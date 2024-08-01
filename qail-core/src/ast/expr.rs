@@ -40,8 +40,14 @@ pub enum Expr {
     Named(String),
     /// An aliased expression (expr AS alias)
     Aliased { name: String, alias: String },
-    /// An aggregate function (COUNT(col))
-    Aggregate { col: String, func: AggregateFunc, alias: Option<String> },
+    /// An aggregate function (COUNT(col)) with optional FILTER clause
+    Aggregate {
+        col: String,
+        func: AggregateFunc,
+        /// PostgreSQL FILTER (WHERE ...) clause for aggregates
+        filter: Option<Vec<Condition>>,
+        alias: Option<String>,
+    },
     /// Column Definition (for Make keys)
     Def {
         name: String,
@@ -117,8 +123,11 @@ impl std::fmt::Display for Expr {
             Expr::Star => write!(f, "*"),
             Expr::Named(name) => write!(f, "{}", name),
             Expr::Aliased { name, alias } => write!(f, "{} AS {}", name, alias),
-            Expr::Aggregate { col, func, alias } => {
+            Expr::Aggregate { col, func, filter, alias } => {
                 write!(f, "{}({})", func, col)?;
+                if let Some(conditions) = filter {
+                    write!(f, " FILTER (WHERE {})", conditions.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" AND "))?;
+                }
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }
