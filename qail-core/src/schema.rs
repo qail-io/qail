@@ -73,6 +73,93 @@ impl Schema {
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
+
+    /// Load schema from QAIL schema format (schema.qail).
+    /// 
+    /// Parses text like:
+    /// ```text
+    /// table users (
+    ///     id string not null,
+    ///     email string not null,
+    ///     created_at date
+    /// )
+    /// ```
+    pub fn from_qail_schema(input: &str) -> Result<Self, String> {
+        let mut schema = Schema::new();
+        let mut current_table: Option<TableDef> = None;
+        
+        for line in input.lines() {
+            let line = line.trim();
+            
+            // Skip empty lines and comments
+            if line.is_empty() || line.starts_with("--") {
+                continue;
+            }
+            
+            // Match "table tablename ("
+            if line.starts_with("table ") {
+                // Save previous table if any
+                if let Some(t) = current_table.take() {
+                    schema.tables.push(t);
+                }
+                
+                // Parse table name: "table users (" -> "users"
+                let rest = &line[6..]; // Skip "table "
+                let name = rest.split('(').next()
+                    .map(|s| s.trim())
+                    .ok_or_else(|| format!("Invalid table line: {}", line))?;
+                
+                current_table = Some(TableDef::new(name));
+            }
+            // Match closing paren
+            else if line == ")" {
+                if let Some(t) = current_table.take() {
+                    schema.tables.push(t);
+                }
+            }
+            // Match column definition: "name type [not null],"
+            else if let Some(ref mut table) = current_table {
+                // Remove trailing comma
+                let line = line.trim_end_matches(',');
+                
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let col_name = parts[0];
+                    let col_type = parts[1];
+                    let not_null = parts.len() > 2 && 
+                        parts.iter().any(|&p| p.eq_ignore_ascii_case("not")) &&
+                        parts.iter().any(|&p| p.eq_ignore_ascii_case("null"));
+                    
+                    table.columns.push(ColumnDef {
+                        name: col_name.to_string(),
+                        typ: col_type.to_string(),
+                        nullable: !not_null,
+                        primary_key: false,
+                    });
+                }
+            }
+        }
+        
+        // Don't forget the last table
+        if let Some(t) = current_table {
+            schema.tables.push(t);
+        }
+        
+        Ok(schema)
+    }
+
+    /// Load schema from file path (auto-detects format).
+    pub fn from_file(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        
+        // Detect format: .json -> JSON, else -> QAIL schema
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            Self::from_json(&content).map_err(|e| e.to_string())
+        } else {
+            Self::from_qail_schema(&content)
+        }
+    }
 }
 
 impl Default for Schema {

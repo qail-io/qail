@@ -34,10 +34,23 @@ impl QailLanguageServer {
         }
     }
 
-    /// Load schema from qail.schema.json in workspace root
+    /// Load schema from schema.qail or qail.schema.json in workspace root
     fn load_schema(&self, workspace_root: &str) {
-        let schema_path = format!("{}/qail.schema.json", workspace_root);
-        if let Ok(content) = std::fs::read_to_string(&schema_path) {
+        // Try schema.qail first (QAIL native format)
+        let qail_path = format!("{}/schema.qail", workspace_root);
+        if let Ok(content) = std::fs::read_to_string(&qail_path) {
+            if let Ok(schema) = Schema::from_qail_schema(&content) {
+                let validator = schema.to_validator();
+                if let Ok(mut s) = self.schema.write() {
+                    *s = Some(validator);
+                    return;
+                }
+            }
+        }
+        
+        // Fall back to qail.schema.json (JSON format)
+        let json_path = format!("{}/qail.schema.json", workspace_root);
+        if let Ok(content) = std::fs::read_to_string(&json_path) {
             if let Ok(schema) = Schema::from_json(&content) {
                 let validator = schema.to_validator();
                 if let Ok(mut s) = self.schema.write() {
