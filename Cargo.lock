@@ -1738,11 +1738,15 @@ dependencies = [
 name = "qail-macros"
 version = "0.8.10"
 dependencies = [
+ "anyhow",
  "proc-macro2",
+ "qail-sqlx",
  "quote",
  "serde",
  "serde_json",
+ "sqlx",
  "syn 2.0.111",
+ "tokio",
  "trybuild",
 ]
 
