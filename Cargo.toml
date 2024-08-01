@@ -7,6 +7,7 @@ members = [
     "qail-lsp",
     "qail-wasm",
     "qail-ffi",
+    "qail-encoder",
     "qail-pg",
     "qail-py",
     "qail-go",
