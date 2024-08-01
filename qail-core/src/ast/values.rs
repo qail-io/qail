@@ -16,6 +16,8 @@ pub enum Value {
     String(String),
     /// Parameter reference ($1, $2, etc.)
     Param(usize),
+    /// Named parameter reference (:name, :id, etc.)
+    NamedParam(String),
     /// SQL function call (e.g., now())
     Function(String),
     /// Array of values
@@ -35,6 +37,7 @@ impl std::fmt::Display for Value {
             Value::Float(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "'{}'", s),
             Value::Param(n) => write!(f, "${}", n),
+            Value::NamedParam(name) => write!(f, ":{}", name),
             Value::Function(s) => write!(f, "{}", s),
             Value::Array(arr) => {
                 write!(f, "[")?;
