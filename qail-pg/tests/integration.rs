@@ -69,7 +69,7 @@ async fn test_extended_query() -> PgResult<()> {
     
     // Extended query with $1 placeholder - parameter sent as binary bytes
     // The value "Alice" never becomes SQL text - it's sent as raw bytes
-    let rows = conn.extended_query(
+    let rows = conn.query(
         "SELECT id, name, email FROM users WHERE name = $1",
         &[Some(b"Alice".to_vec())]  // Binary bytes, not SQL string!
     ).await?;
