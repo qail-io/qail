@@ -22,356 +22,18 @@
 //! ```
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, LitStr, Ident, Token, Expr};
-use syn::parse::{Parse, ParseStream};
+use syn::parse_macro_input;
 
-// ============================================================================
-// Schema Types
-// ============================================================================
+mod schema;
+mod input;
+mod validation;
+mod codegen;
+mod include;
 
-mod schema {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct Schema {
-        pub tables: Vec<TableDef>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct TableDef {
-        pub name: String,
-        pub columns: Vec<ColumnDef>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct ColumnDef {
-        pub name: String,
-        #[serde(rename = "type", alias = "typ")]
-        pub typ: String,
-        #[serde(default)]
-        pub nullable: bool,
-        #[serde(default)]
-        pub primary_key: bool,
-    }
-
-    impl Schema {
-        pub fn load() -> Option<Self> {
-            let paths = [
-                "qail.schema.json",
-                ".qail/schema.json",
-                "../qail.schema.json",
-            ];
-
-            for path in paths {
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    if let Ok(schema) = serde_json::from_str(&content) {
-                        return Some(schema);
-                    }
-                }
-            }
-            None
-        }
-
-        pub fn find_table(&self, name: &str) -> Option<&TableDef> {
-            self.tables.iter().find(|t| t.name == name)
-        }
-
-        /// Find similar table names for "did you mean" suggestions
-        pub fn similar_tables(&self, name: &str) -> Vec<&str> {
-            self.tables
-                .iter()
-                .filter(|t| {
-                    levenshtein(&t.name, name) <= 3 || t.name.contains(name) || name.contains(&t.name)
-                })
-                .map(|t| t.name.as_str())
-                .take(5)
-                .collect()
-        }
-    }
-
-    impl TableDef {
-        pub fn find_column(&self, name: &str) -> Option<&ColumnDef> {
-            self.columns.iter().find(|c| c.name == name)
-        }
-
-        /// Find similar column names for "did you mean" suggestions
-        pub fn similar_columns(&self, name: &str) -> Vec<&str> {
-            self.columns
-                .iter()
-                .filter(|c| {
-                    levenshtein(&c.name, name) <= 3 || c.name.contains(name) || name.contains(&c.name)
-                })
-                .map(|c| c.name.as_str())
-                .take(5)
-                .collect()
-        }
-    }
-
-    /// Simple Levenshtein distance for "did you mean" suggestions
-    fn levenshtein(a: &str, b: &str) -> usize {
-        let a_len = a.chars().count();
-        let b_len = b.chars().count();
-        
-        if a_len == 0 { return b_len; }
-        if b_len == 0 { return a_len; }
-        
-        let mut matrix = vec![vec![0usize; b_len + 1]; a_len + 1];
-        
-        for i in 0..=a_len { matrix[i][0] = i; }
-        for j in 0..=b_len { matrix[0][j] = j; }
-        
-        for (i, ca) in a.chars().enumerate() {
-            for (j, cb) in b.chars().enumerate() {
-                let cost = if ca == cb { 0 } else { 1 };
-                matrix[i + 1][j + 1] = std::cmp::min(
-                    std::cmp::min(matrix[i][j + 1] + 1, matrix[i + 1][j] + 1),
-                    matrix[i][j] + cost,
-                );
-            }
-        }
-        
-        matrix[a_len][b_len]
-    }
-}
-
-// ============================================================================
-// Macro Input Parsing
-// ============================================================================
-
-/// Input for qail! and qail_one! - with result type
-struct QailQueryInput {
-    pool: Expr,
-    result_type: Ident,
-    query: LitStr,
-    params: Vec<(Ident, Expr)>,
-}
-
-impl Parse for QailQueryInput {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let pool: Expr = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let result_type: Ident = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let query: LitStr = input.parse()?;
-        let params = parse_params(input)?;
-        Ok(Self { pool, result_type, query, params })
-    }
-}
-
-/// Input for qail_execute! - no result type
-struct QailExecuteInput {
-    pool: Expr,
-    query: LitStr,
-    params: Vec<(Ident, Expr)>,
-}
-
-impl Parse for QailExecuteInput {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let pool: Expr = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let query: LitStr = input.parse()?;
-        let params = parse_params(input)?;
-        Ok(Self { pool, query, params })
-    }
-}
-
-fn parse_params(input: ParseStream) -> syn::Result<Vec<(Ident, Expr)>> {
-    let mut params = Vec::new();
-    while input.peek(Token![,]) {
-        input.parse::<Token![,]>()?;
-        if input.is_empty() {
-            break;
-        }
-        let name: Ident = input.parse()?;
-        input.parse::<Token![:]>()?;
-        let value: Expr = input.parse()?;
-        params.push((name, value));
-    }
-    Ok(params)
-}
-
-// ============================================================================
-// QAIL Parsing Helpers
-// ============================================================================
-
-fn parse_qail_table(query: &str) -> Option<String> {
-    let query = query.trim().to_lowercase();
-    let words: Vec<&str> = query.split_whitespace().collect();
-    
-    if words.len() >= 2 && matches!(words[0], "get" | "add" | "set" | "del") {
-        return Some(words[1].to_string());
-    }
-    None
-}
-
-fn parse_qail_columns(query: &str) -> Vec<String> {
-    let mut columns = Vec::new();
-    let query_lower = query.to_lowercase();
-    
-    if let Some(where_pos) = query_lower.find("where") {
-        let after_where = &query[where_pos + 5..];
-        for word in after_where.split_whitespace() {
-            let word_lower = word.to_lowercase();
-            if !matches!(word_lower.as_str(), "and" | "or" | "=" | "!=" | "<" | ">" | 
-                         "like" | "ilike" | "in" | "is" | "null" | "not" | "order" | "by" | 
-                         "limit" | "offset" | "asc" | "desc" | "set" | "fields" | "true" | "false") 
-               && !word.starts_with(':') 
-               && !word.starts_with('$')
-               && !word.chars().next().map(|c| c.is_numeric()).unwrap_or(false)
-               && !word.starts_with('\'')
-               && !word.starts_with('"') {
-                let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-                if !clean.is_empty() && clean.len() > 1 {
-                    columns.push(clean.to_string());
-                }
-            }
-        }
-    }
-    
-    columns
-}
-
-// ============================================================================
-// Validation with "Did you mean?" suggestions
-// ============================================================================
-
-fn validate_query(query_str: &str, query_span: proc_macro2::Span) -> Result<(), TokenStream> {
-    // Phase 1: Parse validation using qail-core
-    let cmd = match qail_core::parse(query_str) {
-        Ok(cmd) => cmd,
-        Err(e) => {
-            let error = format!("QAIL parse error: {}", e);
-            return Err(syn::Error::new(query_span, error).to_compile_error().into());
-        }
-    };
-    
-    // Phase 2: Transpile validation - generate SQL and check for issues
-    use qail_core::transpiler::ToSqlParameterized;
-    let result = cmd.to_sql_parameterized();
-    
-    // Check for common SQL generation issues
-    if result.sql.is_empty() {
-        return Err(syn::Error::new(query_span, "QAIL generated empty SQL").to_compile_error().into());
-    }
-    
-    // Check for untranspiled QAIL keywords (should have been converted to SQL)
-    let sql_lower = result.sql.to_lowercase();
-    if sql_lower.contains("get ") && !sql_lower.contains("select") {
-        return Err(syn::Error::new(
-            query_span, 
-            "QAIL transpiler error: 'get' keyword not converted to SELECT"
-        ).to_compile_error().into());
-    }
-    
-    // Check for CTEs missing WITH clause
-    if !cmd.ctes.is_empty() && !result.sql.to_uppercase().starts_with("WITH") {
-        return Err(syn::Error::new(
-            query_span,
-            "QAIL transpiler error: CTEs defined but WITH clause missing from generated SQL"
-        ).to_compile_error().into());
-    }
-    
-    // Check for unquoted JSON access (common bug: contact_info->>phone instead of contact_info->>'phone')
-    let re_unquoted_json = regex_simple_check(&result.sql, r"->>(\w+)");
-    if re_unquoted_json {
-        return Err(syn::Error::new(
-            query_span,
-            "QAIL transpiler error: JSON access path missing quotes (e.g., ->>col instead of ->>'col')"
-        ).to_compile_error().into());
-    }
-    
-    // Phase 3: Schema validation (original logic)
-    let schema = match schema::Schema::load() {
-        Some(s) => s,
-        None => return Ok(()), // No schema = skip schema validation
-    };
-
-    if let Some(table_name) = parse_qail_table(query_str) {
-        if schema.find_table(&table_name).is_none() {
-            let similar = schema.similar_tables(&table_name);
-            let suggestion = if !similar.is_empty() {
-                format!("\n\nDid you mean: {:?}?", similar)
-            } else {
-                String::new()
-            };
-            
-            let error = format!(
-                "table '{}' not found in schema.{}",
-                table_name, suggestion
-            );
-            return Err(syn::Error::new(query_span, error).to_compile_error().into());
-        }
-        
-        if let Some(table) = schema.find_table(&table_name) {
-            for col_name in parse_qail_columns(query_str) {
-                if table.find_column(&col_name).is_none() {
-                    let similar = table.similar_columns(&col_name);
-                    let suggestion = if !similar.is_empty() {
-                        format!("\n\nDid you mean: {:?}?", similar)
-                    } else {
-                        String::new()
-                    };
-                    
-                    let error = format!(
-                        "column '{}' not found in table '{}'.{}",
-                        col_name, table_name, suggestion
-                    );
-                    return Err(syn::Error::new(query_span, error).to_compile_error().into());
-                }
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-/// Simple regex-like check for unquoted JSON access pattern
-fn regex_simple_check(sql: &str, _pattern: &str) -> bool {
-    // Look for ->>identifier (not ->>') which indicates missing quotes
-    let bytes = sql.as_bytes();
-    let len = bytes.len();
-    
-    for i in 0..len.saturating_sub(3) {
-        if bytes[i] == b'-' && bytes[i+1] == b'>' && bytes[i+2] == b'>' {
-            // Check next char after ->>
-            if i + 3 < len {
-                let next = bytes[i + 3];
-                // If next char is alphanumeric (not ' or space), it's unquoted
-                if next.is_ascii_alphanumeric() || next == b'_' {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-// ============================================================================
-// Code Generation
-// ============================================================================
-
-fn generate_params_code(params: &[(Ident, Expr)]) -> TokenStream2 {
-    if params.is_empty() {
-        return quote! {};
-    }
-
-    let param_inserts: Vec<TokenStream2> = params.iter().map(|(name, value)| {
-        let name_str = name.to_string();
-        quote! {
-            __p.insert(#name_str, (#value).to_string());
-        }
-    }).collect();
-
-    quote! {
-        let __qail_params = {
-            let mut __p = qail_sqlx::params::QailParams::new();
-            #(#param_inserts)*
-            __p
-        };
-    }
-}
+use input::{QailQueryInput, QailExecuteInput};
+use validation::validate_query;
+use codegen::generate_params_code;
 
 // ============================================================================
 // Macro Definitions
@@ -538,4 +200,26 @@ pub fn qail_execute(input: TokenStream) -> TokenStream {
     };
     
     output.into()
+}
+
+/// Load a schema from a `.qail` file at compile time.
+///
+/// # Example
+/// ```ignore
+/// include_schema!("db/schema.qail");
+/// ```
+#[proc_macro]
+pub fn include_schema(input: TokenStream) -> TokenStream {
+    include::include_schema_impl(input)
+}
+
+/// Load named queries from a `.qail` file at compile time.
+///
+/// # Example
+/// ```ignore
+/// include_queries!("db/queries.qail");
+/// ```
+#[proc_macro]
+pub fn include_queries(input: TokenStream) -> TokenStream {
+    include::include_queries_impl(input)
 }
