@@ -110,6 +110,162 @@ pub fn is_array_oid(oid: u32) -> bool {
     )
 }
 
+// ==================== UUID Encoding/Decoding ====================
+
+/// Encode a UUID string to 16-byte binary format for PostgreSQL wire protocol.
+/// 
+/// # Example
+/// ```
+/// use qail_pg::protocol::types::encode_uuid;
+/// let bytes = encode_uuid("550e8400-e29b-41d4-a716-446655440000").unwrap();
+/// assert_eq!(bytes.len(), 16);
+/// ```
+pub fn encode_uuid(uuid_str: &str) -> Result<[u8; 16], String> {
+    // Remove hyphens and parse as hex
+    let hex: String = uuid_str.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 {
+        return Err(format!("Invalid UUID length: expected 32 hex chars, got {}", hex.len()));
+    }
+    
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        bytes[i] = u8::from_str_radix(&hex[i*2..i*2+2], 16)
+            .map_err(|e| format!("Invalid hex in UUID: {}", e))?;
+    }
+    Ok(bytes)
+}
+
+/// Decode 16-byte binary UUID from PostgreSQL to string format.
+pub fn decode_uuid(bytes: &[u8]) -> Result<String, String> {
+    if bytes.len() != 16 {
+        return Err(format!("Invalid UUID bytes length: expected 16, got {}", bytes.len()));
+    }
+    
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    ))
+}
+
+// ==================== JSON Encoding/Decoding ====================
+
+/// Encode JSON value for PostgreSQL JSONB wire format (version byte + JSON text).
+/// 
+/// # Example
+/// ```
+/// use qail_pg::protocol::types::encode_jsonb;
+/// let bytes = encode_jsonb(r#"{"key": "value"}"#);
+/// assert_eq!(bytes[0], 1); // JSONB version byte
+/// ```
+pub fn encode_jsonb(json_str: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + json_str.len());
+    buf.push(1); // JSONB version byte
+    buf.extend_from_slice(json_str.as_bytes());
+    buf
+}
+
+/// Decode PostgreSQL JSONB wire format to JSON string.
+pub fn decode_jsonb(bytes: &[u8]) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
+    // Skip version byte (first byte is JSONB version, usually 1)
+    if bytes[0] != 1 {
+        return Err(format!("Unsupported JSONB version: {}", bytes[0]));
+    }
+    String::from_utf8(bytes[1..].to_vec())
+        .map_err(|e| format!("Invalid UTF-8 in JSONB: {}", e))
+}
+
+/// Encode plain JSON (not JSONB) - just the text.
+pub fn encode_json(json_str: &str) -> Vec<u8> {
+    json_str.as_bytes().to_vec()
+}
+
+/// Decode plain JSON from PostgreSQL.
+pub fn decode_json(bytes: &[u8]) -> Result<String, String> {
+    String::from_utf8(bytes.to_vec())
+        .map_err(|e| format!("Invalid UTF-8 in JSON: {}", e))
+}
+
+// ==================== Array Encoding/Decoding ====================
+
+/// Decode a PostgreSQL text-format array like {a,b,c} to Vec<String>.
+/// 
+/// This handles the common text-format arrays returned by PostgreSQL.
+pub fn decode_text_array(s: &str) -> Vec<String> {
+    if s.is_empty() || s == "{}" {
+        return vec![];
+    }
+    
+    // Remove outer braces
+    let inner = s.trim_start_matches('{').trim_end_matches('}');
+    if inner.is_empty() {
+        return vec![];
+    }
+    
+    // Split by comma, handling quoted elements
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escape_next = false;
+    
+    for c in inner.chars() {
+        if escape_next {
+            current.push(c);
+            escape_next = false;
+            continue;
+        }
+        
+        match c {
+            '\\' => escape_next = true,
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                result.push(current.clone());
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    
+    if !current.is_empty() {
+        result.push(current);
+    }
+    
+    result
+}
+
+/// Encode a Vec<String> to PostgreSQL text-format array {a,b,c}.
+pub fn encode_text_array(items: &[String]) -> String {
+    if items.is_empty() {
+        return "{}".to_string();
+    }
+    
+    let escaped: Vec<String> = items.iter()
+        .map(|s| {
+            if s.contains(',') || s.contains('"') || s.contains('\\') || s.contains('{') || s.contains('}') {
+                format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                s.clone()
+            }
+        })
+        .collect();
+    
+    format!("{{{}}}", escaped.join(","))
+}
+
+/// Decode a PostgreSQL text-format integer array to Vec<i64>.
+pub fn decode_int_array(s: &str) -> Result<Vec<i64>, String> {
+    decode_text_array(s)
+        .into_iter()
+        .map(|s| s.parse::<i64>().map_err(|e| format!("Invalid integer: {}", e)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +284,44 @@ mod tests {
         assert!(is_array_oid(oid::UUID_ARRAY));
         assert!(!is_array_oid(oid::INT4));
         assert!(!is_array_oid(oid::UUID));
+    }
+
+    #[test]
+    fn test_uuid_encode_decode() {
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let bytes = encode_uuid(uuid_str).unwrap();
+        assert_eq!(bytes.len(), 16);
+        
+        let decoded = decode_uuid(&bytes).unwrap();
+        assert_eq!(decoded, uuid_str);
+    }
+
+    #[test]
+    fn test_jsonb_encode_decode() {
+        let json = r#"{"key": "value"}"#;
+        let bytes = encode_jsonb(json);
+        assert_eq!(bytes[0], 1); // Version byte
+        
+        let decoded = decode_jsonb(&bytes).unwrap();
+        assert_eq!(decoded, json);
+    }
+
+    #[test]
+    fn test_text_array_decode() {
+        assert_eq!(decode_text_array("{}"), Vec::<String>::new());
+        assert_eq!(decode_text_array("{a,b,c}"), vec!["a", "b", "c"]);
+        assert_eq!(decode_text_array("{\"hello, world\",foo}"), vec!["hello, world", "foo"]);
+    }
+
+    #[test]
+    fn test_text_array_encode() {
+        assert_eq!(encode_text_array(&[]), "{}");
+        assert_eq!(encode_text_array(&["a".to_string(), "b".to_string()]), "{a,b}");
+    }
+
+    #[test]
+    fn test_int_array_decode() {
+        assert_eq!(decode_int_array("{1,2,3}").unwrap(), vec![1, 2, 3]);
+        assert_eq!(decode_int_array("{}").unwrap(), Vec::<i64>::new());
     }
 }
