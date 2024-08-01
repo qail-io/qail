@@ -174,6 +174,87 @@ impl QailCmd {
         });
         self
     }
+
+    // =========================================================================
+    // CTE (Common Table Expression) Builder Methods
+    // =========================================================================
+
+    /// Wrap this query as a CTE with the given name.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cte = QailCmd::get("employees")
+    ///     .hook(&["id", "name"])
+    ///     .cage("manager_id", Value::Null)
+    ///     .as_cte("emp_tree");
+    /// ```
+    pub fn as_cte(self, name: impl Into<String>) -> Self {
+        let cte_name = name.into();
+        let columns: Vec<String> = self.columns.iter().filter_map(|c| {
+            match c {
+                Column::Named(n) => Some(n.clone()),
+                Column::Aliased { alias, .. } => Some(alias.clone()),
+                _ => None,
+            }
+        }).collect();
+        
+        Self {
+            action: Action::With,
+            table: cte_name.clone(),
+            columns: vec![],
+            joins: vec![],
+            cages: vec![],
+            distinct: false,
+            index_def: None,
+            table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            cte: Some(CTEDef {
+                name: cte_name,
+                recursive: false,
+                columns,
+                base_query: Box::new(self),
+                recursive_query: None,
+                source_table: None,
+            }),
+        }
+    }
+
+    /// Make this CTE recursive and add the recursive part.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let recursive_cte = base_query
+    ///     .as_cte("emp_tree")
+    ///     .recursive(recursive_query);
+    /// ```
+    pub fn recursive(mut self, recursive_part: QailCmd) -> Self {
+        if let Some(ref mut cte) = self.cte {
+            cte.recursive = true;
+            cte.recursive_query = Some(Box::new(recursive_part));
+        }
+        self
+    }
+
+    /// Set the source table for recursive join (self-reference).
+    pub fn from_cte(mut self, cte_name: impl Into<String>) -> Self {
+        if let Some(ref mut cte) = self.cte {
+            cte.source_table = Some(cte_name.into());
+        }
+        self
+    }
+
+    /// Chain a final SELECT from the CTE.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let final_query = cte.select_from_cte(&["id", "name", "level"]);
+    /// ```
+    pub fn select_from_cte(mut self, columns: &[&str]) -> Self {
+        self.columns = columns.iter().map(|c| Column::Named(c.to_string())).collect();
+        self
+    }
 }
 
 /// A join definition.
