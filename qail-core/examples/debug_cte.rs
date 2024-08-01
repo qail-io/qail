@@ -1,52 +1,34 @@
-//! Test ToSqlParameterized with CTEs
+//! Debug JSON access in QAIL
 
 use qail_core::parse;
 use qail_core::transpiler::ToSqlParameterized;
 
 fn main() {
-    // Same query as in message_repository.rs (simplified)
-    let qail = r#"with
-                latest_messages as (
-                    get distinct on (phone_number) whatsapp_messages
-                    fields phone_number, content as last_message
-                    where our_phone_number_id = :phone_id
-                    order by phone_number, created_at desc
-                ),
-                customer_names as (
-                    get distinct on (phone_number) whatsapp_messages
-                    fields phone_number, sender_name
-                    where direction = 'inbound' and sender_name is not null and our_phone_number_id = :phone_id
-                    order by phone_number, created_at desc
-                )
-                get latest_messages
-                left join customer_names on customer_names.phone_number = latest_messages.phone_number
-                fields latest_messages.phone_number, customer_names.sender_name"#;
+    println!("=== Debug JSON Access ===\n");
     
-    println!("=== Test ToSqlParameterized with CTEs ===\n");
+    // Test simple JSON access
+    let q1 = "get orders fields contact_info->>'phone'";
+    println!("1. Simple JSON: {}", 
+        parse(q1).map(|c| c.to_sql_parameterized().sql).unwrap_or_else(|e| e.to_string()));
     
-    match parse(qail) {
-        Ok(cmd) => {
-            let result = cmd.to_sql_parameterized();
-            
-            println!("SQL: {}\n", result.sql);
-            println!("Named params: {:?}", result.named_params);
-            
-            // Check if WITH clause is present
-            if result.sql.starts_with("WITH") {
-                println!("\n✅ WITH clause present in parameterized output!");
-            } else {
-                println!("\n❌ WITH clause MISSING from parameterized output!");
-            }
-            
-            // Check if :phone_id was replaced with $1
-            if result.sql.contains("$1") && !result.sql.contains(":phone_id") {
-                println!("✅ Named params correctly replaced with positional $N");
-            } else {
-                println!("❌ Named params NOT replaced");
-            }
-        }
-        Err(e) => {
-            println!("❌ Parse Error: {}", e);
-        }
-    }
+    // Test JSON access with alias
+    let q2 = "get orders fields contact_info->>'phone' as phone_number";
+    println!("2. JSON with alias: {}", 
+        parse(q2).map(|c| c.to_sql_parameterized().sql).unwrap_or_else(|e| e.to_string()));
+    
+    // Test JSON access in WHERE clause
+    let q3 = "get orders where contact_info->>'phone' is not null";
+    println!("3. JSON in WHERE: {}", 
+        parse(q3).map(|c| c.to_sql_parameterized().sql).unwrap_or_else(|e| e.to_string()));
+    
+    // Test the exact CTE pattern  
+    let q4 = r#"with
+        order_counts as (
+            get orders
+            fields contact_info->>'phone' as phone_number, count(*) as order_count
+            where contact_info->>'phone' is not null
+        )
+        get order_counts"#;
+    println!("4. CTE with JSON: {}", 
+        parse(q4).map(|c| c.to_sql_parameterized().sql).unwrap_or_else(|e| e.to_string()));
 }

@@ -98,6 +98,10 @@ impl ConditionToSql for Condition {
                     generator.quote_identifier(name)
                 }
             },
+            Expr::JsonAccess { column, path, as_text, .. } => {
+                let op = if *as_text { "->>" } else { "->" };
+                format!("{}{}'{}'", generator.quote_identifier(column), op, path)
+            },
             expr => expr.to_string(),
         };
 
@@ -218,6 +222,10 @@ impl ConditionToSql for Condition {
                 } else {
                     generator.quote_identifier(name)
                 }
+            },
+            Expr::JsonAccess { column, path, as_text, .. } => {
+                let op = if *as_text { "->>" } else { "->" };
+                format!("{}{}'{}'", generator.quote_identifier(column), op, path)
             },
             expr => expr.to_string(),
         };
