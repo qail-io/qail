@@ -85,14 +85,14 @@ pub enum Expr {
         /// Optional alias
         alias: Option<String>,
     },
-    /// JSON accessor (data->>'key' or data->'key')
+    /// JSON accessor (data->>'key' or data->'key' or chained data->'a'->0->>'b')
     JsonAccess {
         /// Base column name
         column: String,
-        /// JSON path/key
-        path: String,
-        /// true for ->> (as text), false for -> (as JSON)
-        as_text: bool,
+        /// JSON path segments: (key, as_text)
+        /// as_text: true for ->> (extract as text), false for -> (extract as JSON)
+        /// For chained access like x->'a'->0->>'b', this is [("a", false), ("0", false), ("b", true)]
+        path_segments: Vec<(String, bool)>,
         /// Optional alias
         alias: Option<String>,
     },
@@ -210,9 +210,12 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::JsonAccess { column, path, as_text, alias } => {
-                let op = if *as_text { "->>" } else { "->" };
-                write!(f, "{}{}'{}'", column, op, path)?;
+            Expr::JsonAccess { column, path_segments, alias } => {
+                write!(f, "{}", column)?;
+                for (path, as_text) in path_segments {
+                    let op = if *as_text { "->>" } else { "->" };
+                    write!(f, "{}'{}'", op, path)?;
+                }
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }

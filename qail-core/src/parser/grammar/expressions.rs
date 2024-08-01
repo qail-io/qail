@@ -58,45 +58,62 @@ fn set_expr_alias(expr: Expr, alias: String) -> Expr {
         Expr::FunctionCall { name, args, .. } => Expr::FunctionCall { name, args, alias: Some(alias) },
         Expr::SpecialFunction { name, args, .. } => Expr::SpecialFunction { name, args, alias: Some(alias) },
         Expr::Binary { left, op, right, .. } => Expr::Binary { left, op, right, alias: Some(alias) },
-        Expr::JsonAccess { column, path, as_text, .. } => Expr::JsonAccess { column, path, as_text, alias: Some(alias) },
+        Expr::JsonAccess { column, path_segments, .. } => Expr::JsonAccess { column, path_segments, alias: Some(alias) },
         other => other, // Star, Aliased already have alias
     }
 }
 
 /// Parse identifier or JSON access or type cast.
-/// JSON access: col->'key' or col->>'key'
+/// JSON access: col->'key' or col->>'key' or chained col->'a'->0->>'b'
 /// Type cast: expr::type
 pub fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
-    let (input, mut expr) = parse_atom(input)?;
+    let (mut input, atom) = parse_atom(input)?;
     
-    // Check for trailing JSON operators
-    let (input, json_op) = opt(alt((
-        tag("->>"),
-        tag("->"),
-    )))(input)?;
+    // For JSON access, we need the base column name
+    let col_name = match &atom {
+        Expr::Named(name) => Some(name.clone()),
+        _ => None,
+    };
     
-    let input = if let Some(op) = json_op {
-        if let Expr::Named(col_name) = expr {
-             let (input, _) = multispace0(input)?;
-             let (input, key_val) = parse_value(input)?;
-             
-             let path = match key_val {
-                 Value::String(s) => s,
-                 _ => key_val.to_string(),
-             };
-             
-             expr = Expr::JsonAccess {
-                 column: col_name,
-                 path,
-                 as_text: op == "->>",
-                 alias: None,
-             };
-             input
+    // Collect path segments for chained JSON access
+    let mut path_segments: Vec<(String, bool)> = Vec::new();
+    
+    loop {
+        // Check for JSON operators
+        let (remaining, json_op) = opt(alt((
+            tag("->>"),
+            tag("->"),
+        )))(input)?;
+        
+        if let Some(op) = json_op {
+            let (remaining, _) = multispace0(remaining)?;
+            let (remaining, key_val) = parse_value(remaining)?;
+            
+            let path = match key_val {
+                Value::String(s) => s,
+                _ => key_val.to_string(),
+            };
+            
+            path_segments.push((path, op == "->>"));
+            input = remaining;
         } else {
-            input
+            break;
+        }
+    }
+    
+    // Build result expression
+    let mut expr = if !path_segments.is_empty() {
+        if let Some(column) = col_name {
+            Expr::JsonAccess {
+                column,
+                path_segments,
+                alias: None,
+            }
+        } else {
+            atom
         }
     } else {
-        input
+        atom
     };
     
     // Check for type cast suffix: ::type (PostgreSQL syntax)

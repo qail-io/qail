@@ -59,9 +59,12 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         case_sql
                     }
                 }
-                Expr::JsonAccess { column, path, as_text, alias } => {
-                    let op = if *as_text { "->>" } else { "->" };
-                    let expr = format!("{}{}'{}'" , generator.quote_identifier(column), op, path);
+                Expr::JsonAccess { column, path_segments, alias } => {
+                    let mut expr = generator.quote_identifier(column);
+                    for (path, as_text) in path_segments {
+                        let op = if *as_text { "->>" } else { "->" };
+                        expr.push_str(&format!("{}'{}'", op, path));
+                    }
                     if let Some(a) = alias {
                         format!("{} AS {}", expr, generator.quote_identifier(a))
                     } else {
@@ -333,10 +336,14 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                      // Use the base column name for GROUP BY (before AS alias)
                      non_aggregated_cols.push(generator.quote_identifier(name));
                  }
-                 Expr::JsonAccess { column, path, as_text, .. } => {
+                 Expr::JsonAccess { column, path_segments, .. } => {
                      // Include JSON access expression in GROUP BY
-                     let op = if *as_text { "->>" } else { "->" };
-                     non_aggregated_cols.push(format!("{}{}'{}'", generator.quote_identifier(column), op, path));
+                     let mut expr = generator.quote_identifier(column);
+                     for (path, as_text) in path_segments {
+                         let op = if *as_text { "->>" } else { "->" };
+                         expr.push_str(&format!("{}'{}'", op, path));
+                     }
+                     non_aggregated_cols.push(expr);
                  }
                  _ => {} // Aggregates and other expressions not added to GROUP BY
              }
@@ -536,9 +543,13 @@ fn render_expr_for_orderby(expr: &Expr, generator: &Box<dyn crate::transpiler::S
                 _ => format!("{}(...)", name)
             }
         }
-        Expr::JsonAccess { column, path, as_text, .. } => {
-            let op = if *as_text { "->>" } else { "->" };
-            format!("{}{}'{}'", generator.quote_identifier(column), op, path)
+        Expr::JsonAccess { column, path_segments, .. } => {
+            let mut result = generator.quote_identifier(column);
+            for (path, as_text) in path_segments {
+                let op = if *as_text { "->>" } else { "->" };
+                result.push_str(&format!("{}'{}'", op, path));
+            }
+            result
         }
         _ => expr.to_string(), // Fallback for Star, Aliased, etc.
     }
