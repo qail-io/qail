@@ -30,8 +30,16 @@ pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
         }
     }
 
-    // RETURNING clause - always return * to support returning generated IDs/defaults
-    sql.push_str(" RETURNING *");
+    // RETURNING clause - configurable
+    match &cmd.returning {
+        None => sql.push_str(" RETURNING *"), // Default: return all
+        Some(cols) if cols.is_empty() => {}, // Explicitly no RETURNING
+        Some(cols) => {
+            let col_strs: Vec<String> = cols.iter().map(|e| e.to_string()).collect();
+            sql.push_str(" RETURNING ");
+            sql.push_str(&col_strs.join(", "));
+        }
+    }
 
     sql
 }
