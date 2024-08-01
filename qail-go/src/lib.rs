@@ -1,0 +1,312 @@
+//! QAIL Go FFI - C-compatible bindings for Go CGO
+//!
+//! Exports sync encoding functions that Go can call via CGO.
+//! All I/O is done in Go - Rust only handles AST encoding.
+
+use std::ffi::{CStr, c_char, c_int};
+use qail_core::prelude::*;
+use qail_pg::protocol::AstEncoder;
+
+/// Opaque handle to QailCmd
+pub struct QailCmdHandle {
+    cmd: QailCmd,
+}
+
+/// Create a GET command
+/// Returns opaque handle, caller must free with qail_cmd_free
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_get(table: *const c_char) -> *mut QailCmdHandle {
+    let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
+    let cmd = QailCmd::get(table);
+    Box::into_raw(Box::new(QailCmdHandle { cmd }))
+}
+
+/// Create an ADD (INSERT) command
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_add(table: *const c_char) -> *mut QailCmdHandle {
+    let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
+    let cmd = QailCmd::add(table);
+    Box::into_raw(Box::new(QailCmdHandle { cmd }))
+}
+
+/// Create a SET (UPDATE) command
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_set(table: *const c_char) -> *mut QailCmdHandle {
+    let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
+    let cmd = QailCmd::set(table);
+    Box::into_raw(Box::new(QailCmdHandle { cmd }))
+}
+
+/// Create a DEL (DELETE) command
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_del(table: *const c_char) -> *mut QailCmdHandle {
+    let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
+    let cmd = QailCmd::del(table);
+    Box::into_raw(Box::new(QailCmdHandle { cmd }))
+}
+
+/// Add column to command
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_cmd_column(handle: *mut QailCmdHandle, col: *const c_char) {
+    if handle.is_null() { return; }
+    let col = unsafe { CStr::from_ptr(col).to_str().unwrap_or("") };
+    unsafe {
+        (*handle).cmd.columns.push(Expr::Named(col.to_string()));
+    }
+}
+
+/// Add filter condition with int value
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_cmd_filter_int(
+    handle: *mut QailCmdHandle,
+    col: *const c_char,
+    op: c_int,
+    value: i64,
+) {
+    if handle.is_null() { return; }
+    let col = unsafe { CStr::from_ptr(col).to_str().unwrap_or("") };
+    let operator = int_to_operator(op);
+    unsafe {
+        (*handle).cmd = (*handle).cmd.clone().filter(col, operator, value);
+    }
+}
+
+/// Add filter with string value
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_cmd_filter_str(
+    handle: *mut QailCmdHandle,
+    col: *const c_char,
+    op: c_int,
+    value: *const c_char,
+) {
+    if handle.is_null() { return; }
+    let col = unsafe { CStr::from_ptr(col).to_str().unwrap_or("") };
+    let value = unsafe { CStr::from_ptr(value).to_str().unwrap_or("") };
+    let operator = int_to_operator(op);
+    unsafe {
+        (*handle).cmd = (*handle).cmd.clone().filter(col, operator, value);
+    }
+}
+
+/// Add filter with bool value
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_cmd_filter_bool(
+    handle: *mut QailCmdHandle,
+    col: *const c_char,
+    op: c_int,
+    value: c_int,
+) {
+    if handle.is_null() { return; }
+    let col = unsafe { CStr::from_ptr(col).to_str().unwrap_or("") };
+    let operator = int_to_operator(op);
+    let bool_val = value != 0;
+    unsafe {
+        (*handle).cmd = (*handle).cmd.clone().filter(col, operator, bool_val);
+    }
+}
+
+/// Set LIMIT
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_cmd_limit(handle: *mut QailCmdHandle, limit: i64) {
+    if handle.is_null() { return; }
+    unsafe {
+        (*handle).cmd = (*handle).cmd.clone().limit(limit);
+    }
+}
+
+/// Set OFFSET
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_cmd_offset(handle: *mut QailCmdHandle, offset: i64) {
+    if handle.is_null() { return; }
+    unsafe {
+        (*handle).cmd = (*handle).cmd.clone().offset(offset);
+    }
+}
+
+/// Encode command to PostgreSQL wire protocol bytes
+/// Returns pointer to bytes, sets out_len to length
+/// Caller must free with qail_bytes_free
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_cmd_encode(
+    handle: *const QailCmdHandle,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if handle.is_null() {
+        unsafe { *out_len = 0; }
+        return std::ptr::null_mut();
+    }
+    
+    let cmd = unsafe { &(*handle).cmd };
+    let (wire_bytes, _params) = AstEncoder::encode_cmd(cmd);
+    let bytes = wire_bytes.to_vec();
+    
+    let len = bytes.len();
+    let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+    
+    unsafe { *out_len = len; }
+    ptr
+}
+
+/// Encode batch of commands to PostgreSQL wire protocol bytes
+/// Returns single buffer with all commands encoded
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_batch_encode(
+    handles: *const *const QailCmdHandle,
+    count: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if handles.is_null() || count == 0 {
+        unsafe { *out_len = 0; }
+        return std::ptr::null_mut();
+    }
+    
+    // Collect all commands
+    let mut cmds = Vec::with_capacity(count);
+    for i in 0..count {
+        let handle = unsafe { *handles.add(i) };
+        if !handle.is_null() {
+            let cmd = unsafe { &(*handle).cmd };
+            cmds.push(cmd.clone());
+        }
+    }
+    
+    // Encode batch
+    let wire_bytes = AstEncoder::encode_batch(&cmds);
+    let bytes = wire_bytes.to_vec();
+    
+    let len = bytes.len();
+    let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+    
+    unsafe { *out_len = len; }
+    ptr
+}
+
+/// Free command handle
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_cmd_free(handle: *mut QailCmdHandle) {
+    if !handle.is_null() {
+        unsafe { let _ = Box::from_raw(handle); }
+    }
+}
+
+/// Free bytes allocated by encode functions
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_bytes_free(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        unsafe {
+            let slice = std::slice::from_raw_parts_mut(ptr, len);
+            let _ = Box::from_raw(slice as *mut [u8]);
+        }
+    }
+}
+
+// Operator constants (must match Go side)
+const OP_EQ: c_int = 0;
+const OP_NE: c_int = 1;
+const OP_GT: c_int = 2;
+const OP_GTE: c_int = 3;
+const OP_LT: c_int = 4;
+const OP_LTE: c_int = 5;
+
+fn int_to_operator(op: c_int) -> Operator {
+    match op {
+        OP_EQ => Operator::Eq,
+        OP_NE => Operator::Ne,
+        OP_GT => Operator::Gt,
+        OP_GTE => Operator::Gte,
+        OP_LT => Operator::Lt,
+        OP_LTE => Operator::Lte,
+        _ => Operator::Eq,
+    }
+}
+
+// =============================================================================
+// OPTIMIZED: Single-call encoding functions (minimize CGO crossings)
+// =============================================================================
+
+/// Encode SELECT directly without intermediate handle.
+/// ONE CGO call instead of 5+!
+/// 
+/// columns: comma-separated column names (e.g., "id,name")
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_encode_select_fast(
+    table: *const c_char,
+    columns: *const c_char,  // comma-separated
+    limit: i64,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
+    let columns_str = unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") };
+    
+    // Build command directly
+    let mut cmd = QailCmd::get(table);
+    
+    // Parse comma-separated columns
+    if !columns_str.is_empty() && columns_str != "*" {
+        for col in columns_str.split(',') {
+            cmd.columns.push(Expr::Named(col.trim().to_string()));
+        }
+    }
+    
+    // Add limit
+    if limit > 0 {
+        cmd = cmd.limit(limit);
+    }
+    
+    // Encode directly
+    let (wire_bytes, _params) = AstEncoder::encode_cmd(&cmd);
+    let bytes = wire_bytes.to_vec();
+    
+    let len = bytes.len();
+    let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+    
+    unsafe { *out_len = len; }
+    ptr
+}
+
+/// Encode batch of SELECT queries with same structure but different limits.
+/// Returns all wire bytes in one buffer.
+/// 
+/// ONE CGO call for entire batch!
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_encode_select_batch_fast(
+    table: *const c_char,
+    columns: *const c_char,  // comma-separated
+    limits: *const i64,      // array of limit values
+    count: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
+    let columns_str = unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") };
+    
+    // Pre-parse columns once
+    let col_exprs: Vec<Expr> = if !columns_str.is_empty() && columns_str != "*" {
+        columns_str.split(',')
+            .map(|col| Expr::Named(col.trim().to_string()))
+            .collect()
+    } else {
+        vec![]
+    };
+    
+    // Build all commands
+    let mut cmds = Vec::with_capacity(count);
+    for i in 0..count {
+        let limit = unsafe { *limits.add(i) };
+        let mut cmd = QailCmd::get(table);
+        cmd.columns = col_exprs.clone();
+        if limit > 0 {
+            cmd = cmd.limit(limit);
+        }
+        cmds.push(cmd);
+    }
+    
+    // Encode batch
+    let wire_bytes = AstEncoder::encode_batch(&cmds);
+    let bytes = wire_bytes.to_vec();
+    
+    let len = bytes.len();
+    let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+    
+    unsafe { *out_len = len; }
+    ptr
+}
