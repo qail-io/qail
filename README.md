@@ -17,6 +17,8 @@ For years, developers have been trapped between two choices:
 
 **QAIL is the third way.**
 
+> *"I originally built QAIL for internal use to solve my own headaches. But I realized that other engineers shouldn't have to suffer through the same 'Database Dilemma'. That's why I decided to open-source it."* — The Creator
+
 We moved validation from the **networking layer** to the **grammar level**. By treating queries as a compiled language instead of raw strings, QAIL provides compile-time safety with the freedom of raw SQL.
 
 - ✅ **No language lock-in** — Same syntax in Rust, Node.js, Go, Python, PHP
