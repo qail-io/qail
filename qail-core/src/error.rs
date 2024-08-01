@@ -40,6 +40,10 @@ pub enum QailError {
     #[error("Execution error: {0}")]
     Execution(String),
 
+    /// Schema validation error.
+    #[error("Validation error: {0}")]
+    Validation(String),
+
     /// Configuration error.
     #[error("Configuration error: {0}")]
     Config(String),

@@ -94,6 +94,48 @@ impl Validator {
 
         best_match
     }
+
+    /// Validate an entire QailCmd against the schema.
+    /// Returns Ok(()) if valid, or a list of validation errors.
+    pub fn validate_command(&self, cmd: &crate::ast::QailCmd) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        // Check table exists
+        if let Err(e) = self.validate_table(&cmd.table) {
+            errors.push(e);
+        }
+
+        // Check columns exist
+        for col in &cmd.columns {
+            if let crate::ast::Column::Named(name) = col {
+                if let Err(e) = self.validate_column(&cmd.table, name) {
+                    errors.push(e);
+                }
+            }
+        }
+
+        // Check filter/payload conditions
+        for cage in &cmd.cages {
+            for cond in &cage.conditions {
+                if let Err(e) = self.validate_column(&cmd.table, &cond.column) {
+                    errors.push(e);
+                }
+            }
+        }
+
+        // Check join tables
+        for join in &cmd.joins {
+            if let Err(e) = self.validate_table(&join.table) {
+                errors.push(e);
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
 }
 
 #[cfg(test)]
