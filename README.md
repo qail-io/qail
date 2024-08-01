@@ -167,15 +167,38 @@ get::users<-profiles:'name'avatar
 
 ## 🌐 One Syntax. Every Stack.
 
-QAIL works alongside your existing tools:
+QAIL provides multiple integration paths:
 
-| Language | QAIL Package | Works With |
-|----------|--------------|------------|
-| **Rust** | `qail-core` | SQLx, Diesel, tokio-postgres |
-| **Node.js** | `qail-wasm` | pg, mysql2, better-sqlite3 |
-| **Browser** | `qail-wasm` | Any REST/GraphQL client |
-| **Python** | `qail-py` (coming) | psycopg2, SQLAlchemy |
-| **Go** | `qail-go` (coming) | database/sql, GORM |
+| Platform | Package | Description |
+|----------|---------|-------------|
+| **Rust** | `qail-core` | Native crate, zero overhead |
+| **Node.js / Browser** | `qail-wasm` | WebAssembly module (~50KB) |
+| **C / C++** | `libqail` | Universal C-API for FFI |
+| **Python, Go, PHP, Java** | via C-API | Use `libqail` through your language's FFI |
+
+### The C-API Advantage
+
+Instead of building separate bindings for each language, we expose a **Universal C-API** (`libqail`). Any language with FFI support can call QAIL directly:
+
+```c
+// C / C++
+#include <qail.h>
+const char* sql = qail_transpile("get::users:'_ [ 0..10 ]");
+```
+
+```python
+# Python (via ctypes or cffi)
+from ctypes import cdll
+libqail = cdll.LoadLibrary("libqail.so")
+sql = libqail.qail_transpile(b"get::users:'_")
+```
+
+```go
+// Go (via cgo)
+// #include <qail.h>
+import "C"
+sql := C.GoString(C.qail_transpile(C.CString("get::users:'_")))
+```
 
 **Same syntax. Same validation. Any driver.**
 
