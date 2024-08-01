@@ -1,0 +1,22 @@
+[package]
+name = "qail-macro"
+version = "0.6.0"
+edition = "2024"
+description = "Procedural macros for QAIL"
+license = "MIT"
+repository = "https://github.com/qail-rs/qail"
+readme = "../README.md"
+categories = ["database", "rust-patterns"]
+keywords = ["qail", "macro", "sql"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+qail-core = { path = "../qail-core", version = "0.6.0" }
+syn = { version = "2.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+
+[lints]
+workspace = true
