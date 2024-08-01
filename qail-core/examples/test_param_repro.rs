@@ -1,4 +1,4 @@
-use qail_core::{parse, ast::Column, transpiler::{ToSqlParameterized, TranspileResult}};
+use qail_core::{parse, transpiler::ToSqlParameterized};
 
 fn main() {
     let query = "get::t 'coalesce(uc.unread_count, 0)@unread_count";
