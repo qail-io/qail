@@ -11,7 +11,6 @@ keywords = ["db", "sql", "cli", "query", "database"]
 
 [dependencies]
 qail-core = { path = "../qail-core", version = "0.8.10" }
-qail-macro = { path = "../qail-macro", version = "0.8.10" }
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

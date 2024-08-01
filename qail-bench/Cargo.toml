@@ -9,7 +9,6 @@ harness = false
 
 [dependencies]
 qail-core = { path = "../qail-core" }
-qail-macro = { path = "../qail-macro" }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [dev-dependencies]
