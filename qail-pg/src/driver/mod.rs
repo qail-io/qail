@@ -5,8 +5,10 @@
 
 mod connection;
 mod row;
+mod pool;
 
 pub use connection::PgConnection;
+pub use pool::{PgPool, PoolConfig, PooledConnection};
 
 use qail_core::ast::QailCmd;
 
