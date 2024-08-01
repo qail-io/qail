@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use crate::ast::QailCmd;
 
 /// A value in a condition.
@@ -26,6 +27,8 @@ pub enum Value {
     Subquery(Box<QailCmd>),
     /// Column reference (e.g. JOIN ... ON a.id = b.id)
     Column(String),
+    /// UUID value
+    Uuid(Uuid),
 }
 
 impl std::fmt::Display for Value {
@@ -49,6 +52,7 @@ impl std::fmt::Display for Value {
             },
             Value::Subquery(_) => write!(f, "(SUBQUERY)"),
             Value::Column(s) => write!(f, "{}", s),
+            Value::Uuid(u) => write!(f, "'{}'", u),
         }
     }
 }
@@ -95,5 +99,11 @@ impl<T: Into<Value>> From<Option<T>> for Value {
             Some(v) => v.into(),
             None => Value::Null,
         }
+    }
+}
+
+impl From<Uuid> for Value {
+    fn from(u: Uuid) -> Self {
+        Value::Uuid(u)
     }
 }

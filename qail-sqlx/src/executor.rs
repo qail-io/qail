@@ -266,6 +266,7 @@ where
         Value::Float(f) => query.bind(*f),
         Value::Bool(b) => query.bind(*b),
         Value::Null => query.bind(None::<String>),
+        Value::Uuid(u) => query.bind(*u),
         Value::Array(arr) => {
             // Convert array to strings for now
             let strings: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
@@ -290,6 +291,7 @@ fn bind_value_raw<'q>(
         Value::Float(f) => query.bind(*f),
         Value::Bool(b) => query.bind(*b),
         Value::Null => query.bind(None::<String>),
+        Value::Uuid(u) => query.bind(*u),
         Value::Array(arr) => {
             let strings: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
             query.bind(strings)
