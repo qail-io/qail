@@ -58,6 +58,16 @@ macro_rules! qail_params {
     }};
 }
 
+// Re-export chrono types for convenience
+pub use chrono::{DateTime, Utc};
+
+impl QailParams {
+    /// Insert a DateTime<Utc> value, converting to Timestamp.
+    pub fn insert_datetime(&mut self, name: impl Into<String>, dt: DateTime<Utc>) {
+        self.params.insert(name.into(), Value::Timestamp(dt.to_rfc3339()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
