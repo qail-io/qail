@@ -5,6 +5,8 @@
 
 pub mod wire;
 pub mod encoder;
+pub mod auth;
 
 pub use wire::*;
 pub use encoder::PgEncoder;
+pub use auth::ScramClient;

@@ -12,5 +12,12 @@ bytes = "1.5"
 async-trait = "0.1"
 tokio = { version = "1", features = ["net", "io-util"] }
 
+# SCRAM-SHA-256 authentication
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+base64 = "0.22"
+rand = "0.9"
+
 [lints]
 workspace = true

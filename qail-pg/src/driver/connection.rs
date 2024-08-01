@@ -5,7 +5,7 @@
 
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus};
+use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus, ScramClient};
 use super::{PgError, PgResult};
 
 /// A raw PostgreSQL connection.
@@ -15,8 +15,19 @@ pub struct PgConnection {
 }
 
 impl PgConnection {
-    /// Connect to PostgreSQL server.
+    /// Connect to PostgreSQL server without authentication (trust mode).
     pub async fn connect(host: &str, port: u16, user: &str, database: &str) -> PgResult<Self> {
+        Self::connect_with_password(host, port, user, database, None).await
+    }
+
+    /// Connect to PostgreSQL server with optional password authentication.
+    pub async fn connect_with_password(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+    ) -> PgResult<Self> {
         let addr = format!("{}:{}", host, port);
         let stream = TcpStream::connect(&addr).await?;
 
@@ -32,7 +43,7 @@ impl PgConnection {
         }).await?;
 
         // Handle authentication
-        conn.handle_startup().await?;
+        conn.handle_startup(user, password).await?;
 
         Ok(conn)
     }
@@ -63,15 +74,60 @@ impl PgConnection {
     }
 
     /// Handle startup sequence (auth + params).
-    async fn handle_startup(&mut self) -> PgResult<()> {
+    async fn handle_startup(&mut self, user: &str, password: Option<&str>) -> PgResult<()> {
+        let mut scram_client: Option<ScramClient> = None;
+
         loop {
             let msg = self.recv().await?;
             match msg {
                 BackendMessage::AuthenticationOk => {
-                    // Continue to receive params
+                    // Authentication successful, continue to receive params
                 }
                 BackendMessage::AuthenticationMD5Password(_salt) => {
-                    return Err(PgError::Auth("MD5 auth not implemented yet".to_string()));
+                    return Err(PgError::Auth("MD5 auth not supported. Use SCRAM-SHA-256.".to_string()));
+                }
+                BackendMessage::AuthenticationSASL(mechanisms) => {
+                    // SCRAM-SHA-256 authentication requested
+                    let password = password.ok_or_else(|| {
+                        PgError::Auth("Password required for SCRAM authentication".to_string())
+                    })?;
+
+                    if !mechanisms.iter().any(|m| m == "SCRAM-SHA-256") {
+                        return Err(PgError::Auth(format!(
+                            "Server doesn't support SCRAM-SHA-256. Available: {:?}",
+                            mechanisms
+                        )));
+                    }
+
+                    // Initialize SCRAM client
+                    let client = ScramClient::new(user, password);
+                    let first_message = client.client_first_message();
+
+                    // Send SASL initial response
+                    self.send(FrontendMessage::SASLInitialResponse {
+                        mechanism: "SCRAM-SHA-256".to_string(),
+                        data: first_message,
+                    }).await?;
+
+                    scram_client = Some(client);
+                }
+                BackendMessage::AuthenticationSASLContinue(server_data) => {
+                    // Process server challenge and send final response
+                    let client = scram_client.as_mut().ok_or_else(|| {
+                        PgError::Auth("Received SASL Continue without SASL init".to_string())
+                    })?;
+
+                    let final_message = client.process_server_first(&server_data)
+                        .map_err(|e| PgError::Auth(format!("SCRAM error: {}", e)))?;
+
+                    self.send(FrontendMessage::SASLResponse(final_message)).await?;
+                }
+                BackendMessage::AuthenticationSASLFinal(server_signature) => {
+                    // Verify server signature
+                    if let Some(client) = scram_client.as_ref() {
+                        client.verify_server_final(&server_signature)
+                            .map_err(|e| PgError::Auth(format!("Server verification failed: {}", e)))?;
+                    }
                 }
                 BackendMessage::ParameterStatus { .. } => {
                     // Store server parameters if needed
