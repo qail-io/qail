@@ -116,4 +116,239 @@ impl PgConnection {
             }
         }
     }
+    
+    /// FAST receive for result consumption - inline DataRow parsing.
+    /// Returns: (msg_type, Option<row_data>)
+    /// 
+    /// For 'D' (DataRow): returns parsed columns
+    /// For other types: returns None
+    /// This avoids BackendMessage enum allocation for non-DataRow messages.
+    #[inline]
+    pub(crate) async fn recv_with_data_fast(&mut self) -> PgResult<(u8, Option<Vec<Option<Vec<u8>>>>)> {
+        loop {
+            // Check if we have at least the header
+            if self.buffer.len() >= 5 {
+                let msg_len = u32::from_be_bytes([
+                    self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
+                ]) as usize;
+                
+                if self.buffer.len() >= msg_len + 1 {
+                    let msg_type = self.buffer[0];
+                    
+                    // Check for error
+                    if msg_type == b'E' {
+                        let msg_bytes = self.buffer.split_to(msg_len + 1);
+                        let (msg, _) = BackendMessage::decode(&msg_bytes)
+                            .map_err(PgError::Protocol)?;
+                        if let BackendMessage::ErrorResponse(err) = msg {
+                            return Err(PgError::Query(err.message));
+                        }
+                    }
+                    
+                    // Fast path: DataRow - parse inline
+                    if msg_type == b'D' {
+                        let payload = &self.buffer[5..msg_len + 1];
+                        
+                        if payload.len() >= 2 {
+                            let column_count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+                            let mut columns = Vec::with_capacity(column_count);
+                            let mut pos = 2;
+                            
+                            for _ in 0..column_count {
+                                if pos + 4 > payload.len() { break; }
+                                
+                                let len = i32::from_be_bytes([
+                                    payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]
+                                ]);
+                                pos += 4;
+                                
+                                if len == -1 {
+                                    columns.push(None);
+                                } else {
+                                    let len = len as usize;
+                                    if pos + len <= payload.len() {
+                                        columns.push(Some(payload[pos..pos + len].to_vec()));
+                                        pos += len;
+                                    }
+                                }
+                            }
+                            
+                            let _ = self.buffer.split_to(msg_len + 1);
+                            return Ok((msg_type, Some(columns)));
+                        }
+                    }
+                    
+                    // Other messages - skip
+                    let _ = self.buffer.split_to(msg_len + 1);
+                    return Ok((msg_type, None));
+                }
+            }
+            
+            // Need more data
+            if self.buffer.capacity() - self.buffer.len() < 65536 {
+                self.buffer.reserve(131072);
+            }
+            
+            let n = self.stream.read_buf(&mut self.buffer).await?;
+            if n == 0 {
+                return Err(PgError::Connection("Connection closed".to_string()));
+            }
+        }
+    }
+    
+    /// ZERO-COPY receive for DataRow.
+    /// Uses bytes::Bytes for reference-counted slicing instead of Vec copy.
+    /// 
+    /// Returns: (msg_type, Option<row_data>)
+    /// For 'D' (DataRow): returns Bytes slices (no copy!)
+    /// For other types: returns None
+    #[inline]
+    pub(crate) async fn recv_data_zerocopy(&mut self) -> PgResult<(u8, Option<Vec<Option<bytes::Bytes>>>)> {
+        use bytes::Buf;
+        
+        loop {
+            // Check if we have at least the header
+            if self.buffer.len() >= 5 {
+                let msg_len = u32::from_be_bytes([
+                    self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
+                ]) as usize;
+                
+                if self.buffer.len() >= msg_len + 1 {
+                    let msg_type = self.buffer[0];
+                    
+                    // Check for error
+                    if msg_type == b'E' {
+                        let msg_bytes = self.buffer.split_to(msg_len + 1);
+                        let (msg, _) = BackendMessage::decode(&msg_bytes)
+                            .map_err(PgError::Protocol)?;
+                        if let BackendMessage::ErrorResponse(err) = msg {
+                            return Err(PgError::Query(err.message));
+                        }
+                    }
+                    
+                    // Fast path: DataRow - ZERO-COPY using Bytes
+                    if msg_type == b'D' {
+                        // Split off the entire message
+                        let mut msg_bytes = self.buffer.split_to(msg_len + 1);
+                        
+                        // Skip type byte (1) + length (4) = 5 bytes
+                        msg_bytes.advance(5);
+                        
+                        if msg_bytes.len() >= 2 {
+                            let column_count = msg_bytes.get_u16() as usize;
+                            let mut columns = Vec::with_capacity(column_count);
+                            
+                            for _ in 0..column_count {
+                                if msg_bytes.remaining() < 4 { break; }
+                                
+                                let len = msg_bytes.get_i32();
+                                
+                                if len == -1 {
+                                    columns.push(None);
+                                } else {
+                                    let len = len as usize;
+                                    if msg_bytes.remaining() >= len {
+                                        // ZERO-COPY: freeze the BytesMut slice as Bytes
+                                        let col_data = msg_bytes.split_to(len).freeze();
+                                        columns.push(Some(col_data));
+                                    }
+                                }
+                            }
+                            
+                            return Ok((msg_type, Some(columns)));
+                        }
+                        return Ok((msg_type, None));
+                    }
+                    
+                    // Other messages - skip
+                    let _ = self.buffer.split_to(msg_len + 1);
+                    return Ok((msg_type, None));
+                }
+            }
+            
+            // Need more data
+            if self.buffer.capacity() - self.buffer.len() < 65536 {
+                self.buffer.reserve(131072);
+            }
+            
+            let n = self.stream.read_buf(&mut self.buffer).await?;
+            if n == 0 {
+                return Err(PgError::Connection("Connection closed".to_string()));
+            }
+        }
+    }
+    
+    /// ULTRA-FAST receive for 2-column DataRow (id, name pattern).
+    /// Optimized for the common case of SELECT id, name queries.
+    /// Uses fixed-size array instead of Vec allocation.
+    /// 
+    /// Returns: (msg_type, Option<(col0, col1)>)
+    #[inline(always)]
+    pub(crate) async fn recv_data_ultra(&mut self) -> PgResult<(u8, Option<(bytes::Bytes, bytes::Bytes)>)> {
+        use bytes::Buf;
+        
+        loop {
+            // Check if we have at least the header
+            if self.buffer.len() >= 5 {
+                let msg_len = u32::from_be_bytes([
+                    self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
+                ]) as usize;
+                
+                if self.buffer.len() >= msg_len + 1 {
+                    let msg_type = self.buffer[0];
+                    
+                    // Error check
+                    if msg_type == b'E' {
+                        let msg_bytes = self.buffer.split_to(msg_len + 1);
+                        let (msg, _) = BackendMessage::decode(&msg_bytes)
+                            .map_err(PgError::Protocol)?;
+                        if let BackendMessage::ErrorResponse(err) = msg {
+                            return Err(PgError::Query(err.message));
+                        }
+                    }
+                    
+                    // ULTRA-FAST path: DataRow with 2 columns
+                    if msg_type == b'D' {
+                        let mut msg_bytes = self.buffer.split_to(msg_len + 1);
+                        msg_bytes.advance(5); // Skip type + length
+                        
+                        // Read column count (expect 2)
+                        let _col_count = msg_bytes.get_u16();
+                        
+                        // Column 0 (id)
+                        let len0 = msg_bytes.get_i32();
+                        let col0 = if len0 > 0 {
+                            msg_bytes.split_to(len0 as usize).freeze()
+                        } else {
+                            bytes::Bytes::new()
+                        };
+                        
+                        // Column 1 (name)
+                        let len1 = msg_bytes.get_i32();
+                        let col1 = if len1 > 0 {
+                            msg_bytes.split_to(len1 as usize).freeze()
+                        } else {
+                            bytes::Bytes::new()
+                        };
+                        
+                        return Ok((msg_type, Some((col0, col1))));
+                    }
+                    
+                    // Other messages - skip
+                    let _ = self.buffer.split_to(msg_len + 1);
+                    return Ok((msg_type, None));
+                }
+            }
+            
+            // Need more data
+            if self.buffer.capacity() - self.buffer.len() < 65536 {
+                self.buffer.reserve(131072);
+            }
+            
+            let n = self.stream.read_buf(&mut self.buffer).await?;
+            if n == 0 {
+                return Err(PgError::Connection("Connection closed".to_string()));
+            }
+        }
+    }
 }
