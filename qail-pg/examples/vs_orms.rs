@@ -92,13 +92,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Fetch 20: {:?} ({:?}/iter)",
         sqlx_fetch_time, sqlx_fetch_time / ITERATIONS as u32);
 
-    // ============ SeaORM (uses SQLx under the hood) ============
-    println!("\n📊 SeaORM (ORM layer over SQLx)");
+    // ============ SeaORM (FAIR: Pool with max=1 connections) ============
+    // NOTE: SeaORM always uses a pool internally, but we configure it to min=1, max=1
+    println!("\n📊 SeaORM (Pool max=1 - FAIR)");
     
-    use sea_orm::{Database, DatabaseConnection, Statement, ConnectionTrait, DbBackend};
+    use sea_orm::{Database, DatabaseConnection, Statement, ConnectionTrait, DbBackend, ConnectOptions};
     
     let seaorm_connect_start = Instant::now();
-    let seaorm_db: DatabaseConnection = Database::connect(&db_url).await?;
+    let mut opt = ConnectOptions::new(&db_url);
+    opt.max_connections(1).min_connections(1);
+    let seaorm_db: DatabaseConnection = Database::connect(opt).await?;
     let seaorm_connect_time = seaorm_connect_start.elapsed();
     println!("   Connect: {:?}", seaorm_connect_time);
     
