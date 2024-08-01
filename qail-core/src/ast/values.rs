@@ -88,3 +88,12 @@ impl From<String> for Value {
         Value::String(s)
     }
 }
+
+impl<T: Into<Value>> From<Option<T>> for Value {
+    fn from(opt: Option<T>) -> Self {
+        match opt {
+            Some(v) => v.into(),
+            None => Value::Null,
+        }
+    }
+}
