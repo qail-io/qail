@@ -44,16 +44,16 @@ jobs:
         run: |
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
           CORE_VERSION=$(grep '^version' qail-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          MACRO_VERSION=$(grep '^version' qail-macro/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          MACROS_VERSION=$(grep '^version' qail-macros/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           CLI_VERSION=$(grep '^version' qail-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           
           echo "Tag version: $TAG_VERSION"
           echo "Core version: $CORE_VERSION"
-          echo "Macro version: $MACRO_VERSION"
+          echo "Macros version: $MACROS_VERSION"
           echo "CLI version: $CLI_VERSION"
           
-          if [ "$CORE_VERSION" != "$TAG_VERSION" ] || [ "$MACRO_VERSION" != "$TAG_VERSION" ] || [ "$CLI_VERSION" != "$TAG_VERSION" ]; then
-            echo "❌ Version mismatch! Tag: $TAG_VERSION, Core: $CORE_VERSION, Macro: $MACRO_VERSION, CLI: $CLI_VERSION"
+          if [ "$CORE_VERSION" != "$TAG_VERSION" ] || [ "$MACROS_VERSION" != "$TAG_VERSION" ] || [ "$CLI_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch! Tag: $TAG_VERSION, Core: $CORE_VERSION, Macros: $MACROS_VERSION, CLI: $CLI_VERSION"
             exit 1
           fi
           echo "✅ All versions match tag"
@@ -76,13 +76,13 @@ jobs:
         if: ${{ !inputs.dry_run }}
         run: sleep 30
 
-      - name: Publish qail-macro
+      - name: Publish qail-macros
         if: ${{ !inputs.dry_run }}
-        run: cargo publish -p qail-macro || echo "qail-macro already published, skipping"
+        run: cargo publish -p qail-macros || echo "qail-macros already published, skipping"
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-      - name: Wait for qail-macro to be available
+      - name: Wait for qail-macros to be available
         if: ${{ !inputs.dry_run }}
         run: sleep 30
 
@@ -97,5 +97,5 @@ jobs:
         run: |
           echo "🔍 Dry run completed - no packages were published"
           cargo publish -p qail-core --dry-run
-          cargo publish -p qail-macro --dry-run
+          cargo publish -p qail-macros --dry-run
           cargo publish -p qail --dry-run
