@@ -293,7 +293,7 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
     let mut current_input = input;
     
     loop {
-        // Parse: column op value
+        // Parse: column op value/expression
         let (input, _) = multispace0(current_input)?;
         let (input, col) = parse_identifier(input)?;
         let (input, _) = multispace0(input)?;
@@ -315,7 +315,9 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
             let (input, _) = char(')')(input)?;
             (input, Value::Array(values))
         } else {
-            parse_value(input)?
+            // Try parsing as expression first (for now() - 24h type syntax)
+            // then convert to Value::Function with the expression string
+            parse_filter_value(input)?
         };
         
         conditions.push(Condition {
@@ -344,6 +346,60 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
     }
     
     Ok((current_input, conditions))
+}
+
+/// Parse a value in FILTER condition that can be either a simple value or an expression
+/// like `now() - 24h`. Converts expressions to Value::Function with SQL representation.
+fn parse_filter_value(input: &str) -> IResult<&str, Value> {
+    use crate::parser::grammar::base::parse_value;
+    
+    // First try simple value
+    if let Ok((remaining, val)) = parse_value(input) {
+        return Ok((remaining, val));
+    }
+    
+    // Try parsing as a function call expression (e.g., now(), now() - 24h)
+    // We need to parse until we hit a boundary (AND, ), whitespace before AND)
+    let mut end_pos = 0;
+    let mut paren_depth = 0;
+    
+    for (i, c) in input.char_indices() {
+        match c {
+            '(' => paren_depth += 1,
+            ')' => {
+                if paren_depth == 0 {
+                    end_pos = i;
+                    break;
+                }
+                paren_depth -= 1;
+            }
+            _ => {}
+        }
+        
+        // Check for AND keyword (case insensitive)
+        if paren_depth == 0 && i > 0 {
+            let remaining = &input[i..];
+            if remaining.len() >= 4 {
+                let potential_and = &remaining[..4].to_lowercase();
+                if potential_and.starts_with("and ") || potential_and.starts_with("and\t") || potential_and.starts_with("and\n") {
+                    end_pos = i;
+                    break;
+                }
+            }
+        }
+    }
+    
+    if end_pos == 0 {
+        end_pos = input.len();
+    }
+    
+    let expr_str = input[..end_pos].trim();
+    if expr_str.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)));
+    }
+    
+    // Return as Value::Function with the expression string (will be output as-is)
+    Ok((&input[end_pos..], Value::Function(expr_str.to_string())))
 }
 
 /// Parse a single function argument (supports expressions or star)
