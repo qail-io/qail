@@ -4,11 +4,11 @@
 //! Uses tokio for networking.
 
 mod connection;
+mod row;
 
 pub use connection::PgConnection;
 
 use qail_core::ast::QailCmd;
-use crate::protocol::PgEncoder;
 
 /// PostgreSQL row (raw bytes for now).
 pub struct PgRow {
@@ -78,13 +78,14 @@ impl PgDriver {
 
     /// Execute a QAIL command and fetch all rows.
     pub async fn fetch_all(&mut self, cmd: &QailCmd) -> PgResult<Vec<PgRow>> {
-        // Layer 2: Encode the command to bytes (pure, sync)
-        let _bytes = PgEncoder::encode_simple_query(cmd);
+        // Layer 2: Convert AST to SQL (pure, sync)
+        use qail_core::transpiler::ToSql;
+        let sql = cmd.to_sql();
 
-        // Layer 3: Send bytes over the wire (async I/O)
-        // TODO: Implement using self.connection
+        // Layer 3: Execute via connection (async I/O)
+        let raw_rows = self.connection.simple_query(&sql).await?;
         
-        Err(PgError::Query("fetch_all not fully implemented".to_string()))
+        Ok(raw_rows.into_iter().map(|columns| PgRow { columns }).collect())
     }
 
     /// Execute a QAIL command and fetch one row.
@@ -95,8 +96,15 @@ impl PgDriver {
 
     /// Execute a QAIL command (for mutations).
     pub async fn execute(&mut self, cmd: &QailCmd) -> PgResult<u64> {
-        let _bytes = PgEncoder::encode_simple_query(cmd);
+        // Layer 2: Convert AST to SQL (pure, sync)
+        use qail_core::transpiler::ToSql;
+        let sql = cmd.to_sql();
+
+        // Layer 3: Execute via connection (async I/O)
+        // simple_query returns rows, but for mutations we just need to know it succeeded
+        let _ = self.connection.simple_query(&sql).await?;
         
-        Err(PgError::Query("execute not fully implemented".to_string()))
+        // TODO: Parse affected rows from CommandComplete tag (e.g., "INSERT 0 1")
+        Ok(1)
     }
 }

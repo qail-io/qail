@@ -212,14 +212,100 @@ impl BackendMessage {
         Ok(BackendMessage::ReadyForQuery(status))
     }
     
-    fn decode_row_description(_payload: &[u8]) -> Result<Self, String> {
-        // TODO: Full implementation
-        Ok(BackendMessage::RowDescription(vec![]))
+    fn decode_row_description(payload: &[u8]) -> Result<Self, String> {
+        if payload.len() < 2 {
+            return Err("RowDescription payload too short".to_string());
+        }
+        
+        let field_count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+        let mut fields = Vec::with_capacity(field_count);
+        let mut pos = 2;
+        
+        for _ in 0..field_count {
+            // Field name (null-terminated string)
+            let name_end = payload[pos..].iter()
+                .position(|&b| b == 0)
+                .ok_or("Missing null terminator in field name")?;
+            let name = String::from_utf8_lossy(&payload[pos..pos + name_end]).to_string();
+            pos += name_end + 1; // Skip null terminator
+            
+            // Ensure we have enough bytes for the fixed fields
+            if pos + 18 > payload.len() {
+                return Err("RowDescription field truncated".to_string());
+            }
+            
+            let table_oid = u32::from_be_bytes([
+                payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]
+            ]);
+            pos += 4;
+            
+            let column_attr = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+            pos += 2;
+            
+            let type_oid = u32::from_be_bytes([
+                payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]
+            ]);
+            pos += 4;
+            
+            let type_size = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+            pos += 2;
+            
+            let type_modifier = i32::from_be_bytes([
+                payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]
+            ]);
+            pos += 4;
+            
+            let format = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+            pos += 2;
+            
+            fields.push(FieldDescription {
+                name,
+                table_oid,
+                column_attr,
+                type_oid,
+                type_size,
+                type_modifier,
+                format,
+            });
+        }
+        
+        Ok(BackendMessage::RowDescription(fields))
     }
     
-    fn decode_data_row(_payload: &[u8]) -> Result<Self, String> {
-        // TODO: Full implementation
-        Ok(BackendMessage::DataRow(vec![]))
+    fn decode_data_row(payload: &[u8]) -> Result<Self, String> {
+        if payload.len() < 2 {
+            return Err("DataRow payload too short".to_string());
+        }
+        
+        let column_count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+        let mut columns = Vec::with_capacity(column_count);
+        let mut pos = 2;
+        
+        for _ in 0..column_count {
+            if pos + 4 > payload.len() {
+                return Err("DataRow truncated".to_string());
+            }
+            
+            let len = i32::from_be_bytes([
+                payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]
+            ]);
+            pos += 4;
+            
+            if len == -1 {
+                // NULL value
+                columns.push(None);
+            } else {
+                let len = len as usize;
+                if pos + len > payload.len() {
+                    return Err("DataRow column data truncated".to_string());
+                }
+                let data = payload[pos..pos + len].to_vec();
+                pos += len;
+                columns.push(Some(data));
+            }
+        }
+        
+        Ok(BackendMessage::DataRow(columns))
     }
     
     fn decode_command_complete(payload: &[u8]) -> Result<Self, String> {
