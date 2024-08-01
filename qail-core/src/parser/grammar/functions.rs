@@ -171,13 +171,23 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
 /// Parse a value in FILTER condition that can be either a simple value or an expression
 /// like `now() - 24h`. Converts expressions to Value::Function with SQL representation.
 fn parse_filter_value(input: &str) -> IResult<&str, Value> {
-    // First try simple value
+    // First try simple value (but NOT interval - we want full expression parsing for that)
+    // Try parsing just string, int, float, bool, null, params first
     if let Ok((remaining, val)) = parse_value(input) {
-        return Ok((remaining, val));
+        // If it's an interval, we still want the proper SQL format
+        if let Value::Interval { amount, unit } = val {
+            return Ok((remaining, Value::Function(format!("INTERVAL '{} {}'", amount, unit))));
+        }
+        
+        // If it's a function or other complex value, we need expression parsing
+        if !matches!(val, Value::Function(_)) {
+            return Ok((remaining, val));
+        }
     }
     
-    // Try parsing as a function call expression (e.g., now(), now() - 24h)
-    // We need to parse until we hit a boundary (AND, ), whitespace before AND)
+    // Try parsing as a full expression (handles now() - 24h correctly)
+    // We parse as expression and then convert to SQL string representation
+    // Need to parse until we hit a boundary (AND, ))
     let mut end_pos = 0;
     let mut paren_depth = 0;
     
@@ -216,6 +226,12 @@ fn parse_filter_value(input: &str) -> IResult<&str, Value> {
         return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)));
     }
     
-    // Return as Value::Function with the expression string (will be output as-is)
+    // Try to parse as expression and get proper SQL
+    if let Ok((_, expr)) = parse_expression(expr_str) {
+        // Convert expression to SQL string (this handles INTERVAL properly)
+        return Ok((&input[end_pos..], Value::Function(expr.to_string())));
+    }
+    
+    // Fallback: return as-is (shouldn't happen often)
     Ok((&input[end_pos..], Value::Function(expr_str.to_string())))
 }
