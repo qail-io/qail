@@ -133,6 +133,50 @@ impl PgConnection {
         Ok(conn)
     }
 
+    /// Connect to PostgreSQL server via Unix domain socket.
+    ///
+    /// This is faster than TCP for local connections as it avoids
+    /// the network stack overhead.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Connect via default PostgreSQL socket
+    /// let conn = PgConnection::connect_unix(
+    ///     "/var/run/postgresql/.s.PGSQL.5432",
+    ///     "postgres",
+    ///     "mydb",
+    ///     Some("password")
+    /// ).await?;
+    /// ```
+    #[cfg(unix)]
+    pub async fn connect_unix(
+        socket_path: &str,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+    ) -> PgResult<Self> {
+        use tokio::net::UnixStream;
+        
+        let unix_stream = UnixStream::connect(socket_path).await?;
+
+        let mut conn = Self {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+            prepared_statements: HashMap::new(),
+        };
+
+        // Send startup message
+        conn.send(FrontendMessage::Startup {
+            user: user.to_string(),
+            database: database.to_string(),
+        }).await?;
+
+        // Handle authentication
+        conn.handle_startup(user, password).await?;
+
+        Ok(conn)
+    }
+
     /// Send a frontend message.
     pub async fn send(&mut self, msg: FrontendMessage) -> PgResult<()> {
         let bytes = msg.encode();
