@@ -29,6 +29,8 @@ pub enum Value {
     Column(String),
     /// UUID value
     Uuid(Uuid),
+    /// Null UUID value (for typed NULL in UUID columns)
+    NullUuid,
 }
 
 impl std::fmt::Display for Value {
@@ -53,6 +55,7 @@ impl std::fmt::Display for Value {
             Value::Subquery(_) => write!(f, "(SUBQUERY)"),
             Value::Column(s) => write!(f, "{}", s),
             Value::Uuid(u) => write!(f, "'{}'", u),
+            Value::NullUuid => write!(f, "NULL"),
         }
     }
 }
@@ -93,17 +96,18 @@ impl From<String> for Value {
     }
 }
 
-impl<T: Into<Value>> From<Option<T>> for Value {
-    fn from(opt: Option<T>) -> Self {
-        match opt {
-            Some(v) => v.into(),
-            None => Value::Null,
-        }
-    }
-}
 
 impl From<Uuid> for Value {
     fn from(u: Uuid) -> Self {
         Value::Uuid(u)
+    }
+}
+
+impl From<Option<Uuid>> for Value {
+    fn from(opt: Option<Uuid>) -> Self {
+        match opt {
+            Some(u) => Value::Uuid(u),
+            None => Value::NullUuid,
+        }
     }
 }
