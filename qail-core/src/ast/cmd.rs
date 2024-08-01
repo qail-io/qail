@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::ast::{Action, Cage, CageKind, Expr, Condition, GroupByMode, IndexDef, Join, LogicalOp, Operator, SetOp, SortOrder, TableConstraint, Value};
+use crate::ast::{Action, Cage, CageKind, Expr, Condition, GroupByMode, IndexDef, Join, JoinKind, LogicalOp, Operator, SetOp, SortOrder, TableConstraint, Value};
 
 /// The primary command structure representing a parsed QAIL query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -300,18 +300,284 @@ impl QailCmd {
         self
     }
 
-    /// Add a sort cage (descending).
-    pub fn sort_desc(mut self, column: &str) -> Self {
+    // =========================================================================
+    // Fluent Builder API (New)
+    // =========================================================================
+
+    /// Select all columns (*).
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::get("users").select_all();
+    /// ```
+    pub fn select_all(mut self) -> Self {
+        self.columns.push(Expr::Star);
+        self
+    }
+
+    /// Select specific columns.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::get("users").columns(["id", "email", "name"]);
+    /// ```
+    pub fn columns<I, S>(mut self, cols: I) -> Self 
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.columns.extend(cols.into_iter().map(|c| Expr::Named(c.as_ref().to_string())));
+        self
+    }
+
+    /// Add a single column.
+    pub fn column(mut self, col: impl AsRef<str>) -> Self {
+        self.columns.push(Expr::Named(col.as_ref().to_string()));
+        self
+    }
+
+    /// Add a filter condition with a specific operator.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::{QailCmd, Operator};
+    /// let cmd = QailCmd::get("users")
+    ///     .filter("age", Operator::Gte, 18)
+    ///     .filter("status", Operator::Eq, "active");
+    /// ```
+    pub fn filter(mut self, column: impl AsRef<str>, op: Operator, value: impl Into<Value>) -> Self {
+        // Check if there's already a Filter cage to add to
+        let filter_cage = self.cages.iter_mut().find(|c| matches!(c.kind, CageKind::Filter));
+        
+        let condition = Condition {
+            left: Expr::Named(column.as_ref().to_string()),
+            op,
+            value: value.into(),
+            is_array_unnest: false,
+        };
+        
+        if let Some(cage) = filter_cage {
+            cage.conditions.push(condition);
+        } else {
+            self.cages.push(Cage {
+                kind: CageKind::Filter,
+                conditions: vec![condition],
+                logical_op: LogicalOp::And,
+            });
+        }
+        self
+    }
+
+    /// Add an OR filter condition.
+    pub fn or_filter(mut self, column: impl AsRef<str>, op: Operator, value: impl Into<Value>) -> Self {
         self.cages.push(Cage {
-            kind: CageKind::Sort(SortOrder::Desc),
+            kind: CageKind::Filter,
             conditions: vec![Condition {
-                left: Expr::Named(column.to_string()),
+                left: Expr::Named(column.as_ref().to_string()),
+                op,
+                value: value.into(),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::Or,
+        });
+        self
+    }
+
+    /// Add a WHERE equals condition (shorthand for filter with Eq).
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::get("users").where_eq("id", 42);
+    /// ```
+    pub fn where_eq(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
+        self.filter(column, Operator::Eq, value)
+    }
+
+    /// Add ORDER BY clause.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::{QailCmd, SortOrder};
+    /// let cmd = QailCmd::get("users")
+    ///     .order_by("created_at", SortOrder::Desc)
+    ///     .order_by("name", SortOrder::Asc);
+    /// ```
+    pub fn order_by(mut self, column: impl AsRef<str>, order: SortOrder) -> Self {
+        self.cages.push(Cage {
+            kind: CageKind::Sort(order),
+            conditions: vec![Condition {
+                left: Expr::Named(column.as_ref().to_string()),
                 op: Operator::Eq,
                 value: Value::Null,
                 is_array_unnest: false,
             }],
             logical_op: LogicalOp::And,
         });
+        self
+    }
+
+    /// Add OFFSET clause.
+    pub fn offset(mut self, n: i64) -> Self {
+        self.cages.push(Cage {
+            kind: CageKind::Offset(n as usize),
+            conditions: vec![],
+            logical_op: LogicalOp::And,
+        });
+        self
+    }
+
+    /// Add GROUP BY columns.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::get("orders")
+    ///     .columns(["status", "count(*) as cnt"])
+    ///     .group_by(["status"]);
+    /// ```
+    pub fn group_by<I, S>(mut self, cols: I) -> Self 
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        // Use Partition cage kind for GROUP BY (closest match)
+        let conditions: Vec<Condition> = cols.into_iter().map(|c| Condition {
+            left: Expr::Named(c.as_ref().to_string()),
+            op: Operator::Eq,
+            value: Value::Null,
+            is_array_unnest: false,
+        }).collect();
+        
+        self.cages.push(Cage {
+            kind: CageKind::Partition,
+            conditions,
+            logical_op: LogicalOp::And,
+        });
+        self
+    }
+
+    /// Enable DISTINCT.
+    pub fn distinct_on_all(mut self) -> Self {
+        self.distinct = true;
+        self
+    }
+
+    /// Add a JOIN.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::{QailCmd, JoinKind};
+    /// let cmd = QailCmd::get("users")
+    ///     .join(JoinKind::Left, "profiles", "users.id", "profiles.user_id");
+    /// ```
+    pub fn join(
+        mut self, 
+        kind: JoinKind, 
+        table: impl AsRef<str>, 
+        left_col: impl AsRef<str>, 
+        right_col: impl AsRef<str>
+    ) -> Self {
+        self.joins.push(Join {
+            kind,
+            table: table.as_ref().to_string(),
+            on: Some(vec![Condition {
+                left: Expr::Named(left_col.as_ref().to_string()),
+                op: Operator::Eq,
+                value: Value::Column(right_col.as_ref().to_string()),
+                is_array_unnest: false,
+            }]),
+            on_true: false,
+        });
+        self
+    }
+
+    /// Left join shorthand.
+    pub fn left_join(self, table: impl AsRef<str>, left_col: impl AsRef<str>, right_col: impl AsRef<str>) -> Self {
+        self.join(JoinKind::Left, table, left_col, right_col)
+    }
+
+    /// Inner join shorthand.
+    pub fn inner_join(self, table: impl AsRef<str>, left_col: impl AsRef<str>, right_col: impl AsRef<str>) -> Self {
+        self.join(JoinKind::Inner, table, left_col, right_col)
+    }
+
+    /// Set RETURNING clause for INSERT/UPDATE/DELETE.
+    pub fn returning<I, S>(mut self, cols: I) -> Self 
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.returning = Some(cols.into_iter().map(|c| Expr::Named(c.as_ref().to_string())).collect());
+        self
+    }
+
+    /// Set RETURNING * for INSERT/UPDATE/DELETE.
+    pub fn returning_all(mut self) -> Self {
+        self.returning = Some(vec![Expr::Star]);
+        self
+    }
+
+    /// Set values for INSERT.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::add("users")
+    ///     .columns(["email", "name"])
+    ///     .values(["alice@example.com", "Alice"]);
+    /// ```
+    pub fn values<I, V>(mut self, vals: I) -> Self 
+    where
+        I: IntoIterator<Item = V>,
+        V: Into<Value>,
+    {
+        // Use Payload cage kind for INSERT values
+        self.cages.push(Cage {
+            kind: CageKind::Payload,
+            conditions: vals.into_iter().enumerate().map(|(i, v)| Condition {
+                left: Expr::Named(format!("${}", i + 1)),
+                op: Operator::Eq,
+                value: v.into(),
+                is_array_unnest: false,
+            }).collect(),
+            logical_op: LogicalOp::And,
+        });
+        self
+    }
+
+    /// Set update assignments for SET command.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::set("users")
+    ///     .set_value("status", "active")
+    ///     .set_value("updated_at", "now()")
+    ///     .where_eq("id", 42);
+    /// ```
+    pub fn set_value(mut self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
+        // Find or create Payload cage for SET assignments
+        let payload_cage = self.cages.iter_mut().find(|c| matches!(c.kind, CageKind::Payload));
+        
+        let condition = Condition {
+            left: Expr::Named(column.as_ref().to_string()),
+            op: Operator::Eq,
+            value: value.into(),
+            is_array_unnest: false,
+        };
+        
+        if let Some(cage) = payload_cage {
+            cage.conditions.push(condition);
+        } else {
+            self.cages.push(Cage {
+                kind: CageKind::Payload,
+                conditions: vec![condition],
+                logical_op: LogicalOp::And,
+            });
+        }
         self
     }
 
