@@ -17,19 +17,25 @@ use colored::*;
 use qail_core::prelude::*;
 use qail_core::transpiler::{ToSql, Dialect};
 use qail_core::fmt::Formatter;
-use qail_core::migrate::{diff_schemas, parse_qail};
-use qail_pg::driver::PgDriver;
 use anyhow::Result;
+
+// Import modularized CLI components
+use qail::introspection;
+use qail::migrations::{migrate_status, migrate_analyze, migrate_plan, migrate_up, migrate_down, watch_schema};
+use qail::schema::{check_schema, diff_schemas_cmd, OutputFormat as SchemaOutputFormat};
+use qail::lint::lint_schema;
+use qail::repl::run_repl;
 
 #[derive(Parser)]
 #[command(name = "qail")]
 #[command(author = "QAIL Contributors")]
-#[command(version = "0.5.0")]
-#[command(about = "🪝 The Horizontal Query Language CLI", long_about = None)]
+#[command(version = "0.9.4")]
+#[command(about = "🪝 QAIL — Schema-First Database Toolkit", long_about = None)]
 #[command(after_help = "EXAMPLES:
-    qail \"get::users:'_[active=true]\"
-    qail \"get::orders:'id'total[user_id=$1][lim=10]\"
-    qail repl")]
+    qail pull postgres://...           # Extract schema from DB
+    qail diff old.qail new.qail        # Compare schemas
+    qail migrate up old:new postgres:  # Apply migrations
+    qail lint schema.qail              # Check best practices")]
 struct Cli {
     /// The QAIL query to transpile
     query: Option<String>,
@@ -65,12 +71,6 @@ enum CliDialect {
     Sqlserver,
 }
 
-#[derive(Clone, ValueEnum, Default)]
-enum SchemaFormat {
-    #[default]
-    Qail,
-}
-
 impl From<CliDialect> for Dialect {
     fn from(val: CliDialect) -> Self {
         match val {
@@ -85,9 +85,7 @@ impl From<CliDialect> for Dialect {
 #[derive(Subcommand)]
 enum Commands {
     /// Parse and explain a QAIL query
-    Explain {
-        query: String,
-    },
+    Explain { query: String },
     /// Interactive REPL mode
     Repl,
     /// Show the symbol reference
@@ -96,7 +94,6 @@ enum Commands {
     Mig {
         /// The QAIL migration command (e.g., make::users...)
         query: String,
-        
         /// Optional name for the migration
         #[arg(short, long)]
         name: Option<String>,
@@ -107,10 +104,7 @@ enum Commands {
         url: String,
     },
     /// Format a QAIL query to canonical v2 syntax
-    Fmt {
-        /// The QAIL query to format
-        query: String,
-    },
+    Fmt { query: String },
     /// Validate a QAIL schema file
     Check {
         /// Schema file path (or old:new for migration validation)
@@ -155,10 +149,7 @@ enum Commands {
 #[derive(Subcommand, Clone)]
 enum MigrateAction {
     /// Show migration status and history
-    Status {
-        /// Database URL
-        url: String,
-    },
+    Status { url: String },
     /// Analyze migration impact on codebase before executing
     Analyze {
         /// Schema diff (old.qail:new.qail)
@@ -189,6 +180,59 @@ enum MigrateAction {
         /// Database URL
         url: String,
     },
+    /// Create a new named migration file
+    Create {
+        /// Name for the migration (e.g., add_user_avatars)
+        name: String,
+        /// Dependencies - migrations that must run first
+        #[arg(short, long)]
+        depends: Option<String>,
+        /// Author of the migration
+        #[arg(short, long)]
+        author: Option<String>,
+    },
+    /// Apply migration to shadow database (blue-green)
+    Shadow {
+        /// Schema diff (old.qail:new.qail)
+        schema_diff: String,
+        /// Database URL
+        url: String,
+    },
+    /// Promote shadow database to primary
+    Promote {
+        /// Database URL
+        url: String,
+    },
+    /// Abort shadow migration (drop shadow)
+    Abort {
+        /// Database URL
+        url: String,
+    },
+}
+
+/// Parse schema diff string (old.qail:new.qail) into migration commands
+fn parse_schema_diff(schema_diff: &str) -> Result<Vec<qail_core::ast::QailCmd>> {
+    use qail_core::migrate::{diff_schemas, parse_qail};
+    
+    if schema_diff.contains(':') && !schema_diff.starts_with("postgres") {
+        let parts: Vec<&str> = schema_diff.splitn(2, ':').collect();
+        let old_path = parts[0];
+        let new_path = parts[1];
+        
+        let old_content = std::fs::read_to_string(old_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
+        let new_content = std::fs::read_to_string(new_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
+        
+        let old_schema = parse_qail(&old_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
+        let new_schema = parse_qail(&new_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
+        
+        Ok(diff_schemas(&old_schema, &new_schema))
+    } else {
+        Err(anyhow::anyhow!("Please provide two .qail files: old.qail:new.qail"))
+    }
 }
 
 #[tokio::main]
@@ -201,42 +245,50 @@ async fn main() -> Result<()> {
         Some(Commands::Symbols) => show_symbols(),
         Some(Commands::Mig { query, name }) => {
             generate_migration(query, name.clone())?;
-        },
+        }
         Some(Commands::Pull { url }) => {
-            qail::introspection::pull_schema(url, qail::introspection::SchemaOutputFormat::Qail).await?;
-        },
+            introspection::pull_schema(url, introspection::SchemaOutputFormat::Qail).await?;
+        }
         Some(Commands::Fmt { query }) => {
             format_query(query)?;
-        },
+        }
         Some(Commands::Check { schema }) => {
             check_schema(schema)?;
-        },
+        }
         Some(Commands::Diff { old, new, format }) => {
-            diff_schemas_cmd(old, new, format.clone(), &cli)?;
-        },
+            let schema_fmt = match format {
+                OutputFormat::Sql => SchemaOutputFormat::Sql,
+                OutputFormat::Json => SchemaOutputFormat::Json,
+                OutputFormat::Pretty => SchemaOutputFormat::Pretty,
+            };
+            let dialect: Dialect = cli.dialect.clone().into();
+            diff_schemas_cmd(old, new, schema_fmt, dialect)?;
+        }
         Some(Commands::Lint { schema, strict }) => {
             lint_schema(schema, *strict)?;
-        },
+        }
         Some(Commands::Watch { schema, url, auto_apply }) => {
             watch_schema(schema, url.as_deref(), *auto_apply).await?;
-        },
-        Some(Commands::Migrate { action }) => {
-            match action {
-                MigrateAction::Status { url } => {
-                    migrate_status(url).await?;
-                },
-                MigrateAction::Analyze { schema_diff, codebase } => {
-                    migrate_analyze(schema_diff, codebase)?;
-                },
-                MigrateAction::Plan { schema_diff, output } => {
-                    migrate_plan(schema_diff, output.as_deref())?;
-                },
-                MigrateAction::Up { schema_diff, url } => {
-                    migrate_up(schema_diff, url).await?;
-                },
-                MigrateAction::Down { schema_diff, url } => {
-                    migrate_down(schema_diff, url).await?;
-                },
+        }
+        Some(Commands::Migrate { action }) => match action {
+            MigrateAction::Status { url } => migrate_status(url).await?,
+            MigrateAction::Analyze { schema_diff, codebase } => migrate_analyze(schema_diff, codebase)?,
+            MigrateAction::Plan { schema_diff, output } => migrate_plan(schema_diff, output.as_deref())?,
+            MigrateAction::Up { schema_diff, url } => migrate_up(schema_diff, url).await?,
+            MigrateAction::Down { schema_diff, url } => migrate_down(schema_diff, url).await?,
+            MigrateAction::Create { name, depends, author } => {
+                qail::migrations::migrate_create(name, depends.as_deref(), author.as_deref())?;
+            }
+            MigrateAction::Shadow { schema_diff, url } => {
+                // Parse schema diff and run shadow migration
+                let cmds = parse_schema_diff(schema_diff)?;
+                qail::shadow::run_shadow_migration(url, &cmds).await?;
+            }
+            MigrateAction::Promote { url } => {
+                qail::shadow::promote_shadow(url).await?;
+            }
+            MigrateAction::Abort { url } => {
+                qail::shadow::abort_shadow(url).await?;
             }
         },
         None => {
@@ -261,17 +313,12 @@ fn transpile_query(query: &str, cli: &Cli) -> Result<()> {
         println!();
     }
 
-    // Parse the query
     let cmd = qail_core::parse(query).map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
     let dialect: Dialect = cli.dialect.clone().into();
-    
+
     match cli.format {
-        OutputFormat::Sql => {
-            println!("{}", cmd.to_sql_with_dialect(dialect));
-        }
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&cmd)?);
-        }
+        OutputFormat::Sql => println!("{}", cmd.to_sql_with_dialect(dialect)),
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&cmd)?),
         OutputFormat::Pretty => {
             println!("{}", "Generated SQL:".green().bold());
             println!("{}", cmd.to_sql_with_dialect(dialect).white());
@@ -291,122 +338,46 @@ fn format_query(query: &str) -> Result<()> {
 
 fn generate_migration(query: &str, name_override: Option<String>) -> Result<()> {
     let cmd = qail_core::parse(query).map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
-    
-    // Validate action
+
     if !matches!(cmd.action, Action::Make | Action::Mod) {
-         anyhow::bail!("Only 'make' and 'mod' actions are supported for migrations. Got: {}", cmd.action);
+        anyhow::bail!("Only 'make' and 'mod' actions are supported for migrations. Got: {}", cmd.action);
     }
 
     let up_sql = cmd.to_sql();
-    let down_sql = generate_down_sql(&cmd);
+    let down_sql = qail::sql_gen::generate_down_sql(&cmd);
 
-    // Generate filename
+    let name = name_override.unwrap_or_else(|| format!("{}_{}", cmd.action, cmd.table));
     let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S");
-    let action_name = match cmd.action {
-         Action::Make => format!("create_{}", cmd.table),
-         Action::Mod => format!("alter_{}", cmd.table),
-         _ => "migration".to_string(),
-    };
-    let name = name_override.unwrap_or(action_name);
-    let base_filename = format!("{}_{}", timestamp, name);
 
-    // Ensure migrations directory exists
-    std::fs::create_dir_all("migrations")?;
-
-    let up_path = format!("migrations/{}.up.sql", base_filename);
-    let down_path = format!("migrations/{}.down.sql", base_filename);
-
-    std::fs::write(&up_path, up_sql)?;
-    std::fs::write(&down_path, down_sql)?;
-
-    println!("{} Created migration files:", "✓".green());
-    println!("   {} {}", "UP:".cyan(), up_path);
-    println!("   {} {}", "DOWN:".cyan(), down_path);
+    println!("{}", "Generated Migration:".green().bold());
+    println!();
+    println!("-- Name: {}_{}", timestamp, name);
+    println!("-- UP:");
+    println!("{};", up_sql);
+    println!();
+    println!("-- DOWN:");
+    println!("{};", down_sql);
 
     Ok(())
 }
 
-fn generate_down_sql(cmd: &QailCmd) -> String {
-    match cmd.action {
-        Action::Make => format!("DROP TABLE IF EXISTS {};", cmd.table),
-        Action::Mod => {
-            let mut stmts = Vec::new();
-            for col in &cmd.columns {
-                 if let Expr::Mod { kind, col } = col {
-                     match kind {
-                         ModKind::Add => {
-                             if let Expr::Def { name, .. } = col.as_ref() {
-                                 stmts.push(format!("ALTER TABLE {} DROP COLUMN {}", cmd.table, name));
-                             }
-                         }
-                         ModKind::Drop => {
-                             if let Expr::Named(name) = col.as_ref() {
-                                 stmts.push(format!("-- TODO: Re-add dropped column '{}' (type unknown)", name));
-                             }
-                         }
-                     }
-                 }
-            }
-            stmts.join(";\n")
-        }
-        _ => "-- No down migration generated".to_string(),
-    }
-}
-
 fn explain_query(query: &str) {
-    println!("{}", "🪝 QAIL Query Explanation".cyan().bold());
+    println!("{}", "🔍 Query Analysis".cyan().bold());
     println!();
-    println!("{} {}", "Query:".dimmed(), query.yellow());
+    println!("  {} {}", "Query:".dimmed(), query.yellow());
     println!();
 
     match qail_core::parse(query) {
         Ok(cmd) => {
-            println!("{}", "Parsed Structure:".green().bold());
-            println!("  {} {}", "Action:".dimmed(), format!("{}", cmd.action).cyan());
+            println!("  {} {}", "Action:".dimmed(), format!("{}", cmd.action).green());
             println!("  {} {}", "Table:".dimmed(), cmd.table.white());
 
             if !cmd.columns.is_empty() {
-                println!("  {}", "Columns:".dimmed());
-                for col in &cmd.columns {
-                    println!("    • {}", col.to_string().white());
-                }
-            }
-
-            if !cmd.cages.is_empty() {
-                println!("  {}", "Cages:".dimmed());
-                for cage in &cmd.cages {
-                    let kind = match &cage.kind {
-                        CageKind::Filter => "Filter".to_string(),
-                        CageKind::Payload => "Payload".to_string(),
-                        CageKind::Sort(order) => match order {
-                            qail_core::ast::SortOrder::Asc => "Sort ↑".to_string(),
-                            qail_core::ast::SortOrder::Desc => "Sort ↓".to_string(),
-                            qail_core::ast::SortOrder::AscNullsFirst => "Sort ↑ (Nulls 1st)".to_string(),
-                            qail_core::ast::SortOrder::AscNullsLast => "Sort ↑ (Nulls Last)".to_string(),
-                            qail_core::ast::SortOrder::DescNullsFirst => "Sort ↓ (Nulls 1st)".to_string(),
-                            qail_core::ast::SortOrder::DescNullsLast => "Sort ↓ (Nulls Last)".to_string(),
-                        },
-                        CageKind::Limit(n) => format!("Limit({})", n),
-                        CageKind::Offset(n) => format!("Offset({})", n),
-                        CageKind::Sample(n) => format!("Sample({}%)", n),
-                        CageKind::Qualify => "Qualify".to_string(),
-                        CageKind::Partition => "Partition".to_string(),
-                    };
-                    println!("    [{}]", kind.cyan());
-                    for cond in &cage.conditions {
-                        println!(
-                            "      {} {:?} {}",
-                            cond.left.to_string().white(),
-                            cond.op,
-                            cond.value.to_string().yellow()
-                        );
-                    }
-                }
+                println!("  {} {}", "Columns:".dimmed(), cmd.columns.len());
             }
 
             println!();
-            println!("{}", "Generated SQL:".green().bold());
-            println!("  {}", cmd.to_sql().white());
+            println!("  {} {}", "SQL:".cyan(), cmd.to_sql().white().bold());
         }
         Err(e) => {
             eprintln!("{} {}", "Parse Error:".red().bold(), e);
@@ -414,125 +385,22 @@ fn explain_query(query: &str) {
     }
 }
 
-fn run_repl() {
-    use rustyline::error::ReadlineError;
-    use rustyline::DefaultEditor;
-
-    println!("{}", "🪝 QAIL REPL — Interactive Mode".cyan().bold());
-    println!("{}", "Type queries to see generated SQL. Commands:".dimmed());
-    println!("  {}  - Exit the REPL", ".exit".yellow());
-    println!("  {} - Show symbol reference", ".help".yellow());
-    println!("  {} - Clear screen", ".clear".yellow());
-    println!();
-
-    let mut rl = match DefaultEditor::new() {
-        Ok(editor) => editor,
-        Err(e) => {
-            eprintln!("{} {}", "Failed to initialize REPL:".red(), e);
-            return;
-        }
-    };
-
-    // Load history if available
-    let history_path = dirs::home_dir()
-        .map(|p| p.join(".qail_history"))
-        .unwrap_or_default();
-    let _ = rl.load_history(&history_path);
-
-    loop {
-        let prompt = "qail> ".cyan().bold().to_string();
-        match rl.readline(&prompt) {
-            Ok(line) => {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-
-                let _ = rl.add_history_entry(line);
-
-                match line {
-                    ".exit" | ".quit" | "exit" | "quit" => {
-                        println!("{}", "Goodbye! 👋".green());
-                        break;
-                    }
-                    ".help" | "help" => {
-                        show_repl_help();
-                        continue;
-                    }
-                    ".clear" | "clear" => {
-                        print!("\x1B[2J\x1B[1;1H");
-                        continue;
-                    }
-                    ".symbols" | "symbols" => {
-                        show_symbols();
-                        continue;
-                    }
-                    _ => {}
-                }
-
-                match qail_core::parse(line) {
-                    Ok(cmd) => {
-                        let sql = cmd.to_sql();
-                        println!("{} {}", "→".green(), sql.white().bold());
-                        println!();
-                    }
-                    Err(e) => {
-                        eprintln!("{} {}", "✗".red(), e.to_string().red());
-                    }
-                }
-            }
-            Err(ReadlineError::Interrupted) => {
-                println!("{}", "^C".dimmed());
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                println!("{}", "Goodbye! 👋".green());
-                break;
-            }
-            Err(err) => {
-                eprintln!("{} {:?}", "Error:".red(), err);
-                break;
-            }
-        }
-    }
-
-    let _ = rl.save_history(&history_path);
-}
-
-fn show_repl_help() {
-    println!("{}", "QAIL REPL Commands:".cyan().bold());
-    println!("  {}     - Exit the REPL", ".exit".yellow());
-    println!("  {}     - Show this help", ".help".yellow());
-    println!("  {}    - Clear screen", ".clear".yellow());
-    println!("  {}  - Show symbol reference", ".symbols".yellow());
-    println!();
-    println!("{}", "Query Examples (v2.0 syntax):".cyan().bold());
-    println!("  get::users:'_");
-    println!("  get::orders:'id'total[status=$1][lim=10]");
-    println!("  set::users:[verified=true][id=$1]");
-    println!("  get!::products:'category  (DISTINCT)");
-    println!("  get::users<-profiles:'name'avatar  (LEFT JOIN)");
-    println!();
-}
-
-fn show_symbols() {
+pub fn show_symbols() {
     println!("{}", "🪝 QAIL Symbol Reference (v2.0)".cyan().bold());
     println!();
 
     let symbols = [
-        ("::", "The Gate", "Defines the action", "SELECT/UPDATE/DELETE"),
-        (":", "The Link", "Connects table to columns", "FROM table"),
-        ("'", "The Label", "Marks a column", "col1, col2"),
-        ("'_", "The Wildcard", "All columns", "*"),
-        ("[]", "The Cage", "Constraints block", "WHERE, LIMIT, ORDER BY"),
-        ("==", "The Equal", "Equality check", "= value"),
-        ("+col", "Sort Asc", "Ascending sort", "ORDER BY col ASC"),
-        ("-col", "Sort Desc", "Descending sort", "ORDER BY col DESC"),
-        ("N..M", "The Range", "Limit/Offset", "LIMIT M-N OFFSET N"),
-        ("~", "The Fuse", "Fuzzy match", "ILIKE '%val%'"),
-        ("|", "The Split", "Logical OR", "OR"),
-        ("&", "The Bind", "Logical AND", "AND"),
-        ("$", "The Var", "Parameter", "$1, $2"),
+        ("::", "separator", "Table delimiter", "FROM"),
+        ("'", "field", "Column selector", "SELECT col"),
+        ("'_", "all", "All columns", "SELECT *"),
+        ("[", "filter", "WHERE condition", "WHERE ..."),
+        ("]", "close", "End filter/modifier", ""),
+        ("[]", "values", "Insert values", "VALUES (...)"),
+        ("$", "param", "Placeholder", "$1, $2"),
+        ("<-", "left", "LEFT JOIN", "LEFT JOIN"),
+        ("->", "inner", "INNER JOIN", "JOIN"),
+        ("<>", "full", "FULL OUTER JOIN", "FULL JOIN"),
+        ("!", "distinct", "DISTINCT modifier", "SELECT DISTINCT"),
     ];
 
     println!(
@@ -554,1030 +422,4 @@ fn show_symbols() {
         );
     }
     println!();
-}
-
-/// Validate a QAIL schema file with detailed error reporting.
-fn check_schema(schema_path: &str) -> Result<()> {
-    // Check if validating a migration (old:new format)
-    if schema_path.contains(':') && !schema_path.starts_with("postgres") {
-        let parts: Vec<&str> = schema_path.splitn(2, ':').collect();
-        if parts.len() == 2 {
-            println!("{} {} → {}", "Checking migration:".cyan().bold(), parts[0].yellow(), parts[1].yellow());
-            return check_migration(parts[0], parts[1]);
-        }
-    }
-    
-    // Single schema file validation
-    println!("{} {}", "Checking schema:".cyan().bold(), schema_path.yellow());
-    
-    let content = std::fs::read_to_string(schema_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read schema file '{}': {}", schema_path, e))?;
-    
-    match parse_qail(&content) {
-        Ok(schema) => {
-            println!("{}", "✓ Schema is valid".green().bold());
-            println!("  Tables: {}", schema.tables.len());
-            
-            // Detailed breakdown
-            let mut total_columns = 0;
-            let mut primary_keys = 0;
-            let mut unique_constraints = 0;
-            
-            for table in schema.tables.values() {
-                total_columns += table.columns.len();
-                for col in &table.columns {
-                    if col.primary_key {
-                        primary_keys += 1;
-                    }
-                    if col.unique {
-                        unique_constraints += 1;
-                    }
-                }
-            }
-            
-            println!("  Columns: {}", total_columns);
-            println!("  Indexes: {}", schema.indexes.len());
-            println!("  Migration Hints: {}", schema.migrations.len());
-            
-            if primary_keys > 0 {
-                println!("  {} {} primary key(s)", "✓".green(), primary_keys);
-            }
-            if unique_constraints > 0 {
-                println!("  {} {} unique constraint(s)", "✓".green(), unique_constraints);
-            }
-            
-            Ok(())
-        }
-        Err(e) => {
-            println!("{} {}", "✗ Schema validation failed:".red().bold(), e);
-            Err(anyhow::anyhow!("Schema is invalid"))
-        }
-    }
-}
-
-/// Validate a migration between two schemas.
-fn check_migration(old_path: &str, new_path: &str) -> Result<()> {
-    // Load old schema
-    let old_content = std::fs::read_to_string(old_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read old schema '{}': {}", old_path, e))?;
-    let old_schema = parse_qail(&old_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
-    
-    // Load new schema
-    let new_content = std::fs::read_to_string(new_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read new schema '{}': {}", new_path, e))?;
-    let new_schema = parse_qail(&new_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
-    
-    println!("{}", "✓ Both schemas are valid".green().bold());
-    
-    // Compute diff
-    let cmds = diff_schemas(&old_schema, &new_schema);
-    
-    if cmds.is_empty() {
-        println!("{}", "✓ No migration needed - schemas are identical".green());
-        return Ok(());
-    }
-    
-    println!("{} {} operation(s)", "Migration preview:".cyan().bold(), cmds.len());
-    
-    // Classify operations by safety
-    let mut safe_ops = 0;
-    let mut reversible_ops = 0;
-    let mut destructive_ops = 0;
-    
-    for cmd in &cmds {
-        match cmd.action {
-            Action::Make | Action::Alter | Action::Index => safe_ops += 1,
-            Action::Set | Action::Mod => reversible_ops += 1,
-            Action::Drop | Action::AlterDrop | Action::DropIndex => destructive_ops += 1,
-            _ => {}
-        }
-    }
-    
-    if safe_ops > 0 {
-        println!("  {} {} safe operation(s) (CREATE TABLE, ADD COLUMN, CREATE INDEX)", "✓".green(), safe_ops);
-    }
-    if reversible_ops > 0 {
-        println!("  {} {} reversible operation(s) (UPDATE, RENAME)", "⚠️ ".yellow(), reversible_ops);
-    }
-    if destructive_ops > 0 {
-        println!("  {} {} destructive operation(s) (DROP)", "⚠️ ".red(), destructive_ops);
-        println!("    {} Review carefully before applying!", "⚠ WARNING:".red().bold());
-    }
-    
-    Ok(())
-}
-
-/// Compare two schema .qail files and output migration commands.
-fn diff_schemas_cmd(old_path: &str, new_path: &str, format: OutputFormat, cli: &Cli) -> Result<()> {
-    println!("{} {} → {}", "Diffing:".cyan(), old_path.yellow(), new_path.yellow());
-    
-    // Load old schema
-    let old_content = std::fs::read_to_string(old_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read old schema '{}': {}", old_path, e))?;
-    let old_schema = parse_qail(&old_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
-    
-    // Load new schema
-    let new_content = std::fs::read_to_string(new_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read new schema '{}': {}", new_path, e))?;
-    let new_schema = parse_qail(&new_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
-    
-    // Compute diff
-    let cmds = diff_schemas(&old_schema, &new_schema);
-    
-    if cmds.is_empty() {
-        println!("{}", "No changes detected.".green());
-        return Ok(());
-    }
-    
-    println!("{} {} migration command(s):", "Found:".green(), cmds.len());
-    println!();
-    
-    let dialect: Dialect = cli.dialect.clone().into();
-    
-    match format {
-        OutputFormat::Sql => {
-            for cmd in &cmds {
-                println!("{};", cmd.to_sql_with_dialect(dialect));
-            }
-        }
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&cmds)?);
-        }
-        OutputFormat::Pretty => {
-            for (i, cmd) in cmds.iter().enumerate() {
-                println!("{} {} {}", 
-                    format!("{}.", i + 1).cyan(),
-                    format!("{}", cmd.action).yellow(),
-                    cmd.table.white()
-                );
-                println!("   {}", cmd.to_sql_with_dialect(dialect).dimmed());
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-/// Lint severity level.
-#[derive(Debug, Clone, PartialEq)]
-enum LintLevel {
-    Error,
-    Warning,
-    Info,
-}
-
-/// A lint issue found in the schema.
-#[derive(Debug)]
-struct LintIssue {
-    level: LintLevel,
-    table: String,
-    column: Option<String>,
-    message: String,
-    suggestion: Option<String>,
-}
-
-/// Lint a schema file for best practices.
-fn lint_schema(schema_path: &str, strict: bool) -> Result<()> {
-    use qail_core::migrate::{parse_qail, ColumnType};
-    
-    println!("{}", "🔍 Schema Linter".cyan().bold());
-    println!();
-    
-    let content = std::fs::read_to_string(schema_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read schema: {}", e))?;
-    
-    let schema = parse_qail(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
-    
-    println!("  Linting: {}", schema_path.yellow());
-    println!("  Tables: {}", schema.tables.len());
-    println!();
-    
-    let mut issues: Vec<LintIssue> = Vec::new();
-    
-    for table in schema.tables.values() {
-        // Check 1: Missing primary key
-        let has_pk = table.columns.iter().any(|c| c.primary_key);
-        if !has_pk {
-            issues.push(LintIssue {
-                level: LintLevel::Error,
-                table: table.name.clone(),
-                column: None,
-                message: "Table has no primary key".to_string(),
-                suggestion: Some("Add a primary key column, e.g., 'id UUID primary_key'".to_string()),
-            });
-        }
-        
-        // Check 2: UUID vs SERIAL preference
-        for col in &table.columns {
-            if col.primary_key && matches!(col.data_type, ColumnType::Serial | ColumnType::BigSerial) {
-                issues.push(LintIssue {
-                    level: LintLevel::Info,
-                    table: table.name.clone(),
-                    column: Some(col.name.clone()),
-                    message: "Using SERIAL for primary key".to_string(),
-                    suggestion: Some("Consider UUID for distributed systems: 'id UUID primary_key'".to_string()),
-                });
-            }
-        }
-        
-        // Check 3: Missing created_at/updated_at
-        let has_created_at = table.columns.iter().any(|c| c.name == "created_at");
-        let has_updated_at = table.columns.iter().any(|c| c.name == "updated_at");
-        
-        if !has_created_at && table.columns.len() > 2 {
-            issues.push(LintIssue {
-                level: LintLevel::Warning,
-                table: table.name.clone(),
-                column: None,
-                message: "Missing created_at column".to_string(),
-                suggestion: Some("Add 'created_at TIMESTAMPTZ not_null' for audit trail".to_string()),
-            });
-        }
-        
-        if !has_updated_at && table.columns.len() > 2 {
-            issues.push(LintIssue {
-                level: LintLevel::Warning,
-                table: table.name.clone(),
-                column: None,
-                message: "Missing updated_at column".to_string(),
-                suggestion: Some("Add 'updated_at TIMESTAMPTZ not_null' for audit trail".to_string()),
-            });
-        }
-        
-        // Check 4: Nullable columns without defaults
-        for col in &table.columns {
-            if col.nullable && col.default.is_none() && !col.primary_key {
-                // Skip certain types
-                if matches!(col.data_type, ColumnType::Text | ColumnType::Jsonb) {
-                    continue;
-                }
-                issues.push(LintIssue {
-                    level: LintLevel::Info,
-                    table: table.name.clone(),
-                    column: Some(col.name.clone()),
-                    message: "Nullable column without default".to_string(),
-                    suggestion: Some("Consider adding a default value or making it NOT NULL".to_string()),
-                });
-            }
-        }
-        
-        // Check 5: Foreign key columns without defined FK relation
-        for col in &table.columns {
-            if col.name.ends_with("_id") && !col.primary_key && col.foreign_key.is_none() {
-                issues.push(LintIssue {
-                    level: LintLevel::Warning,
-                    table: table.name.clone(),
-                    column: Some(col.name.clone()),
-                    message: "Possible FK column without references()".to_string(),
-                    suggestion: Some(format!("Consider adding '.references(\"table\", \"id\")' for referential integrity")),
-                });
-            }
-        }
-        
-        // Check 6: Table naming conventions
-        if table.name.chars().any(|c| c.is_uppercase()) {
-            issues.push(LintIssue {
-                level: LintLevel::Warning,
-                table: table.name.clone(),
-                column: None,
-                message: "Table name contains uppercase letters".to_string(),
-                suggestion: Some("Use snake_case for table names".to_string()),
-            });
-        }
-    }
-    
-    // Filter based on strict mode
-    let filtered: Vec<_> = if strict {
-        issues.iter().filter(|i| i.level == LintLevel::Error).collect()
-    } else {
-        issues.iter().collect()
-    };
-    
-    // Print results
-    if filtered.is_empty() {
-        println!("{}", "✓ No issues found!".green().bold());
-    } else {
-        let errors = issues.iter().filter(|i| i.level == LintLevel::Error).count();
-        let warnings = issues.iter().filter(|i| i.level == LintLevel::Warning).count();
-        let infos = issues.iter().filter(|i| i.level == LintLevel::Info).count();
-        
-        if errors > 0 {
-            println!("{} {} error(s)", "✗".red(), errors);
-        }
-        if warnings > 0 && !strict {
-            println!("{} {} warning(s)", "⚠".yellow(), warnings);
-        }
-        if infos > 0 && !strict {
-            println!("{} {} info(s)", "ℹ".blue(), infos);
-        }
-        println!();
-        
-        for issue in &filtered {
-            let icon = match issue.level {
-                LintLevel::Error => "✗".red(),
-                LintLevel::Warning => "⚠".yellow(),
-                LintLevel::Info => "ℹ".blue(),
-            };
-            
-            let location = if let Some(ref col) = issue.column {
-                format!("{}.{}", issue.table, col)
-            } else {
-                issue.table.clone()
-            };
-            
-            println!("{} {} {}", icon, location.white(), issue.message);
-            if let Some(ref suggestion) = issue.suggestion {
-                println!("  {} {}", "→".dimmed(), suggestion.dimmed());
-            }
-            println!();
-        }
-    }
-    
-    Ok(())
-}
-
-/// SQL for creating migration history table
-const MIGRATION_TABLE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS _qail_migrations (
-    id SERIAL PRIMARY KEY,
-    version VARCHAR(255) NOT NULL UNIQUE,
-    name VARCHAR(255),
-    applied_at TIMESTAMPTZ DEFAULT NOW(),
-    checksum VARCHAR(64) NOT NULL,
-    sql_up TEXT NOT NULL,
-    sql_down TEXT
-)
-"#;
-
-/// Show migration status and history.
-async fn migrate_status(url: &str) -> Result<()> {
-    println!("{}", "📋 Migration Status".cyan().bold());
-    println!();
-    
-    let (host, port, user, password, database) = parse_pg_url(url)?;
-    let mut driver = if let Some(pwd) = password {
-        PgDriver::connect_with_password(&host, port, &user, &database, &pwd).await
-            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
-    } else {
-        PgDriver::connect(&host, port, &user, &database).await
-            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
-    };
-    
-    // Ensure migration table exists
-    driver.execute_raw(MIGRATION_TABLE_SQL).await
-        .map_err(|e| anyhow::anyhow!("Failed to create migration table: {}", e))?;
-    
-    // Query migration history
-    let _rows = driver.execute_raw(
-        "SELECT version, name, applied_at, checksum FROM _qail_migrations ORDER BY applied_at DESC LIMIT 20"
-    ).await;
-    
-    // Since execute_raw returns (), we need to use a different approach
-    // For now, show that the table exists
-    println!("  Database: {}", database.yellow());
-    println!("  Migration table: {}", "_qail_migrations".green());
-    println!();
-    
-    // Try to get count
-    let count_result = driver.execute_raw(
-        "SELECT 1 FROM _qail_migrations LIMIT 1"
-    ).await;
-    
-    match count_result {
-        Ok(_) => {
-            println!("  {} Migration history table is ready", "✓".green());
-            println!();
-            println!("  Run {} to apply migrations", "qail migrate up".cyan());
-        }
-        Err(_) => {
-            println!("  {} No migrations applied yet", "○".dimmed());
-        }
-    }
-    
-    Ok(())
-}
-
-/// Analyze migration impact on codebase before executing.
-fn migrate_analyze(schema_diff_path: &str, codebase_path: &str) -> Result<()> {
-    use qail_core::analyzer::{CodebaseScanner, MigrationImpact};
-    use std::path::Path;
-    
-    println!("{}", "🔍 Migration Impact Analyzer".cyan().bold());
-    println!();
-    
-    // Parse schema files
-    let (old_schema, new_schema, cmds) = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
-        let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
-        let old_path = parts[0];
-        let new_path = parts[1];
-        
-        println!("  Schema: {} → {}", old_path.yellow(), new_path.yellow());
-        
-        let old_content = std::fs::read_to_string(old_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
-        let new_content = std::fs::read_to_string(new_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-        
-        let old = parse_qail(&old_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
-        let new = parse_qail(&new_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
-        
-        let cmds = diff_schemas(&old, &new);
-        (old, new, cmds)
-    } else {
-        return Err(anyhow::anyhow!("Please provide two .qail files: old.qail:new.qail"));
-    };
-    
-    if cmds.is_empty() {
-        println!("{}", "✓ No migrations needed - schemas are identical".green());
-        return Ok(());
-    }
-    
-    println!("  Codebase: {}", codebase_path.yellow());
-    println!();
-    
-    // Scan codebase
-    let scanner = CodebaseScanner::new();
-    let code_path = Path::new(codebase_path);
-    
-    if !code_path.exists() {
-        return Err(anyhow::anyhow!("Codebase path not found: {}", codebase_path));
-    }
-    
-    println!("{}", "Scanning codebase...".dimmed());
-    let code_refs = scanner.scan(code_path);
-    println!("  Found {} query references\n", code_refs.len());
-    
-    // Analyze impact
-    let impact = MigrationImpact::analyze(&cmds, &code_refs, &old_schema, &new_schema);
-    
-    if impact.safe_to_run {
-        println!("{}", "✓ Migration is safe to run".green().bold());
-        println!("  No breaking changes detected in codebase\n");
-        
-        println!("{}", "Migration preview:".cyan());
-        for cmd in &cmds {
-            let sql = cmd_to_sql(cmd);
-            println!("  {}", sql);
-        }
-    } else {
-        println!("{}", "⚠️  BREAKING CHANGES DETECTED".red().bold());
-        println!();
-        println!("Affected files: {}", impact.affected_files);
-        println!();
-        
-        for change in &impact.breaking_changes {
-            match change {
-                qail_core::analyzer::BreakingChange::DroppedTable { table, references } => {
-                    println!("┌─ {} {} ({} references) ─────────────────────────┐", 
-                        "DROP TABLE".red(), table.yellow(), references.len());
-                    for r in references.iter().take(5) {
-                        println!("│ {} {}:{} → {}", "❌".red(), 
-                            r.file.display(), r.line, r.snippet.cyan());
-                    }
-                    if references.len() > 5 {
-                        println!("│ ... and {} more", references.len() - 5);
-                    }
-                    println!("└──────────────────────────────────────────────────────┘");
-                    println!();
-                },
-                qail_core::analyzer::BreakingChange::DroppedColumn { table, column, references } => {
-                    println!("┌─ {} {}.{} ({} references) ─────────────────┐", 
-                        "DROP COLUMN".red(), table.yellow(), column.yellow(), references.len());
-                    for r in references.iter().take(5) {
-                        println!("│ {} {}:{} → {}", "❌".red(), 
-                            r.file.display(), r.line, r.snippet.cyan());
-                    }
-                    println!("└──────────────────────────────────────────────────────┘");
-                    println!();
-                },
-                qail_core::analyzer::BreakingChange::RenamedColumn { table, references, .. } => {
-                    println!("┌─ {} on {} ({} references) ───────────────────┐", 
-                        "RENAME".yellow(), table.yellow(), references.len());
-                    for r in references.iter().take(5) {
-                        println!("│ {} {}:{} → {}", "⚠️ ".yellow(), 
-                            r.file.display(), r.line, r.snippet.cyan());
-                    }
-                    println!("└──────────────────────────────────────────────────────┘");
-                    println!();
-                },
-                _ => {}
-            }
-        }
-        
-        println!("What would you like to do?");
-        println!("  1. {} (DANGEROUS - will cause {} runtime errors)", 
-            "Run anyway".red(), impact.breaking_changes.len());
-        println!("  2. {} (show SQL, don't execute)", "Dry-run first".yellow());
-        println!("  3. {} (exit)", "Let me fix the code first".green());
-    }
-    
-    Ok(())
-}
-
-/// Watch a schema file for changes and auto-generate migrations.
-async fn watch_schema(schema_path: &str, db_url: Option<&str>, auto_apply: bool) -> Result<()> {
-    use notify_debouncer_full::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
-    use std::sync::mpsc::channel;
-    use std::time::Duration;
-    use std::path::Path;
-    
-    let path = Path::new(schema_path);
-    if !path.exists() {
-        return Err(anyhow::anyhow!("Schema file not found: {}", schema_path));
-    }
-    
-    println!("{}", "👀 QAIL Schema Watch Mode".cyan().bold());
-    println!("   Watching: {}", schema_path.yellow());
-    if let Some(url) = db_url {
-        println!("   Database: {}", url.yellow());
-        if auto_apply {
-            println!("   Auto-apply: {}", "enabled".green());
-        }
-    }
-    println!("   Press {} to stop\n", "Ctrl+C".red());
-    
-    // Load initial schema
-    let initial_content = std::fs::read_to_string(schema_path)?;
-    let mut last_schema = parse_qail(&initial_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse initial schema: {}", e))?;
-    
-    println!("[{}] Initial schema loaded: {} tables", 
-        chrono::Local::now().format("%H:%M:%S").to_string().dimmed(),
-        last_schema.tables.len());
-    
-    // Set up file watcher
-    let (tx, rx) = channel::<DebounceEventResult>();
-    let mut debouncer = new_debouncer(Duration::from_millis(500), None, tx)?;
-    
-    debouncer.watch(path, RecursiveMode::NonRecursive)?;
-    
-    loop {
-        match rx.recv() {
-            Ok(Ok(events)) => {
-                for event in events {
-                    if event.paths.iter().any(|p| p.ends_with(schema_path)) {
-                        // File changed
-                        let now = chrono::Local::now().format("%H:%M:%S").to_string();
-                        
-                        // Reload schema
-                        let content = match std::fs::read_to_string(schema_path) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                println!("[{}] {} Failed to read schema: {}", 
-                                    now.dimmed(), "✗".red(), e);
-                                continue;
-                            }
-                        };
-                        
-                        let new_schema = match parse_qail(&content) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                println!("[{}] {} Parse error: {}", 
-                                    now.dimmed(), "✗".red(), e);
-                                continue;
-                            }
-                        };
-                        
-                        // Compute diff
-                        let cmds = diff_schemas(&last_schema, &new_schema);
-                        
-                        if cmds.is_empty() {
-                            println!("[{}] {} No changes detected", 
-                                now.dimmed(), "•".dimmed());
-                        } else {
-                            println!("[{}] {} Detected {} change(s):", 
-                                now.dimmed(), "✓".green(), cmds.len());
-                            
-                            for cmd in &cmds {
-                                let sql = cmd_to_sql(cmd);
-                                println!("       {}", sql.cyan());
-                            }
-                            
-                            // Apply if auto_apply and URL provided
-                            if auto_apply && db_url.is_some() {
-                                println!("[{}] Applying to database...", now.dimmed());
-                                // Would call apply logic here
-                                println!("       {} Applied successfully", "✓".green());
-                            }
-                        }
-                        
-                        last_schema = new_schema;
-                    }
-                }
-            }
-            Ok(Err(errors)) => {
-                for e in errors {
-                    println!("{} Watch error: {}", "✗".red(), e);
-                }
-            }
-            Err(e) => {
-                println!("{} Channel error: {}", "✗".red(), e);
-                break;
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-/// Preview migration SQL without executing (dry-run).
-fn migrate_plan(schema_diff_path: &str, output: Option<&str>) -> Result<()> {
-    println!("{}", "📋 Migration Plan (dry-run)".cyan().bold());
-    println!();
-    
-    // Parse schema files
-    let cmds = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
-        let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
-        let old_path = parts[0];
-        let new_path = parts[1];
-        
-        println!("  {} → {}", old_path.yellow(), new_path.yellow());
-        println!();
-        
-        let old_content = std::fs::read_to_string(old_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
-        let new_content = std::fs::read_to_string(new_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-        
-        let old_schema = parse_qail(&old_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
-        let new_schema = parse_qail(&new_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
-        
-        diff_schemas(&old_schema, &new_schema)
-    } else {
-        return Err(anyhow::anyhow!("Please provide two .qail files: old.qail:new.qail"));
-    };
-    
-    if cmds.is_empty() {
-        println!("{}", "✓ No migrations needed - schemas are identical".green());
-        return Ok(());
-    }
-    
-    // Generate UP SQL
-    let mut up_sql = Vec::new();
-    let mut down_sql = Vec::new();
-    
-    println!("┌─ {} ({} operations) ─────────────────────────────────┐", "UP".green().bold(), cmds.len());
-    for (i, cmd) in cmds.iter().enumerate() {
-        let sql = cmd_to_sql(cmd);
-        println!("│ {}. {}", i + 1, sql.cyan());
-        up_sql.push(format!("{}. {}", i + 1, sql));
-        
-        // Generate rollback SQL
-        let rollback = generate_rollback_sql(cmd);
-        down_sql.push(format!("{}. {}", i + 1, rollback));
-    }
-    println!("└──────────────────────────────────────────────────────────────┘");
-    println!();
-    
-    println!("┌─ {} ({} operations) ──────────────────────────────┐", "DOWN".yellow().bold(), cmds.len());
-    for sql in &down_sql {
-        println!("│ {}", sql.yellow());
-    }
-    println!("└──────────────────────────────────────────────────────────────┘");
-    
-    // Save to file if requested
-    if let Some(path) = output {
-        let mut content = String::new();
-        content.push_str("-- Migration UP\n");
-        for cmd in &cmds {
-            content.push_str(&format!("{};\n", cmd_to_sql(cmd)));
-        }
-        content.push_str("\n-- Migration DOWN (rollback)\n");
-        for (i, cmd) in cmds.iter().enumerate() {
-            content.push_str(&format!("-- {}. {};\n", i + 1, generate_rollback_sql(cmd)));
-        }
-        std::fs::write(path, &content)?;
-        println!();
-        println!("{} {}", "Saved to:".green(), path);
-    }
-    
-    println!();
-    println!("{} Run 'qail migrate up old.qail:new.qail <URL>' to apply", "💡".yellow());
-    
-    Ok(())
-}
-
-/// Convert QailCmd to SQL string for preview.
-fn cmd_to_sql(cmd: &QailCmd) -> String {
-    // Generate SQL for migration DDL operations
-    match cmd.action {
-        Action::Make => {
-            // CREATE TABLE
-            let mut sql = format!("CREATE TABLE {} (", cmd.table);
-            let cols: Vec<String> = cmd.columns.iter().filter_map(|col| {
-                if let Expr::Def { name, data_type, constraints } = col {
-                    let mut col_def = format!("{} {}", name, data_type);
-                    for c in constraints {
-                        match c {
-                            Constraint::PrimaryKey => col_def.push_str(" PRIMARY KEY"),
-                            Constraint::Nullable => {},
-                            Constraint::Unique => col_def.push_str(" UNIQUE"),
-                            Constraint::Default(v) => col_def.push_str(&format!(" DEFAULT {}", v)),
-                            _ => {},
-                        }
-                    }
-                    Some(col_def)
-                } else {
-                    None
-                }
-            }).collect();
-            sql.push_str(&cols.join(", "));
-            sql.push(')');
-            sql
-        },
-        Action::Drop => {
-            format!("DROP TABLE IF EXISTS {}", cmd.table)
-        },
-        Action::Alter => {
-            // ADD COLUMN
-            if let Some(Expr::Def { name, data_type, constraints }) = cmd.columns.first() {
-                let mut sql = format!("ALTER TABLE {} ADD COLUMN {} {}", cmd.table, name, data_type);
-                for c in constraints {
-                    match c {
-                        Constraint::Nullable => {},
-                        Constraint::Unique => sql.push_str(" UNIQUE"),
-                        Constraint::Default(v) => sql.push_str(&format!(" DEFAULT {}", v)),
-                        _ => {},
-                    }
-                }
-                return sql;
-            }
-            format!("ALTER TABLE {} ADD COLUMN ...", cmd.table)
-        },
-        Action::AlterDrop => {
-            // DROP COLUMN
-            if let Some(Expr::Named(name)) = cmd.columns.first() {
-                return format!("ALTER TABLE {} DROP COLUMN {}", cmd.table, name);
-            }
-            if let Some(Expr::Def { name, .. }) = cmd.columns.first() {
-                return format!("ALTER TABLE {} DROP COLUMN {}", cmd.table, name);
-            }
-            format!("ALTER TABLE {} DROP COLUMN ...", cmd.table)
-        },
-        Action::Index => {
-            if let Some(ref idx) = cmd.index_def {
-                let unique = if idx.unique { "UNIQUE " } else { "" };
-                return format!("CREATE {}INDEX {} ON {} ({})", 
-                    unique, idx.name, cmd.table, idx.columns.join(", "));
-            }
-            format!("CREATE INDEX ON {} (...)", cmd.table)
-        },
-        Action::DropIndex => {
-            if let Some(ref idx) = cmd.index_def {
-                return format!("DROP INDEX IF EXISTS {}", idx.name);
-            }
-            "DROP INDEX ...".to_string()
-        },
-        Action::Mod => {
-            // RENAME COLUMN
-            format!("ALTER TABLE {} RENAME COLUMN ... TO ...", cmd.table)
-        },
-        _ => format!("-- Unsupported action: {:?}", cmd.action),
-    }
-}
-
-/// Generate rollback SQL for a command.
-fn generate_rollback_sql(cmd: &QailCmd) -> String {
-    match cmd.action {
-        Action::Make => {
-            format!("DROP TABLE IF EXISTS {}", cmd.table)
-        },
-        Action::Drop => {
-            format!("-- Cannot auto-rollback DROP TABLE {} (data lost)", cmd.table)
-        },
-        Action::Alter => {
-            // ADD COLUMN -> DROP COLUMN
-            if let Some(col) = cmd.columns.first() {
-                if let Expr::Def { name, .. } = col {
-                    return format!("ALTER TABLE {} DROP COLUMN {}", cmd.table, name);
-                }
-            }
-            format!("-- Cannot determine rollback for ALTER on {}", cmd.table)
-        },
-        Action::AlterDrop => {
-            // DROP COLUMN -> cannot easily reverse
-            format!("-- Cannot auto-rollback DROP COLUMN on {} (data lost)", cmd.table)
-        },
-        Action::Index => {
-            if let Some(ref idx) = cmd.index_def {
-                return format!("DROP INDEX IF EXISTS {}", idx.name);
-            }
-            "-- Cannot determine index name for rollback".to_string()
-        },
-        Action::DropIndex => {
-            format!("-- Cannot auto-rollback DROP INDEX (need original definition)")
-        },
-        Action::Mod => {
-            format!("-- RENAME operation: reverse manually")
-        },
-        _ => format!("-- No rollback for {:?}", cmd.action),
-    }
-}
-
-/// Apply migrations forward using qail-pg native driver.
-async fn migrate_up(schema_diff_path: &str, url: &str) -> Result<()> {
-    println!("{} {}", "Migrating UP:".cyan().bold(), url.yellow());
-    
-    // Load the two schemas and compute diff
-    // schema_diff_path can be either:
-    // 1. A single diff file (JSON of Vec<QailCmd>)
-    // 2. Two schema files separated by ":"
-    
-    let cmds = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
-        // Two schema files: old:new
-        let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
-        let old_path = parts[0];
-        let new_path = parts[1];
-        
-        let old_content = std::fs::read_to_string(old_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
-        let new_content = std::fs::read_to_string(new_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-        
-        let old_schema = parse_qail(&old_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
-        let new_schema = parse_qail(&new_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
-        
-        diff_schemas(&old_schema, &new_schema)
-    } else {
-        // For now, only support two-file format
-        return Err(anyhow::anyhow!("Please provide two .qail files: old.qail:new.qail"));
-    };
-    
-    if cmds.is_empty() {
-        println!("{}", "No migrations to apply.".green());
-        return Ok(());
-    }
-    
-    println!("{} {} migration(s) to apply", "Found:".cyan(), cmds.len());
-    
-    // Parse URL and connect using qail-pg
-    let (host, port, user, password, database) = parse_pg_url(url)?;
-    let mut driver = if let Some(pwd) = password {
-        PgDriver::connect_with_password(&host, port, &user, &database, &pwd).await
-            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
-    } else {
-        PgDriver::connect(&host, port, &user, &database).await
-            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
-    };
-    
-    // Begin transaction for atomic migration
-    println!("{}", "Starting transaction...".dimmed());
-    driver.execute_raw("BEGIN").await
-        .map_err(|e| anyhow::anyhow!("Failed to start transaction: {}", e))?;
-    
-    // Ensure migration table exists
-    driver.execute_raw(MIGRATION_TABLE_SQL).await
-        .map_err(|e| anyhow::anyhow!("Failed to create migration table: {}", e))?;
-    
-    let mut applied = 0;
-    let mut sql_up_all = String::new();
-    
-    for (i, cmd) in cmds.iter().enumerate() {
-        println!("  {} {} {}", format!("[{}/{}]", i + 1, cmds.len()).cyan(), format!("{}", cmd.action).yellow(), &cmd.table);
-        
-        let sql = cmd_to_sql(cmd);
-        sql_up_all.push_str(&sql);
-        sql_up_all.push_str(";\n");
-        
-        if let Err(e) = driver.execute(cmd).await {
-            // Rollback on failure
-            println!("{}", "Rolling back transaction...".red());
-            let _ = driver.execute_raw("ROLLBACK").await;
-            return Err(anyhow::anyhow!("Migration failed at step {}/{}: {}\nTransaction rolled back - database unchanged.", 
-                i + 1, cmds.len(), e));
-        }
-        applied += 1;
-    }
-    
-    // Generate migration version and checksum
-    let version = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
-    let checksum = format!("{:x}", md5::compute(&sql_up_all));
-    
-    // Record migration in history
-    let record_sql = format!(
-        "INSERT INTO _qail_migrations (version, name, checksum, sql_up) VALUES ('{}', 'auto_{}', '{}', '{}')",
-        version,
-        version,
-        checksum,
-        sql_up_all.replace('\'', "''")
-    );
-    driver.execute_raw(&record_sql).await
-        .map_err(|e| anyhow::anyhow!("Failed to record migration: {}", e))?;
-    
-    // Commit transaction
-    driver.execute_raw("COMMIT").await
-        .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
-    
-    println!("{}", format!("✓ {} migrations applied successfully (atomic)", applied).green().bold());
-    println!("  Recorded as migration: {}", version.cyan());
-    Ok(())
-}
-
-/// Rollback migrations using qail-pg native driver.
-async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
-    println!("{} {}", "Migrating DOWN:".cyan().bold(), url.yellow());
-    
-    // For rollback, we reverse the diff: old becomes new, new becomes old
-    let cmds = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
-        let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
-        let old_path = parts[0];
-        let new_path = parts[1];
-        
-        // Swap: rollback means going from new -> old
-        let old_content = std::fs::read_to_string(new_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-        let new_content = std::fs::read_to_string(old_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
-        
-        let old_schema = parse_qail(&old_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
-        let new_schema = parse_qail(&new_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
-        
-        diff_schemas(&old_schema, &new_schema)
-    } else {
-        println!("{}", "Warning: Rollback requires two .qail files".yellow());
-        println!("  Use format: qail migrate down old.qail:new.qail <url>");
-        return Ok(());
-    };
-    
-    if cmds.is_empty() {
-        println!("{}", "No rollbacks to apply.".green());
-        return Ok(());
-    }
-    
-    println!("{} {} rollback(s) to apply", "Found:".cyan(), cmds.len());
-    
-    let (host, port, user, password, database) = parse_pg_url(url)?;
-    let mut driver = if let Some(pwd) = password {
-        PgDriver::connect_with_password(&host, port, &user, &database, &pwd).await
-            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
-    } else {
-        PgDriver::connect(&host, port, &user, &database).await
-            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
-    };
-    
-    // Begin transaction for atomic rollback
-    println!("{}", "Starting transaction...".dimmed());
-    driver.execute_raw("BEGIN").await
-        .map_err(|e| anyhow::anyhow!("Failed to start transaction: {}", e))?;
-    
-    let mut applied = 0;
-    for (i, cmd) in cmds.iter().enumerate() {
-        println!("  {} {} {}", format!("[{}/{}]", i + 1, cmds.len()).cyan(), format!("{}", cmd.action).yellow(), &cmd.table);
-        
-        if let Err(e) = driver.execute(cmd).await {
-            // Rollback on failure
-            println!("{}", "Rolling back transaction...".red());
-            let _ = driver.execute_raw("ROLLBACK").await;
-            return Err(anyhow::anyhow!("Rollback failed at step {}/{}: {}\nTransaction rolled back - database unchanged.", 
-                i + 1, cmds.len(), e));
-        }
-        applied += 1;
-    }
-    
-    // Commit transaction
-    driver.execute_raw("COMMIT").await
-        .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
-    
-    println!("{}", format!("✓ {} rollbacks applied successfully (atomic)", applied).green().bold());
-    Ok(())
-}
-
-/// Parse a PostgreSQL URL into (host, port, user, password, database).
-fn parse_pg_url(url: &str) -> Result<(String, u16, String, Option<String>, String)> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
-    
-    let host = parsed.host_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing host in URL"))?
-        .to_string();
-    
-    let port = parsed.port().unwrap_or(5432);
-    
-    let user = if parsed.username().is_empty() {
-        "postgres".to_string()
-    } else {
-        parsed.username().to_string()
-    };
-    
-    let password = parsed.password().map(|s| s.to_string());
-    
-    let database = parsed.path().trim_start_matches('/').to_string();
-    if database.is_empty() {
-        return Err(anyhow::anyhow!("Missing database in URL"));
-    }
-    
-    Ok((host, port, user, password, database))
 }

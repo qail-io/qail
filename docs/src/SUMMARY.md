@@ -16,6 +16,8 @@
 # Features
 
 - [Migrations](./features/migrations.md)
+- [Named Migrations](./features/named-migrations.md)
+- [Data-Safe Migrations](./features/data-safe-migrations.md)
 - [Impact Analyzer](./features/analyzer.md)
 - [Foreign Keys](./features/foreign-keys.md)
 - [Connection Pooling](./features/connection-pool.md)

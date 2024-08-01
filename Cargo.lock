@@ -2066,7 +2066,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.9.4"
+version = "0.9.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2080,14 +2080,13 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
- "sqlx",
  "tokio",
  "url",
 ]
 
 [[package]]
 name = "qail-bench"
-version = "0.9.4"
+version = "0.9.6"
 dependencies = [
  "criterion",
  "qail-core",
@@ -2097,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.9.4"
+version = "0.9.6"
 dependencies = [
  "chrono",
  "colored 3.0.0",
@@ -2113,7 +2112,7 @@ dependencies = [
 
 [[package]]
 name = "qail-ffi"
-version = "0.9.4"
+version = "0.9.6"
 dependencies = [
  "qail-core",
  "serde_json",
@@ -2121,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "qail-lsp"
-version = "0.9.4"
+version = "0.9.6"
 dependencies = [
  "qail-core",
  "serde",
@@ -2132,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "qail-pg"
-version = "0.9.4"
+version = "0.9.6"
 dependencies = [
  "async-trait",
  "base64",
@@ -2154,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "qail-wasm"
-version = "0.9.4"
+version = "0.9.6"
 dependencies = [
  "js-sys",
  "qail-core",

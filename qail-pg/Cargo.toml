@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.9.4"
+version = "0.9.6"
 edition = "2024"
 description = "PostgreSQL driver for QAIL - native wire protocol"
 license = "MIT"
@@ -10,7 +10,7 @@ qail-core = { path = "../qail-core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 async-trait = "0.1"
-tokio = { version = "1.48.0", features = ["net", "io-util", "sync", "rt"] }
+tokio = { version = "1.48.0", features = ["net", "io-util", "sync", "rt", "time"] }
 
 # SCRAM-SHA-256 authentication
 sha2 = "0.10"

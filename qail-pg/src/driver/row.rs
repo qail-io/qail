@@ -113,6 +113,56 @@ impl PgRow {
         let s = std::str::from_utf8(bytes).ok()?;
         crate::protocol::types::decode_int_array(s).ok()
     }
+
+    // ==================== GET BY COLUMN NAME ====================
+
+    /// Get column index by name.
+    /// Returns None if column_info is not available or column not found.
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.column_info.as_ref()?.name_to_index.get(name).copied()
+    }
+
+    /// Get a String column by name.
+    pub fn get_string_by_name(&self, name: &str) -> Option<String> {
+        self.get_string(self.column_index(name)?)
+    }
+
+    /// Get an i32 column by name.
+    pub fn get_i32_by_name(&self, name: &str) -> Option<i32> {
+        self.get_i32(self.column_index(name)?)
+    }
+
+    /// Get an i64 column by name.
+    pub fn get_i64_by_name(&self, name: &str) -> Option<i64> {
+        self.get_i64(self.column_index(name)?)
+    }
+
+    /// Get a f64 column by name.
+    pub fn get_f64_by_name(&self, name: &str) -> Option<f64> {
+        self.get_f64(self.column_index(name)?)
+    }
+
+    /// Get a bool column by name.
+    pub fn get_bool_by_name(&self, name: &str) -> Option<bool> {
+        self.get_bool(self.column_index(name)?)
+    }
+
+    /// Get a UUID column by name.
+    pub fn get_uuid_by_name(&self, name: &str) -> Option<String> {
+        self.get_uuid(self.column_index(name)?)
+    }
+
+    /// Get a JSON column by name.
+    pub fn get_json_by_name(&self, name: &str) -> Option<String> {
+        self.get_json(self.column_index(name)?)
+    }
+
+    /// Check if a column is NULL by name.
+    pub fn is_null_by_name(&self, name: &str) -> bool {
+        self.column_index(name)
+            .map(|idx| self.is_null(idx))
+            .unwrap_or(true)
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +177,7 @@ mod tests {
                 None,
                 Some(b"world".to_vec()),
             ],
+            column_info: None,
         };
 
         assert_eq!(row.get_string(0), Some("hello".to_string()));
@@ -142,6 +193,7 @@ mod tests {
                 Some(b"-123".to_vec()),
                 Some(b"not_a_number".to_vec()),
             ],
+            column_info: None,
         };
 
         assert_eq!(row.get_i32(0), Some(42));
@@ -158,6 +210,7 @@ mod tests {
                 Some(b"true".to_vec()),
                 Some(b"false".to_vec()),
             ],
+            column_info: None,
         };
 
         assert_eq!(row.get_bool(0), Some(true));
@@ -173,6 +226,7 @@ mod tests {
                 Some(b"value".to_vec()),
                 None,
             ],
+            column_info: None,
         };
 
         assert!(!row.is_null(0));

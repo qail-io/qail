@@ -1,14 +1,16 @@
 //! Database Schema Introspection
 //!
 //! Extracts schema from live databases into QAIL format.
+//! Uses pure AST-native queries via QailCmd (no raw SQL).
 
-use sqlx::postgres::PgPoolOptions;
-use sqlx::mysql::MySqlPoolOptions;
-use sqlx::Row;
+use qail_core::ast::{QailCmd, Operator};
 use qail_core::migrate::{Schema, Table, Column, to_qail_string};
+use qail_pg::driver::PgDriver;
 use anyhow::{Result, anyhow};
 use colored::*;
 use url::Url;
+
+use crate::util::parse_pg_url;
 
 /// Output format for schema generation
 #[derive(Clone, Default)]
@@ -25,7 +27,9 @@ pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<(
 
     let schema = match scheme {
         "postgres" | "postgresql" => inspect_postgres(url_str).await?,
-        "mysql" | "mariadb" => inspect_mysql(url_str).await?,
+        "mysql" | "mariadb" => {
+            return Err(anyhow!("MySQL introspection not yet migrated to qail-pg"));
+        },
         _ => return Err(anyhow!("Unsupported database scheme: {}", scheme)),
     };
 
@@ -39,37 +43,32 @@ pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<(
 }
 
 async fn inspect_postgres(url: &str) -> Result<Schema> {
-    let pool = PgPoolOptions::new()
-        .connect(url)
-        .await?;
+    let (host, port, user, password, database) = parse_pg_url(url)?;
+    
+    let mut driver = if let Some(pwd) = password {
+        PgDriver::connect_with_password(&host, port, &user, &database, &pwd).await
+            .map_err(|e| anyhow!("Failed to connect: {}", e))?
+    } else {
+        PgDriver::connect(&host, port, &user, &database).await
+            .map_err(|e| anyhow!("Failed to connect: {}", e))?
+    };
 
-    // Query columns with primary key info
-    let rows = sqlx::query(
-        "SELECT c.table_name, c.column_name, c.udt_name, c.is_nullable,
-                CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_primary
-         FROM information_schema.columns c
-         LEFT JOIN (
-             SELECT kcu.table_name, kcu.column_name
-             FROM information_schema.table_constraints tc
-             JOIN information_schema.key_column_usage kcu 
-               ON tc.constraint_name = kcu.constraint_name
-             WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public'
-         ) pk ON c.table_name = pk.table_name AND c.column_name = pk.column_name
-         WHERE c.table_schema = 'public'
-         ORDER BY c.table_name, c.ordinal_position"
-    )
-    .fetch_all(&pool)
-    .await?;
+    // Query columns from information_schema (AST-native)
+    let columns_cmd = QailCmd::get("information_schema.columns")
+        .columns(["table_name", "column_name", "udt_name", "is_nullable"])
+        .filter("table_schema", Operator::Eq, "public");
+    
+    let rows = driver.fetch_all(&columns_cmd).await
+        .map_err(|e| anyhow!("Failed to query columns: {}", e))?;
 
     let mut tables: std::collections::HashMap<String, Vec<Column>> = std::collections::HashMap::new();
 
     for row in rows {
-        let table_name: String = row.get("table_name");
-        let col_name: String = row.get("column_name");
-        let udt_name: String = row.get("udt_name");
-        let is_nullable_str: String = row.get("is_nullable");
+        let table_name = row.get_string_by_name("table_name").unwrap_or_default();
+        let col_name = row.get_string_by_name("column_name").unwrap_or_default();
+        let udt_name = row.get_string_by_name("udt_name").unwrap_or_default();
+        let is_nullable_str = row.get_string_by_name("is_nullable").unwrap_or_default();
         let is_nullable = is_nullable_str == "YES";
-        let is_primary: bool = row.get("is_primary");
         
         // Map PostgreSQL type to QAIL ColumnType
         let col_type_str = map_pg_type(&udt_name);
@@ -78,20 +77,61 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
         let mut col = Column::new(&col_name, col_type);
         col.nullable = is_nullable;
-        col.primary_key = is_primary;
 
         tables.entry(table_name).or_default().push(col);
     }
 
-    // Query indexes
-    let index_rows = sqlx::query(
-        "SELECT indexname, tablename, indexdef
-         FROM pg_indexes
-         WHERE schemaname = 'public'
-         AND indexname NOT LIKE '%_pkey'"
-    )
-    .fetch_all(&pool)
-    .await?;
+    // Query primary keys (AST-native)
+    let pk_cmd = QailCmd::get("information_schema.table_constraints")
+        .columns(["table_name", "constraint_type"])
+        .filter("table_schema", Operator::Eq, "public")
+        .filter("constraint_type", Operator::Eq, "PRIMARY KEY");
+    
+    let pk_rows = driver.fetch_all(&pk_cmd).await
+        .map_err(|e| anyhow!("Failed to query primary keys: {}", e))?;
+
+    // Get tables with primary keys
+    let pk_tables: std::collections::HashSet<String> = pk_rows.iter()
+        .filter_map(|r| r.get_string_by_name("table_name"))
+        .collect();
+
+    // Query key column usage for primary key columns (AST-native)
+    let kcu_cmd = QailCmd::get("information_schema.key_column_usage")
+        .columns(["table_name", "column_name", "constraint_name"])
+        .filter("table_schema", Operator::Eq, "public");
+    
+    let kcu_rows = driver.fetch_all(&kcu_cmd).await
+        .map_err(|e| anyhow!("Failed to query key columns: {}", e))?;
+
+    // Build a set of primary key columns
+    let mut pk_columns: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for row in kcu_rows {
+        let table = row.get_string_by_name("table_name").unwrap_or_default();
+        let column = row.get_string_by_name("column_name").unwrap_or_default();
+        let constraint = row.get_string_by_name("constraint_name").unwrap_or_default();
+        
+        // Primary key constraints typically end with _pkey
+        if constraint.ends_with("_pkey") || pk_tables.contains(&table) {
+            pk_columns.insert((table, column));
+        }
+    }
+
+    // Mark primary key columns
+    for (table_name, columns) in tables.iter_mut() {
+        for col in columns.iter_mut() {
+            if pk_columns.contains(&(table_name.clone(), col.name.clone())) {
+                col.primary_key = true;
+            }
+        }
+    }
+
+    // Query indexes from pg_indexes (AST-native)
+    let idx_cmd = QailCmd::get("pg_indexes")
+        .columns(["indexname", "tablename", "indexdef"])
+        .filter("schemaname", Operator::Eq, "public");
+    
+    let index_rows = driver.fetch_all(&idx_cmd).await
+        .map_err(|e| anyhow!("Failed to query indexes: {}", e))?;
 
     let mut schema = Schema::new();
     
@@ -102,9 +142,14 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     }
 
     for row in index_rows {
-        let name: String = row.get("indexname");
-        let table: String = row.get("tablename");
-        let def: String = row.get("indexdef");
+        let name = row.get_string_by_name("indexname").unwrap_or_default();
+        let table = row.get_string_by_name("tablename").unwrap_or_default();
+        let def = row.get_string_by_name("indexdef").unwrap_or_default();
+        
+        // Skip primary key indexes
+        if name.ends_with("_pkey") {
+            continue;
+        }
         
         let is_unique = def.to_uppercase().contains("UNIQUE");
         // Parse columns from index definition
@@ -148,70 +193,4 @@ fn parse_index_columns(def: &str) -> Vec<String> {
         }
     }
     vec![]
-}
-
-async fn inspect_mysql(url: &str) -> Result<Schema> {
-    let pool = MySqlPoolOptions::new()
-        .connect(url)
-        .await?;
-
-    let url_parsed = Url::parse(url)?;
-    let db_name = url_parsed.path().trim_start_matches('/');
-    
-    let rows = sqlx::query(
-        "SELECT table_name, column_name, data_type, is_nullable, column_key
-         FROM information_schema.columns 
-         WHERE table_schema = ? 
-         ORDER BY table_name, ordinal_position"
-    )
-    .bind(db_name)
-    .fetch_all(&pool)
-    .await?;
-
-    let mut tables: std::collections::HashMap<String, Vec<Column>> = std::collections::HashMap::new();
-
-    for row in rows {
-        let table_name: String = row.get("table_name");
-        let col_name: String = row.get("column_name");
-        let data_type: String = row.get("data_type");
-        let is_nullable_str: String = row.get("is_nullable");
-        let column_key: String = row.get("column_key");
-        
-        let is_nullable = is_nullable_str == "YES";
-        let is_primary = column_key == "PRI";
-        
-        // Map MySQL type to QAIL ColumnType  
-        let col_type_str = map_mysql_type(&data_type);
-        let col_type = qail_core::migrate::ColumnType::from_str(col_type_str)
-            .unwrap_or(qail_core::migrate::ColumnType::Text);
-
-        let mut col = Column::new(&col_name, col_type);
-        col.nullable = is_nullable;
-        col.primary_key = is_primary;
-
-        tables.entry(table_name).or_default().push(col);
-    }
-
-    let mut schema = Schema::new();
-    for (name, columns) in tables {
-        let mut table = Table::new(&name);
-        table.columns = columns;
-        schema.add_table(table);
-    }
-
-    Ok(schema)
-}
-
-fn map_mysql_type(data_type: &str) -> &'static str {
-    match data_type {
-        "int" | "tinyint" | "smallint" | "mediumint" => "int",
-        "bigint" => "bigint",
-        "float" | "double" | "decimal" => "float",
-        "boolean" | "bool" => "bool",
-        "json" => "json",
-        "datetime" | "timestamp" => "timestamp",
-        "date" => "date",
-        "varchar" | "char" => "varchar",
-        _ => "text",
-    }
 }
