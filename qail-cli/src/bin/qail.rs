@@ -146,6 +146,14 @@ enum Commands {
 
 #[derive(Subcommand, Clone)]
 enum MigrateAction {
+    /// Analyze migration impact on codebase before executing
+    Analyze {
+        /// Schema diff (old.qail:new.qail)
+        schema_diff: String,
+        /// Codebase path to scan
+        #[arg(short, long, default_value = "./src")]
+        codebase: String,
+    },
     /// Preview migration SQL without executing (dry-run)
     Plan {
         /// Schema diff (old.qail:new.qail)
@@ -198,6 +206,9 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Migrate { action }) => {
             match action {
+                MigrateAction::Analyze { schema_diff, codebase } => {
+                    migrate_analyze(schema_diff, codebase)?;
+                },
                 MigrateAction::Plan { schema_diff, output } => {
                     migrate_plan(schema_diff, output.as_deref())?;
                 },
@@ -687,6 +698,125 @@ fn diff_schemas_cmd(old_path: &str, new_path: &str, format: OutputFormat, cli: &
                 println!("   {}", cmd.to_sql_with_dialect(dialect).dimmed());
             }
         }
+    }
+    
+    Ok(())
+}
+
+/// Analyze migration impact on codebase before executing.
+fn migrate_analyze(schema_diff_path: &str, codebase_path: &str) -> Result<()> {
+    use qail_core::analyzer::{CodebaseScanner, MigrationImpact};
+    use std::path::Path;
+    
+    println!("{}", "🔍 Migration Impact Analyzer".cyan().bold());
+    println!();
+    
+    // Parse schema files
+    let (old_schema, new_schema, cmds) = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
+        let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
+        let old_path = parts[0];
+        let new_path = parts[1];
+        
+        println!("  Schema: {} → {}", old_path.yellow(), new_path.yellow());
+        
+        let old_content = std::fs::read_to_string(old_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
+        let new_content = std::fs::read_to_string(new_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
+        
+        let old = parse_qail(&old_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
+        let new = parse_qail(&new_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
+        
+        let cmds = diff_schemas(&old, &new);
+        (old, new, cmds)
+    } else {
+        return Err(anyhow::anyhow!("Please provide two .qail files: old.qail:new.qail"));
+    };
+    
+    if cmds.is_empty() {
+        println!("{}", "✓ No migrations needed - schemas are identical".green());
+        return Ok(());
+    }
+    
+    println!("  Codebase: {}", codebase_path.yellow());
+    println!();
+    
+    // Scan codebase
+    let scanner = CodebaseScanner::new();
+    let code_path = Path::new(codebase_path);
+    
+    if !code_path.exists() {
+        return Err(anyhow::anyhow!("Codebase path not found: {}", codebase_path));
+    }
+    
+    println!("{}", "Scanning codebase...".dimmed());
+    let code_refs = scanner.scan(code_path);
+    println!("  Found {} query references\n", code_refs.len());
+    
+    // Analyze impact
+    let impact = MigrationImpact::analyze(&cmds, &code_refs, &old_schema, &new_schema);
+    
+    if impact.safe_to_run {
+        println!("{}", "✓ Migration is safe to run".green().bold());
+        println!("  No breaking changes detected in codebase\n");
+        
+        println!("{}", "Migration preview:".cyan());
+        for cmd in &cmds {
+            let sql = cmd_to_sql(cmd);
+            println!("  {}", sql);
+        }
+    } else {
+        println!("{}", "⚠️  BREAKING CHANGES DETECTED".red().bold());
+        println!();
+        println!("Affected files: {}", impact.affected_files);
+        println!();
+        
+        for change in &impact.breaking_changes {
+            match change {
+                qail_core::analyzer::BreakingChange::DroppedTable { table, references } => {
+                    println!("┌─ {} {} ({} references) ─────────────────────────┐", 
+                        "DROP TABLE".red(), table.yellow(), references.len());
+                    for r in references.iter().take(5) {
+                        println!("│ {} {}:{} → {}", "❌".red(), 
+                            r.file.display(), r.line, r.snippet.cyan());
+                    }
+                    if references.len() > 5 {
+                        println!("│ ... and {} more", references.len() - 5);
+                    }
+                    println!("└──────────────────────────────────────────────────────┘");
+                    println!();
+                },
+                qail_core::analyzer::BreakingChange::DroppedColumn { table, column, references } => {
+                    println!("┌─ {} {}.{} ({} references) ─────────────────┐", 
+                        "DROP COLUMN".red(), table.yellow(), column.yellow(), references.len());
+                    for r in references.iter().take(5) {
+                        println!("│ {} {}:{} → {}", "❌".red(), 
+                            r.file.display(), r.line, r.snippet.cyan());
+                    }
+                    println!("└──────────────────────────────────────────────────────┘");
+                    println!();
+                },
+                qail_core::analyzer::BreakingChange::RenamedColumn { table, references, .. } => {
+                    println!("┌─ {} on {} ({} references) ───────────────────┐", 
+                        "RENAME".yellow(), table.yellow(), references.len());
+                    for r in references.iter().take(5) {
+                        println!("│ {} {}:{} → {}", "⚠️ ".yellow(), 
+                            r.file.display(), r.line, r.snippet.cyan());
+                    }
+                    println!("└──────────────────────────────────────────────────────┘");
+                    println!();
+                },
+                _ => {}
+            }
+        }
+        
+        println!("What would you like to do?");
+        println!("  1. {} (DANGEROUS - will cause {} runtime errors)", 
+            "Run anyway".red(), impact.breaking_changes.len());
+        println!("  2. {} (show SQL, don't execute)", "Dry-run first".yellow());
+        println!("  3. {} (exit)", "Let me fix the code first".green());
     }
     
     Ok(())
