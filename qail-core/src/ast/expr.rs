@@ -64,10 +64,10 @@ pub enum Expr {
     },
     /// CASE WHEN expression
     Case {
-        /// WHEN condition THEN value pairs
-        when_clauses: Vec<(Condition, Value)>,
-        /// ELSE value (optional)
-        else_value: Option<Box<Value>>,
+        /// WHEN condition THEN expr pairs (Expr allows functions, values, identifiers)
+        when_clauses: Vec<(Condition, Box<Expr>)>,
+        /// ELSE expr (optional)
+        else_value: Option<Box<Expr>>,
         /// Optional alias
         alias: Option<String>,
     },

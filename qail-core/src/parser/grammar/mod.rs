@@ -22,7 +22,18 @@ use self::dml::*;
 use self::joins::*;
 // use self::expressions::*; // Used in clauses module
 
+/// Parse a QAIL query with comment preprocessing.
+/// This is the recommended entry point - handles SQL comment stripping.
+pub fn parse(input: &str) -> Result<QailCmd, String> {
+    let cleaned = strip_sql_comments(input);
+    match parse_root(&cleaned) {
+        Ok((_, cmd)) => Ok(cmd),
+        Err(e) => Err(format!("Parse error: {:?}", e)),
+    }
+}
+
 /// Parse a QAIL query (root entry point).
+/// Note: Does NOT strip comments. Use `parse()` for automatic comment handling.
 pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     let input = input.trim();
     
@@ -142,4 +153,37 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     }))
 }
 
-
+/// Strip SQL comments from input (both -- line comments and /* */ block comments)
+fn strip_sql_comments(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if c == '-' && chars.peek() == Some(&'-') {
+            // Line comment: skip until end of line
+            chars.next(); // consume second -
+            while let Some(&nc) = chars.peek() {
+                if nc == '\n' {
+                    result.push('\n'); // preserve newline
+                    chars.next();
+                    break;
+                }
+                chars.next();
+            }
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            // Block comment: skip until */
+            chars.next(); // consume *
+            while let Some(nc) = chars.next() {
+                if nc == '*' && chars.peek() == Some(&'/') {
+                    chars.next(); // consume /
+                    result.push(' '); // replace with space to preserve separation
+                    break;
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    
+    result
+}
