@@ -1,0 +1,94 @@
+<!-- Custom header for QAIL docs -->
+<nav class="qail-header">
+    <a href="https://qail.rs" class="qail-logo">
+        <span class="qail-icon">🪝</span>
+        <span class="qail-text">QAIL</span>
+    </a>
+    <div class="qail-nav-links">
+        <a href="https://qail.rs">Home</a>
+        <a href="https://qail.rs/playground">Playground</a>
+        <a href="https://qail.rs/docs" class="active">Docs</a>
+        <a href="https://qail.rs/benchmarks">Benchmarks</a>
+        <a href="https://github.com/qail-rs/qail" target="_blank">GitHub</a>
+    </div>
+</nav>
+
+<style>
+    .qail-header {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 56px;
+        background: linear-gradient(to right, #12121a, #0a0a0f);
+        border-bottom: 1px solid rgba(139, 92, 246, 0.3);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 2rem;
+        z-index: 1000;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    .qail-logo {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        text-decoration: none;
+        font-weight: 700;
+        font-size: 1.25rem;
+    }
+
+    .qail-icon {
+        font-size: 1.5rem;
+    }
+
+    .qail-text {
+        background: linear-gradient(135deg, #8b5cf6 0%, #06b6d4 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+
+    .qail-nav-links {
+        display: flex;
+        gap: 1.5rem;
+    }
+
+    .qail-nav-links a {
+        color: #cbd5e1;
+        text-decoration: none;
+        font-size: 0.9rem;
+        transition: color 0.2s;
+    }
+
+    .qail-nav-links a:hover {
+        color: #8b5cf6;
+    }
+
+    .qail-nav-links a.active {
+        color: #8b5cf6;
+        font-weight: 600;
+    }
+
+    /* Adjust body to account for fixed header */
+    body {
+        padding-top: 56px !important;
+    }
+
+    .sidebar {
+        top: 56px !important;
+        height: calc(100vh - 56px) !important;
+    }
+
+    .menu-bar,
+    .menu-bar-sticky-container {
+        top: 56px !important;
+    }
+
+    @media (max-width: 768px) {
+        .qail-nav-links {
+            display: none;
+        }
+    }
+</style>

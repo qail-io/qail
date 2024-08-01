@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "qail-core",
+    "qail-cli",
+    "qail-bench",
+    "qail-lsp",
+    "qail-wasm",
+    "qail-ffi",
+    "qail-pg",
+    "qail-py",
+    "qail-go",
+    "qail-php",
+]
+
+[workspace.lints.rust]
+warnings = "deny"
+unused = "deny"
+dead_code = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+
+# Profiling: enable debug symbols in release builds
+[profile.release]
+debug = true

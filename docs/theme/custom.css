@@ -1,0 +1,345 @@
+/* QAIL Custom Theme - matches qail-web styling */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --qail-primary: #8b5cf6;
+    --qail-secondary: #06b6d4;
+    --qail-accent: #22c55e;
+    --qail-bg: #0a0a0f;
+    --qail-surface: #12121a;
+    --qail-border: rgba(139, 92, 246, 0.3);
+}
+
+/* Force dark theme */
+html {
+    background: #0a0a0f !important;
+}
+
+/* Dark theme overrides */
+.coal,
+.navy,
+.ayu,
+.rust {
+    --bg: #0a0a0f;
+    --fg: #e2e8f0;
+    --sidebar-bg: #12121a;
+    --sidebar-fg: #cbd5e1;
+    --sidebar-active: #8b5cf6;
+    --links: #8b5cf6;
+    --inline-code-color: #22c55e;
+    --theme-popup-bg: #12121a;
+    --theme-popup-border: rgba(139, 92, 246, 0.3);
+    --quote-bg: rgba(139, 92, 246, 0.1);
+    --quote-border: #8b5cf6;
+    --table-border-color: rgba(139, 92, 246, 0.3);
+    --table-header-bg: #1a1a2e;
+    --searchbar-border-color: rgba(139, 92, 246, 0.3);
+    --searchbar-bg: #12121a;
+}
+
+/* QAIL Header Navigation Bar */
+.qail-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    background: linear-gradient(to right, #12121a, #0a0a0f);
+    border-bottom: 1px solid rgba(139, 92, 246, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 2rem;
+    z-index: 1000;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.qail-logo {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    text-decoration: none !important;
+    font-weight: 700;
+    font-size: 1.25rem;
+}
+
+.qail-icon {
+    font-size: 1.5rem;
+}
+
+.qail-text {
+    background: linear-gradient(135deg, #8b5cf6 0%, #06b6d4 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.qail-nav-links {
+    display: flex;
+    gap: 1.5rem;
+}
+
+.qail-nav-links a {
+    color: #cbd5e1 !important;
+    text-decoration: none !important;
+    font-size: 0.9rem;
+    transition: color 0.2s;
+}
+
+.qail-nav-links a:hover {
+    color: #8b5cf6 !important;
+}
+
+.qail-nav-links a.active {
+    color: #8b5cf6 !important;
+    font-weight: 600;
+}
+
+/* Adjust body and sidebar to account for fixed header */
+body {
+    padding-top: 56px !important;
+}
+
+.sidebar {
+    top: 56px !important;
+    height: calc(100vh - 56px) !important;
+}
+
+.menu-bar,
+.menu-bar-sticky-container {
+    top: 56px !important;
+}
+
+@media (max-width: 768px) {
+    .qail-nav-links {
+        display: none;
+    }
+}
+
+/* Add QAIL logo via CSS */
+.sidebar .sidebar-scrollbox::before {
+    content: "🪝 QAIL Docs";
+    display: block;
+    padding: 1rem 1.5rem;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #f8fafc;
+    background: linear-gradient(135deg, #8b5cf6 0%, #06b6d4 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    border-bottom: 1px solid rgba(139, 92, 246, 0.3);
+    margin-bottom: 1rem;
+}
+
+/* Back to site link */
+.sidebar .sidebar-scrollbox::after {
+    content: "← Back to QAIL.rs";
+    display: block;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.875rem;
+    color: #8b5cf6;
+    border-top: 1px solid rgba(139, 92, 246, 0.2);
+    margin-top: 1rem;
+    cursor: pointer;
+}
+
+.sidebar .sidebar-scrollbox::after:hover {
+    color: #a78bfa;
+}
+
+/* Sidebar styling */
+.sidebar {
+    background: #12121a !important;
+}
+
+.sidebar .sidebar-scrollbox {
+    background: #12121a;
+    padding-top: 0 !important;
+}
+
+.sidebar a {
+    color: #cbd5e1 !important;
+    padding: 0.5rem 1.5rem;
+    display: block;
+    transition: all 0.2s ease;
+}
+
+.sidebar a:hover {
+    color: #8b5cf6 !important;
+    background: rgba(139, 92, 246, 0.1);
+}
+
+.sidebar a.active {
+    color: #8b5cf6 !important;
+    font-weight: 600;
+    background: rgba(139, 92, 246, 0.15);
+    border-left: 3px solid #8b5cf6;
+}
+
+/* Main content area */
+.content {
+    background: #0a0a0f;
+}
+
+.content main {
+    max-width: 900px;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* Code blocks */
+pre {
+    background: #161b22 !important;
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    border-radius: 12px;
+    padding: 1rem !important;
+}
+
+code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9em;
+}
+
+/* Inline code */
+:not(pre)>code {
+    background: rgba(139, 92, 246, 0.15);
+    color: #22c55e;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+}
+
+/* Tables */
+table {
+    border-collapse: collapse;
+    width: 100%;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+th,
+td {
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    padding: 0.75rem 1rem;
+}
+
+th {
+    background: #1a1a2e;
+    color: #f8fafc;
+    font-weight: 600;
+}
+
+tr:hover {
+    background: rgba(139, 92, 246, 0.05);
+}
+
+/* Links */
+a {
+    color: #8b5cf6;
+    text-decoration: none;
+}
+
+a:hover {
+    color: #a78bfa;
+    text-decoration: underline;
+}
+
+/* Headers */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+    color: #f8fafc;
+    font-family: 'Inter', sans-serif;
+}
+
+h1 {
+    font-size: 2.25rem;
+    font-weight: 700;
+    margin-bottom: 1.5rem;
+}
+
+h2 {
+    font-size: 1.5rem;
+    border-bottom: 2px solid rgba(139, 92, 246, 0.3);
+    padding-bottom: 0.5rem;
+    margin-top: 2rem;
+}
+
+h3 {
+    font-size: 1.25rem;
+    color: #cbd5e1;
+}
+
+/* Blockquotes */
+blockquote {
+    background: rgba(139, 92, 246, 0.1);
+    border-left: 4px solid #8b5cf6;
+    padding: 1rem;
+    margin: 1rem 0;
+    border-radius: 0 8px 8px 0;
+}
+
+/* Menu bar */
+.menu-bar {
+    background: #12121a !important;
+    border-bottom: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+/* Search */
+#searchbar {
+    background: #0a0a0f !important;
+    border: 1px solid rgba(139, 92, 246, 0.3) !important;
+    border-radius: 8px !important;
+    color: #e2e8f0 !important;
+}
+
+/* Hide theme switcher (keep it dark) */
+#theme-list {
+    display: none !important;
+}
+
+.theme-popup {
+    display: none !important;
+}
+
+/* Chapter navigation */
+.nav-chapters {
+    background: rgba(139, 92, 246, 0.1);
+    border-radius: 8px;
+    padding: 0.5rem 1rem;
+}
+
+.nav-chapters:hover {
+    background: rgba(139, 92, 246, 0.2);
+}
+
+/* Status emoji styling */
+td:has(✅),
+td:has(🚧),
+td:has(❌) {
+    text-align: center;
+}
+
+/* Lists */
+ul,
+ol {
+    padding-left: 1.5rem;
+}
+
+li {
+    margin: 0.5rem 0;
+}
+
+/* Paragraphs */
+p {
+    line-height: 1.7;
+    color: #cbd5e1;
+}
+
+/* Selection */
+::selection {
+    background: rgba(139, 92, 246, 0.3);
+}
