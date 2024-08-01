@@ -23,7 +23,7 @@
 //! ```
 
 use wasm_bindgen::prelude::*;
-use qail_core::transpiler::ToSql;
+use qail_core::transpiler::{ToSql, Dialect};
 
 /// Parse QAIL and return SQL string.
 #[wasm_bindgen]
@@ -31,6 +31,24 @@ pub fn parse_and_transpile(qail: &str) -> Result<String, JsError> {
     let cmd = qail_core::parse(qail)
         .map_err(|e| JsError::new(&format!("{:?}", e)))?;
     Ok(cmd.to_sql())
+}
+
+/// Parse QAIL and return SQL string with specific dialect.
+/// Dialect: "postgres", "mysql", "sqlite", "sqlserver"
+#[wasm_bindgen]
+pub fn parse_and_transpile_with_dialect(qail: &str, dialect: &str) -> Result<String, JsError> {
+    let cmd = qail_core::parse(qail)
+        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    
+    let d = match dialect.to_lowercase().as_str() {
+        "postgres" | "postgresql" => Dialect::Postgres,
+        "mysql" => Dialect::MySQL,
+        "sqlite" => Dialect::SQLite,
+        "sqlserver" | "mssql" => Dialect::SqlServer,
+        _ => return Err(JsError::new(&format!("Unsupported dialect: {}", dialect))),
+    };
+
+    Ok(cmd.to_sql_with_dialect(d))
 }
 
 /// Parse QAIL and return AST as JSON.

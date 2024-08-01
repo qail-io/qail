@@ -28,6 +28,18 @@ pub struct QailCmd {
     /// Table-level constraints (for Action::Make)
     #[serde(default)]
     pub table_constraints: Vec<TableConstraint>,
+    /// Set operations (UNION, INTERSECT, EXCEPT) chained queries
+    #[serde(default)]
+    pub set_ops: Vec<(SetOp, Box<QailCmd>)>,
+    /// HAVING clause conditions (filter on aggregates)
+    #[serde(default)]
+    pub having: Vec<Condition>,
+    /// GROUP BY mode (Simple, Rollup, Cube)
+    #[serde(default)]
+    pub group_by_mode: GroupByMode,
+    /// CTE definition (for WITH/WITH RECURSIVE queries)
+    #[serde(default)]
+    pub cte: Option<CTEDef>,
 }
 
 impl QailCmd {
@@ -42,6 +54,10 @@ impl QailCmd {
             distinct: false,
             index_def: None,
             table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            cte: None,
         }
     }
 
@@ -56,6 +72,10 @@ impl QailCmd {
             distinct: false,
             index_def: None,
             table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            cte: None,
         }
     }
 
@@ -70,6 +90,10 @@ impl QailCmd {
             distinct: false,
             index_def: None,
             table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            cte: None,
         }
     }
 
@@ -84,6 +108,10 @@ impl QailCmd {
             distinct: false,
             index_def: None,
             table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            cte: None,
         }
     }
     /// Add columns to hook (select).
@@ -160,6 +188,50 @@ pub enum JoinKind {
     Inner,
     Left,
     Right,
+    /// LATERAL join (Postgres, MySQL 8+) - allows subquery to reference outer query
+    Lateral,
+}
+
+/// Set operation type for combining queries
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SetOp {
+    /// UNION (removes duplicates)
+    Union,
+    /// UNION ALL (keeps duplicates)
+    UnionAll,
+    /// INTERSECT (common rows)
+    Intersect,
+    /// EXCEPT (rows in first but not second)
+    Except,
+}
+
+/// GROUP BY mode for advanced aggregations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum GroupByMode {
+    /// Standard GROUP BY
+    #[default]
+    Simple,
+    /// ROLLUP - hierarchical subtotals
+    Rollup,
+    /// CUBE - all combinations of subtotals
+    Cube,
+}
+
+/// CTE (Common Table Expression) definition
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CTEDef {
+    /// CTE name (the alias used in the query)
+    pub name: String,
+    /// Whether this is a RECURSIVE CTE
+    pub recursive: bool,
+    /// Column list for the CTE (optional)
+    pub columns: Vec<String>,
+    /// Base query (non-recursive part)
+    pub base_query: Box<QailCmd>,
+    /// Recursive part (UNION ALL with self-reference)
+    pub recursive_query: Option<Box<QailCmd>>,
+    /// Source table for recursive join (references CTE name)
+    pub source_table: Option<String>,
 }
 
 /// A column reference.
@@ -191,6 +263,15 @@ pub enum Column {
         params: Vec<Value>,
         partition: Vec<String>,
         order: Vec<Cage>,
+    },
+    /// CASE WHEN expression
+    Case {
+        /// WHEN condition THEN value pairs
+        when_clauses: Vec<(Condition, Value)>,
+        /// ELSE value (optional)
+        else_value: Option<Box<Value>>,
+        /// Optional alias
+        alias: Option<String>,
     },
 }
 
@@ -240,6 +321,20 @@ impl std::fmt::Display for Column {
                 }
                 Ok(())
             }
+            Column::Case { when_clauses, else_value, alias } => {
+                write!(f, "CASE")?;
+                for (cond, val) in when_clauses {
+                    write!(f, " WHEN {} THEN {}", cond.column, val)?;
+                }
+                if let Some(e) = else_value {
+                    write!(f, " ELSE {}", e)?;
+                }
+                write!(f, " END")?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -263,6 +358,36 @@ pub enum Constraint {
     Check(Vec<String>),
     /// Column comment (COMMENT ON COLUMN)
     Comment(String),
+    /// Generated column expression (GENERATED ALWAYS AS)
+    Generated(ColumnGeneration),
+}
+
+/// Generated column type (STORED or VIRTUAL)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ColumnGeneration {
+    /// GENERATED ALWAYS AS (expr) STORED - computed and stored
+    Stored(String),
+    /// GENERATED ALWAYS AS (expr) - computed at query time (default in Postgres 18+)
+    Virtual(String),
+}
+
+/// Window frame definition for window functions
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum WindowFrame {
+    /// ROWS BETWEEN start AND end
+    Rows { start: FrameBound, end: FrameBound },
+    /// RANGE BETWEEN start AND end
+    Range { start: FrameBound, end: FrameBound },
+}
+
+/// Window frame boundary
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameBound {
+    UnboundedPreceding,
+    Preceding(i32),
+    CurrentRow,
+    Following(i32),
+    UnboundedFollowing,
 }
 
 impl std::fmt::Display for Constraint {
@@ -274,6 +399,10 @@ impl std::fmt::Display for Constraint {
             Constraint::Default(val) => write!(f, "={}", val),
             Constraint::Check(vals) => write!(f, "check({})", vals.join(",")),
             Constraint::Comment(text) => write!(f, "comment(\"{}\")", text),
+            Constraint::Generated(generation) => match generation {
+                ColumnGeneration::Stored(expr) => write!(f, "gen({})", expr),
+                ColumnGeneration::Virtual(expr) => write!(f, "vgen({})", expr),
+            },
         }
     }
 }
@@ -339,6 +468,8 @@ pub enum Action {
     Gen,
     /// Create Table (Make)
     Make,
+    /// Drop Table (Drop)
+    Drop,
     /// Modify Table (Mod)
     Mod,
     /// Window Function (Over)
@@ -346,7 +477,18 @@ pub enum Action {
     /// CTE (With)
     With,
     /// Create Index
+    /// Create Index
     Index,
+    // Transactions
+    TxnStart,
+    TxnCommit,
+    TxnRollback,
+    Put,
+    DropCol,
+    RenameCol,
+    // Additional clauses
+    /// JSON_TABLE - convert JSON to relational rows
+    JsonTable,
 }
 
 impl std::fmt::Display for Action {
@@ -358,10 +500,18 @@ impl std::fmt::Display for Action {
             Action::Add => write!(f, "ADD"),
             Action::Gen => write!(f, "GEN"),
             Action::Make => write!(f, "MAKE"),
+            Action::Drop => write!(f, "DROP"),
             Action::Mod => write!(f, "MOD"),
             Action::Over => write!(f, "OVER"),
             Action::With => write!(f, "WITH"),
             Action::Index => write!(f, "INDEX"),
+            Action::TxnStart => write!(f, "TXN_START"),
+            Action::TxnCommit => write!(f, "TXN_COMMIT"),
+            Action::TxnRollback => write!(f, "TXN_ROLLBACK"),
+            Action::Put => write!(f, "PUT"),
+            Action::DropCol => write!(f, "DROP_COL"),
+            Action::RenameCol => write!(f, "RENAME_COL"),
+            Action::JsonTable => write!(f, "JSON_TABLE"),
         }
     }
 }
@@ -392,6 +542,12 @@ pub enum CageKind {
     Limit(usize),
     /// OFFSET
     Offset(usize),
+    /// TABLESAMPLE - percentage of rows
+    Sample(usize),
+    /// QUALIFY - filter on window function results
+    Qualify,
+    /// PARTITION BY - window function partitioning
+    Partition,
 }
 
 /// Sort order direction.
@@ -448,6 +604,16 @@ pub enum Operator {
     IsNull,
     /// IS NOT NULL
     IsNotNull,
+    /// JSON/Array Contains (@>)
+    Contains,
+    /// JSON Key Exists (?)
+    KeyExists,
+    /// JSON_EXISTS - check if path exists (Postgres 17+)
+    JsonExists,
+    /// JSON_QUERY - extract JSON object/array at path (Postgres 17+)
+    JsonQuery,
+    /// JSON_VALUE - extract scalar value at path (Postgres 17+)
+    JsonValue,
 }
 
 /// A value in a condition.
@@ -469,6 +635,8 @@ pub enum Value {
     Function(String),
     /// Array of values
     Array(Vec<Value>),
+    /// Subquery for IN/EXISTS expressions (e.g., WHERE id IN (SELECT ...))
+    Subquery(Box<QailCmd>),
 }
 
 impl From<bool> for Value {
@@ -527,6 +695,7 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            Value::Subquery(cmd) => write!(f, "({})", cmd.table), // Placeholder display
         }
     }
 }

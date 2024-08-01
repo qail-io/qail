@@ -13,9 +13,8 @@
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use qail_core::transpiler::{ToSql, Dialect};
 use std::cell::RefCell;
-
-use qail_core::transpiler::ToSql;
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<String>> = RefCell::new(None);
@@ -57,6 +56,64 @@ pub extern "C" fn qail_transpile(qail: *const c_char) -> *mut c_char {
     match qail_core::parse(qail_str) {
         Ok(cmd) => {
             let sql = cmd.to_sql();
+            match CString::new(sql) {
+                Ok(c_string) => c_string.into_raw(),
+                Err(e) => {
+                    set_error(format!("NUL byte in output: {}", e));
+                    std::ptr::null_mut()
+                }
+            }
+        }
+        Err(e) => {
+            set_error(format!("{:?}", e));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn qail_transpile_with_dialect(qail: *const c_char, dialect: *const c_char) -> *mut c_char {
+    clear_error();
+
+    if qail.is_null() {
+        set_error("NULL QAIL input".to_string());
+        return std::ptr::null_mut();
+    }
+    if dialect.is_null() {
+        set_error("NULL dialect input".to_string());
+        return std::ptr::null_mut();
+    }
+
+    let qail_str = match unsafe { CStr::from_ptr(qail) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_error(format!("Invalid UTF-8 in qail string: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+    
+    let dialect_str = match unsafe { CStr::from_ptr(dialect) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_error(format!("Invalid UTF-8 in dialect string: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let d = match dialect_str.to_lowercase().as_str() {
+        "postgres" | "postgresql" => Dialect::Postgres,
+        "mysql" => Dialect::MySQL,
+        "sqlite" => Dialect::SQLite,
+        "sqlserver" | "mssql" => Dialect::SqlServer,
+        _ => {
+            set_error(format!("Unsupported dialect: {}", dialect_str));
+            return std::ptr::null_mut();
+        }
+    };
+
+    match qail_core::parse(qail_str) {
+        Ok(cmd) => {
+            let sql = cmd.to_sql_with_dialect(d);
             match CString::new(sql) {
                 Ok(c_string) => c_string.into_raw(),
                 Err(e) => {

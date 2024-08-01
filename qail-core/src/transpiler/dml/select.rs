@@ -1,0 +1,211 @@
+//! SELECT SQL generation.
+
+use crate::ast::*;
+use crate::transpiler::dialect::Dialect;
+use crate::transpiler::conditions::ConditionToSql;
+
+/// Generate SELECT SQL.
+pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    
+    let mut sql = if cmd.distinct {
+        String::from("SELECT DISTINCT ")
+    } else {
+        String::from("SELECT ")
+    };
+
+    // Columns
+    if cmd.columns.is_empty() {
+        sql.push('*');
+    } else {
+        let cols: Vec<String> = cmd.columns.iter().map(|c| {
+             match c {
+                Column::Named(name) => generator.quote_identifier(name),
+                Column::Case { when_clauses, else_value, alias } => {
+                    let mut case_sql = String::from("CASE");
+                    for (cond, val) in when_clauses {
+                        case_sql.push_str(&format!(" WHEN {} THEN {}", cond.to_sql(&generator, Some(cmd)), val));
+                    }
+                    if let Some(e) = else_value {
+                        case_sql.push_str(&format!(" ELSE {}", e));
+                    }
+                    case_sql.push_str(" END");
+                    if let Some(a) = alias {
+                        format!("{} AS {}", case_sql, generator.quote_identifier(a))
+                    } else {
+                        case_sql
+                    }
+                }
+                _ => c.to_string(), // Fallback for complex cols if any remaining
+            }
+        }).collect();
+        sql.push_str(&cols.join(", "));
+    }
+
+    // FROM
+    sql.push_str(" FROM ");
+    sql.push_str(&generator.quote_identifier(&cmd.table));
+    
+    // Check for TABLESAMPLE (Postgres/Standard SQL) - handle early before joins
+    let sample_percent = cmd.cages.iter().find_map(|c| {
+        if let CageKind::Sample(pct) = c.kind {
+            Some(pct)
+        } else {
+            None
+        }
+    });
+    if let Some(pct) = sample_percent {
+        sql.push_str(&format!(" TABLESAMPLE BERNOULLI({})", pct));
+    }
+
+    // JOINS
+    for join in &cmd.joins {
+        let kind = match join.kind {
+            JoinKind::Inner => "INNER",
+            JoinKind::Left => "LEFT",
+            JoinKind::Right => "RIGHT",
+            JoinKind::Lateral => "LATERAL",
+        };
+        // Heuristic: target.source_singular_id = source.id
+        let source_singular = cmd.table.trim_end_matches('s');
+        
+        let target_table = generator.quote_identifier(&join.table);
+        let source_fk = format!("{}_id", source_singular);
+        let source_table = generator.quote_identifier(&cmd.table);
+        
+        sql.push_str(&format!(
+            " {} JOIN {} ON {}.{} = {}.id",
+            kind, 
+            target_table, 
+            target_table, 
+            generator.quote_identifier(&source_fk), 
+            source_table
+        ));
+    }
+    
+    // Prepare for GROUP BY check
+    let has_aggregates = cmd.columns.iter().any(|c| matches!(c, Column::Aggregate { .. }));
+    let mut non_aggregated_cols = Vec::new();
+    if has_aggregates {
+         for col in &cmd.columns {
+             if let Column::Named(name) = col {
+                 non_aggregated_cols.push(generator.quote_identifier(name));
+             }
+         }
+    }
+
+    // Process cages
+    let mut where_groups: Vec<String> = Vec::new();
+    let mut order_by: Option<String> = None;
+    let mut limit: Option<usize> = None;
+    let mut offset: Option<usize> = None;
+
+    for cage in &cmd.cages {
+        match &cage.kind {
+            CageKind::Filter => {
+                if !cage.conditions.is_empty() {
+                    let joiner = match cage.logical_op {
+                        LogicalOp::And => " AND ",
+                        LogicalOp::Or => " OR ",
+                    };
+                    let conditions: Vec<String> = cage.conditions.iter().map(|c| c.to_sql(&generator, Some(cmd))).collect();
+                    let group = conditions.join(joiner);
+                    // Wrap OR groups in parentheses for correct precedence
+                    if cage.logical_op == LogicalOp::Or && cage.conditions.len() > 1 {
+                        where_groups.push(format!("({})", group));
+                    } else {
+                        where_groups.push(group);
+                    }
+                }
+            }
+            CageKind::Sort(order) => {
+                if let Some(cond) = cage.conditions.first() {
+                    let dir = match order {
+                        SortOrder::Asc => "ASC",
+                        SortOrder::Desc => "DESC",
+                    };
+                    order_by = Some(format!("{} {}", generator.quote_identifier(&cond.column), dir));
+                }
+            }
+            CageKind::Limit(n) => {
+                limit = Some(*n);
+            }
+            CageKind::Offset(n) => {
+                offset = Some(*n);
+            }
+            CageKind::Payload => {
+                // Not used in SELECT
+            }
+            CageKind::Sample(_) => {
+                // Handled separately after FROM clause
+            }
+            CageKind::Qualify => {
+                // Will be processed separately after ORDER BY for QUALIFY clause
+            }
+            CageKind::Partition => {
+                // Handled in window function OVER clause
+            }
+        }
+    }
+
+    // WHERE - each cage group is joined with AND
+    if !where_groups.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_groups.join(" AND "));
+    }
+
+    // GROUP BY (with ROLLUP/CUBE support)
+    if !non_aggregated_cols.is_empty() {
+        sql.push_str(" GROUP BY ");
+        match cmd.group_by_mode {
+            GroupByMode::Simple => sql.push_str(&non_aggregated_cols.join(", ")),
+            GroupByMode::Rollup => sql.push_str(&format!("ROLLUP({})", non_aggregated_cols.join(", "))),
+            GroupByMode::Cube => sql.push_str(&format!("CUBE({})", non_aggregated_cols.join(", "))),
+        }
+    }
+
+    // HAVING (filter on aggregates)
+    if !cmd.having.is_empty() {
+        let having_conds: Vec<String> = cmd.having.iter()
+            .map(|c| c.to_sql(&generator, Some(cmd)))
+            .collect();
+        sql.push_str(" HAVING ");
+        sql.push_str(&having_conds.join(" AND "));
+    }
+
+    // ORDER BY
+    if let Some(order) = order_by {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&order);
+    }
+
+    // QUALIFY (Snowflake, BigQuery, Databricks) - filter on window function results
+    // Appears after ORDER BY, before LIMIT
+    for cage in &cmd.cages {
+        if let CageKind::Qualify = cage.kind {
+            if !cage.conditions.is_empty() {
+                let qualify_conds: Vec<String> = cage.conditions.iter()
+                    .map(|c| c.to_sql(&generator, Some(cmd)))
+                    .collect();
+                sql.push_str(" QUALIFY ");
+                sql.push_str(&qualify_conds.join(" AND "));
+            }
+        }
+    }
+
+    // LIMIT / OFFSET
+    sql.push_str(&generator.limit_offset(limit, offset));
+
+    // SET OPERATIONS (UNION, INTERSECT, EXCEPT)
+    for (set_op, other_cmd) in &cmd.set_ops {
+        let op_str = match set_op {
+            SetOp::Union => "UNION",
+            SetOp::UnionAll => "UNION ALL",
+            SetOp::Intersect => "INTERSECT",
+            SetOp::Except => "EXCEPT",
+        };
+        sql.push_str(&format!(" {} {}", op_str, build_select(other_cmd, dialect)));
+    }
+
+    sql
+}

@@ -17,12 +17,23 @@ extern "C" {
 #endif
 
 /**
- * Parse QAIL string and return SQL.
+ * Transpile a QAIL string into SQL using the default dialect (Postgres).
  * 
- * @param qail  QAIL query string (UTF-8)
- * @return      SQL string (caller must free with qail_free), or NULL on error
+ * Returns a pointer to a null-terminated C string containing the SQL.
+ * The caller must free this string using `qail_free`.
+ * Returns NULL on error; call `qail_last_error` for details.
  */
 char* qail_transpile(const char* qail);
+
+/**
+ * Transpile a QAIL string into SQL using a specific dialect.
+ * Supported dialects: "postgres", "mysql", "sqlite", "sqlserver".
+ * 
+ * Returns a pointer to a null-terminated C string containing the SQL.
+ * The caller must free this string using `qail_free`.
+ * Returns NULL on error; call `qail_last_error` for details.
+ */
+char* qail_transpile_with_dialect(const char* qail, const char* dialect);
 
 /**
  * Parse QAIL string and return AST as JSON.
