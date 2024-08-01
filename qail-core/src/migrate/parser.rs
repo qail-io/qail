@@ -110,9 +110,13 @@ fn parse_column(line: &str) -> Result<Column, String> {
     }
     
     let name = parts[0].to_string();
-    let data_type = parts[1].to_string();
+    let type_str = parts[1];
     
-    let mut col = Column::new(&name, &data_type);
+    // Parse type string to ColumnType enum
+    let data_type = super::types::ColumnType::from_str(type_str)
+        .ok_or_else(|| format!("Unknown column type: {}", type_str))?;
+    
+    let mut col = Column::new(&name, data_type);
     
     // Parse constraints
     let mut i = 2;
