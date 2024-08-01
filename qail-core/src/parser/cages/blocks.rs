@@ -1,52 +1,32 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag},
-    character::complete::{char, digit1},
-    combinator::{map, opt},
-    multi::{many0},
-    sequence::{preceded},
+    character::complete::char,
+    combinator::{opt, map},
     IResult,
 };
 
 use crate::ast::*;
-use super::tokens::*;
+use crate::parser::tokens::ws_or_comment;
+use crate::parser::tokens::parse_value; // Assuming parse_value is public there
 
-/// Parse unified constraint blocks [...].
-/// Syntax: [ 'active == true, -created_at, 0..10 ]
-pub fn parse_unified_blocks(input: &str) -> IResult<&str, Vec<Cage>> {
-    many0(preceded(ws_or_comment, parse_unified_block))(input)
-}
-
-/// Parse a unified constraint block [...].
-/// Contains comma-separated items: filters, sorts, ranges.
-fn parse_unified_block(input: &str) -> IResult<&str, Cage> {
-    let (input, _) = char('[')(input)?;
-    let (input, _) = ws_or_comment(input)?;
-    
-    // Parse all items in the block (comma-separated)
-    let (input, items) = parse_block_items(input)?;
-    
-    let (input, _) = ws_or_comment(input)?;
-    let (input, _) = char(']')(input)?;
-    
-    // Convert items into appropriate cages
-    // For now, combine into a single cage or return the first meaningful one
-    items_to_cage(items, input)
-}
+use super::filter::*;
+use super::range::*;
+use super::sort::*;
 
 /// Represents a parsed item within a unified block.
 #[derive(Debug)]
-enum BlockItem {
+pub enum BlockItem {
     Filter(Condition, LogicalOp),
     Sort(String, SortOrder),
     Range(usize, Option<usize>), // start, end
     NamedLimit(usize),
     NamedOffset(usize),
+    Value(Value),
 }
 
 /// Parse comma-separated items within a block.
 /// Also handles | (OR) and & (AND) operators for filter conditions.
-fn parse_block_items(input: &str) -> IResult<&str, Vec<BlockItem>> {
+pub fn parse_block_items(input: &str) -> IResult<&str, Vec<BlockItem>> {
     let (input, first) = opt(parse_block_item)(input)?;
     
     match first {
@@ -102,7 +82,7 @@ fn parse_block_items(input: &str) -> IResult<&str, Vec<BlockItem>> {
 }
 
 /// Parse a single item in a unified block.
-fn parse_block_item(input: &str) -> IResult<&str, BlockItem> {
+pub fn parse_block_item(input: &str) -> IResult<&str, BlockItem> {
     alt((
         // Range: N..M or N.. (must try before other number parsing)
         parse_range_item,
@@ -116,97 +96,13 @@ fn parse_block_item(input: &str) -> IResult<&str, BlockItem> {
         parse_caret_sort_item,
         // Filter: 'col == value
         parse_filter_item,
+        // Raw Value (for INSERTs): '$1', 123
+        map(parse_value, BlockItem::Value),
     ))(input)
-}
-
-/// Parse a range item: N..M or N..
-fn parse_range_item(input: &str) -> IResult<&str, BlockItem> {
-    let (input, start) = digit1(input)?;
-    let (input, _) = tag("..")(input)?;
-    let (input, end) = opt(digit1)(input)?;
-    
-    let start_num: usize = start.parse().unwrap_or(0);
-    let end_num = end.map(|e| e.parse().unwrap_or(0));
-    
-    Ok((input, BlockItem::Range(start_num, end_num)))
-}
-
-/// Parse a sort item: +col (asc) or -col (desc).
-fn parse_sort_item(input: &str) -> IResult<&str, BlockItem> {
-    alt((
-        map(preceded(char('+'), parse_identifier), |col| {
-            BlockItem::Sort(col.to_string(), SortOrder::Asc)
-        }),
-        map(preceded(char('-'), parse_identifier), |col| {
-            BlockItem::Sort(col.to_string(), SortOrder::Desc)
-        }),
-    ))(input)
-}
-
-/// Parse named limit: lim=N
-fn parse_named_limit_item(input: &str) -> IResult<&str, BlockItem> {
-    let (input, _) = tag("lim")(input)?;
-    let (input, _) = ws_or_comment(input)?;
-    let (input, _) = char('=')(input)?;
-    let (input, _) = ws_or_comment(input)?;
-    let (input, n) = digit1(input)?;
-    Ok((input, BlockItem::NamedLimit(n.parse().unwrap_or(10))))
-}
-
-/// Parse named offset: off=N
-fn parse_named_offset_item(input: &str) -> IResult<&str, BlockItem> {
-    let (input, _) = tag("off")(input)?;
-    let (input, _) = ws_or_comment(input)?;
-    let (input, _) = char('=')(input)?;
-    let (input, _) = ws_or_comment(input)?;
-    let (input, n) = digit1(input)?;
-    Ok((input, BlockItem::NamedOffset(n.parse().unwrap_or(0))))
-}
-
-/// Parse caret sort: ^col or ^!col
-fn parse_caret_sort_item(input: &str) -> IResult<&str, BlockItem> {
-    let (input, _) = char('^')(input)?;
-    let (input, desc) = opt(char('!'))(input)?;
-    let (input, col) = parse_identifier(input)?;
-    
-    let order = if desc.is_some() {
-        SortOrder::Desc
-    } else {
-        SortOrder::Asc
-    };
-    
-    Ok((input, BlockItem::Sort(col.to_string(), order)))
-}
-
-/// Parse a filter item: 'col == value or col == value
-fn parse_filter_item(input: &str) -> IResult<&str, BlockItem> {
-    // Optional leading ' for column
-    let (input, _) = opt(char('\''))(input)?;
-    let (input, column) = parse_identifier(input)?;
-    
-    // Check for array unnest syntax: column[*]
-    let (input, is_array_unnest) = if input.starts_with("[*]") {
-        (&input[3..], true)
-    } else {
-        (input, false)
-    };
-    
-    let (input, _) = ws_or_comment(input)?;
-    let (input, (op, val)) = parse_operator_and_value(input)?;
-    
-    Ok((input, BlockItem::Filter(
-        Condition {
-            column: column.to_string(),
-            op,
-            value: val,
-            is_array_unnest,
-        },
-        LogicalOp::And, // Default, could be enhanced for | and &
-    )))
 }
 
 /// Convert parsed block items into a Cage.
-fn items_to_cage(items: Vec<BlockItem>, input: &str) -> IResult<&str, Cage> {
+pub fn items_to_cage(items: Vec<BlockItem>, input: &str) -> IResult<&str, Cage> {
     // Default: return a filter cage if we have filters
     let mut conditions = Vec::new();
     let mut logical_op = LogicalOp::And;
@@ -280,8 +176,32 @@ fn items_to_cage(items: Vec<BlockItem>, input: &str) -> IResult<&str, Cage> {
             }
             BlockItem::Filter(cond, op) => {
                 conditions.push(cond.clone());
-                logical_op = *op;
+                logical_op = op.clone();
             }
+            BlockItem::Value(val) => {
+                // If value is a raw string "{...}", we treat it as a raw condition
+                // by putting it in 'column' and using a dummy OP.
+                // Logic in conditions.rs/to_sql must handle this.
+                if let Value::String(s) = &val {
+                    if s.starts_with('{') && s.ends_with('}') {
+                        conditions.push(Condition {
+                            column: s.clone(), // Pass raw string as column
+                            op: Operator::Eq, // Dummy
+                            value: Value::Null, // Dummy
+                            is_array_unnest: false,
+                        });
+                        continue;
+                    }
+                }
+                
+                conditions.push(Condition {
+                    column: "".to_string(), // Dummy for INSERT values
+                    op: Operator::Eq, 
+                    value: val.clone(),
+                    is_array_unnest: false,
+                });
+            }
+
         }
     }
     

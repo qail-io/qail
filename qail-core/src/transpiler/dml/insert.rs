@@ -30,15 +30,8 @@ pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
         }
     }
 
-    // RETURNING clause - if columns are specified, return them
-    if !cmd.columns.is_empty() {
-        let cols: Vec<String> = cmd.columns.iter().map(|c| c.to_string()).collect();
-        sql.push_str(" RETURNING ");
-        sql.push_str(&cols.join(", "));
-    } else {
-        // Default to returning * for convenience
-        sql.push_str(" RETURNING *");
-    }
+    // RETURNING clause - always return * to support returning generated IDs/defaults
+    sql.push_str(" RETURNING *");
 
     sql
 }

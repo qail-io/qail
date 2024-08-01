@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use colored::*;
 use qail_core::prelude::*;
 use qail_core::transpiler::{ToSql, Dialect};
+use qail_core::fmt::Formatter;
 use anyhow::Result;
 
 #[derive(Parser)]
@@ -97,6 +98,11 @@ enum Commands {
         /// Database connection URL (postgres:// or mysql://)
         url: String,
     },
+    /// Format a QAIL query to canonical v2 syntax
+    Fmt {
+        /// The QAIL query to format
+        query: String,
+    },
 }
 
 #[tokio::main]
@@ -112,6 +118,9 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Pull { url }) => {
             qail::introspection::pull_schema(url).await?;
+        },
+        Some(Commands::Fmt { query }) => {
+            format_query(query)?;
         },
         None => {
             if let Some(query) = &cli.query {
@@ -152,6 +161,14 @@ fn transpile_query(query: &str, cli: &Cli) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn format_query(query: &str) -> Result<()> {
+    let cmd = qail_core::parse(query).map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
+    let formatter = Formatter::new();
+    let formatted = formatter.format(&cmd).map_err(|e| anyhow::anyhow!("Format error: {}", e))?;
+    println!("{}", formatted);
     Ok(())
 }
 
