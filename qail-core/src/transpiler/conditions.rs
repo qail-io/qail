@@ -1,5 +1,6 @@
 use crate::ast::*;
 use super::traits::SqlGenerator;
+use super::ToSql;
 
 /// Context for parameterized query building.
 #[derive(Debug, Default)]
@@ -192,6 +193,23 @@ impl ConditionToSql for Condition {
                 }
                 format!("{} NOT BETWEEN {}", col, self.value)
             }
+            Operator::Exists => {
+                // EXISTS takes subquery, col is ignored
+                if let Value::Subquery(cmd) = &self.value {
+                    let subquery_sql = cmd.to_sql();
+                    format!("EXISTS ({})", subquery_sql)
+                } else {
+                    format!("EXISTS ({})", self.value)
+                }
+            }
+            Operator::NotExists => {
+                if let Value::Subquery(cmd) = &self.value {
+                    let subquery_sql = cmd.to_sql();
+                    format!("NOT EXISTS ({})", subquery_sql)
+                } else {
+                    format!("NOT EXISTS ({})", self.value)
+                }
+            }
         }
     }
 
@@ -334,6 +352,22 @@ impl ConditionToSql for Condition {
                     }
                 }
                 format!("{} NOT BETWEEN {}", col, self.value)
+            }
+            Operator::Exists => {
+                if let Value::Subquery(cmd) = &self.value {
+                    let subquery_sql = cmd.to_sql();
+                    format!("EXISTS ({})", subquery_sql)
+                } else {
+                    format!("EXISTS ({})", self.value)
+                }
+            }
+            Operator::NotExists => {
+                if let Value::Subquery(cmd) = &self.value {
+                    let subquery_sql = cmd.to_sql();
+                    format!("NOT EXISTS ({})", subquery_sql)
+                } else {
+                    format!("NOT EXISTS ({})", self.value)
+                }
             }
         }
     }
