@@ -239,6 +239,9 @@ fn explain_query(query: &str) {
                         CageKind::Sort(SortOrder::Desc) => "Sort ↓".to_string(),
                         CageKind::Limit(n) => format!("Limit({})", n),
                         CageKind::Offset(n) => format!("Offset({})", n),
+                        CageKind::Sample(n) => format!("Sample({}%)", n),
+                        CageKind::Qualify => "Qualify".to_string(),
+                        CageKind::Partition => "Partition".to_string(),
                     };
                     println!("    [{}]", kind.cyan());
                     for cond in &cage.conditions {
