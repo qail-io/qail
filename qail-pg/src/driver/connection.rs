@@ -292,7 +292,22 @@ impl PgConnection {
         }
     }
 
-    /// Execute a query with binary parameters.
+    /// Execute a raw SQL query (USE PgDriver.fetch_all FOR SOUNDNESS).
+    ///
+    /// ⚠️ **WARNING**: This bypasses QAIL's AST layer. For sound queries,
+    /// use `PgDriver::fetch_all(&QailCmd)` instead.
+    ///
+    /// This method is provided for benchmarking and edge cases only.
+    #[doc(hidden)]
+    pub async fn query_sql(
+        &mut self, 
+        sql: &str, 
+        params: &[Option<Vec<u8>>]
+    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        self.query(sql, params).await
+    }
+
+    /// Execute a query with binary parameters (crate-internal).
     ///
     /// This uses the Extended Query Protocol (Parse/Bind/Execute/Sync):
     /// - Parameters are sent as binary bytes, skipping the string layer
@@ -306,7 +321,7 @@ impl PgConnection {
     ///     &[Some(b"Alice".to_vec())]
     /// ).await?;
     /// ```
-    pub async fn query(
+    pub(crate) async fn query(
         &mut self, 
         sql: &str, 
         params: &[Option<Vec<u8>>]
@@ -439,7 +454,7 @@ impl PgConnection {
     /// - "INSERT 0 1" → 1
     /// - "UPDATE 5" → 5
     /// - "DELETE 10" → 10
-    pub async fn execute_raw(
+    pub(crate) async fn execute_raw(
         &mut self,
         sql: &str,
         params: &[Option<Vec<u8>>]
@@ -546,12 +561,14 @@ impl PgConnection {
     /// }
     /// ```
     pub async fn listen(&mut self, channel: &str) -> PgResult<()> {
+        Self::validate_identifier(channel)?;
         let sql = format!("LISTEN {}", channel);
         self.execute_simple(&sql).await
     }
 
     /// Stop listening to a PostgreSQL notification channel.
     pub async fn unlisten(&mut self, channel: &str) -> PgResult<()> {
+        Self::validate_identifier(channel)?;
         let sql = format!("UNLISTEN {}", channel);
         self.execute_simple(&sql).await
     }
@@ -563,8 +580,34 @@ impl PgConnection {
     /// conn.notify("new_orders", "order_id=12345").await?;
     /// ```
     pub async fn notify(&mut self, channel: &str, payload: &str) -> PgResult<()> {
+        Self::validate_identifier(channel)?;
+        // Payload is safely escaped for SQL string literals
         let sql = format!("NOTIFY {}, '{}'", channel, payload.replace('\'', "''"));
         self.execute_simple(&sql).await
+    }
+
+    /// Validate that a string is a valid PostgreSQL identifier.
+    /// Prevents SQL injection in LISTEN/NOTIFY/COPY operations.
+    fn validate_identifier(name: &str) -> PgResult<()> {
+        if name.is_empty() {
+            return Err(PgError::Query("Identifier cannot be empty".to_string()));
+        }
+        // Must start with letter or underscore
+        let first = name.chars().next().unwrap();
+        if !first.is_ascii_alphabetic() && first != '_' {
+            return Err(PgError::Query(format!(
+                "Invalid identifier '{}': must start with letter or underscore", name
+            )));
+        }
+        // Rest must be alphanumeric or underscore
+        for c in name.chars() {
+            if !c.is_ascii_alphanumeric() && c != '_' {
+                return Err(PgError::Query(format!(
+                    "Invalid identifier '{}': contains invalid character '{}'", name, c
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Try to receive a pending notification (non-blocking check).

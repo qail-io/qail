@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Test 1: Simple query using Extended Query Protocol
     println!("📊 Test 1: Simple query (Extended Query Protocol)");
-    let rows = conn.query("SELECT COUNT(*) FROM vessels", &[]).await?;
+    let rows = conn.query_sql("SELECT COUNT(*) FROM vessels", &[]).await?;
     
     if let Some(row) = rows.first() {
         if let Some(Some(count)) = row.first() {
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Test 2: Parameterized query - binary params!
     println!("📊 Test 2: Parameterized query (Binary params)");
-    let rows = conn.query(
+    let rows = conn.query_sql(
         "SELECT id, name FROM harbors WHERE name ILIKE $1 LIMIT 5",
         &[Some(b"%port%".to_vec())]  // Binary bytes, not SQL string!
     ).await?;
@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = cmd.to_sql_parameterized();
     println!("   SQL: {}", result.sql);
     
-    let rows = conn.query(&result.sql, &[]).await?;
+    let rows = conn.query_sql(&result.sql, &[]).await?;
     println!("   Fetched {} vessels", rows.len());
     
     println!("\n✅ All tests passed against staging DB!");

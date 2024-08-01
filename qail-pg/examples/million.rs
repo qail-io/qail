@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Warmup
     for _ in 0..5 {
-        let _ = conn.query("SELECT 1", &[]).await?;
+        let _ = conn.query_sql("SELECT 1", &[]).await?;
     }
     
     // ===== PIPELINED QUERIES =====
