@@ -1,6 +1,6 @@
-# 🪝 QAIL — The Universal Query Transpiler
+# 🪝 QAIL — The Universal Query Language
 
-> **SQL is Assembly. Stop writing Assembly. Write Qail. Compile to Safety.**
+> **Safe but Free.** Write queries once. Run them everywhere. Zero lock-in.
 
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![npm](https://img.shields.io/badge/npm-qail--wasm-red)](https://www.npmjs.com/package/qail-wasm)
@@ -8,21 +8,29 @@
 
 ---
 
-## What is QAIL?
+## Why QAIL?
 
-QAIL is not an ORM. It is not a Query Builder.
+For years, developers have been trapped between two choices:
 
-**QAIL is a Query Transpiler.**
+1. **Raw SQL** — Maximum freedom, but dangerous strings scattered across your codebase.
+2. **ORMs / Query Builders** — Maximum safety, but a "prison" of boilerplate and language lock-in.
 
-Write high-density, logic-focused queries in QAIL, and it compiles them instantly into Safe, Optimized, Raw SQL with zero runtime overhead.
+**QAIL is the third way.**
+
+We moved validation from the **networking layer** to the **grammar level**. By treating queries as a compiled language instead of raw strings, QAIL provides compile-time safety with the freedom of raw SQL.
+
+- ✅ **No language lock-in** — Same syntax in Rust, Node.js, Go, Python, PHP
+- ✅ **No heavy dependencies** — Pure logic, zero networking code
+- ✅ **No "big bang" migration** — Adopt incrementally, one query at a time
+- ✅ **Works with your existing driver** — SQLx, pg, PDO, psycopg2, etc.
 
 ```sql
--- SQL (Assembly)
+-- SQL (The Assembly)
 SELECT id, email FROM users WHERE active = true LIMIT 10;
 ```
 
 ```bash
-# QAIL
+# QAIL (The Source Code)
 get::users:'id'email [ 'active == true, 0..10 ]
 ```
 
@@ -32,20 +40,18 @@ One line. Zero ceremony. **Runs everywhere.**
 
 ## 🚀 Installation
 
-### Rust / CLI
+### Rust (Native)
 
 ```bash
 cargo install qail
 ```
 
-### Rust Library
-
 ```toml
 [dependencies]
-qail-core = "0.5.0"
+qail-core = "0.6.1"
 ```
 
-### JavaScript / Browser (WASM)
+### Node.js / Browser (WASM)
 
 ```bash
 npm i qail-wasm
@@ -58,11 +64,16 @@ npm i qail-wasm
 ### Rust
 
 ```rust
-use qail_macro::qail;
+use qail_core::prelude::*;
 
-// Compile-time validated query
-let sql = qail!("get::users:'id'email [ 'active == true ]");
+// Parse and transpile
+let sql = parse("get::users:'id'email [ 'active == true ]")?.to_sql();
 // Returns: "SELECT id, email FROM users WHERE active = true"
+
+// Use with your existing driver (sqlx, diesel, etc.)
+let users = sqlx::query_as::<_, User>(&sql)
+    .fetch_all(&pool)
+    .await?;
 ```
 
 ### JavaScript / TypeScript
@@ -72,6 +83,9 @@ import { parseAndTranspile } from 'qail-wasm';
 
 const sql = parseAndTranspile("get::users:'id'email [ 'active == true ]");
 // Returns: "SELECT id, email FROM users WHERE active = true"
+
+// Use with your existing driver (pg, mysql2, etc.)
+const result = await client.query(sql);
 ```
 
 ---
@@ -86,15 +100,15 @@ const sql = parseAndTranspile("get::users:'id'email [ 'active == true ]");
 | `'_`   | The Wildcard| All columns            | `users:'_`                 |
 | `[ ]`  | The Cage   | Constraints block       | `[ 'active == true ]`      |
 | `==`   | The Equal  | Equality check          | `'status == "active"`      |
-| `~`    | The Fuse   | Fuzzy match             | `'name ~ "john"`           |
+| `~`    | The Fuse   | Fuzzy match (ILIKE)     | `'name ~ "john"`           |
 | `\|`   | The Split  | Logical OR              | `'a == 1 \| 'b == 2`       |
 | `&`    | The Bind   | Logical AND             | `'a == 1 & 'b == 2`        |
 | `+`/`-`| Sort Order | ASC/DESC                | `-created_at`              |
 | `N..M` | The Range  | Pagination              | `0..10`                    |
-| `$`    | The Var    | Parameter               | `$1`                       |
-| `!`    | The Unique | Distinct                | `get!::`                   |
-| `<-`   | The Left   | Left Join               | `users<-profiles`          |
-| `->`   | The Right  | Inner Join              | `users->orders`            |
+| `$`    | The Var    | Parameter placeholder   | `$1`                       |
+| `!`    | The Unique | DISTINCT                | `get!::`                   |
+| `<-`   | Left Join  | LEFT JOIN               | `users<-profiles`          |
+| `->`   | Inner Join | INNER JOIN              | `users->orders`            |
 
 ---
 
@@ -114,18 +128,11 @@ get::users:'_
 # → SELECT * FROM users
 ```
 
-### Sorting
+### Sorting & Pagination
 
 ```bash
-get::users:'_ [ -created_at ]
-# → SELECT * FROM users ORDER BY created_at DESC
-```
-
-### Pagination
-
-```bash
-get::users:'_ [ 20..30 ]
-# → SELECT * FROM users LIMIT 10 OFFSET 20
+get::users:'_ [ -created_at, 0..10 ]
+# → SELECT * FROM users ORDER BY created_at DESC LIMIT 10
 ```
 
 ### Fuzzy Search
@@ -138,8 +145,8 @@ get::users:'id'name [ 'name ~ "john" ]
 ### UPDATE
 
 ```bash
-set::users:[ verified = true ][ 'id == $1 ]
-# → UPDATE users SET verified = true WHERE id = $1
+set::users:[ status = "active" ] [ 'id == $1 ]
+# → UPDATE users SET status = 'active' WHERE id = $1
 ```
 
 ### DELETE
@@ -147,13 +154,6 @@ set::users:[ verified = true ][ 'id == $1 ]
 ```bash
 del::users:[ 'id == $1 ]
 # → DELETE FROM users WHERE id = $1
-```
-
-### DISTINCT
-
-```bash
-get!::users:'role
-# → SELECT DISTINCT role FROM users
 ```
 
 ### JOINs
@@ -165,21 +165,25 @@ get::users<-profiles:'name'avatar
 
 ---
 
-## 🌐 One Language. Everywhere.
+## 🌐 One Syntax. Every Stack.
 
-QAIL works in:
+QAIL works alongside your existing tools:
 
-- **Rust** — `qail-core` + `qail!` macro (compile-time)
-- **Node.js** — `qail-wasm` (runtime)
-- **Browser** — `qail-wasm` (~50KB)
+| Language | QAIL Package | Works With |
+|----------|--------------|------------|
+| **Rust** | `qail-core` | SQLx, Diesel, tokio-postgres |
+| **Node.js** | `qail-wasm` | pg, mysql2, better-sqlite3 |
+| **Browser** | `qail-wasm` | Any REST/GraphQL client |
+| **Python** | `qail-py` (coming) | psycopg2, SQLAlchemy |
+| **Go** | `qail-go` (coming) | database/sql, GORM |
 
-Same syntax. Same validation. Any stack.
+**Same syntax. Same validation. Any driver.**
 
 ---
 
 ## 🤝 Contributing
 
-We welcome contributions! 
+We welcome contributions!
 
 ```bash
 git clone https://github.com/qail-rs/qail.git
