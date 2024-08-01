@@ -18,6 +18,7 @@ env:
 jobs:
   publish:
     name: Publish
+    runs-on: ubuntu-latest
     environment: release
     permissions:
       id-token: write
