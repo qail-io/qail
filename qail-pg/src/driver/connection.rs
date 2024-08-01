@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::BytesMut;
 use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus, ScramClient, PgEncoder};
 use super::stream::PgStream;
-use super::{PgError, PgResult};
+use super::{PgError, PgResult, Notification};
 
 /// Initial buffer capacity (8KB - typical response size)
 const BUFFER_CAPACITY: usize = 8192;
@@ -520,6 +520,75 @@ impl PgConnection {
                 BackendMessage::CommandComplete(_) => {}
                 BackendMessage::ReadyForQuery(_) => {
                     return Ok(());
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // ==================== LISTEN/NOTIFY ====================
+
+    /// Subscribe to a PostgreSQL notification channel.
+    ///
+    /// After calling this, you can receive notifications on this channel
+    /// using `receive_notification()`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// conn.listen("new_orders").await?;
+    /// loop {
+    ///     if let Some(notification) = conn.receive_notification().await? {
+    ///         println!("Got: {} on {}", notification.payload, notification.channel);
+    ///     }
+    /// }
+    /// ```
+    pub async fn listen(&mut self, channel: &str) -> PgResult<()> {
+        let sql = format!("LISTEN {}", channel);
+        self.execute_simple(&sql).await
+    }
+
+    /// Stop listening to a PostgreSQL notification channel.
+    pub async fn unlisten(&mut self, channel: &str) -> PgResult<()> {
+        let sql = format!("UNLISTEN {}", channel);
+        self.execute_simple(&sql).await
+    }
+
+    /// Send a notification to a channel.
+    ///
+    /// # Example
+    /// ```ignore
+    /// conn.notify("new_orders", "order_id=12345").await?;
+    /// ```
+    pub async fn notify(&mut self, channel: &str, payload: &str) -> PgResult<()> {
+        let sql = format!("NOTIFY {}, '{}'", channel, payload.replace('\'', "''"));
+        self.execute_simple(&sql).await
+    }
+
+    /// Try to receive a pending notification (non-blocking check).
+    ///
+    /// Returns `None` if no notification is pending.
+    /// Use this in a loop to poll for notifications.
+    pub async fn try_receive_notification(&mut self) -> PgResult<Option<Notification>> {
+        // Send an empty query to flush any pending notifications
+        let bytes = PgEncoder::encode_query_string("");
+        self.stream.write_all(&bytes).await?;
+
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::NotificationResponse { process_id, channel, payload } => {
+                    return Ok(Some(Notification { 
+                        process_id, 
+                        channel, 
+                        payload,
+                    }));
+                }
+                BackendMessage::EmptyQueryResponse => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(None);
                 }
                 BackendMessage::ErrorResponse(err) => {
                     return Err(PgError::Query(err.message));
