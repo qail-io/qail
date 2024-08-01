@@ -1,2 +1,5 @@
 /target
 .DS_Store
+
+# Prevent DB connection info leaks (examples contain connection strings)
+qail-pg/examples/
