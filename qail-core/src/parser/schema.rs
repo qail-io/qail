@@ -40,6 +40,12 @@ pub struct ColumnDef {
     pub name: String,
     #[serde(rename = "type", alias = "typ")]
     pub typ: String,
+    /// Type is an array (e.g., text[], uuid[])
+    #[serde(default)]
+    pub is_array: bool,
+    /// Type parameters (e.g., varchar(255) -> Some(vec!["255"]), decimal(10,2) -> Some(vec!["10", "2"]))
+    #[serde(default)]
+    pub type_params: Option<Vec<String>>,
     #[serde(default)]
     pub nullable: bool,
     #[serde(default)]
@@ -50,6 +56,12 @@ pub struct ColumnDef {
     pub references: Option<String>,
     #[serde(default)]
     pub default_value: Option<String>,
+    /// Check constraint expression
+    #[serde(default)]
+    pub check: Option<String>,
+    /// Is this a serial/auto-increment type
+    #[serde(default)]
+    pub is_serial: bool,
 }
 
 impl Default for ColumnDef {
@@ -57,11 +69,15 @@ impl Default for ColumnDef {
         Self {
             name: String::new(),
             typ: String::new(),
+            is_array: false,
+            type_params: None,
             nullable: true,
             primary_key: false,
             unique: false,
             references: None,
             default_value: None,
+            check: None,
+            is_serial: false,
         }
     }
 }
@@ -79,6 +95,31 @@ impl Schema {
     /// Find a table by name
     pub fn find_table(&self, name: &str) -> Option<&TableDef> {
         self.tables.iter().find(|t| t.name.eq_ignore_ascii_case(name))
+    }
+    
+    /// Export schema to JSON string (for qail-macros compatibility)
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(self)
+            .map_err(|e| format!("JSON serialization failed: {}", e))
+    }
+    
+    /// Import schema from JSON string
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json)
+            .map_err(|e| format!("JSON deserialization failed: {}", e))
+    }
+    
+    /// Load schema from a .qail file
+    pub fn from_file(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+        
+        // Check if it's JSON or QAIL format
+        if content.trim().starts_with('{') {
+            Self::from_json(&content)
+        } else {
+            Self::parse(&content)
+        }
     }
 }
 
@@ -107,9 +148,53 @@ fn ws_and_comments(input: &str) -> IResult<&str, ()> {
     Ok((input, ()))
 }
 
-/// Parse column type
-fn column_type(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_alphanumeric())(input)
+/// Column type info
+struct TypeInfo {
+    name: String,
+    params: Option<Vec<String>>,
+    is_array: bool,
+    is_serial: bool,
+}
+
+/// Parse column type with optional params and array suffix
+/// Handles: varchar(255), decimal(10,2), text[], serial, bigserial
+fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
+    // Parse type name
+    let (input, type_name) = take_while1(|c: char| c.is_alphanumeric())(input)?;
+    
+    // Check for type parameters like (255) or (10, 2)
+    let (input, params) = if input.starts_with('(') {
+        let paren_start = 1;
+        let mut paren_end = paren_start;
+        for (i, c) in input[paren_start..].char_indices() {
+            if c == ')' {
+                paren_end = paren_start + i;
+                break;
+            }
+        }
+        let param_str = &input[paren_start..paren_end];
+        let params: Vec<String> = param_str.split(',').map(|s| s.trim().to_string()).collect();
+        (&input[paren_end + 1..], Some(params))
+    } else {
+        (input, None)
+    };
+    
+    // Check for array suffix []
+    let (input, is_array) = if input.starts_with("[]") {
+        (&input[2..], true)
+    } else {
+        (input, false)
+    };
+    
+    let lower = type_name.to_lowercase();
+    let is_serial = lower == "serial" || lower == "bigserial" || lower == "smallserial";
+    
+    Ok((input, TypeInfo {
+        name: lower,
+        params,
+        is_array,
+        is_serial,
+    }))
 }
 
 /// Parse constraint text until comma or closing paren (handling nested parens)
@@ -145,7 +230,7 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
     let (input, _) = ws_and_comments(input)?;
     let (input, name) = identifier(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, typ) = column_type(input)?;
+    let (input, type_info) = parse_type_info(input)?;
     
     // Get remaining text until comma or paren for constraints
     let (input, constraint_str) = opt(preceded(multispace1, constraint_text))(input)?;
@@ -153,8 +238,11 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
     // Parse constraints from the string
     let mut col = ColumnDef {
         name: name.to_string(),
-        typ: typ.to_lowercase(),
-        nullable: true,
+        typ: type_info.name,
+        is_array: type_info.is_array,
+        type_params: type_info.params,
+        is_serial: type_info.is_serial,
+        nullable: !type_info.is_serial, // Serial types are implicitly not null
         ..Default::default()
     };
     
@@ -175,7 +263,26 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
         // Parse references
         if let Some(idx) = lower.find("references ") {
             let rest = &constraints[idx + 11..];
-            let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+            // Find end (space or end of string), but handle nested parens
+            let mut paren_depth = 0;
+            let mut end = rest.len();
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '(' => paren_depth += 1,
+                    ')' => {
+                        if paren_depth == 0 {
+                            end = i;
+                            break;
+                        }
+                        paren_depth -= 1;
+                    }
+                    c if c.is_whitespace() && paren_depth == 0 => {
+                        end = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
             col.references = Some(rest[..end].to_string());
         }
         
@@ -184,6 +291,28 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
             let rest = &constraints[idx + 8..];
             let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
             col.default_value = Some(rest[..end].to_string());
+        }
+        
+        // Parse check constraint
+        if let Some(idx) = lower.find("check(") {
+            let rest = &constraints[idx + 6..];
+            // Find matching closing paren
+            let mut depth = 1;
+            let mut end = rest.len();
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            col.check = Some(rest[..end].to_string());
         }
     }
     
@@ -301,5 +430,75 @@ mod tests {
         
         let schema = Schema::parse(input).expect("parse failed");
         assert_eq!(schema.tables.len(), 1);
+    }
+
+    #[test]
+    fn test_array_types() {
+        let input = r#"
+            table products (
+                id uuid primary_key,
+                tags text[],
+                prices decimal[]
+            )
+        "#;
+        
+        let schema = Schema::parse(input).expect("parse failed");
+        let products = &schema.tables[0];
+        
+        let tags = products.find_column("tags").expect("tags not found");
+        assert_eq!(tags.typ, "text");
+        assert!(tags.is_array);
+        
+        let prices = products.find_column("prices").expect("prices not found");
+        assert!(prices.is_array);
+    }
+
+    #[test]
+    fn test_type_params() {
+        let input = r#"
+            table items (
+                id serial primary_key,
+                name varchar(255) not null,
+                price decimal(10,2),
+                code varchar(50) unique
+            )
+        "#;
+        
+        let schema = Schema::parse(input).expect("parse failed");
+        let items = &schema.tables[0];
+        
+        let id = items.find_column("id").expect("id not found");
+        assert!(id.is_serial);
+        assert!(!id.nullable); // Serial is implicitly not null
+        
+        let name = items.find_column("name").expect("name not found");
+        assert_eq!(name.typ, "varchar");
+        assert_eq!(name.type_params, Some(vec!["255".to_string()]));
+        
+        let price = items.find_column("price").expect("price not found");
+        assert_eq!(price.type_params, Some(vec!["10".to_string(), "2".to_string()]));
+        
+        let code = items.find_column("code").expect("code not found");
+        assert!(code.unique);
+    }
+
+    #[test]
+    fn test_check_constraint() {
+        let input = r#"
+            table employees (
+                id uuid primary_key,
+                age i32 check(age >= 18),
+                salary decimal check(salary > 0)
+            )
+        "#;
+        
+        let schema = Schema::parse(input).expect("parse failed");
+        let employees = &schema.tables[0];
+        
+        let age = employees.find_column("age").expect("age not found");
+        assert_eq!(age.check, Some("age >= 18".to_string()));
+        
+        let salary = employees.find_column("salary").expect("salary not found");
+        assert_eq!(salary.check, Some("salary > 0".to_string()));
     }
 }
