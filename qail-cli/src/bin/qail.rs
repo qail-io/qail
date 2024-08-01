@@ -1172,14 +1172,30 @@ async fn migrate_up(schema_diff_path: &str, url: &str) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
     
+    // Begin transaction for atomic migration
+    println!("{}", "Starting transaction...".dimmed());
+    driver.execute_raw("BEGIN").await
+        .map_err(|e| anyhow::anyhow!("Failed to start transaction: {}", e))?;
+    
+    let mut applied = 0;
     for (i, cmd) in cmds.iter().enumerate() {
         println!("  {} {} {}", format!("[{}/{}]", i + 1, cmds.len()).cyan(), format!("{}", cmd.action).yellow(), &cmd.table);
         
-        driver.execute(cmd).await
-            .map_err(|e| anyhow::anyhow!("Migration failed: {}", e))?;
+        if let Err(e) = driver.execute(cmd).await {
+            // Rollback on failure
+            println!("{}", "Rolling back transaction...".red());
+            let _ = driver.execute_raw("ROLLBACK").await;
+            return Err(anyhow::anyhow!("Migration failed at step {}/{}: {}\nTransaction rolled back - database unchanged.", 
+                i + 1, cmds.len(), e));
+        }
+        applied += 1;
     }
     
-    println!("{}", "✓ All migrations applied successfully!".green().bold());
+    // Commit transaction
+    driver.execute_raw("COMMIT").await
+        .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
+    
+    println!("{}", format!("✓ {} migrations applied successfully (atomic)", applied).green().bold());
     Ok(())
 }
 
@@ -1227,14 +1243,30 @@ async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
     
+    // Begin transaction for atomic rollback
+    println!("{}", "Starting transaction...".dimmed());
+    driver.execute_raw("BEGIN").await
+        .map_err(|e| anyhow::anyhow!("Failed to start transaction: {}", e))?;
+    
+    let mut applied = 0;
     for (i, cmd) in cmds.iter().enumerate() {
         println!("  {} {} {}", format!("[{}/{}]", i + 1, cmds.len()).cyan(), format!("{}", cmd.action).yellow(), &cmd.table);
         
-        driver.execute(cmd).await
-            .map_err(|e| anyhow::anyhow!("Rollback failed: {}", e))?;
+        if let Err(e) = driver.execute(cmd).await {
+            // Rollback on failure
+            println!("{}", "Rolling back transaction...".red());
+            let _ = driver.execute_raw("ROLLBACK").await;
+            return Err(anyhow::anyhow!("Rollback failed at step {}/{}: {}\nTransaction rolled back - database unchanged.", 
+                i + 1, cmds.len(), e));
+        }
+        applied += 1;
     }
     
-    println!("{}", "✓ All rollbacks applied successfully!".green().bold());
+    // Commit transaction
+    driver.execute_raw("COMMIT").await
+        .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
+    
+    println!("{}", format!("✓ {} rollbacks applied successfully (atomic)", applied).green().bold());
     Ok(())
 }
 

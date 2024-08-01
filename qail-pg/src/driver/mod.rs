@@ -194,6 +194,13 @@ impl PgDriver {
             }
         }
     }
+    
+    /// Execute a raw SQL string (for BEGIN, COMMIT, ROLLBACK, etc.).
+    ///
+    /// Use sparingly - prefer AST-native methods when possible.
+    pub async fn execute_raw(&mut self, sql: &str) -> PgResult<()> {
+        self.connection.execute_simple(sql).await
+    }
 
     /// Bulk insert data using PostgreSQL COPY protocol (AST-native).
     ///

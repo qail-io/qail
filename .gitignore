@@ -3,3 +3,6 @@
 
 # Prevent DB connection info leaks (examples contain connection strings)
 qail-pg/examples/
+
+# Internal documentation workflow
+docs/README.md

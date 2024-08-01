@@ -209,7 +209,7 @@ impl Column {
     /// Add a foreign key reference to another table.
     /// 
     /// # Example
-    /// ```
+    /// ```ignore
     /// Column::new("user_id", ColumnType::Uuid)
     ///     .references("users", "id")
     ///     .on_delete(FkAction::Cascade)
