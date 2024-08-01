@@ -21,3 +21,6 @@ rand = "0.9"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

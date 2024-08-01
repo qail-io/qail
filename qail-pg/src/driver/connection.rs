@@ -56,21 +56,32 @@ impl PgConnection {
     }
 
     /// Receive backend messages.
+    /// Loops until a complete message is available.
     pub async fn recv(&mut self) -> PgResult<BackendMessage> {
-        // Read into buffer
-        let mut temp = [0u8; 4096];
-        let n = self.stream.read(&mut temp).await?;
-        if n == 0 {
-            return Err(PgError::Connection("Connection closed".to_string()));
+        loop {
+            // Try to decode from buffer first
+            if self.buffer.len() >= 5 {
+                let msg_len = i32::from_be_bytes([
+                    self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
+                ]) as usize;
+                
+                if self.buffer.len() >= msg_len + 1 {
+                    // We have a complete message
+                    let (msg, consumed) = BackendMessage::decode(&self.buffer)
+                        .map_err(PgError::Protocol)?;
+                    self.buffer.drain(..consumed);
+                    return Ok(msg);
+                }
+            }
+            
+            // Need more data - read from stream
+            let mut temp = [0u8; 4096];
+            let n = self.stream.read(&mut temp).await?;
+            if n == 0 {
+                return Err(PgError::Connection("Connection closed".to_string()));
+            }
+            self.buffer.extend_from_slice(&temp[..n]);
         }
-        self.buffer.extend_from_slice(&temp[..n]);
-
-        // Decode message
-        let (msg, consumed) = BackendMessage::decode(&self.buffer)
-            .map_err(PgError::Protocol)?;
-
-        self.buffer.drain(..consumed);
-        Ok(msg)
     }
 
     /// Handle startup sequence (auth + params).
