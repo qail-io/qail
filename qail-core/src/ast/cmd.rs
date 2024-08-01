@@ -726,4 +726,212 @@ impl QailCmd {
         self.columns = columns.iter().map(|c| Expr::Named(c.to_string())).collect();
         self
     }
+
+    // =========================================================================
+    // Advanced Expression Builder Methods
+    // =========================================================================
+
+    /// Add an expression column (for aggregates, functions, CASE WHEN, etc.)
+    /// 
+    /// # Example
+    /// ```ignore
+    /// use qail_core::ast::{QailCmd, Expr, AggregateFunc};
+    /// let cmd = QailCmd::get("orders")
+    ///     .column_expr(Expr::Aggregate {
+    ///         col: "*".to_string(),
+    ///         func: AggregateFunc::Count,
+    ///         distinct: false,
+    ///         filter: None,
+    ///         alias: Some("total".to_string()),
+    ///     });
+    /// ```
+    pub fn column_expr(mut self, expr: Expr) -> Self {
+        self.columns.push(expr);
+        self
+    }
+
+    /// Add multiple expression columns.
+    pub fn columns_expr<I>(mut self, exprs: I) -> Self 
+    where 
+        I: IntoIterator<Item = Expr>,
+    {
+        self.columns.extend(exprs);
+        self
+    }
+
+    /// Add DISTINCT ON expressions (PostgreSQL-specific).
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmd = QailCmd::get("messages")
+    ///     .distinct_on(["phone_number"])
+    ///     .columns(["phone_number", "content"])
+    ///     .order_by("phone_number", SortOrder::Asc)
+    ///     .order_by("created_at", SortOrder::Desc);
+    /// ```
+    pub fn distinct_on<I, S>(mut self, cols: I) -> Self 
+    where 
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.distinct_on = cols.into_iter()
+            .map(|c| Expr::Named(c.as_ref().to_string()))
+            .collect();
+        self
+    }
+
+    /// Add DISTINCT ON with expression columns.
+    pub fn distinct_on_expr<I>(mut self, exprs: I) -> Self 
+    where 
+        I: IntoIterator<Item = Expr>,
+    {
+        self.distinct_on = exprs.into_iter().collect();
+        self
+    }
+
+    /// Add a filter condition using an expression (for JSON, function results, etc.)
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmd = QailCmd::get("orders")
+    ///     .filter_cond(Condition {
+    ///         left: Expr::JsonAccess { 
+    ///             column: "data".to_string(), 
+    ///             path_segments: vec![("status".to_string(), true)],
+    ///             alias: None,
+    ///         },
+    ///         op: Operator::Eq,
+    ///         value: Value::String("active".to_string()),
+    ///         is_array_unnest: false,
+    ///     });
+    /// ```
+    pub fn filter_cond(mut self, condition: Condition) -> Self {
+        let filter_cage = self.cages.iter_mut().find(|c| matches!(c.kind, CageKind::Filter));
+        
+        if let Some(cage) = filter_cage {
+            cage.conditions.push(condition);
+        } else {
+            self.cages.push(Cage {
+                kind: CageKind::Filter,
+                conditions: vec![condition],
+                logical_op: LogicalOp::And,
+            });
+        }
+        self
+    }
+
+    /// Add CTEs to this query.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmd = QailCmd::get("cte_results")
+    ///     .with_ctes(vec![cte1, cte2, cte3])
+    ///     .columns(["*"]);
+    /// ```
+    pub fn with_ctes(mut self, ctes: Vec<CTEDef>) -> Self {
+        self.ctes = ctes;
+        self
+    }
+
+    /// Add a CTE to this query.
+    pub fn with_cte(mut self, cte: CTEDef) -> Self {
+        self.ctes.push(cte);
+        self
+    }
+
+    /// LEFT JOIN with table alias support.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmd = QailCmd::get("users")
+    ///     .left_join_as("profiles", "p", "users.id", "p.user_id");
+    /// ```
+    pub fn left_join_as(
+        mut self, 
+        table: impl AsRef<str>, 
+        alias: impl AsRef<str>,
+        left_col: impl AsRef<str>, 
+        right_col: impl AsRef<str>
+    ) -> Self {
+        self.joins.push(Join {
+            kind: JoinKind::Left,
+            table: format!("{} {}", table.as_ref(), alias.as_ref()),
+            on: Some(vec![Condition {
+                left: Expr::Named(left_col.as_ref().to_string()),
+                op: Operator::Eq,
+                value: Value::Column(right_col.as_ref().to_string()),
+                is_array_unnest: false,
+            }]),
+            on_true: false,
+        });
+        self
+    }
+
+    /// INNER JOIN with table alias support.
+    pub fn inner_join_as(
+        mut self, 
+        table: impl AsRef<str>, 
+        alias: impl AsRef<str>,
+        left_col: impl AsRef<str>, 
+        right_col: impl AsRef<str>
+    ) -> Self {
+        self.joins.push(Join {
+            kind: JoinKind::Inner,
+            table: format!("{} {}", table.as_ref(), alias.as_ref()),
+            on: Some(vec![Condition {
+                left: Expr::Named(left_col.as_ref().to_string()),
+                op: Operator::Eq,
+                value: Value::Column(right_col.as_ref().to_string()),
+                is_array_unnest: false,
+            }]),
+            on_true: false,
+        });
+        self
+    }
+
+    /// Set table alias for the main table.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmd = QailCmd::get("users").table_alias("u");
+    /// ```
+    pub fn table_alias(mut self, alias: impl AsRef<str>) -> Self {
+        self.table = format!("{} {}", self.table, alias.as_ref());
+        self
+    }
+
+    /// Order by expression (for complex ORDER BY like CASE WHEN).
+    pub fn order_by_expr(mut self, expr: Expr, order: SortOrder) -> Self {
+        self.cages.push(Cage {
+            kind: CageKind::Sort(order),
+            conditions: vec![Condition {
+                left: expr,
+                op: Operator::Eq,
+                value: Value::Null,
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+        self
+    }
+
+    /// Group by expressions (for complex GROUP BY like JSON accessors).
+    pub fn group_by_expr<I>(mut self, exprs: I) -> Self 
+    where 
+        I: IntoIterator<Item = Expr>,
+    {
+        let conditions: Vec<Condition> = exprs.into_iter().map(|e| Condition {
+            left: e,
+            op: Operator::Eq,
+            value: Value::Null,
+            is_array_unnest: false,
+        }).collect();
+        
+        self.cages.push(Cage {
+            kind: CageKind::Partition,
+            conditions,
+            logical_op: LogicalOp::And,
+        });
+        self
+    }
 }
