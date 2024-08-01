@@ -37,6 +37,7 @@ pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Q
         group_by_mode: GroupByMode::default(),
         ctes: vec![],
         returning: None,
+        on_conflict: None,
     }))
 }
 
@@ -187,5 +188,6 @@ pub fn parse_create_index(input: &str) -> IResult<&str, QailCmd> {
         group_by_mode: GroupByMode::default(),
         ctes: vec![],
         returning: None,
+        on_conflict: None,
     }))
 }
