@@ -269,6 +269,71 @@ impl PgConnection {
         }
     }
 
+    /// Execute multiple queries in a single network round-trip (PIPELINING).
+    ///
+    /// This sends all queries at once, then reads all responses.
+    /// Reduces N queries from N round-trips to 1 round-trip.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let results = conn.query_pipeline(&[
+    ///     ("SELECT * FROM users WHERE id = $1", &[Some(b"1".to_vec())]),
+    ///     ("SELECT * FROM orders WHERE user_id = $1", &[Some(b"1".to_vec())]),
+    /// ]).await?;
+    /// ```
+    pub async fn query_pipeline(
+        &mut self,
+        queries: &[(&str, &[Option<Vec<u8>>])]
+    ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
+        use bytes::BytesMut;
+        use crate::protocol::PgEncoder;
+        
+        // Encode all queries into a single buffer
+        let mut buf = BytesMut::new();
+        for (sql, params) in queries {
+            buf.extend(PgEncoder::encode_extended_query(sql, params));
+        }
+        
+        // Send all queries in ONE write
+        self.stream.write_all(&buf).await?;
+        
+        // Collect all results
+        let mut all_results: Vec<Vec<Vec<Option<Vec<u8>>>>> = Vec::with_capacity(queries.len());
+        let mut current_rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
+        let mut queries_completed = 0;
+        
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::ParseComplete | BackendMessage::BindComplete => {}
+                BackendMessage::RowDescription(_) => {}
+                BackendMessage::DataRow(data) => {
+                    current_rows.push(data);
+                }
+                BackendMessage::CommandComplete(_) => {
+                    // One query finished - save results and reset
+                    all_results.push(std::mem::take(&mut current_rows));
+                    queries_completed += 1;
+                }
+                BackendMessage::NoData => {
+                    // Non-SELECT query completed
+                    all_results.push(Vec::new());
+                    queries_completed += 1;
+                }
+                BackendMessage::ReadyForQuery(_) => {
+                    // All queries done
+                    if queries_completed == queries.len() {
+                        return Ok(all_results);
+                    }
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Send raw bytes to the stream.
     pub async fn send_bytes(&mut self, bytes: &[u8]) -> PgResult<()> {
         self.stream.write_all(bytes).await?;
