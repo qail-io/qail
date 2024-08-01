@@ -9,6 +9,7 @@ use qail_pg::{PgDriver, PgResult};
 
 /// Test connecting to PostgreSQL and running a simple query.
 #[tokio::test]
+#[ignore = "Requires PostgreSQL server - run manually"]
 async fn test_simple_query() -> PgResult<()> {
     // Connect via SCRAM-SHA-256 auth
     let mut driver = PgDriver::connect_with_password(
@@ -38,6 +39,7 @@ async fn test_simple_query() -> PgResult<()> {
 
 /// Test with QailCmd filter
 #[tokio::test]
+#[ignore = "Requires PostgreSQL server - run manually"]
 async fn test_filtered_query() -> PgResult<()> {
     use qail_core::ast::Operator;
     
