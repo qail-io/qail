@@ -74,6 +74,8 @@ pub enum BackendMessage {
     BindComplete,
     /// No data
     NoData,
+    /// Copy in response (server ready to receive COPY data)
+    CopyInResponse { format: u8, column_formats: Vec<u8> },
 }
 
 /// Transaction status
@@ -201,6 +203,7 @@ impl BackendMessage {
             b'1' => BackendMessage::ParseComplete,
             b'2' => BackendMessage::BindComplete,
             b'n' => BackendMessage::NoData,
+            b'G' => Self::decode_copy_in_response(payload)?,
             _ => return Err(format!("Unknown message type: {}", msg_type as char)),
         };
         
@@ -388,5 +391,23 @@ impl BackendMessage {
             }
         }
         Ok(BackendMessage::ErrorResponse(fields))
+    }
+
+    fn decode_copy_in_response(payload: &[u8]) -> Result<Self, String> {
+        if payload.is_empty() {
+            return Err("Empty CopyInResponse payload".to_string());
+        }
+        let format = payload[0];
+        let num_columns = if payload.len() >= 3 {
+            i16::from_be_bytes([payload[1], payload[2]]) as usize
+        } else {
+            0
+        };
+        let column_formats: Vec<u8> = if payload.len() > 3 && num_columns > 0 {
+            payload[3..].iter().take(num_columns).copied().collect()
+        } else {
+            vec![]
+        };
+        Ok(BackendMessage::CopyInResponse { format, column_formats })
     }
 }

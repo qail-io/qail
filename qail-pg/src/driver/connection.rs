@@ -485,6 +485,95 @@ impl PgConnection {
         }
     }
 
+    // ==================== COPY Protocol ====================
+
+    /// Bulk insert data using PostgreSQL COPY protocol.
+    ///
+    /// This is the fastest way to insert large amounts of data.
+    /// Uses tab-separated values format internally.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Insert 1000 rows in one operation
+    /// let rows = vec![
+    ///     vec!["1", "Alice", "alice@example.com"],
+    ///     vec!["2", "Bob", "bob@example.com"],
+    /// ];
+    /// conn.copy_in("users", &["id", "name", "email"], &rows).await?;
+    /// ```
+    pub async fn copy_in(
+        &mut self,
+        table: &str,
+        columns: &[&str],
+        rows: &[Vec<&str>],
+    ) -> PgResult<u64> {
+        // Build COPY command
+        let cols = columns.join(", ");
+        let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
+        
+        // Send COPY command
+        let bytes = PgEncoder::encode_query_string(&sql);
+        self.stream.write_all(&bytes).await?;
+
+        // Wait for CopyInResponse
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CopyInResponse { .. } => break,
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+
+        // Send data rows as CopyData messages
+        for row in rows {
+            let line = row.join("\t") + "\n";
+            self.send_copy_data(line.as_bytes()).await?;
+        }
+
+        // Send CopyDone
+        self.send_copy_done().await?;
+
+        // Wait for CommandComplete
+        let mut affected = 0u64;
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CommandComplete(tag) => {
+                    affected = parse_affected_rows(&tag);
+                }
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(affected);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Send CopyData message (raw bytes).
+    async fn send_copy_data(&mut self, data: &[u8]) -> PgResult<()> {
+        // CopyData: 'd' + length + data
+        let len = (data.len() + 4) as i32;
+        let mut buf = BytesMut::with_capacity(1 + 4 + data.len());
+        buf.extend_from_slice(&[b'd']);
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(data);
+        self.stream.write_all(&buf).await?;
+        Ok(())
+    }
+
+    /// Send CopyDone message.
+    async fn send_copy_done(&mut self) -> PgResult<()> {
+        // CopyDone: 'c' + length (4)
+        self.stream.write_all(&[b'c', 0, 0, 0, 4]).await?;
+        Ok(())
+    }
+
     /// Execute multiple queries in a single network round-trip (PIPELINING).
     ///
     /// This sends all queries at once, then reads all responses.
