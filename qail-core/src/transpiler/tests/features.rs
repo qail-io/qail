@@ -166,6 +166,7 @@ fn test_lateral_join() {
     cmd.joins.push(Join {
         table: "orders".to_string(),
         kind: JoinKind::Lateral,
+        on: None,
     });
 
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);

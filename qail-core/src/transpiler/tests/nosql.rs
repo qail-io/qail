@@ -35,7 +35,7 @@ fn test_mongo_join() {
     let mut cmd = QailCmd::get("users");
     cmd.columns.push(Column::Named("name".to_string()));
     cmd.columns.push(Column::Named("email".to_string()));
-    cmd.joins.push(Join { table: "orders".to_string(), kind: JoinKind::Left });
+    cmd.joins.push(Join { table: "orders".to_string(), kind: JoinKind::Left, on: None });
     
     let mongo = cmd.to_mongo();
     println!("Mongo $lookup: {}", mongo);

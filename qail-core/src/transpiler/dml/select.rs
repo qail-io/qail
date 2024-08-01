@@ -101,7 +101,17 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
         let source_fk = format!("{}_id", source_singular);
         let source_table = generator.quote_identifier(&cmd.table);
         
-        if needs_on {
+        if let Some(on_conds) = &join.on {
+            let on_sql: Vec<String> = on_conds.iter()
+                .map(|c| c.to_sql(&generator, Some(cmd)))
+                .collect();
+            sql.push_str(&format!(
+                " {} JOIN {} ON {}",
+                kind,
+                target_table,
+                on_sql.join(" AND ")
+            ));
+        } else if needs_on {
             sql.push_str(&format!(
                 " {} JOIN {} ON {}.{} = {}.id",
                 kind, 
