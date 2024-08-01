@@ -292,21 +292,6 @@ impl PgConnection {
         }
     }
 
-    /// Execute a raw SQL query (USE PgDriver.fetch_all FOR SOUNDNESS).
-    ///
-    /// ⚠️ **WARNING**: This bypasses QAIL's AST layer. For sound queries,
-    /// use `PgDriver::fetch_all(&QailCmd)` instead.
-    ///
-    /// This method is provided for benchmarking and edge cases only.
-    #[doc(hidden)]
-    pub async fn query_sql(
-        &mut self, 
-        sql: &str, 
-        params: &[Option<Vec<u8>>]
-    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        self.query(sql, params).await
-    }
-
     /// Execute a query with binary parameters (crate-internal).
     ///
     /// This uses the Extended Query Protocol (Parse/Bind/Execute/Sync):
