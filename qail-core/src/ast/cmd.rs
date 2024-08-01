@@ -480,6 +480,22 @@ impl QailCmd {
         self
     }
 
+    /// ORDER BY column DESC shorthand.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::get("users").order_desc("created_at");
+    /// ```
+    pub fn order_desc(self, column: impl AsRef<str>) -> Self {
+        self.order_by(column, SortOrder::Desc)
+    }
+
+    /// ORDER BY column ASC shorthand.
+    pub fn order_asc(self, column: impl AsRef<str>) -> Self {
+        self.order_by(column, SortOrder::Asc)
+    }
+
     /// Add OFFSET clause.
     pub fn offset(mut self, n: i64) -> Self {
         self.cages.push(Cage {
