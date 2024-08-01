@@ -1695,7 +1695,6 @@ dependencies = [
  "chrono",
  "colored",
  "nom",
- "regex",
  "rust_decimal",
  "serde",
  "serde_json",
