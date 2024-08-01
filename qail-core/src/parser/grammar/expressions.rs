@@ -2,7 +2,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case},
     character::complete::{char, multispace0, multispace1},
-    combinator::{map, opt},
+    combinator::{map, opt, peek},
     multi::separated_list0,
     sequence::{preceded, tuple},
     IResult,
@@ -114,29 +114,23 @@ where
     Ok((input, left))
 }
 
-/// Parse identifier or JSON access.
+/// Parse identifier or JSON access or type cast.
 /// JSON access: col->'key' or col->>'key'
+/// Type cast: expr::type
 fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
     let (input, mut expr) = parse_atom(input)?;
     
     // Check for trailing JSON operators
-    // Loop because logicaly you could chain, though Expr::JsonAccess isn't recursive yet in struct.
-    // Expr::JsonAccess has { column: String, path: String ... }
-    // So distinct limits chaining unless we restructure Expr to be recursive `base: Box<Expr>`.
-    // Current definition: column is String. So only one level supported for now in AST.
-    // We will parse ONE level if present.
-    
-    // Attempt to match -> or ->>
+    // Loop because logically you could chain, though Expr::JsonAccess isn't recursive yet.
     let (input, json_op) = opt(alt((
         tag("->>"),
         tag("->"),
     )))(input)?;
     
-    if let Some(op) = json_op {
+    let input = if let Some(op) = json_op {
         if let Expr::Named(col_name) = expr {
-             // Parse key: 'key' (string value)
              let (input, _) = multispace0(input)?;
-             let (input, key_val) = parse_value(input)?; // Expect string
+             let (input, key_val) = parse_value(input)?;
              
              let path = match key_val {
                  Value::String(s) => s,
@@ -149,8 +143,26 @@ fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
                  as_text: op == "->>",
                  alias: None,
              };
-             return Ok((input, expr));
+             input
+        } else {
+            input
         }
+    } else {
+        input
+    };
+    
+    // Check for type cast suffix: ::type (PostgreSQL syntax)
+    let (input, cast_type) = opt(preceded(
+        tag("::"),
+        parse_identifier
+    ))(input)?;
+    
+    if let Some(target_type) = cast_type {
+        expr = Expr::Cast {
+            expr: Box::new(expr),
+            target_type: target_type.to_string(),
+            alias: None,
+        };
     }
     
     Ok((input, expr))
@@ -201,6 +213,13 @@ fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
     let (input, _) = char('(')(input)?;
     let (input, _) = multispace0(input)?;
     
+    // Check for DISTINCT keyword (for COUNT(DISTINCT col), etc.)
+    let (input, has_distinct) = opt(tuple((
+        tag_no_case("distinct"),
+        multispace1
+    )))(input)?;
+    let distinct = has_distinct.is_some();
+    
     // Parse arguments as full expressions (supports nesting)
     let (input, args) = separated_list0(
         tuple((multispace0, char(','), multispace0)),
@@ -209,10 +228,14 @@ fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
     
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')')(input)?;
+    let (input, _) = multispace0(input)?;
+    
+    // Check for FILTER (WHERE ...) clause - PostgreSQL aggregate extension
+    let (input, filter_clause) = opt(parse_filter_clause)(input)?;
     
     // Optional alias: AS alias_name or just alias_name (after space)
     let (input, alias) = opt(preceded(
-        tuple((multispace1, tag_no_case("as"), multispace1)),
+        tuple((multispace0, tag_no_case("as"), multispace1)),
         parse_identifier
     ))(input)?;
     let alias = alias.map(|s| s.to_string());
@@ -232,7 +255,7 @@ fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
                 "max" => AggregateFunc::Max,
                 _ => AggregateFunc::Count, // unreachable
             };
-            Ok((input, Expr::Aggregate { col, func, distinct: false, filter: None, alias }))
+            Ok((input, Expr::Aggregate { col, func, distinct, filter: filter_clause, alias }))
         },
         _ => {
             Ok((input, Expr::FunctionCall {
@@ -242,6 +265,85 @@ fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
             }))
         }
     }
+}
+
+/// Parse FILTER (WHERE condition) clause for aggregates
+fn parse_filter_clause(input: &str) -> IResult<&str, Vec<Condition>> {
+    let (input, _) = tag_no_case("filter")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = tag_no_case("where")(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    // Parse conditions (simple version - single or AND-joined conditions)
+    let (input, conditions) = parse_filter_conditions(input)?;
+    
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    
+    Ok((input, conditions))
+}
+
+/// Parse conditions inside FILTER clause
+fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
+    use crate::parser::grammar::base::{parse_operator, parse_value};
+    
+    let mut conditions = Vec::new();
+    let mut current_input = input;
+    
+    loop {
+        // Parse: column op value
+        let (input, _) = multispace0(current_input)?;
+        let (input, col) = parse_identifier(input)?;
+        let (input, _) = multispace0(input)?;
+        let (input, op) = parse_operator(input)?;
+        let (input, _) = multispace0(input)?;
+        
+        // For IS NULL / IS NOT NULL, no value needed
+        let (input, value) = if matches!(op, Operator::IsNull | Operator::IsNotNull) {
+            (input, Value::Null)
+        } else if matches!(op, Operator::In | Operator::NotIn) {
+            // Parse IN ('val1', 'val2', ...)
+            let (input, _) = char('(')(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, values) = separated_list0(
+                tuple((multispace0, char(','), multispace0)),
+                parse_value
+            )(input)?;
+            let (input, _) = multispace0(input)?;
+            let (input, _) = char(')')(input)?;
+            (input, Value::Array(values))
+        } else {
+            parse_value(input)?
+        };
+        
+        conditions.push(Condition {
+            left: Expr::Named(col.to_string()),
+            op,
+            value,
+            is_array_unnest: false,
+        });
+        
+        current_input = input;
+        
+        // Check for AND
+        let and_result: IResult<&str, _> = preceded(
+            tuple((multispace1, tag_no_case("and"), multispace1)),
+            peek(parse_identifier)
+        )(current_input);
+        
+        if let Ok((_next_input, _)) = and_result {
+            // Skip the AND keyword
+            let (next_input, _) = multispace1(current_input)?;
+            let (next_input, _) = tag_no_case("and")(next_input)?;
+            current_input = next_input;
+        } else {
+            break;
+        }
+    }
+    
+    Ok((current_input, conditions))
 }
 
 /// Parse a single function argument (supports expressions or star)
