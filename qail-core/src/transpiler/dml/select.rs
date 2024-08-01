@@ -154,6 +154,15 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         }
                     }
                 }
+                Expr::Aggregate { col, func, alias } => {
+                    // Render aggregate function: COUNT(*), SUM(col), etc.
+                    let expr = format!("{}({})", func, if col == "*" { "*".to_string() } else { generator.quote_identifier(col) });
+                    if let Some(a) = alias {
+                        format!("{} AS {}", expr, generator.quote_identifier(a))
+                    } else {
+                        expr
+                    }
+                }
                 _ => c.to_string(), // Fallback for complex cols if any remaining
             }
         }).collect();
