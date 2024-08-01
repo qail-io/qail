@@ -72,6 +72,59 @@ Rollback migrations:
 qail migrate down old.qail:new.qail postgres://...
 ```
 
+### `qail migrate plan`
+
+Preview migration SQL without executing (dry-run):
+
+```bash
+qail migrate plan old.qail:new.qail
+# 📋 Migration Plan (dry-run)
+# ┌─ UP (2 operations) ─────────────────────────────────┐
+# │ 1. ALTER TABLE users ADD COLUMN verified BOOLEAN
+# │ 2. CREATE INDEX idx_users_email ON users (email)
+# └─────────────────────────────────────────────────────┘
+# ┌─ DOWN (2 operations) ───────────────────────────────┐
+# │ 1. ALTER TABLE users DROP COLUMN verified
+# │ 2. DROP INDEX IF EXISTS idx_users_email
+# └─────────────────────────────────────────────────────┘
+
+# Save to file
+qail migrate plan old.qail:new.qail --output migration.sql
+```
+
+### `qail migrate analyze`
+
+Analyze codebase for breaking changes before migrating:
+
+```bash
+qail migrate analyze old.qail:new.qail --codebase ./src
+# 🔍 Migration Impact Analyzer
+# Scanning codebase...
+#   Found 395 query references
+#
+# ⚠️  BREAKING CHANGES DETECTED
+# ┌─ DROP TABLE promotions (6 references) ─────────────┐
+# │ ❌ src/repository/promotion.rs:89 → INSERT INTO...
+# │ ❌ src/repository/promotion.rs:264 → SELECT...
+# └────────────────────────────────────────────────────┘
+```
+
+### `qail watch`
+
+Watch schema file for changes and auto-generate migrations:
+
+```bash
+qail watch schema.qail
+# 👀 QAIL Schema Watch Mode
+#    Watching: schema.qail
+#    Press Ctrl+C to stop
+# [14:32:15] ✓ Detected 2 change(s):
+#        ALTER TABLE users ADD COLUMN avatar_url TEXT
+
+# With database connection
+qail watch schema.qail --url postgres://... --auto-apply
+```
+
 ### `qail fmt`
 
 Format QAIL text:
