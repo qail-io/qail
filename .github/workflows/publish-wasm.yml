@@ -1,0 +1,85 @@
+name: Publish qail-wasm to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (do not actually publish)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-wasm:
+    name: Build and Publish WASM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          WASM_VERSION=$(grep '^version' qail-wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          
+          echo "Tag version: $TAG_VERSION"
+          echo "WASM version: $WASM_VERSION"
+          
+          if [ "$WASM_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch! Tag: $TAG_VERSION, WASM: $WASM_VERSION"
+            exit 1
+          fi
+          echo "✅ Version matches tag"
+
+      - name: Build WASM package
+        run: |
+          cd qail-wasm
+          wasm-pack build --target web --release
+
+      - name: Update package.json for npm
+        run: |
+          cd qail-wasm/pkg
+          # Update package name if needed
+          jq '.name = "qail-wasm"' package.json > tmp.json && mv tmp.json package.json
+          cat package.json
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cd qail-wasm/pkg
+          npm publish --provenance --access public
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "🔍 Dry run - would publish:"
+          cd qail-wasm/pkg
+          npm pack --dry-run
