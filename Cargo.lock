@@ -1728,6 +1728,7 @@ version = "0.8.11"
 dependencies = [
  "anyhow",
  "proc-macro2",
+ "qail-core",
  "qail-sqlx",
  "quote",
  "serde",

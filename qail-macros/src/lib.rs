@@ -238,9 +238,54 @@ fn parse_qail_columns(query: &str) -> Vec<String> {
 // ============================================================================
 
 fn validate_query(query_str: &str, query_span: proc_macro2::Span) -> Result<(), TokenStream> {
+    // Phase 1: Parse validation using qail-core
+    let cmd = match qail_core::parse(query_str) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            let error = format!("QAIL parse error: {}", e);
+            return Err(syn::Error::new(query_span, error).to_compile_error().into());
+        }
+    };
+    
+    // Phase 2: Transpile validation - generate SQL and check for issues
+    use qail_core::transpiler::ToSqlParameterized;
+    let result = cmd.to_sql_parameterized();
+    
+    // Check for common SQL generation issues
+    if result.sql.is_empty() {
+        return Err(syn::Error::new(query_span, "QAIL generated empty SQL").to_compile_error().into());
+    }
+    
+    // Check for untranspiled QAIL keywords (should have been converted to SQL)
+    let sql_lower = result.sql.to_lowercase();
+    if sql_lower.contains("get ") && !sql_lower.contains("select") {
+        return Err(syn::Error::new(
+            query_span, 
+            "QAIL transpiler error: 'get' keyword not converted to SELECT"
+        ).to_compile_error().into());
+    }
+    
+    // Check for CTEs missing WITH clause
+    if !cmd.ctes.is_empty() && !result.sql.to_uppercase().starts_with("WITH") {
+        return Err(syn::Error::new(
+            query_span,
+            "QAIL transpiler error: CTEs defined but WITH clause missing from generated SQL"
+        ).to_compile_error().into());
+    }
+    
+    // Check for unquoted JSON access (common bug: contact_info->>phone instead of contact_info->>'phone')
+    let re_unquoted_json = regex_simple_check(&result.sql, r"->>(\w+)");
+    if re_unquoted_json {
+        return Err(syn::Error::new(
+            query_span,
+            "QAIL transpiler error: JSON access path missing quotes (e.g., ->>col instead of ->>'col')"
+        ).to_compile_error().into());
+    }
+    
+    // Phase 3: Schema validation (original logic)
     let schema = match schema::Schema::load() {
         Some(s) => s,
-        None => return Ok(()), // No schema = skip validation
+        None => return Ok(()), // No schema = skip schema validation
     };
 
     if let Some(table_name) = parse_qail_table(query_str) {
@@ -280,6 +325,27 @@ fn validate_query(query_str: &str, query_span: proc_macro2::Span) -> Result<(), 
     }
     
     Ok(())
+}
+
+/// Simple regex-like check for unquoted JSON access pattern
+fn regex_simple_check(sql: &str, _pattern: &str) -> bool {
+    // Look for ->>identifier (not ->>') which indicates missing quotes
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    
+    for i in 0..len.saturating_sub(3) {
+        if bytes[i] == b'-' && bytes[i+1] == b'>' && bytes[i+2] == b'>' {
+            // Check next char after ->>
+            if i + 3 < len {
+                let next = bytes[i + 3];
+                // If next char is alphanumeric (not ' or space), it's unquoted
+                if next.is_ascii_alphanumeric() || next == b'_' {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ============================================================================
