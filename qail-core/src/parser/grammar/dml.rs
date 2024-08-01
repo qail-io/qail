@@ -132,15 +132,36 @@ fn parse_conflict_assignments(input: &str) -> IResult<&str, Vec<(String, Expr)>>
     )(input)
 }
 
-/// Parse single conflict assignment: column = expression
+/// Parse single conflict assignment: column = expression (supports :named_params)
 fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
+    use nom::branch::alt;
     use super::expressions::parse_expression;
     
     let (input, column) = parse_identifier(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char('=')(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, expr) = parse_expression(input)?;
+    
+    // Try to parse a value first (handles :named_params, literals, etc.)
+    // Then fall back to full expression parsing
+    let (input, expr) = alt((
+        // Parse value and convert to Expr
+        nom::combinator::map(parse_value, |v| match v {
+            Value::NamedParam(name) => Expr::Named(format!(":{}", name)),
+            Value::Param(n) => Expr::Named(format!("${}", n)),
+            Value::String(s) => Expr::Named(format!("'{}'", s)),
+            Value::Int(n) => Expr::Named(n.to_string()),
+            Value::Float(f) => Expr::Named(f.to_string()),
+            Value::Bool(b) => Expr::Named(b.to_string()),
+            Value::Null => Expr::Named("NULL".to_string()),
+            Value::Array(_) => Expr::Named("ARRAY".to_string()),
+            Value::Function(name) => Expr::Named(name),
+            Value::Subquery(_) => Expr::Named("(SUBQUERY)".to_string()),
+            Value::Column(col) => Expr::Named(col),
+        }),
+        // Fall back to full expression parsing
+        parse_expression,
+    ))(input)?;
     
     Ok((input, (column.to_string(), expr)))
 }
