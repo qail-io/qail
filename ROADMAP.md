@@ -343,9 +343,8 @@ qail diff v1.qail v2.qail > migrations/001_structure.sql
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| — | Dec 2024 | **Idea born** — "What if we had a universal query language?" |
-| — | Jul 2025 | **Draft created** — Started building the transpiler internally |
-| 0.6.0 | Dec 2025 | **Public release** — Universal query transpiler (still string-based, relied on SQLx) |
+| — | Dec 2024 | **The "Meme" Era** — Started as "TailwindSQL" (inline styles/queries). Fun toy, but needed to grow up. |
+| 0.6.0 | Dec 2025 | **Public release** — First serious transpiler attempt (still string-based, relied on SQLx) |
 | 0.8.0 | Dec 2025 | Improved parser, but realized: "We're just another ORM, 80% strings" |
 | 0.9.0 | Dec 2025 | **The pivot** — "Be like clib/pgx, or be nothing." Nuked strings entirely. AST-native. |
 | 0.9.2 | Dec 2025 | **.qail schema format** — Intent-aware migrations. SCRAM auth. SSL/TLS. |
