@@ -175,6 +175,23 @@ impl ConditionToSql for Condition {
             Operator::NotLike => format!("{} NOT LIKE {}", col, self.to_value_sql(generator)),
             Operator::ILike => format!("{} ILIKE {}", col, self.to_value_sql(generator)),
             Operator::NotILike => format!("{} NOT ILIKE {}", col, self.to_value_sql(generator)),
+            Operator::Between => {
+                // Value is Array with 2 elements [min, max]
+                if let Value::Array(vals) = &self.value {
+                    if vals.len() >= 2 {
+                        return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
+                    }
+                }
+                format!("{} BETWEEN {}", col, self.value)
+            }
+            Operator::NotBetween => {
+                if let Value::Array(vals) = &self.value {
+                    if vals.len() >= 2 {
+                        return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
+                    }
+                }
+                format!("{} NOT BETWEEN {}", col, self.value)
+            }
         }
     }
 
@@ -302,6 +319,22 @@ impl ConditionToSql for Condition {
             Operator::NotLike => format!("{} NOT LIKE {}", col, value_placeholder(&self.value, params)),
             Operator::ILike => format!("{} ILIKE {}", col, value_placeholder(&self.value, params)),
             Operator::NotILike => format!("{} NOT ILIKE {}", col, value_placeholder(&self.value, params)),
+            Operator::Between => {
+                if let Value::Array(vals) = &self.value {
+                    if vals.len() >= 2 {
+                        return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
+                    }
+                }
+                format!("{} BETWEEN {}", col, self.value)
+            }
+            Operator::NotBetween => {
+                if let Value::Array(vals) = &self.value {
+                    if vals.len() >= 2 {
+                        return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
+                    }
+                }
+                format!("{} NOT BETWEEN {}", col, self.value)
+            }
         }
     }
 }

@@ -38,6 +38,8 @@ impl std::fmt::Display for Condition {
             Operator::JsonExists => "JSON_EXISTS",
             Operator::JsonQuery => "JSON_QUERY",
             Operator::JsonValue => "JSON_VALUE",
+            Operator::Between => "BETWEEN",
+            Operator::NotBetween => "NOT BETWEEN",
         };
         write!(f, "{} {} {}", self.left, op_str, self.value)
     }
