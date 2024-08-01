@@ -27,6 +27,7 @@ mod pool;
 mod stream;
 
 pub use connection::PgConnection;
+pub use connection::TlsConfig;
 pub(crate) use connection::{parse_affected_rows, CANCEL_REQUEST_CODE};
 pub use pool::{PgPool, PoolConfig, PooledConnection};
 pub use prepared::PreparedStatement;

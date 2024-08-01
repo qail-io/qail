@@ -25,6 +25,12 @@ pub enum Action {
     With,
     /// Create Index
     Index,
+    /// Drop Index
+    DropIndex,
+    /// ALTER TABLE ADD COLUMN
+    Alter,
+    /// ALTER TABLE DROP COLUMN
+    AlterDrop,
     // Transactions
     TxnStart,
     TxnCommit,
@@ -35,6 +41,8 @@ pub enum Action {
     // Additional clauses
     /// JSON_TABLE - convert JSON to relational rows
     JsonTable,
+    /// COPY TO STDOUT - bulk export data (AST-native)
+    Export,
 }
 
 impl std::fmt::Display for Action {
@@ -51,6 +59,9 @@ impl std::fmt::Display for Action {
             Action::Over => write!(f, "OVER"),
             Action::With => write!(f, "WITH"),
             Action::Index => write!(f, "INDEX"),
+            Action::DropIndex => write!(f, "DROP_INDEX"),
+            Action::Alter => write!(f, "ALTER"),
+            Action::AlterDrop => write!(f, "ALTER_DROP"),
             Action::TxnStart => write!(f, "TXN_START"),
             Action::TxnCommit => write!(f, "TXN_COMMIT"),
             Action::TxnRollback => write!(f, "TXN_ROLLBACK"),
@@ -58,6 +69,7 @@ impl std::fmt::Display for Action {
             Action::DropCol => write!(f, "DROP_COL"),
             Action::RenameCol => write!(f, "RENAME_COL"),
             Action::JsonTable => write!(f, "JSON_TABLE"),
+            Action::Export => write!(f, "EXPORT"),
         }
     }
 }
