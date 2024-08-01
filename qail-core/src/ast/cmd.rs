@@ -261,7 +261,7 @@ impl QailCmd {
     /// 
     /// # Example
     /// ```
-    /// use qail_core::ast::QailCmd;
+    /// use qail_core::ast::{QailCmd, Operator};
     /// 
     /// // Export all users
     /// let cmd = QailCmd::export("users")
@@ -270,7 +270,7 @@ impl QailCmd {
     /// // Export with filter
     /// let cmd = QailCmd::export("users")
     ///     .columns(["id", "name"])
-    ///     .filter("active", true);
+    ///     .filter("active", Operator::Eq, true);
     /// ```
     pub fn export(table: impl Into<String>) -> Self {
         Self {
