@@ -92,9 +92,15 @@ enum Commands {
         #[arg(short, long)]
         name: Option<String>,
     },
+    /// Introspect database schema and update qail.schema.json
+    Pull {
+        /// Database connection URL (postgres:// or mysql://)
+        url: String,
+    },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
@@ -103,6 +109,9 @@ fn main() -> Result<()> {
         Some(Commands::Symbols) => show_symbols(),
         Some(Commands::Mig { query, name }) => {
             generate_migration(query, name.clone())?;
+        },
+        Some(Commands::Pull { url }) => {
+            qail::introspection::pull_schema(url).await?;
         },
         None => {
             if let Some(query) = &cli.query {
