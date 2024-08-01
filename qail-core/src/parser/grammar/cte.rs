@@ -3,7 +3,8 @@ use nom::{
     character::complete::{char, multispace0, multispace1},
     combinator::{opt, map},
     multi::separated_list1,
-    sequence::{tuple, preceded, delimited},
+    sequence::{preceded, delimited},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -12,21 +13,21 @@ use super::base::parse_identifier;
 /// Parse WITH clause including optional RECURSIVE keyword
 /// Syntax: WITH [RECURSIVE] cte_name [(col1, col2)] AS (subquery) [, ...] main_query
 pub fn parse_with_clause(input: &str) -> IResult<&str, (Vec<CTEDef>, bool)> {
-    let (input, _) = tag_no_case("with")(input)?;
+    let (input, _) = tag_no_case("with").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Check for RECURSIVE keyword
     let (input, recursive) = opt(preceded(
         tag_no_case("recursive"),
         multispace1
-    ))(input)?;
+    )).parse(input)?;
     let is_recursive = recursive.is_some();
     
     // Parse CTE definitions (comma-separated)
     let (input, ctes) = separated_list1(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         |i| parse_cte_definition(i, is_recursive)
-    )(input)?;
+    ).parse(input)?;
     
     Ok((input, (ctes, is_recursive)))
 }
@@ -41,15 +42,15 @@ fn parse_cte_definition(input: &str, is_recursive: bool) -> IResult<&str, CTEDef
     let (input, columns) = opt(delimited(
         char('('),
         separated_list1(
-            tuple((multispace0, char(','), multispace0)),
+            (multispace0, char(','), multispace0),
             map(parse_identifier, |s| s.to_string())
         ),
         char(')')
-    ))(input)?;
+    )).parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // AS keyword
-    let (input, _) = tag_no_case("as")(input)?;
+    let (input, _) = tag_no_case("as").parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Subquery in parentheses - extract content and parse recursively
@@ -57,7 +58,7 @@ fn parse_cte_definition(input: &str, is_recursive: bool) -> IResult<&str, CTEDef
         char('('),
         take_until_matching_paren,
         char(')')
-    )(input)?;
+    ).parse(input)?;
     
     // Try to parse as QAIL query first, fallback to raw SQL
     let base_query = parse_cte_body(cte_body.trim());

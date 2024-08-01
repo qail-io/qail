@@ -5,7 +5,8 @@ use nom::{
     character::complete::{multispace0, multispace1},
     combinator::opt,
     multi::separated_list0,
-    sequence::{preceded, tuple},
+    sequence::{preceded},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -14,25 +15,25 @@ use super::expressions::{parse_expression, parse_multiplicative_expr};
 
 /// Parse CASE WHEN ... END
 pub fn parse_case(input: &str) -> IResult<&str, Expr> {
-    let (input, _) = tag_no_case("case")(input)?;
+    let (input, _) = tag_no_case("case").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Parse when clauses
     let (input, when_clauses) = separated_list0(
         multispace1,
         parse_when
-    )(input)?;
+    ).parse(input)?;
     
     let (input, _) = multispace0(input)?;
     
     // Else - parse as expression (not just value)
     let (input, else_value) = opt(preceded(
-        tuple((tag_no_case("else"), multispace1)),
+        (tag_no_case("else"), multispace1),
         parse_expression
-    ))(input)?;
+    )).parse(input)?;
     
     let (input, _) = multispace0(input)?;
-    let (input, _) = tag_no_case("end")(input)?;
+    let (input, _) = tag_no_case("end").parse(input)?;
     
     Ok((input, Expr::Case {
         when_clauses,
@@ -43,7 +44,7 @@ pub fn parse_case(input: &str) -> IResult<&str, Expr> {
 
 /// Parse a single WHEN condition THEN expression clause
 pub fn parse_when(input: &str) -> IResult<&str, (Condition, Box<Expr>)> {
-    let (input, _) = tag_no_case("when")(input)?;
+    let (input, _) = tag_no_case("when").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Parse condition LHS as full expression (supports JSON access, functions, etc.)
@@ -63,7 +64,7 @@ pub fn parse_when(input: &str) -> IResult<&str, (Condition, Box<Expr>)> {
     
     // Use multispace0 since IS NULL already consumed trailing space
     let (input, _) = multispace0(input)?;
-    let (input, _) = tag_no_case("then")(input)?;
+    let (input, _) = tag_no_case("then").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Parse THEN as expression (not just value) - allows SUBSTRING, functions, etc.

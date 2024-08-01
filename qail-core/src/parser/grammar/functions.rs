@@ -12,7 +12,8 @@ use nom::{
     character::complete::{char, multispace0, multispace1},
     combinator::{map, opt, peek},
     multi::separated_list0,
-    sequence::{preceded, tuple},
+    sequence::{preceded},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -24,55 +25,55 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
     // Identifier followed by (
     let (input, name) = parse_identifier(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char('(')(input)?;
+    let (input, _) = char('(').parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Check for DISTINCT keyword (for COUNT(DISTINCT col), etc.)
-    let (input, has_distinct) = opt(tuple((
+    let (input, has_distinct) = opt((
         tag_no_case("distinct"),
         multispace1
-    )))(input)?;
+    )).parse(input)?;
     let distinct = has_distinct.is_some();
     
     // Parse arguments as full expressions (supports nesting)
     let (input, args) = separated_list0(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_function_arg
-    )(input)?;
+    ).parse(input)?;
     
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = char(')').parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Check for FILTER (WHERE ...) clause - PostgreSQL aggregate extension
-    let (input, filter_clause) = opt(parse_filter_clause)(input)?;
+    let (input, filter_clause) = opt(parse_filter_clause).parse(input)?;
     
     // Check for OVER clause (window function)
     let (input, _) = multispace0(input)?;
-    if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("over")(input) {
+    if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("over").parse(input) {
         let (remaining, _) = multispace0(remaining)?;
-        let (remaining, _) = char('(')(remaining)?;
+        let (remaining, _) = char('(').parse(remaining)?;
         let (remaining, _) = multispace0(remaining)?;
         
         // Parse PARTITION BY clause (optional)
-        let (remaining, partition) = opt(parse_partition_by)(remaining)?;
+        let (remaining, partition) = opt(parse_partition_by).parse(remaining)?;
         let partition = partition.unwrap_or_default();
         let (remaining, _) = multispace0(remaining)?;
         
         // Parse ORDER BY clause (optional)
-        let (remaining, order) = opt(parse_window_order_by)(remaining)?;
+        let (remaining, order) = opt(parse_window_order_by).parse(remaining)?;
         let order = order.unwrap_or_default();
         let (remaining, _) = multispace0(remaining)?;
         
         // Close the OVER clause
-        let (remaining, _) = char(')')(remaining)?;
+        let (remaining, _) = char(')').parse(remaining)?;
         let (remaining, _) = multispace0(remaining)?;
         
         // Optional alias for window function
         let (remaining, alias) = opt(preceded(
-            tuple((multispace0, tag_no_case("as"), multispace1)),
+            (multispace0, tag_no_case("as"), multispace1),
             parse_identifier
-        ))(remaining)?;
+        )).parse(remaining)?;
         let alias_str = alias.map(|s| s.to_string()).unwrap_or_else(|| name.to_string());
         
         // Convert args to Values for Expr::Window
@@ -90,9 +91,9 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
     
     // Optional alias: AS alias_name or just alias_name (after space)
     let (input, alias) = opt(preceded(
-        tuple((multispace0, tag_no_case("as"), multispace1)),
+        (multispace0, tag_no_case("as"), multispace1),
         parse_identifier
-    ))(input)?;
+    )).parse(input)?;
     let alias = alias.map(|s| s.to_string());
     
     let name_lower = name.to_lowercase();
@@ -127,23 +128,23 @@ pub fn parse_function_arg(input: &str) -> IResult<&str, Expr> {
     alt((
         map(tag("*"), |_| Expr::Star),
         parse_expression,
-    ))(input)
+    )).parse(input)
 }
 
 /// Parse FILTER (WHERE condition) clause for aggregates
 fn parse_filter_clause(input: &str) -> IResult<&str, Vec<Condition>> {
-    let (input, _) = tag_no_case("filter")(input)?;
+    let (input, _) = tag_no_case("filter").parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char('(')(input)?;
+    let (input, _) = char('(').parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = tag_no_case("where")(input)?;
+    let (input, _) = tag_no_case("where").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Parse conditions (simple version - single or AND-joined conditions)
     let (input, conditions) = parse_filter_conditions(input)?;
     
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = char(')').parse(input)?;
     
     Ok((input, conditions))
 }
@@ -166,20 +167,20 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
             (input, Value::Null)
         } else if matches!(op, Operator::In | Operator::NotIn) {
             // Parse IN ('val1', 'val2', ...)
-            let (input, _) = char('(')(input)?;
+            let (input, _) = char('(').parse(input)?;
             let (input, _) = multispace0(input)?;
             let (input, values) = separated_list0(
-                tuple((multispace0, char(','), multispace0)),
+                (multispace0, char(','), multispace0),
                 parse_value
-            )(input)?;
+            ).parse(input)?;
             let (input, _) = multispace0(input)?;
-            let (input, _) = char(')')(input)?;
+            let (input, _) = char(')').parse(input)?;
             (input, Value::Array(values))
         } else if matches!(op, Operator::Between | Operator::NotBetween) {
             // Parse BETWEEN min AND max
             let (input, min_val) = parse_value(input)?;
             let (input, _) = multispace1(input)?;
-            let (input, _) = tag_no_case("and")(input)?;
+            let (input, _) = tag_no_case("and").parse(input)?;
             let (input, _) = multispace1(input)?;
             let (input, max_val) = parse_value(input)?;
             // Store as array with 2 elements [min, max]
@@ -200,14 +201,14 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
         
         // Check for AND (use multispace0 since parse_filter_value may consume trailing space)
         let and_result: IResult<&str, _> = preceded(
-            tuple((multispace0, tag_no_case("and"), multispace1)),
+            (multispace0, tag_no_case("and"), multispace1),
             peek(parse_identifier)
-        )(current_input);
+        ).parse(current_input);
         
         if let Ok((_next_input, _)) = and_result {
             // Skip the AND keyword and trailing whitespace
             let (next_input, _) = multispace0(current_input)?;
-            let (next_input, _) = tag_no_case("and")(next_input)?;
+            let (next_input, _) = tag_no_case("and").parse(next_input)?;
             let (next_input, _) = multispace1(next_input)?;
             current_input = next_input;
         } else {
@@ -288,30 +289,30 @@ fn parse_filter_value(input: &str) -> IResult<&str, Value> {
 
 /// Parse PARTITION BY col1, col2 clause for window functions
 fn parse_partition_by(input: &str) -> IResult<&str, Vec<String>> {
-    let (input, _) = tag_no_case("partition")(input)?;
+    let (input, _) = tag_no_case("partition").parse(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, _) = tag_no_case("by")(input)?;
+    let (input, _) = tag_no_case("by").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     let (input, cols) = separated_list0(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_identifier
-    )(input)?;
+    ).parse(input)?;
     
     Ok((input, cols.into_iter().map(|s| s.to_string()).collect()))
 }
 
 /// Parse ORDER BY col1 [asc|desc], col2 clause for window functions
 fn parse_window_order_by(input: &str) -> IResult<&str, Vec<Cage>> {
-    let (input, _) = tag_no_case("order")(input)?;
+    let (input, _) = tag_no_case("order").parse(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, _) = tag_no_case("by")(input)?;
+    let (input, _) = tag_no_case("by").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     let (input, order_parts) = separated_list0(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_window_sort_item
-    )(input)?;
+    ).parse(input)?;
     
     Ok((input, order_parts))
 }
@@ -326,7 +327,7 @@ fn parse_window_sort_item(input: &str) -> IResult<&str, Cage> {
     let (input, order) = opt(alt((
         value(SortOrder::Desc, tag_no_case("desc")),
         value(SortOrder::Asc, tag_no_case("asc")),
-    )))(input)?;
+    ))).parse(input)?;
     
     Ok((input, Cage {
         kind: CageKind::Sort(order.unwrap_or(SortOrder::Asc)),

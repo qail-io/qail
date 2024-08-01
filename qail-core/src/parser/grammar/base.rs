@@ -3,7 +3,8 @@ use nom::{
     bytes::complete::{tag, tag_no_case, take_while1},
     character::complete::{char, multispace1, digit1},
     combinator::{opt, map, value, recognize},
-    sequence::{tuple, preceded, delimited},
+    sequence::{preceded, delimited},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -11,7 +12,7 @@ use crate::ast::values::IntervalUnit;
 
 /// Parse checking identifier (table name, column name, or qualified name like table.column)
 pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.')(input)
+    take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.').parse(input)
 }
 
 /// Parse interval shorthand: 24h, 7d, 1w, 30m, 6mo, 1y
@@ -28,7 +29,7 @@ pub fn parse_interval(input: &str) -> IResult<&str, Value> {
         value(IntervalUnit::Week, tag_no_case("w")),
         value(IntervalUnit::Month, tag_no_case("mo")),
         value(IntervalUnit::Year, tag_no_case("y")),
-    ))(input)?;
+    )).parse(input)?;
     
     Ok((input, Value::Interval { amount, unit }))
 }
@@ -63,17 +64,17 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
         ),
         // Float (must check before int)
         map(
-            recognize(tuple((opt(char('-')), digit1, char('.'), digit1))),
+            recognize((opt(char('-')), digit1, char('.'), digit1)),
             |s: &str| Value::Float(s.parse().unwrap_or(0.0))
         ),
         // Interval shorthand before plain integers: 24h, 7d, 1w
         parse_interval,
         // Integer (last, after interval)
         map(
-            recognize(tuple((opt(char('-')), digit1))),
+            recognize((opt(char('-')), digit1)),
             |s: &str| Value::Int(s.parse().unwrap_or(0))
         ),
-    ))(input)
+    )).parse(input)
 }
 
 /// Parse comparison operator
@@ -99,7 +100,7 @@ pub fn parse_operator(input: &str) -> IResult<&str, Operator> {
         value(Operator::Gt, tag(">")),
         value(Operator::Lt, tag("<")),
         value(Operator::Fuzzy, tag("~")),
-    ))(input)
+    )).parse(input)
 }
 
 /// Parse action keyword: get, set, del, add, make
@@ -107,7 +108,7 @@ pub fn parse_action(input: &str) -> IResult<&str, (Action, bool)> {
     alt((
         // get distinct
         map(
-            tuple((tag_no_case("get"), multispace1, tag_no_case("distinct"))),
+            (tag_no_case("get"), multispace1, tag_no_case("distinct")),
             |_| (Action::Get, true)
         ),
         // get
@@ -129,7 +130,7 @@ pub fn parse_action(input: &str) -> IResult<&str, (Action, bool)> {
             value((Action::Make, false), tag_no_case("create")),
             value((Action::Make, false), tag_no_case("make")),
         )),
-    ))(input)
+    )).parse(input)
 }
 
 /// Parse transaction commands: begin, commit, rollback
@@ -138,7 +139,7 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, QailCmd> {
         value(Action::TxnStart, tag_no_case("begin")),
         value(Action::TxnCommit, tag_no_case("commit")),
         value(Action::TxnRollback, tag_no_case("rollback")),
-    ))(input)?;
+    )).parse(input)?;
     
     Ok((input, QailCmd {
         action,

@@ -9,7 +9,8 @@ use nom::{
     bytes::complete::tag_no_case,
     character::complete::{char, multispace0, multispace1},
     combinator::opt,
-    sequence::{preceded, tuple},
+    sequence::{preceded},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -33,9 +34,9 @@ pub fn parse_special_function(input: &str) -> IResult<&str, Expr> {
 
 /// Parse SUBSTRING(expr FROM pos [FOR len])
 pub fn parse_substring(input: &str) -> IResult<&str, Expr> {
-    let (input, _) = tag_no_case("substring")(input)?;
+    let (input, _) = tag_no_case("substring").parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char('(')(input)?;
+    let (input, _) = char('(').parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // First argument: the string expression
@@ -43,7 +44,7 @@ pub fn parse_substring(input: &str) -> IResult<&str, Expr> {
     let (input, _) = multispace1(input)?;
     
     // FROM keyword
-    let (input, _) = tag_no_case("from")(input)?;
+    let (input, _) = tag_no_case("from").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Position expression
@@ -52,12 +53,12 @@ pub fn parse_substring(input: &str) -> IResult<&str, Expr> {
     
     // Optional FOR length
     let (input, for_expr) = opt(preceded(
-        tuple((tag_no_case("for"), multispace1)),
+        (tag_no_case("for"), multispace1),
         parse_expression
-    ))(input)?;
+    )).parse(input)?;
     
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = char(')').parse(input)?;
     
     let mut args = vec![
         (None, Box::new(string_expr)),
@@ -76,9 +77,9 @@ pub fn parse_substring(input: &str) -> IResult<&str, Expr> {
 
 /// Parse EXTRACT(field FROM date_expr)
 pub fn parse_extract(input: &str) -> IResult<&str, Expr> {
-    let (input, _) = tag_no_case("extract")(input)?;
+    let (input, _) = tag_no_case("extract").parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char('(')(input)?;
+    let (input, _) = char('(').parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Field name (YEAR, MONTH, DAY, etc.)
@@ -86,13 +87,13 @@ pub fn parse_extract(input: &str) -> IResult<&str, Expr> {
     let (input, _) = multispace1(input)?;
     
     // FROM keyword
-    let (input, _) = tag_no_case("from")(input)?;
+    let (input, _) = tag_no_case("from").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Date expression
     let (input, date_expr) = parse_expression(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = char(')').parse(input)?;
     
     Ok((input, Expr::SpecialFunction {
         name: "EXTRACT".to_string(),

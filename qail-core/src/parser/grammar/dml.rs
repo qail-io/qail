@@ -2,7 +2,7 @@ use nom::{
     bytes::complete::{tag_no_case},
     character::complete::{char, multispace0, multispace1},
     multi::separated_list1,
-    sequence::tuple,
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -10,7 +10,7 @@ use super::base::{parse_identifier, parse_value};
 
 /// Parse: values col = val, col2 = val2 (for SET/UPDATE)
 pub fn parse_values_clause(input: &str) -> IResult<&str, Cage> {
-    let (input, _) = tag_no_case("values")(input)?;
+    let (input, _) = tag_no_case("values").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     let (input, conditions) = parse_set_assignments(input)?;
@@ -24,14 +24,14 @@ pub fn parse_values_clause(input: &str) -> IResult<&str, Cage> {
 
 /// Parse: values :val1, :val2 (for INSERT/ADD) - just list of values without column names
 pub fn parse_insert_values(input: &str) -> IResult<&str, Cage> {
-    let (input, _) = tag_no_case("values")(input)?;
+    let (input, _) = tag_no_case("values").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Parse comma-separated values
     let (input, values) = separated_list1(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_value
-    )(input)?;
+    ).parse(input)?;
     
     // Create conditions with placeholder column names (positional)
     let conditions: Vec<Condition> = values.into_iter().enumerate().map(|(i, val)| {
@@ -53,9 +53,9 @@ pub fn parse_insert_values(input: &str) -> IResult<&str, Cage> {
 /// Parse comma-separated assignments: col = val, col2 = val2
 pub fn parse_set_assignments(input: &str) -> IResult<&str, Vec<Condition>> {
     separated_list1(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_assignment
-    )(input)
+    ).parse(input)
 }
 
 /// Parse single assignment: column = value or column = expression (supports functions and subqueries)
@@ -65,7 +65,7 @@ pub fn parse_assignment(input: &str) -> IResult<&str, Condition> {
     
     let (input, column) = parse_identifier(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char('=')(input)?;
+    let (input, _) = char('=').parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Try simple value first (booleans, strings, numbers, params), then subquery, then expression
@@ -78,7 +78,7 @@ pub fn parse_assignment(input: &str) -> IResult<&str, Condition> {
         nom::combinator::map(parse_expression, |expr| {
             Value::Function(expr.to_string())
         }),
-    ))(input)?;
+    )).parse(input)?;
     
     Ok((input, Condition {
         left: Expr::Named(column.to_string()),
@@ -90,11 +90,11 @@ pub fn parse_assignment(input: &str) -> IResult<&str, Condition> {
 
 /// Parse a subquery value: (get ...) -> Value::Subquery
 fn parse_subquery_value(input: &str) -> IResult<&str, Value> {
-    let (input, _) = char('(')(input)?;
+    let (input, _) = char('(').parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, subquery) = super::parse_root(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = char(')').parse(input)?;
     Ok((input, Value::Subquery(Box::new(subquery))))
 }
 
@@ -107,25 +107,25 @@ pub fn parse_on_conflict(input: &str) -> IResult<&str, OnConflict> {
     use nom::branch::alt;
     
     let (input, _) = multispace0(input)?;
-    let (input, _) = tag_no_case("conflict")(input)?;
+    let (input, _) = tag_no_case("conflict").parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Parse conflict columns: (col1, col2)
-    let (input, _) = char('(')(input)?;
+    let (input, _) = char('(').parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, columns) = separated_list1(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_identifier
-    )(input)?;
+    ).parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = char(')').parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Parse action: "nothing" or "update col = val, col2 = val2"
     let (input, action) = alt((
         parse_conflict_nothing,
         parse_conflict_update,
-    ))(input)?;
+    )).parse(input)?;
     
     Ok((input, OnConflict {
         columns: columns.iter().map(|s| s.to_string()).collect(),
@@ -136,12 +136,12 @@ pub fn parse_on_conflict(input: &str) -> IResult<&str, OnConflict> {
 /// Parse: nothing
 fn parse_conflict_nothing(input: &str) -> IResult<&str, ConflictAction> {
     use nom::combinator::value;
-    value(ConflictAction::DoNothing, tag_no_case("nothing"))(input)
+    value(ConflictAction::DoNothing, tag_no_case("nothing")).parse(input)
 }
 
 /// Parse: update col = val, col2 = val2
 fn parse_conflict_update(input: &str) -> IResult<&str, ConflictAction> {
-    let (input, _) = tag_no_case("update")(input)?;
+    let (input, _) = tag_no_case("update").parse(input)?;
     let (input, _) = multispace1(input)?;
     let (input, assignments) = parse_conflict_assignments(input)?;
     
@@ -151,9 +151,9 @@ fn parse_conflict_update(input: &str) -> IResult<&str, ConflictAction> {
 /// Parse assignments for ON CONFLICT UPDATE: col = val, col2 = excluded.col2
 fn parse_conflict_assignments(input: &str) -> IResult<&str, Vec<(String, Expr)>> {
     separated_list1(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_conflict_assignment
-    )(input)
+    ).parse(input)
 }
 
 /// Parse single conflict assignment: column = expression (supports :named_params)
@@ -163,7 +163,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
     
     let (input, column) = parse_identifier(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char('=')(input)?;
+    let (input, _) = char('=').parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Try to parse a value first (handles :named_params, literals, etc.)
@@ -189,7 +189,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
         }),
         // Fall back to full expression parsing
         parse_expression,
-    ))(input)?;
+    )).parse(input)?;
     
     Ok((input, (column.to_string(), expr)))
 }
@@ -199,12 +199,12 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
 /// Syntax: `from (get table fields col1, col2 where ...)`
 pub fn parse_source_query(input: &str) -> IResult<&str, Box<crate::ast::QailCmd>> {
     let (input, _) = multispace0(input)?;
-    let (input, _) = tag_no_case("from")(input)?;
+    let (input, _) = tag_no_case("from").parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char('(')(input)?;
+    let (input, _) = char('(').parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, subquery) = super::parse_root(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = char(')').parse(input)?;
     Ok((input, Box::new(subquery)))
 }

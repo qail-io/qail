@@ -16,7 +16,8 @@ use nom::{
     character::complete::{multispace1, char, not_line_ending},
     combinator::{opt, map},
     multi::{separated_list0, many0},
-    sequence::{preceded, tuple},
+    sequence::{preceded},
+    Parser,
     IResult,
 };
 use serde::{Deserialize, Serialize};
@@ -143,8 +144,8 @@ fn identifier(input: &str) -> IResult<&str, &str> {
 fn ws_and_comments(input: &str) -> IResult<&str, ()> {
     let (input, _) = many0(alt((
         map(multispace1, |_| ()),
-        map(tuple((tag("--"), not_line_ending)), |_| ()),
-    )))(input)?;
+        map((tag("--"), not_line_ending), |_| ()),
+    ))).parse(input)?;
     Ok((input, ()))
 }
 
@@ -160,7 +161,7 @@ struct TypeInfo {
 /// Handles: varchar(255), decimal(10,2), text[], serial, bigserial
 fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
     // Parse type name
-    let (input, type_name) = take_while1(|c: char| c.is_alphanumeric())(input)?;
+    let (input, type_name) = take_while1(|c: char| c.is_alphanumeric()).parse(input)?;
     
     // Check for type parameters like (255) or (10, 2)
     let (input, params) = if input.starts_with('(') {
@@ -233,7 +234,7 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
     let (input, type_info) = parse_type_info(input)?;
     
     // Get remaining text until comma or paren for constraints
-    let (input, constraint_str) = opt(preceded(multispace1, constraint_text))(input)?;
+    let (input, constraint_str) = opt(preceded(multispace1, constraint_text)).parse(input)?;
     
     // Parse constraints from the string
     let mut col = ColumnDef {
@@ -322,13 +323,13 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
 /// Parse column list: (col1 type, col2 type, ...)
 fn parse_column_list(input: &str) -> IResult<&str, Vec<ColumnDef>> {
     let (input, _) = ws_and_comments(input)?;
-    let (input, _) = char('(')(input)?;
+    let (input, _) = char('(').parse(input)?;
     let (input, columns) = separated_list0(
         char(','),
         parse_column,
-    )(input)?;
+    ).parse(input)?;
     let (input, _) = ws_and_comments(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = char(')').parse(input)?;
     
     Ok((input, columns))
 }
@@ -336,7 +337,7 @@ fn parse_column_list(input: &str) -> IResult<&str, Vec<ColumnDef>> {
 /// Parse a table definition
 fn parse_table(input: &str) -> IResult<&str, TableDef> {
     let (input, _) = ws_and_comments(input)?;
-    let (input, _) = tag_no_case("table")(input)?;
+    let (input, _) = tag_no_case("table").parse(input)?;
     let (input, _) = multispace1(input)?;
     let (input, name) = identifier(input)?;
     let (input, columns) = parse_column_list(input)?;
@@ -350,7 +351,7 @@ fn parse_table(input: &str) -> IResult<&str, TableDef> {
 /// Parse complete schema file
 fn parse_schema(input: &str) -> IResult<&str, Schema> {
     let (input, _) = ws_and_comments(input)?;
-    let (input, tables) = many0(parse_table)(input)?;
+    let (input, tables) = many0(parse_table).parse(input)?;
     let (input, _) = ws_and_comments(input)?;
     
     Ok((input, Schema { tables }))

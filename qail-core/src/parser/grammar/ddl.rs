@@ -4,7 +4,8 @@ use nom::{
     character::complete::{char, multispace0, multispace1},
     combinator::{opt, map, value, recognize},
     multi::{separated_list1, many0},
-    sequence::{tuple, preceded, delimited},
+    sequence::{preceded, delimited},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -14,13 +15,13 @@ use super::base::parse_identifier;
 pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, QailCmd> {
     // Parse column definitions
     let (input, columns) = separated_list1(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_column_definition
-    )(input)?;
+    ).parse(input)?;
     
     // Parse optional table constraints: primary key (col1, col2), unique (col1, col2)
     let (input, _) = multispace0(input)?;
-    let (input, table_constraints) = many0(parse_table_constraint)(input)?;
+    let (input, table_constraints) = many0(parse_table_constraint).parse(input)?;
     
     Ok((input, QailCmd {
         action: Action::Make,
@@ -49,7 +50,7 @@ pub fn parse_table_constraint(input: &str) -> IResult<&str, TableConstraint> {
     alt((
         // primary key (col1, col2)
         map(
-            tuple((
+            (
                 tag_no_case("primary"),
                 multispace1,
                 tag_no_case("key"),
@@ -57,51 +58,51 @@ pub fn parse_table_constraint(input: &str) -> IResult<&str, TableConstraint> {
                 delimited(
                     char('('),
                     separated_list1(
-                        tuple((multispace0, char(','), multispace0)),
+                        (multispace0, char(','), multispace0),
                         parse_identifier
                     ),
                     char(')')
                 )
-            )),
+            ),
             |(_, _, _, _, cols): (_, _, _, _, Vec<&str>)| {
                 TableConstraint::PrimaryKey(cols.iter().map(|s| s.to_string()).collect())
             }
         ),
         // unique (col1, col2)
         map(
-            tuple((
+            (
                 tag_no_case("unique"),
                 multispace0,
                 delimited(
                     char('('),
                     separated_list1(
-                        tuple((multispace0, char(','), multispace0)),
+                        (multispace0, char(','), multispace0),
                         parse_identifier
                     ),
                     char(')')
                 )
-            )),
+            ),
             |(_, _, cols): (_, _, Vec<&str>)| {
                 TableConstraint::Unique(cols.iter().map(|s| s.to_string()).collect())
             }
         ),
-    ))(input)
+    )).parse(input)
 }
 
 /// Parse column definition: name:type[:constraint1[:constraint2]]
 pub fn parse_column_definition(input: &str) -> IResult<&str, Expr> {
     // Parse column name
-    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
-    let (input, _) = char(':')(input)?;
+    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)?;
+    let (input, _) = char(':').parse(input)?;
     
     // Parse data type
-    let (input, data_type) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
+    let (input, data_type) = take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)?;
     
     // Parse optional constraints (separated by :)
     let (input, constraints) = many0(preceded(
         char(':'),
         parse_constraint
-    ))(input)?;
+    )).parse(input)?;
     
     Ok((input, Expr::Def {
         name: name.to_string(),
@@ -138,13 +139,13 @@ pub fn parse_constraint(input: &str) -> IResult<&str, Constraint> {
             ),
             |expr: &str| Constraint::Check(vec![expr.to_string()])
         ),
-    ))(input)
+    )).parse(input)
 }
 
 /// Parse CREATE INDEX: index idx_name on table_name col1, col2 [unique]
 pub fn parse_create_index(input: &str) -> IResult<&str, QailCmd> {
     // Parse "index"
-    let (input, _) = tag_no_case("index")(input)?;
+    let (input, _) = tag_no_case("index").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Parse index name
@@ -152,7 +153,7 @@ pub fn parse_create_index(input: &str) -> IResult<&str, QailCmd> {
     let (input, _) = multispace1(input)?;
     
     // Parse "on"
-    let (input, _) = tag_no_case("on")(input)?;
+    let (input, _) = tag_no_case("on").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     // Parse table name
@@ -161,13 +162,13 @@ pub fn parse_create_index(input: &str) -> IResult<&str, QailCmd> {
     
     // Parse column list
     let (input, columns) = separated_list1(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_identifier
-    )(input)?;
+    ).parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Parse optional "unique"
-    let (input, unique) = opt(tag_no_case("unique"))(input)?;
+    let (input, unique) = opt(tag_no_case("unique")).parse(input)?;
     
     Ok((input, QailCmd {
         action: Action::Index,
