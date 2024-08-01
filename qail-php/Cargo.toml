@@ -1,0 +1,14 @@
+[package]
+name = "qail-php"
+version = "0.10.1"
+edition = "2024"
+description = "QAIL PHP bindings - Rust FFI for PHP FFI"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]  # cdylib for FFI, staticlib for extension
+
+[dependencies]
+qail-core = { path = "../qail-core", version = "0.10.1" }
+qail-pg = { path = "../qail-pg", version = "0.10.1" }
+libc = "0.2"

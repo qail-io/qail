@@ -1,6 +1,7 @@
 package qail
 
 import (
+	"bufio"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -8,6 +9,14 @@ import (
 	"net"
 	"sync"
 )
+
+// Buffer pool for reducing allocations (like pgx)
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 8192) // 8KB like pgx default
+		return &buf
+	},
+}
 
 // Driver provides connection pooling and query execution.
 type Driver struct {
@@ -23,9 +32,11 @@ type Driver struct {
 	mu       sync.Mutex
 }
 
-// Conn represents a single PostgreSQL connection.
+// Conn represents a single PostgreSQL connection with buffered I/O.
 type Conn struct {
-	conn net.Conn
+	conn   net.Conn
+	reader *bufio.Reader
+	writer *bufio.Writer
 }
 
 // Config for creating a Driver.
@@ -103,7 +114,12 @@ func (d *Driver) connect() (*Conn, error) {
 		}
 	}
 	
-	c := &Conn{conn: conn}
+	// Create buffered I/O (like pgx - 16KB buffers)
+	c := &Conn{
+		conn:   conn,
+		reader: bufio.NewReaderSize(conn, 16384), // 16KB read buffer
+		writer: bufio.NewWriterSize(conn, 16384), // 16KB write buffer
+	}
 	
 	// Startup handshake
 	if err := c.startup(d.user, d.database, d.password); err != nil {
@@ -221,7 +237,7 @@ func (c *Conn) sendMD5Password(user, password string, salt []byte) error {
 
 func (c *Conn) readMessage() (byte, []byte, error) {
 	header := make([]byte, 5)
-	if _, err := io.ReadFull(c.conn, header); err != nil {
+	if _, err := io.ReadFull(c.reader, header); err != nil {
 		return 0, nil, err
 	}
 	
@@ -230,10 +246,39 @@ func (c *Conn) readMessage() (byte, []byte, error) {
 	
 	if length > 0 {
 		data := make([]byte, length)
-		if _, err := io.ReadFull(c.conn, data); err != nil {
+		if _, err := io.ReadFull(c.reader, data); err != nil {
 			return 0, nil, err
 		}
 		return msgType, data, nil
+	}
+	
+	return msgType, nil, nil
+}
+
+// readMessageFast reads a message, reusing the provided buffer if possible.
+// Returns: msgType, data slice, error
+// The returned data is ONLY VALID until the next call!
+func (c *Conn) readMessageFast(buf []byte) (byte, []byte, error) {
+	// Read header: 1 byte type + 4 bytes length
+	var header [5]byte
+	if _, err := io.ReadFull(c.reader, header[:]); err != nil {
+		return 0, nil, err
+	}
+	
+	msgType := header[0]
+	length := int(binary.BigEndian.Uint32(header[1:])) - 4
+	
+	if length > 0 {
+		// Reuse buffer if possible
+		if cap(buf) >= length {
+			buf = buf[:length]
+		} else {
+			buf = make([]byte, length)
+		}
+		if _, err := io.ReadFull(c.reader, buf); err != nil {
+			return 0, nil, err
+		}
+		return msgType, buf, nil
 	}
 	
 	return msgType, nil, nil
@@ -487,3 +532,84 @@ func parseDataRow(data []byte) [][]byte {
 	
 	return cols
 }
+
+// =============================================================================
+// V3: PREPARED BATCH - Encode once, execute many with ZERO CGO!
+// =============================================================================
+
+// PreparedBatch holds pre-encoded wire bytes for repeated execution.
+// This is the FASTEST path - CGO only happens on Prepare(), not Execute()!
+type PreparedBatch struct {
+	wireBytes []byte
+	queryCount int
+}
+
+// PrepareBatch encodes a batch of queries ONCE via CGO.
+// Returns PreparedBatch that can be executed many times with ZERO CGO overhead!
+func (d *Driver) PrepareBatch(table, columns string, limits []int64) *PreparedBatch {
+	wireBytes := EncodeSelectBatchFast(table, columns, limits)
+	if wireBytes == nil {
+		return nil
+	}
+	return &PreparedBatch{
+		wireBytes:  wireBytes,
+		queryCount: len(limits),
+	}
+}
+
+// ExecutePrepared executes a prepared batch using PURE GO I/O.
+// NO CGO calls in this hot path! Uses buffered I/O for max performance.
+func (d *Driver) ExecutePrepared(pb *PreparedBatch) (int, error) {
+	if pb == nil || pb.wireBytes == nil {
+		return 0, errors.New("prepared batch is nil")
+	}
+	
+	c, err := d.getConn()
+	if err != nil {
+		return 0, err
+	}
+	defer d.putConn(c)
+	
+	// Buffered write + flush (reduces syscalls)
+	if _, err := c.writer.Write(pb.wireBytes); err != nil {
+		return 0, err
+	}
+	if err := c.writer.Flush(); err != nil {
+		return 0, err
+	}
+	
+	// Pre-allocate reusable buffer for response parsing
+	buf := make([]byte, 1024)
+	
+	// Count completed commands
+	completed := 0
+	for {
+		msgType, data, err := c.readMessageFast(buf)
+		if err != nil {
+			return completed, err
+		}
+		// Reuse buffer for next read
+		if len(data) > 0 && cap(data) > cap(buf) {
+			buf = data[:0]
+		}
+		switch msgType {
+		case 'C', 'n': // CommandComplete or NoData
+			completed++
+		case 'Z':
+			return completed, nil
+		case 'E':
+			return completed, errors.New("batch error: " + string(data))
+		}
+	}
+}
+
+// PrepareBatchN creates a prepared batch for N queries with same pattern.
+// Uses fixed limits for benchmark comparison.
+func (d *Driver) PrepareBatchN(table, columns string, count int) *PreparedBatch {
+	limits := make([]int64, count)
+	for i := 0; i < count; i++ {
+		limits[i] = int64((i % 10) + 1)
+	}
+	return d.PrepareBatch(table, columns, limits)
+}
+

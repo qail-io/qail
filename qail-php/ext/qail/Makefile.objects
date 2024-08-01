@@ -1,0 +1,9 @@
+-include qail.dep
+qail.lo: /Users/orion/qail.rs/qail-php/ext/qail/qail.c
+	$(LIBTOOL) --tag=CC --mode=compile $(CC) -I. -I/Users/orion/qail.rs/qail-php/ext/qail $(COMMON_FLAGS) $(CFLAGS_CLEAN) $(EXTRA_CFLAGS)   -DZEND_COMPILE_DL_EXT=1 -c /Users/orion/qail.rs/qail-php/ext/qail/qail.c -o qail.lo  -MMD -MF qail.dep -MT qail.lo
+$(phplibdir)/qail.la: ./qail.la
+	$(LIBTOOL) --tag=CC --mode=install cp ./qail.la $(phplibdir)
+
+./qail.la: $(shared_objects_qail) $(QAIL_SHARED_DEPENDENCIES)
+	$(LIBTOOL) --tag=CC --mode=link $(CC) -shared $(COMMON_FLAGS) $(CFLAGS_CLEAN) $(EXTRA_CFLAGS) $(LDFLAGS)  -o $@ -export-dynamic -avoid-version -prefer-pic -module -rpath $(phplibdir) $(EXTRA_LDFLAGS) $(shared_objects_qail) $(QAIL_SHARED_LIBADD)
+
