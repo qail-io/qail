@@ -11,7 +11,11 @@ impl ToCassandra for QailCmd {
         for cage in &self.cages {
              if let CageKind::Filter = cage.kind {
                  for cond in &cage.conditions {
-                     if cond.column == "consistency" {
+                     let col_str = match &cond.left {
+                         Expr::Named(name) => name.clone(),
+                         expr => expr.to_string(),
+                     };
+                     if col_str == "consistency" {
                          // Value might be string or param
                          let val = cond.value.to_string().replace("'", "").to_uppercase();
                          consistency = format!("CONSISTENCY {}; ", val);
@@ -45,7 +49,7 @@ fn build_cql_select(cmd: &QailCmd) -> String {
         "*".to_string()
     } else {
         cmd.columns.iter().map(|c| match c {
-            Column::Named(n) => n.clone(),
+            Expr::Named(n) => n.clone(),
             _ => "*".to_string()
         }).collect::<Vec<_>>().join(", ")
     };
@@ -56,12 +60,16 @@ fn build_cql_select(cmd: &QailCmd) -> String {
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
             for cond in &cage.conditions {
-                 if cond.column == "consistency" { continue; }
+                 let col_str = match &cond.left {
+                     Expr::Named(name) => name.clone(),
+                     expr => expr.to_string(),
+                 };
+                 if col_str == "consistency" { continue; }
                  let op = match cond.op {
                      Operator::Eq => "=", Operator::Gt => ">", Operator::Lt => "<",
                      _ => "="
                  };
-                 parts.push(format!("{} {} {}", cond.column, op, value_to_cql(&cond.value)));
+                 parts.push(format!("{} {} {}", col_str, op, value_to_cql(&cond.value)));
             }
         }
     }
@@ -88,8 +96,12 @@ fn build_cql_insert(cmd: &QailCmd) -> String {
         match cage.kind {
              CageKind::Payload | CageKind::Filter => {
                  for cond in &cage.conditions {
-                      if cond.column == "consistency" { continue; }
-                      cols.push(cond.column.clone());
+                      let col_str = match &cond.left {
+                          Expr::Named(name) => name.clone(),
+                          expr => expr.to_string(),
+                      };
+                      if col_str == "consistency" { continue; }
+                      cols.push(col_str);
                       vals.push(value_to_cql(&cond.value));
                  }
              },
@@ -108,14 +120,22 @@ fn build_cql_update(cmd: &QailCmd) -> String {
          match cage.kind {
              CageKind::Payload => {
                  for cond in &cage.conditions {
-                      if cond.column == "consistency" { continue; }
-                      assignments.push(format!("{} = {}", cond.column, value_to_cql(&cond.value)));
+                      let col_str = match &cond.left {
+                          Expr::Named(name) => name.clone(),
+                          expr => expr.to_string(),
+                      };
+                      if col_str == "consistency" { continue; }
+                      assignments.push(format!("{} = {}", col_str, value_to_cql(&cond.value)));
                  }
              },
              CageKind::Filter => {
                  for cond in &cage.conditions {
-                      if cond.column == "consistency" { continue; }
-                      wheres.push(format!("{} = {}", cond.column, value_to_cql(&cond.value)));
+                      let col_str = match &cond.left {
+                          Expr::Named(name) => name.clone(),
+                          expr => expr.to_string(),
+                      };
+                      if col_str == "consistency" { continue; }
+                      wheres.push(format!("{} = {}", col_str, value_to_cql(&cond.value)));
                  }
              }
              _ => {}
@@ -130,8 +150,12 @@ fn build_cql_delete(cmd: &QailCmd) -> String {
      for cage in &cmd.cages {
          if let CageKind::Filter = cage.kind {
               for cond in &cage.conditions {
-                   if cond.column == "consistency" { continue; }
-                   wheres.push(format!("{} = {}", cond.column, value_to_cql(&cond.value)));
+                    let col_str = match &cond.left {
+                        Expr::Named(name) => name.clone(),
+                        expr => expr.to_string(),
+                    };
+                    if col_str == "consistency" { continue; }
+                    wheres.push(format!("{} = {}", col_str, value_to_cql(&cond.value)));
               }
          }
      }
@@ -143,7 +167,7 @@ fn build_cql_create_table(cmd: &QailCmd) -> String {
     let mut pks = Vec::new();
     
     for col in &cmd.columns {
-        if let Column::Def { name, data_type, constraints } = col {
+        if let Expr::Def { name, data_type, constraints } = col {
             let cql_type = match data_type.as_str() {
                 "str" | "string" => "text",
                 "int" | "i32" => "int",

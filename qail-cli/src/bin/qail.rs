@@ -215,15 +215,15 @@ fn generate_down_sql(cmd: &QailCmd) -> String {
         Action::Mod => {
             let mut stmts = Vec::new();
             for col in &cmd.columns {
-                 if let Column::Mod { kind, col } = col {
+                 if let Expr::Mod { kind, col } = col {
                      match kind {
                          ModKind::Add => {
-                             if let Column::Def { name, .. } = col.as_ref() {
+                             if let Expr::Def { name, .. } = col.as_ref() {
                                  stmts.push(format!("ALTER TABLE {} DROP COLUMN {}", cmd.table, name));
                              }
                          }
                          ModKind::Drop => {
-                             if let Column::Named(name) = col.as_ref() {
+                             if let Expr::Named(name) = col.as_ref() {
                                  stmts.push(format!("-- TODO: Re-add dropped column '{}' (type unknown)", name));
                              }
                          }
@@ -279,7 +279,7 @@ fn explain_query(query: &str) {
                     for cond in &cage.conditions {
                         println!(
                             "      {} {:?} {}",
-                            cond.column.white(),
+                            cond.left.to_string().white(),
                             cond.op,
                             cond.value.to_string().yellow()
                         );

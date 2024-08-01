@@ -117,7 +117,7 @@ impl Validator {
 
         // Check columns exist
         for col in &cmd.columns {
-            if let crate::ast::Column::Named(name) = col {
+            if let crate::ast::Expr::Named(name) = col {
                 if let Err(e) = self.validate_column(&cmd.table, name) {
                     errors.push(e);
                 }
@@ -127,8 +127,10 @@ impl Validator {
         // Check filter/payload conditions
         for cage in &cmd.cages {
             for cond in &cage.conditions {
-                if let Err(e) = self.validate_column(&cmd.table, &cond.column) {
-                    errors.push(e);
+                if let crate::ast::Expr::Named(name) = &cond.left {
+                    if let Err(e) = self.validate_column(&cmd.table, name) {
+                        errors.push(e);
+                    }
                 }
             }
         }

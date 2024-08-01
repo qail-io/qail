@@ -1,37 +1,32 @@
 //! QAIL Parser using nom.
 //!
-//! Parses QAIL syntax into an AST.
+//! Parses QAIL v2 keyword-based syntax into an AST.
 //!
 //! # Syntax Overview
 //!
 //! ```text
-//! get::users:'id'email [ 'active == true, -created_at, 0..10 ]
-//! ─┬─ ─┬─ ─┬────┬──── ─────────────────┬────────────────────
-//!  │   │   │    │                      │
-//!  │   │   │    │                      └── Unified Block (filters, sorts, ranges)
-//!  │   │   │    └── Labels (columns with ')
-//!  │   │   │    └── Link (connects to table with :)
-//!  │   │   └── Table name
-//!  │   └── Gate (action with ::)
+//! get users
+//! fields id, email
+//! where active = true
+//! order by created_at desc
+//! limit 10
 //! ```
 
-pub mod tokens;
-pub mod columns;
-pub mod cages;
-pub mod commands;
+pub mod grammar;
 
 #[cfg(test)]
 mod tests;
 
 use crate::ast::*;
 use crate::error::{QailError, QailResult};
-use commands::parse_qail_cmd;
 
-/// Parse a complete QAIL query string.
+/// Parse a complete QAIL query string (v2 syntax only).
+/// 
+/// Uses keyword-based syntax: `get table fields * where col = value`
 pub fn parse(input: &str) -> QailResult<QailCmd> {
     let input = input.trim();
     
-    match parse_qail_cmd(input) {
+    match grammar::parse_root(input) {
         Ok(("", cmd)) => Ok(cmd),
         Ok((remaining, _)) => Err(QailError::parse(
             input.len() - remaining.len(),
@@ -40,3 +35,4 @@ pub fn parse(input: &str) -> QailResult<QailCmd> {
         Err(e) => Err(QailError::parse(0, format!("Parse failed: {:?}", e))),
     }
 }
+
