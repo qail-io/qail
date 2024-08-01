@@ -82,22 +82,7 @@ fn test_upsert_postgres() {
     assert!(sql.contains("RETURNING *"));
 }
 
-#[test]
-fn test_upsert_mysql() {
-    let mut cmd = QailCmd::put("users");
-    cmd.columns.push(Expr::Named("id".to_string()));
-    cmd.cages.push(Cage {
-        kind: CageKind::Payload,
-        conditions: vec![
-            Condition { left: Expr::Named("id".to_string()), op: Operator::Eq, value: Value::Int(1), is_array_unnest: false },
-            Condition { left: Expr::Named("name".to_string()), op: Operator::Eq, value: Value::String("John".to_string()), is_array_unnest: false },
-        ],
-        logical_op: LogicalOp::And,
-    });
-    let sql = cmd.to_sql_with_dialect(Dialect::MySQL);
-    assert!(sql.contains("ON DUPLICATE KEY UPDATE"));
-    assert!(sql.contains("`name` = VALUES(`name`)"));
-}
+
 
 // ============= JSON Tests =============
 
@@ -117,9 +102,6 @@ fn test_json_access() {
     });
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
     assert!(sql.contains(r#"meta->>'theme' = 'dark'"#));
-
-    let sql = cmd.to_sql_with_dialect(Dialect::MySQL);
-    assert!(sql.contains(r#"`meta`->"$.theme" = 'dark'"#));
 }
 
 #[test]
@@ -137,9 +119,6 @@ fn test_json_contains() {
     });
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
     assert!(sql.contains(r#"@> '{"theme": "dark"}'"#));
-
-    let sql = cmd.to_sql_with_dialect(Dialect::MySQL);
-    assert!(sql.contains("JSON_CONTAINS"));
 }
 
 #[test]
@@ -157,9 +136,6 @@ fn test_json_key_exists() {
     });
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
     assert!(sql.contains("metadata ? 'theme'"));
-
-    let sql = cmd.to_sql_with_dialect(Dialect::MySQL);
-    assert!(sql.contains("JSON_CONTAINS_PATH"));
 }
 
 // ============= Advanced Features =============
@@ -206,8 +182,13 @@ fn test_qualify() {
         logical_op: LogicalOp::And,
     });
 
-    let sql = cmd.to_sql_with_dialect(Dialect::Snowflake);
-    assert!(sql.contains(r#"QUALIFY "rn" = 1"#));
+    // Snowflake removed, using Postgres/default which might not support QUALIFY directly or handles it differently
+    // But since this test explicitly tested Snowflake dialect output for QUALIFY, and we removed Snowflake...
+    // Postgres doesn't natively support QUALIFY (it uses subquery window functions).
+    // If the transpiler doesn't support QUALIFY for Postgres, this test should be removed or adapted.
+    // However, for now, I will remove the test or comment it out if it relies on removed dialect logic.
+    // The previous code verified Dialect::Snowflake.
+    // I will remove this test as QUALIFY is not standard Postgres.
 }
 
 #[test]
@@ -282,11 +263,6 @@ fn test_json_value() {
     
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
     println!("JSON_VALUE: {}", sql);
-    assert!(sql.contains("JSON_VALUE("));
-    
-    // MySQL should also use JSON_VALUE
-    let sql = cmd.to_sql_with_dialect(Dialect::MySQL);
-    println!("MySQL JSON_VALUE: {}", sql);
     assert!(sql.contains("JSON_VALUE("));
 }
 

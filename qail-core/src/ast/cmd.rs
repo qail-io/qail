@@ -315,6 +315,127 @@ impl QailCmd {
         }
     }
 
+    /// Create a new TRUNCATE command for the given table.
+    /// 
+    /// TRUNCATE is faster than DELETE for removing all rows.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::truncate("temp_data");
+    /// ```
+    pub fn truncate(table: impl Into<String>) -> Self {
+        Self {
+            action: Action::Truncate,
+            table: table.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create an EXPLAIN command to analyze a query's execution plan.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::explain("users").columns(["id", "name"]);
+    /// // Generates: EXPLAIN SELECT id, name FROM users
+    /// ```
+    pub fn explain(table: impl Into<String>) -> Self {
+        Self {
+            action: Action::Explain,
+            table: table.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create an EXPLAIN ANALYZE command to execute and analyze a query.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::explain_analyze("users").columns(["id", "name"]);
+    /// // Generates: EXPLAIN ANALYZE SELECT id, name FROM users
+    /// ```
+    pub fn explain_analyze(table: impl Into<String>) -> Self {
+        Self {
+            action: Action::ExplainAnalyze,
+            table: table.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a LOCK TABLE command for explicit table locking.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::lock("users");
+    /// // Generates: LOCK TABLE users IN ACCESS EXCLUSIVE MODE
+    /// ```
+    pub fn lock(table: impl Into<String>) -> Self {
+        Self {
+            action: Action::Lock,
+            table: table.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a materialized view from a query.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::{QailCmd, Operator};
+    /// 
+    /// // Create view definition query
+    /// let view_query = QailCmd::get("users")
+    ///     .columns(["id", "name"])
+    ///     .filter("active", Operator::Eq, true);
+    /// 
+    /// // Create the materialized view
+    /// let cmd = QailCmd::create_materialized_view("active_users", view_query);
+    /// // Generates: CREATE MATERIALIZED VIEW active_users AS SELECT id, name FROM users WHERE active = true
+    /// ```
+    pub fn create_materialized_view(name: impl Into<String>, query: QailCmd) -> Self {
+        Self {
+            action: Action::CreateMaterializedView,
+            table: name.into(),
+            source_query: Some(Box::new(query)),
+            ..Default::default()
+        }
+    }
+
+    /// Refresh a materialized view to update its data.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::refresh_materialized_view("active_users");
+    /// // Generates: REFRESH MATERIALIZED VIEW active_users
+    /// ```
+    pub fn refresh_materialized_view(name: impl Into<String>) -> Self {
+        Self {
+            action: Action::RefreshMaterializedView,
+            table: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Drop a materialized view.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// let cmd = QailCmd::drop_materialized_view("active_users");
+    /// // Generates: DROP MATERIALIZED VIEW active_users
+    /// ```
+    pub fn drop_materialized_view(name: impl Into<String>) -> Self {
+        Self {
+            action: Action::DropMaterializedView,
+            table: name.into(),
+            ..Default::default()
+        }
+    }
+
     /// Add columns to hook (select).
     pub fn hook(mut self, cols: &[&str]) -> Self {
         self.columns = cols.iter().map(|c| Expr::Named(c.to_string())).collect();

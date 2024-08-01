@@ -147,6 +147,36 @@ impl PgDriver {
         Ok(Self::new(connection))
     }
 
+    /// Connect to PostgreSQL with a connection timeout.
+    ///
+    /// If the connection cannot be established within the timeout, returns an error.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use std::time::Duration;
+    /// let driver = PgDriver::connect_with_timeout(
+    ///     "localhost", 5432, "user", "db", "password",
+    ///     Duration::from_secs(5)
+    /// ).await?;
+    /// ```
+    pub async fn connect_with_timeout(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: &str,
+        timeout: std::time::Duration,
+    ) -> PgResult<Self> {
+        tokio::time::timeout(
+            timeout,
+            Self::connect_with_password(host, port, user, database, password)
+        )
+        .await
+        .map_err(|_| PgError::Connection(format!(
+            "Connection timeout after {:?}", timeout
+        )))?
+    }
+
     /// Execute a QAIL command and fetch all rows (AST-NATIVE).
     ///
     /// Uses AstEncoder to directly encode AST to wire protocol bytes.
@@ -251,6 +281,91 @@ impl PgDriver {
     /// Rollback the current transaction (AST-native).
     pub async fn rollback(&mut self) -> PgResult<()> {
         self.connection.rollback().await
+    }
+    
+    /// Create a named savepoint within the current transaction.
+    ///
+    /// Savepoints allow partial rollback within a transaction.
+    /// Use `rollback_to()` to return to this savepoint.
+    ///
+    /// # Example
+    /// ```ignore
+    /// driver.begin().await?;
+    /// driver.execute(&insert1).await?;
+    /// driver.savepoint("sp1").await?;
+    /// driver.execute(&insert2).await?;
+    /// driver.rollback_to("sp1").await?; // Undo insert2, keep insert1
+    /// driver.commit().await?;
+    /// ```
+    pub async fn savepoint(&mut self, name: &str) -> PgResult<()> {
+        self.connection.savepoint(name).await
+    }
+    
+    /// Rollback to a previously created savepoint.
+    ///
+    /// Discards all changes since the named savepoint was created,
+    /// but keeps the transaction open.
+    pub async fn rollback_to(&mut self, name: &str) -> PgResult<()> {
+        self.connection.rollback_to(name).await
+    }
+    
+    /// Release a savepoint (free resources, if no longer needed).
+    ///
+    /// After release, the savepoint cannot be rolled back to.
+    pub async fn release_savepoint(&mut self, name: &str) -> PgResult<()> {
+        self.connection.release_savepoint(name).await
+    }
+    
+    // ==================== BATCH TRANSACTIONS ====================
+    
+    /// Execute multiple commands in a single atomic transaction.
+    ///
+    /// All commands succeed or all are rolled back.
+    /// Returns the number of affected rows for each command.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let cmds = vec![
+    ///     QailCmd::add("users").columns(["name"]).values(["Alice"]),
+    ///     QailCmd::add("users").columns(["name"]).values(["Bob"]),
+    /// ];
+    /// let results = driver.execute_batch(&cmds).await?;
+    /// // results = [1, 1] (rows affected)
+    /// ```
+    pub async fn execute_batch(&mut self, cmds: &[QailCmd]) -> PgResult<Vec<u64>> {
+        self.begin().await?;
+        let mut results = Vec::with_capacity(cmds.len());
+        for cmd in cmds {
+            match self.execute(cmd).await {
+                Ok(n) => results.push(n),
+                Err(e) => {
+                    self.rollback().await?;
+                    return Err(e);
+                }
+            }
+        }
+        self.commit().await?;
+        Ok(results)
+    }
+    
+    // ==================== STATEMENT TIMEOUT ====================
+    
+    /// Set statement timeout for this connection (in milliseconds).
+    ///
+    /// Queries that exceed this time will be cancelled.
+    /// This is a production safety feature.
+    ///
+    /// # Example
+    /// ```ignore
+    /// driver.set_statement_timeout(30_000).await?; // 30 seconds
+    /// ```
+    pub async fn set_statement_timeout(&mut self, ms: u32) -> PgResult<()> {
+        self.execute_raw(&format!("SET statement_timeout = {}", ms)).await
+    }
+    
+    /// Reset statement timeout to default (no limit).
+    pub async fn reset_statement_timeout(&mut self) -> PgResult<()> {
+        self.execute_raw("RESET statement_timeout").await
     }
     
     // ==================== PIPELINE (BATCH) ====================

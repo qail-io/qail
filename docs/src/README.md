@@ -4,13 +4,22 @@
 
 QAIL compiles typed query ASTs directly to database wire protocols. No SQL strings. No injection surface. Just pure, type-safe queries.
 
-## Why QAIL?
+## Philosophy: AST = Meaning
 
-| Aspect | SQL Strings | QAIL AST |
-|--------|-------------|----------|
-| **Type Safety** | Runtime errors | Compile-time |
-| **Injection Risk** | Possible | Impossible |
-| **Portability** | Dialect-specific | Universal |
+> **If a database doesn't let us encode semantic intent, we don't fake it.**
+
+QAIL compiles typed query ASTs directly to database wire protocols. No SQL strings. No injection surface.
+
+### Supported Databases
+
+| Tier | Category | Supported | Why? |
+|------|----------|-----------|------|
+| **1** | **SQL-AST** | **PostgreSQL**, **SQLite** | Open wire protocols allow full AST encoding. |
+| **2** | **Document-AST** | **MongoDB**, **DynamoDB**, **Qdrant** | Native AST query structure (BSON/JSON). |
+
+### ❌ Not Supported
+* **Oracle, SQL Server, MySQL:** Proprietary/Closed protocols.
+* **Redis:** Imperative command model (not a query language).
 
 ## Quick Example
 
@@ -29,7 +38,7 @@ let mut driver = PgDriver::connect("localhost", 5432, "user", "db").await?;
 let rows = driver.query(&cmd).await?;
 ```
 
-## Current Status (~70% Production Ready)
+## Current Status (~80% Production Ready)
 
 | Feature | Status |
 |---------|--------|
@@ -38,7 +47,7 @@ let rows = driver.query(&cmd).await?;
 | Connection Pooling | ✅ |
 | AST-Native Migrations | ✅ |
 | JSON/JSONB Types | ✅ |
-| UUID, Timestamps | ✅ |
+| UUID, Timestamps, INTERVAL | ✅ |
 | CTEs (WITH) | ✅ |
 | DISTINCT ON | ✅ |
 | CASE WHEN | ✅ |
@@ -46,9 +55,49 @@ let rows = driver.query(&cmd).await?;
 | qail-lsp (IDE) | ✅ |
 | COPY Protocol | ✅ |
 | Arrays (Value::Array) | ✅ |
-| Transactions (BEGIN/COMMIT) | ✅ |
-| Savepoints | 🚧 |
-| Prepared Statements | 🚧 |
+| Transactions (BEGIN/COMMIT/ROLLBACK) | ✅ |
+| Query Plan Caching | ✅ |
+| Window Functions (OVER) | ✅ |
+| Subqueries & EXISTS | ✅ |
+| UPSERT (ON CONFLICT) | ✅ |
+| RETURNING Clause | ✅ |
+| LATERAL JOIN | ✅ |
+| Unix Socket & mTLS | ✅ |
+| Savepoints | ✅ |
+| UNION/INTERSECT/EXCEPT | ✅ |
+| TRUNCATE | ✅ |
+| Batch Transactions | ✅ |
+| Statement Timeout | ✅ |
+| EXPLAIN / EXPLAIN ANALYZE | ✅ |
+| LOCK TABLE | ✅ |
+| Connection Timeout | ✅ |
+| Materialized Views | ✅ |
+
+> **Note:** QAIL's AST-native design eliminates SQL injection by construction — no strings, no injection surface. Query plan caching (`prepare()`, `pipeline_prepared_fast()`) is purely a PostgreSQL performance optimization, not a security measure.
+
+## Why Some SQL Features Don't Exist in QAIL
+
+QAIL speaks **AST**, not SQL strings. Many traditional SQL "security features" are solutions to string-based problems that don't exist in an AST-native world:
+
+| SQL Feature | Why It Exists | QAIL Replacement |
+|-------------|---------------|------------------|
+| **Parameterized Queries** | Prevent string injection | Not needed — `Value::Param` is a typed AST node, not a string hole |
+| **Prepared Statements** (for security) | Separate SQL from data | Not needed — AST has no SQL text to inject into |
+| **Query Escaping** | Sanitize user input | Not needed — values are typed (`Value::Text`, `Value::Int`), never interpolated |
+| **SQL Validators** | Detect malformed queries | Not needed — invalid AST won't compile |
+| **LISTEN/NOTIFY** | Pub/sub channels | Not planned — string-based protocol, outside AST scope |
+
+### The AST Guarantee
+
+```rust
+// SQL String (vulnerable):
+let sql = format!("SELECT * FROM users WHERE id = {}", user_input);
+
+// QAIL AST (impossible to inject):
+QailCmd::get("users").filter("id", Operator::Eq, user_input)
+// user_input becomes Value::Int(123) or Value::Text("...") 
+// — never interpolated into a string
+```
 
 ## Getting Help
 

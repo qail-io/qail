@@ -43,6 +43,20 @@ pub enum Action {
     JsonTable,
     /// COPY TO STDOUT - bulk export data (AST-native)
     Export,
+    /// TRUNCATE TABLE - fast delete all rows
+    Truncate,
+    /// EXPLAIN - query plan analysis
+    Explain,
+    /// EXPLAIN ANALYZE - execute and analyze query plan
+    ExplainAnalyze,
+    /// LOCK TABLE - explicit table locking
+    Lock,
+    /// CREATE MATERIALIZED VIEW
+    CreateMaterializedView,
+    /// REFRESH MATERIALIZED VIEW
+    RefreshMaterializedView,
+    /// DROP MATERIALIZED VIEW
+    DropMaterializedView,
 }
 
 impl std::fmt::Display for Action {
@@ -70,6 +84,13 @@ impl std::fmt::Display for Action {
             Action::RenameCol => write!(f, "RENAME_COL"),
             Action::JsonTable => write!(f, "JSON_TABLE"),
             Action::Export => write!(f, "EXPORT"),
+            Action::Truncate => write!(f, "TRUNCATE"),
+            Action::Explain => write!(f, "EXPLAIN"),
+            Action::ExplainAnalyze => write!(f, "EXPLAIN_ANALYZE"),
+            Action::Lock => write!(f, "LOCK"),
+            Action::CreateMaterializedView => write!(f, "CREATE_MATERIALIZED_VIEW"),
+            Action::RefreshMaterializedView => write!(f, "REFRESH_MATERIALIZED_VIEW"),
+            Action::DropMaterializedView => write!(f, "DROP_MATERIALIZED_VIEW"),
         }
     }
 }
