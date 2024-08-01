@@ -111,6 +111,17 @@ pub fn parse_where_clause(input: &str) -> IResult<&str, Vec<Cage>> {
     }]))
 }
 
+/// Parse: having condition and condition2
+/// HAVING is for filtering on aggregates after GROUP BY
+pub fn parse_having_clause(input: &str) -> IResult<&str, Vec<Condition>> {
+    let (input, _) = tag_no_case("having")(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    let (input, conditions) = parse_conditions(input)?;
+    
+    Ok((input, conditions))
+}
+
 /// Parse conditions with and/or
 pub fn parse_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
     let (input, first) = parse_condition(input)?;
