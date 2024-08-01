@@ -47,6 +47,7 @@ impl ToSql for QailCmd {
             Action::Mod => self.to_alter_table_sql(),
             Action::Over => self.to_window_sql(),
             Action::With => self.to_cte_sql(),
+            Action::Index => self.to_create_index_sql(),
         }
     }
 }
@@ -338,8 +339,51 @@ impl QailCmd {
                 defs.push(line);
             }
         }
+        
+        // Add table-level constraints
+        for tc in &self.table_constraints {
+            match tc {
+                TableConstraint::Unique(cols) => {
+                    let col_list = cols.iter()
+                        .map(|c| escape_identifier(c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    defs.push(format!("    UNIQUE ({})", col_list));
+                }
+                TableConstraint::PrimaryKey(cols) => {
+                    let col_list = cols.iter()
+                        .map(|c| escape_identifier(c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    defs.push(format!("    PRIMARY KEY ({})", col_list));
+                }
+            }
+        }
+        
         sql.push_str(&defs.join(",\n"));
         sql.push_str("\n)");
+        
+        // Generate COMMENT ON statements
+        let mut comments = Vec::new();
+        for col in &self.columns {
+            if let Column::Def { name, constraints, .. } = col {
+                for c in constraints {
+                    if let Constraint::Comment(text) = c {
+                        comments.push(format!(
+                            "COMMENT ON COLUMN {}.{} IS '{}'",
+                            escape_identifier(&self.table),
+                            escape_identifier(name),
+                            text.replace('\'', "''")
+                        ));
+                    }
+                }
+            }
+        }
+        if !comments.is_empty() {
+            sql.push_str(";\n");
+            sql.push_str(&comments.join(";\n"));
+        }
+        
         sql
     }
 
@@ -489,6 +533,27 @@ impl QailCmd {
         sql.push_str(&self.table);
 
         sql
+    }
+
+    /// Generate CREATE INDEX SQL.
+    fn to_create_index_sql(&self) -> String {
+        match &self.index_def {
+            Some(idx) => {
+                let unique = if idx.unique { "UNIQUE " } else { "" };
+                let cols = idx.columns.iter()
+                    .map(|c| escape_identifier(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "CREATE {}INDEX {} ON {} ({})",
+                    unique,
+                    escape_identifier(&idx.name),
+                    escape_identifier(&idx.table),
+                    cols
+                )
+            }
+            None => String::new(),
+        }
     }
 }
 
@@ -692,6 +757,49 @@ mod tests {
         let cmd = parse("get!::users:'role").unwrap();
         assert!(cmd.distinct);
         assert_eq!(cmd.to_sql(), "SELECT DISTINCT role FROM users");
+    }
+
+    // INDEX SQL Generation Tests
+    #[test]
+    fn test_index_sql_basic() {
+        let cmd = parse("index::idx_users_email^on(users:'email)").unwrap();
+        assert_eq!(cmd.to_sql(), "CREATE INDEX idx_users_email ON users (email)");
+    }
+
+    #[test]
+    fn test_index_sql_composite() {
+        let cmd = parse("index::idx_lookup^on(orders:'user_id-created_at)").unwrap();
+        assert_eq!(cmd.to_sql(), "CREATE INDEX idx_lookup ON orders (user_id, created_at)");
+    }
+
+    #[test]
+    fn test_index_sql_unique() {
+        let cmd = parse("index::idx_phone^on(users:'phone)^unique").unwrap();
+        assert_eq!(cmd.to_sql(), "CREATE UNIQUE INDEX idx_phone ON users (phone)");
+    }
+
+    // Composite Table Constraints SQL Tests
+    #[test]
+    fn test_composite_unique_sql() {
+        let cmd = parse("make::bookings:'user_id:uuid'schedule_id:uuid^unique(user_id, schedule_id)").unwrap();
+        let sql = cmd.to_sql();
+        assert!(sql.contains("UNIQUE (user_id, schedule_id)"));
+    }
+
+    #[test]
+    fn test_composite_pk_sql() {
+        let cmd = parse("make::order_items:'order_id:uuid'product_id:uuid^pk(order_id, product_id)").unwrap();
+        let sql = cmd.to_sql();
+        assert!(sql.contains("PRIMARY KEY (order_id, product_id)"));
+    }
+
+    // COMMENT ON SQL Tests
+    #[test]
+    fn test_comment_sql_generation() {
+        let cmd = parse(r#"make::users:'id:uuid^pk^comment("Primary key")"#).unwrap();
+        let sql = cmd.to_sql();
+        assert!(sql.contains("COMMENT ON COLUMN"));
+        assert!(sql.contains("Primary key"));
     }
 }
 

@@ -7,15 +7,23 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use qail_core::{parse, transpiler::ToSql};
 
+fn criterion_config() -> Criterion {
+    Criterion::default()
+        .significance_level(0.1)      // 10% significance level
+        .noise_threshold(0.05)         // Ignore changes < 5%
+        .sample_size(50)               // Fewer samples = faster
+        .warm_up_time(std::time::Duration::from_secs(1))
+}
+
 /// Benchmark: Parse + Transpile (no DB)
 /// This measures the overhead of QAIL parsing and SQL generation.
 fn bench_parse_transpile(c: &mut Criterion) {
     let queries = [
-        ("simple_select", "get::users•@*"),
-        ("filtered", "get::users•@id@email[active=true][lim=10]"),
-        ("complex", "get::users•@id@email@role[active=true][^!created_at][lim=100]"),
-        ("join", "get::users->profiles•@id@name"),
-        ("aggregation", "get::orders•@total#sum[status=completed]"),
+        ("simple_select", "get::users:'_"),
+        ("filtered", "get::users:'id'email[active=true][lim=10]"),
+        ("complex", "get::users:'id'email'role[active=true][^!created_at][lim=100]"),
+        ("join", "get::users->profiles:'id'name"),
+        ("aggregation", "get::orders:'total#sum[status=completed]"),
     ];
 
     let mut group = c.benchmark_group("parse_transpile");
@@ -34,7 +42,7 @@ fn bench_parse_transpile(c: &mut Criterion) {
 
 /// Benchmark: Just parsing (no transpilation)
 fn bench_parse_only(c: &mut Criterion) {
-    let query = "get::users•@id@email@role[active=true][^!created_at][lim=100]";
+    let query = "get::users:'id'email'role[active=true][^!created_at][lim=100]";
     
     c.bench_function("parse_only", |b| {
         b.iter(|| {
@@ -45,7 +53,7 @@ fn bench_parse_only(c: &mut Criterion) {
 
 /// Benchmark: Just transpilation (pre-parsed)
 fn bench_transpile_only(c: &mut Criterion) {
-    let cmd = parse("get::users•@id@email@role[active=true][^!created_at][lim=100]").unwrap();
+    let cmd = parse("get::users:'id'email'role[active=true][^!created_at][lim=100]").unwrap();
     
     c.bench_function("transpile_only", |b| {
         b.iter(|| {
@@ -62,7 +70,7 @@ fn bench_sql_building(c: &mut Criterion) {
     // QAIL
     group.bench_function("qail_transpile", |b| {
         b.iter(|| {
-            let cmd = parse("get::users•@id@email[active=true][lim=10]").unwrap();
+            let cmd = parse("get::users:'id'email[active=true][lim=10]").unwrap();
             black_box(cmd.to_sql())
         });
     });
@@ -107,7 +115,7 @@ fn bench_compile_vs_runtime(c: &mut Criterion) {
     // Runtime parsing (what we do in CLI)
     group.bench_function("runtime_parse", |b| {
         b.iter(|| {
-            let cmd = parse("get::users•@id@email[active=true][lim=10]").unwrap();
+            let cmd = parse("get::users:'id'email[active=true][lim=10]").unwrap();
             black_box(cmd.to_sql())
         });
     });
@@ -135,13 +143,14 @@ fn bench_compile_vs_runtime(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_parse_transpile,
-    bench_parse_only,
-    bench_transpile_only,
-    bench_sql_building,
-    bench_compile_vs_runtime,
-);
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets = bench_parse_transpile,
+              bench_parse_only,
+              bench_transpile_only,
+              bench_sql_building,
+              bench_compile_vs_runtime
+}
 
 criterion_main!(benches);

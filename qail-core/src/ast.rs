@@ -22,6 +22,12 @@ pub struct QailCmd {
     /// Whether to use DISTINCT in SELECT
     #[serde(default)]
     pub distinct: bool,
+    /// Index definition (for Action::Index)
+    #[serde(default)]
+    pub index_def: Option<IndexDef>,
+    /// Table-level constraints (for Action::Make)
+    #[serde(default)]
+    pub table_constraints: Vec<TableConstraint>,
 }
 
 impl QailCmd {
@@ -34,6 +40,8 @@ impl QailCmd {
             columns: vec![],
             cages: vec![],
             distinct: false,
+            index_def: None,
+            table_constraints: vec![],
         }
     }
 
@@ -46,6 +54,8 @@ impl QailCmd {
             columns: vec![],
             cages: vec![],
             distinct: false,
+            index_def: None,
+            table_constraints: vec![],
         }
     }
 
@@ -58,6 +68,8 @@ impl QailCmd {
             columns: vec![],
             cages: vec![],
             distinct: false,
+            index_def: None,
+            table_constraints: vec![],
         }
     }
 
@@ -70,6 +82,8 @@ impl QailCmd {
             columns: vec![],
             cages: vec![],
             distinct: false,
+            index_def: None,
+            table_constraints: vec![],
         }
     }
     /// Add columns to hook (select).
@@ -247,6 +261,8 @@ pub enum Constraint {
     Default(String),
     /// CHECK constraint with allowed values (e.g., `^check("a","b")`)
     Check(Vec<String>),
+    /// Column comment (COMMENT ON COLUMN)
+    Comment(String),
 }
 
 impl std::fmt::Display for Constraint {
@@ -257,8 +273,31 @@ impl std::fmt::Display for Constraint {
             Constraint::Nullable => write!(f, "?"),
             Constraint::Default(val) => write!(f, "={}", val),
             Constraint::Check(vals) => write!(f, "check({})", vals.join(",")),
+            Constraint::Comment(text) => write!(f, "comment(\"{}\")", text),
         }
     }
+}
+
+/// Index definition for CREATE INDEX
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct IndexDef {
+    /// Index name
+    pub name: String,
+    /// Target table
+    pub table: String,
+    /// Columns to index (ordered)
+    pub columns: Vec<String>,
+    /// Whether this is a UNIQUE index
+    pub unique: bool,
+}
+
+/// Table-level constraints for composite keys
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TableConstraint {
+    /// UNIQUE (col1, col2, ...)
+    Unique(Vec<String>),
+    /// PRIMARY KEY (col1, col2, ...)
+    PrimaryKey(Vec<String>),
 }
 
 /// Aggregate functions.
@@ -306,6 +345,8 @@ pub enum Action {
     Over,
     /// CTE (With)
     With,
+    /// Create Index
+    Index,
 }
 
 impl std::fmt::Display for Action {
@@ -320,6 +361,7 @@ impl std::fmt::Display for Action {
             Action::Mod => write!(f, "MOD"),
             Action::Over => write!(f, "OVER"),
             Action::With => write!(f, "WITH"),
+            Action::Index => write!(f, "INDEX"),
         }
     }
 }

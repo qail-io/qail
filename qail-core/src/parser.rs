@@ -80,6 +80,12 @@ fn parse_qail_cmd(input: &str) -> IResult<&str, QailCmd> {
     let (input, distinct_marker) = opt(char('!'))(input)?;
     let distinct = distinct_marker.is_some();
     let (input, _) = tag("::")(input)?;
+    
+    // Special handling for INDEX action
+    if action == Action::Index {
+        return parse_index_command(input);
+    }
+    
     let (input, table) = parse_identifier(input)?;
     let (input, joins) = parse_joins(input)?;
     let (input, _) = ws_or_comment(input)?;
@@ -87,6 +93,15 @@ fn parse_qail_cmd(input: &str) -> IResult<&str, QailCmd> {
     let (input, _) = opt(char(':'))(input)?;
     let (input, _) = ws_or_comment(input)?;
     let (input, columns) = parse_columns(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    
+    // Parse table-level constraints for Make action
+    let (input, table_constraints) = if action == Action::Make {
+        parse_table_constraints(input)?
+    } else {
+        (input, vec![])
+    };
+    
     let (input, _) = ws_or_comment(input)?;
     let (input, cages) = parse_unified_blocks(input)?;
 
@@ -99,6 +114,8 @@ fn parse_qail_cmd(input: &str) -> IResult<&str, QailCmd> {
             columns,
             cages,
             distinct,
+            index_def: None,
+            table_constraints,
         },
     ))
 }
@@ -115,6 +132,7 @@ fn parse_action(input: &str) -> IResult<&str, Action> {
         value(Action::Mod, tag("mod")),
         value(Action::Over, tag("over")),
         value(Action::With, tag("with")),
+        value(Action::Index, tag("index")),
     ))(input)
 }
 
@@ -282,11 +300,20 @@ fn parse_column_full_def_or_named(input: &str) -> IResult<&str, Column> {
 
 fn parse_constraints(input: &str) -> IResult<&str, Vec<Constraint>> {
     many0(alt((
-        value(Constraint::PrimaryKey, tag("^pk")),
-        value(Constraint::Unique, tag("^uniq")),
+        // ^pk without parentheses (column-level PK)
+        map(
+            tuple((tag("^pk"), nom::combinator::not(char('(')))),
+            |_| Constraint::PrimaryKey
+        ),
+        // ^uniq without following 'ue(' (to avoid matching ^unique())
+        map(
+            tuple((tag("^uniq"), nom::combinator::not(tag("ue(")))),
+            |_| Constraint::Unique
+        ),
         value(Constraint::Nullable, char('?')),
         parse_default_constraint,
         parse_check_constraint,
+        parse_comment_constraint,
     )))(input)
 }
 
@@ -334,6 +361,97 @@ fn parse_check_constraint(input: &str) -> IResult<&str, Constraint> {
     let (input, _) = char(')')(input)?;
     
     Ok((input, Constraint::Check(values.into_iter().map(|s| s.to_string()).collect())))
+}
+
+/// Parse COMMENT constraint: `^comment("description")`
+fn parse_comment_constraint(input: &str) -> IResult<&str, Constraint> {
+    let (input, _) = tag("^comment(\"")(input)?;
+    let (input, text) = take_until("\"")(input)?;
+    let (input, _) = tag("\")")(input)?;
+    Ok((input, Constraint::Comment(text.to_string())))
+}
+
+/// Parse INDEX command: `index::idx_name^on(table:'col1-col2)^unique`
+/// Returns a QailCmd with action=Index and populated index_def
+fn parse_index_command(input: &str) -> IResult<&str, QailCmd> {
+    // Parse index name
+    let (input, name) = parse_identifier(input)?;
+    
+    // Parse ^on(table:'columns)
+    let (input, _) = tag("^on(")(input)?;
+    let (input, table) = parse_identifier(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, columns) = parse_index_columns(input)?;
+    let (input, _) = char(')')(input)?;
+    
+    // Parse optional ^unique
+    let (input, unique) = opt(tag("^unique"))(input)?;
+    
+    Ok((input, QailCmd {
+        action: Action::Index,
+        table: table.to_string(),
+        columns: vec![],
+        joins: vec![],
+        cages: vec![],
+        distinct: false,
+        index_def: Some(IndexDef {
+            name: name.to_string(),
+            table: table.to_string(),
+            columns,
+            unique: unique.is_some(),
+        }),
+        table_constraints: vec![],
+    }))
+}
+
+/// Parse index columns: 'col1-col2-col3
+fn parse_index_columns(input: &str) -> IResult<&str, Vec<String>> {
+    let (input, _) = char('\'')(input)?;
+    let (input, first) = parse_identifier(input)?;
+    let (input, rest) = many0(preceded(char('-'), parse_identifier))(input)?;
+    
+    let mut cols = vec![first.to_string()];
+    cols.extend(rest.iter().map(|s| s.to_string()));
+    Ok((input, cols))
+}
+
+/// Parse table-level constraints: ^unique(col1, col2) or ^pk(col1, col2)
+fn parse_table_constraints(input: &str) -> IResult<&str, Vec<TableConstraint>> {
+    many0(alt((
+        parse_table_unique,
+        parse_table_pk,
+    )))(input)
+}
+
+/// Parse ^unique(col1, col2)
+fn parse_table_unique(input: &str) -> IResult<&str, TableConstraint> {
+    let (input, _) = tag("^unique(")(input)?;
+    let (input, cols) = parse_constraint_columns(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, TableConstraint::Unique(cols)))
+}
+
+/// Parse ^pk(col1, col2)
+fn parse_table_pk(input: &str) -> IResult<&str, TableConstraint> {
+    let (input, _) = tag("^pk(")(input)?;
+    let (input, cols) = parse_constraint_columns(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, TableConstraint::PrimaryKey(cols)))
+}
+
+/// Parse comma-separated column names: col1, col2, col3
+fn parse_constraint_columns(input: &str) -> IResult<&str, Vec<String>> {
+    let (input, _) = multispace0(input)?;
+    let (input, first) = parse_identifier(input)?;
+    let (input, rest) = many0(preceded(
+        tuple((multispace0, char(','), multispace0)),
+        parse_identifier
+    ))(input)?;
+    let (input, _) = multispace0(input)?;
+    
+    let mut cols = vec![first.to_string()];
+    cols.extend(rest.iter().map(|s| s.to_string()));
+    Ok((input, cols))
 }
 
 fn parse_agg_func(input: &str) -> IResult<&str, AggregateFunc> {
@@ -1059,6 +1177,68 @@ mod tests {
             }
         } else {
             panic!("Expected Column::Def");
+        }
+    }
+
+    // ========================================================================
+    // INDEX Tests (v0.7.0)
+    // ========================================================================
+
+    #[test]
+    fn test_index_basic() {
+        let cmd = parse("index::idx_users_email^on(users:'email)").unwrap();
+        assert_eq!(cmd.action, Action::Index);
+        let idx = cmd.index_def.expect("index_def should be Some");
+        assert_eq!(idx.name, "idx_users_email");
+        assert_eq!(idx.table, "users");
+        assert_eq!(idx.columns, vec!["email".to_string()]);
+        assert!(!idx.unique);
+    }
+
+    #[test]
+    fn test_index_composite() {
+        let cmd = parse("index::idx_lookup^on(orders:'user_id-created_at)").unwrap();
+        assert_eq!(cmd.action, Action::Index);
+        let idx = cmd.index_def.expect("index_def should be Some");
+        assert_eq!(idx.name, "idx_lookup");
+        assert_eq!(idx.table, "orders");
+        assert_eq!(idx.columns, vec!["user_id".to_string(), "created_at".to_string()]);
+    }
+
+    #[test]
+    fn test_index_unique() {
+        let cmd = parse("index::idx_phone^on(users:'phone)^unique").unwrap();
+        assert_eq!(cmd.action, Action::Index);
+        let idx = cmd.index_def.expect("index_def should be Some");
+        assert_eq!(idx.name, "idx_phone");
+        assert!(idx.unique);
+    }
+
+    // ========================================================================
+    // Composite Table Constraints Tests (v0.7.0)
+    // ========================================================================
+
+    #[test]
+    fn test_make_composite_unique() {
+        let cmd = parse("make::bookings:'user_id:uuid'schedule_id:uuid^unique(user_id, schedule_id)").unwrap();
+        assert_eq!(cmd.action, Action::Make);
+        assert_eq!(cmd.table_constraints.len(), 1);
+        if let TableConstraint::Unique(cols) = &cmd.table_constraints[0] {
+            assert_eq!(cols, &vec!["user_id".to_string(), "schedule_id".to_string()]);
+        } else {
+            panic!("Expected TableConstraint::Unique");
+        }
+    }
+
+    #[test]
+    fn test_make_composite_pk() {
+        let cmd = parse("make::order_items:'order_id:uuid'product_id:uuid^pk(order_id, product_id)").unwrap();
+        assert_eq!(cmd.action, Action::Make);
+        assert_eq!(cmd.table_constraints.len(), 1);
+        if let TableConstraint::PrimaryKey(cols) = &cmd.table_constraints[0] {
+            assert_eq!(cols, &vec!["order_id".to_string(), "product_id".to_string()]);
+        } else {
+            panic!("Expected TableConstraint::PrimaryKey");
         }
     }
 }

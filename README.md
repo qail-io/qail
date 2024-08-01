@@ -164,6 +164,40 @@ get::users<-profiles:'name'avatar
 ```
 
 ---
+## 📦 Schema Management (Migrations)
+
+Create and modify tables with the same concise syntax.
+
+### Create Table (`make::`)
+```bash
+make::users:'id:uuid^pk'email:varchar^unique^comment("User email")
+# → CREATE TABLE users (id UUID PRIMARY KEY, email VARCHAR(255) UNIQUE);
+# → COMMENT ON COLUMN users.email IS 'User email'
+```
+
+### Constraints & Defaults
+```bash
+make::posts:'id:uuid^pk'status:varchar^def("draft")'views:int^def(0)
+# → CREATE TABLE posts (
+#     id UUID PRIMARY KEY,
+#     status VARCHAR(255) DEFAULT 'draft',
+#     views INT DEFAULT 0
+# )
+```
+
+### Composite Constraints
+```bash
+make::bookings:'user_id:uuid'slot_id:uuid^unique(user_id, slot_id)
+# → CREATE TABLE bookings (..., UNIQUE (user_id, slot_id))
+```
+
+### Create Index (`index::`)
+```bash
+index::idx_email^on(users:'email)^unique
+# → CREATE UNIQUE INDEX idx_email ON users (email)
+```
+
+---
 
 ## 🌐 One Syntax. Every Stack.
 

@@ -1230,6 +1230,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "qail-ffi"
+version = "0.8.0"
+dependencies = [
+ "qail-core",
+ "serde_json",
+]
+
+[[package]]
 name = "qail-lsp"
 version = "0.6.1"
 dependencies = [
@@ -1255,7 +1263,7 @@ name = "qail-wasm"
 version = "0.6.1"
 dependencies = [
  "js-sys",
- "nom",
+ "qail-core",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",
