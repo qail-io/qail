@@ -99,7 +99,7 @@ fn test_array_unnest() {
 fn test_left_join() {
     use crate::ast::*;
     let mut cmd = QailCmd::get("users");
-    cmd.joins.push(Join { table: "posts".to_string(), kind: JoinKind::Left, on: None });
+    cmd.joins.push(Join { table: "posts".to_string(), kind: JoinKind::Left, on: None, on_true: false });
     let sql = cmd.to_sql();
     assert!(sql.contains("LEFT JOIN"));
     assert!(sql.contains("posts"));
@@ -109,7 +109,7 @@ fn test_left_join() {
 fn test_right_join() {
     use crate::ast::*;
     let mut cmd = QailCmd::get("users");
-    cmd.joins.push(Join { table: "posts".to_string(), kind: JoinKind::Right, on: None });
+    cmd.joins.push(Join { table: "posts".to_string(), kind: JoinKind::Right, on: None, on_true: false });
     let sql = cmd.to_sql();
     assert!(sql.contains("RIGHT JOIN"));
 }

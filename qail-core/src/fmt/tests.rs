@@ -51,6 +51,7 @@ fn test_fmt_complex_query() {
             table: "message_stats".to_string(),
             kind: JoinKind::Inner,
             on: None, // Implicit join for now to match proposal simplification or explicit? Proposal had explicit ON in example 4.
+            on_true: false,
         }
     ];
     
