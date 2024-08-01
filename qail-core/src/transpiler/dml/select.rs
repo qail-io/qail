@@ -8,7 +8,13 @@ use crate::transpiler::conditions::ConditionToSql;
 pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
     let generator = dialect.generator();
     
-    let mut sql = if cmd.distinct {
+    // Handle DISTINCT ON (Postgres-specific)
+    let mut sql = if !cmd.distinct_on.is_empty() {
+        let cols: Vec<String> = cmd.distinct_on.iter()
+            .map(|c| generator.quote_identifier(c))
+            .collect();
+        format!("SELECT DISTINCT ON ({}) ", cols.join(", "))
+    } else if cmd.distinct {
         String::from("SELECT DISTINCT ")
     } else {
         String::from("SELECT ")
@@ -36,6 +42,26 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         case_sql
                     }
                 }
+                Column::JsonAccess { column, path, as_text, alias } => {
+                    let op = if *as_text { "->>" } else { "->" };
+                    let expr = format!("{}{}'{}'" , generator.quote_identifier(column), op, path);
+                    if let Some(a) = alias {
+                        format!("{} AS {}", expr, generator.quote_identifier(a))
+                    } else {
+                        expr
+                    }
+                }
+                Column::FunctionCall { name, args, alias } => {
+                    let args_sql: Vec<String> = args.iter()
+                        .map(|a| generator.quote_identifier(a))
+                        .collect();
+                    let expr = format!("{}({})", name.to_uppercase(), args_sql.join(", "));
+                    if let Some(a) = alias {
+                        format!("{} AS {}", expr, generator.quote_identifier(a))
+                    } else {
+                        expr
+                    }
+                }
                 _ => c.to_string(), // Fallback for complex cols if any remaining
             }
         }).collect();
@@ -60,27 +86,37 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
 
     // JOINS
     for join in &cmd.joins {
-        let kind = match join.kind {
-            JoinKind::Inner => "INNER",
-            JoinKind::Left => "LEFT",
-            JoinKind::Right => "RIGHT",
-            JoinKind::Lateral => "LATERAL",
+        let (kind, needs_on) = match join.kind {
+            JoinKind::Inner => ("INNER", true),
+            JoinKind::Left => ("LEFT", true),
+            JoinKind::Right => ("RIGHT", true),
+            JoinKind::Lateral => ("LATERAL", true),
+            JoinKind::Full => ("FULL OUTER", true),
+            JoinKind::Cross => ("CROSS", false),
         };
-        // Heuristic: target.source_singular_id = source.id
+        // Join: target.source_singular_id = source.id
         let source_singular = cmd.table.trim_end_matches('s');
         
         let target_table = generator.quote_identifier(&join.table);
         let source_fk = format!("{}_id", source_singular);
         let source_table = generator.quote_identifier(&cmd.table);
         
-        sql.push_str(&format!(
-            " {} JOIN {} ON {}.{} = {}.id",
-            kind, 
-            target_table, 
-            target_table, 
-            generator.quote_identifier(&source_fk), 
-            source_table
-        ));
+        if needs_on {
+            sql.push_str(&format!(
+                " {} JOIN {} ON {}.{} = {}.id",
+                kind, 
+                target_table, 
+                target_table, 
+                generator.quote_identifier(&source_fk), 
+                source_table
+            ));
+        } else {
+            sql.push_str(&format!(
+                " {} JOIN {}",
+                kind,
+                target_table
+            ));
+        }
     }
     
     // Prepare for GROUP BY check
@@ -123,6 +159,10 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                     let dir = match order {
                         SortOrder::Asc => "ASC",
                         SortOrder::Desc => "DESC",
+                        SortOrder::AscNullsFirst => "ASC NULLS FIRST",
+                        SortOrder::AscNullsLast => "ASC NULLS LAST",
+                        SortOrder::DescNullsFirst => "DESC NULLS FIRST",
+                        SortOrder::DescNullsLast => "DESC NULLS LAST",
                     };
                     order_by = Some(format!("{} {}", generator.quote_identifier(&cond.column), dir));
                 }
