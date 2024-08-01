@@ -40,12 +40,20 @@ pub enum Expr {
     Named(String),
     /// An aliased expression (expr AS alias)
     Aliased { name: String, alias: String },
-    /// An aggregate function (COUNT(col)) with optional FILTER clause
+    /// An aggregate function (COUNT(col)) with optional FILTER and DISTINCT
     Aggregate {
         col: String,
         func: AggregateFunc,
+        /// Whether to use DISTINCT (e.g., COUNT(DISTINCT col))
+        distinct: bool,
         /// PostgreSQL FILTER (WHERE ...) clause for aggregates
         filter: Option<Vec<Condition>>,
+        alias: Option<String>,
+    },
+    /// Type cast expression (expr::type)
+    Cast {
+        expr: Box<Expr>,
+        target_type: String,
         alias: Option<String>,
     },
     /// Column Definition (for Make keys)
@@ -123,11 +131,22 @@ impl std::fmt::Display for Expr {
             Expr::Star => write!(f, "*"),
             Expr::Named(name) => write!(f, "{}", name),
             Expr::Aliased { name, alias } => write!(f, "{} AS {}", name, alias),
-            Expr::Aggregate { col, func, filter, alias } => {
-                write!(f, "{}({})", func, col)?;
+            Expr::Aggregate { col, func, distinct, filter, alias } => {
+                if *distinct {
+                    write!(f, "{}(DISTINCT {})", func, col)?;
+                } else {
+                    write!(f, "{}({})", func, col)?;
+                }
                 if let Some(conditions) = filter {
                     write!(f, " FILTER (WHERE {})", conditions.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" AND "))?;
                 }
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::Cast { expr, target_type, alias } => {
+                write!(f, "{}::{}", expr, target_type)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }

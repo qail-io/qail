@@ -232,7 +232,7 @@ fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
                 "max" => AggregateFunc::Max,
                 _ => AggregateFunc::Count, // unreachable
             };
-            Ok((input, Expr::Aggregate { col, func, filter: None, alias }))
+            Ok((input, Expr::Aggregate { col, func, distinct: false, filter: None, alias }))
         },
         _ => {
             Ok((input, Expr::FunctionCall {

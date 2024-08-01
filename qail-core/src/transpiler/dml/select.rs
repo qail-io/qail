@@ -154,9 +154,14 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         }
                     }
                 }
-                Expr::Aggregate { col, func, filter, alias } => {
-                    // Render aggregate function: COUNT(*), SUM(col), etc.
-                    let mut expr = format!("{}({})", func, if col == "*" { "*".to_string() } else { generator.quote_identifier(col) });
+                Expr::Aggregate { col, func, distinct, filter, alias } => {
+                    // Render aggregate function: COUNT(*), COUNT(DISTINCT col), SUM(col), etc.
+                    let col_expr = if col == "*" { "*".to_string() } else { generator.quote_identifier(col) };
+                    let mut expr = if *distinct {
+                        format!("{}(DISTINCT {})", func, col_expr)
+                    } else {
+                        format!("{}({})", func, col_expr)
+                    };
                     
                     // Add FILTER clause if present (PostgreSQL extension)
                     if let Some(conditions) = filter {
@@ -172,6 +177,14 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         format!("{} AS {}", expr, generator.quote_identifier(a))
                     } else {
                         expr
+                    }
+                }
+                Expr::Cast { expr, target_type, alias } => {
+                    let cast_expr = format!("{}::{}", expr, target_type);
+                    if let Some(a) = alias {
+                        format!("{} AS {}", cast_expr, generator.quote_identifier(a))
+                    } else {
+                        cast_expr
                     }
                 }
                 _ => c.to_string(), // Fallback for complex cols if any remaining
