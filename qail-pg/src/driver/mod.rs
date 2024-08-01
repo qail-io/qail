@@ -18,17 +18,6 @@ pub struct PgRow {
     pub columns: Vec<Option<Vec<u8>>>,
 }
 
-/// PostgreSQL notification from LISTEN/NOTIFY.
-#[derive(Debug, Clone)]
-pub struct Notification {
-    /// Process ID of the notifying backend
-    pub process_id: i32,
-    /// Channel name
-    pub channel: String,
-    /// Notification payload
-    pub payload: String,
-}
-
 /// Error type for PostgreSQL driver operations.
 #[derive(Debug)]
 pub enum PgError {
@@ -148,6 +137,71 @@ impl PgDriver {
         // Layer 3: Execute via Extended Query Protocol (async I/O)
         let affected = self.connection.execute_raw(&result.sql, &params).await?;
         Ok(affected)
+    }
+
+    /// Bulk insert data using PostgreSQL COPY protocol (AST-native).
+    ///
+    /// Uses a QailCmd::Add to get validated table and column names from the AST,
+    /// not user-provided strings. This is the sound, AST-native approach.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Create a QailCmd::Add to define table and columns
+    /// let cmd = QailCmd::add("users")
+    ///     .columns(["id", "name", "email"]);
+    ///
+    /// // Bulk insert rows
+    /// let rows: Vec<Vec<Value>> = vec![
+    ///     vec![Value::Int(1), Value::String("Alice"), Value::String("alice@ex.com")],
+    ///     vec![Value::Int(2), Value::String("Bob"), Value::String("bob@ex.com")],
+    /// ];
+    /// driver.copy_bulk(&cmd, &rows).await?;
+    /// ```
+    pub async fn copy_bulk(
+        &mut self,
+        cmd: &QailCmd,
+        rows: &[Vec<qail_core::ast::Value>],
+    ) -> PgResult<u64> {
+        use qail_core::ast::Action;
+        
+        // Validate this is an Add command
+        if cmd.action != Action::Add {
+            return Err(PgError::Query(
+                "copy_bulk requires QailCmd::Add action".to_string()
+            ));
+        }
+        
+        // Extract table from AST (already validated at parse time)
+        let table = &cmd.table;
+        
+        // Extract column names from AST expressions
+        let columns: Vec<String> = cmd.columns.iter()
+            .filter_map(|expr| {
+                use qail_core::ast::Expr;
+                match expr {
+                    Expr::Named(name) => Some(name.clone()),
+                    Expr::Aliased { name, .. } => Some(name.clone()),
+                    Expr::Star => None, // Can't COPY with *
+                    _ => None,
+                }
+            })
+            .collect();
+        
+        if columns.is_empty() {
+            return Err(PgError::Query(
+                "copy_bulk requires columns in QailCmd".to_string()
+            ));
+        }
+        
+        // Convert Value rows to string representations for COPY format
+        let str_rows: Vec<Vec<String>> = rows.iter()
+            .map(|row| {
+                row.iter().map(|v| format!("{}", v)).collect()
+            })
+            .collect();
+        
+        // Call internal copy implementation
+        self.connection.copy_in_internal(table, &columns, &str_rows).await
     }
 }
 

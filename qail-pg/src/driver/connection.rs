@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::BytesMut;
 use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus, ScramClient, PgEncoder};
 use super::stream::PgStream;
-use super::{PgError, PgResult, Notification};
+use super::{PgError, PgResult};
 
 /// Initial buffer capacity (8KB - typical response size)
 const BUFFER_CAPACITY: usize = 8192;
@@ -529,132 +529,19 @@ impl PgConnection {
         }
     }
 
-    // ==================== LISTEN/NOTIFY ====================
-
-    /// Subscribe to a PostgreSQL notification channel.
-    ///
-    /// After calling this, you can receive notifications on this channel
-    /// using `receive_notification()`.
-    ///
-    /// # Example
-    /// ```ignore
-    /// conn.listen("new_orders").await?;
-    /// loop {
-    ///     if let Some(notification) = conn.receive_notification().await? {
-    ///         println!("Got: {} on {}", notification.payload, notification.channel);
-    ///     }
-    /// }
-    /// ```
-    pub async fn listen(&mut self, channel: &str) -> PgResult<()> {
-        Self::validate_identifier(channel)?;
-        let sql = format!("LISTEN {}", channel);
-        self.execute_simple(&sql).await
-    }
-
-    /// Stop listening to a PostgreSQL notification channel.
-    pub async fn unlisten(&mut self, channel: &str) -> PgResult<()> {
-        Self::validate_identifier(channel)?;
-        let sql = format!("UNLISTEN {}", channel);
-        self.execute_simple(&sql).await
-    }
-
-    /// Send a notification to a channel.
-    ///
-    /// # Example
-    /// ```ignore
-    /// conn.notify("new_orders", "order_id=12345").await?;
-    /// ```
-    pub async fn notify(&mut self, channel: &str, payload: &str) -> PgResult<()> {
-        Self::validate_identifier(channel)?;
-        // Payload is safely escaped for SQL string literals
-        let sql = format!("NOTIFY {}, '{}'", channel, payload.replace('\'', "''"));
-        self.execute_simple(&sql).await
-    }
-
-    /// Validate that a string is a valid PostgreSQL identifier.
-    /// Prevents SQL injection in LISTEN/NOTIFY/COPY operations.
-    fn validate_identifier(name: &str) -> PgResult<()> {
-        if name.is_empty() {
-            return Err(PgError::Query("Identifier cannot be empty".to_string()));
-        }
-        // Must start with letter or underscore
-        let first = name.chars().next().unwrap();
-        if !first.is_ascii_alphabetic() && first != '_' {
-            return Err(PgError::Query(format!(
-                "Invalid identifier '{}': must start with letter or underscore", name
-            )));
-        }
-        // Rest must be alphanumeric or underscore
-        for c in name.chars() {
-            if !c.is_ascii_alphanumeric() && c != '_' {
-                return Err(PgError::Query(format!(
-                    "Invalid identifier '{}': contains invalid character '{}'", name, c
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// Try to receive a pending notification (non-blocking check).
-    ///
-    /// Returns `None` if no notification is pending.
-    /// Use this in a loop to poll for notifications.
-    pub async fn try_receive_notification(&mut self) -> PgResult<Option<Notification>> {
-        // Send an empty query to flush any pending notifications
-        let bytes = PgEncoder::encode_query_string("");
-        self.stream.write_all(&bytes).await?;
-
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::NotificationResponse { process_id, channel, payload } => {
-                    return Ok(Some(Notification { 
-                        process_id, 
-                        channel, 
-                        payload,
-                    }));
-                }
-                BackendMessage::EmptyQueryResponse => {}
-                BackendMessage::ReadyForQuery(_) => {
-                    return Ok(None);
-                }
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-    }
-
     // ==================== COPY Protocol ====================
 
-    /// Bulk insert data using PostgreSQL COPY protocol.
+    /// Internal bulk insert using COPY protocol (crate-private).
     ///
-    /// This is the fastest way to insert large amounts of data.
-    /// Uses tab-separated values format internally.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Insert 1000 rows in one operation
-    /// let rows = vec![
-    ///     vec!["1", "Alice", "alice@example.com"],
-    ///     vec!["2", "Bob", "bob@example.com"],
-    /// ];
-    /// conn.copy_in("users", &["id", "name", "email"], &rows).await?;
-    /// ```
-    pub async fn copy_in(
+    /// Use `PgDriver::copy_bulk(&QailCmd)` for AST-native access.
+    pub(crate) async fn copy_in_internal(
         &mut self,
         table: &str,
-        columns: &[&str],
-        rows: &[Vec<&str>],
+        columns: &[String],
+        rows: &[Vec<String>],
     ) -> PgResult<u64> {
-        // Validate all identifiers to prevent SQL injection
-        Self::validate_identifier(table)?;
-        for col in columns {
-            Self::validate_identifier(col)?;
-        }
-        
-        // Build COPY command with validated identifiers
+        // Table and columns come from validated AST - no string-based validation needed here
+        // Build COPY command
         let cols = columns.join(", ");
         let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
         
