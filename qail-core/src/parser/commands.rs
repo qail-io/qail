@@ -74,7 +74,7 @@ pub fn parse_qail_cmd(input: &str) -> IResult<&str, QailCmd> {
             set_ops: vec![],
             having: vec![],
             group_by_mode: GroupByMode::default(),
-            cte: None,
+            ctes: vec![],
         },
     ))
 }
@@ -150,14 +150,14 @@ fn parse_with_command(input: &str) -> IResult<&str, QailCmd> {
             set_ops: vec![],
             having: vec![],
             group_by_mode: GroupByMode::default(),
-            cte: Some(CTEDef {
+            ctes: vec![CTEDef {
                 name: cte_name.to_string(),
                 recursive: recursive_query.is_some(),
                 columns,
                 base_query: Box::new(base_query),
                 recursive_query: recursive_query.map(Box::new),
                 source_table: Some(cte_name.to_string()),
-            }),
+            }],
         },
     ))
 }
@@ -195,6 +195,6 @@ fn parse_index_command(input: &str) -> IResult<&str, QailCmd> {
         set_ops: vec![],
         having: vec![],
         group_by_mode: GroupByMode::default(),
-        cte: None,
+        ctes: vec![],
     }))
 }
