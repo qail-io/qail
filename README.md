@@ -1,4 +1,4 @@
-# 🪝 QAIL — The Universal Query Language
+# 🪝 QAIL — The Universal Query Transpiler
 
 > **Safe but Free.** Write queries once. Run them everywhere. Zero lock-in.
 
