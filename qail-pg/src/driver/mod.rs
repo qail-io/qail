@@ -387,6 +387,50 @@ impl PgDriver {
         self.connection.pipeline_ast_fast(cmds).await
     }
     
+    /// Execute multiple QailCmd ASTs and return full row data.
+    ///
+    /// Unlike `pipeline_batch` which only returns count, this method
+    /// collects and returns all row data from each query.
+    ///
+    /// Returns: Vec of PgRow vectors, one per query in the batch.
+    pub async fn pipeline_fetch(&mut self, cmds: &[QailCmd]) -> PgResult<Vec<Vec<PgRow>>> {
+        let raw_results = self.connection.pipeline_ast(cmds).await?;
+        
+        // Convert raw results to PgRow format
+        let results: Vec<Vec<PgRow>> = raw_results
+            .into_iter()
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|columns| PgRow { 
+                        columns,
+                        column_info: None 
+                    })
+                    .collect()
+            })
+            .collect();
+        
+        Ok(results)
+    }
+    
+    /// Prepare a SQL statement for repeated execution.
+    ///
+    /// Returns a PreparedStatement handle for use with pipeline_prepared_fast.
+    pub async fn prepare(&mut self, sql: &str) -> PgResult<PreparedStatement> {
+        self.connection.prepare(sql).await
+    }
+    
+    /// Execute a prepared statement pipeline in FAST mode (count only).
+    ///
+    /// This is the fastest possible path - Parse once, Bind+Execute many.
+    /// Matches native Rust benchmark performance (~355k q/s).
+    pub async fn pipeline_prepared_fast(
+        &mut self,
+        stmt: &PreparedStatement,
+        params_batch: &[Vec<Option<Vec<u8>>>],
+    ) -> PgResult<usize> {
+        self.connection.pipeline_prepared_fast(stmt, params_batch).await
+    }
+    
     // ==================== LEGACY/BOOTSTRAP ====================
     
     /// Execute a raw SQL string.
