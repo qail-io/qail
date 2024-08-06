@@ -57,6 +57,20 @@ pub enum Action {
     RefreshMaterializedView,
     /// DROP MATERIALIZED VIEW
     DropMaterializedView,
+    // Pub/Sub (LISTEN/NOTIFY)
+    /// LISTEN channel - subscribe to notifications
+    Listen,
+    /// NOTIFY channel, 'payload' - send notification
+    Notify,
+    /// UNLISTEN channel - unsubscribe from notifications
+    Unlisten,
+    // Savepoints
+    /// SAVEPOINT name
+    Savepoint,
+    /// RELEASE SAVEPOINT name
+    ReleaseSavepoint,
+    /// ROLLBACK TO SAVEPOINT name
+    RollbackToSavepoint,
 }
 
 impl std::fmt::Display for Action {
@@ -91,6 +105,12 @@ impl std::fmt::Display for Action {
             Action::CreateMaterializedView => write!(f, "CREATE_MATERIALIZED_VIEW"),
             Action::RefreshMaterializedView => write!(f, "REFRESH_MATERIALIZED_VIEW"),
             Action::DropMaterializedView => write!(f, "DROP_MATERIALIZED_VIEW"),
+            Action::Listen => write!(f, "LISTEN"),
+            Action::Notify => write!(f, "NOTIFY"),
+            Action::Unlisten => write!(f, "UNLISTEN"),
+            Action::Savepoint => write!(f, "SAVEPOINT"),
+            Action::ReleaseSavepoint => write!(f, "RELEASE_SAVEPOINT"),
+            Action::RollbackToSavepoint => write!(f, "ROLLBACK_TO_SAVEPOINT"),
         }
     }
 }

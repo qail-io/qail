@@ -157,6 +157,9 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, QailCmd> {
         ctes: vec![],
         returning: None,
         on_conflict: None,
-            source_query: None,
+        source_query: None,
+        channel: None,
+        payload: None,
+        savepoint_name: None,
     }))
 }
