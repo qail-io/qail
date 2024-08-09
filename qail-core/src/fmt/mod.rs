@@ -177,6 +177,12 @@ impl Formatter {
                      crate::ast::AggregateFunc::Avg => "avg",
                      crate::ast::AggregateFunc::Min => "min",
                      crate::ast::AggregateFunc::Max => "max",
+                     crate::ast::AggregateFunc::ArrayAgg => "array_agg",
+                     crate::ast::AggregateFunc::StringAgg => "string_agg",
+                     crate::ast::AggregateFunc::JsonAgg => "json_agg",
+                     crate::ast::AggregateFunc::JsonbAgg => "jsonb_agg",
+                     crate::ast::AggregateFunc::BoolAnd => "bool_and",
+                     crate::ast::AggregateFunc::BoolOr => "bool_or",
                  };
                  if *distinct {
                      write!(self.buffer, "{}(distinct {})", func_name, col)?;

@@ -93,6 +93,20 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
             // Can't COPY a subquery - output NULL
             buf.extend_from_slice(b"\\N");
         }
+        
+        Value::Bytes(bytes) => {
+            // PostgreSQL bytea hex format: \x followed by hex digits
+            buf.extend_from_slice(b"\\\\x");
+            for byte in bytes {
+                // Format each byte as 2 hex digits
+                let hi = byte >> 4;
+                let lo = byte & 0x0f;
+                buf.extend_from_slice(&[
+                    if hi < 10 { b'0' + hi } else { b'a' + hi - 10 },
+                    if lo < 10 { b'0' + lo } else { b'a' + lo - 10 },
+                ]);
+            }
+        }
     }
 }
 

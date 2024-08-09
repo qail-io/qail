@@ -189,6 +189,16 @@ pub enum Operator {
     Exists,
     /// NOT EXISTS (subquery)
     NotExists,
+    /// Regular expression match (~ in Postgres)
+    Regex,
+    /// Case-insensitive regex (~* in Postgres)
+    RegexI,
+    /// SIMILAR TO pattern match
+    SimilarTo,
+    /// Array/JSON is contained by (<@)
+    ContainedBy,
+    /// Array overlap (&&)
+    Overlaps,
 }
 
 impl Operator {
@@ -221,6 +231,11 @@ impl Operator {
             Operator::NotBetween => "NOT BETWEEN",
             Operator::Exists => "EXISTS",
             Operator::NotExists => "NOT EXISTS",
+            Operator::Regex => "~",
+            Operator::RegexI => "~*",
+            Operator::SimilarTo => "SIMILAR TO",
+            Operator::ContainedBy => "<@",
+            Operator::Overlaps => "&&",
         }
     }
 
@@ -253,6 +268,18 @@ pub enum AggregateFunc {
     Avg,
     Min,
     Max,
+    /// ARRAY_AGG - collect values into array
+    ArrayAgg,
+    /// STRING_AGG - concatenate strings with delimiter
+    StringAgg,
+    /// JSON_AGG - aggregate values as JSON array
+    JsonAgg,
+    /// JSONB_AGG - aggregate values as JSONB array
+    JsonbAgg,
+    /// BOOL_AND - logical AND of all values
+    BoolAnd,
+    /// BOOL_OR - logical OR of all values
+    BoolOr,
 }
 
 impl std::fmt::Display for AggregateFunc {
@@ -263,6 +290,12 @@ impl std::fmt::Display for AggregateFunc {
             AggregateFunc::Avg => write!(f, "AVG"),
             AggregateFunc::Min => write!(f, "MIN"),
             AggregateFunc::Max => write!(f, "MAX"),
+            AggregateFunc::ArrayAgg => write!(f, "ARRAY_AGG"),
+            AggregateFunc::StringAgg => write!(f, "STRING_AGG"),
+            AggregateFunc::JsonAgg => write!(f, "JSON_AGG"),
+            AggregateFunc::JsonbAgg => write!(f, "JSONB_AGG"),
+            AggregateFunc::BoolAnd => write!(f, "BOOL_AND"),
+            AggregateFunc::BoolOr => write!(f, "BOOL_OR"),
         }
     }
 }

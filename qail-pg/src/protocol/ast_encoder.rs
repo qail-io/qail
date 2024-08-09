@@ -688,6 +688,11 @@ impl AstEncoder {
                 params.push(None);
                 write_param_placeholder(buf, params.len());  // ZERO ALLOCATION!
             }
+            Value::Bytes(bytes) => {
+                // Bytea - encode as raw bytes
+                params.push(Some(bytes.clone()));
+                write_param_placeholder(buf, params.len());  // ZERO ALLOCATION!
+            }
         }
     }
 
