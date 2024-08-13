@@ -277,6 +277,8 @@ pub enum Constraint {
     Check(Vec<String>),
     /// Column comment (COMMENT ON COLUMN)
     Comment(String),
+    /// Foreign key reference (REFERENCES table(column))
+    References(String),
     /// Generated column expression (GENERATED ALWAYS AS)
     Generated(ColumnGeneration),
 }
@@ -318,6 +320,7 @@ impl std::fmt::Display for Constraint {
             Constraint::Default(val) => write!(f, "={}", val),
             Constraint::Check(vals) => write!(f, "check({})", vals.join(",")),
             Constraint::Comment(text) => write!(f, "comment(\"{}\")", text),
+            Constraint::References(target) => write!(f, "ref({})", target),
             Constraint::Generated(generation) => match generation {
                 ColumnGeneration::Stored(expr) => write!(f, "gen({})", expr),
                 ColumnGeneration::Virtual(expr) => write!(f, "vgen({})", expr),
