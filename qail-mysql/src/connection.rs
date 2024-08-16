@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use bytes::BytesMut;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use rustls::ClientConfig;
@@ -96,7 +96,7 @@ impl MySqlConnection {
                 .with_no_client_auth();
             
             // For local MySQL, skip certificate verification
-            let mut config = ClientConfig::builder()
+            let config = ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
                 .with_no_client_auth();

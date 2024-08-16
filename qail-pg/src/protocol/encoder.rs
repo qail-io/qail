@@ -30,7 +30,7 @@ impl PgEncoder {
         let mut buf = BytesMut::new();
         
         // Message type 'Q' for Query
-        buf.extend_from_slice(&[b'Q']);
+        buf.extend_from_slice(b"Q");
         
         // Content: query string + null terminator
         let content_len = sql.len() + 1; // +1 for null terminator
@@ -77,7 +77,7 @@ impl PgEncoder {
         let mut buf = BytesMut::new();
         
         // Message type 'P'
-        buf.extend_from_slice(&[b'P']);
+        buf.extend_from_slice(b"P");
         
         // Build content first to calculate length
         let mut content = Vec::new();
@@ -121,7 +121,7 @@ impl PgEncoder {
         let mut buf = BytesMut::new();
         
         // Message type 'B'
-        buf.extend_from_slice(&[b'B']);
+        buf.extend_from_slice(b"B");
         
         // Build content
         let mut content = Vec::new();
@@ -176,7 +176,7 @@ impl PgEncoder {
         let mut buf = BytesMut::new();
         
         // Message type 'E'
-        buf.extend_from_slice(&[b'E']);
+        buf.extend_from_slice(b"E");
         
         // Build content
         let mut content = Vec::new();
@@ -207,7 +207,7 @@ impl PgEncoder {
         let mut buf = BytesMut::new();
         
         // Message type 'D'
-        buf.extend_from_slice(&[b'D']);
+        buf.extend_from_slice(b"D");
         
         // Build content
         let mut content = Vec::new();
@@ -245,7 +245,7 @@ impl PgEncoder {
         let mut buf = BytesMut::with_capacity(total_size);
         
         // ===== PARSE =====
-        buf.extend_from_slice(&[b'P']);
+        buf.extend_from_slice(b"P");
         let parse_len = (1 + sql.len() + 1 + 2 + 4) as i32; // name + sql + param_count
         buf.extend_from_slice(&parse_len.to_be_bytes());
         buf.extend_from_slice(&[0]); // Unnamed statement
@@ -254,7 +254,7 @@ impl PgEncoder {
         buf.extend_from_slice(&0i16.to_be_bytes()); // No param types (infer)
         
         // ===== BIND =====
-        buf.extend_from_slice(&[b'B']);
+        buf.extend_from_slice(b"B");
         let bind_len = (1 + 1 + 2 + 2 + params_size + 2 + 4) as i32;
         buf.extend_from_slice(&bind_len.to_be_bytes());
         buf.extend_from_slice(&[0]); // Unnamed portal
@@ -273,7 +273,7 @@ impl PgEncoder {
         buf.extend_from_slice(&0i16.to_be_bytes()); // Result format (default text)
         
         // ===== EXECUTE =====
-        buf.extend_from_slice(&[b'E']);
+        buf.extend_from_slice(b"E");
         buf.extend_from_slice(&9i32.to_be_bytes()); // len = 4 + 1 + 4
         buf.extend_from_slice(&[0]); // Unnamed portal
         buf.extend_from_slice(&0i32.to_be_bytes()); // Unlimited rows

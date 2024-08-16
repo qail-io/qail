@@ -227,8 +227,8 @@ fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
     };
     
     // Check for array suffix []
-    let (input, is_array) = if input.starts_with("[]") {
-        (&input[2..], true)
+    let (input, is_array) = if let Some(stripped) = input.strip_prefix("[]") {
+        (stripped, true)
     } else {
         (input, false)
     };

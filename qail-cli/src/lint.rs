@@ -114,7 +114,7 @@ pub fn lint_schema(schema_path: &str, strict: bool) -> Result<()> {
                     table: table.name.clone(),
                     column: Some(col.name.clone()),
                     message: "Possible FK column without references()".to_string(),
-                    suggestion: Some(format!("Consider adding '.references(\"table\", \"id\")' for referential integrity")),
+                    suggestion: Some("Consider adding '.references(\"table\", \"id\")' for referential integrity".to_string()),
                 });
             }
         }

@@ -200,14 +200,12 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
         let (input, _) = multispace0(input)?;
         let (input, _) = char(')').parse(input)?;
         (input, Value::Array(values))
+    } else if let Ok((i, val)) = parse_value(input) {
+        (i, val)
     } else {
-        if let Ok((i, val)) = parse_value(input) {
-            (i, val)
-        } else {
-            // Fallback: try parsing as identifier -> Value::Column
-            let (i, col_name) = parse_identifier(input)?;
-            (i, Value::Column(col_name.to_string()))
-        }
+        // Fallback: try parsing as identifier -> Value::Column
+        let (i, col_name) = parse_identifier(input)?;
+        (i, Value::Column(col_name.to_string()))
     };
     
     Ok((input, Condition {

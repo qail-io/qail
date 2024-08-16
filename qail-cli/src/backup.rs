@@ -76,11 +76,10 @@ async fn count_table_rows(driver: &mut PgDriver, table: &str) -> Result<u64> {
     let rows = driver.fetch_all(&cmd).await
         .map_err(|e| anyhow!("Failed to count rows: {}", e))?;
     
-    if let Some(row) = rows.first() {
-        if let Some(count_str) = row.get_string(0) {
+    if let Some(row) = rows.first()
+        && let Some(count_str) = row.get_string(0) {
             return Ok(count_str.parse().unwrap_or(0));
         }
-    }
     
     Ok(0)
 }
@@ -90,16 +89,15 @@ async fn count_column_values(driver: &mut PgDriver, table: &str, column: &str) -
     
     // SELECT COUNT(column) FROM table WHERE column IS NOT NULL
     let cmd = QailCmd::get(table)
-        .column(&format!("count({})", column));
+        .column(format!("count({})", column));
     
     let rows = driver.fetch_all(&cmd).await
         .map_err(|e| anyhow!("Failed to count column values: {}", e))?;
     
-    if let Some(row) = rows.first() {
-        if let Some(count_str) = row.get_string(0) {
+    if let Some(row) = rows.first()
+        && let Some(count_str) = row.get_string(0) {
             return Ok(count_str.parse().unwrap_or(0));
         }
-    }
     
     Ok(0)
 }

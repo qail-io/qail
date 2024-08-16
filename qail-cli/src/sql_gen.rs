@@ -112,11 +112,10 @@ pub fn generate_rollback_sql(cmd: &QailCmd) -> String {
         },
         Action::Alter => {
             // ADD COLUMN -> DROP COLUMN
-            if let Some(col) = cmd.columns.first() {
-                if let Expr::Def { name, .. } = col {
+            if let Some(col) = cmd.columns.first()
+                && let Expr::Def { name, .. } = col {
                     return format!("ALTER TABLE {} DROP COLUMN {}", cmd.table, name);
                 }
-            }
             format!("-- Cannot determine rollback for ALTER on {}", cmd.table)
         },
         Action::AlterDrop => {
@@ -130,10 +129,10 @@ pub fn generate_rollback_sql(cmd: &QailCmd) -> String {
             "-- Cannot determine index name for rollback".to_string()
         },
         Action::DropIndex => {
-            format!("-- Cannot auto-rollback DROP INDEX (need original definition)")
+            "-- Cannot auto-rollback DROP INDEX (need original definition)".to_string()
         },
         Action::Mod => {
-            format!("-- RENAME operation: reverse manually")
+            "-- RENAME operation: reverse manually".to_string()
         },
         Action::AlterType => {
             // ALTER COLUMN TYPE -> cannot easily reverse (may lose data)

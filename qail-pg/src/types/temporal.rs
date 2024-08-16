@@ -93,11 +93,11 @@ fn parse_timestamp_text(s: &str) -> Result<Timestamp, TypeError> {
     let time_str = parts[1].trim_end_matches(|c: char| c == '+' || c == '-' || c.is_ascii_digit() || c == ':');
     let time_parts: Vec<&str> = time_str.split(':').collect();
     
-    let hour: i32 = time_parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let hour: i32 = time_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minute: i32 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let second_str = time_parts.get(2).unwrap_or(&"0");
     let sec_parts: Vec<&str> = second_str.split('.').collect();
-    let second: i32 = sec_parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let second: i32 = sec_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
     let usec: i64 = sec_parts.get(1)
         .map(|s| {
             let padded = format!("{:0<6}", s);

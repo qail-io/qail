@@ -11,9 +11,9 @@ pub trait ExprExt {
     /// 
     /// # Example
     /// ```ignore
-    /// col("name").as_alias("user_name")
+    /// col("name").with_alias("user_name")
     /// ```
-    fn as_alias(self, alias: &str) -> Expr;
+    fn with_alias(self, alias: &str) -> Expr;
     
     /// COALESCE with a default value.
     /// 
@@ -41,7 +41,7 @@ pub trait ExprExt {
 }
 
 impl ExprExt for Expr {
-    fn as_alias(self, alias: &str) -> Expr {
+    fn with_alias(self, alias: &str) -> Expr {
         match self {
             Expr::Named(name) => Expr::Aliased { name, alias: alias.to_string() },
             Expr::Aggregate { col, func, distinct, filter, .. } => {
@@ -113,7 +113,7 @@ impl ExprExt for Expr {
 
 // Implement ExprExt for &str to enable: "col_name".or_default("X")
 impl ExprExt for &str {
-    fn as_alias(self, alias: &str) -> Expr {
+    fn with_alias(self, alias: &str) -> Expr {
         Expr::Aliased { name: self.to_string(), alias: alias.to_string() }
     }
     

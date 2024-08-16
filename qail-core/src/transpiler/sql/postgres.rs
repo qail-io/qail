@@ -4,6 +4,12 @@ use crate::transpiler::escape_identifier;
 /// PostgreSQL Generator (Default).
 pub struct PostgresGenerator;
 
+impl Default for PostgresGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PostgresGenerator {
     pub fn new() -> Self {
         Self

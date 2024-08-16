@@ -90,13 +90,13 @@ impl MigrationImpact {
             match cmd.action {
                 Action::Drop => {
                     // Table being dropped
-                    if let Some(refs) = table_refs.get(&cmd.table) {
-                        if !refs.is_empty() {
-                            impact.breaking_changes.push(BreakingChange::DroppedTable {
-                                table: cmd.table.clone(),
-                                references: refs.iter().map(|r| (*r).clone()).collect(),
-                            });
-                        }
+                    if let Some(refs) = table_refs.get(&cmd.table)
+                        && !refs.is_empty() 
+                    {
+                        impact.breaking_changes.push(BreakingChange::DroppedTable {
+                            table: cmd.table.clone(),
+                            references: refs.iter().map(|r| (*r).clone()).collect(),
+                        });
                     }
                 },
                 Action::AlterDrop => {
@@ -104,14 +104,14 @@ impl MigrationImpact {
                     for col_expr in &cmd.columns {
                         if let crate::ast::Expr::Named(col_name) = col_expr {
                             let key = (cmd.table.clone(), col_name.clone());
-                            if let Some(refs) = column_refs.get(&key) {
-                                if !refs.is_empty() {
-                                    impact.breaking_changes.push(BreakingChange::DroppedColumn {
-                                        table: cmd.table.clone(),
-                                        column: col_name.clone(),
-                                        references: refs.iter().map(|r| (*r).clone()).collect(),
-                                    });
-                                }
+                            if let Some(refs) = column_refs.get(&key)
+                                && !refs.is_empty() 
+                            {
+                                impact.breaking_changes.push(BreakingChange::DroppedColumn {
+                                    table: cmd.table.clone(),
+                                    column: col_name.clone(),
+                                    references: refs.iter().map(|r| (*r).clone()).collect(),
+                                });
                             }
                         }
                     }
@@ -120,15 +120,15 @@ impl MigrationImpact {
                     // Rename operation - check for references to old name
                     // Would need to parse the rename details from the command
                     // For now, flag any table with Mod action
-                    if let Some(refs) = table_refs.get(&cmd.table) {
-                        if !refs.is_empty() {
-                            impact.breaking_changes.push(BreakingChange::RenamedColumn {
-                                table: cmd.table.clone(),
-                                old_name: "unknown".to_string(),
-                                new_name: "unknown".to_string(),
-                                references: refs.iter().map(|r| (*r).clone()).collect(),
-                            });
-                        }
+                    if let Some(refs) = table_refs.get(&cmd.table)
+                        && !refs.is_empty() 
+                    {
+                        impact.breaking_changes.push(BreakingChange::RenamedColumn {
+                            table: cmd.table.clone(),
+                            old_name: "unknown".to_string(),
+                            new_name: "unknown".to_string(),
+                            references: refs.iter().map(|r| (*r).clone()).collect(),
+                        });
                     }
                 },
                 _ => {}

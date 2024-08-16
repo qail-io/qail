@@ -17,19 +17,18 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
     for hint in &new.migrations {
         match hint {
             MigrationHint::Rename { from, to } => {
-                // Parse "table.column" format
+                // Parse "table.column" format and collapse if same table
                 if let (Some((from_table, from_col)), Some((to_table, to_col))) = 
                     (parse_table_col(from), parse_table_col(to)) 
+                    && from_table == to_table 
                 {
-                    if from_table == to_table {
-                        // Same table rename - use ALTER TABLE RENAME COLUMN
-                        cmds.push(QailCmd {
-                            action: Action::Mod,
-                            table: from_table.to_string(),
-                            columns: vec![Expr::Named(format!("{} -> {}", from_col, to_col))],
-                            ..Default::default()
-                        });
-                    }
+                    // Same table rename - use ALTER TABLE RENAME COLUMN
+                    cmds.push(QailCmd {
+                        action: Action::Mod,
+                        table: from_table.to_string(),
+                        columns: vec![Expr::Named(format!("{} -> {}", from_col, to_col))],
+                        ..Default::default()
+                    });
                 }
             }
             MigrationHint::Transform { expression, target } => {

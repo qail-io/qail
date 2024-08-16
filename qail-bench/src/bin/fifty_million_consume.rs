@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         
-        if successful_queries % 1_000_000 == 0 || last_report.elapsed().as_secs() >= 5 {
+        if successful_queries.is_multiple_of(1_000_000) || last_report.elapsed().as_secs() >= 5 {
             let elapsed = start.elapsed();
             let qps = successful_queries as f64 / elapsed.as_secs_f64();
             let remaining = TOTAL_QUERIES - successful_queries;

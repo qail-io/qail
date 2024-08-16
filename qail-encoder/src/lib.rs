@@ -14,7 +14,7 @@ use qail_core::transpiler::ToSql;
 use std::cell::RefCell;
 
 thread_local! {
-    static LAST_ERROR: RefCell<Option<String>> = RefCell::new(None);
+    static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn set_error(msg: String) {
@@ -282,7 +282,7 @@ pub extern "C" fn qail_free_bytes(ptr: *mut u8, len: usize) {
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_last_error() -> *const c_char {
     thread_local! {
-        static ERROR_CSTRING: RefCell<Option<CString>> = RefCell::new(None);
+        static ERROR_CSTRING: RefCell<Option<CString>> = const { RefCell::new(None) };
     }
     
     LAST_ERROR.with(|e| {
@@ -807,7 +807,6 @@ pub extern "C" fn qail_response_free(handle: *mut QailResponse) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
 
     #[test]
     fn test_version() {

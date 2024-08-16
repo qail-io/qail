@@ -18,7 +18,7 @@ pub fn escape_identifier(name: &str) -> String {
     if name.contains('.') {
         return name
             .split('.')
-            .map(|part| escape_single_identifier(part))
+            .map(escape_single_identifier)
             .collect::<Vec<_>>()
             .join(".");
     }
