@@ -77,7 +77,7 @@ impl PgConnection {
     /// # Format
     /// Data should be tab-separated rows with newlines:
     /// `1\thello\t3.14\n2\tworld\t2.71\n`
-    pub(crate) async fn copy_in_raw(
+    pub async fn copy_in_raw(
         &mut self,
         table: &str,
         columns: &[String],

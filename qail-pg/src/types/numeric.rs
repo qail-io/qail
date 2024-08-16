@@ -107,11 +107,11 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<Numeric, TypeError> {
 
     // Integer part
     let int_digits = (weight + 1) as usize;
-    for i in 0..int_digits.min(ndigits) {
+    for (i, digit) in digits.iter().enumerate().take(int_digits.min(ndigits)) {
         if i == 0 {
-            result.push_str(&digits[i].to_string());
+            result.push_str(&digit.to_string());
         } else {
-            result.push_str(&format!("{:04}", digits[i]));
+            result.push_str(&format!("{:04}", digit));
         }
     }
     // Pad with zeros if weight > ndigits
@@ -128,8 +128,8 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<Numeric, TypeError> {
         result.push('.');
         let start = int_digits.max(0);
         let mut decimal_digits = 0;
-        for i in start..ndigits {
-            let s = format!("{:04}", digits[i]);
+        for digit in digits.iter().skip(start) {
+            let s = format!("{:04}", digit);
             for c in s.chars() {
                 if decimal_digits >= dscale {
                     break;

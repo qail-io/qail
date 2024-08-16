@@ -8,6 +8,9 @@
 //! NO I/O, NO TLS, NO async - just pure encoding.
 //! Languages handle their own I/O (Zig, Go, etc.)
 
+// FFI functions check pointers before dereferencing, clippy doesn't understand this pattern
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use qail_core::transpiler::ToSql;
@@ -350,10 +353,7 @@ pub extern "C" fn qail_encode_parse(
     let name_str = if name.is_null() {
         ""
     } else {
-        match unsafe { CStr::from_ptr(name) }.to_str() {
-            Ok(s) => s,
-            Err(_) => "",
-        }
+        unsafe { CStr::from_ptr(name) }.to_str().unwrap_or_default()
     };
     
     let sql_str = match unsafe { CStr::from_ptr(sql) }.to_str() {
@@ -432,10 +432,7 @@ pub extern "C" fn qail_encode_bind_execute_batch(
         return -1;
     }
     
-    let stmt_str = match unsafe { CStr::from_ptr(statement) }.to_str() {
-        Ok(s) => s,
-        Err(_) => "",
-    };
+    let stmt_str = unsafe { CStr::from_ptr(statement) }.to_str().unwrap_or_default();
     
     // Collect params
     let param_strs: Vec<&str> = if params.is_null() || params_count == 0 {
