@@ -7,10 +7,7 @@
 #[derive(Debug, Clone)]
 pub enum FrontendMessage {
     /// Startup message (sent first, no type byte)
-    Startup {
-        user: String,
-        database: String,
-    },
+    Startup { user: String, database: String },
     /// Password response
     PasswordMessage(String),
     /// Simple query
@@ -28,19 +25,13 @@ pub enum FrontendMessage {
         params: Vec<Option<Vec<u8>>>,
     },
     /// Execute portal
-    Execute {
-        portal: String,
-        max_rows: i32,
-    },
+    Execute { portal: String, max_rows: i32 },
     /// Sync (end of pipeline)
     Sync,
     /// Terminate connection
     Terminate,
     /// SASL initial response (first message in SCRAM)
-    SASLInitialResponse {
-        mechanism: String,
-        data: Vec<u8>,
-    },
+    SASLInitialResponse { mechanism: String, data: Vec<u8> },
     /// SASL response (subsequent messages in SCRAM)
     SASLResponse(Vec<u8>),
 }
@@ -55,9 +46,15 @@ pub enum BackendMessage {
     AuthenticationSASLContinue(Vec<u8>),
     AuthenticationSASLFinal(Vec<u8>),
     /// Parameter status (server config)
-    ParameterStatus { name: String, value: String },
+    ParameterStatus {
+        name: String,
+        value: String,
+    },
     /// Backend key data (for cancel)
-    BackendKeyData { process_id: i32, secret_key: i32 },
+    BackendKeyData {
+        process_id: i32,
+        secret_key: i32,
+    },
     /// Ready for query
     ReadyForQuery(TransactionStatus),
     /// Row description
@@ -75,17 +72,23 @@ pub enum BackendMessage {
     /// No data
     NoData,
     /// Copy in response (server ready to receive COPY data)
-    CopyInResponse { format: u8, column_formats: Vec<u8> },
+    CopyInResponse {
+        format: u8,
+        column_formats: Vec<u8>,
+    },
     /// Copy out response (server will send COPY data)
-    CopyOutResponse { format: u8, column_formats: Vec<u8> },
+    CopyOutResponse {
+        format: u8,
+        column_formats: Vec<u8>,
+    },
     /// Copy data (row data during COPY)
     CopyData(Vec<u8>),
     /// Copy done (end of COPY data)
     CopyDone,
     /// Notification response (async notification from LISTEN/NOTIFY)
-    NotificationResponse { 
-        process_id: i32, 
-        channel: String, 
+    NotificationResponse {
+        process_id: i32,
+        channel: String,
         payload: String,
     },
     /// Empty query response
@@ -97,9 +100,9 @@ pub enum BackendMessage {
 /// Transaction status
 #[derive(Debug, Clone, Copy)]
 pub enum TransactionStatus {
-    Idle,       // 'I'
-    InBlock,    // 'T'
-    Failed,     // 'E'
+    Idle,    // 'I'
+    InBlock, // 'T'
+    Failed,  // 'E'
 }
 
 /// Field description in RowDescription
@@ -140,7 +143,7 @@ impl FrontendMessage {
                 buf.extend_from_slice(database.as_bytes());
                 buf.push(0);
                 buf.push(0); // Terminator
-                
+
                 // Prepend length (includes length itself)
                 let len = (buf.len() + 4) as i32;
                 let mut result = len.to_be_bytes().to_vec();
@@ -162,14 +165,14 @@ impl FrontendMessage {
             FrontendMessage::SASLInitialResponse { mechanism, data } => {
                 let mut buf = Vec::new();
                 buf.push(b'p'); // SASLInitialResponse uses 'p'
-                
+
                 // Build content
                 let mut content = Vec::new();
                 content.extend_from_slice(mechanism.as_bytes());
                 content.push(0); // null-terminated mechanism
                 content.extend_from_slice(&(data.len() as i32).to_be_bytes());
                 content.extend_from_slice(data);
-                
+
                 let len = (content.len() + 4) as i32;
                 buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(&content);
@@ -178,7 +181,7 @@ impl FrontendMessage {
             FrontendMessage::SASLResponse(data) => {
                 let mut buf = Vec::new();
                 buf.push(b'p'); // SASLResponse also uses 'p'
-                
+
                 let len = (data.len() + 4) as i32;
                 buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(data);
@@ -197,16 +200,16 @@ impl BackendMessage {
         if buf.len() < 5 {
             return Err("Buffer too short".to_string());
         }
-        
+
         let msg_type = buf[0];
         let len = i32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-        
+
         if buf.len() < len + 1 {
             return Err("Incomplete message".to_string());
         }
-        
+
         let payload = &buf[5..len + 1];
-        
+
         let message = match msg_type {
             b'R' => Self::decode_auth(payload)?,
             b'S' => Self::decode_parameter_status(payload)?,
@@ -228,10 +231,10 @@ impl BackendMessage {
             b'N' => BackendMessage::NoticeResponse(Self::parse_error_fields(payload)?),
             _ => return Err(format!("Unknown message type: {}", msg_type as char)),
         };
-        
+
         Ok((message, len + 1))
     }
-    
+
     fn decode_auth(payload: &[u8]) -> Result<Self, String> {
         let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         match auth_type {
@@ -245,7 +248,8 @@ impl BackendMessage {
                 let mut mechanisms = Vec::new();
                 let mut pos = 4;
                 while pos < payload.len() && payload[pos] != 0 {
-                    let end = payload[pos..].iter()
+                    let end = payload[pos..]
+                        .iter()
                         .position(|&b| b == 0)
                         .map(|p| pos + p)
                         .unwrap_or(payload.len());
@@ -256,16 +260,20 @@ impl BackendMessage {
             }
             11 => {
                 // SASL Continue - server challenge
-                Ok(BackendMessage::AuthenticationSASLContinue(payload[4..].to_vec()))
+                Ok(BackendMessage::AuthenticationSASLContinue(
+                    payload[4..].to_vec(),
+                ))
             }
             12 => {
                 // SASL Final - server signature
-                Ok(BackendMessage::AuthenticationSASLFinal(payload[4..].to_vec()))
+                Ok(BackendMessage::AuthenticationSASLFinal(
+                    payload[4..].to_vec(),
+                ))
             }
             _ => Err(format!("Unknown auth type: {}", auth_type)),
         }
     }
-    
+
     fn decode_parameter_status(payload: &[u8]) -> Result<Self, String> {
         let parts: Vec<&[u8]> = payload.split(|&b| b == 0).collect();
         let empty: &[u8] = b"";
@@ -274,14 +282,14 @@ impl BackendMessage {
             value: String::from_utf8_lossy(parts.get(1).unwrap_or(&empty)).to_string(),
         })
     }
-    
+
     fn decode_backend_key(payload: &[u8]) -> Result<Self, String> {
         Ok(BackendMessage::BackendKeyData {
             process_id: i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]),
             secret_key: i32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]),
         })
     }
-    
+
     fn decode_ready_for_query(payload: &[u8]) -> Result<Self, String> {
         let status = match payload[0] {
             b'I' => TransactionStatus::Idle,
@@ -291,53 +299,63 @@ impl BackendMessage {
         };
         Ok(BackendMessage::ReadyForQuery(status))
     }
-    
+
     fn decode_row_description(payload: &[u8]) -> Result<Self, String> {
         if payload.len() < 2 {
             return Err("RowDescription payload too short".to_string());
         }
-        
+
         let field_count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
         let mut fields = Vec::with_capacity(field_count);
         let mut pos = 2;
-        
+
         for _ in 0..field_count {
             // Field name (null-terminated string)
-            let name_end = payload[pos..].iter()
+            let name_end = payload[pos..]
+                .iter()
                 .position(|&b| b == 0)
                 .ok_or("Missing null terminator in field name")?;
             let name = String::from_utf8_lossy(&payload[pos..pos + name_end]).to_string();
             pos += name_end + 1; // Skip null terminator
-            
+
             // Ensure we have enough bytes for the fixed fields
             if pos + 18 > payload.len() {
                 return Err("RowDescription field truncated".to_string());
             }
-            
+
             let table_oid = u32::from_be_bytes([
-                payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]
+                payload[pos],
+                payload[pos + 1],
+                payload[pos + 2],
+                payload[pos + 3],
             ]);
             pos += 4;
-            
+
             let column_attr = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
             pos += 2;
-            
+
             let type_oid = u32::from_be_bytes([
-                payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]
+                payload[pos],
+                payload[pos + 1],
+                payload[pos + 2],
+                payload[pos + 3],
             ]);
             pos += 4;
-            
+
             let type_size = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
             pos += 2;
-            
+
             let type_modifier = i32::from_be_bytes([
-                payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]
+                payload[pos],
+                payload[pos + 1],
+                payload[pos + 2],
+                payload[pos + 3],
             ]);
             pos += 4;
-            
+
             let format = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
             pos += 2;
-            
+
             fields.push(FieldDescription {
                 name,
                 table_oid,
@@ -348,29 +366,32 @@ impl BackendMessage {
                 format,
             });
         }
-        
+
         Ok(BackendMessage::RowDescription(fields))
     }
-    
+
     fn decode_data_row(payload: &[u8]) -> Result<Self, String> {
         if payload.len() < 2 {
             return Err("DataRow payload too short".to_string());
         }
-        
+
         let column_count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
         let mut columns = Vec::with_capacity(column_count);
         let mut pos = 2;
-        
+
         for _ in 0..column_count {
             if pos + 4 > payload.len() {
                 return Err("DataRow truncated".to_string());
             }
-            
+
             let len = i32::from_be_bytes([
-                payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]
+                payload[pos],
+                payload[pos + 1],
+                payload[pos + 2],
+                payload[pos + 3],
             ]);
             pos += 4;
-            
+
             if len == -1 {
                 // NULL value
                 columns.push(None);
@@ -384,17 +405,21 @@ impl BackendMessage {
                 columns.push(Some(data));
             }
         }
-        
+
         Ok(BackendMessage::DataRow(columns))
     }
-    
+
     fn decode_command_complete(payload: &[u8]) -> Result<Self, String> {
-        let tag = String::from_utf8_lossy(payload).trim_end_matches('\0').to_string();
+        let tag = String::from_utf8_lossy(payload)
+            .trim_end_matches('\0')
+            .to_string();
         Ok(BackendMessage::CommandComplete(tag))
     }
-    
+
     fn decode_error_response(payload: &[u8]) -> Result<Self, String> {
-        Ok(BackendMessage::ErrorResponse(Self::parse_error_fields(payload)?))
+        Ok(BackendMessage::ErrorResponse(Self::parse_error_fields(
+            payload,
+        )?))
     }
 
     fn parse_error_fields(payload: &[u8]) -> Result<ErrorFields, String> {
@@ -406,7 +431,7 @@ impl BackendMessage {
             let end = payload[i..].iter().position(|&b| b == 0).unwrap_or(0) + i;
             let value = String::from_utf8_lossy(&payload[i..end]).to_string();
             i = end + 1;
-            
+
             match field_type {
                 b'S' => fields.severity = value,
                 b'C' => fields.code = value,
@@ -434,7 +459,10 @@ impl BackendMessage {
         } else {
             vec![]
         };
-        Ok(BackendMessage::CopyInResponse { format, column_formats })
+        Ok(BackendMessage::CopyInResponse {
+            format,
+            column_formats,
+        })
     }
 
     fn decode_copy_out_response(payload: &[u8]) -> Result<Self, String> {
@@ -452,7 +480,10 @@ impl BackendMessage {
         } else {
             vec![]
         };
-        Ok(BackendMessage::CopyOutResponse { format, column_formats })
+        Ok(BackendMessage::CopyOutResponse {
+            format,
+            column_formats,
+        })
     }
 
     fn decode_notification_response(payload: &[u8]) -> Result<Self, String> {
@@ -460,17 +491,17 @@ impl BackendMessage {
             return Err("NotificationResponse too short".to_string());
         }
         let process_id = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-        
+
         // Channel name (null-terminated)
         let mut i = 4;
         let channel_end = payload[i..].iter().position(|&b| b == 0).unwrap_or(0) + i;
         let channel = String::from_utf8_lossy(&payload[i..channel_end]).to_string();
         i = channel_end + 1;
-        
+
         // Payload (null-terminated)
         let payload_end = payload[i..].iter().position(|&b| b == 0).unwrap_or(0) + i;
         let notification_payload = String::from_utf8_lossy(&payload[i..payload_end]).to_string();
-        
+
         Ok(BackendMessage::NotificationResponse {
             process_id,
             channel,

@@ -14,8 +14,8 @@
 //! rename users.username -> users.name
 //! ```
 
-use std::collections::HashMap;
 use super::types::ColumnType;
+use std::collections::HashMap;
 
 /// A complete database schema.
 #[derive(Debug, Clone, Default)]
@@ -100,13 +100,13 @@ impl Schema {
     pub fn add_hint(&mut self, hint: MigrationHint) {
         self.migrations.push(hint);
     }
-    
+
     /// Validate all foreign key references in the schema.
-    /// 
+    ///
     /// Returns a list of validation errors if any references are invalid.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
-        
+
         for table in self.tables.values() {
             for col in &table.columns {
                 if let Some(ref fk) = col.foreign_key {
@@ -129,8 +129,12 @@ impl Schema {
                 }
             }
         }
-        
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }
 
@@ -168,7 +172,7 @@ impl Column {
     }
 
     /// Set as primary key with compile-time validation.
-    /// 
+    ///
     /// Validates that the column type can be a primary key.
     /// Panics at runtime if type doesn't support PK (caught in tests).
     pub fn primary_key(mut self) -> Self {
@@ -186,7 +190,7 @@ impl Column {
     }
 
     /// Set as unique with compile-time validation.
-    /// 
+    ///
     /// Validates that the column type supports indexing.
     pub fn unique(mut self) -> Self {
         if !self.data_type.supports_indexing() {
@@ -205,9 +209,9 @@ impl Column {
         self.default = Some(val.into());
         self
     }
-    
+
     /// Add a foreign key reference to another table.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// Column::new("user_id", ColumnType::Uuid)
@@ -223,7 +227,7 @@ impl Column {
         });
         self
     }
-    
+
     /// Set the ON DELETE action for the foreign key.
     pub fn on_delete(mut self, action: FkAction) -> Self {
         if let Some(ref mut fk) = self.foreign_key {
@@ -231,7 +235,7 @@ impl Column {
         }
         self
     }
-    
+
     /// Set the ON UPDATE action for the foreign key.
     pub fn on_update(mut self, action: FkAction) -> Self {
         if let Some(ref mut fk) = self.foreign_key {
@@ -281,14 +285,19 @@ pub fn to_qail_string(schema: &Schema) -> String {
             if let Some(ref fk) = col.foreign_key {
                 constraints.push(format!("references {}({})", fk.table, fk.column));
             }
-            
+
             let constraint_str = if constraints.is_empty() {
                 String::new()
             } else {
                 format!(" {}", constraints.join(" "))
             };
-            
-            output.push_str(&format!("  {} {}{}\n", col.name, col.data_type.to_pg_type(), constraint_str));
+
+            output.push_str(&format!(
+                "  {} {}{}\n",
+                col.name,
+                col.data_type.to_pg_type(),
+                constraint_str
+            ));
         }
         output.push_str("}\n\n");
     }
@@ -329,15 +338,15 @@ mod tests {
     #[test]
     fn test_schema_builder() {
         let mut schema = Schema::new();
-        
+
         let users = Table::new("users")
             .column(Column::new("id", ColumnType::Serial).primary_key())
             .column(Column::new("name", ColumnType::Text).not_null())
             .column(Column::new("email", ColumnType::Text).unique());
-        
+
         schema.add_table(users);
         schema.add_index(Index::new("idx_users_email", "users", vec!["email".into()]).unique());
-        
+
         let output = to_qail_string(&schema);
         assert!(output.contains("table users"));
         assert!(output.contains("id SERIAL primary_key"));
@@ -351,74 +360,84 @@ mod tests {
             from: "users.username".into(),
             to: "users.name".into(),
         });
-        
+
         let output = to_qail_string(&schema);
         assert!(output.contains("rename users.username -> users.name"));
     }
-    
+
     #[test]
     #[should_panic(expected = "cannot be a primary key")]
     fn test_invalid_primary_key_type() {
         // TEXT cannot be a primary key
         Column::new("data", ColumnType::Text).primary_key();
     }
-    
+
     #[test]
     #[should_panic(expected = "cannot have UNIQUE")]
     fn test_invalid_unique_type() {
         // JSONB cannot have standard unique index
         Column::new("data", ColumnType::Jsonb).unique();
     }
-    
+
     #[test]
     fn test_foreign_key_valid() {
         let mut schema = Schema::new();
-        
+
         // Add users table first
-        schema.add_table(Table::new("users")
-            .column(Column::new("id", ColumnType::Uuid).primary_key()));
-        
+        schema.add_table(
+            Table::new("users").column(Column::new("id", ColumnType::Uuid).primary_key()),
+        );
+
         // Add posts with valid FK to users
-        schema.add_table(Table::new("posts")
-            .column(Column::new("id", ColumnType::Uuid).primary_key())
-            .column(Column::new("user_id", ColumnType::Uuid)
-                .references("users", "id")
-                .on_delete(FkAction::Cascade)));
-        
+        schema.add_table(
+            Table::new("posts")
+                .column(Column::new("id", ColumnType::Uuid).primary_key())
+                .column(
+                    Column::new("user_id", ColumnType::Uuid)
+                        .references("users", "id")
+                        .on_delete(FkAction::Cascade),
+                ),
+        );
+
         // Should pass validation
         assert!(schema.validate().is_ok());
     }
-    
+
     #[test]
     fn test_foreign_key_invalid_table() {
         let mut schema = Schema::new();
-        
+
         // Add posts with FK to non-existent table
-        schema.add_table(Table::new("posts")
-            .column(Column::new("id", ColumnType::Uuid).primary_key())
-            .column(Column::new("user_id", ColumnType::Uuid)
-                .references("nonexistent", "id")));
-        
+        schema.add_table(
+            Table::new("posts")
+                .column(Column::new("id", ColumnType::Uuid).primary_key())
+                .column(Column::new("user_id", ColumnType::Uuid).references("nonexistent", "id")),
+        );
+
         // Should fail validation
         let result = schema.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err()[0].contains("non-existent table"));
     }
-    
+
     #[test]
     fn test_foreign_key_invalid_column() {
         let mut schema = Schema::new();
-        
+
         // Add users table
-        schema.add_table(Table::new("users")
-            .column(Column::new("id", ColumnType::Uuid).primary_key()));
-        
+        schema.add_table(
+            Table::new("users").column(Column::new("id", ColumnType::Uuid).primary_key()),
+        );
+
         // Add posts with FK to non-existent column
-        schema.add_table(Table::new("posts")
-            .column(Column::new("id", ColumnType::Uuid).primary_key())
-            .column(Column::new("user_id", ColumnType::Uuid)
-                .references("users", "wrong_column")));
-        
+        schema.add_table(
+            Table::new("posts")
+                .column(Column::new("id", ColumnType::Uuid).primary_key())
+                .column(
+                    Column::new("user_id", ColumnType::Uuid).references("users", "wrong_column"),
+                ),
+        );
+
         // Should fail validation
         let result = schema.validate();
         assert!(result.is_err());

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::ast::{AggregateFunc, Cage, Condition, ModKind, Value};
+use serde::{Deserialize, Serialize};
 
 /// Binary operators for expressions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,10 +63,7 @@ pub enum Expr {
         constraints: Vec<Constraint>,
     },
     /// Column Modification (for Mod keys)
-    Mod {
-        kind: ModKind,
-        col: Box<Expr>,
-    },
+    Mod { kind: ModKind, col: Box<Expr> },
     /// Window Function Definition
     Window {
         name: String,
@@ -134,21 +131,39 @@ impl std::fmt::Display for Expr {
             Expr::Star => write!(f, "*"),
             Expr::Named(name) => write!(f, "{}", name),
             Expr::Aliased { name, alias } => write!(f, "{} AS {}", name, alias),
-            Expr::Aggregate { col, func, distinct, filter, alias } => {
+            Expr::Aggregate {
+                col,
+                func,
+                distinct,
+                filter,
+                alias,
+            } => {
                 if *distinct {
                     write!(f, "{}(DISTINCT {})", func, col)?;
                 } else {
                     write!(f, "{}({})", func, col)?;
                 }
                 if let Some(conditions) = filter {
-                    write!(f, " FILTER (WHERE {})", conditions.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" AND "))?;
+                    write!(
+                        f,
+                        " FILTER (WHERE {})",
+                        conditions
+                            .iter()
+                            .map(|c| c.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" AND ")
+                    )?;
                 }
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }
                 Ok(())
             }
-            Expr::Cast { expr, target_type, alias } => {
+            Expr::Cast {
+                expr,
+                target_type,
+                alias,
+            } => {
                 write!(f, "{}::{}", expr, target_type)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
@@ -170,19 +185,30 @@ impl std::fmt::Display for Expr {
                 ModKind::Add => write!(f, "+{}", col),
                 ModKind::Drop => write!(f, "-{}", col),
             },
-            Expr::Window { name, func, params, partition, order, frame } => {
+            Expr::Window {
+                name,
+                func,
+                params,
+                partition,
+                order,
+                frame,
+            } => {
                 write!(f, "{}:{}(", name, func)?;
                 for (i, p) in params.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", p)?;
                 }
                 write!(f, ")")?;
-                
+
                 // Print partitions if any
                 if !partition.is_empty() {
                     write!(f, "{{Part=")?;
                     for (i, p) in partition.iter().enumerate() {
-                        if i > 0 { write!(f, ",")?; }
+                        if i > 0 {
+                            write!(f, ",")?;
+                        }
                         write!(f, "{}", p)?;
                     }
                     if let Some(fr) = frame {
@@ -190,7 +216,7 @@ impl std::fmt::Display for Expr {
                     }
                     write!(f, "}}")?;
                 } else if frame.is_some() {
-                     write!(f, "{{Frame={:?}}}", frame.as_ref().unwrap())?;
+                    write!(f, "{{Frame={:?}}}", frame.as_ref().unwrap())?;
                 }
 
                 // Print order cages
@@ -199,7 +225,11 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::Case { when_clauses, else_value, alias } => {
+            Expr::Case {
+                when_clauses,
+                else_value,
+                alias,
+            } => {
                 write!(f, "CASE")?;
                 for (cond, val) in when_clauses {
                     write!(f, " WHEN {} THEN {}", cond.left, val)?;
@@ -213,7 +243,11 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::JsonAccess { column, path_segments, alias } => {
+            Expr::JsonAccess {
+                column,
+                path_segments,
+                alias,
+            } => {
                 write!(f, "{}", column)?;
                 for (path, as_text) in path_segments {
                     let op = if *as_text { "->>" } else { "->" };
@@ -241,7 +275,9 @@ impl std::fmt::Display for Expr {
             Expr::SpecialFunction { name, args, alias } => {
                 write!(f, "{}(", name.to_uppercase())?;
                 for (i, (keyword, expr)) in args.iter().enumerate() {
-                    if i > 0 { write!(f, " ")?; }
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
                     if let Some(kw) = keyword {
                         write!(f, "{} ", kw)?;
                     }
@@ -253,7 +289,12 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::Binary { left, op, right, alias } => {
+            Expr::Binary {
+                left,
+                op,
+                right,
+                alias,
+            } => {
                 write!(f, "({} {} {})", left, op, right)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
@@ -372,4 +413,3 @@ impl From<&String> for Expr {
         Expr::Named(s.clone())
     }
 }
-

@@ -1,7 +1,7 @@
 //! Row wrapper for PostgreSQL query results.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyString, PyBool};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyString};
 use qail_pg::PgRow;
 
 /// Python-exposed Row from query results.
@@ -26,7 +26,7 @@ impl PyRow {
             Ok(py.None())
         }
     }
-    
+
     /// Get column value by name.
     fn get_by_name(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         if let Some(col_info) = &self.inner.column_info {
@@ -36,11 +36,11 @@ impl PyRow {
         }
         Ok(py.None())
     }
-    
+
     /// Convert row to Python dict.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
-        
+
         if let Some(col_info) = &self.inner.column_info {
             for (name, &idx) in col_info.name_to_index.iter() {
                 if let Some(value) = self.inner.columns.get(idx) {
@@ -48,10 +48,10 @@ impl PyRow {
                 }
             }
         }
-        
+
         Ok(dict.unbind().into_any())
     }
-    
+
     /// Support row[index] and row["column_name"] syntax.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(idx) = key.extract::<usize>() {
@@ -62,12 +62,12 @@ impl PyRow {
             Ok(py.None())
         }
     }
-    
+
     /// Number of columns.
     fn __len__(&self) -> usize {
         self.inner.columns.len()
     }
-    
+
     fn __repr__(&self) -> String {
         format!("Row({} columns)", self.inner.columns.len())
     }
@@ -88,19 +88,19 @@ fn pg_value_to_py(py: Python<'_>, value: &Option<Vec<u8>>) -> Py<PyAny> {
                     let obj = PyBool::new(py, false);
                     return obj.to_owned().unbind().into_any();
                 }
-                
+
                 // Try integer - use into_pyobject with owned binding
                 if let Ok(i) = s.parse::<i64>() {
                     let bound = i.into_pyobject(py).unwrap();
                     return bound.unbind().into_any();
                 }
-                
+
                 // Try float
                 if let Ok(f) = s.parse::<f64>() {
                     let bound = f.into_pyobject(py).unwrap();
                     return bound.unbind().into_any();
                 }
-                
+
                 // Return as string
                 PyString::new(py, s).unbind().into_any()
             } else {

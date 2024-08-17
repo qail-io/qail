@@ -8,7 +8,8 @@ use super::PgRow;
 impl PgRow {
     /// Get a column value as String.
     pub fn get_string(&self, idx: usize) -> Option<String> {
-        self.columns.get(idx)?
+        self.columns
+            .get(idx)?
             .as_ref()
             .map(|bytes| String::from_utf8_lossy(bytes).to_string())
     }
@@ -66,7 +67,7 @@ impl PgRow {
     /// Handles both text format (36-char string) and binary format (16 bytes).
     pub fn get_uuid(&self, idx: usize) -> Option<String> {
         let bytes = self.columns.get(idx)?.as_ref()?;
-        
+
         if bytes.len() == 16 {
             // Binary format - decode 16 bytes
             use crate::protocol::types::decode_uuid;
@@ -81,11 +82,11 @@ impl PgRow {
     /// Handles both JSON (text) and JSONB (version byte prefix) formats.
     pub fn get_json(&self, idx: usize) -> Option<String> {
         let bytes = self.columns.get(idx)?.as_ref()?;
-        
+
         if bytes.is_empty() {
             return Some(String::new());
         }
-        
+
         // JSONB has version byte (1) as first byte
         if bytes[0] == 1 && bytes.len() > 1 {
             String::from_utf8(bytes[1..].to_vec()).ok()
@@ -172,11 +173,7 @@ mod tests {
     #[test]
     fn test_get_string() {
         let row = PgRow {
-            columns: vec![
-                Some(b"hello".to_vec()),
-                None,
-                Some(b"world".to_vec()),
-            ],
+            columns: vec![Some(b"hello".to_vec()), None, Some(b"world".to_vec())],
             column_info: None,
         };
 
@@ -222,10 +219,7 @@ mod tests {
     #[test]
     fn test_is_null() {
         let row = PgRow {
-            columns: vec![
-                Some(b"value".to_vec()),
-                None,
-            ],
+            columns: vec![Some(b"value".to_vec()), None],
             column_info: None,
         };
 

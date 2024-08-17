@@ -1,8 +1,8 @@
 //! DELETE SQL generation.
 
 use crate::ast::*;
-use crate::transpiler::dialect::Dialect;
 use crate::transpiler::conditions::ConditionToSql;
+use crate::transpiler::dialect::Dialect;
 
 /// Generate DELETE SQL.
 pub fn build_delete(cmd: &QailCmd, dialect: Dialect) -> String {

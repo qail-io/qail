@@ -12,28 +12,29 @@ use qail_pg::{PgDriver, PgResult};
 #[ignore = "Requires PostgreSQL server - run manually"]
 async fn test_simple_query() -> PgResult<()> {
     // Connect via SCRAM-SHA-256 auth
-    let mut driver = PgDriver::connect_with_password(
-        "127.0.0.1", 5432, "qail", "qail_test", "qail"
-    ).await?;
-    
+    let mut driver =
+        PgDriver::connect_with_password("127.0.0.1", 5432, "qail", "qail_test", "qail").await?;
+
     // Build a QAIL command
-    let cmd = QailCmd::get("users")
-        .select_all();
-    
+    let cmd = QailCmd::get("users").select_all();
+
     // Execute and fetch rows
     let rows = driver.fetch_all(&cmd).await?;
-    
+
     println!("Fetched {} rows:", rows.len());
     for row in &rows {
         let id = row.get_i32(0);
         let name = row.get_string(1);
         let email = row.get_string(2);
         let active = row.get_bool(3);
-        println!("  id={:?}, name={:?}, email={:?}, active={:?}", id, name, email, active);
+        println!(
+            "  id={:?}, name={:?}, email={:?}, active={:?}",
+            id, name, email, active
+        );
     }
-    
+
     assert!(rows.len() >= 2, "Expected at least 2 users");
-    
+
     Ok(())
 }
 
@@ -42,19 +43,18 @@ async fn test_simple_query() -> PgResult<()> {
 #[ignore = "Requires PostgreSQL server - run manually"]
 async fn test_filtered_query() -> PgResult<()> {
     use qail_core::ast::Operator;
-    
-    let mut driver = PgDriver::connect_with_password(
-        "127.0.0.1", 5432, "qail", "qail_test", "qail"
-    ).await?;
-    
+
+    let mut driver =
+        PgDriver::connect_with_password("127.0.0.1", 5432, "qail", "qail_test", "qail").await?;
+
     // Query with filter
     let cmd = QailCmd::get("users")
         .columns(["id", "name"])
         .filter("active", Operator::Eq, true);
-    
+
     let rows = driver.fetch_all(&cmd).await?;
-    
+
     println!("Active users: {}", rows.len());
-    
+
     Ok(())
 }

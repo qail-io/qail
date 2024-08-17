@@ -8,6 +8,5 @@
 
 mod core;
 mod dialects;
-mod nosql;
 mod features;
-
+mod nosql;

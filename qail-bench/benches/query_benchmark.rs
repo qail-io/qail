@@ -1,17 +1,17 @@
 //! QAIL Performance Benchmarks
-//! 
+//!
 //! Compares QAIL transpilation + execution vs raw SQLx.
-//! 
+//!
 //! Run with: cargo bench -p qail-bench
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use qail_core::{parse, transpiler::ToSql};
 
 fn criterion_config() -> Criterion {
     Criterion::default()
-        .significance_level(0.1)      // 10% significance level
-        .noise_threshold(0.05)         // Ignore changes < 5%
-        .sample_size(50)               // Fewer samples = faster
+        .significance_level(0.1) // 10% significance level
+        .noise_threshold(0.05) // Ignore changes < 5%
+        .sample_size(50) // Fewer samples = faster
         .warm_up_time(std::time::Duration::from_secs(1))
 }
 
@@ -21,13 +21,16 @@ fn bench_parse_transpile(c: &mut Criterion) {
     let queries = [
         ("simple_select", "get::users:'_"),
         ("filtered", "get::users:'id'email[active=true][lim=10]"),
-        ("complex", "get::users:'id'email'role[active=true][^!created_at][lim=100]"),
+        (
+            "complex",
+            "get::users:'id'email'role[active=true][^!created_at][lim=100]",
+        ),
         ("join", "get::users->profiles:'id'name"),
         ("aggregation", "get::orders:'total#sum[status=completed]"),
     ];
 
     let mut group = c.benchmark_group("parse_transpile");
-    
+
     for (name, query) in queries {
         group.bench_with_input(BenchmarkId::new("qail", name), query, |b, q| {
             b.iter(|| {
@@ -36,14 +39,14 @@ fn bench_parse_transpile(c: &mut Criterion) {
             });
         });
     }
-    
+
     group.finish();
 }
 
 /// Benchmark: Just parsing (no transpilation)
 fn bench_parse_only(c: &mut Criterion) {
     let query = "get::users:'id'email'role[active=true][^!created_at][lim=100]";
-    
+
     c.bench_function("parse_only", |b| {
         b.iter(|| {
             let _cmd = parse(black_box(query)).unwrap();
@@ -54,7 +57,7 @@ fn bench_parse_only(c: &mut Criterion) {
 /// Benchmark: Just transpilation (pre-parsed)
 fn bench_transpile_only(c: &mut Criterion) {
     let cmd = parse("get::users:'id'email'role[active=true][^!created_at][lim=100]").unwrap();
-    
+
     c.bench_function("transpile_only", |b| {
         b.iter(|| {
             let _sql = black_box(&cmd).to_sql();
@@ -66,7 +69,7 @@ fn bench_transpile_only(c: &mut Criterion) {
 /// Compares QAIL transpilation vs format! macro vs String concatenation.
 fn bench_sql_building(c: &mut Criterion) {
     let mut group = c.benchmark_group("sql_building");
-    
+
     // QAIL
     group.bench_function("qail_transpile", |b| {
         b.iter(|| {
@@ -74,7 +77,7 @@ fn bench_sql_building(c: &mut Criterion) {
             black_box(cmd.to_sql())
         });
     });
-    
+
     // format! macro (typical hand-written)
     group.bench_function("format_macro", |b| {
         b.iter(|| {
@@ -84,7 +87,7 @@ fn bench_sql_building(c: &mut Criterion) {
             ))
         });
     });
-    
+
     // String concatenation
     group.bench_function("string_concat", |b| {
         b.iter(|| {
@@ -95,14 +98,12 @@ fn bench_sql_building(c: &mut Criterion) {
             black_box(sql)
         });
     });
-    
+
     // Pre-built static string (baseline)
     group.bench_function("static_string", |b| {
-        b.iter(|| {
-            black_box("SELECT id, email FROM users WHERE active = true LIMIT 10")
-        });
+        b.iter(|| black_box("SELECT id, email FROM users WHERE active = true LIMIT 10"));
     });
-    
+
     group.finish();
 }
 
@@ -111,7 +112,7 @@ fn bench_sql_building(c: &mut Criterion) {
 /// achieving the same performance as Diesel/SeaORM.
 fn bench_compile_vs_runtime(c: &mut Criterion) {
     let mut group = c.benchmark_group("compile_vs_runtime");
-    
+
     // Runtime parsing (what we do in CLI)
     group.bench_function("runtime_parse", |b| {
         b.iter(|| {
@@ -119,11 +120,11 @@ fn bench_compile_vs_runtime(c: &mut Criterion) {
             black_box(cmd.to_sql())
         });
     });
-    
+
     // Simulated compile-time (SQL is pre-computed, stored as static str)
     // This is what qail! macro produces - the SQL is embedded at compile time
     const PRECOMPILED_SQL: &str = "SELECT id, email FROM users WHERE active = true LIMIT 10";
-    
+
     group.bench_function("compile_time_macro", |b| {
         b.iter(|| {
             // This is what happens at runtime when using qail! macro:
@@ -131,15 +132,13 @@ fn bench_compile_vs_runtime(c: &mut Criterion) {
             black_box(PRECOMPILED_SQL)
         });
     });
-    
+
     // For comparison: Diesel-style query builder (simulated)
     // Diesel also compiles to static SQL at compile time
     group.bench_function("diesel_style_static", |b| {
-        b.iter(|| {
-            black_box("SELECT id, email FROM users WHERE active = $1 LIMIT $2")
-        });
+        b.iter(|| black_box("SELECT id, email FROM users WHERE active = $1 LIMIT $2"));
     });
-    
+
     group.finish();
 }
 

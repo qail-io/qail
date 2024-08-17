@@ -1,6 +1,6 @@
-use crate::transpiler::traits::SqlGenerator;
 use crate::transpiler::sql::postgres::PostgresGenerator;
 use crate::transpiler::sql::sqlite::SqliteGenerator;
+use crate::transpiler::traits::SqlGenerator;
 
 /// Supported SQL Dialects.
 #[derive(Debug, Clone, Copy, PartialEq)]

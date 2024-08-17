@@ -32,8 +32,7 @@ pub fn read_len_enc_int(buf: &mut &[u8]) -> u64 {
         }
         0xfe => {
             let val = u64::from_le_bytes([
-                buf[0], buf[1], buf[2], buf[3],
-                buf[4], buf[5], buf[6], buf[7],
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
             ]);
             *buf = &buf[8..];
             val
@@ -100,65 +99,67 @@ pub struct InitialHandshake {
 impl InitialHandshake {
     pub fn parse(data: &[u8]) -> Option<Self> {
         let mut buf = data;
-        
+
         // Protocol version
         let protocol_version = buf[0];
         buf = &buf[1..];
-        
+
         // Server version (null-terminated)
         let server_version = String::from_utf8_lossy(&read_null_string(&mut buf)).to_string();
-        
+
         // Connection ID
-        if buf.len() < 4 { return None; }
+        if buf.len() < 4 {
+            return None;
+        }
         let connection_id = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
         buf = &buf[4..];
-        
+
         // Auth plugin data part 1 (8 bytes)
         let mut auth_data = buf[..8].to_vec();
         buf = &buf[8..];
-        
+
         // Skip filler
         buf = &buf[1..];
-        
+
         // Capability flags (lower 2 bytes)
         let cap_lower = u16::from_le_bytes([buf[0], buf[1]]) as u32;
         buf = &buf[2..];
-        
+
         // Character set
         let character_set = buf[0];
         buf = &buf[1..];
-        
+
         // Status flags
         let status_flags = u16::from_le_bytes([buf[0], buf[1]]);
         buf = &buf[2..];
-        
+
         // Capability flags (upper 2 bytes)
         let cap_upper = u16::from_le_bytes([buf[0], buf[1]]) as u32;
         let capability_flags = cap_lower | (cap_upper << 16);
         buf = &buf[2..];
-        
+
         // Auth plugin data length
         let auth_data_len = buf[0] as usize;
         buf = &buf[1..];
-        
+
         // Skip 10 bytes reserved
         buf = &buf[10..];
-        
+
         // Auth plugin data part 2
         if auth_data_len > 8 {
             let part2_len = auth_data_len - 8;
             auth_data.extend_from_slice(&buf[..part2_len.min(buf.len())]);
             buf = &buf[part2_len.min(buf.len())..];
         }
-        
+
         // Remove trailing null from scramble
         while auth_data.last() == Some(&0) {
             auth_data.pop();
         }
-        
+
         // Auth plugin name
         let auth_plugin_name = String::from_utf8_lossy(&read_null_string(&mut buf)).to_string();
-        
+
         Some(Self {
             protocol_version,
             server_version,
@@ -181,56 +182,56 @@ pub fn encode_handshake_response(
     auth_plugin: &str,
 ) -> BytesMut {
     let mut buf = BytesMut::with_capacity(128);
-    
+
     // Capability flags (CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_CONNECT_WITH_DB | CLIENT_PLUGIN_AUTH)
     let caps: u32 = 0x00000200 | 0x00008000 | 0x00000008 | 0x00080000;
     buf.put_u32_le(caps);
-    
+
     // Max packet size
     buf.put_u32_le(16777215);
-    
+
     // Character set
     buf.put_u8(character_set);
-    
+
     // Reserved (23 bytes)
     buf.put_slice(&[0u8; 23]);
-    
+
     // Username (null-terminated)
     buf.put_slice(user.as_bytes());
     buf.put_u8(0);
-    
+
     // Auth response (length-encoded)
     buf.put_u8(auth_response.len() as u8);
     buf.put_slice(auth_response);
-    
+
     // Database (null-terminated)
     buf.put_slice(database.as_bytes());
     buf.put_u8(0);
-    
+
     // Auth plugin name (null-terminated)
     buf.put_slice(auth_plugin.as_bytes());
     buf.put_u8(0);
-    
+
     buf
 }
 
 /// Encode SSL request packet (for TLS upgrade).
 pub fn encode_ssl_request(character_set: u8) -> BytesMut {
     let mut buf = BytesMut::with_capacity(32);
-    
+
     // Capability flags (CLIENT_SSL | CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_CONNECT_WITH_DB | CLIENT_PLUGIN_AUTH)
     let caps: u32 = 0x00000800 | 0x00000200 | 0x00008000 | 0x00000008 | 0x00080000;
     buf.put_u32_le(caps);
-    
+
     // Max packet size
     buf.put_u32_le(16777215);
-    
+
     // Character set
     buf.put_u8(character_set);
-    
+
     // Reserved (23 bytes)
     buf.put_slice(&[0u8; 23]);
-    
+
     buf
 }
 
@@ -252,32 +253,34 @@ pub struct ColumnDef {
 impl ColumnDef {
     pub fn parse(data: &[u8]) -> Option<Self> {
         let mut buf = data;
-        
+
         // Skip catalog, schema, table, org_table
         let _catalog = read_len_enc_string(&mut buf);
         let _schema = read_len_enc_string(&mut buf);
         let _table = read_len_enc_string(&mut buf);
         let _org_table = read_len_enc_string(&mut buf);
-        
+
         // Column name
         let name = String::from_utf8_lossy(&read_len_enc_string(&mut buf)).to_string();
-        
+
         // Skip org_name
         let _org_name = read_len_enc_string(&mut buf);
-        
+
         // Fixed length fields
-        if buf.len() < 12 { return None; }
+        if buf.len() < 12 {
+            return None;
+        }
         let _fixed_len = buf[0]; // 0x0c
         buf = &buf[1..];
-        
+
         let _charset = u16::from_le_bytes([buf[0], buf[1]]);
         buf = &buf[2..];
-        
+
         let _column_length = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
         buf = &buf[4..];
-        
+
         let column_type = buf[0];
-        
+
         Some(Self { name, column_type })
     }
 }

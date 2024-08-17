@@ -11,14 +11,13 @@
 //! ```
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while1},
-    character::complete::{multispace1, char, not_line_ending},
-    combinator::{opt, map},
-    multi::{separated_list0, many0},
-    sequence::{preceded},
-    Parser,
-    IResult,
+    character::complete::{char, multispace1, not_line_ending},
+    combinator::{map, opt},
+    multi::{many0, separated_list0},
+    sequence::preceded,
 };
 use serde::{Deserialize, Serialize};
 
@@ -95,26 +94,26 @@ impl Schema {
 
     /// Find a table by name
     pub fn find_table(&self, name: &str) -> Option<&TableDef> {
-        self.tables.iter().find(|t| t.name.eq_ignore_ascii_case(name))
+        self.tables
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
     }
-    
+
     /// Export schema to JSON string (for qail-macros compatibility)
     pub fn to_json(&self) -> Result<String, String> {
-        serde_json::to_string_pretty(self)
-            .map_err(|e| format!("JSON serialization failed: {}", e))
+        serde_json::to_string_pretty(self).map_err(|e| format!("JSON serialization failed: {}", e))
     }
-    
+
     /// Import schema from JSON string
     pub fn from_json(json: &str) -> Result<Self, String> {
-        serde_json::from_str(json)
-            .map_err(|e| format!("JSON deserialization failed: {}", e))
+        serde_json::from_str(json).map_err(|e| format!("JSON deserialization failed: {}", e))
     }
-    
+
     /// Load schema from a .qail file
     pub fn from_file(path: &std::path::Path) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
-        
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+
         // Check if it's JSON or QAIL format
         if content.trim().starts_with('{') {
             Self::from_json(&content)
@@ -127,17 +126,19 @@ impl Schema {
 impl TableDef {
     /// Find a column by name
     pub fn find_column(&self, name: &str) -> Option<&ColumnDef> {
-        self.columns.iter().find(|c| c.name.eq_ignore_ascii_case(name))
+        self.columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
     }
-    
+
     /// Generate CREATE TABLE IF NOT EXISTS SQL (AST-native DDL).
     pub fn to_ddl(&self) -> String {
         let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", self.name);
-        
+
         let mut col_defs = Vec::new();
         for col in &self.columns {
             let mut line = format!("    {}", col.name);
-            
+
             // Type with params
             let mut typ = col.typ.to_uppercase();
             if let Some(params) = &col.type_params {
@@ -147,7 +148,7 @@ impl TableDef {
                 typ.push_str("[]");
             }
             line.push_str(&format!(" {}", typ));
-            
+
             // Constraints
             if col.primary_key {
                 line.push_str(" PRIMARY KEY");
@@ -167,10 +168,10 @@ impl TableDef {
             if let Some(ref check) = col.check {
                 line.push_str(&format!(" CHECK({})", check));
             }
-            
+
             col_defs.push(line);
         }
-        
+
         sql.push_str(&col_defs.join(",\n"));
         sql.push_str("\n)");
         sql
@@ -191,7 +192,8 @@ fn ws_and_comments(input: &str) -> IResult<&str, ()> {
     let (input, _) = many0(alt((
         map(multispace1, |_| ()),
         map((tag("--"), not_line_ending), |_| ()),
-    ))).parse(input)?;
+    )))
+    .parse(input)?;
     Ok((input, ()))
 }
 
@@ -208,7 +210,7 @@ struct TypeInfo {
 fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
     // Parse type name
     let (input, type_name) = take_while1(|c: char| c.is_alphanumeric()).parse(input)?;
-    
+
     // Check for type parameters like (255) or (10, 2)
     let (input, params) = if input.starts_with('(') {
         let paren_start = 1;
@@ -225,30 +227,33 @@ fn parse_type_info(input: &str) -> IResult<&str, TypeInfo> {
     } else {
         (input, None)
     };
-    
+
     // Check for array suffix []
     let (input, is_array) = if let Some(stripped) = input.strip_prefix("[]") {
         (stripped, true)
     } else {
         (input, false)
     };
-    
+
     let lower = type_name.to_lowercase();
     let is_serial = lower == "serial" || lower == "bigserial" || lower == "smallserial";
-    
-    Ok((input, TypeInfo {
-        name: lower,
-        params,
-        is_array,
-        is_serial,
-    }))
+
+    Ok((
+        input,
+        TypeInfo {
+            name: lower,
+            params,
+            is_array,
+            is_serial,
+        },
+    ))
 }
 
 /// Parse constraint text until comma or closing paren (handling nested parens)
 fn constraint_text(input: &str) -> IResult<&str, &str> {
     let mut paren_depth = 0;
     let mut end = 0;
-    
+
     for (i, c) in input.char_indices() {
         match c {
             '(' => paren_depth += 1,
@@ -264,9 +269,12 @@ fn constraint_text(input: &str) -> IResult<&str, &str> {
         }
         end = i + c.len_utf8();
     }
-    
+
     if end == 0 {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::TakeWhile1)))
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TakeWhile1,
+        )))
     } else {
         Ok((&input[end..], &input[..end]))
     }
@@ -278,10 +286,10 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
     let (input, name) = identifier(input)?;
     let (input, _) = multispace1(input)?;
     let (input, type_info) = parse_type_info(input)?;
-    
+
     // Get remaining text until comma or paren for constraints
     let (input, constraint_str) = opt(preceded(multispace1, constraint_text)).parse(input)?;
-    
+
     // Parse constraints from the string
     let mut col = ColumnDef {
         name: name.to_string(),
@@ -292,10 +300,10 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
         nullable: !type_info.is_serial, // Serial types are implicitly not null
         ..Default::default()
     };
-    
+
     if let Some(constraints) = constraint_str {
         let lower = constraints.to_lowercase();
-        
+
         if lower.contains("primary_key") || lower.contains("primary key") {
             col.primary_key = true;
             col.nullable = false;
@@ -306,7 +314,7 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
         if lower.contains("unique") {
             col.unique = true;
         }
-        
+
         // Parse references
         if let Some(idx) = lower.find("references ") {
             let rest = &constraints[idx + 11..];
@@ -332,14 +340,14 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
             }
             col.references = Some(rest[..end].to_string());
         }
-        
+
         // Parse default
         if let Some(idx) = lower.find("default ") {
             let rest = &constraints[idx + 8..];
             let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
             col.default_value = Some(rest[..end].to_string());
         }
-        
+
         // Parse check constraint
         if let Some(idx) = lower.find("check(") {
             let rest = &constraints[idx + 6..];
@@ -362,7 +370,7 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
             col.check = Some(rest[..end].to_string());
         }
     }
-    
+
     Ok((input, col))
 }
 
@@ -370,13 +378,10 @@ fn parse_column(input: &str) -> IResult<&str, ColumnDef> {
 fn parse_column_list(input: &str) -> IResult<&str, Vec<ColumnDef>> {
     let (input, _) = ws_and_comments(input)?;
     let (input, _) = char('(').parse(input)?;
-    let (input, columns) = separated_list0(
-        char(','),
-        parse_column,
-    ).parse(input)?;
+    let (input, columns) = separated_list0(char(','), parse_column).parse(input)?;
     let (input, _) = ws_and_comments(input)?;
     let (input, _) = char(')').parse(input)?;
-    
+
     Ok((input, columns))
 }
 
@@ -387,11 +392,14 @@ fn parse_table(input: &str) -> IResult<&str, TableDef> {
     let (input, _) = multispace1(input)?;
     let (input, name) = identifier(input)?;
     let (input, columns) = parse_column_list(input)?;
-    
-    Ok((input, TableDef {
-        name: name.to_string(),
-        columns,
-    }))
+
+    Ok((
+        input,
+        TableDef {
+            name: name.to_string(),
+            columns,
+        },
+    ))
 }
 
 /// Parse complete schema file
@@ -399,7 +407,7 @@ fn parse_schema(input: &str) -> IResult<&str, Schema> {
     let (input, _) = ws_and_comments(input)?;
     let (input, tables) = many0(parse_table).parse(input)?;
     let (input, _) = ws_and_comments(input)?;
-    
+
     Ok((input, Schema { tables }))
 }
 
@@ -416,24 +424,24 @@ mod tests {
                 name text
             )
         "#;
-        
+
         let schema = Schema::parse(input).expect("parse failed");
         assert_eq!(schema.tables.len(), 1);
-        
+
         let users = &schema.tables[0];
         assert_eq!(users.name, "users");
         assert_eq!(users.columns.len(), 3);
-        
+
         let id = &users.columns[0];
         assert_eq!(id.name, "id");
         assert_eq!(id.typ, "uuid");
         assert!(id.primary_key);
         assert!(!id.nullable);
-        
+
         let email = &users.columns[1];
         assert_eq!(email.name, "email");
         assert!(!email.nullable);
-        
+
         let name = &users.columns[2];
         assert!(name.nullable);
     }
@@ -454,14 +462,14 @@ mod tests {
                 total i64 not null default 0
             )
         "#;
-        
+
         let schema = Schema::parse(input).expect("parse failed");
         assert_eq!(schema.tables.len(), 2);
-        
+
         let orders = schema.find_table("orders").expect("orders not found");
         let user_id = orders.find_column("user_id").expect("user_id not found");
         assert_eq!(user_id.references, Some("users(id)".to_string()));
-        
+
         let total = orders.find_column("total").expect("total not found");
         assert_eq!(total.default_value, Some("0".to_string()));
     }
@@ -474,7 +482,7 @@ mod tests {
                 bar text
             )
         "#;
-        
+
         let schema = Schema::parse(input).expect("parse failed");
         assert_eq!(schema.tables.len(), 1);
     }
@@ -488,14 +496,14 @@ mod tests {
                 prices decimal[]
             )
         "#;
-        
+
         let schema = Schema::parse(input).expect("parse failed");
         let products = &schema.tables[0];
-        
+
         let tags = products.find_column("tags").expect("tags not found");
         assert_eq!(tags.typ, "text");
         assert!(tags.is_array);
-        
+
         let prices = products.find_column("prices").expect("prices not found");
         assert!(prices.is_array);
     }
@@ -510,21 +518,24 @@ mod tests {
                 code varchar(50) unique
             )
         "#;
-        
+
         let schema = Schema::parse(input).expect("parse failed");
         let items = &schema.tables[0];
-        
+
         let id = items.find_column("id").expect("id not found");
         assert!(id.is_serial);
         assert!(!id.nullable); // Serial is implicitly not null
-        
+
         let name = items.find_column("name").expect("name not found");
         assert_eq!(name.typ, "varchar");
         assert_eq!(name.type_params, Some(vec!["255".to_string()]));
-        
+
         let price = items.find_column("price").expect("price not found");
-        assert_eq!(price.type_params, Some(vec!["10".to_string(), "2".to_string()]));
-        
+        assert_eq!(
+            price.type_params,
+            Some(vec!["10".to_string(), "2".to_string()])
+        );
+
         let code = items.find_column("code").expect("code not found");
         assert!(code.unique);
     }
@@ -538,13 +549,13 @@ mod tests {
                 salary decimal check(salary > 0)
             )
         "#;
-        
+
         let schema = Schema::parse(input).expect("parse failed");
         let employees = &schema.tables[0];
-        
+
         let age = employees.find_column("age").expect("age not found");
         assert_eq!(age.check, Some("age >= 18".to_string()));
-        
+
         let salary = employees.find_column("salary").expect("salary not found");
         assert_eq!(salary.check, Some("salary > 0".to_string()));
     }

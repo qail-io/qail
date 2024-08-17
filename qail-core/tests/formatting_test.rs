@@ -1,5 +1,5 @@
-use qail_core::parse;
 use qail_core::ast::*;
+use qail_core::parse;
 
 #[test]
 #[ignore] // Requires V2 parser
@@ -13,7 +13,7 @@ fn test_comments_and_whitespace() {
         -- Sort by creation
         [^!created_at]
     "#;
-    
+
     let cmd = parse(query).expect("Failed to parse query with comments");
     assert_eq!(cmd.action, Action::Get);
     assert_eq!(cmd.table, "users");

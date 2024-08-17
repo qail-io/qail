@@ -1,5 +1,5 @@
-use crate::transpiler::traits::SqlGenerator;
 use crate::transpiler::escape_identifier;
+use crate::transpiler::traits::SqlGenerator;
 
 /// PostgreSQL Generator (Default).
 pub struct PostgresGenerator;
@@ -30,7 +30,11 @@ impl SqlGenerator for PostgresGenerator {
     }
 
     fn bool_literal(&self, val: bool) -> String {
-        if val { "true".to_string() } else { "false".to_string() }
+        if val {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }
     }
 
     fn string_concat(&self, parts: &[&str]) -> String {
@@ -50,7 +54,7 @@ impl SqlGenerator for PostgresGenerator {
 
     fn json_access(&self, col: &str, path: &[&str]) -> String {
         let mut sql = self.quote_identifier(col);
-        
+
         for (i, key) in path.iter().enumerate() {
             let is_last = i == path.len() - 1;
             // Use -> (json) for intermediates, ->> (text) for last

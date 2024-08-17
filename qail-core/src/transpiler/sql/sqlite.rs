@@ -16,7 +16,11 @@ impl SqlGenerator for SqliteGenerator {
     }
 
     fn bool_literal(&self, val: bool) -> String {
-        if val { "1".to_string() } else { "0".to_string() }
+        if val {
+            "1".to_string()
+        } else {
+            "0".to_string()
+        }
     }
 
     fn string_concat(&self, parts: &[&str]) -> String {

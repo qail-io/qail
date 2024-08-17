@@ -2,10 +2,10 @@
 //!
 //! This module provides query, query_cached, and execute_simple.
 
+use super::{PgConnection, PgError, PgResult};
+use crate::protocol::{BackendMessage, PgEncoder};
 use bytes::BytesMut;
 use tokio::io::AsyncWriteExt;
-use crate::protocol::{BackendMessage, PgEncoder};
-use super::{PgConnection, PgError, PgResult};
 
 impl PgConnection {
     /// Execute a query with binary parameters (crate-internal).
@@ -15,9 +15,9 @@ impl PgConnection {
     /// - No SQL injection possible - parameters are never interpolated
     /// - Better performance via prepared statement reuse
     pub(crate) async fn query(
-        &mut self, 
-        sql: &str, 
-        params: &[Option<Vec<u8>>]
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
         // Send Parse + Bind + Execute + Sync as one pipeline
         let bytes = PgEncoder::encode_extended_query(sql, params);
@@ -52,40 +52,41 @@ impl PgConnection {
     /// Like `query()`, but reuses prepared statements across calls.
     /// The statement name is derived from a hash of the SQL text.
     pub async fn query_cached(
-        &mut self, 
-        sql: &str, 
-        params: &[Option<Vec<u8>>]
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
         // Generate statement name from SQL hash
         let stmt_name = Self::sql_to_stmt_name(sql);
         let is_new = !self.prepared_statements.contains_key(&stmt_name);
-        
+
         // Build the message: Parse (if new) + Bind + Execute + Sync
         let mut buf = BytesMut::new();
-        
+
         if is_new {
             // Parse statement with name
             buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
         }
-        
+
         // Bind to named statement
         buf.extend(PgEncoder::encode_bind("", &stmt_name, params));
         // Execute
         buf.extend(PgEncoder::encode_execute("", 0));
         // Sync
         buf.extend(PgEncoder::encode_sync());
-        
+
         self.stream.write_all(&buf).await?;
-        
+
         let mut rows = Vec::new();
         let sql_owned = sql.to_string(); // For storing in cache
-        
+
         loop {
             let msg = self.recv().await?;
             match msg {
                 BackendMessage::ParseComplete => {
                     // Statement parsed - store with SQL text for debugging
-                    self.prepared_statements.insert(stmt_name.clone(), sql_owned.clone());
+                    self.prepared_statements
+                        .insert(stmt_name.clone(), sql_owned.clone());
                 }
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
@@ -110,7 +111,7 @@ impl PgConnection {
     pub(crate) fn sql_to_stmt_name(sql: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         sql.hash(&mut hasher);
         format!("s{:016x}", hasher.finish())

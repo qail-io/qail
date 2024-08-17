@@ -1,5 +1,5 @@
-use crate::ast::*;
 use super::dialect::Dialect;
+use crate::ast::*;
 // use super::traits::SqlGenerator;
 
 /// Generate CREATE TABLE SQL.
@@ -54,7 +54,10 @@ pub fn build_create_table(cmd: &QailCmd, dialect: Dialect) -> String {
                     line.push_str(&format!(
                         " CHECK ({} IN ({}))",
                         generator.quote_identifier(name),
-                        vals.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", ")
+                        vals.iter()
+                            .map(|v| format!("'{}'", v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
             }
@@ -62,19 +65,21 @@ pub fn build_create_table(cmd: &QailCmd, dialect: Dialect) -> String {
             defs.push(line);
         }
     }
-    
+
     // Add table-level constraints
     for tc in &cmd.table_constraints {
         match tc {
             TableConstraint::Unique(cols) => {
-                let col_list = cols.iter()
+                let col_list = cols
+                    .iter()
                     .map(|c| generator.quote_identifier(c))
                     .collect::<Vec<_>>()
                     .join(", ");
                 defs.push(format!("    UNIQUE ({})", col_list));
             }
             TableConstraint::PrimaryKey(cols) => {
-                let col_list = cols.iter()
+                let col_list = cols
+                    .iter()
                     .map(|c| generator.quote_identifier(c))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -82,14 +87,17 @@ pub fn build_create_table(cmd: &QailCmd, dialect: Dialect) -> String {
             }
         }
     }
-    
+
     sql.push_str(&defs.join(",\n"));
     sql.push_str("\n)");
-    
+
     // Generate COMMENT ON statements
     let mut comments = Vec::new();
     for col in &cmd.columns {
-        if let Expr::Def { name, constraints, .. } = col {
+        if let Expr::Def {
+            name, constraints, ..
+        } = col
+        {
             for c in constraints {
                 if let Constraint::Comment(text) = c {
                     comments.push(format!(
@@ -106,7 +114,7 @@ pub fn build_create_table(cmd: &QailCmd, dialect: Dialect) -> String {
         sql.push_str(";\n");
         sql.push_str(&comments.join(";\n"));
     }
-    
+
     sql
 }
 
@@ -118,31 +126,43 @@ pub fn build_alter_table(cmd: &QailCmd, dialect: Dialect) -> String {
 
     for col in &cmd.columns {
         match col {
-            Expr::Mod { kind, col } => {
-                match kind {
-                    ModKind::Add => {
-                        if let Expr::Def { name, data_type, constraints } = col.as_ref() {
-                            let sql_type = map_type(data_type);
-                            let mut line = format!("ALTER TABLE {} ADD COLUMN {} {}", table_name, generator.quote_identifier(name), sql_type);
-                            
-                            let is_nullable = constraints.contains(&Constraint::Nullable);
-                            if !is_nullable {
-                                line.push_str(" NOT NULL");
-                            }
+            Expr::Mod { kind, col } => match kind {
+                ModKind::Add => {
+                    if let Expr::Def {
+                        name,
+                        data_type,
+                        constraints,
+                    } = col.as_ref()
+                    {
+                        let sql_type = map_type(data_type);
+                        let mut line = format!(
+                            "ALTER TABLE {} ADD COLUMN {} {}",
+                            table_name,
+                            generator.quote_identifier(name),
+                            sql_type
+                        );
 
-                            if constraints.contains(&Constraint::Unique) {
-                                line.push_str(" UNIQUE");
-                            }
-                            stmts.push(line);
+                        let is_nullable = constraints.contains(&Constraint::Nullable);
+                        if !is_nullable {
+                            line.push_str(" NOT NULL");
                         }
-                    }
-                    ModKind::Drop => {
-                        if let Expr::Named(name) = col.as_ref() {
-                            stmts.push(format!("ALTER TABLE {} DROP COLUMN {}", table_name, generator.quote_identifier(name)));
+
+                        if constraints.contains(&Constraint::Unique) {
+                            line.push_str(" UNIQUE");
                         }
+                        stmts.push(line);
                     }
                 }
-            }
+                ModKind::Drop => {
+                    if let Expr::Named(name) = col.as_ref() {
+                        stmts.push(format!(
+                            "ALTER TABLE {} DROP COLUMN {}",
+                            table_name,
+                            generator.quote_identifier(name)
+                        ));
+                    }
+                }
+            },
             // Handle rename: "old_name -> new_name" format
             Expr::Named(rename_expr) if rename_expr.contains(" -> ") => {
                 let parts: Vec<&str> = rename_expr.split(" -> ").collect();
@@ -169,7 +189,9 @@ pub fn build_create_index(cmd: &QailCmd, dialect: Dialect) -> String {
     match &cmd.index_def {
         Some(idx) => {
             let unique = if idx.unique { "UNIQUE " } else { "" };
-            let cols = idx.columns.iter()
+            let cols = idx
+                .columns
+                .iter()
                 .map(|c| generator.quote_identifier(c))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -205,28 +227,39 @@ fn map_type(t: &str) -> &str {
 pub fn build_alter_column(cmd: &QailCmd, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
-    
+
     // Identified columns (target column)
-    let cols: Vec<String> = cmd.columns.iter().filter_map(|c| match c {
-        Expr::Named(n) => Some(n.clone()),
-        _ => None,
-    }).collect();
-    
-    if cols.is_empty() { return "/* ERROR: Column required */".to_string(); }
+    let cols: Vec<String> = cmd
+        .columns
+        .iter()
+        .filter_map(|c| match c {
+            Expr::Named(n) => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+
+    if cols.is_empty() {
+        return "/* ERROR: Column required */".to_string();
+    }
     let col_name = &cols[0];
     let quoted_col = generator.quote_identifier(col_name);
-    
+
     match cmd.action {
         Action::DropCol => {
             format!("ALTER TABLE {} DROP COLUMN {}", table, quoted_col)
-        },
+        }
         Action::RenameCol => {
             // Find "to" or "new" in cages
             // Syntax: rename::users:old[to=new]
-            let new_name_opt = cmd.cages.iter()
+            let new_name_opt = cmd
+                .cages
+                .iter()
                 .flat_map(|c| &c.conditions)
                 .find(|c| {
-                    let col = match &c.left { Expr::Named(n) => n.as_str(), _ => "" };
+                    let col = match &c.left {
+                        Expr::Named(n) => n.as_str(),
+                        _ => "",
+                    };
                     matches!(col, "to" | "new" | "rename")
                 })
                 .map(|c| match &c.value {
@@ -234,15 +267,18 @@ pub fn build_alter_column(cmd: &QailCmd, dialect: Dialect) -> String {
                     Value::Param(_) => "PARAM".to_string(), // unsupported
                     _ => c.value.to_string(),
                 });
-            
+
             if let Some(new_name) = new_name_opt {
-                 let quoted_new = generator.quote_identifier(&new_name);
-                 format!("ALTER TABLE {} RENAME COLUMN {} TO {}", table, quoted_col, quoted_new)
+                let quoted_new = generator.quote_identifier(&new_name);
+                format!(
+                    "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                    table, quoted_col, quoted_new
+                )
             } else {
                 "/* ERROR: New name required (e.g. [to=new_name]) */".to_string()
             }
-        },
-        _ => "/* ERROR: Unknown Column Action */".to_string()
+        }
+        _ => "/* ERROR: Unknown Column Action */".to_string(),
     }
 }
 
@@ -250,21 +286,26 @@ pub fn build_alter_column(cmd: &QailCmd, dialect: Dialect) -> String {
 pub fn build_alter_add_column(cmd: &QailCmd, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
-    
+
     let mut parts = Vec::new();
-    
+
     for col in &cmd.columns {
-        if let Expr::Def { name, data_type, constraints } = col {
+        if let Expr::Def {
+            name,
+            data_type,
+            constraints,
+        } = col
+        {
             let sql_type = map_type(data_type);
             let quoted_name = generator.quote_identifier(name);
-            
+
             let mut col_def = format!("{} {}", quoted_name, sql_type);
-            
+
             let is_nullable = constraints.contains(&Constraint::Nullable);
             if !is_nullable {
                 col_def.push_str(" NOT NULL");
             }
-            
+
             for constraint in constraints {
                 if let Constraint::Default(val) = constraint {
                     col_def.push_str(" DEFAULT ");
@@ -276,11 +317,11 @@ pub fn build_alter_add_column(cmd: &QailCmd, dialect: Dialect) -> String {
                     col_def.push_str(sql_default);
                 }
             }
-            
+
             parts.push(format!("ALTER TABLE {} ADD COLUMN {}", table, col_def));
         }
     }
-    
+
     parts.join(";\n")
 }
 
@@ -288,20 +329,20 @@ pub fn build_alter_add_column(cmd: &QailCmd, dialect: Dialect) -> String {
 pub fn build_alter_drop_column(cmd: &QailCmd, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
-    
+
     let mut parts = Vec::new();
-    
+
     for col in &cmd.columns {
         let col_name = match col {
             Expr::Named(n) => n.clone(),
             Expr::Def { name, .. } => name.clone(),
             _ => continue,
         };
-        
+
         let quoted_col = generator.quote_identifier(&col_name);
         parts.push(format!("ALTER TABLE {} DROP COLUMN {}", table, quoted_col));
     }
-    
+
     parts.join(";\n")
 }
 
@@ -309,18 +350,23 @@ pub fn build_alter_drop_column(cmd: &QailCmd, dialect: Dialect) -> String {
 pub fn build_alter_column_type(cmd: &QailCmd, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
-    
+
     let mut parts = Vec::new();
-    
+
     for col in &cmd.columns {
         let (col_name, new_type) = match col {
-            Expr::Def { name, data_type, .. } => (name.clone(), data_type.clone()),
+            Expr::Def {
+                name, data_type, ..
+            } => (name.clone(), data_type.clone()),
             _ => continue,
         };
-        
+
         let quoted_col = generator.quote_identifier(&col_name);
-        parts.push(format!("ALTER TABLE {} ALTER COLUMN {} TYPE {}", table, quoted_col, new_type));
+        parts.push(format!(
+            "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
+            table, quoted_col, new_type
+        ));
     }
-    
+
     parts.join(";\n")
 }

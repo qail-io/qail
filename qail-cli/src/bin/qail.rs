@@ -12,19 +12,21 @@
 //! qail repl
 //! ```
 
+use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::*;
-use qail_core::prelude::*;
-use qail_core::transpiler::{ToSql, Dialect};
 use qail_core::fmt::Formatter;
-use anyhow::Result;
+use qail_core::prelude::*;
+use qail_core::transpiler::{Dialect, ToSql};
 
 // Import modularized CLI components
 use qail::introspection;
-use qail::migrations::{migrate_status, migrate_analyze, migrate_plan, migrate_up, migrate_down, watch_schema};
-use qail::schema::{check_schema, diff_schemas_cmd, OutputFormat as SchemaOutputFormat};
 use qail::lint::lint_schema;
+use qail::migrations::{
+    migrate_analyze, migrate_down, migrate_plan, migrate_status, migrate_up, watch_schema,
+};
 use qail::repl::run_repl;
+use qail::schema::{OutputFormat as SchemaOutputFormat, check_schema, diff_schemas_cmd};
 
 #[derive(Parser)]
 #[command(name = "qail")]
@@ -209,25 +211,27 @@ enum MigrateAction {
 /// Parse schema diff string (old.qail:new.qail) into migration commands
 fn parse_schema_diff(schema_diff: &str) -> Result<Vec<qail_core::ast::QailCmd>> {
     use qail_core::migrate::{diff_schemas, parse_qail};
-    
+
     if schema_diff.contains(':') && !schema_diff.starts_with("postgres") {
         let parts: Vec<&str> = schema_diff.splitn(2, ':').collect();
         let old_path = parts[0];
         let new_path = parts[1];
-        
+
         let old_content = std::fs::read_to_string(old_path)
             .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
         let new_content = std::fs::read_to_string(new_path)
             .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-        
+
         let old_schema = parse_qail(&old_content)
             .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
         let new_schema = parse_qail(&new_content)
             .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
-        
+
         Ok(diff_schemas(&old_schema, &new_schema))
     } else {
-        Err(anyhow::anyhow!("Please provide two .qail files: old.qail:new.qail"))
+        Err(anyhow::anyhow!(
+            "Please provide two .qail files: old.qail:new.qail"
+        ))
     }
 }
 
@@ -263,16 +267,30 @@ async fn main() -> Result<()> {
         Some(Commands::Lint { schema, strict }) => {
             lint_schema(schema, *strict)?;
         }
-        Some(Commands::Watch { schema, url, auto_apply }) => {
+        Some(Commands::Watch {
+            schema,
+            url,
+            auto_apply,
+        }) => {
             watch_schema(schema, url.as_deref(), *auto_apply).await?;
         }
         Some(Commands::Migrate { action }) => match action {
             MigrateAction::Status { url } => migrate_status(url).await?,
-            MigrateAction::Analyze { schema_diff, codebase } => migrate_analyze(schema_diff, codebase)?,
-            MigrateAction::Plan { schema_diff, output } => migrate_plan(schema_diff, output.as_deref())?,
+            MigrateAction::Analyze {
+                schema_diff,
+                codebase,
+            } => migrate_analyze(schema_diff, codebase)?,
+            MigrateAction::Plan {
+                schema_diff,
+                output,
+            } => migrate_plan(schema_diff, output.as_deref())?,
             MigrateAction::Up { schema_diff, url } => migrate_up(schema_diff, url).await?,
             MigrateAction::Down { schema_diff, url } => migrate_down(schema_diff, url).await?,
-            MigrateAction::Create { name, depends, author } => {
+            MigrateAction::Create {
+                name,
+                depends,
+                author,
+            } => {
                 qail::migrations::migrate_create(name, depends.as_deref(), author.as_deref())?;
             }
             MigrateAction::Shadow { schema_diff, url } => {
@@ -291,7 +309,10 @@ async fn main() -> Result<()> {
             if let Some(query) = &cli.query {
                 transpile_query(query, &cli)?;
             } else {
-                println!("{}", "🪝 QAIL — The Horizontal Query Language".cyan().bold());
+                println!(
+                    "{}",
+                    "🪝 QAIL — The Horizontal Query Language".cyan().bold()
+                );
                 println!();
                 println!("Usage: qail <QUERY> [OPTIONS]");
                 println!();
@@ -327,7 +348,9 @@ fn transpile_query(query: &str, cli: &Cli) -> Result<()> {
 fn format_query(query: &str) -> Result<()> {
     let cmd = qail_core::parse(query).map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
     let formatter = Formatter::new();
-    let formatted = formatter.format(&cmd).map_err(|e| anyhow::anyhow!("Format error: {}", e))?;
+    let formatted = formatter
+        .format(&cmd)
+        .map_err(|e| anyhow::anyhow!("Format error: {}", e))?;
     println!("{}", formatted);
     Ok(())
 }
@@ -336,7 +359,10 @@ fn generate_migration(query: &str, name_override: Option<String>) -> Result<()> 
     let cmd = qail_core::parse(query).map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
 
     if !matches!(cmd.action, Action::Make | Action::Mod) {
-        anyhow::bail!("Only 'make' and 'mod' actions are supported for migrations. Got: {}", cmd.action);
+        anyhow::bail!(
+            "Only 'make' and 'mod' actions are supported for migrations. Got: {}",
+            cmd.action
+        );
     }
 
     let up_sql = cmd.to_sql();
@@ -365,7 +391,11 @@ fn explain_query(query: &str) {
 
     match qail_core::parse(query) {
         Ok(cmd) => {
-            println!("  {} {}", "Action:".dimmed(), format!("{}", cmd.action).green());
+            println!(
+                "  {} {}",
+                "Action:".dimmed(),
+                format!("{}", cmd.action).green()
+            );
             println!("  {} {}", "Table:".dimmed(), cmd.table.white());
 
             if !cmd.columns.is_empty() {

@@ -6,13 +6,13 @@
 // FFI functions check pointers before dereferencing, clippy doesn't understand this pattern
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+use once_cell::sync::Lazy;
+use qail_core::prelude::*;
+use qail_pg::driver::PreparedStatement as PgPreparedStatement;
+use qail_pg::protocol::AstEncoder;
 use std::ffi::{CStr, c_char};
 use std::sync::Mutex as SyncMutex;
 use tokio::sync::Mutex as AsyncMutex;
-use qail_core::prelude::*;
-use qail_pg::protocol::AstEncoder;
-use qail_pg::driver::PreparedStatement as PgPreparedStatement;
-use once_cell::sync::Lazy;
 
 // ==================== Tokio Runtime ====================
 // Global runtime for async operations from synchronous FFI
@@ -46,36 +46,40 @@ pub extern "C" fn qail_encode_select(
     out_len: *mut usize,
 ) -> *mut u8 {
     if table.is_null() {
-        unsafe { *out_len = 0; }
+        unsafe {
+            *out_len = 0;
+        }
         return std::ptr::null_mut();
     }
-    
+
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
     let columns_str = if columns.is_null() {
         "*"
     } else {
         unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") }
     };
-    
+
     let mut cmd = QailCmd::get(table);
-    
+
     if !columns_str.is_empty() && columns_str != "*" {
         cmd.columns = columns_str
             .split(',')
             .map(|c| Expr::Named(c.trim().to_string()))
             .collect();
     }
-    
+
     if limit > 0 {
         cmd = cmd.limit(limit);
     }
-    
+
     let (wire_bytes, _params) = AstEncoder::encode_cmd(&cmd);
     let bytes = wire_bytes.to_vec();
-    
+
     let len = bytes.len();
     let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
-    unsafe { *out_len = len; }
+    unsafe {
+        *out_len = len;
+    }
     ptr
 }
 
@@ -89,25 +93,28 @@ pub extern "C" fn qail_encode_batch(
     out_len: *mut usize,
 ) -> *mut u8 {
     if table.is_null() || count == 0 {
-        unsafe { *out_len = 0; }
+        unsafe {
+            *out_len = 0;
+        }
         return std::ptr::null_mut();
     }
-    
+
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
     let columns_str = if columns.is_null() {
         "*"
     } else {
         unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") }
     };
-    
+
     let col_exprs: Vec<Expr> = if !columns_str.is_empty() && columns_str != "*" {
-        columns_str.split(',')
+        columns_str
+            .split(',')
             .map(|c| Expr::Named(c.trim().to_string()))
             .collect()
     } else {
         vec![]
     };
-    
+
     let mut cmds = Vec::with_capacity(count);
     for i in 0..count {
         let limit = unsafe { *limits.add(i) };
@@ -118,13 +125,15 @@ pub extern "C" fn qail_encode_batch(
         }
         cmds.push(cmd);
     }
-    
+
     let batch_bytes = AstEncoder::encode_batch(&cmds);
     let bytes = batch_bytes.to_vec();
-    
+
     let len = bytes.len();
     let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
-    unsafe { *out_len = len; }
+    unsafe {
+        *out_len = len;
+    }
     ptr
 }
 
@@ -147,27 +156,30 @@ pub extern "C" fn qail_version() -> *const c_char {
 
 /// Transpile QAIL text to SQL.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_transpile(
-    qail_text: *const c_char,
-    out_len: *mut usize,
-) -> *mut c_char {
+pub extern "C" fn qail_transpile(qail_text: *const c_char, out_len: *mut usize) -> *mut c_char {
     if qail_text.is_null() {
-        unsafe { *out_len = 0; }
+        unsafe {
+            *out_len = 0;
+        }
         return std::ptr::null_mut();
     }
-    
+
     let input = unsafe { CStr::from_ptr(qail_text).to_str().unwrap_or("") };
-    
+
     match qail_core::parse(input) {
         Ok(cmd) => {
             let sql = cmd.to_sql();
             let len = sql.len();
             let c_str = std::ffi::CString::new(sql).unwrap();
-            unsafe { *out_len = len; }
+            unsafe {
+                *out_len = len;
+            }
             c_str.into_raw()
         }
         Err(_) => {
-            unsafe { *out_len = 0; }
+            unsafe {
+                *out_len = 0;
+            }
             std::ptr::null_mut()
         }
     }
@@ -186,7 +198,7 @@ pub extern "C" fn qail_string_free(ptr: *mut c_char) {
 // ==================== Connection Functions (NEW) ====================
 
 /// Connect to PostgreSQL and return a connection handle.
-/// 
+///
 /// Returns NULL on connection failure.
 /// Caller must call qail_disconnect() to free the connection.
 #[unsafe(no_mangle)]
@@ -199,16 +211,15 @@ pub extern "C" fn qail_connect(
     if host.is_null() || user.is_null() || database.is_null() {
         return std::ptr::null_mut();
     }
-    
+
     let host = unsafe { CStr::from_ptr(host).to_str().unwrap_or("127.0.0.1") };
     let user = unsafe { CStr::from_ptr(user).to_str().unwrap_or("postgres") };
     let database = unsafe { CStr::from_ptr(database).to_str().unwrap_or("postgres") };
-    
+
     // Connect using tokio runtime
-    let result = RUNTIME.block_on(async {
-        qail_pg::PgConnection::connect(host, port, user, database).await
-    });
-    
+    let result = RUNTIME
+        .block_on(async { qail_pg::PgConnection::connect(host, port, user, database).await });
+
     match result {
         Ok(conn) => {
             let handle = Box::new(QailConnection {
@@ -231,7 +242,7 @@ pub extern "C" fn qail_disconnect(conn: *mut QailConnection) {
 }
 
 /// Prepare a SQL statement for pipelined execution.
-/// 
+///
 /// Returns NULL on failure.
 /// Caller must call qail_prepared_free() to free the handle.
 #[unsafe(no_mangle)]
@@ -242,15 +253,15 @@ pub extern "C" fn qail_prepare(
     if conn.is_null() || sql.is_null() {
         return std::ptr::null_mut();
     }
-    
+
     let sql_str = unsafe { CStr::from_ptr(sql).to_str().unwrap_or("") };
     let conn_ref = unsafe { &*conn };
-    
+
     let result = RUNTIME.block_on(async {
         let mut conn_guard = conn_ref.inner.lock().await;
         conn_guard.prepare(sql_str).await
     });
-    
+
     match result {
         Ok(_stmt) => {
             let handle = Box::new(QailPreparedStatement {
@@ -273,16 +284,16 @@ pub extern "C" fn qail_prepared_free(stmt: *mut QailPreparedStatement) {
 }
 
 /// Execute a prepared statement N times with different parameters.
-/// 
+///
 /// TRUE PIPELINING: All queries sent in ONE network packet,
 /// all responses read in ONE round-trip.
-/// 
+///
 /// # Arguments
 /// * `conn` - Connection handle from qail_connect()
 /// * `stmt` - Prepared statement from qail_prepare()
 /// * `params` - Array of null-terminated C strings (one per query)
 /// * `count` - Number of queries to execute
-/// 
+///
 /// # Returns
 /// Number of queries completed, or -1 on error.
 #[unsafe(no_mangle)]
@@ -295,10 +306,10 @@ pub extern "C" fn qail_pipeline_exec(
     if conn.is_null() || stmt.is_null() || count == 0 {
         return -1;
     }
-    
+
     let conn_ref = unsafe { &*conn };
     let stmt_ref = unsafe { &*stmt };
-    
+
     // Build params batch
     let mut params_batch: Vec<Vec<Option<Vec<u8>>>> = Vec::with_capacity(count);
     for i in 0..count {
@@ -310,17 +321,19 @@ pub extern "C" fn qail_pipeline_exec(
             params_batch.push(vec![Some(param_str)]);
         }
     }
-    
+
     // Execute pipeline
     let result = RUNTIME.block_on(async {
         let mut conn_guard = conn_ref.inner.lock().await;
-        
+
         // Create PreparedStatement handle for driver using from_sql
         let driver_stmt = PgPreparedStatement::from_sql(&stmt_ref.sql);
-        
-        conn_guard.pipeline_prepared_fast(&driver_stmt, &params_batch).await
+
+        conn_guard
+            .pipeline_prepared_fast(&driver_stmt, &params_batch)
+            .await
     });
-    
+
     match result {
         Ok(count) => count as i64,
         Err(_) => -1,
@@ -328,7 +341,7 @@ pub extern "C" fn qail_pipeline_exec(
 }
 
 /// Execute pipeline and return results as JSON.
-/// 
+///
 /// Returns pointer to JSON string with all rows.
 /// Caller must call qail_string_free() to free.
 #[unsafe(no_mangle)]
@@ -340,13 +353,15 @@ pub extern "C" fn qail_pipeline_exec_json(
     out_len: *mut usize,
 ) -> *mut c_char {
     if conn.is_null() || stmt.is_null() || count == 0 {
-        unsafe { *out_len = 0; }
+        unsafe {
+            *out_len = 0;
+        }
         return std::ptr::null_mut();
     }
-    
+
     let conn_ref = unsafe { &*conn };
     let stmt_ref = unsafe { &*stmt };
-    
+
     // Build params batch
     let mut params_batch: Vec<Vec<Option<Vec<u8>>>> = Vec::with_capacity(count);
     for i in 0..count {
@@ -358,28 +373,36 @@ pub extern "C" fn qail_pipeline_exec_json(
             params_batch.push(vec![Some(param_str)]);
         }
     }
-    
+
     // Execute pipeline with results
     let result = RUNTIME.block_on(async {
         let mut conn_guard = conn_ref.inner.lock().await;
-        
+
         let driver_stmt = PgPreparedStatement::from_sql(&stmt_ref.sql);
-        
-        conn_guard.pipeline_prepared_results(&driver_stmt, &params_batch).await
+
+        conn_guard
+            .pipeline_prepared_results(&driver_stmt, &params_batch)
+            .await
     });
-    
+
     match result {
         Ok(results) => {
             // Convert to simple JSON array
             let mut json = String::from("[");
             for (qi, rows) in results.iter().enumerate() {
-                if qi > 0 { json.push(','); }
+                if qi > 0 {
+                    json.push(',');
+                }
                 json.push('[');
                 for (ri, row) in rows.iter().enumerate() {
-                    if ri > 0 { json.push(','); }
+                    if ri > 0 {
+                        json.push(',');
+                    }
                     json.push('[');
                     for (ci, col) in row.iter().enumerate() {
-                        if ci > 0 { json.push(','); }
+                        if ci > 0 {
+                            json.push(',');
+                        }
                         match col {
                             Some(data) => {
                                 let s = String::from_utf8_lossy(data);
@@ -395,29 +418,33 @@ pub extern "C" fn qail_pipeline_exec_json(
                 json.push(']');
             }
             json.push(']');
-            
+
             let len = json.len();
             let c_str = std::ffi::CString::new(json).unwrap();
-            unsafe { *out_len = len; }
+            unsafe {
+                *out_len = len;
+            }
             c_str.into_raw()
         }
         Err(_) => {
-            unsafe { *out_len = 0; }
+            unsafe {
+                *out_len = 0;
+            }
             std::ptr::null_mut()
         }
     }
 }
 
 /// Simplified pipeline execution - takes limit values as int64 array.
-/// 
+///
 /// This is easier to call from PHP than passing char** arrays.
-/// 
+///
 /// # Arguments
 /// * `conn` - Connection handle from qail_connect()
 /// * `stmt` - Prepared statement from qail_prepare()
 /// * `limits` - Array of i64 limit values (one per query)
 /// * `count` - Number of queries to execute
-/// 
+///
 /// # Returns
 /// Number of queries completed, or -1 on error.
 #[unsafe(no_mangle)]
@@ -430,10 +457,10 @@ pub extern "C" fn qail_pipeline_exec_limits(
     if conn.is_null() || stmt.is_null() || count == 0 || limits.is_null() {
         return -1;
     }
-    
+
     let conn_ref = unsafe { &*conn };
     let stmt_ref = unsafe { &*stmt };
-    
+
     // Build params batch from limits
     let mut params_batch: Vec<Vec<Option<Vec<u8>>>> = Vec::with_capacity(count);
     for i in 0..count {
@@ -442,14 +469,16 @@ pub extern "C" fn qail_pipeline_exec_limits(
         let param_str = limit.to_string().into_bytes();
         params_batch.push(vec![Some(param_str)]);
     }
-    
+
     // Execute pipeline
     let result = RUNTIME.block_on(async {
         let mut conn_guard = conn_ref.inner.lock().await;
         let driver_stmt = PgPreparedStatement::from_sql(&stmt_ref.sql);
-        conn_guard.pipeline_prepared_fast(&driver_stmt, &params_batch).await
+        conn_guard
+            .pipeline_prepared_fast(&driver_stmt, &params_batch)
+            .await
     });
-    
+
     match result {
         Ok(count) => count as i64,
         Err(_) => -1,
@@ -469,10 +498,10 @@ pub struct QailCopyStream {
 }
 
 /// Start a COPY stream for bulk inserts.
-/// 
+///
 /// Returns a handle for streaming rows, or NULL on failure.
 /// Call qail_copy_row() to add rows, then qail_copy_end() to commit.
-/// 
+///
 /// # Example (PHP)
 /// ```php
 /// $copy = qail_copy_start($conn, "users", "id,name,email");
@@ -490,17 +519,18 @@ pub extern "C" fn qail_copy_start(
     if conn.is_null() || table.is_null() || columns.is_null() {
         return std::ptr::null_mut();
     }
-    
+
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") }.to_string();
     let columns_str = unsafe { CStr::from_ptr(columns).to_str().unwrap_or("") };
-    let columns: Vec<String> = columns_str.split(',')
+    let columns: Vec<String> = columns_str
+        .split(',')
         .map(|s| s.trim().to_string())
         .collect();
-    
+
     if table.is_empty() || columns.is_empty() {
         return std::ptr::null_mut();
     }
-    
+
     let stream = Box::new(QailCopyStream {
         conn,
         table,
@@ -508,12 +538,12 @@ pub extern "C" fn qail_copy_start(
         buffer: SyncMutex::new(Vec::with_capacity(1024 * 1024)), // 1MB initial buffer
         row_count: std::sync::atomic::AtomicUsize::new(0),
     });
-    
+
     Box::into_raw(stream)
 }
 
 /// Add a row to the COPY stream (3-column version for users table).
-/// 
+///
 /// Returns 1 on success, 0 on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_copy_row_3(
@@ -525,24 +555,30 @@ pub extern "C" fn qail_copy_row_3(
     if stream.is_null() {
         return 0;
     }
-    
+
     let stream_ref = unsafe { &*stream };
     let mut buffer = match stream_ref.buffer.lock() {
         Ok(b) => b,
         Err(_) => return 0,
     };
-    
+
     // Encode values as TSV line
-    let v0 = if col0.is_null() { "\\N" } else { 
+    let v0 = if col0.is_null() {
+        "\\N"
+    } else {
         unsafe { CStr::from_ptr(col0).to_str().unwrap_or("\\N") }
     };
-    let v1 = if col1.is_null() { "\\N" } else { 
+    let v1 = if col1.is_null() {
+        "\\N"
+    } else {
         unsafe { CStr::from_ptr(col1).to_str().unwrap_or("\\N") }
     };
-    let v2 = if col2.is_null() { "\\N" } else { 
+    let v2 = if col2.is_null() {
+        "\\N"
+    } else {
         unsafe { CStr::from_ptr(col2).to_str().unwrap_or("\\N") }
     };
-    
+
     // Write TSV line: col0\tcol1\tcol2\n
     buffer.extend_from_slice(v0.as_bytes());
     buffer.push(b'\t');
@@ -550,8 +586,10 @@ pub extern "C" fn qail_copy_row_3(
     buffer.push(b'\t');
     buffer.extend_from_slice(v2.as_bytes());
     buffer.push(b'\n');
-    
-    stream_ref.row_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    stream_ref
+        .row_count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     1
 }
 
@@ -567,19 +605,21 @@ pub extern "C" fn qail_copy_row_4(
     if stream.is_null() {
         return 0;
     }
-    
+
     let stream_ref = unsafe { &*stream };
     let mut buffer = match stream_ref.buffer.lock() {
         Ok(b) => b,
         Err(_) => return 0,
     };
-    
+
     fn get_val(ptr: *const c_char) -> &'static str {
-        if ptr.is_null() { "\\N" } else { 
+        if ptr.is_null() {
+            "\\N"
+        } else {
             unsafe { CStr::from_ptr(ptr).to_str().unwrap_or("\\N") }
         }
     }
-    
+
     buffer.extend_from_slice(get_val(col0).as_bytes());
     buffer.push(b'\t');
     buffer.extend_from_slice(get_val(col1).as_bytes());
@@ -588,8 +628,10 @@ pub extern "C" fn qail_copy_row_4(
     buffer.push(b'\t');
     buffer.extend_from_slice(get_val(col3).as_bytes());
     buffer.push(b'\n');
-    
-    stream_ref.row_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    stream_ref
+        .row_count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     1
 }
 
@@ -607,19 +649,21 @@ pub extern "C" fn qail_copy_row_6(
     if stream.is_null() {
         return 0;
     }
-    
+
     let stream_ref = unsafe { &*stream };
     let mut buffer = match stream_ref.buffer.lock() {
         Ok(b) => b,
         Err(_) => return 0,
     };
-    
+
     fn get_val(ptr: *const c_char) -> &'static str {
-        if ptr.is_null() { "\\N" } else { 
+        if ptr.is_null() {
+            "\\N"
+        } else {
             unsafe { CStr::from_ptr(ptr).to_str().unwrap_or("\\N") }
         }
     }
-    
+
     buffer.extend_from_slice(get_val(col0).as_bytes());
     buffer.push(b'\t');
     buffer.extend_from_slice(get_val(col1).as_bytes());
@@ -632,13 +676,15 @@ pub extern "C" fn qail_copy_row_6(
     buffer.push(b'\t');
     buffer.extend_from_slice(get_val(col5).as_bytes());
     buffer.push(b'\n');
-    
-    stream_ref.row_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    stream_ref
+        .row_count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     1
 }
 
 /// End the COPY stream and commit to PostgreSQL.
-/// 
+///
 /// Returns number of rows inserted, or -1 on failure.
 /// Frees the stream handle.
 #[unsafe(no_mangle)]
@@ -646,32 +692,30 @@ pub extern "C" fn qail_copy_end(stream: *mut QailCopyStream) -> i64 {
     if stream.is_null() {
         return -1;
     }
-    
+
     // Take ownership of stream
     let stream = unsafe { Box::from_raw(stream) };
-    
+
     let conn_ref = unsafe { &*stream.conn };
     let buffer = match stream.buffer.lock() {
         Ok(b) => b,
         Err(_) => return -1,
     };
-    
+
     if buffer.is_empty() {
         return 0;
     }
-    
+
     // Execute COPY using Rust's async runtime
     let result = RUNTIME.block_on(async {
         let mut conn_guard = conn_ref.inner.lock().await;
-        
+
         // Use copy_in_raw for maximum speed
-        conn_guard.copy_in_raw(
-            &stream.table,
-            &stream.columns,
-            &buffer
-        ).await
+        conn_guard
+            .copy_in_raw(&stream.table, &stream.columns, &buffer)
+            .await
     });
-    
+
     match result {
         Ok(count) => count as i64,
         Err(_) => -1,
@@ -691,17 +735,17 @@ pub extern "C" fn qail_copy_cancel(stream: *mut QailCopyStream) {
 // ==================== Direct MySQL→PostgreSQL Migration ====================
 
 /// Direct Rust-to-Rust MySQL → PostgreSQL migration.
-/// 
+///
 /// Bypasses PHP loop entirely for maximum throughput.
 /// Expected: 600K+ rows/s vs 330K rows/s with PHP loop.
-/// 
+///
 /// # Arguments
 /// * `mysql_host`, `mysql_port`, `mysql_user`, `mysql_pass`, `mysql_db` - MySQL connection
 /// * `pg_conn` - Existing PostgreSQL connection from qail_connect()
 /// * `sql` - SELECT query to execute on MySQL
 /// * `pg_table` - Target PostgreSQL table name
 /// * `pg_columns` - Comma-separated column names for COPY
-/// 
+///
 /// # Returns
 /// Number of rows migrated, or -1 on error.
 #[unsafe(no_mangle)]
@@ -716,46 +760,57 @@ pub extern "C" fn qail_mysql_to_pg(
     pg_table: *const c_char,
     pg_columns: *const c_char,
 ) -> i64 {
-    if mysql_host.is_null() || mysql_user.is_null() || mysql_db.is_null() 
-        || pg_conn.is_null() || sql.is_null() || pg_table.is_null() || pg_columns.is_null() {
+    if mysql_host.is_null()
+        || mysql_user.is_null()
+        || mysql_db.is_null()
+        || pg_conn.is_null()
+        || sql.is_null()
+        || pg_table.is_null()
+        || pg_columns.is_null()
+    {
         return -1;
     }
-    
+
     let mysql_host = unsafe { CStr::from_ptr(mysql_host).to_str().unwrap_or("127.0.0.1") };
     let mysql_user = unsafe { CStr::from_ptr(mysql_user).to_str().unwrap_or("root") };
-    let mysql_pass = if mysql_pass.is_null() { "" } else {
+    let mysql_pass = if mysql_pass.is_null() {
+        ""
+    } else {
         unsafe { CStr::from_ptr(mysql_pass).to_str().unwrap_or("") }
     };
     let mysql_db = unsafe { CStr::from_ptr(mysql_db).to_str().unwrap_or("") };
     let sql = unsafe { CStr::from_ptr(sql).to_str().unwrap_or("") };
     let pg_table = unsafe { CStr::from_ptr(pg_table).to_str().unwrap_or("") };
     let pg_columns_str = unsafe { CStr::from_ptr(pg_columns).to_str().unwrap_or("") };
-    
-    let pg_columns: Vec<String> = pg_columns_str.split(',')
+
+    let pg_columns: Vec<String> = pg_columns_str
+        .split(',')
         .map(|s| s.trim().to_string())
         .collect();
-    
+
     let pg_conn_ref = unsafe { &*pg_conn };
-    
+
     // Initialize TLS crypto provider
     qail_mysql::init();
-    
+
     // Execute migration in tokio runtime
     let result = RUNTIME.block_on(async {
         // Connect to MySQL with TLS
         let mut mysql_conn = match qail_mysql::MySqlConnection::connect(
-            mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db
-        ).await {
+            mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db,
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => return Err(format!("MySQL connection failed: {}", e)),
         };
-        
+
         // Execute query and get TSV data
         let tsv_data = match mysql_conn.query_to_tsv(sql).await {
             Ok(data) => data,
             Err(e) => return Err(format!("MySQL query failed: {}", e)),
         };
-        
+
         // Write to PostgreSQL using COPY
         let mut pg_guard = pg_conn_ref.inner.lock().await;
         match pg_guard.copy_in_raw(pg_table, &pg_columns, &tsv_data).await {
@@ -763,7 +818,7 @@ pub extern "C" fn qail_mysql_to_pg(
             Err(e) => Err(format!("PostgreSQL COPY failed: {}", e)),
         }
     });
-    
+
     match result {
         Ok(count) => count as i64,
         Err(msg) => {

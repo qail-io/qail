@@ -3,9 +3,9 @@
 //! Provides compile-time-like validation for QailCmd against a known schema.
 //! Used by CLI, LSP, and the encoder to catch errors before they hit the wire.
 
+use crate::ast::{Expr, QailCmd};
 use std::collections::HashMap;
 use strsim::levenshtein;
-use crate::ast::{Expr, QailCmd};
 
 /// Validation error with structured information.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,18 +46,43 @@ impl std::fmt::Display for ValidationError {
                     write!(f, "Table '{}' not found.", table)
                 }
             }
-            ValidationError::ColumnNotFound { table, column, suggestion } => {
+            ValidationError::ColumnNotFound {
+                table,
+                column,
+                suggestion,
+            } => {
                 if let Some(s) = suggestion {
-                    write!(f, "Column '{}' not found in table '{}'. Did you mean '{}'?", column, table, s)
+                    write!(
+                        f,
+                        "Column '{}' not found in table '{}'. Did you mean '{}'?",
+                        column, table, s
+                    )
                 } else {
                     write!(f, "Column '{}' not found in table '{}'.", column, table)
                 }
             }
-            ValidationError::TypeMismatch { table, column, expected, got } => {
-                write!(f, "Type mismatch for '{}.{}': expected {}, got {}", table, column, expected, got)
+            ValidationError::TypeMismatch {
+                table,
+                column,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "Type mismatch for '{}.{}': expected {}, got {}",
+                    table, column, expected, got
+                )
             }
-            ValidationError::InvalidOperator { column, operator, reason } => {
-                write!(f, "Invalid operator '{}' for column '{}': {}", operator, column, reason)
+            ValidationError::InvalidOperator {
+                column,
+                operator,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "Invalid operator '{}' for column '{}': {}",
+                    operator, column, reason
+                )
             }
         }
     }
@@ -108,8 +133,9 @@ impl Validator {
         self.tables.push(table.to_string());
         let col_names: Vec<String> = cols.iter().map(|(name, _)| name.to_string()).collect();
         self.columns.insert(table.to_string(), col_names);
-        
-        let type_map: HashMap<String, String> = cols.iter()
+
+        let type_map: HashMap<String, String> = cols
+            .iter()
             .map(|(name, typ)| (name.to_string(), typ.to_string()))
             .collect();
         self.column_types.insert(table.to_string(), type_map);
@@ -196,9 +222,10 @@ impl Validator {
         // Check SELECT columns
         for col in &cmd.columns {
             if let Some(name) = Self::extract_column_name(col)
-                && let Err(e) = self.validate_column(&cmd.table, &name) {
-                    errors.push(e);
-                }
+                && let Err(e) = self.validate_column(&cmd.table, &name)
+            {
+                errors.push(e);
+            }
         }
 
         // Check filter/payload conditions
@@ -209,9 +236,10 @@ impl Validator {
                     if name.contains('.') {
                         let parts: Vec<&str> = name.split('.').collect();
                         if parts.len() == 2
-                            && let Err(e) = self.validate_column(parts[0], parts[1]) {
-                                errors.push(e);
-                            }
+                            && let Err(e) = self.validate_column(parts[0], parts[1])
+                        {
+                            errors.push(e);
+                        }
                     } else if let Err(e) = self.validate_column(&cmd.table, &name) {
                         errors.push(e);
                     }
@@ -230,22 +258,26 @@ impl Validator {
             if let Some(conditions) = &join.on {
                 for cond in conditions {
                     if let Some(name) = Self::extract_column_name(&cond.left)
-                        && name.contains('.') {
-                            let parts: Vec<&str> = name.split('.').collect();
-                            if parts.len() == 2
-                                && let Err(e) = self.validate_column(parts[0], parts[1]) {
-                                    errors.push(e);
-                                }
+                        && name.contains('.')
+                    {
+                        let parts: Vec<&str> = name.split('.').collect();
+                        if parts.len() == 2
+                            && let Err(e) = self.validate_column(parts[0], parts[1])
+                        {
+                            errors.push(e);
                         }
+                    }
                     // Also check right side if it's a column reference
                     if let crate::ast::Value::Column(col_name) = &cond.value
-                        && col_name.contains('.') {
-                            let parts: Vec<&str> = col_name.split('.').collect();
-                            if parts.len() == 2
-                                && let Err(e) = self.validate_column(parts[0], parts[1]) {
-                                    errors.push(e);
-                                }
+                        && col_name.contains('.')
+                    {
+                        let parts: Vec<&str> = col_name.split('.').collect();
+                        if parts.len() == 2
+                            && let Err(e) = self.validate_column(parts[0], parts[1])
+                        {
+                            errors.push(e);
                         }
+                    }
                 }
             }
         }
@@ -254,9 +286,10 @@ impl Validator {
         if let Some(returning) = &cmd.returning {
             for col in returning {
                 if let Some(name) = Self::extract_column_name(col)
-                    && let Err(e) = self.validate_column(&cmd.table, &name) {
-                        errors.push(e);
-                    }
+                    && let Err(e) = self.validate_column(&cmd.table, &name)
+                {
+                    errors.push(e);
+                }
             }
         }
 
@@ -278,9 +311,9 @@ impl Validator {
 
             // Dynamic threshold based on length
             let threshold = match input.len() {
-                0..=2 => 0,      // Precise match only for very short strings
-                3..=5 => 2,      // Allow 2 char diff (e.g. usr -> users)
-                _ => 3,          // Allow 3 char diff for longer strings
+                0..=2 => 0, // Precise match only for very short strings
+                3..=5 => 2, // Allow 2 char diff (e.g. usr -> users)
+                _ => 3,     // Allow 3 char diff for longer strings
             };
 
             if dist <= threshold && dist < min_dist {
@@ -305,7 +338,8 @@ impl Validator {
     /// Legacy: validate_column that returns String error
     #[deprecated(note = "Use validate_column() which returns ValidationError")]
     pub fn validate_column_legacy(&self, table: &str, column: &str) -> Result<(), String> {
-        self.validate_column(table, column).map_err(|e| e.to_string())
+        self.validate_column(table, column)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -320,12 +354,16 @@ mod tests {
         v.add_table("orders", &["id", "total"]);
 
         assert!(v.validate_table("users").is_ok());
-        
+
         let err = v.validate_table("usr").unwrap_err();
-        assert!(matches!(err, ValidationError::TableNotFound { suggestion: Some(ref s), .. } if s == "users"));
+        assert!(
+            matches!(err, ValidationError::TableNotFound { suggestion: Some(ref s), .. } if s == "users")
+        );
 
         let err = v.validate_table("usrs").unwrap_err();
-        assert!(matches!(err, ValidationError::TableNotFound { suggestion: Some(ref s), .. } if s == "users"));
+        assert!(
+            matches!(err, ValidationError::TableNotFound { suggestion: Some(ref s), .. } if s == "users")
+        );
     }
 
     #[test]
@@ -337,7 +375,9 @@ mod tests {
         assert!(v.validate_column("users", "*").is_ok());
 
         let err = v.validate_column("users", "emial").unwrap_err();
-        assert!(matches!(err, ValidationError::ColumnNotFound { suggestion: Some(ref s), .. } if s == "email"));
+        assert!(
+            matches!(err, ValidationError::ColumnNotFound { suggestion: Some(ref s), .. } if s == "email")
+        );
     }
 
     #[test]
@@ -362,7 +402,9 @@ mod tests {
         let cmd = QailCmd::get("users").columns(["id", "emial"]); // typo
         let errors = v.validate_command(&cmd).unwrap_err();
         assert_eq!(errors.len(), 1);
-        assert!(matches!(&errors[0], ValidationError::ColumnNotFound { column, .. } if column == "emial"));
+        assert!(
+            matches!(&errors[0], ValidationError::ColumnNotFound { column, .. } if column == "emial")
+        );
     }
 
     #[test]
@@ -371,13 +413,19 @@ mod tests {
             table: "usrs".to_string(),
             suggestion: Some("users".to_string()),
         };
-        assert_eq!(err.to_string(), "Table 'usrs' not found. Did you mean 'users'?");
+        assert_eq!(
+            err.to_string(),
+            "Table 'usrs' not found. Did you mean 'users'?"
+        );
 
         let err = ValidationError::ColumnNotFound {
             table: "users".to_string(),
             column: "emial".to_string(),
             suggestion: Some("email".to_string()),
         };
-        assert_eq!(err.to_string(), "Column 'emial' not found in table 'users'. Did you mean 'email'?");
+        assert_eq!(
+            err.to_string(),
+            "Column 'emial' not found in table 'users'. Did you mean 'email'?"
+        );
     }
 }

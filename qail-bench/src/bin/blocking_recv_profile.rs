@@ -14,7 +14,7 @@ fn main() {
     // Test 1: oneshot channel creation + blocking_recv
     println!("📊 Test 1: oneshot create + blocking_recv");
     let rt = tokio::runtime::Runtime::new().unwrap();
-    
+
     let start = Instant::now();
     for _ in 0..ITERATIONS {
         let (tx, rx) = oneshot::channel::<i32>();

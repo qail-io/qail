@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::ast::{Condition, JoinKind};
+use serde::{Deserialize, Serialize};
 
 /// A join definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

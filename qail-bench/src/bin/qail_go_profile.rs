@@ -9,8 +9,8 @@
 //! Run:
 //!   cargo run --release --bin qail_go_profile
 
-use std::time::Instant;
 use std::env;
+use std::time::Instant;
 
 const ITERATIONS: usize = 100_000;
 const BATCH_SIZE: usize = 1000;
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cmd.columns.push(Expr::Named("id".to_string()));
     cmd.columns.push(Expr::Named("name".to_string()));
     cmd = cmd.limit(10);
-    
+
     let start = Instant::now();
     for _ in 0..ITERATIONS {
         let (_bytes, _params) = AstEncoder::encode_cmd(&cmd);
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cmd = cmd.limit((i % 10 + 1) as i64);
         cmds.push(cmd);
     }
-    
+
     let batches = ITERATIONS / BATCH_SIZE;
     let start = Instant::now();
     for _ in 0..batches {
@@ -83,9 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port: u16 = get_env_or("PG_PORT", "5432").parse()?;
     let user = get_env_or("PG_USER", "postgres");
     let database = get_env_or("PG_DATABASE", "postgres");
-    
+
     let conn_result = PgConnection::connect(&host, port, &user, &database).await;
-    
+
     if let Ok(mut conn) = conn_result {
         let batch_count = 100;
         let start = Instant::now();
@@ -94,10 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let io_time = start.elapsed().as_nanos() as f64 / batch_count as f64;
         let per_query_io = io_time / BATCH_SIZE as f64;
-        
+
         println!("   Per batch (encode + I/O): {:.0}ns", io_time);
         println!("   Per query with I/O: {:.0}ns\n", per_query_io);
-        
+
         // Calculate I/O vs encoding overhead
         let io_only = io_time - batch_encode_time;
         println!("   📌 I/O overhead only: {:.0}ns per batch", io_only);
@@ -113,11 +113,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("├─────────────────────────────────────────────┤");
     println!("│ QailCmd creation:           {:>10.0}      │", cmd_time);
     println!("│ Single encode:              {:>10.0}      │", encode_time);
-    println!("│ Batch encode per query:     {:>10.0}      │", per_query_encode);
+    println!(
+        "│ Batch encode per query:     {:>10.0}      │",
+        per_query_encode
+    );
     println!("└─────────────────────────────────────────────┘");
 
     let theoretical_qps = 1e9 / per_query_encode;
-    println!("\n🎯 Theoretical max (encode only): {:.0} q/s", theoretical_qps);
+    println!(
+        "\n🎯 Theoretical max (encode only): {:.0} q/s",
+        theoretical_qps
+    );
     println!("   pgx is ~250k q/s");
 
     Ok(())

@@ -1,8 +1,8 @@
 //! Migration impact analysis.
 
 use super::scanner::CodeReference;
-use crate::migrate::Schema;
 use crate::ast::{Action, QailCmd};
+use crate::migrate::Schema;
 use std::collections::HashMap;
 
 /// Result of analyzing migration impact on codebase.
@@ -68,44 +68,46 @@ impl MigrationImpact {
         _new_schema: &Schema,
     ) -> Self {
         let mut impact = MigrationImpact::default();
-        
+
         // Build lookup maps
         let mut table_refs: HashMap<String, Vec<&CodeReference>> = HashMap::new();
         let mut column_refs: HashMap<(String, String), Vec<&CodeReference>> = HashMap::new();
-        
+
         for code_ref in code_refs {
-            table_refs.entry(code_ref.table.clone())
+            table_refs
+                .entry(code_ref.table.clone())
                 .or_default()
                 .push(code_ref);
-            
+
             for col in &code_ref.columns {
-                column_refs.entry((code_ref.table.clone(), col.clone()))
+                column_refs
+                    .entry((code_ref.table.clone(), col.clone()))
                     .or_default()
                     .push(code_ref);
             }
         }
-        
+
         // Analyze each migration command
         for cmd in commands {
             match cmd.action {
                 Action::Drop => {
                     // Table being dropped
                     if let Some(refs) = table_refs.get(&cmd.table)
-                        && !refs.is_empty() 
+                        && !refs.is_empty()
                     {
                         impact.breaking_changes.push(BreakingChange::DroppedTable {
                             table: cmd.table.clone(),
                             references: refs.iter().map(|r| (*r).clone()).collect(),
                         });
                     }
-                },
+                }
                 Action::AlterDrop => {
                     // Column being dropped
                     for col_expr in &cmd.columns {
                         if let crate::ast::Expr::Named(col_name) = col_expr {
                             let key = (cmd.table.clone(), col_name.clone());
                             if let Some(refs) = column_refs.get(&key)
-                                && !refs.is_empty() 
+                                && !refs.is_empty()
                             {
                                 impact.breaking_changes.push(BreakingChange::DroppedColumn {
                                     table: cmd.table.clone(),
@@ -115,13 +117,13 @@ impl MigrationImpact {
                             }
                         }
                     }
-                },
+                }
                 Action::Mod => {
                     // Rename operation - check for references to old name
                     // Would need to parse the rename details from the command
                     // For now, flag any table with Mod action
                     if let Some(refs) = table_refs.get(&cmd.table)
-                        && !refs.is_empty() 
+                        && !refs.is_empty()
                     {
                         impact.breaking_changes.push(BreakingChange::RenamedColumn {
                             table: cmd.table.clone(),
@@ -130,19 +132,19 @@ impl MigrationImpact {
                             references: refs.iter().map(|r| (*r).clone()).collect(),
                         });
                     }
-                },
+                }
                 _ => {}
             }
         }
-        
+
         // Count affected files
         let mut affected: std::collections::HashSet<_> = std::collections::HashSet::new();
         for change in &impact.breaking_changes {
             match change {
-                BreakingChange::DroppedColumn { references, .. } |
-                BreakingChange::DroppedTable { references, .. } |
-                BreakingChange::RenamedColumn { references, .. } |
-                BreakingChange::TypeChanged { references, .. } => {
+                BreakingChange::DroppedColumn { references, .. }
+                | BreakingChange::DroppedTable { references, .. }
+                | BreakingChange::RenamedColumn { references, .. }
+                | BreakingChange::TypeChanged { references, .. } => {
                     for r in references {
                         affected.insert(r.file.clone());
                     }
@@ -151,66 +153,115 @@ impl MigrationImpact {
         }
         impact.affected_files = affected.len();
         impact.safe_to_run = impact.breaking_changes.is_empty();
-        
+
         impact
     }
-    
+
     /// Generate a human-readable report.
     pub fn report(&self) -> String {
         let mut output = String::new();
-        
+
         if self.safe_to_run {
             output.push_str("✓ Migration is safe to run\n");
             return output;
         }
-        
+
         output.push_str("⚠️  BREAKING CHANGES DETECTED\n\n");
         output.push_str(&format!("Affected files: {}\n\n", self.affected_files));
-        
+
         for change in &self.breaking_changes {
             match change {
-                BreakingChange::DroppedColumn { table, column, references } => {
-                    output.push_str(&format!("DROP COLUMN {}.{} ({} references)\n", 
-                        table, column, references.len()));
+                BreakingChange::DroppedColumn {
+                    table,
+                    column,
+                    references,
+                } => {
+                    output.push_str(&format!(
+                        "DROP COLUMN {}.{} ({} references)\n",
+                        table,
+                        column,
+                        references.len()
+                    ));
                     for r in references.iter().take(5) {
-                        output.push_str(&format!("  ❌ {}:{} → {}\n", 
-                            r.file.display(), r.line, r.snippet));
+                        output.push_str(&format!(
+                            "  ❌ {}:{} → {}\n",
+                            r.file.display(),
+                            r.line,
+                            r.snippet
+                        ));
                     }
                     if references.len() > 5 {
                         output.push_str(&format!("  ... and {} more\n", references.len() - 5));
                     }
                     output.push('\n');
-                },
+                }
                 BreakingChange::DroppedTable { table, references } => {
-                    output.push_str(&format!("DROP TABLE {} ({} references)\n", 
-                        table, references.len()));
+                    output.push_str(&format!(
+                        "DROP TABLE {} ({} references)\n",
+                        table,
+                        references.len()
+                    ));
                     for r in references.iter().take(5) {
-                        output.push_str(&format!("  ❌ {}:{} → {}\n", 
-                            r.file.display(), r.line, r.snippet));
+                        output.push_str(&format!(
+                            "  ❌ {}:{} → {}\n",
+                            r.file.display(),
+                            r.line,
+                            r.snippet
+                        ));
                     }
                     output.push('\n');
-                },
-                BreakingChange::RenamedColumn { table, old_name, new_name, references } => {
-                    output.push_str(&format!("RENAME {}.{} → {} ({} references)\n", 
-                        table, old_name, new_name, references.len()));
+                }
+                BreakingChange::RenamedColumn {
+                    table,
+                    old_name,
+                    new_name,
+                    references,
+                } => {
+                    output.push_str(&format!(
+                        "RENAME {}.{} → {} ({} references)\n",
+                        table,
+                        old_name,
+                        new_name,
+                        references.len()
+                    ));
                     for r in references.iter().take(5) {
-                        output.push_str(&format!("  ⚠️  {}:{} → {}\n", 
-                            r.file.display(), r.line, r.snippet));
+                        output.push_str(&format!(
+                            "  ⚠️  {}:{} → {}\n",
+                            r.file.display(),
+                            r.line,
+                            r.snippet
+                        ));
                     }
                     output.push('\n');
-                },
-                BreakingChange::TypeChanged { table, column, old_type, new_type, references } => {
-                    output.push_str(&format!("TYPE CHANGE {}.{}: {} → {} ({} references)\n", 
-                        table, column, old_type, new_type, references.len()));
+                }
+                BreakingChange::TypeChanged {
+                    table,
+                    column,
+                    old_type,
+                    new_type,
+                    references,
+                } => {
+                    output.push_str(&format!(
+                        "TYPE CHANGE {}.{}: {} → {} ({} references)\n",
+                        table,
+                        column,
+                        old_type,
+                        new_type,
+                        references.len()
+                    ));
                     for r in references.iter().take(5) {
-                        output.push_str(&format!("  ⚠️  {}:{} → {}\n", 
-                            r.file.display(), r.line, r.snippet));
+                        output.push_str(&format!(
+                            "  ⚠️  {}:{} → {}\n",
+                            r.file.display(),
+                            r.line,
+                            r.snippet
+                        ));
                     }
                     output.push('\n');
-                },
+                }
             }
         }
-        
+
         output
     }
 }
@@ -219,7 +270,7 @@ impl MigrationImpact {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    
+
     #[test]
     fn test_detect_dropped_table() {
         let cmd = QailCmd {
@@ -227,7 +278,7 @@ mod tests {
             table: "users".to_string(),
             ..Default::default()
         };
-        
+
         let code_ref = CodeReference {
             file: PathBuf::from("src/handlers.rs"),
             line: 42,
@@ -236,12 +287,12 @@ mod tests {
             query_type: super::super::scanner::QueryType::Qail,
             snippet: "get::users".to_string(),
         };
-        
+
         let old_schema = Schema::new();
         let new_schema = Schema::new();
-        
+
         let impact = MigrationImpact::analyze(&[cmd], &[code_ref], &old_schema, &new_schema);
-        
+
         assert!(!impact.safe_to_run);
         assert_eq!(impact.breaking_changes.len(), 1);
     }

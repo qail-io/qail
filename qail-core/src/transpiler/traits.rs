@@ -2,12 +2,55 @@
 
 /// SQL reserved words that must be quoted when used as identifiers.
 pub const RESERVED_WORDS: &[&str] = &[
-    "order", "group", "user", "table", "select", "from", "where", "join",
-    "left", "right", "inner", "outer", "on", "and", "or", "not", "null",
-    "true", "false", "limit", "offset", "as", "in", "is", "like", "between",
-    "having", "union", "all", "distinct", "case", "when", "then", "else", "end",
-    "create", "alter", "drop", "insert", "update", "delete", "index", "key",
-    "primary", "foreign", "references", "default", "constraint", "check",
+    "order",
+    "group",
+    "user",
+    "table",
+    "select",
+    "from",
+    "where",
+    "join",
+    "left",
+    "right",
+    "inner",
+    "outer",
+    "on",
+    "and",
+    "or",
+    "not",
+    "null",
+    "true",
+    "false",
+    "limit",
+    "offset",
+    "as",
+    "in",
+    "is",
+    "like",
+    "between",
+    "having",
+    "union",
+    "all",
+    "distinct",
+    "case",
+    "when",
+    "then",
+    "else",
+    "end",
+    "create",
+    "alter",
+    "drop",
+    "insert",
+    "update",
+    "delete",
+    "index",
+    "key",
+    "primary",
+    "foreign",
+    "references",
+    "default",
+    "constraint",
+    "check",
 ];
 
 /// Escape an identifier if it's a reserved word or contains special chars.
@@ -31,7 +74,7 @@ fn escape_single_identifier(name: &str) -> String {
     let needs_escaping = RESERVED_WORDS.contains(&lower.as_str())
         || name.chars().any(|c| !c.is_alphanumeric() && c != '_')
         || name.chars().next().map(|c| c.is_numeric()).unwrap_or(false);
-    
+
     if needs_escaping {
         format!("\"{}\"", name.replace('"', "\"\""))
     } else {
@@ -73,17 +116,17 @@ pub trait SqlGenerator {
     fn json_key_exists(&self, col: &str, key: &str) -> String {
         format!("{} ? {}", col, key)
     }
-    
+
     /// JSON_EXISTS - check if path exists in JSON (Postgres 17+, SQL/JSON standard)
     fn json_exists(&self, col: &str, path: &str) -> String {
         format!("JSON_EXISTS({}, '{}')", col, path)
     }
-    
+
     /// JSON_QUERY - extract JSON object/array at path (Postgres 17+, SQL/JSON standard)
     fn json_query(&self, col: &str, path: &str) -> String {
         format!("JSON_QUERY({}, '{}')", col, path)
     }
-    
+
     /// JSON_VALUE - extract scalar value at path (Postgres 17+, SQL/JSON standard)
     fn json_value(&self, col: &str, path: &str) -> String {
         format!("JSON_VALUE({}, '{}')", col, path)

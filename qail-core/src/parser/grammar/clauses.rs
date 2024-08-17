@@ -1,28 +1,28 @@
-use nom::{
-    branch::alt,
-    bytes::complete::{tag_no_case},
-    character::complete::{char, multispace0, multispace1, digit1},
-    combinator::{opt, map, value},
-    multi::{separated_list0, separated_list1, many0},
-    sequence::{preceded, delimited},
-    Parser,
-    IResult,
-};
-use crate::ast::*;
-use super::base::{parse_identifier, parse_value, parse_operator};
+use super::base::{parse_identifier, parse_operator, parse_value};
 use super::expressions::parse_expression;
+use crate::ast::*;
+use nom::{
+    IResult, Parser,
+    branch::alt,
+    bytes::complete::tag_no_case,
+    character::complete::{char, digit1, multispace0, multispace1},
+    combinator::{map, opt, value},
+    multi::{many0, separated_list0, separated_list1},
+    sequence::{delimited, preceded},
+};
 
 /// Parse: fields id, name, email  OR  fields *
 pub fn parse_fields_clause(input: &str) -> IResult<&str, Vec<Expr>> {
     let (input, _) = tag_no_case("fields").parse(input)?;
     let (input, _) = multispace1(input)?;
-    
+
     alt((
         // Wildcard: *
         map(char('*'), |_| vec![Expr::Star]),
         // Column list: id, name, email
         parse_column_list,
-    )).parse(input)
+    ))
+    .parse(input)
 }
 
 /// Parse comma-separated column list, respecting parenthesis depth
@@ -30,16 +30,16 @@ pub fn parse_fields_clause(input: &str) -> IResult<&str, Vec<Expr>> {
 pub fn parse_column_list(input: &str) -> IResult<&str, Vec<Expr>> {
     let mut columns = Vec::new();
     let mut current_input = input;
-    
+
     loop {
         // Parse a single column
         let (remaining, col) = parse_single_column(current_input)?;
         columns.push(col);
         current_input = remaining;
-        
+
         // Skip whitespace
         let (remaining, _) = multispace0(current_input)?;
-        
+
         // Check for comma separator at depth 0
         if remaining.starts_with(',') {
             // Consume comma and whitespace
@@ -52,9 +52,12 @@ pub fn parse_column_list(input: &str) -> IResult<&str, Vec<Expr>> {
             break;
         }
     }
-    
+
     if columns.is_empty() {
-        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::SeparatedList)))
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::SeparatedList,
+        )))
     } else {
         Ok((current_input, columns))
     }
@@ -64,13 +67,11 @@ pub fn parse_column_list(input: &str) -> IResult<&str, Vec<Expr>> {
 pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
     let (input, mut expr) = parse_expression(input)?;
     let (input, _) = multispace0(input)?;
-    
+
     // Check for alias
-    let (input, alias) = opt(preceded(
-        (tag_no_case("as"), multispace1),
-        parse_identifier
-    )).parse(input)?;
-    
+    let (input, alias) =
+        opt(preceded((tag_no_case("as"), multispace1), parse_identifier)).parse(input)?;
+
     if let Some(a) = alias {
         // Wrap whatever expr we found in Aliased?
         // Wait, Expr::Aliased has { name: String, alias: String }.
@@ -81,20 +82,63 @@ pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
         // Case { ..., alias: Option<String> }
         // JsonAccess { ..., alias: Option<String> }
         // FunctionCall { ..., alias: Option<String> }
-        
+
         // We should move Alias into global Expr wrapper or update Expr structure.
         // For now, let's map what we can.
         expr = match expr {
-            Expr::Named(n) => Expr::Aliased { name: n, alias: a.to_string() },
-            Expr::FunctionCall { name, args, .. } => Expr::FunctionCall { name, args, alias: Some(a.to_string()) },
-            Expr::JsonAccess { column, path_segments, .. } => Expr::JsonAccess { column, path_segments, alias: Some(a.to_string()) },
-            Expr::Case { when_clauses, else_value, .. } => Expr::Case { when_clauses, else_value, alias: Some(a.to_string()) },
-            Expr::Aggregate { col, func, distinct, filter, .. } => Expr::Aggregate { col, func, distinct, filter, alias: Some(a.to_string()) },
-            Expr::Cast { expr: inner, target_type, .. } => Expr::Cast { expr: inner, target_type, alias: Some(a.to_string()) },
+            Expr::Named(n) => Expr::Aliased {
+                name: n,
+                alias: a.to_string(),
+            },
+            Expr::FunctionCall { name, args, .. } => Expr::FunctionCall {
+                name,
+                args,
+                alias: Some(a.to_string()),
+            },
+            Expr::JsonAccess {
+                column,
+                path_segments,
+                ..
+            } => Expr::JsonAccess {
+                column,
+                path_segments,
+                alias: Some(a.to_string()),
+            },
+            Expr::Case {
+                when_clauses,
+                else_value,
+                ..
+            } => Expr::Case {
+                when_clauses,
+                else_value,
+                alias: Some(a.to_string()),
+            },
+            Expr::Aggregate {
+                col,
+                func,
+                distinct,
+                filter,
+                ..
+            } => Expr::Aggregate {
+                col,
+                func,
+                distinct,
+                filter,
+                alias: Some(a.to_string()),
+            },
+            Expr::Cast {
+                expr: inner,
+                target_type,
+                ..
+            } => Expr::Cast {
+                expr: inner,
+                target_type,
+                alias: Some(a.to_string()),
+            },
             _ => expr,
         };
     }
-    
+
     Ok((input, expr))
 }
 
@@ -102,14 +146,17 @@ pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
 pub fn parse_where_clause(input: &str) -> IResult<&str, Vec<Cage>> {
     let (input, _) = tag_no_case("where").parse(input)?;
     let (input, _) = multispace1(input)?;
-    
+
     let (input, conditions) = parse_conditions(input)?;
-    
-    Ok((input, vec![Cage {
-        kind: CageKind::Filter,
-        conditions,
-        logical_op: LogicalOp::And, // Default, actual logic handled in conditions
-    }]))
+
+    Ok((
+        input,
+        vec![Cage {
+            kind: CageKind::Filter,
+            conditions,
+            logical_op: LogicalOp::And, // Default, actual logic handled in conditions
+        }],
+    ))
 }
 
 /// Parse: having condition and condition2
@@ -117,9 +164,9 @@ pub fn parse_where_clause(input: &str) -> IResult<&str, Vec<Cage>> {
 pub fn parse_having_clause(input: &str) -> IResult<&str, Vec<Condition>> {
     let (input, _) = tag_no_case("having").parse(input)?;
     let (input, _) = multispace1(input)?;
-    
+
     let (input, conditions) = parse_conditions(input)?;
-    
+
     Ok((input, conditions))
 }
 
@@ -128,10 +175,15 @@ pub fn parse_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
     let (input, first) = parse_condition(input)?;
     // Use multispace0 before and/or to handle IS NULL case (trailing space already consumed)
     let (input, rest) = many0(preceded(
-        (multispace0, alt((tag_no_case("and"), tag_no_case("or"))), multispace1),
-        parse_condition
-    )).parse(input)?;
-    
+        (
+            multispace0,
+            alt((tag_no_case("and"), tag_no_case("or"))),
+            multispace1,
+        ),
+        parse_condition,
+    ))
+    .parse(input)?;
+
     let mut conditions = vec![first];
     conditions.extend(rest);
     Ok((input, conditions))
@@ -147,12 +199,15 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
         let (input, subquery) = super::parse_root(input)?;
         let (input, _) = multispace0(input)?;
         let (input, _) = char(')').parse(input)?;
-        return Ok((input, Condition {
-            left: Expr::Named("".to_string()),
-            op: Operator::NotExists,
-            value: Value::Subquery(Box::new(subquery)),
-            is_array_unnest: false,
-        }));
+        return Ok((
+            input,
+            Condition {
+                left: Expr::Named("".to_string()),
+                op: Operator::NotExists,
+                value: Value::Subquery(Box::new(subquery)),
+                is_array_unnest: false,
+            },
+        ));
     }
     if let Ok((input, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("exists")(input) {
         let (input, _) = multispace0(input)?;
@@ -161,22 +216,25 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
         let (input, subquery) = super::parse_root(input)?;
         let (input, _) = multispace0(input)?;
         let (input, _) = char(')').parse(input)?;
-        return Ok((input, Condition {
-            left: Expr::Named("".to_string()),
-            op: Operator::Exists,
-            value: Value::Subquery(Box::new(subquery)),
-            is_array_unnest: false,
-        }));
+        return Ok((
+            input,
+            Condition {
+                left: Expr::Named("".to_string()),
+                op: Operator::Exists,
+                value: Value::Subquery(Box::new(subquery)),
+                is_array_unnest: false,
+            },
+        ));
     }
-    
+
     // Normal case: column op value
     let (input, left_expr) = parse_expression(input)?;
     let (input, _) = multispace0(input)?;
-    
+
     // Parse operator
     let (input, op) = parse_operator(input)?;
     let (input, _) = multispace0(input)?;
-    
+
     // Parse value (handle special operators)
     let (input, value) = if matches!(op, Operator::IsNull | Operator::IsNotNull) {
         (input, Value::Null)
@@ -193,10 +251,8 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
         // Parse IN (val1, val2, ...)
         let (input, _) = char('(').parse(input)?;
         let (input, _) = multispace0(input)?;
-        let (input, values) = separated_list0(
-            (multispace0, char(','), multispace0),
-            parse_value
-        ).parse(input)?;
+        let (input, values) =
+            separated_list0((multispace0, char(','), multispace0), parse_value).parse(input)?;
         let (input, _) = multispace0(input)?;
         let (input, _) = char(')').parse(input)?;
         (input, Value::Array(values))
@@ -207,13 +263,16 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
         let (i, col_name) = parse_identifier(input)?;
         (i, Value::Column(col_name.to_string()))
     };
-    
-    Ok((input, Condition {
-        left: left_expr,
-        op,
-        value,
-        is_array_unnest: false,
-    }))
+
+    Ok((
+        input,
+        Condition {
+            left: left_expr,
+            op,
+            value,
+            is_array_unnest: false,
+        },
+    ))
 }
 
 /// Parse: order by col [asc|desc], col2 [asc|desc]
@@ -222,12 +281,10 @@ pub fn parse_order_by_clause(input: &str) -> IResult<&str, Vec<Cage>> {
     let (input, _) = multispace1(input)?;
     let (input, _) = tag_no_case("by").parse(input)?;
     let (input, _) = multispace1(input)?;
-    
-    let (input, sorts) = separated_list1(
-        (multispace0, char(','), multispace0),
-        parse_sort_column
-    ).parse(input)?;
-    
+
+    let (input, sorts) =
+        separated_list1((multispace0, char(','), multispace0), parse_sort_column).parse(input)?;
+
     Ok((input, sorts))
 }
 
@@ -235,22 +292,26 @@ pub fn parse_order_by_clause(input: &str) -> IResult<&str, Vec<Cage>> {
 pub fn parse_sort_column(input: &str) -> IResult<&str, Cage> {
     let (input, expr) = parse_expression(input)?;
     let (input, _) = multispace0(input)?;
-    
+
     let (input, order) = opt(alt((
         value(SortOrder::Desc, tag_no_case("desc")),
         value(SortOrder::Asc, tag_no_case("asc")),
-    ))).parse(input)?;
-    
-    Ok((input, Cage {
-        kind: CageKind::Sort(order.unwrap_or(SortOrder::Asc)),
-        conditions: vec![Condition {
-            left: expr,
-            op: Operator::Eq,
-            value: Value::Null,
-            is_array_unnest: false,
-        }],
-        logical_op: LogicalOp::And,
-    }))
+    )))
+    .parse(input)?;
+
+    Ok((
+        input,
+        Cage {
+            kind: CageKind::Sort(order.unwrap_or(SortOrder::Asc)),
+            conditions: vec![Condition {
+                left: expr,
+                op: Operator::Eq,
+                value: Value::Null,
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        },
+    ))
 }
 
 /// Parse: limit N
@@ -258,12 +319,15 @@ pub fn parse_limit_clause(input: &str) -> IResult<&str, Cage> {
     let (input, _) = tag_no_case("limit").parse(input)?;
     let (input, _) = multispace1(input)?;
     let (input, n) = digit1(input)?;
-    
-    Ok((input, Cage {
-        kind: CageKind::Limit(n.parse().unwrap_or(0)),
-        conditions: vec![],
-        logical_op: LogicalOp::And,
-    }))
+
+    Ok((
+        input,
+        Cage {
+            kind: CageKind::Limit(n.parse().unwrap_or(0)),
+            conditions: vec![],
+            logical_op: LogicalOp::And,
+        },
+    ))
 }
 
 /// Parse: offset N
@@ -271,12 +335,15 @@ pub fn parse_offset_clause(input: &str) -> IResult<&str, Cage> {
     let (input, _) = tag_no_case("offset").parse(input)?;
     let (input, _) = multispace1(input)?;
     let (input, n) = digit1(input)?;
-    
-    Ok((input, Cage {
-        kind: CageKind::Offset(n.parse().unwrap_or(0)),
-        conditions: vec![],
-        logical_op: LogicalOp::And,
-    }))
+
+    Ok((
+        input,
+        Cage {
+            kind: CageKind::Offset(n.parse().unwrap_or(0)),
+            conditions: vec![],
+            logical_op: LogicalOp::And,
+        },
+    ))
 }
 
 /// Parse: DISTINCT ON (col1, col2, ...)
@@ -286,16 +353,17 @@ pub fn parse_distinct_on(input: &str) -> IResult<&str, Vec<String>> {
     let (input, _) = multispace1(input)?;
     let (input, _) = tag_no_case("on").parse(input)?;
     let (input, _) = multispace0(input)?;
-    
+
     // Parse column list in parentheses
     let (input, cols) = delimited(
         char('('),
         separated_list1(
             (multispace0, char(','), multispace0),
-            map(parse_identifier, |s| s.to_string())
+            map(parse_identifier, |s| s.to_string()),
         ),
-        char(')')
-    ).parse(input)?;
-    
+        char(')'),
+    )
+    .parse(input)?;
+
     Ok((input, cols))
 }

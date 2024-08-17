@@ -18,21 +18,21 @@ use qail_core::ast::Value;
 pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
     match value {
         Value::Null | Value::NullUuid => buf.extend_from_slice(b"\\N"),
-        
+
         Value::Bool(b) => buf.extend_from_slice(if *b { b"t" } else { b"f" }),
-        
+
         Value::Int(n) => {
             // Zero-alloc integer formatting
             let mut tmp = itoa::Buffer::new();
             buf.extend_from_slice(tmp.format(*n).as_bytes());
         }
-        
+
         Value::Float(n) => {
             // Zero-alloc float formatting
             let mut tmp = ryu::Buffer::new();
             buf.extend_from_slice(tmp.format(*n).as_bytes());
         }
-        
+
         Value::String(s) => {
             // COPY text format: escape tabs, newlines, backslashes
             for c in s.bytes() {
@@ -45,42 +45,44 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
                 }
             }
         }
-        
+
         Value::Uuid(u) => {
             // UUID: 36-char hyphenated lowercase
             let mut uuid_buf = [0u8; 36];
             u.hyphenated().encode_lower(&mut uuid_buf);
             buf.extend_from_slice(&uuid_buf);
         }
-        
+
         Value::Timestamp(ts) => buf.extend_from_slice(ts.as_bytes()),
-        
+
         Value::Column(s) => buf.extend_from_slice(s.as_bytes()),
-        
+
         Value::Function(s) => buf.extend_from_slice(s.as_bytes()),
-        
+
         Value::Param(n) => {
             // $N - unlikely in COPY but handle gracefully
             buf.extend_from_slice(b"$");
             let mut tmp = itoa::Buffer::new();
             buf.extend_from_slice(tmp.format(*n).as_bytes());
         }
-        
+
         Value::NamedParam(name) => {
             buf.extend_from_slice(b":");
             buf.extend_from_slice(name.as_bytes());
         }
-        
+
         Value::Array(arr) => {
             // PostgreSQL array literal: {val1,val2,...}
             buf.extend_from_slice(b"{");
             for (i, v) in arr.iter().enumerate() {
-                if i > 0 { buf.extend_from_slice(b","); }
+                if i > 0 {
+                    buf.extend_from_slice(b",");
+                }
                 encode_copy_value(buf, v);
             }
             buf.extend_from_slice(b"}");
         }
-        
+
         Value::Interval { amount, unit } => {
             // interval '7 days' format
             let mut tmp = itoa::Buffer::new();
@@ -88,12 +90,12 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(unit.to_string().as_bytes());
         }
-        
+
         Value::Subquery(_) => {
             // Can't COPY a subquery - output NULL
             buf.extend_from_slice(b"\\N");
         }
-        
+
         Value::Bytes(bytes) => {
             // PostgreSQL bytea hex format: \x followed by hex digits
             buf.extend_from_slice(b"\\\\x");
@@ -119,15 +121,17 @@ pub fn encode_copy_batch(rows: &[Vec<Value>]) -> BytesMut {
     // Pre-allocate: estimate ~50 bytes per column, 7 columns avg
     let estimated_size = rows.len() * 7 * 50;
     let mut buf = BytesMut::with_capacity(estimated_size);
-    
+
     for row in rows {
         for (i, val) in row.iter().enumerate() {
-            if i > 0 { buf.extend_from_slice(b"\t"); }
+            if i > 0 {
+                buf.extend_from_slice(b"\t");
+            }
             encode_copy_value(&mut buf, val);
         }
         buf.extend_from_slice(b"\n");
     }
-    
+
     buf
 }
 

@@ -3,11 +3,11 @@
 //! Computes the difference between two schemas and generates QailCmd operations.
 //! Now with intent-awareness from MigrationHint.
 
-use super::schema::{Schema, MigrationHint};
-use crate::ast::{QailCmd, Action, Expr, Constraint, IndexDef};
+use super::schema::{MigrationHint, Schema};
+use crate::ast::{Action, Constraint, Expr, IndexDef, QailCmd};
 
 /// Compute the difference between two schemas.
-/// 
+///
 /// Returns a Vec<QailCmd> representing the operations needed to migrate
 /// from `old` to `new`. Respects MigrationHint for intent-aware diffing.
 pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
@@ -18,9 +18,9 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
         match hint {
             MigrationHint::Rename { from, to } => {
                 // Parse "table.column" format and collapse if same table
-                if let (Some((from_table, from_col)), Some((to_table, to_col))) = 
-                    (parse_table_col(from), parse_table_col(to)) 
-                    && from_table == to_table 
+                if let (Some((from_table, from_col)), Some((to_table, to_col))) =
+                    (parse_table_col(from), parse_table_col(to))
+                    && from_table == to_table
                 {
                     // Same table rename - use ALTER TABLE RENAME COLUMN
                     cmds.push(QailCmd {
@@ -42,7 +42,10 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                     });
                 }
             }
-            MigrationHint::Drop { target, confirmed: true } => {
+            MigrationHint::Drop {
+                target,
+                confirmed: true,
+            } => {
                 if target.contains('.') {
                     // Drop column
                     if let Some((table, col)) = parse_table_col(target) {
@@ -70,30 +73,37 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
     for (name, table) in &new.tables {
         if !old.tables.contains_key(name) {
             // New table - CREATE TABLE
-            let columns: Vec<Expr> = table.columns.iter().map(|col| {
-                let mut constraints = Vec::new();
-                if col.primary_key {
-                    constraints.push(Constraint::PrimaryKey);
-                }
-                if col.nullable {
-                    constraints.push(Constraint::Nullable);
-                }
-                if col.unique {
-                    constraints.push(Constraint::Unique);
-                }
-                if let Some(def) = &col.default {
-                    constraints.push(Constraint::Default(def.clone()));
-                }
-                if let Some(ref fk) = col.foreign_key {
-                    constraints.push(Constraint::References(format!("{}({})", fk.table, fk.column)));
-                }
-                
-                Expr::Def {
-                    name: col.name.clone(),
-                    data_type: col.data_type.to_pg_type(),
-                    constraints,
-                }
-            }).collect();
+            let columns: Vec<Expr> = table
+                .columns
+                .iter()
+                .map(|col| {
+                    let mut constraints = Vec::new();
+                    if col.primary_key {
+                        constraints.push(Constraint::PrimaryKey);
+                    }
+                    if col.nullable {
+                        constraints.push(Constraint::Nullable);
+                    }
+                    if col.unique {
+                        constraints.push(Constraint::Unique);
+                    }
+                    if let Some(def) = &col.default {
+                        constraints.push(Constraint::Default(def.clone()));
+                    }
+                    if let Some(ref fk) = col.foreign_key {
+                        constraints.push(Constraint::References(format!(
+                            "{}({})",
+                            fk.table, fk.column
+                        )));
+                    }
+
+                    Expr::Def {
+                        name: col.name.clone(),
+                        data_type: col.data_type.to_pg_type(),
+                        constraints,
+                    }
+                })
+                .collect();
 
             cmds.push(QailCmd {
                 action: Action::Make,
@@ -107,9 +117,9 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
     // Detect dropped tables (only if not already handled by hints)
     for name in old.tables.keys() {
         if !new.tables.contains_key(name) {
-            let already_dropped = new.migrations.iter().any(|h| {
-                matches!(h, MigrationHint::Drop { target, confirmed: true } if target == name)
-            });
+            let already_dropped = new.migrations.iter().any(
+                |h| matches!(h, MigrationHint::Drop { target, confirmed: true } if target == name),
+            );
             if !already_dropped {
                 cmds.push(QailCmd {
                     action: Action::Drop,
@@ -123,8 +133,10 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
     // Detect column changes in existing tables
     for (name, new_table) in &new.tables {
         if let Some(old_table) = old.tables.get(name) {
-            let old_cols: std::collections::HashSet<_> = old_table.columns.iter().map(|c| &c.name).collect();
-            let new_cols: std::collections::HashSet<_> = new_table.columns.iter().map(|c| &c.name).collect();
+            let old_cols: std::collections::HashSet<_> =
+                old_table.columns.iter().map(|c| &c.name).collect();
+            let new_cols: std::collections::HashSet<_> =
+                new_table.columns.iter().map(|c| &c.name).collect();
 
             // New columns
             for col in &new_table.columns {
@@ -133,7 +145,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                     let is_rename_target = new.migrations.iter().any(|h| {
                         matches!(h, MigrationHint::Rename { to, .. } if to.ends_with(&format!(".{}", col.name)))
                     });
-                    
+
                     if !is_rename_target {
                         let mut constraints = Vec::new();
                         if col.nullable {
@@ -166,7 +178,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                     let is_rename_source = new.migrations.iter().any(|h| {
                         matches!(h, MigrationHint::Rename { from, .. } if from.ends_with(&format!(".{}", col.name)))
                     });
-                    
+
                     if !is_rename_source {
                         cmds.push(QailCmd {
                             action: Action::AlterDrop,
@@ -183,7 +195,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                 if let Some(old_col) = old_table.columns.iter().find(|c| c.name == new_col.name) {
                     let old_type = old_col.data_type.to_pg_type();
                     let new_type = new_col.data_type.to_pg_type();
-                    
+
                     if old_type != new_type {
                         // Type changed - ALTER COLUMN TYPE
                         cmds.push(QailCmd {
@@ -247,18 +259,20 @@ fn parse_table_col(s: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::schema::{Column, Table};
     use super::*;
-    use super::super::schema::{Table, Column};
 
     #[test]
     fn test_diff_new_table() {
         use super::super::types::ColumnType;
         let old = Schema::default();
         let mut new = Schema::default();
-        new.add_table(Table::new("users")
-            .column(Column::new("id", ColumnType::Serial).primary_key())
-            .column(Column::new("name", ColumnType::Text).not_null()));
-        
+        new.add_table(
+            Table::new("users")
+                .column(Column::new("id", ColumnType::Serial).primary_key())
+                .column(Column::new("name", ColumnType::Text).not_null()),
+        );
+
         let cmds = diff_schemas(&old, &new);
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0].action, Action::Make));
@@ -268,17 +282,15 @@ mod tests {
     fn test_diff_rename_with_hint() {
         use super::super::types::ColumnType;
         let mut old = Schema::default();
-        old.add_table(Table::new("users")
-            .column(Column::new("username", ColumnType::Text)));
-        
+        old.add_table(Table::new("users").column(Column::new("username", ColumnType::Text)));
+
         let mut new = Schema::default();
-        new.add_table(Table::new("users")
-            .column(Column::new("name", ColumnType::Text)));
+        new.add_table(Table::new("users").column(Column::new("name", ColumnType::Text)));
         new.add_hint(MigrationHint::Rename {
             from: "users.username".into(),
             to: "users.name".into(),
         });
-        
+
         let cmds = diff_schemas(&old, &new);
         // Should have rename, NOT drop + add
         assert!(cmds.iter().any(|c| matches!(c.action, Action::Mod)));
