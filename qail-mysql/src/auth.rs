@@ -4,8 +4,8 @@
 //! - mysql_native_password (SHA1-based, legacy)
 //! - caching_sha2_password (SHA256-based, MySQL 8+)
 
-use sha1::{Sha1, Digest as Sha1Digest};
-use sha2::{Sha256, Digest as Sha256Digest};
+use sha1::Sha1;
+use sha2::{Sha256, Digest};
 
 /// Compute mysql_native_password authentication response (legacy).
 ///
