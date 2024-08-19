@@ -22,26 +22,40 @@ table orders (
 "#;
 
     println!("Testing schema parsing...\n");
-    
+
     match Schema::parse(schema_content) {
         Ok(schema) => {
             println!("✓ Parsed {} tables", schema.tables.len());
-            
+
             for table in &schema.tables {
                 println!("\nTable: {}", table.name);
                 for col in &table.columns {
                     print!("  - {} {}", col.name, col.typ);
-                    if col.primary_key { print!(" PK"); }
-                    if !col.nullable { print!(" NOT NULL"); }
-                    if col.is_array { print!(" ARRAY"); }
-                    if col.is_serial { print!(" SERIAL"); }
-                    if let Some(ref check) = col.check { print!(" CHECK({})", check); }
-                    if let Some(ref refs) = col.references { print!(" -> {}", refs); }
-                    if let Some(ref params) = col.type_params { print!(" ({})", params.join(",")); }
+                    if col.primary_key {
+                        print!(" PK");
+                    }
+                    if !col.nullable {
+                        print!(" NOT NULL");
+                    }
+                    if col.is_array {
+                        print!(" ARRAY");
+                    }
+                    if col.is_serial {
+                        print!(" SERIAL");
+                    }
+                    if let Some(ref check) = col.check {
+                        print!(" CHECK({})", check);
+                    }
+                    if let Some(ref refs) = col.references {
+                        print!(" -> {}", refs);
+                    }
+                    if let Some(ref params) = col.type_params {
+                        print!(" ({})", params.join(","));
+                    }
                     println!();
                 }
             }
-            
+
             println!("\n✓ JSON export:");
             match schema.to_json() {
                 Ok(json) => println!("{}", &json[..300.min(json.len())]),

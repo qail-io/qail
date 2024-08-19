@@ -21,7 +21,7 @@ impl PgConnection {
     ) -> PgResult<Option<Vec<Vec<Option<Vec<u8>>>>>> {
         let fetch_sql = format!("FETCH {} FROM {}", batch_size, name);
         let rows = self.query(&fetch_sql, &[]).await?;
-        
+
         if rows.is_empty() {
             Ok(None)
         } else {

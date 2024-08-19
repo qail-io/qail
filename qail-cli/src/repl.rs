@@ -5,11 +5,14 @@ use qail_core::transpiler::ToSql;
 
 /// Run the interactive REPL mode.
 pub fn run_repl() {
-    use rustyline::error::ReadlineError;
     use rustyline::DefaultEditor;
+    use rustyline::error::ReadlineError;
 
     println!("{}", "🪝 QAIL REPL — Interactive Mode".cyan().bold());
-    println!("{}", "Type queries to see generated SQL. Commands:".dimmed());
+    println!(
+        "{}",
+        "Type queries to see generated SQL. Commands:".dimmed()
+    );
     println!("  {}  - Exit the REPL", ".exit".yellow());
     println!("  {} - Show symbol reference", ".help".yellow());
     println!("  {} - Clear screen", ".clear".yellow());
@@ -54,7 +57,11 @@ pub fn run_repl() {
                         continue;
                     }
                     ".symbols" | "symbols" => {
-                        println!("{}", "Type 'qail symbols' in a terminal to see the full symbol reference.".dimmed());
+                        println!(
+                            "{}",
+                            "Type 'qail symbols' in a terminal to see the full symbol reference."
+                                .dimmed()
+                        );
                         continue;
                     }
                     _ => {}

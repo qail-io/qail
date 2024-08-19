@@ -22,7 +22,8 @@ pub struct CaseBuilder {
 impl CaseBuilder {
     /// Add another WHEN clause
     pub fn when(mut self, condition: Condition, then_expr: impl Into<Expr>) -> Self {
-        self.when_clauses.push((condition, Box::new(then_expr.into())));
+        self.when_clauses
+            .push((condition, Box::new(then_expr.into())));
         self
     }
 

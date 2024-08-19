@@ -1,7 +1,9 @@
 //! PostgreSQL Driver Module (Layer 3: Async I/O)
 //!
 //! This module contains the async runtime-specific code.
-//! Uses tokio for networking.
+//! Auto-detects the best I/O backend:
+//! - Linux 5.1+: io_uring (fastest)
+//! - Linux < 5.1 / macOS / Windows: tokio
 //!
 //! Connection methods are split across modules for easier maintenance:
 //! - `connection.rs` - Core struct and connect methods
@@ -12,29 +14,32 @@
 //! - `copy.rs` - COPY protocol for bulk operations
 //! - `pipeline.rs` - High-performance pipelining (275k q/s)
 //! - `cancel.rs` - Query cancellation
+//! - `io_backend.rs` - Runtime I/O backend detection
 
-mod connection;
-mod io;
-mod query;
-mod transaction;
-mod cursor;
-mod copy;
-mod pipeline;
 mod cancel;
-mod prepared;
-mod row;
+mod connection;
+mod copy;
+mod cursor;
+mod io;
+pub mod io_backend;
+mod pipeline;
 mod pool;
+mod prepared;
+mod query;
+mod row;
 mod stream;
+mod transaction;
 
 pub use connection::PgConnection;
 pub use connection::TlsConfig;
-pub(crate) use connection::{parse_affected_rows, CANCEL_REQUEST_CODE};
-pub use pool::{PgPool, PoolConfig, PooledConnection};
+pub(crate) use connection::{CANCEL_REQUEST_CODE, parse_affected_rows};
+pub use io_backend::{IoBackend, backend_name, detect as detect_io_backend};
+pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection};
 pub use prepared::PreparedStatement;
 
 use qail_core::ast::QailCmd;
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Column metadata from RowDescription (shared across rows via Arc).
 #[derive(Debug, Clone)]
@@ -53,14 +58,18 @@ impl ColumnInfo {
         let mut name_to_index = HashMap::with_capacity(fields.len());
         let mut oids = Vec::with_capacity(fields.len());
         let mut formats = Vec::with_capacity(fields.len());
-        
+
         for (i, field) in fields.iter().enumerate() {
             name_to_index.insert(field.name.clone(), i);
             oids.push(field.type_oid);
             formats.push(field.format);
         }
-        
-        Self { name_to_index, oids, formats }
+
+        Self {
+            name_to_index,
+            oids,
+            formats,
+        }
     }
 }
 
@@ -141,9 +150,8 @@ impl PgDriver {
         database: &str,
         password: &str,
     ) -> PgResult<Self> {
-        let connection = PgConnection::connect_with_password(
-            host, port, user, database, Some(password)
-        ).await?;
+        let connection =
+            PgConnection::connect_with_password(host, port, user, database, Some(password)).await?;
         Ok(Self::new(connection))
     }
 
@@ -169,12 +177,10 @@ impl PgDriver {
     ) -> PgResult<Self> {
         tokio::time::timeout(
             timeout,
-            Self::connect_with_password(host, port, user, database, password)
+            Self::connect_with_password(host, port, user, database, password),
         )
         .await
-        .map_err(|_| PgError::Connection(format!(
-            "Connection timeout after {:?}", timeout
-        )))?
+        .map_err(|_| PgError::Connection(format!("Connection timeout after {:?}", timeout)))?
     }
 
     /// Execute a QAIL command and fetch all rows (AST-NATIVE).
@@ -183,28 +189,28 @@ impl PgDriver {
     /// NO SQL STRING GENERATION!
     pub async fn fetch_all(&mut self, cmd: &QailCmd) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
-        
+
         // AST-NATIVE: Encode directly to wire bytes (no to_sql()!)
         let (wire_bytes, _params) = AstEncoder::encode_cmd(cmd);
-        
+
         // Send wire bytes and receive response
         self.connection.send_bytes(&wire_bytes).await?;
-        
+
         // Collect results
         let mut rows: Vec<PgRow> = Vec::new();
         let mut column_info: Option<Arc<ColumnInfo>> = None;
-        
+
         loop {
             let msg = self.connection.recv().await?;
             match msg {
-                crate::protocol::BackendMessage::ParseComplete | 
-                crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::ParseComplete
+                | crate::protocol::BackendMessage::BindComplete => {}
                 crate::protocol::BackendMessage::RowDescription(fields) => {
                     // Create and share column metadata across all rows
                     column_info = Some(Arc::new(ColumnInfo::from_fields(&fields)));
                 }
                 crate::protocol::BackendMessage::DataRow(data) => {
-                    rows.push(PgRow { 
+                    rows.push(PgRow {
                         columns: data,
                         column_info: column_info.clone(),
                     });
@@ -227,26 +233,54 @@ impl PgDriver {
         rows.into_iter().next().ok_or(PgError::NoRows)
     }
 
+    /// Execute a QAIL command with PREPARED STATEMENT CACHING.
+    ///
+    /// Like fetch_all(), but caches the prepared statement on the server.
+    /// On first call: sends Parse + Bind + Execute + Sync
+    /// On subsequent calls: sends only Bind + Execute + Sync (much faster!)
+    ///
+    /// Use this for repeated queries with the same AST structure.
+    pub async fn fetch_all_cached(&mut self, cmd: &QailCmd) -> PgResult<Vec<PgRow>> {
+        use crate::protocol::AstEncoder;
+
+        // Generate SQL and params from AST (for caching)
+        let (sql, params) = AstEncoder::encode_cmd_sql(cmd);
+
+        // Use cached query - only parses on first call
+        let raw_rows = self.connection.query_cached(&sql, &params).await?;
+
+        // Convert to PgRow with column info
+        let rows: Vec<PgRow> = raw_rows
+            .into_iter()
+            .map(|data| PgRow {
+                columns: data,
+                column_info: None, // Simple version - no column metadata
+            })
+            .collect();
+
+        Ok(rows)
+    }
+
     /// Execute a QAIL command (for mutations) - AST-NATIVE.
     ///
     /// Uses AstEncoder to directly encode AST to wire protocol bytes.
     /// Returns the number of affected rows.
     pub async fn execute(&mut self, cmd: &QailCmd) -> PgResult<u64> {
         use crate::protocol::AstEncoder;
-        
+
         // AST-NATIVE: Encode directly to wire bytes (no to_sql()!)
         let (wire_bytes, _params) = AstEncoder::encode_cmd(cmd);
-        
+
         // Send wire bytes and receive response
         self.connection.send_bytes(&wire_bytes).await?;
-        
+
         // Parse response for affected rows
         let mut affected = 0u64;
         loop {
             let msg = self.connection.recv().await?;
             match msg {
-                crate::protocol::BackendMessage::ParseComplete | 
-                crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::ParseComplete
+                | crate::protocol::BackendMessage::BindComplete => {}
                 crate::protocol::BackendMessage::RowDescription(_) => {}
                 crate::protocol::BackendMessage::DataRow(_) => {}
                 crate::protocol::BackendMessage::CommandComplete(tag) => {
@@ -265,24 +299,24 @@ impl PgDriver {
             }
         }
     }
-    
+
     // ==================== TRANSACTION CONTROL ====================
-    
+
     /// Begin a transaction (AST-native).
     pub async fn begin(&mut self) -> PgResult<()> {
         self.connection.begin_transaction().await
     }
-    
+
     /// Commit the current transaction (AST-native).
     pub async fn commit(&mut self) -> PgResult<()> {
         self.connection.commit().await
     }
-    
+
     /// Rollback the current transaction (AST-native).
     pub async fn rollback(&mut self) -> PgResult<()> {
         self.connection.rollback().await
     }
-    
+
     /// Create a named savepoint within the current transaction.
     ///
     /// Savepoints allow partial rollback within a transaction.
@@ -300,7 +334,7 @@ impl PgDriver {
     pub async fn savepoint(&mut self, name: &str) -> PgResult<()> {
         self.connection.savepoint(name).await
     }
-    
+
     /// Rollback to a previously created savepoint.
     ///
     /// Discards all changes since the named savepoint was created,
@@ -308,16 +342,16 @@ impl PgDriver {
     pub async fn rollback_to(&mut self, name: &str) -> PgResult<()> {
         self.connection.rollback_to(name).await
     }
-    
+
     /// Release a savepoint (free resources, if no longer needed).
     ///
     /// After release, the savepoint cannot be rolled back to.
     pub async fn release_savepoint(&mut self, name: &str) -> PgResult<()> {
         self.connection.release_savepoint(name).await
     }
-    
+
     // ==================== BATCH TRANSACTIONS ====================
-    
+
     /// Execute multiple commands in a single atomic transaction.
     ///
     /// All commands succeed or all are rolled back.
@@ -347,9 +381,9 @@ impl PgDriver {
         self.commit().await?;
         Ok(results)
     }
-    
+
     // ==================== STATEMENT TIMEOUT ====================
-    
+
     /// Set statement timeout for this connection (in milliseconds).
     ///
     /// Queries that exceed this time will be cancelled.
@@ -360,21 +394,22 @@ impl PgDriver {
     /// driver.set_statement_timeout(30_000).await?; // 30 seconds
     /// ```
     pub async fn set_statement_timeout(&mut self, ms: u32) -> PgResult<()> {
-        self.execute_raw(&format!("SET statement_timeout = {}", ms)).await
+        self.execute_raw(&format!("SET statement_timeout = {}", ms))
+            .await
     }
-    
+
     /// Reset statement timeout to default (no limit).
     pub async fn reset_statement_timeout(&mut self) -> PgResult<()> {
         self.execute_raw("RESET statement_timeout").await
     }
-    
+
     // ==================== PIPELINE (BATCH) ====================
-    
+
     /// Execute multiple QailCmd ASTs in a single network round-trip (PIPELINING).
-    /// 
+    ///
     /// This is the high-performance path for batch operations.
     /// Returns the count of successful queries.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmds: Vec<QailCmd> = (1..=1000)
@@ -386,9 +421,55 @@ impl PgDriver {
     pub async fn pipeline_batch(&mut self, cmds: &[QailCmd]) -> PgResult<usize> {
         self.connection.pipeline_ast_fast(cmds).await
     }
-    
+
+    /// Execute multiple QailCmd ASTs and return full row data.
+    ///
+    /// Unlike `pipeline_batch` which only returns count, this method
+    /// collects and returns all row data from each query.
+    ///
+    /// Returns: Vec of PgRow vectors, one per query in the batch.
+    pub async fn pipeline_fetch(&mut self, cmds: &[QailCmd]) -> PgResult<Vec<Vec<PgRow>>> {
+        let raw_results = self.connection.pipeline_ast(cmds).await?;
+
+        // Convert raw results to PgRow format
+        let results: Vec<Vec<PgRow>> = raw_results
+            .into_iter()
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|columns| PgRow {
+                        columns,
+                        column_info: None,
+                    })
+                    .collect()
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Prepare a SQL statement for repeated execution.
+    ///
+    /// Returns a PreparedStatement handle for use with pipeline_prepared_fast.
+    pub async fn prepare(&mut self, sql: &str) -> PgResult<PreparedStatement> {
+        self.connection.prepare(sql).await
+    }
+
+    /// Execute a prepared statement pipeline in FAST mode (count only).
+    ///
+    /// This is the fastest possible path - Parse once, Bind+Execute many.
+    /// Matches native Rust benchmark performance (~355k q/s).
+    pub async fn pipeline_prepared_fast(
+        &mut self,
+        stmt: &PreparedStatement,
+        params_batch: &[Vec<Option<Vec<u8>>>],
+    ) -> PgResult<usize> {
+        self.connection
+            .pipeline_prepared_fast(stmt, params_batch)
+            .await
+    }
+
     // ==================== LEGACY/BOOTSTRAP ====================
-    
+
     /// Execute a raw SQL string.
     ///
     /// ⚠️ **Discouraged**: Violates AST-native philosophy.
@@ -422,19 +503,21 @@ impl PgDriver {
         rows: &[Vec<qail_core::ast::Value>],
     ) -> PgResult<u64> {
         use qail_core::ast::Action;
-        
+
         // Validate this is an Add command
         if cmd.action != Action::Add {
             return Err(PgError::Query(
-                "copy_bulk requires QailCmd::Add action".to_string()
+                "copy_bulk requires QailCmd::Add action".to_string(),
             ));
         }
-        
+
         // Extract table from AST (already validated at parse time)
         let table = &cmd.table;
-        
+
         // Extract column names from AST expressions
-        let columns: Vec<String> = cmd.columns.iter()
+        let columns: Vec<String> = cmd
+            .columns
+            .iter()
             .filter_map(|expr| {
                 use qail_core::ast::Expr;
                 match expr {
@@ -445,20 +528,20 @@ impl PgDriver {
                 }
             })
             .collect();
-        
+
         if columns.is_empty() {
             return Err(PgError::Query(
-                "copy_bulk requires columns in QailCmd".to_string()
+                "copy_bulk requires columns in QailCmd".to_string(),
             ));
         }
-        
+
         // Use optimized COPY path: direct Value → bytes encoding, single syscall
         self.connection.copy_in_fast(table, &columns, rows).await
     }
 
     /// **Fastest** bulk insert using pre-encoded COPY data.
     ///
-    /// Accepts raw COPY text format bytes. Use when caller has already 
+    /// Accepts raw COPY text format bytes. Use when caller has already
     /// encoded rows to avoid any encoding overhead.
     ///
     /// # Format
@@ -471,21 +554,19 @@ impl PgDriver {
     /// let data = b"1\tAlice\n2\tBob\n";
     /// driver.copy_bulk_bytes(&cmd, data).await?;
     /// ```
-    pub async fn copy_bulk_bytes(
-        &mut self,
-        cmd: &QailCmd,
-        data: &[u8],
-    ) -> PgResult<u64> {
+    pub async fn copy_bulk_bytes(&mut self, cmd: &QailCmd, data: &[u8]) -> PgResult<u64> {
         use qail_core::ast::Action;
-        
+
         if cmd.action != Action::Add {
             return Err(PgError::Query(
-                "copy_bulk_bytes requires QailCmd::Add action".to_string()
+                "copy_bulk_bytes requires QailCmd::Add action".to_string(),
             ));
         }
-        
+
         let table = &cmd.table;
-        let columns: Vec<String> = cmd.columns.iter()
+        let columns: Vec<String> = cmd
+            .columns
+            .iter()
             .filter_map(|expr| {
                 use qail_core::ast::Expr;
                 match expr {
@@ -495,13 +576,13 @@ impl PgDriver {
                 }
             })
             .collect();
-        
+
         if columns.is_empty() {
             return Err(PgError::Query(
-                "copy_bulk_bytes requires columns in QailCmd".to_string()
+                "copy_bulk_bytes requires columns in QailCmd".to_string(),
             ));
         }
-        
+
         // Direct to raw COPY - zero encoding!
         self.connection.copy_in_raw(table, &columns, data).await
     }
@@ -528,36 +609,44 @@ impl PgDriver {
     ) -> PgResult<Vec<Vec<PgRow>>> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static CURSOR_ID: AtomicU64 = AtomicU64::new(0);
-        
+
         // Generate unique cursor name
         let cursor_name = format!("qail_cursor_{}", CURSOR_ID.fetch_add(1, Ordering::SeqCst));
-        
+
         // AST-NATIVE: Generate SQL directly from AST (no to_sql_parameterized!)
         use crate::protocol::AstEncoder;
         let mut sql_buf = bytes::BytesMut::with_capacity(256);
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
         AstEncoder::encode_select_sql(cmd, &mut sql_buf, &mut params);
         let sql = String::from_utf8_lossy(&sql_buf).to_string();
-        
+
         // Must be in a transaction for cursors
         self.connection.begin_transaction().await?;
-        
+
         // Declare cursor
         self.connection.declare_cursor(&cursor_name, &sql).await?;
-        
+
         // Fetch all batches
         let mut all_batches = Vec::new();
-        while let Some(rows) = self.connection.fetch_cursor(&cursor_name, batch_size).await? {
-            let pg_rows: Vec<PgRow> = rows.into_iter()
-                .map(|cols| PgRow { columns: cols, column_info: None })
+        while let Some(rows) = self
+            .connection
+            .fetch_cursor(&cursor_name, batch_size)
+            .await?
+        {
+            let pg_rows: Vec<PgRow> = rows
+                .into_iter()
+                .map(|cols| PgRow {
+                    columns: cols,
+                    column_info: None,
+                })
                 .collect();
             all_batches.push(pg_rows);
         }
-        
+
         // Cleanup
         self.connection.close_cursor(&cursor_name).await?;
         self.connection.commit().await?;
-        
+
         Ok(all_batches)
     }
 }

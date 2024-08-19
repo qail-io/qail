@@ -13,13 +13,12 @@
 //! ```
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while1},
-    character::complete::{multispace0, multispace1, char, not_line_ending},
+    character::complete::{char, multispace0, multispace1, not_line_ending},
     combinator::map,
     multi::{many0, separated_list0},
-    Parser,
-    IResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,22 +70,22 @@ impl QueryFile {
             Err(e) => Err(format!("Parse error: {:?}", e)),
         }
     }
-    
+
     /// Find a query by name
     pub fn find_query(&self, name: &str) -> Option<&QueryDef> {
-        self.queries.iter().find(|q| q.name.eq_ignore_ascii_case(name))
+        self.queries
+            .iter()
+            .find(|q| q.name.eq_ignore_ascii_case(name))
     }
-    
+
     /// Export to JSON
     pub fn to_json(&self) -> Result<String, String> {
-        serde_json::to_string_pretty(self)
-            .map_err(|e| format!("JSON serialization failed: {}", e))
+        serde_json::to_string_pretty(self).map_err(|e| format!("JSON serialization failed: {}", e))
     }
-    
+
     /// Import from JSON
     pub fn from_json(json: &str) -> Result<Self, String> {
-        serde_json::from_str(json)
-            .map_err(|e| format!("JSON deserialization failed: {}", e))
+        serde_json::from_str(json).map_err(|e| format!("JSON deserialization failed: {}", e))
     }
 }
 
@@ -104,7 +103,8 @@ fn ws_and_comments(input: &str) -> IResult<&str, ()> {
     let (input, _) = many0(alt((
         map(multispace1, |_| ()),
         map((tag("--"), not_line_ending), |_| ()),
-    ))).parse(input)?;
+    )))
+    .parse(input)?;
     Ok((input, ()))
 }
 
@@ -116,23 +116,23 @@ fn parse_param(input: &str) -> IResult<&str, QueryParam> {
     let (input, _) = char(':').parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, typ) = identifier(input)?;
-    
-    Ok((input, QueryParam {
-        name: name.to_string(),
-        typ: typ.to_string(),
-    }))
+
+    Ok((
+        input,
+        QueryParam {
+            name: name.to_string(),
+            typ: typ.to_string(),
+        },
+    ))
 }
 
 /// Parse parameter list: (param1: Type, param2: Type)
 fn parse_params(input: &str) -> IResult<&str, Vec<QueryParam>> {
     let (input, _) = char('(').parse(input)?;
-    let (input, params) = separated_list0(
-        char(','),
-        parse_param,
-    ).parse(input)?;
+    let (input, params) = separated_list0(char(','), parse_param).parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')').parse(input)?;
-    
+
     Ok((input, params))
 }
 
@@ -141,20 +141,20 @@ fn parse_return_type(input: &str) -> IResult<&str, ReturnType> {
     let (input, _) = multispace0(input)?;
     let (input, _) = tag("->").parse(input)?;
     let (input, _) = multispace0(input)?;
-    
+
     // Check for Vec<T> or Option<T>
     if let Ok((input, _)) = tag::<_, _, nom::error::Error<&str>>("Vec<")(input) {
         let (input, inner) = take_while1(|c: char| c != '>').parse(input)?;
         let (input, _) = char('>').parse(input)?;
         return Ok((input, ReturnType::Vec(inner.to_string())));
     }
-    
+
     if let Ok((input, _)) = tag::<_, _, nom::error::Error<&str>>("Option<")(input) {
         let (input, inner) = take_while1(|c: char| c != '>').parse(input)?;
         let (input, _) = char('>').parse(input)?;
         return Ok((input, ReturnType::Option(inner.to_string())));
     }
-    
+
     // Single type
     let (input, typ) = identifier(input)?;
     Ok((input, ReturnType::Single(typ.to_string())))
@@ -165,10 +165,10 @@ fn parse_body(input: &str) -> IResult<&str, &str> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char(':').parse(input)?;
     let (input, _) = multispace0(input)?;
-    
+
     // Find end: next "query" or "execute" keyword at line start (after whitespace), or EOF
     let mut end = input.len();
-    
+
     for (i, _) in input.char_indices() {
         if i == 0 || input.as_bytes().get(i.saturating_sub(1)) == Some(&b'\n') {
             // At start of line, skip whitespace and check for keyword
@@ -182,7 +182,7 @@ fn parse_body(input: &str) -> IResult<&str, &str> {
             }
         }
     }
-    
+
     let body = input[..end].trim();
     Ok((&input[end..], body))
 }
@@ -190,17 +190,18 @@ fn parse_body(input: &str) -> IResult<&str, &str> {
 /// Parse a single query definition
 fn parse_query_def(input: &str) -> IResult<&str, QueryDef> {
     let (input, _) = ws_and_comments(input)?;
-    
+
     // Check for query or execute keyword
     let (input, is_execute) = alt((
         map(tag_no_case("query"), |_| false),
         map(tag_no_case("execute"), |_| true),
-    )).parse(input)?;
-    
+    ))
+    .parse(input)?;
+
     let (input, _) = multispace1(input)?;
     let (input, name) = identifier(input)?;
     let (input, params) = parse_params(input)?;
-    
+
     // Return type (optional for execute)
     let (input, return_type) = if is_execute {
         (input, None)
@@ -208,16 +209,19 @@ fn parse_query_def(input: &str) -> IResult<&str, QueryDef> {
         let (input, rt) = parse_return_type(input)?;
         (input, Some(rt))
     };
-    
+
     let (input, body) = parse_body(input)?;
-    
-    Ok((input, QueryDef {
-        name: name.to_string(),
-        params,
-        return_type,
-        body: body.to_string(),
-        is_execute,
-    }))
+
+    Ok((
+        input,
+        QueryDef {
+            name: name.to_string(),
+            params,
+            return_type,
+            body: body.to_string(),
+            is_execute,
+        },
+    ))
 }
 
 /// Parse complete query file
@@ -225,7 +229,7 @@ fn parse_query_file(input: &str) -> IResult<&str, QueryFile> {
     let (input, _) = ws_and_comments(input)?;
     let (input, queries) = many0(parse_query_def).parse(input)?;
     let (input, _) = ws_and_comments(input)?;
-    
+
     Ok((input, QueryFile { queries }))
 }
 
@@ -239,10 +243,10 @@ mod tests {
             query find_user(id: Uuid) -> User:
               get users where id = :id
         "#;
-        
+
         let qf = QueryFile::parse(input).expect("parse failed");
         assert_eq!(qf.queries.len(), 1);
-        
+
         let q = &qf.queries[0];
         assert_eq!(q.name, "find_user");
         assert!(!q.is_execute);
@@ -259,7 +263,7 @@ mod tests {
             query list_orders(user_id: Uuid) -> Vec<Order>:
               get orders where user_id = :user_id order by created_at desc
         "#;
-        
+
         let qf = QueryFile::parse(input).expect("parse failed");
         let q = &qf.queries[0];
         assert!(matches!(q.return_type, Some(ReturnType::Vec(ref t)) if t == "Order"));
@@ -271,7 +275,7 @@ mod tests {
             query find_optional(email: String) -> Option<User>:
               get users where email = :email limit 1
         "#;
-        
+
         let qf = QueryFile::parse(input).expect("parse failed");
         let q = &qf.queries[0];
         assert!(matches!(q.return_type, Some(ReturnType::Option(ref t)) if t == "User"));
@@ -283,7 +287,7 @@ mod tests {
             execute create_user(email: String, name: String):
               add::users : email, name [ :email, :name ]
         "#;
-        
+
         let qf = QueryFile::parse(input).expect("parse failed");
         let q = &qf.queries[0];
         assert!(q.is_execute);
@@ -304,10 +308,10 @@ mod tests {
             execute delete_user(id: Uuid):
               del::users where id = :id
         "#;
-        
+
         let qf = QueryFile::parse(input).expect("parse failed");
         assert_eq!(qf.queries.len(), 3);
-        
+
         assert_eq!(qf.queries[0].name, "find_user");
         assert_eq!(qf.queries[1].name, "list_users");
         assert_eq!(qf.queries[2].name, "delete_user");

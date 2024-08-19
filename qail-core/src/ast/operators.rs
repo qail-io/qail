@@ -31,6 +31,8 @@ pub enum Action {
     Alter,
     /// ALTER TABLE DROP COLUMN
     AlterDrop,
+    /// ALTER TABLE ALTER COLUMN TYPE
+    AlterType,
     // Transactions
     TxnStart,
     TxnCommit,
@@ -57,6 +59,20 @@ pub enum Action {
     RefreshMaterializedView,
     /// DROP MATERIALIZED VIEW
     DropMaterializedView,
+    // Pub/Sub (LISTEN/NOTIFY)
+    /// LISTEN channel - subscribe to notifications
+    Listen,
+    /// NOTIFY channel, 'payload' - send notification
+    Notify,
+    /// UNLISTEN channel - unsubscribe from notifications
+    Unlisten,
+    // Savepoints
+    /// SAVEPOINT name
+    Savepoint,
+    /// RELEASE SAVEPOINT name
+    ReleaseSavepoint,
+    /// ROLLBACK TO SAVEPOINT name
+    RollbackToSavepoint,
 }
 
 impl std::fmt::Display for Action {
@@ -76,6 +92,7 @@ impl std::fmt::Display for Action {
             Action::DropIndex => write!(f, "DROP_INDEX"),
             Action::Alter => write!(f, "ALTER"),
             Action::AlterDrop => write!(f, "ALTER_DROP"),
+            Action::AlterType => write!(f, "ALTER_TYPE"),
             Action::TxnStart => write!(f, "TXN_START"),
             Action::TxnCommit => write!(f, "TXN_COMMIT"),
             Action::TxnRollback => write!(f, "TXN_ROLLBACK"),
@@ -91,6 +108,12 @@ impl std::fmt::Display for Action {
             Action::CreateMaterializedView => write!(f, "CREATE_MATERIALIZED_VIEW"),
             Action::RefreshMaterializedView => write!(f, "REFRESH_MATERIALIZED_VIEW"),
             Action::DropMaterializedView => write!(f, "DROP_MATERIALIZED_VIEW"),
+            Action::Listen => write!(f, "LISTEN"),
+            Action::Notify => write!(f, "NOTIFY"),
+            Action::Unlisten => write!(f, "UNLISTEN"),
+            Action::Savepoint => write!(f, "SAVEPOINT"),
+            Action::ReleaseSavepoint => write!(f, "RELEASE_SAVEPOINT"),
+            Action::RollbackToSavepoint => write!(f, "ROLLBACK_TO_SAVEPOINT"),
         }
     }
 }
@@ -169,6 +192,16 @@ pub enum Operator {
     Exists,
     /// NOT EXISTS (subquery)
     NotExists,
+    /// Regular expression match (~ in Postgres)
+    Regex,
+    /// Case-insensitive regex (~* in Postgres)
+    RegexI,
+    /// SIMILAR TO pattern match
+    SimilarTo,
+    /// Array/JSON is contained by (<@)
+    ContainedBy,
+    /// Array overlap (&&)
+    Overlaps,
 }
 
 impl Operator {
@@ -201,26 +234,37 @@ impl Operator {
             Operator::NotBetween => "NOT BETWEEN",
             Operator::Exists => "EXISTS",
             Operator::NotExists => "NOT EXISTS",
+            Operator::Regex => "~",
+            Operator::RegexI => "~*",
+            Operator::SimilarTo => "SIMILAR TO",
+            Operator::ContainedBy => "<@",
+            Operator::Overlaps => "&&",
         }
     }
 
     /// Returns true if this operator requires a value on the right side.
     /// IS NULL, IS NOT NULL, EXISTS, NOT EXISTS don't need values.
     pub fn needs_value(&self) -> bool {
-        !matches!(self, 
-            Operator::IsNull | 
-            Operator::IsNotNull | 
-            Operator::Exists | 
-            Operator::NotExists
+        !matches!(
+            self,
+            Operator::IsNull | Operator::IsNotNull | Operator::Exists | Operator::NotExists
         )
     }
 
     /// Returns true if this operator is a simple binary operator (col OP value).
     pub fn is_simple_binary(&self) -> bool {
-        matches!(self,
-            Operator::Eq | Operator::Ne | Operator::Gt | Operator::Gte |
-            Operator::Lt | Operator::Lte | Operator::Like | Operator::NotLike |
-            Operator::ILike | Operator::NotILike
+        matches!(
+            self,
+            Operator::Eq
+                | Operator::Ne
+                | Operator::Gt
+                | Operator::Gte
+                | Operator::Lt
+                | Operator::Lte
+                | Operator::Like
+                | Operator::NotLike
+                | Operator::ILike
+                | Operator::NotILike
         )
     }
 }
@@ -233,6 +277,18 @@ pub enum AggregateFunc {
     Avg,
     Min,
     Max,
+    /// ARRAY_AGG - collect values into array
+    ArrayAgg,
+    /// STRING_AGG - concatenate strings with delimiter
+    StringAgg,
+    /// JSON_AGG - aggregate values as JSON array
+    JsonAgg,
+    /// JSONB_AGG - aggregate values as JSONB array
+    JsonbAgg,
+    /// BOOL_AND - logical AND of all values
+    BoolAnd,
+    /// BOOL_OR - logical OR of all values
+    BoolOr,
 }
 
 impl std::fmt::Display for AggregateFunc {
@@ -243,6 +299,12 @@ impl std::fmt::Display for AggregateFunc {
             AggregateFunc::Avg => write!(f, "AVG"),
             AggregateFunc::Min => write!(f, "MIN"),
             AggregateFunc::Max => write!(f, "MAX"),
+            AggregateFunc::ArrayAgg => write!(f, "ARRAY_AGG"),
+            AggregateFunc::StringAgg => write!(f, "STRING_AGG"),
+            AggregateFunc::JsonAgg => write!(f, "JSON_AGG"),
+            AggregateFunc::JsonbAgg => write!(f, "JSONB_AGG"),
+            AggregateFunc::BoolAnd => write!(f, "BOOL_AND"),
+            AggregateFunc::BoolOr => write!(f, "BOOL_OR"),
         }
     }
 }

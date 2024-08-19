@@ -1,0 +1,5 @@
+# QAIL Configuration
+# For use with SSH tunneling to production
+
+[postgres]
+url = "postgres://user:password@localhost:5432/mydb"

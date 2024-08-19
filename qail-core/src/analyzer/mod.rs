@@ -3,8 +3,8 @@
 //! Scans source files for QAIL queries and raw SQL to detect
 //! breaking changes before migrations are applied.
 
-mod scanner;
 mod impact;
+mod scanner;
 
-pub use scanner::{CodebaseScanner, CodeReference, QueryType};
-pub use impact::{MigrationImpact, BreakingChange};
+pub use impact::{BreakingChange, MigrationImpact};
+pub use scanner::{CodeReference, CodebaseScanner, QueryType};

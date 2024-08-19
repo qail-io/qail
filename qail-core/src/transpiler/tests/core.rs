@@ -35,7 +35,9 @@ fn test_select_with_order() {
 
 #[test]
 fn test_select_complex() {
-    let cmd = parse("get users fields id, email where active = true order by created_at desc limit 10").unwrap();
+    let cmd =
+        parse("get users fields id, email where active = true order by created_at desc limit 10")
+            .unwrap();
     assert_eq!(
         cmd.to_sql(),
         "SELECT id, email FROM users WHERE active = true ORDER BY created_at DESC LIMIT 10"
@@ -45,7 +47,10 @@ fn test_select_complex() {
 #[test]
 fn test_update() {
     let cmd = parse("set users values verified = true where id = $1").unwrap();
-    assert_eq!(cmd.to_sql(), "UPDATE users SET verified = true WHERE id = $1");
+    assert_eq!(
+        cmd.to_sql(),
+        "UPDATE users SET verified = true WHERE id = $1"
+    );
 }
 
 #[test]
@@ -57,7 +62,10 @@ fn test_delete() {
 #[test]
 fn test_fuzzy_match() {
     let cmd = parse("get users fields * where name ~ $1").unwrap();
-    assert_eq!(cmd.to_sql(), "SELECT * FROM users WHERE name ILIKE '%' || $1 || '%'");
+    assert_eq!(
+        cmd.to_sql(),
+        "SELECT * FROM users WHERE name ILIKE '%' || $1 || '%'"
+    );
 }
 
 // OR conditions - using manual QailCmd construction
@@ -68,8 +76,18 @@ fn test_or_conditions() {
     cmd.cages.push(Cage {
         kind: CageKind::Filter,
         conditions: vec![
-            Condition { left: Expr::Named("status".to_string()), op: Operator::Eq, value: Value::String("active".to_string()), is_array_unnest: false },
-            Condition { left: Expr::Named("status".to_string()), op: Operator::Eq, value: Value::String("pending".to_string()), is_array_unnest: false },
+            Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::Eq,
+                value: Value::String("active".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::Eq,
+                value: Value::String("pending".to_string()),
+                is_array_unnest: false,
+            },
         ],
         logical_op: LogicalOp::Or,
     });
@@ -99,7 +117,12 @@ fn test_array_unnest() {
 fn test_left_join() {
     use crate::ast::*;
     let mut cmd = QailCmd::get("users");
-    cmd.joins.push(Join { table: "posts".to_string(), kind: JoinKind::Left, on: None, on_true: false });
+    cmd.joins.push(Join {
+        table: "posts".to_string(),
+        kind: JoinKind::Left,
+        on: None,
+        on_true: false,
+    });
     let sql = cmd.to_sql();
     assert!(sql.contains("LEFT JOIN"));
     assert!(sql.contains("posts"));
@@ -109,7 +132,12 @@ fn test_left_join() {
 fn test_right_join() {
     use crate::ast::*;
     let mut cmd = QailCmd::get("users");
-    cmd.joins.push(Join { table: "posts".to_string(), kind: JoinKind::Right, on: None, on_true: false });
+    cmd.joins.push(Join {
+        table: "posts".to_string(),
+        kind: JoinKind::Right,
+        on: None,
+        on_true: false,
+    });
     let sql = cmd.to_sql();
     assert!(sql.contains("RIGHT JOIN"));
 }
@@ -127,14 +155,14 @@ fn test_distinct() {
 
 #[test]
 fn test_transactions() {
-    use crate::ast::{QailCmd, Action};
+    use crate::ast::{Action, QailCmd};
     let mut cmd = QailCmd::get("users");
     cmd.action = Action::TxnStart;
     assert!(cmd.to_sql().contains("BEGIN"));
-    
+
     cmd.action = Action::TxnCommit;
     assert!(cmd.to_sql().contains("COMMIT"));
-    
+
     cmd.action = Action::TxnRollback;
     assert!(cmd.to_sql().contains("ROLLBACK"));
 }
@@ -142,17 +170,33 @@ fn test_transactions() {
 #[test]
 fn test_parameterized_sql() {
     use crate::transpiler::ToSqlParameterized;
-    
+
     // Test with named parameters (current implementation supports this)
     let cmd = parse("get users fields * where name = :name and age = :age").unwrap();
     let result = cmd.to_sql_parameterized();
-    
+
     // SQL should have positional placeholders, not named params
-    assert!(result.sql.contains("$1"), "SQL should have $1 placeholder: {}", result.sql);
-    assert!(result.sql.contains("$2"), "SQL should have $2 placeholder: {}", result.sql);
-    assert!(!result.sql.contains(":name"), "SQL should NOT contain ':name': {}", result.sql);
-    assert!(!result.sql.contains(":age"), "SQL should NOT contain ':age': {}", result.sql);
-    
+    assert!(
+        result.sql.contains("$1"),
+        "SQL should have $1 placeholder: {}",
+        result.sql
+    );
+    assert!(
+        result.sql.contains("$2"),
+        "SQL should have $2 placeholder: {}",
+        result.sql
+    );
+    assert!(
+        !result.sql.contains(":name"),
+        "SQL should NOT contain ':name': {}",
+        result.sql
+    );
+    assert!(
+        !result.sql.contains(":age"),
+        "SQL should NOT contain ':age': {}",
+        result.sql
+    );
+
     // Named params should be extracted in order
     assert_eq!(result.named_params.len(), 2);
     assert_eq!(result.named_params[0], "name");

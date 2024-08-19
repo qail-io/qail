@@ -1,0 +1,3 @@
+module QailPackageTests {
+    header "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/include/QailPackageTests-Swift.h"
+}

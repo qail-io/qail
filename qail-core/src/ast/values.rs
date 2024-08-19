@@ -1,6 +1,6 @@
+use crate::ast::QailCmd;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::ast::QailCmd;
 
 /// Time interval unit for duration expressions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +61,8 @@ pub enum Value {
     Interval { amount: i64, unit: IntervalUnit },
     /// Timestamp value (for DateTime binding)
     Timestamp(String),
+    /// Binary data (bytea)
+    Bytes(Vec<u8>),
 }
 
 impl std::fmt::Display for Value {
@@ -77,17 +79,26 @@ impl std::fmt::Display for Value {
             Value::Array(arr) => {
                 write!(f, "(")?;
                 for (i, v) in arr.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, ")")
-            },
+            }
             Value::Subquery(_) => write!(f, "(SUBQUERY)"),
             Value::Column(s) => write!(f, "{}", s),
             Value::Uuid(u) => write!(f, "'{}'", u),
             Value::NullUuid => write!(f, "NULL"),
             Value::Interval { amount, unit } => write!(f, "INTERVAL '{} {}'", amount, unit),
             Value::Timestamp(ts) => write!(f, "'{}'", ts),
+            Value::Bytes(bytes) => {
+                write!(f, "'\\x")?;
+                for byte in bytes {
+                    write!(f, "{:02x}", byte)?;
+                }
+                write!(f, "'")
+            }
         }
     }
 }
@@ -127,7 +138,6 @@ impl From<String> for Value {
         Value::String(s)
     }
 }
-
 
 impl From<Uuid> for Value {
     fn from(u: Uuid) -> Self {

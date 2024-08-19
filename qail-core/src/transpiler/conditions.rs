@@ -1,6 +1,6 @@
-use crate::ast::*;
-use super::traits::SqlGenerator;
 use super::ToSql;
+use super::traits::SqlGenerator;
+use crate::ast::*;
 
 /// Context for parameterized query building.
 #[derive(Debug, Default)]
@@ -15,7 +15,11 @@ pub struct ParamContext {
 
 impl ParamContext {
     pub fn new() -> Self {
-        Self { index: 0, params: Vec::new(), named_params: Vec::new() }
+        Self {
+            index: 0,
+            params: Vec::new(),
+            named_params: Vec::new(),
+        }
     }
 
     /// Add a value and return the placeholder for it.
@@ -34,7 +38,7 @@ impl ParamContext {
 }
 
 /// Helper to resolve a column identifier that might be a JSON path or a JOIN reference.
-/// 
+///
 /// Heuristic:
 /// 1. Split by '.'
 /// 2. If single part -> quote_identifier
@@ -44,47 +48,56 @@ impl ParamContext {
 fn resolve_col_syntax(col: &str, cmd: &QailCmd, generator: &dyn SqlGenerator) -> String {
     // Check for raw SQL syntax { ... }
     if col.starts_with('{') && col.ends_with('}') {
-        return col[1..col.len()-1].to_string();
+        return col[1..col.len() - 1].to_string();
     }
 
     let parts: Vec<&str> = col.split('.').collect();
     if parts.len() <= 1 {
         return generator.quote_identifier(col);
     }
-    
+
     let first = parts[0];
-    
+
     // Check main table matches
     if first == cmd.table {
         // table.col
-        return format!("{}.{}", generator.quote_identifier(first), generator.quote_identifier(parts[1]));
+        return format!(
+            "{}.{}",
+            generator.quote_identifier(first),
+            generator.quote_identifier(parts[1])
+        );
     }
-    
+
     // Check joins matches
     for join in &cmd.joins {
         if first == join.table {
-             // join_table.col
-             return format!("{}.{}", generator.quote_identifier(first), generator.quote_identifier(parts[1]));
+            // join_table.col
+            return format!(
+                "{}.{}",
+                generator.quote_identifier(first),
+                generator.quote_identifier(parts[1])
+            );
         }
     }
-    
+
     // Default: treated as JSON access on the first part
     let col_name = parts[0];
     let path = &parts[1..];
     generator.json_access(col_name, path)
 }
 
+#[allow(clippy::borrowed_box)]
 pub trait ConditionToSql {
     fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&QailCmd>) -> String;
     fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String;
-    
+
     /// Convert condition to SQL with parameterized values.
     /// Returns the SQL fragment and updates the ParamContext with extracted values.
     fn to_sql_parameterized(
-        &self, 
-        generator: &Box<dyn SqlGenerator>, 
+        &self,
+        generator: &Box<dyn SqlGenerator>,
         context: Option<&QailCmd>,
-        params: &mut ParamContext
+        params: &mut ParamContext,
     ) -> String;
 }
 
@@ -95,27 +108,35 @@ impl ConditionToSql for Condition {
             Expr::Named(name) => {
                 // Handle raw SQL {content} first - context-independent
                 if name.starts_with('{') && name.ends_with('}') {
-                    name[1..name.len()-1].to_string()
+                    name[1..name.len() - 1].to_string()
                 } else if let Some(cmd) = context {
                     resolve_col_syntax(name, cmd, generator.as_ref())
                 } else {
                     generator.quote_identifier(name)
                 }
-            },
-            Expr::JsonAccess { column, path_segments, .. } => {
+            }
+            Expr::JsonAccess {
+                column,
+                path_segments,
+                ..
+            } => {
                 let mut result = generator.quote_identifier(column);
                 for (path, as_text) in path_segments {
                     let op = if *as_text { "->>" } else { "->" };
-                    if path.parse::<i64>().is_ok() { result.push_str(&format!("{}{}", op, path)); } else { result.push_str(&format!("{}'{}'", op, path)); }
+                    if path.parse::<i64>().is_ok() {
+                        result.push_str(&format!("{}{}", op, path));
+                    } else {
+                        result.push_str(&format!("{}'{}'", op, path));
+                    }
                 }
                 result
-            },
+            }
             expr => expr.to_string(),
         };
 
         // Handle array unnest conditions
         if self.is_array_unnest {
-             let inner_condition = match self.op {
+            let inner_condition = match self.op {
                 Operator::Eq => format!("_el = {}", self.to_value_sql(generator)),
                 Operator::Ne => format!("_el != {}", self.to_value_sql(generator)),
                 Operator::Gt => format!("_el > {}", self.to_value_sql(generator)),
@@ -126,10 +147,10 @@ impl ConditionToSql for Condition {
                     let val = match &self.value {
                         Value::String(s) => format!("'%{}%'", s),
                         Value::Param(n) => {
-                             let p = generator.placeholder(*n);
-                             generator.string_concat(&["'%'", &p, "'%'"])
-                        },
-                         v => format!("'%{}%'", v),
+                            let p = generator.placeholder(*n);
+                            generator.string_concat(&["'%'", &p, "'%'"])
+                        }
+                        v => format!("'%{}%'", v),
                     };
                     format!("_el {} {}", generator.fuzzy_operator(), val)
                 }
@@ -140,13 +161,18 @@ impl ConditionToSql for Condition {
                 col, inner_condition
             );
         }
-        
+
         // Normal conditions
         // Simple binary operators use sql_symbol() for unified handling
         if self.op.is_simple_binary() {
-            return format!("{} {} {}", col, self.op.sql_symbol(), self.to_value_sql(generator));
+            return format!(
+                "{} {} {}",
+                col,
+                self.op.sql_symbol(),
+                self.to_value_sql(generator)
+            );
         }
-        
+
         // Special operators that need custom handling
         match self.op {
             Operator::Fuzzy => {
@@ -155,7 +181,7 @@ impl ConditionToSql for Condition {
                     Value::Param(n) => {
                         let p = generator.placeholder(*n);
                         generator.string_concat(&["'%'", &p, "'%'"])
-                    },
+                    }
                     v => format!("'%{}%'", v),
                 };
                 format!("{} {} {}", col, generator.fuzzy_operator(), val)
@@ -169,30 +195,34 @@ impl ConditionToSql for Condition {
             // Postgres 17+ SQL/JSON standard functions
             Operator::JsonExists => {
                 let path = self.to_value_sql(generator);
-                generator.json_exists(&col, &path.trim_matches('\''))
+                generator.json_exists(&col, path.trim_matches('\''))
             }
             Operator::JsonQuery => {
                 let path = self.to_value_sql(generator);
-                generator.json_query(&col, &path.trim_matches('\''))
+                generator.json_query(&col, path.trim_matches('\''))
             }
             Operator::JsonValue => {
                 let path = self.to_value_sql(generator);
-                format!("{} = {}", generator.json_value(&col, &path.trim_matches('\'')), self.to_value_sql(generator))
+                format!(
+                    "{} = {}",
+                    generator.json_value(&col, path.trim_matches('\'')),
+                    self.to_value_sql(generator)
+                )
             }
             Operator::Between => {
                 // Value is Array with 2 elements [min, max]
-                if let Value::Array(vals) = &self.value {
-                    if vals.len() >= 2 {
-                        return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
-                    }
+                if let Value::Array(vals) = &self.value
+                    && vals.len() >= 2
+                {
+                    return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
                 }
                 format!("{} BETWEEN {}", col, self.value)
             }
             Operator::NotBetween => {
-                if let Value::Array(vals) = &self.value {
-                    if vals.len() >= 2 {
-                        return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
-                    }
+                if let Value::Array(vals) = &self.value
+                    && vals.len() >= 2
+                {
+                    return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
                 }
                 format!("{} NOT BETWEEN {}", col, self.value)
             }
@@ -214,7 +244,12 @@ impl ConditionToSql for Condition {
                 }
             }
             // Simple binary operators are handled above by is_simple_binary()
-            _ => format!("{} {} {}", col, self.op.sql_symbol(), self.to_value_sql(generator)),
+            _ => format!(
+                "{} {} {}",
+                col,
+                self.op.sql_symbol(),
+                self.to_value_sql(generator)
+            ),
         }
     }
 
@@ -229,51 +264,63 @@ impl ConditionToSql for Condition {
                 format!("({})", cmd.to_sql())
             }
             Value::Column(col) => {
-                 // Determine if it's "table"."col" or just "col"
-                 // Use resolve_col_syntax logic? Or simply quote?
-                 // Usually Join ON RHS is just an identifier, but transpiler logic in resolve_col_syntax
-                 // requires a QailCmd context which we don't have here efficiently (we have context: Option<&QailCmd> in other methods but strictly to_value_sql signature is fixed?).
-                 // Wait, to_value_sql signature is: fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String
-                 // We don't have context here.
-                 // However, we can use a basic split check or just quote full string.
-                 // If col is "users.id", generator.quote_identifier("users.id") might quote the whole thing which is wrong for Postgres ("users.id" vs "users"."id").
-                 // We should manually split if dot is present.
-                 if col.contains('.') {
-                     let parts: Vec<&str> = col.split('.').collect();
-                     parts.iter().map(|p| generator.quote_identifier(p)).collect::<Vec<String>>().join(".")
-                 } else {
-                     generator.quote_identifier(col)
-                 }
+                // Determine if it's "table"."col" or just "col"
+                // Use resolve_col_syntax logic? Or simply quote?
+                // Usually Join ON RHS is just an identifier, but transpiler logic in resolve_col_syntax
+                // requires a QailCmd context which we don't have here efficiently (we have context: Option<&QailCmd> in other methods but strictly to_value_sql signature is fixed?).
+                // Wait, to_value_sql signature is: fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String
+                // We don't have context here.
+                // However, we can use a basic split check or just quote full string.
+                // If col is "users.id", generator.quote_identifier("users.id") might quote the whole thing which is wrong for Postgres ("users.id" vs "users"."id").
+                // We should manually split if dot is present.
+                if col.contains('.') {
+                    let parts: Vec<&str> = col.split('.').collect();
+                    parts
+                        .iter()
+                        .map(|p| generator.quote_identifier(p))
+                        .collect::<Vec<String>>()
+                        .join(".")
+                } else {
+                    generator.quote_identifier(col)
+                }
             }
-            v => v.to_string(), 
+            v => v.to_string(),
         }
     }
 
     fn to_sql_parameterized(
-        &self, 
-        generator: &Box<dyn SqlGenerator>, 
+        &self,
+        generator: &Box<dyn SqlGenerator>,
         context: Option<&QailCmd>,
-        params: &mut ParamContext
+        params: &mut ParamContext,
     ) -> String {
         let col = match &self.left {
             Expr::Named(name) => {
                 // Handle raw SQL {content} first - context-independent
                 if name.starts_with('{') && name.ends_with('}') {
-                    name[1..name.len()-1].to_string()
+                    name[1..name.len() - 1].to_string()
                 } else if let Some(cmd) = context {
                     resolve_col_syntax(name, cmd, generator.as_ref())
                 } else {
                     generator.quote_identifier(name)
                 }
-            },
-            Expr::JsonAccess { column, path_segments, .. } => {
+            }
+            Expr::JsonAccess {
+                column,
+                path_segments,
+                ..
+            } => {
                 let mut result = generator.quote_identifier(column);
                 for (path, as_text) in path_segments {
                     let op = if *as_text { "->>" } else { "->" };
-                    if path.parse::<i64>().is_ok() { result.push_str(&format!("{}{}", op, path)); } else { result.push_str(&format!("{}'{}'", op, path)); }
+                    if path.parse::<i64>().is_ok() {
+                        result.push_str(&format!("{}{}", op, path));
+                    } else {
+                        result.push_str(&format!("{}'{}'", op, path));
+                    }
                 }
                 result
-            },
+            }
             expr => expr.to_string(),
         };
 
@@ -290,15 +337,15 @@ impl ConditionToSql for Condition {
         match self.op {
             Operator::Eq => {
                 // Raw conditions ({...}, op=Eq, value=Null) are now handled at col resolution
-                if matches!(self.value, Value::Null) {
-                    if let Expr::Named(name) = &self.left {
-                        if name.starts_with('{') && name.ends_with('}') {
-                            return col; // col already contains raw SQL content
-                        }
-                    }
+                if matches!(self.value, Value::Null)
+                    && let Expr::Named(name) = &self.left
+                    && name.starts_with('{')
+                    && name.ends_with('}')
+                {
+                    return col; // col already contains raw SQL content
                 }
                 format!("{} = {}", col, value_placeholder(&self.value, params))
-            },
+            }
             Operator::Fuzzy => {
                 // For LIKE, we need to wrap in wildcards
                 let placeholder = value_placeholder(&self.value, params);
@@ -307,9 +354,15 @@ impl ConditionToSql for Condition {
             Operator::IsNull => format!("{} IS NULL", col),
             Operator::IsNotNull => format!("{} IS NOT NULL", col),
             Operator::In => format!("{} = ANY({})", col, value_placeholder(&self.value, params)),
-            Operator::NotIn => format!("{} != ALL({})", col, value_placeholder(&self.value, params)),
-            Operator::Contains => generator.json_contains(&col, &value_placeholder(&self.value, params)),
-            Operator::KeyExists => generator.json_key_exists(&col, &value_placeholder(&self.value, params)),
+            Operator::NotIn => {
+                format!("{} != ALL({})", col, value_placeholder(&self.value, params))
+            }
+            Operator::Contains => {
+                generator.json_contains(&col, &value_placeholder(&self.value, params))
+            }
+            Operator::KeyExists => {
+                generator.json_key_exists(&col, &value_placeholder(&self.value, params))
+            }
             Operator::JsonExists => {
                 let path = value_placeholder(&self.value, params);
                 generator.json_exists(&col, &path)
@@ -320,21 +373,25 @@ impl ConditionToSql for Condition {
             }
             Operator::JsonValue => {
                 let path = value_placeholder(&self.value, params);
-                format!("{} = {}", generator.json_value(&col, &path), value_placeholder(&self.value, params))
+                format!(
+                    "{} = {}",
+                    generator.json_value(&col, &path),
+                    value_placeholder(&self.value, params)
+                )
             }
             Operator::Between => {
-                if let Value::Array(vals) = &self.value {
-                    if vals.len() >= 2 {
-                        return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
-                    }
+                if let Value::Array(vals) = &self.value
+                    && vals.len() >= 2
+                {
+                    return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
                 }
                 format!("{} BETWEEN {}", col, self.value)
             }
             Operator::NotBetween => {
-                if let Value::Array(vals) = &self.value {
-                    if vals.len() >= 2 {
-                        return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
-                    }
+                if let Value::Array(vals) = &self.value
+                    && vals.len() >= 2
+                {
+                    return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
                 }
                 format!("{} NOT BETWEEN {}", col, self.value)
             }
@@ -355,7 +412,12 @@ impl ConditionToSql for Condition {
                 }
             }
             // Simple operators (Ne, Gt, Gte, Lt, Lte, Like, NotLike, ILike, NotILike) use sql_symbol()
-            _ => format!("{} {} {}", col, self.op.sql_symbol(), value_placeholder(&self.value, params)),
+            _ => format!(
+                "{} {} {}",
+                col,
+                self.op.sql_symbol(),
+                value_placeholder(&self.value, params)
+            ),
         }
     }
 }

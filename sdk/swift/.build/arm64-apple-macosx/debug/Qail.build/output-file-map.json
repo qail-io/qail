@@ -1,0 +1,26 @@
+{
+  "": {
+    "swift-dependencies": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/master.swiftdeps"
+  },
+  "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Builders.swift": {
+    "dependencies": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Builders.d",
+    "object": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Builders.swift.o",
+    "swiftmodule": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Builders~partial.swiftmodule",
+    "swift-dependencies": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Builders.swiftdeps",
+    "diagnostics": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Builders.dia"
+  },
+  "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Models.swift": {
+    "dependencies": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Models.d",
+    "object": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Models.swift.o",
+    "swiftmodule": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Models~partial.swiftmodule",
+    "swift-dependencies": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Models.swiftdeps",
+    "diagnostics": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Models.dia"
+  },
+  "/Users/orion/qail.rs/sdk/swift/Sources/Qail/QailClient.swift": {
+    "dependencies": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/QailClient.d",
+    "object": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/QailClient.swift.o",
+    "swiftmodule": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/QailClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/QailClient.swiftdeps",
+    "diagnostics": "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/QailClient.dia"
+  }
+}

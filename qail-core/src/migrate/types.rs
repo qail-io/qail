@@ -5,7 +5,7 @@
 use std::fmt;
 
 /// Column type enum for compile-time validation.
-/// 
+///
 /// This replaces runtime strings with a compile-time enum, enabling:
 /// - Type safety (no typos like "uuud" instead of "uuid")
 /// - Compile-time validation (e.g., can this be a primary key?)
@@ -31,7 +31,7 @@ pub enum ColumnType {
     /// DOUBLE PRECISION (64-bit float)
     Float,
     /// DECIMAL/NUMERIC with optional precision
-    Decimal(Option<(u8, u8)>),  // (precision, scale)
+    Decimal(Option<(u8, u8)>), // (precision, scale)
     /// JSONB (binary JSON)
     Jsonb,
     /// TIMESTAMP without timezone
@@ -48,7 +48,7 @@ pub enum ColumnType {
 
 impl ColumnType {
     /// Convert to PostgreSQL type string.
-    /// 
+    ///
     /// This is the ONLY place where we convert to SQL strings.
     /// All builder logic works with the enum.
     pub fn to_pg_type(&self) -> String {
@@ -73,9 +73,9 @@ impl ColumnType {
             Self::Bytea => "BYTEA".to_string(),
         }
     }
-    
+
     /// Check if this type can be a primary key.
-    /// 
+    ///
     /// Compile-time validation: TEXT, JSONB, BYTEA cannot be PKs.
     pub const fn can_be_primary_key(&self) -> bool {
         matches!(
@@ -83,19 +83,19 @@ impl ColumnType {
             Self::Uuid | Self::Serial | Self::BigSerial | Self::Int | Self::BigInt
         )
     }
-    
+
     /// Check if this type supports indexing.
-    /// 
+    ///
     /// Most types support indexing except large binary/JSON types.
     pub const fn supports_indexing(&self) -> bool {
         !matches!(self, Self::Jsonb | Self::Bytea)
     }
-    
+
     /// Check if this type requires a default value when NOT NULL.
     pub const fn requires_default_when_not_null(&self) -> bool {
         matches!(self, Self::Serial | Self::BigSerial)
     }
-    
+
     /// Get a human-readable name for error messages.
     pub const fn name(&self) -> &'static str {
         match self {
@@ -126,27 +126,29 @@ impl fmt::Display for ColumnType {
 }
 
 /// Parse a string into ColumnType (for backward compatibility with .qail files).
-/// 
+///
 /// This is ONLY used when parsing .qail text files, not in the builder API.
-impl ColumnType {
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for ColumnType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "uuid" => Some(Self::Uuid),
-            "text" | "string" | "str" => Some(Self::Text),
-            "varchar" => Some(Self::Varchar(None)),
-            "int" | "integer" | "i32" | "int4" => Some(Self::Int),
-            "bigint" | "i64" | "int8" => Some(Self::BigInt),
-            "serial" => Some(Self::Serial),
-            "bigserial" => Some(Self::BigSerial),
-            "bool" | "boolean" => Some(Self::Bool),
-            "float" | "f64" | "double" | "double precision" | "float8" => Some(Self::Float),
-            "decimal" | "numeric" | "dec" => Some(Self::Decimal(None)),
-            "jsonb" | "json" => Some(Self::Jsonb),
-            "timestamp" | "time" => Some(Self::Timestamp),
-            "timestamptz" => Some(Self::Timestamptz),
-            "date" => Some(Self::Date),
-            "bytea" | "bytes" => Some(Self::Bytea),
-            _ => None,
+            "uuid" => Ok(Self::Uuid),
+            "text" | "string" | "str" => Ok(Self::Text),
+            "varchar" => Ok(Self::Varchar(None)),
+            "int" | "integer" | "i32" | "int4" => Ok(Self::Int),
+            "bigint" | "i64" | "int8" => Ok(Self::BigInt),
+            "serial" => Ok(Self::Serial),
+            "bigserial" => Ok(Self::BigSerial),
+            "bool" | "boolean" => Ok(Self::Bool),
+            "float" | "f64" | "double" | "double precision" | "float8" => Ok(Self::Float),
+            "decimal" | "numeric" | "dec" => Ok(Self::Decimal(None)),
+            "jsonb" | "json" => Ok(Self::Jsonb),
+            "timestamp" | "time" => Ok(Self::Timestamp),
+            "timestamptz" => Ok(Self::Timestamptz),
+            "date" => Ok(Self::Date),
+            "bytea" | "bytes" => Ok(Self::Bytea),
+            _ => Err(()),
         }
     }
 }
@@ -182,9 +184,9 @@ mod tests {
 
     #[test]
     fn test_from_str() {
-        assert_eq!(ColumnType::from_str("uuid"), Some(ColumnType::Uuid));
-        assert_eq!(ColumnType::from_str("TEXT"), Some(ColumnType::Text));
-        assert_eq!(ColumnType::from_str("serial"), Some(ColumnType::Serial));
-        assert_eq!(ColumnType::from_str("unknown"), None);
+        assert_eq!("uuid".parse::<ColumnType>(), Ok(ColumnType::Uuid));
+        assert_eq!("TEXT".parse::<ColumnType>(), Ok(ColumnType::Text));
+        assert_eq!("serial".parse::<ColumnType>(), Ok(ColumnType::Serial));
+        assert!("unknown".parse::<ColumnType>().is_err());
     }
 }
