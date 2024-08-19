@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::ast::{Condition, LogicalOp, SortOrder};
+use serde::{Deserialize, Serialize};
 
 /// A cage (constraint block) in the query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

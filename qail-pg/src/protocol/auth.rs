@@ -5,8 +5,8 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, Mac};
-use sha2::{Sha256, Digest};
 use rand::Rng;
+use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -75,8 +75,8 @@ impl ScramClient {
     /// Server-first-message format: `r=<nonce>,s=<salt>,i=<iterations>`
     /// Returns the client-final-message.
     pub fn process_server_first(&mut self, server_msg: &[u8]) -> Result<Vec<u8>, String> {
-        let server_str = std::str::from_utf8(server_msg)
-            .map_err(|_| "Invalid UTF-8 in server message")?;
+        let server_str =
+            std::str::from_utf8(server_msg).map_err(|_| "Invalid UTF-8 in server message")?;
 
         // Parse server-first-message
         let mut nonce = None;
@@ -89,7 +89,11 @@ impl ScramClient {
             } else if let Some(value) = part.strip_prefix("s=") {
                 salt = Some(BASE64.decode(value).map_err(|_| "Invalid salt base64")?);
             } else if let Some(value) = part.strip_prefix("i=") {
-                iterations = Some(value.parse::<u32>().map_err(|_| "Invalid iteration count")?);
+                iterations = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| "Invalid iteration count")?,
+                );
             }
         }
 
@@ -117,12 +121,16 @@ impl ScramClient {
         // Build auth message
         let client_first_bare = self.client_first_message_bare();
         let client_final_without_proof = format!("c=biws,r={}", nonce); // biws = base64("n,,")
-        let auth_message = format!("{},{},{}", client_first_bare, server_str, client_final_without_proof);
+        let auth_message = format!(
+            "{},{},{}",
+            client_first_bare, server_str, client_final_without_proof
+        );
         self.auth_message = Some(auth_message.clone());
 
         // Compute proof
         let client_signature = self.hmac(&stored_key, auth_message.as_bytes());
-        let client_proof: Vec<u8> = client_key.iter()
+        let client_proof: Vec<u8> = client_key
+            .iter()
             .zip(client_signature.iter())
             .map(|(a, b)| a ^ b)
             .collect();
@@ -136,21 +144,24 @@ impl ScramClient {
 
     /// Verify the server-final-message (server signature).
     pub fn verify_server_final(&self, server_msg: &[u8]) -> Result<(), String> {
-        let server_str = std::str::from_utf8(server_msg)
-            .map_err(|_| "Invalid UTF-8 in server final message")?;
+        let server_str =
+            std::str::from_utf8(server_msg).map_err(|_| "Invalid UTF-8 in server final message")?;
 
         // Parse verifier
-        let verifier = server_str.strip_prefix("v=")
+        let verifier = server_str
+            .strip_prefix("v=")
             .ok_or("Missing verifier in server final message")?;
 
-        let expected_signature = BASE64.decode(verifier)
+        let expected_signature = BASE64
+            .decode(verifier)
             .map_err(|_| "Invalid base64 in server signature")?;
 
         // Compute expected server signature
-        let salted_password = self.salted_password.as_ref()
+        let salted_password = self
+            .salted_password
+            .as_ref()
             .ok_or("Missing salted password")?;
-        let auth_message = self.auth_message.as_ref()
-            .ok_or("Missing auth message")?;
+        let auth_message = self.auth_message.as_ref().ok_or("Missing auth message")?;
 
         let server_key = self.hmac(salted_password, b"Server Key");
         let computed_signature = self.hmac(&server_key, auth_message.as_bytes());
@@ -165,12 +176,7 @@ impl ScramClient {
     /// Derive salted password using PBKDF2-SHA256.
     fn derive_salted_password(&self, salt: &[u8], iterations: u32) -> Vec<u8> {
         let mut output = [0u8; 32];
-        pbkdf2::pbkdf2_hmac::<Sha256>(
-            self.password.as_bytes(),
-            salt,
-            iterations,
-            &mut output,
-        );
+        pbkdf2::pbkdf2_hmac::<Sha256>(self.password.as_bytes(), salt, iterations, &mut output);
         output.to_vec()
     }
 
@@ -198,28 +204,30 @@ mod tests {
         let client = ScramClient::new("user", "password");
         let msg = client.client_first_message();
         let msg_str = String::from_utf8(msg).unwrap();
-        
+
         assert!(msg_str.starts_with("n,,n=user,r="));
     }
 
     #[test]
     fn test_scram_flow() {
         let mut client = ScramClient::new("testuser", "testpass");
-        
+
         // Client sends first message
         let first = client.client_first_message();
         assert!(String::from_utf8(first).unwrap().contains("n=testuser"));
-        
+
         // Simulate server response (in real scenario, server generates this)
         // Format: r=<combined_nonce>,s=<salt_base64>,i=<iterations>
         let server_nonce = format!("{}ServerPart", client.client_nonce);
         let salt_b64 = BASE64.encode(b"randomsalt");
         let server_first = format!("r={},s={},i=4096", server_nonce, salt_b64);
-        
+
         // Client processes and generates final message
-        let final_msg = client.process_server_first(server_first.as_bytes()).unwrap();
+        let final_msg = client
+            .process_server_first(server_first.as_bytes())
+            .unwrap();
         let final_str = String::from_utf8(final_msg).unwrap();
-        
+
         assert!(final_str.starts_with("c=biws,r="));
         assert!(final_str.contains(",p="));
     }

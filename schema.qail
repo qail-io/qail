@@ -1,0 +1,3258 @@
+# QAIL Schema
+
+extension "uuid-ossp" version "1.1"
+
+enum article_status { draft, published, archived }
+enum boarding_point_type { main, alternative, seasonal, vip }
+enum charter_booking_status { pending, confirmed, cancelled, completed }
+enum charter_category { fishing, charter, yacht }
+enum charter_duration_type { hourly, half_day, full_day, sunset, multi_day }
+enum charter_payment_status { unpaid, deposit_paid, fully_paid, refunded }
+enum charter_price_type { per_boat, per_person, per_cabin, per_night }
+enum charter_style { trolling, jigging, popping, bottom, reef }
+enum charter_vessel_type { jukung, speedboat, sportfisher, phinisi, catamaran, yacht, traditional }
+enum fishing_booking_status { pending, confirmed, cancelled, completed }
+enum fishing_duration_type { hourly, half_day, full_day, sunset, multi_day }
+enum fishing_payment_status { unpaid, deposit_paid, fully_paid, refunded }
+enum fishing_price_type { per_boat, per_person, per_cabin, per_night }
+enum fishing_style { trolling, jigging, popping, bottom, reef }
+enum fishing_vessel_type { jukung, speedboat, sportfisher, phinisi, catamaran, yacht, traditional }
+enum hold_status { Active, Expired, Confirmed, Released }
+enum nationality { Indonesian, NonIndonesian }
+enum operator_type { live, fast_sync, confirmation_needed, enquiry_only }
+enum order_status { Draft, AwaitingPayment, Paid, Confirmed, Expired, Failed, Cancelled }
+enum payment_session_status { Pending, AwaitingPayment, Authorized, Paid, Expired, Failed, Cancelled, Refunded }
+enum refund_reason { UserRequested, SystemCancelled, Duplicate, Fraud, Reschedule, ServiceIssue, Other }
+enum refund_status { Pending, Succeeded, Failed, Cancelled }
+enum reservation_status { Confirmed, Cancelled, Refunded }
+enum seo_comparison_type { operator_vs_operator, best_of }
+enum user_role { admin, operator, customer, administrator, finance_admin, super_admin }
+enum vessel_category { fishing, charter, yacht }
+enum vessel_class { LUXURY, EXECUTIVE, BUSINESS, ECONOMY }
+enum vessel_type { SPEEDBOAT, FAST_FERRY, FERRY, CRUISE, YACHT, FASTBOAT }
+
+table tenants {
+  is_active BOOLEAN not_null default true
+  slug VARCHAR not_null unique
+  id UUID primary_key default gen_random_uuid()
+  contact_email VARCHAR
+  updated_at TIMESTAMPTZ not_null default now()
+  contact_phone VARCHAR
+  created_at TIMESTAMPTZ not_null default now()
+  name VARCHAR not_null
+  api_key_hash VARCHAR
+  can_resell BOOLEAN not_null default false
+  can_operate BOOLEAN not_null default false
+  logo_url TEXT
+  verticals TEXT not_null default '{}'
+  enable_rls
+  force_rls
+}
+
+table service_groups {
+  name VARCHAR not_null
+  class VARCHAR not_null
+  category VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  description TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  deleted_at TIMESTAMPTZ
+  created_at TIMESTAMPTZ not_null default now()
+  is_active BOOLEAN not_null default true
+  sort_order INT not_null default 0
+  enable_rls
+  force_rls
+}
+
+table email_templates {
+  is_system BOOLEAN not_null default false
+  category VARCHAR not_null default 'email'
+  tenant_id UUID references tenants(id)
+  sample_data JSONB
+  operator_id UUID references operators(id)
+  is_active BOOLEAN not_null default true
+  slug VARCHAR not_null unique
+  created_by UUID references users(id)
+  description TEXT
+  id UUID primary_key default gen_random_uuid()
+  name VARCHAR not_null
+  created_at TIMESTAMPTZ not_null default now()
+  tiptap_json JSONB
+  updated_at TIMESTAMPTZ not_null default now()
+  updated_by UUID references users(id)
+  available_variables JSONB not_null default '[]'
+  html_body TEXT not_null
+  text_body TEXT
+  subject_template TEXT not_null
+  enable_rls
+  force_rls
+}
+
+table payment_gateway_configs {
+  is_active BOOLEAN not_null default false
+  id UUID primary_key default gen_random_uuid()
+  tenant_id UUID references tenants(id)
+  display_name VARCHAR not_null
+  merchant_id TEXT
+  created_at TIMESTAMPTZ not_null default now()
+  provider VARCHAR not_null unique
+  updated_at TIMESTAMPTZ not_null default now()
+  is_production BOOLEAN not_null default false
+  operator_id UUID references operators(id)
+  webhook_secret TEXT
+  client_key TEXT
+  server_key TEXT
+  config JSONB not_null default '{}'
+  enable_rls
+  force_rls
+}
+
+table refresh_tokens {
+  user_id UUID not_null references users(id) on_delete cascade
+  created_at TIMESTAMPTZ not_null default now()
+  token VARCHAR not_null unique
+  id UUID primary_key default gen_random_uuid()
+  expires_at TIMESTAMPTZ not_null
+  revoked_at TIMESTAMPTZ
+  enable_rls
+  force_rls
+}
+
+table pricing_plans {
+  created_at TIMESTAMPTZ not_null default now()
+  name VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  currency VARCHAR not_null default 'IDR'
+  virtual_segment_id UUID
+  parent_route_id UUID
+  segment_id UUID
+  start_date DATE not_null
+  end_date DATE not_null
+  is_active BOOLEAN not_null default true
+  priority INT not_null default 0
+  updated_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table whatsapp_contact_group_members {
+  contact_name VARCHAR
+  added_at TIMESTAMPTZ not_null default now()
+  group_id UUID primary_key references whatsapp_contact_groups(id) on_delete cascade
+  contact_phone VARCHAR primary_key
+  enable_rls
+  force_rls
+}
+
+table postmark_events {
+  tag VARCHAR
+  processed_at TIMESTAMPTZ not_null default now()
+  message_id VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  click_location VARCHAR
+  server_id INT
+  bounce_type VARCHAR
+  first_open BOOLEAN
+  message_stream VARCHAR
+  changed_at TIMESTAMPTZ
+  event_type VARCHAR not_null
+  bounce_description TEXT
+  request_headers JSONB
+  received_at TIMESTAMPTZ
+  error_message TEXT
+  bounced_at TIMESTAMPTZ
+  complaint_id BIGINT
+  platform VARCHAR
+  email VARCHAR
+  original_link TEXT
+  recipient VARCHAR
+  metadata JSONB default '{}'
+  processing_status VARCHAR not_null default 'processed'
+  raw_payload JSONB not_null
+  sender VARCHAR
+  source_ip TEXT
+  origin VARCHAR
+  read_seconds INT
+  created_at TIMESTAMPTZ not_null default now()
+  delivered_at TIMESTAMPTZ
+  user_agent TEXT
+  type_code INT
+  suppression_reason VARCHAR
+  suppress_sending BOOLEAN
+  enable_rls
+  force_rls
+}
+
+table vessel_images {
+  created_at TIMESTAMPTZ not_null default now()
+  created_by UUID not_null
+  updated_by UUID not_null
+  deleted_at TIMESTAMPTZ
+  id UUID primary_key default gen_random_uuid()
+  display_order INT not_null default 0
+  updated_at TIMESTAMPTZ not_null default now()
+  image_url TEXT not_null
+  vessel_id UUID not_null references vessels(id) on_delete cascade
+  caption TEXT
+  enable_rls
+  force_rls
+}
+
+table schedule_patterns {
+  count INT
+  interval INT not_null default 1
+  id UUID primary_key default gen_random_uuid()
+  by_weekday TEXT
+  by_month TEXT
+  frequency TEXT not_null
+  created_at TIMESTAMPTZ not_null default now()
+  start_date DATE not_null
+  by_month_day TEXT
+  end_date DATE
+  until DATE
+  enable_rls
+  force_rls
+}
+
+table operator_facilities {
+  name VARCHAR not_null
+  updated_at TIMESTAMPTZ not_null default now()
+  description TEXT
+  id UUID primary_key default gen_random_uuid()
+  icon VARCHAR
+  tenant_id UUID references tenants(id)
+  operator_id UUID not_null references operators(id) on_delete cascade
+  updated_by UUID not_null
+  created_by UUID not_null
+  created_at TIMESTAMPTZ not_null default now()
+  deleted_at TIMESTAMPTZ
+  enable_rls
+  force_rls
+}
+
+table seo_poros {
+  destination TEXT not_null
+  operator_count INT default 0
+  dest_destination_id UUID references destinations(id)
+  id UUID primary_key default gen_random_uuid()
+  faqs JSONB default '[]'
+  origin TEXT not_null
+  min_price INT
+  title TEXT not_null
+  tips JSONB default '[]'
+  created_by UUID
+  updated_by UUID
+  faqs_ja JSONB default '[]'
+  translation_tokens_total INT default 0
+  departures_per_day INT
+  slug TEXT not_null
+  updated_at TIMESTAMPTZ not_null default now()
+  agent_id UUID references agents(id)
+  distance TEXT
+  origin_harbor_id UUID references harbors(id)
+  tenant_id UUID references tenants(id)
+  content_paragraphs JSONB default '[]'
+  translation_status TEXT default 'pending'
+  faqs_ko JSONB default '[]'
+  avg_duration TEXT
+  meta_description TEXT
+  translation_hash TEXT
+  is_published BOOLEAN not_null default false
+  origin_destination_id UUID references destinations(id)
+  dest_harbor_id UUID references harbors(id)
+  translation_last_run TIMESTAMPTZ
+  faqs_zh JSONB default '[]'
+  faqs_id JSONB default '[]'
+  operator_id UUID references operators(id)
+  created_at TIMESTAMPTZ not_null default now()
+  max_price INT
+  enable_rls
+  force_rls
+}
+
+table marketing_config {
+  tiktok_pixel_id TEXT
+  facebook_access_token TEXT
+  tiktok_access_token TEXT
+  created_at TIMESTAMPTZ not_null default now()
+  tracking_enabled BOOLEAN not_null default true
+  google_ads_conversion_id TEXT
+  tenant_id UUID references tenants(id)
+  id UUID primary_key default gen_random_uuid()
+  google_ads_conversion_label TEXT
+  agent_id UUID references agents(id)
+  facebook_pixel_id TEXT
+  operator_id UUID references operators(id)
+  gtm_container_id TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table tenant_harbor_overrides {
+  agent_id UUID references agents(id)
+  seo_title_zh TEXT
+  id UUID primary_key default gen_random_uuid()
+  seo_description_ko TEXT
+  og_image_url TEXT
+  operator_id UUID references operators(id)
+  map_image_url TEXT
+  seo_description_zh TEXT
+  is_hidden BOOLEAN not_null default false
+  facilities TEXT
+  seo_description TEXT
+  harbor_id UUID not_null references harbors(id)
+  seo_keywords TEXT
+  seo_title_ko TEXT
+  custom_slug TEXT
+  seo_article TEXT
+  seo_description_id TEXT
+  position_override INT
+  updated_at TIMESTAMPTZ not_null default now()
+  photo_url TEXT
+  created_at TIMESTAMPTZ not_null default now()
+  custom_name TEXT
+  operating_hours TEXT
+  custom_description TEXT
+  contact_email TEXT
+  important_notes JSONB
+  seo_title_ja TEXT
+  seo_title TEXT
+  seo_title_id TEXT
+  seo_description_ja TEXT
+  tenant_id UUID references tenants(id)
+  contact_phone TEXT
+  enable_rls
+  force_rls
+}
+
+table search_location_stats {
+  agent_id UUID references agents(id)
+  created_at TIMESTAMPTZ not_null default now()
+  selection_count BIGINT not_null default 0
+  last_selected_at TIMESTAMPTZ
+  tenant_id UUID references tenants(id)
+  location_type VARCHAR not_null
+  operator_id UUID references operators(id)
+  location_slug VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  location_name VARCHAR not_null
+  updated_at TIMESTAMPTZ not_null default now()
+  location_id UUID not_null
+  enable_rls
+  force_rls
+}
+
+table whatsapp_contact_groups {
+  tenant_id UUID references tenants(id)
+  operator_id UUID references operators(id)
+  updated_at TIMESTAMPTZ not_null default now()
+  name VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  created_at TIMESTAMPTZ not_null default now()
+  description TEXT
+  enable_rls
+  force_rls
+}
+
+table ai_token_usage {
+  tokens_out INT not_null default 0
+  created_at TIMESTAMPTZ not_null default now()
+  request_count INT not_null default 0
+  operator_id UUID references operators(id)
+  tokens_in INT not_null default 0
+  tenant_id UUID references tenants(id)
+  agent_id UUID references agents(id)
+  id UUID primary_key default gen_random_uuid()
+  usage_date DATE not_null default CURRENT_DATE
+  enable_rls
+  force_rls
+}
+
+table harbors {
+  name_id VARCHAR
+  created_by UUID not_null
+  seo_article_id TEXT
+  operating_hours TEXT
+  seo_description TEXT not_null default ''
+  port_fee_description_id TEXT
+  seo_description_ko VARCHAR
+  longitude DOUBLE PRECISION
+  name_zh VARCHAR
+  facilities JSONB default '[]'
+  created_at TIMESTAMPTZ not_null default now()
+  updated_by UUID not_null
+  address TEXT
+  name_ko VARCHAR
+  seo_title_ko VARCHAR
+  description_id TEXT
+  contact_email TEXT
+  seo_description_id VARCHAR
+  seo_article_zh TEXT
+  seo_article_ja TEXT
+  seo_title_zh VARCHAR
+  is_active BOOLEAN not_null default true
+  country TEXT
+  city TEXT
+  tz_region VARCHAR
+  google_maps_url TEXT
+  description_ja TEXT
+  seo_article_ko TEXT
+  description_zh TEXT
+  port_fee_description TEXT
+  position INT not_null default 0
+  seo_article TEXT
+  seo_description_ja VARCHAR
+  seo_title_id VARCHAR
+  name TEXT not_null
+  port_fee_amount DOUBLE PRECISION
+  name_ja VARCHAR
+  map_image_url TEXT
+  description TEXT
+  port_fee_description_zh TEXT
+  photo_url TEXT
+  description_ko TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  important_notes JSONB default '[]'
+  latitude DOUBLE PRECISION
+  seo_title TEXT not_null default ''
+  slug TEXT not_null unique
+  translation_hash VARCHAR
+  seo_description_zh VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  port_fee_description_ja TEXT
+  contact_phone TEXT
+  seo_keywords_zh VARCHAR
+  timezone TEXT not_null default 'Asia/Makassar'
+  seo_keywords TEXT not_null default ''
+  seo_title_ja VARCHAR
+  port_fee_description_ko TEXT
+  seo_keywords_ja VARCHAR
+  seo_keywords_ko VARCHAR
+  seo_keywords_id VARCHAR
+  enable_rls
+  force_rls
+}
+
+table destination_seo_overrides {
+  tenant_id UUID references tenants(id)
+  meta_description TEXT
+  created_at TIMESTAMPTZ default now()
+  og_image_url TEXT
+  operator_id UUID references operators(id) on_delete cascade
+  meta_title VARCHAR
+  updated_at TIMESTAMPTZ default now()
+  agent_id UUID references agents(id) on_delete cascade
+  id UUID primary_key default gen_random_uuid()
+  destination_id UUID not_null references destinations(id) on_delete cascade
+  enable_rls
+  force_rls
+}
+
+table settlement_items {
+  payout_amount BIGINT not_null
+  created_at TIMESTAMPTZ not_null default now()
+  order_total BIGINT not_null
+  id UUID primary_key default gen_random_uuid()
+  order_id UUID not_null references orders(id) on_delete cascade
+  settlement_id UUID not_null references settlements(id) on_delete cascade
+  commission_amount BIGINT not_null
+  enable_rls
+  force_rls
+}
+
+table agent_contracts {
+  terminated_by UUID references users(id)
+  approved_by UUID references users(id)
+  is_active BOOLEAN default true
+  valid_from DATE
+  static_markup DOUBLE PRECISION
+  commission_percent DOUBLE PRECISION
+  termination_reason TEXT
+  created_at TIMESTAMPTZ not_null default now()
+  agent_id UUID not_null references agents(id) on_delete cascade
+  updated_at TIMESTAMPTZ not_null default now()
+  pricing_model VARCHAR not_null
+  terminated_by_party VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  terminated_at TIMESTAMPTZ
+  operator_id UUID not_null references operators(id) on_delete cascade
+  valid_until DATE
+  enable_rls
+  force_rls
+}
+
+table whatsapp_broadcast_recipients {
+  read_at TIMESTAMPTZ
+  sent_at TIMESTAMPTZ
+  delivered_at TIMESTAMPTZ
+  contact_phone VARCHAR primary_key
+  error_message TEXT
+  broadcast_id UUID primary_key references whatsapp_broadcasts(id) on_delete cascade
+  status VARCHAR default 'pending'
+  wa_message_id VARCHAR
+  enable_rls
+  force_rls
+}
+
+table user_payment_methods {
+  is_active BOOLEAN default true
+  card_expiry_year TEXT
+  card_holder_name TEXT
+  card_expiry_month TEXT
+  card_last_four TEXT
+  created_at TIMESTAMPTZ default now()
+  user_id UUID not_null references users(id) on_delete cascade
+  updated_at TIMESTAMPTZ default now()
+  card_brand TEXT
+  id UUID primary_key default gen_random_uuid()
+  xendit_payment_token_id TEXT not_null unique
+  is_default BOOLEAN default false
+  enable_rls
+  force_rls
+}
+
+table contract_route_rates {
+  created_at TIMESTAMPTZ not_null default now()
+  operator_id UUID not_null references operators(id)
+  id UUID primary_key default gen_random_uuid()
+  origin_harbor_id UUID not_null references harbors(id)
+  destination_harbor_id UUID not_null references harbors(id)
+  contract_id UUID not_null references agent_contracts(id) on_delete cascade
+  tenant_id UUID references tenants(id)
+  currency VARCHAR not_null default 'IDR'
+  rate_amount DOUBLE PRECISION not_null
+  notes TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table reservations {
+  seats INT not_null
+  id UUID primary_key default gen_random_uuid()
+  hold_id UUID
+  status TEXT not_null default 'Confirmed'
+  updated_at TIMESTAMPTZ not_null default now()
+  connection_id UUID not_null
+  operator_id UUID references operators(id)
+  nationality TEXT not_null
+  tenant_id UUID references tenants(id)
+  currency TEXT not_null default 'IDR'
+  pax_breakdown JSONB not_null
+  price_paid BIGINT not_null
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table refunds {
+  order_id UUID not_null references orders(id)
+  initiated_by UUID references users(id)
+  reason_notes TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  external_refund_id TEXT
+  id UUID primary_key default gen_random_uuid()
+  tenant_id UUID references tenants(id)
+  manual_reference_id TEXT
+  amount BIGINT not_null
+  is_manual BOOLEAN not_null default false
+  manual_transfer_note TEXT
+  operator_id UUID references operators(id)
+  payment_session_id UUID not_null references payment_sessions(id)
+  status refund_status not_null default 'Pending'
+  currency VARCHAR not_null default 'IDR'
+  reason refund_reason not_null default 'UserRequested'
+  created_at TIMESTAMPTZ not_null default now()
+  completed_at TIMESTAMPTZ
+  idempotency_key UUID not_null default gen_random_uuid()
+  enable_rls
+  force_rls
+}
+
+table agents {
+  created_at TIMESTAMPTZ not_null default now()
+  slug VARCHAR not_null unique
+  id UUID primary_key default gen_random_uuid()
+  contact_email VARCHAR
+  contact_phone VARCHAR
+  name VARCHAR not_null
+  verticals TEXT not_null default '{}'
+  is_active BOOLEAN default true
+  api_key_hash VARCHAR
+  created_by UUID references users(id)
+  updated_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table user_email_verifications {
+  created_at TIMESTAMPTZ not_null default now()
+  token VARCHAR not_null unique
+  id UUID primary_key default gen_random_uuid()
+  expires_at TIMESTAMPTZ not_null
+  consumed_at TIMESTAMPTZ
+  user_id UUID not_null references users(id) on_delete cascade
+  enable_rls
+  force_rls
+}
+
+table whatsapp_flow_config {
+  footer_text VARCHAR not_null default 'ExampleApp Booking'
+  cta_text VARCHAR not_null default 'Book Fastboat'
+  is_active BOOLEAN not_null default true
+  header_text VARCHAR not_null default 'Book Your Fastboat Ticket'
+  trigger_type VARCHAR not_null default 'booking'
+  updated_at TIMESTAMPTZ not_null default now()
+  flow_id VARCHAR not_null
+  created_at TIMESTAMPTZ not_null default now()
+  body_text TEXT not_null default 'Book your fastboat tickets to Nusa Penida, Gili, and Lembongan easily via WhatsApp!'
+  flow_name VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  first_screen VARCHAR not_null
+  enable_rls
+  force_rls
+}
+
+table oauth_accounts {
+  metadata JSONB default '{}'
+  refresh_token TEXT
+  token_expires_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ not_null default now()
+  provider_user_id VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  provider VARCHAR not_null
+  created_at TIMESTAMPTZ not_null default now()
+  user_id UUID not_null references users(id) on_delete cascade
+  access_token TEXT
+  enable_rls
+  force_rls
+}
+
+table saved_passengers {
+  created_at TIMESTAMPTZ not_null default now()
+  updated_at TIMESTAMPTZ not_null default now()
+  passenger_type VARCHAR not_null
+  tenant_id UUID references tenants(id)
+  title VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  full_name VARCHAR not_null
+  operator_id UUID references operators(id)
+  country VARCHAR not_null
+  user_id UUID not_null references users(id) on_delete cascade
+  enable_rls
+  force_rls
+}
+
+table vessels {
+  updated_by UUID not_null
+  default_arrival_dock_id UUID
+  seat_capacity INT not_null
+  default_departure_dock_id UUID
+  updated_at TIMESTAMPTZ not_null default now()
+  id UUID primary_key default gen_random_uuid()
+  name VARCHAR not_null
+  created_by UUID not_null
+  is_active BOOLEAN not_null default true
+  operator_id UUID not_null references operators(id) on_delete cascade
+  tenant_id UUID references tenants(id)
+  facility TEXT not_null
+  vessel_type vessel_type not_null
+  slug VARCHAR not_null unique
+  vessel_class vessel_class not_null
+  created_at TIMESTAMPTZ not_null default now()
+  deleted_at TIMESTAMPTZ
+  active_since DATE not_null
+  enable_rls
+  force_rls
+}
+
+table vessel_facilities {
+  created_at TIMESTAMPTZ not_null default now()
+  created_by UUID not_null
+  updated_by UUID not_null
+  deleted_at TIMESTAMPTZ
+  id UUID primary_key default gen_random_uuid()
+  description TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  name TEXT not_null
+  vessel_id UUID not_null references vessels(id) on_delete cascade
+  icon TEXT
+  enable_rls
+  force_rls
+}
+
+table odyssey_connections {
+  origin_harbor_id UUID not_null references harbors(id)
+  created_at TIMESTAMPTZ not_null default now()
+  destination_harbor_id UUID not_null references harbors(id)
+  id UUID primary_key default gen_random_uuid()
+  sales_start_date DATE
+  operator_id UUID references operators(id)
+  odyssey_id UUID not_null references odysseys(id) on_delete cascade
+  tenant_id UUID references tenants(id)
+  name VARCHAR not_null
+  description TEXT
+  leg_ids TEXT not_null default '{}'
+  is_enabled BOOLEAN not_null default false
+  updated_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table app_chat_messages {
+  status TEXT not_null default 'sent'
+  metadata JSONB
+  created_at TIMESTAMPTZ not_null default now()
+  tenant_id UUID references tenants(id)
+  sender_type TEXT not_null
+  message_type VARCHAR not_null default 'text'
+  agent_id UUID references users(id) on_delete set_null
+  id UUID primary_key default gen_random_uuid()
+  content TEXT not_null
+  session_id UUID not_null references app_chat_sessions(id) on_delete cascade
+  enable_rls
+  force_rls
+}
+
+table payment_events {
+  payload JSONB not_null
+  payment_session_id UUID not_null references payment_sessions(id) on_delete cascade
+  id BIGINT primary_key
+  provider_id TEXT
+  tenant_id UUID references tenants(id)
+  event_type TEXT not_null
+  processed BOOLEAN not_null default false
+  operator_id UUID references operators(id)
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table vessel_class_options {
+  created_at TIMESTAMPTZ not_null default now()
+  updated_at TIMESTAMPTZ not_null default now()
+  position INT not_null default 0
+  id UUID primary_key default uuid_generate_v4()
+  label TEXT not_null
+  value TEXT not_null unique
+  is_active BOOLEAN not_null default true
+  enable_rls
+  force_rls
+}
+
+table schema_migrations {
+  version VARCHAR primary_key
+  applied_at TIMESTAMPTZ not_null default now()
+}
+
+table tenant_destination_overrides {
+  seo_description_ko TEXT
+  custom_display_name TEXT
+  is_hidden BOOLEAN not_null default false
+  transportation_info TEXT
+  custom_description TEXT
+  climate_info TEXT
+  custom_name TEXT
+  seo_description_zh TEXT
+  og_image_url TEXT
+  created_at TIMESTAMPTZ not_null default now()
+  highlights JSONB
+  best_time_to_visit TEXT
+  travel_tips JSONB
+  gallery_images JSONB
+  updated_at TIMESTAMPTZ not_null default now()
+  seo_title_zh TEXT
+  id UUID primary_key default gen_random_uuid()
+  seo_description_ja TEXT
+  agent_id UUID references agents(id)
+  seo_title_id TEXT
+  cover_image TEXT
+  seo_article TEXT
+  operator_id UUID references operators(id)
+  custom_slug TEXT
+  seo_keywords TEXT
+  seo_title_ko TEXT
+  popular_activities JSONB
+  seo_description_id TEXT
+  destination_id UUID not_null references destinations(id)
+  seo_title_ja TEXT
+  seo_description TEXT
+  tenant_id UUID references tenants(id)
+  position_override INT
+  seo_title TEXT
+  enable_rls
+  force_rls
+}
+
+table drivers {
+  rating DOUBLE PRECISION default 0.00
+  license_expiry DATE
+  photo_url TEXT
+  status VARCHAR not_null default 'available'
+  deleted_at TIMESTAMPTZ
+  created_at TIMESTAMPTZ not_null default now()
+  id UUID primary_key default gen_random_uuid()
+  updated_at TIMESTAMPTZ not_null default now()
+  phone VARCHAR not_null
+  total_trips INT not_null default 0
+  name VARCHAR not_null
+  updated_by UUID not_null
+  is_active BOOLEAN not_null default true
+  tenant_id UUID references tenants(id)
+  operator_id UUID not_null references operators(id) on_delete cascade
+  default_vehicle_id UUID references vehicles(id) on_delete set_null
+  created_by UUID not_null
+  license_number VARCHAR
+  enable_rls
+  force_rls
+}
+
+table ssl_certificates {
+  expires_at TIMESTAMPTZ not_null
+  issuer TEXT
+  valid_from TIMESTAMPTZ
+  created_at TIMESTAMPTZ not_null default now()
+  id UUID primary_key default gen_random_uuid()
+  private_key_pem TEXT not_null
+  is_active BOOLEAN not_null default true
+  certificate_pem TEXT not_null
+  domain TEXT not_null unique
+  operator_id UUID not_null references operators(id) on_delete cascade
+  updated_at TIMESTAMPTZ not_null default now()
+  certificate_chain_pem TEXT
+  tenant_id UUID references tenants(id)
+  enable_rls
+  force_rls
+}
+
+table whatsapp_messages {
+  created_at TIMESTAMPTZ not_null default now()
+  direction VARCHAR not_null
+  status VARCHAR default 'received'
+  message_type VARCHAR not_null default 'text'
+  session_id UUID references whatsapp_sessions(id) on_delete set_null
+  operator_id UUID references operators(id)
+  id UUID primary_key default gen_random_uuid()
+  user_id UUID references users(id) on_delete set_null
+  phone_number VARCHAR not_null
+  delivered_at TIMESTAMPTZ
+  sender_name VARCHAR
+  our_phone_number_id VARCHAR
+  read_at TIMESTAMPTZ
+  content TEXT
+  error_message TEXT
+  media_url TEXT
+  wa_message_id VARCHAR
+  media_mime_type VARCHAR
+  tenant_id UUID references tenants(id)
+  sent_at TIMESTAMPTZ
+  order_id UUID references orders(id) on_delete set_null
+  updated_at TIMESTAMPTZ not_null default now()
+  bsuid VARCHAR
+  enable_rls
+  force_rls
+}
+
+table whatsapp_phone_configs {
+  phone_number VARCHAR
+  tenant_id UUID references tenants(id)
+  id UUID primary_key default gen_random_uuid()
+  operator_id UUID references operators(id)
+  display_name VARCHAR not_null
+  created_at TIMESTAMPTZ not_null default now()
+  verify_token TEXT
+  phone_number_id VARCHAR not_null unique
+  app_secret TEXT
+  waba_id VARCHAR not_null
+  app_id TEXT
+  is_test BOOLEAN not_null default false
+  access_token TEXT
+  is_active BOOLEAN not_null default false
+  updated_at TIMESTAMPTZ not_null default now()
+  deleted_at TIMESTAMPTZ
+  enable_rls
+  force_rls
+}
+
+table whatsapp_daily_stats {
+  daily_limit INT not_null default 2000
+  date DATE primary_key default CURRENT_DATE
+  messages_sent INT not_null default 0
+  enable_rls
+  force_rls
+}
+
+table odyssey_leg_inventory {
+  id UUID primary_key default gen_random_uuid()
+  service_date DATE not_null
+  operator_id UUID references operators(id)
+  leg_id UUID not_null references odyssey_legs(id) on_delete cascade
+  odyssey_id UUID not_null references odysseys(id) on_delete cascade
+  tenant_id UUID references tenants(id)
+  capacity INT not_null default 0
+  updated_at TIMESTAMPTZ default now()
+  reserved INT not_null default 0
+  created_at TIMESTAMPTZ default now()
+  bookable_seats INT not_null default 0
+  enable_rls
+  force_rls
+}
+
+table ai_client_config {
+  is_active BOOLEAN not_null default true
+  updated_at TIMESTAMPTZ not_null default now()
+  created_at TIMESTAMPTZ not_null default now()
+  operator_id UUID unique references operators(id)
+  token_limit_monthly INT not_null default 100000
+  agent_id UUID unique references agents(id)
+  tenant_id UUID references tenants(id)
+  model VARCHAR not_null default 'gpt-5.2'
+  id UUID primary_key default gen_random_uuid()
+  enable_rls
+  force_rls
+}
+
+table payment_sessions {
+  order_id UUID not_null references orders(id) on_delete cascade
+  updated_at TIMESTAMPTZ not_null default now()
+  tenant_id UUID references tenants(id)
+  card_type TEXT
+  processing_fee_amount DOUBLE PRECISION
+  created_at TIMESTAMPTZ not_null default now()
+  va_customer_name TEXT
+  card_issuer TEXT
+  card_brand TEXT
+  payment_id TEXT
+  payment_request_id VARCHAR
+  channel_code TEXT
+  xendit_session_id VARCHAR
+  provider TEXT not_null default 'xendit'
+  card_exp_year TEXT
+  id UUID primary_key default gen_random_uuid()
+  session_id TEXT unique
+  card_masked TEXT
+  expires_at TIMESTAMPTZ
+  card_last_four TEXT
+  operator_id UUID references operators(id)
+  va_bank_code TEXT
+  va_virtual_account_number TEXT
+  card_country TEXT
+  exchange_rate DOUBLE PRECISION
+  card_exp_month TEXT
+  completed_at TIMESTAMPTZ
+  foreign_amount DOUBLE PRECISION
+  status TEXT not_null default 'Pending'
+  foreign_currency TEXT
+  processing_fee_percent DOUBLE PRECISION
+  currency TEXT not_null default 'IDR'
+  amount BIGINT not_null
+  card_fingerprint TEXT
+  enable_rls
+  force_rls
+}
+
+table promotions {
+  tenant_id UUID references tenants(id)
+  currency VARCHAR
+  starts_at TIMESTAMPTZ not_null default now()
+  discount_value DOUBLE PRECISION not_null
+  max_discount_amount DOUBLE PRECISION
+  operator_id UUID references operators(id)
+  applicable_operators JSONB
+  is_active BOOLEAN not_null default true
+  applicable_routes JSONB
+  description TEXT
+  apply_to_agents BOOLEAN not_null default false
+  id UUID primary_key default gen_random_uuid()
+  name VARCHAR not_null
+  min_purchase_amount DOUBLE PRECISION
+  expires_at TIMESTAMPTZ
+  current_uses INT not_null default 0
+  discount_type VARCHAR not_null
+  updated_at TIMESTAMPTZ not_null default now()
+  created_by UUID references users(id)
+  max_uses INT
+  created_at TIMESTAMPTZ not_null default now()
+  max_uses_per_customer INT
+  code VARCHAR not_null unique
+  enable_rls
+  force_rls
+}
+
+table articles {
+  featured_image_id VARCHAR
+  meta_title_id TEXT
+  meta_title_ja TEXT
+  slug_id TEXT
+  meta_desc_id TEXT
+  meta_title VARCHAR
+  featured_image_url TEXT
+  meta_desc_zh TEXT
+  title_ko TEXT
+  translation_hash TEXT
+  excerpt_ko TEXT
+  word_count INT not_null default 0
+  content_ko TEXT
+  operator_id UUID references operators(id)
+  meta_keywords TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  slug_zh TEXT
+  deleted_at TIMESTAMPTZ
+  title_id TEXT
+  content_zh TEXT
+  reading_time_minutes INT not_null default 0
+  excerpt_ja TEXT
+  category VARCHAR
+  published_at TIMESTAMPTZ
+  tenant_id UUID references tenants(id)
+  meta_desc_ko TEXT
+  meta_desc_ja TEXT
+  excerpt_id TEXT
+  excerpt_zh TEXT
+  translation_tokens_total INT default 0
+  meta_description TEXT
+  author_id UUID not_null references users(id) on_delete cascade
+  slug VARCHAR not_null unique
+  slug_ko TEXT
+  id UUID primary_key default gen_random_uuid()
+  version INT not_null default 1
+  translation_last_run TIMESTAMPTZ
+  content TEXT not_null
+  created_at TIMESTAMPTZ not_null default now()
+  title VARCHAR not_null
+  meta_title_zh TEXT
+  is_featured BOOLEAN not_null default false
+  view_count BIGINT not_null default 0
+  title_zh TEXT
+  status article_status not_null default 'draft'
+  content_ja TEXT
+  content_id TEXT
+  tags JSONB default '[]'
+  agent_id UUID references agents(id)
+  title_ja TEXT
+  like_count BIGINT not_null default 0
+  translation_status TEXT default 'pending'
+  excerpt TEXT
+  allow_comments BOOLEAN not_null default true
+  meta_title_ko TEXT
+  slug_ja TEXT
+  enable_rls
+  force_rls
+}
+
+table whatsapp_sessions {
+  close_reason TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  our_phone_number_id VARCHAR
+  tenant_id UUID references tenants(id)
+  welcome_sent_at TIMESTAMPTZ
+  phone_number VARCHAR not_null
+  created_at TIMESTAMPTZ not_null default now()
+  operator_id UUID references operators(id)
+  closed_by VARCHAR
+  admin_takeover_at TIMESTAMPTZ
+  id UUID primary_key default gen_random_uuid()
+  closed_at TIMESTAMPTZ
+  status VARCHAR not_null default 'active'
+  pending_close_prompted_at TIMESTAMPTZ
+  admin_takeover BOOLEAN default false
+  admin_takeover_by VARCHAR
+  welcome_sent BOOLEAN not_null default false
+  last_bot_message_at TIMESTAMPTZ
+  pending_close_prompted BOOLEAN not_null default false
+  last_customer_message_at TIMESTAMPTZ
+  enable_rls
+  force_rls
+}
+
+table cloudflare_images {
+  tenant_id UUID references tenants(id)
+  file_size_bytes BIGINT
+  created_at TIMESTAMPTZ not_null default now()
+  image_id TEXT not_null unique
+  cloudflare_created_at TIMESTAMPTZ
+  operator_id UUID not_null references operators(id) on_delete cascade
+  uploaded_at TIMESTAMPTZ not_null default now()
+  variants JSONB default '[]'
+  updated_at TIMESTAMPTZ not_null default now()
+  image_url TEXT not_null
+  id UUID primary_key default gen_random_uuid()
+  filename TEXT
+  description TEXT
+  deleted_at TIMESTAMPTZ
+  uploaded_by UUID references users(id) on_delete set_null
+  alt_text TEXT
+  width INT
+  mime_type TEXT
+  height INT
+  enable_rls
+  force_rls
+}
+
+table whatsapp_broadcasts {
+  delivered_count INT not_null default 0
+  created_at TIMESTAMPTZ not_null default now()
+  template_name VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  template_language VARCHAR not_null default 'en'
+  operator_id UUID references operators(id)
+  template_variables JSONB
+  created_by VARCHAR
+  name VARCHAR not_null
+  status VARCHAR default 'pending'
+  failed_count INT not_null default 0
+  recipient_count INT not_null default 0
+  group_id UUID references whatsapp_contact_groups(id)
+  sent_count INT not_null default 0
+  completed_at TIMESTAMPTZ
+  read_count INT not_null default 0
+  tenant_id UUID references tenants(id)
+  enable_rls
+  force_rls
+}
+
+table operator_offices {
+  name VARCHAR not_null
+  updated_by UUID not_null
+  address TEXT not_null
+  id UUID primary_key default gen_random_uuid()
+  updated_at TIMESTAMPTZ not_null default now()
+  deleted_at TIMESTAMPTZ
+  operator_id UUID not_null references operators(id) on_delete cascade
+  tenant_id UUID references tenants(id)
+  phone VARCHAR
+  email VARCHAR
+  created_by UUID not_null
+  is_main_office BOOLEAN not_null default false
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table app_chat_sessions {
+  tenant_id UUID references tenants(id)
+  closed_at TIMESTAMPTZ
+  welcome_sent BOOLEAN not_null default false
+  created_at TIMESTAMPTZ not_null default now()
+  admin_id UUID references users(id) on_delete set_null
+  status TEXT not_null default 'active'
+  operator_id UUID references operators(id)
+  user_id UUID references users(id) on_delete set_null
+  close_reason TEXT
+  closed_by VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  order_id UUID references orders(id) on_delete set_null
+  updated_at TIMESTAMPTZ not_null default now()
+  agent_id UUID references agents(id)
+  guest_id TEXT
+  enable_rls
+  force_rls
+}
+
+table odyssey_pricing_tiers {
+  operator_id UUID references operators(id)
+  tenant_id UUID references tenants(id)
+  created_at TIMESTAMPTZ not_null default now()
+  id UUID primary_key default gen_random_uuid()
+  pax_type VARCHAR not_null
+  market VARCHAR not_null
+  base_amount DOUBLE PRECISION not_null default 0
+  plan_id UUID not_null references odyssey_pricing_plans(id) on_delete cascade
+  enable_rls
+  force_rls
+}
+
+table popular_tickets {
+  tenant_id UUID references tenants(id)
+  id UUID primary_key default uuid_generate_v4()
+  position INT not_null default 0
+  ribbon_color VARCHAR
+  arrival_destination_id UUID references destinations(id) on_delete set_null
+  ribbon_text VARCHAR
+  facilities JSONB not_null default '[]'
+  created_at TIMESTAMPTZ default now()
+  base_price DOUBLE PRECISION
+  created_by UUID not_null references users(id)
+  title VARCHAR not_null
+  trip_duration VARCHAR
+  display_price VARCHAR
+  image_url VARCHAR
+  updated_by UUID not_null references users(id)
+  arrival_harbor_id UUID references harbors(id) on_delete set_null
+  origin_harbor_id UUID references harbors(id) on_delete set_null
+  origin_destination_id UUID references destinations(id) on_delete set_null
+  operator_id UUID references operators(id) on_delete set_null
+  is_active BOOLEAN not_null default true
+  updated_at TIMESTAMPTZ default now()
+  default_departure_date DATE
+  enable_rls
+  force_rls
+}
+
+table order_modifications {
+  admin_id UUID not_null references users(id)
+  customer_response_at TIMESTAMPTZ
+  status VARCHAR not_null default 'pending'
+  expires_at TIMESTAMPTZ not_null
+  id UUID primary_key default gen_random_uuid()
+  target_connection_id UUID not_null
+  approval_token VARCHAR not_null
+  original_connection_id UUID not_null
+  tenant_id UUID references tenants(id)
+  operator_id UUID references operators(id)
+  reason TEXT not_null
+  updated_at TIMESTAMPTZ not_null default now()
+  order_id UUID not_null references orders(id) on_delete cascade
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table redirects {
+  hit_count BIGINT not_null default 0
+  created_by UUID not_null references users(id)
+  description TEXT
+  created_at TIMESTAMPTZ default now()
+  id UUID primary_key default uuid_generate_v4()
+  redirect_type INT not_null default 302
+  updated_by UUID not_null references users(id)
+  destination_url TEXT not_null
+  tenant_id UUID references tenants(id)
+  agent_id UUID references agents(id)
+  is_active BOOLEAN not_null default true
+  operator_id UUID references operators(id)
+  source_path VARCHAR not_null unique
+  updated_at TIMESTAMPTZ default now()
+  enable_rls
+  force_rls
+}
+
+table order_requests {
+  processed_at TIMESTAMPTZ
+  admin_notes TEXT
+  reason TEXT not_null
+  new_travel_date DATE
+  operator_id UUID references operators(id)
+  order_id UUID not_null references orders(id) on_delete cascade
+  updated_at TIMESTAMPTZ not_null default now()
+  tenant_id UUID references tenants(id)
+  status TEXT not_null default 'PENDING'
+  id UUID primary_key default gen_random_uuid()
+  type TEXT not_null
+  created_at TIMESTAMPTZ not_null default now()
+  user_id UUID references users(id) on_delete set_null
+  enable_rls
+  force_rls
+}
+
+table ai_knowledge_base {
+  agent_id UUID references agents(id)
+  is_active BOOLEAN default true
+  updated_at TIMESTAMPTZ default now()
+  created_at TIMESTAMPTZ default now()
+  topic VARCHAR not_null
+  tenant_id UUID references tenants(id)
+  keywords TEXT
+  operator_id UUID references operators(id)
+  question TEXT not_null
+  id UUID primary_key default gen_random_uuid()
+  answer TEXT not_null
+  enable_rls
+  force_rls
+}
+
+table transfer_bookings {
+  price_breakdown JSONB default '{}'
+  price_charged DOUBLE PRECISION not_null default 0
+  cancelled_at TIMESTAMPTZ
+  dropoff_latitude DOUBLE PRECISION
+  status VARCHAR not_null default 'requested'
+  pickup_google_place_id VARCHAR
+  actual_pickup_time TIMESTAMPTZ
+  duration_minutes INT
+  cancellation_reason TEXT
+  passenger_notes TEXT
+  passenger_name VARCHAR
+  b2b_client_id UUID references b2b_clients(id) on_delete set_null
+  vehicle_id UUID references vehicles(id) on_delete set_null
+  passenger_phone VARCHAR
+  distance_km DOUBLE PRECISION
+  created_at TIMESTAMPTZ not_null default now()
+  updated_by UUID not_null
+  driver_id UUID references drivers(id) on_delete set_null
+  pickup_time TIMESTAMPTZ
+  currency VARCHAR not_null default 'IDR'
+  driver_notes TEXT
+  pickup_address TEXT
+  operator_id UUID not_null references operators(id) on_delete cascade
+  dropoff_longitude DOUBLE PRECISION
+  created_by UUID not_null
+  pickup_hotel_name VARCHAR
+  zone_id UUID references pickup_zones(id) on_delete set_null
+  pickup_latitude DOUBLE PRECISION
+  updated_at TIMESTAMPTZ not_null default now()
+  pax_count INT not_null default 1
+  tenant_id UUID references tenants(id)
+  booking_type VARCHAR not_null default 'port_transfer'
+  dropoff_address TEXT
+  completion_time TIMESTAMPTZ
+  id UUID primary_key default gen_random_uuid()
+  pickup_longitude DOUBLE PRECISION
+  booking_number VARCHAR
+  parent_order_id UUID references orders(id) on_delete set_null
+  enable_rls
+  force_rls
+}
+
+table destination_harbors {
+  created_at TIMESTAMPTZ not_null default now()
+  position INT not_null default 0
+  destination_id UUID not_null references destinations(id) on_delete cascade
+  id UUID primary_key default gen_random_uuid()
+  is_primary BOOLEAN not_null default false
+  harbor_id UUID not_null references harbors(id) on_delete cascade
+  enable_rls
+  force_rls
+}
+
+table operators {
+  legal_name VARCHAR not_null
+  description TEXT not_null
+  default_arrival_dock_id UUID
+  reschedule_policy_description_zh TEXT
+  seo_description_zh TEXT
+  reschedule_policy_description_id TEXT
+  id UUID primary_key default gen_random_uuid()
+  refund_policy_description_ja TEXT
+  seo_keywords_zh TEXT
+  reschedule_policy_description TEXT
+  default_departure_dock_id UUID
+  infant_policy_description TEXT
+  refund_policy_description_ko TEXT
+  seo_title_ja VARCHAR
+  seo_keywords_ja TEXT
+  seo_keywords_ko TEXT
+  seo_keywords_id TEXT
+  seo_article_ko TEXT
+  description_ja TEXT
+  refund_policy TEXT not_null
+  description_zh TEXT
+  operator_type operator_type not_null
+  address TEXT not_null
+  seo_description_ja TEXT
+  seo_title_id VARCHAR
+  translation_hash VARCHAR
+  parent_operator_id UUID references operators(id) on_delete set_null
+  phone VARCHAR not_null
+  seo_keywords TEXT default ''
+  child_age_policy_description TEXT
+  linked_agent_id UUID references agents(id)
+  refund_policy_description_zh TEXT
+  lead_time_hours INT not_null default 0
+  description_ko TEXT
+  photo TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  refund_policy_description TEXT
+  slug VARCHAR not_null unique
+  reschedule_policy_description_ko TEXT
+  seo_article TEXT
+  seo_title_ko VARCHAR
+  description_id TEXT
+  seo_article_zh TEXT
+  seo_description_id TEXT
+  is_active BOOLEAN not_null default true
+  seo_article_ja TEXT
+  rating DOUBLE PRECISION default 0.0
+  operator_type_description TEXT
+  seo_title_zh VARCHAR
+  deleted_at TIMESTAMPTZ
+  logo_url TEXT
+  reschedule_policy_description_ja TEXT
+  brand_name VARCHAR not_null
+  seo_title TEXT default ''
+  created_by UUID not_null
+  seo_article_id TEXT
+  verticals TEXT not_null default '{}'
+  reschedule_policy TEXT not_null
+  infant_policy TEXT
+  refund_policy_description_id TEXT
+  seo_description_ko TEXT
+  logo TEXT
+  child_age_policy TEXT
+  seo_description TEXT default ''
+  updated_by UUID not_null
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table odysseys {
+  name VARCHAR not_null
+  sales_lead_time_hours INT not_null default 24
+  description TEXT
+  id UUID primary_key default gen_random_uuid()
+  operator_id UUID references operators(id)
+  tenant_id UUID references tenants(id)
+  vessel_id UUID not_null references vessels(id)
+  is_active BOOLEAN not_null default true
+  created_at TIMESTAMPTZ not_null default now()
+  booking_window_days INT not_null default 30
+  updated_at TIMESTAMPTZ not_null default now()
+  booking_window_rollout BOOLEAN not_null default false
+  enable_rls
+  force_rls
+}
+
+table charters_alieus {
+  is_verified BOOLEAN default false
+  slug TEXT not_null unique
+  review_count INT default 0
+  is_active BOOLEAN default true
+  logo_url TEXT
+  id UUID primary_key default gen_random_uuid()
+  operator_id UUID references operators(id)
+  description TEXT
+  city TEXT
+  name TEXT not_null
+  created_at TIMESTAMPTZ default now()
+  rating DOUBLE PRECISION default 0
+  tenant_id UUID references tenants(id)
+  updated_at TIMESTAMPTZ default now()
+  address TEXT
+  contact_email TEXT
+  contact_phone TEXT
+  enable_rls
+  force_rls
+}
+
+table vehicles {
+  tenant_id UUID references tenants(id)
+  notes TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  photo_url TEXT
+  color VARCHAR
+  max_pax INT not_null default 4
+  is_active BOOLEAN not_null default true
+  operator_id UUID not_null references operators(id) on_delete cascade
+  created_by UUID not_null
+  plate_number VARCHAR not_null
+  updated_by UUID not_null
+  make_model VARCHAR not_null
+  deleted_at TIMESTAMPTZ
+  id UUID primary_key default gen_random_uuid()
+  created_at TIMESTAMPTZ not_null default now()
+  vehicle_type VARCHAR not_null default 'sedan'
+  status VARCHAR not_null default 'available'
+  enable_rls
+  force_rls
+}
+
+table user_permissions {
+  permission VARCHAR primary_key
+  granted_by UUID references users(id) on_delete set_null
+  user_id UUID primary_key references users(id) on_delete cascade
+  granted_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table orders {
+  user_id UUID references users(id) on_delete set_null
+  updated_at TIMESTAMPTZ not_null default now()
+  commission_percent DOUBLE PRECISION
+  pricing_model VARCHAR
+  operator_payout_amount BIGINT
+  invoice_number TEXT unique
+  carrier_ids TEXT default '{}'
+  tenant_id UUID references tenants(id)
+  nationality TEXT not_null
+  platform_fee_type VARCHAR
+  contact_info JSONB not_null
+  pax_breakdown JSONB not_null
+  agent_commission_amount BIGINT
+  pricing_breakdown JSONB
+  connection_id UUID
+  voyage_id UUID
+  passenger_details JSONB default '[]'
+  operator_id UUID references operators(id) on_delete set_null
+  platform_fee_amount BIGINT default 0
+  hold_id UUID
+  currency TEXT not_null default 'IDR'
+  connection_snapshot JSONB
+  metadata JSONB
+  status TEXT not_null default 'Draft'
+  created_at TIMESTAMPTZ not_null default now()
+  total_fare BIGINT not_null
+  booking_number TEXT unique
+  agent_id UUID references agents(id)
+  id UUID primary_key default gen_random_uuid()
+  enable_rls
+  force_rls
+}
+
+table platform_reports {
+  total_revenue BIGINT default 0
+  fee_type VARCHAR
+  total_orders INT default 0
+  currency VARCHAR default 'IDR'
+  tenant_id UUID references tenants(id)
+  period_start DATE not_null
+  id UUID primary_key default gen_random_uuid()
+  operator_id UUID not_null references operators(id)
+  created_at TIMESTAMPTZ default now()
+  total_fees BIGINT default 0
+  s3_key TEXT
+  status VARCHAR default 'pending'
+  report_id VARCHAR not_null unique
+  generated_at TIMESTAMPTZ
+  period_end DATE not_null
+  enable_rls
+  force_rls
+}
+
+table pickup_zones {
+  created_by UUID not_null
+  max_pax INT not_null default 6
+  operator_id UUID not_null references operators(id) on_delete cascade
+  is_active BOOLEAN not_null default true
+  coverage_radius_km DOUBLE PRECISION
+  description TEXT
+  center_latitude DOUBLE PRECISION
+  display_order INT not_null default 0
+  name VARCHAR not_null
+  peak_hour_surcharge DOUBLE PRECISION not_null default 0
+  created_at TIMESTAMPTZ not_null default now()
+  id UUID primary_key default gen_random_uuid()
+  center_longitude DOUBLE PRECISION
+  boarding_point_id UUID references operator_boarding_points(id) on_delete set_null
+  currency VARCHAR not_null default 'IDR'
+  tenant_id UUID references tenants(id)
+  night_surcharge DOUBLE PRECISION not_null default 0
+  min_lead_time_hours INT not_null default 24
+  vehicle_type_surcharges JSONB default '{}'
+  updated_by UUID not_null
+  deleted_at TIMESTAMPTZ
+  per_km_rate DOUBLE PRECISION not_null default 0
+  pricing_type VARCHAR not_null default 'free'
+  updated_at TIMESTAMPTZ not_null default now()
+  base_price DOUBLE PRECISION not_null default 0
+  enable_rls
+  force_rls
+}
+
+table api_keys {
+  operator_id UUID references operators(id)
+  expires_at TIMESTAMPTZ
+  last_used_at TIMESTAMPTZ
+  key_prefix VARCHAR not_null
+  revoked_at TIMESTAMPTZ
+  id UUID primary_key
+  key_type VARCHAR not_null
+  agent_id UUID references agents(id)
+  is_live BOOLEAN not_null default false
+  created_by UUID
+  b2b_client_id UUID references b2b_clients(id)
+  rate_limit INT not_null default 1000
+  tenant_id UUID references tenants(id)
+  created_at TIMESTAMPTZ not_null default now()
+  scopes TEXT
+  key_hash TEXT not_null
+  label VARCHAR
+  enable_rls
+  force_rls
+}
+
+table settlements {
+  currency VARCHAR not_null default 'IDR'
+  created_at TIMESTAMPTZ not_null default now()
+  agent_id UUID references agents(id) on_delete cascade
+  id UUID primary_key default gen_random_uuid()
+  period_start DATE not_null
+  tenant_id UUID references tenants(id)
+  operator_id UUID references operators(id) on_delete cascade
+  paid_at TIMESTAMPTZ
+  payment_reference VARCHAR
+  period_end DATE not_null
+  notes TEXT
+  total_orders_amount BIGINT not_null default 0
+  total_payout_amount BIGINT not_null default 0
+  total_commission_amount BIGINT not_null default 0
+  status VARCHAR not_null default 'pending'
+  updated_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table webhook_logs {
+  provider TEXT not_null
+  reference_id TEXT
+  status TEXT not_null
+  id UUID primary_key default gen_random_uuid()
+  event_type TEXT
+  created_at TIMESTAMPTZ not_null default now()
+  error_message TEXT
+  payload JSONB not_null
+  headers JSONB
+  enable_rls
+  force_rls
+}
+
+table user_password_resets {
+  consumed_at TIMESTAMPTZ
+  user_id UUID not_null references users(id) on_delete cascade
+  id UUID primary_key default gen_random_uuid()
+  expires_at TIMESTAMPTZ not_null
+  token VARCHAR not_null unique
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table page_translations {
+  language VARCHAR not_null
+  operator_id UUID references operators(id)
+  content_hash VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  sections JSONB not_null default '{}'
+  tenant_id UUID references tenants(id)
+  page_key VARCHAR not_null
+  created_at TIMESTAMPTZ default now()
+  translation_status VARCHAR default 'pending'
+  updated_at TIMESTAMPTZ default now()
+  agent_id UUID references agents(id)
+  enable_rls
+  force_rls
+}
+
+table odyssey_pricing_fees {
+  plan_id UUID not_null references odyssey_pricing_plans(id) on_delete cascade
+  amount DOUBLE PRECISION not_null default 0
+  tenant_id UUID references tenants(id)
+  fee_type VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  name VARCHAR not_null
+  per_pax BOOLEAN not_null default false
+  operator_id UUID references operators(id)
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table system_settings {
+  openai_api_key TEXT
+  postmark_invoice_from_email TEXT
+  paypal_client_secret TEXT
+  social_facebook VARCHAR
+  hours_tuesday_open VARCHAR
+  recaptcha_enterprise_project_id TEXT
+  hours_thursday_open VARCHAR
+  tenant_id UUID references tenants(id)
+  wise_api_token TEXT
+  support_phone VARCHAR
+  google_client_id VARCHAR
+  admin_recaptcha_v3_secret_key TEXT
+  paypal_webhook_id TEXT
+  postmark_from_email TEXT
+  postmark_notify_from_email TEXT
+  postmark_invoice_from_name TEXT
+  web_recaptcha_v3_site_key TEXT
+  hours_sunday_close VARCHAR
+  paypal_processing_fee_percent DOUBLE PRECISION default 10
+  doku_secret_key VARCHAR
+  payment_va_provider TEXT not_null default 'xendit'
+  doku_is_production BOOLEAN default false
+  postmark_eticket_from_name TEXT
+  hours_tuesday_close VARCHAR
+  telegram_bot_token TEXT
+  hours_wednesday_open VARCHAR
+  cloudflare_images_hash TEXT
+  webhook_basic_auth_username TEXT
+  web_recaptcha_v3_secret_key TEXT
+  payment_qris_provider TEXT not_null default 'xendit'
+  operator_id UUID not_null unique references operators(id) on_delete cascade
+  hours_sunday_open VARCHAR
+  webhook_basic_auth_password TEXT
+  postmark_webhook_secret TEXT
+  admin_turnstile_secret_key TEXT
+  telegram_thread_id TEXT
+  hours_wednesday_close VARCHAR
+  telegram_chat_id TEXT
+  recaptcha_enterprise_site_key TEXT
+  web_turnstile_site_key TEXT
+  xendit_secret_key TEXT
+  cloudflare_images_api_token TEXT
+  payment_credit_card_provider TEXT not_null default 'xendit'
+  company_address TEXT
+  google_client_secret VARCHAR
+  created_at TIMESTAMPTZ not_null default now()
+  social_instagram VARCHAR
+  postmark_from_name TEXT
+  xendit_public_key TEXT
+  paypal_mode TEXT default 'sandbox'
+  paypal_client_id TEXT
+  hours_thursday_close VARCHAR
+  social_twitter VARCHAR
+  cloudflare_images_account_id TEXT
+  admin_recaptcha_v3_site_key TEXT
+  postmark_notify_from_name TEXT
+  recaptcha_enterprise_api_key TEXT
+  admin_turnstile_site_key TEXT
+  xendit_webhook_verification_token TEXT
+  hours_saturday_close VARCHAR
+  updated_at TIMESTAMPTZ not_null default now()
+  hours_saturday_open VARCHAR
+  company_name VARCHAR
+  facebook_app_secret VARCHAR
+  postmark_eticket_from_email TEXT
+  website_url VARCHAR
+  hours_friday_open VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  web_turnstile_secret_key TEXT
+  postmark_token TEXT
+  hours_friday_close VARCHAR
+  doku_client_id VARCHAR
+  facebook_app_id VARCHAR
+  hours_monday_close VARCHAR
+  hours_monday_open VARCHAR
+  social_tiktok VARCHAR
+  support_email VARCHAR
+  enable_rls
+  force_rls
+}
+
+table odyssey_pricing_plans {
+  is_active BOOLEAN not_null default true
+  odyssey_id UUID not_null references odysseys(id) on_delete cascade
+  id UUID primary_key default gen_random_uuid()
+  name VARCHAR not_null
+  operator_id UUID references operators(id)
+  connection_id UUID references odyssey_connections(id) on_delete cascade
+  updated_at TIMESTAMPTZ not_null default now()
+  tenant_id UUID references tenants(id)
+  currency VARCHAR not_null default 'IDR'
+  start_date DATE not_null
+  priority INT not_null default 0
+  end_date DATE not_null
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table tenant_contracts {
+  static_markup DOUBLE PRECISION
+  valid_from DATE
+  is_active BOOLEAN default true
+  approved_by UUID
+  created_at TIMESTAMPTZ not_null default now()
+  valid_until DATE
+  reseller_tenant_id UUID not_null references tenants(id) on_delete cascade
+  terminated_by_party VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  updated_at TIMESTAMPTZ not_null default now()
+  pricing_model VARCHAR not_null
+  terminated_at TIMESTAMPTZ
+  principal_tenant_id UUID not_null references tenants(id) on_delete cascade
+  termination_reason TEXT
+  terminated_by UUID
+  commission_percent DOUBLE PRECISION
+  enable_rls
+  force_rls
+}
+
+table seo_kairos {
+  quick_stats JSONB
+  content_paragraphs JSONB default '[]'
+  related_harbors JSONB default '[]'
+  operator_id UUID references operators(id)
+  is_published BOOLEAN not_null default false
+  tenant_id UUID references tenants(id)
+  tips JSONB default '[]'
+  destination TEXT not_null
+  updated_by UUID
+  id UUID primary_key default gen_random_uuid()
+  agent_id UUID references agents(id)
+  title TEXT not_null
+  created_by UUID
+  meta_description TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  slug TEXT not_null
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table registration_otp_codes {
+  otp_code VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  expires_at TIMESTAMPTZ not_null
+  email VARCHAR not_null
+  consumed_at TIMESTAMPTZ
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table seo_comparisons {
+  description TEXT
+  updated_by UUID
+  id UUID primary_key default gen_random_uuid()
+  updated_at TIMESTAMPTZ not_null default now()
+  title TEXT not_null
+  intro TEXT
+  comparison_type seo_comparison_type not_null
+  created_at TIMESTAMPTZ not_null default now()
+  rankings JSONB default '[]'
+  slug TEXT not_null
+  is_published BOOLEAN not_null default false
+  operator2_id UUID
+  category TEXT
+  operator1_id UUID
+  created_by UUID
+  criteria JSONB default '[]'
+  enable_rls
+  force_rls
+}
+
+table car_catalog {
+  year_start INT not_null
+  is_active BOOLEAN not_null default true
+  year_end INT
+  updated_at TIMESTAMPTZ not_null default now()
+  created_at TIMESTAMPTZ not_null default now()
+  model VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  category VARCHAR not_null default 'sedan'
+  make VARCHAR not_null
+  seats INT not_null default 5
+  enable_rls
+  force_rls
+}
+
+table pricing_tiers {
+  base_amount DOUBLE PRECISION not_null
+  plan_id UUID not_null references pricing_plans(id) on_delete cascade
+  pax_type VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  market VARCHAR not_null
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table pricing_fees {
+  fee_type VARCHAR not_null
+  name VARCHAR not_null
+  id UUID primary_key default gen_random_uuid()
+  amount DOUBLE PRECISION not_null
+  plan_id UUID not_null references pricing_plans(id) on_delete cascade
+  created_at TIMESTAMPTZ not_null default now()
+  per_pax BOOLEAN not_null default true
+  enable_rls
+  force_rls
+}
+
+table users {
+  agent_id UUID references agents(id)
+  two_factor_last_used_at TIMESTAMPTZ
+  password_changed_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ not_null default now()
+  two_factor_secret TEXT
+  tenant_id UUID references tenants(id)
+  is_active BOOLEAN not_null default true
+  operator_id UUID references operators(id) on_delete set_null
+  role user_role not_null default 'customer'
+  email_verified BOOLEAN not_null default false
+  two_factor_recovery_codes TEXT
+  last_name VARCHAR not_null
+  display_name VARCHAR
+  email VARCHAR not_null unique
+  deleted_at TIMESTAMPTZ
+  two_factor_temp_secret TEXT
+  last_login TIMESTAMPTZ
+  two_factor_confirmed_at TIMESTAMPTZ
+  created_at TIMESTAMPTZ not_null default now()
+  profile_image_url TEXT
+  password_hash VARCHAR not_null
+  phone_numbers JSONB default '[]'
+  id UUID primary_key default gen_random_uuid()
+  first_name VARCHAR not_null
+  two_factor_enabled BOOLEAN not_null default false
+  enable_rls
+  force_rls
+}
+
+table operator_schedule_table {
+  updated_at TIMESTAMPTZ not_null default now()
+  travel_duration VARCHAR
+  frequency VARCHAR not_null default 'Daily'
+  arrival_time TEXT
+  tenant_id UUID references tenants(id)
+  departure_time TEXT not_null
+  destination_harbor_id UUID references harbors(id)
+  operator_id UUID not_null references operators(id) on_delete cascade
+  origin_harbor_id UUID references harbors(id)
+  id UUID primary_key default gen_random_uuid()
+  destination VARCHAR not_null
+  created_at TIMESTAMPTZ not_null default now()
+  origin VARCHAR not_null
+  enable_rls
+  force_rls
+}
+
+table idempotency_keys {
+  response_body TEXT not_null
+  key VARCHAR primary_key
+  response_status INT not_null
+  created_at TIMESTAMPTZ not_null default now()
+  request_hash VARCHAR not_null
+  expires_at TIMESTAMPTZ not_null default (now() + '24:00:00'
+  enable_rls
+  force_rls
+}
+
+table harbor_images {
+  harbor_id UUID not_null references harbors(id) on_delete cascade
+  deleted_at TIMESTAMPTZ
+  display_order INT not_null default 0
+  created_at TIMESTAMPTZ not_null default now()
+  image_url TEXT not_null
+  id UUID primary_key default gen_random_uuid()
+  is_featured BOOLEAN not_null default false
+  updated_at TIMESTAMPTZ not_null default now()
+  caption TEXT
+  updated_by UUID not_null
+  created_by UUID not_null
+  enable_rls
+  force_rls
+}
+
+table cloudflare_image_attachments {
+  tenant_id UUID references tenants(id)
+  created_at TIMESTAMPTZ not_null default now()
+  updated_at TIMESTAMPTZ not_null default now()
+  is_featured BOOLEAN not_null default false
+  field_name TEXT
+  image_id UUID not_null references cloudflare_images(id) on_delete cascade
+  entity_id UUID not_null
+  id UUID primary_key default gen_random_uuid()
+  entity_type TEXT not_null
+  operator_id UUID not_null references operators(id) on_delete cascade
+  enable_rls
+  force_rls
+}
+
+table odyssey_legs {
+  departure_time TEXT not_null
+  arrival_time TEXT not_null
+  departure_day_offset INT not_null default 0
+  dwell_minutes INT not_null default 0
+  tenant_id UUID references tenants(id)
+  arrival_day_offset INT not_null default 0
+  operator_id UUID references operators(id)
+  from_harbor_id UUID not_null references harbors(id)
+  id UUID primary_key default gen_random_uuid()
+  to_harbor_id UUID not_null references harbors(id)
+  odyssey_id UUID not_null references odysseys(id) on_delete cascade
+  created_at TIMESTAMPTZ not_null default now()
+  is_enabled BOOLEAN not_null default false
+  sequence_order INT not_null
+  updated_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table charters_diathesi {
+  notes TEXT
+  tenant_id UUID references tenants(id)
+  available_date DATE not_null
+  id UUID primary_key default gen_random_uuid()
+  start_time TEXT
+  end_time TEXT
+  operator_id UUID references operators(id)
+  drasimos_id UUID not_null references charters_drasimos(id) on_delete cascade
+  updated_at TIMESTAMPTZ default now()
+  created_at TIMESTAMPTZ default now()
+  current_bookings INT default 0
+  max_bookings INT default 1
+  price_override INT
+  is_available BOOLEAN default true
+  enable_rls
+  force_rls
+}
+
+table promotion_uses {
+  tenant_id UUID references tenants(id)
+  discount_applied DOUBLE PRECISION not_null
+  created_at TIMESTAMPTZ not_null default now()
+  original_amount DOUBLE PRECISION not_null
+  promotion_id UUID not_null references promotions(id) on_delete cascade
+  customer_id UUID references users(id)
+  order_id UUID not_null
+  operator_id UUID references operators(id)
+  customer_email VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  enable_rls
+  force_rls
+}
+
+table charters_kratisei {
+  status charter_booking_status default 'pending'
+  diathesi_id UUID references charters_diathesi(id)
+  contact_phone TEXT not_null
+  id UUID primary_key default gen_random_uuid()
+  special_requests TEXT
+  booking_date DATE not_null
+  updated_at TIMESTAMPTZ default now()
+  contact_last_name TEXT not_null
+  drasimos_id UUID not_null references charters_drasimos(id)
+  contact_first_name TEXT not_null
+  tenant_id UUID references tenants(id)
+  operator_id UUID references operators(id)
+  contact_email TEXT not_null
+  guest_count INT not_null
+  total_amount INT not_null
+  currency TEXT default 'IDR'
+  deposit_amount INT not_null
+  payment_status charter_payment_status default 'unpaid'
+  created_at TIMESTAMPTZ default now()
+  contact_nationality TEXT
+  enable_rls
+  force_rls
+}
+
+table platform_fee_configs {
+  effective_from DATE default CURRENT_DATE
+  currency VARCHAR default 'IDR'
+  is_active BOOLEAN default true
+  notes TEXT
+  id UUID primary_key default gen_random_uuid()
+  fixed_amount BIGINT default 0
+  effective_to DATE
+  fee_type VARCHAR not_null default 'percentage'
+  tenant_id UUID references tenants(id)
+  created_at TIMESTAMPTZ default now()
+  operator_id UUID not_null references operators(id) on_delete cascade
+  created_by UUID references users(id)
+  updated_at TIMESTAMPTZ default now()
+  percentage DOUBLE PRECISION default 5.00
+  enable_rls
+  force_rls
+}
+
+table b2b_clients {
+  is_active BOOLEAN not_null default true
+  deleted_at TIMESTAMPTZ
+  created_by UUID not_null
+  credit_balance DOUBLE PRECISION not_null default 0
+  contact_email VARCHAR
+  address TEXT
+  contact_phone VARCHAR
+  contact_name VARCHAR
+  contract_end DATE
+  created_at TIMESTAMPTZ not_null default now()
+  updated_at TIMESTAMPTZ not_null default now()
+  discount_percent DOUBLE PRECISION not_null default 0
+  operator_id UUID not_null references operators(id) on_delete cascade
+  contract_start DATE
+  updated_by UUID not_null
+  name VARCHAR not_null
+  notes TEXT
+  tenant_id UUID references tenants(id)
+  id UUID primary_key default gen_random_uuid()
+  client_type VARCHAR not_null default 'hotel'
+  billing_type VARCHAR not_null default 'per_trip'
+  enable_rls
+  force_rls
+}
+
+table _sqlx_migrations {
+  installed_on TIMESTAMPTZ not_null default now()
+  success BOOLEAN not_null
+  version BIGINT primary_key
+  description TEXT not_null
+  checksum TEXT not_null
+  execution_time BIGINT not_null
+}
+
+table charters_skaphos {
+  id UUID primary_key default gen_random_uuid()
+  harbor_id UUID references harbors(id)
+  is_active BOOLEAN default true
+  name TEXT not_null
+  capacity_max INT not_null
+  slug TEXT not_null unique
+  features JSONB default '[]'
+  equipment JSONB default '[]'
+  vessel_type charter_vessel_type not_null
+  category charter_category default 'fishing'
+  cabins INT
+  year_built INT
+  updated_at TIMESTAMPTZ default now()
+  alieus_id UUID not_null references charters_alieus(id) on_delete cascade
+  length TEXT
+  destination_id UUID references destinations(id)
+  images JSONB default '[]'
+  capacity_min INT not_null default 1
+  description TEXT
+  amenities JSONB default '[]'
+  base_location TEXT not_null
+  operator_id UUID references operators(id)
+  tenant_id UUID references tenants(id)
+  crew INT not_null default 1
+  created_at TIMESTAMPTZ default now()
+  enable_rls
+  force_rls
+}
+
+table charters_drasimos {
+  price_currency TEXT default 'IDR'
+  id UUID primary_key default gen_random_uuid()
+  name TEXT not_null
+  exclusions JSONB default '[]'
+  duration_hours INT not_null
+  return_time TEXT
+  slug TEXT not_null unique
+  is_available BOOLEAN default true
+  charter_techniques JSONB default '[]'
+  skaphos_id UUID not_null references charters_skaphos(id) on_delete cascade
+  trip_highlights JSONB default '[]'
+  operator_id UUID references operators(id)
+  departure_location TEXT not_null
+  category charter_category default 'fishing'
+  target_species JSONB default '[]'
+  tagline TEXT
+  departure_time TEXT
+  schedule JSONB default '[]'
+  updated_at TIMESTAMPTZ default now()
+  is_published BOOLEAN default false
+  duration_type charter_duration_type not_null
+  description TEXT
+  created_at TIMESTAMPTZ default now()
+  price_type charter_price_type not_null
+  charter_style charter_style not_null
+  tenant_id UUID references tenants(id)
+  images JSONB default '[]'
+  deposit_percent INT default 30
+  duration_label TEXT not_null
+  nights INT
+  what_to_bring JSONB default '[]'
+  price_amount INT not_null
+  inclusions JSONB default '[]'
+  price_label TEXT
+  destinations JSONB default '[]'
+  enable_rls
+  force_rls
+}
+
+table api_key_usage_log {
+  user_agent TEXT
+  status_code INT
+  path TEXT not_null
+  response_time_ms INT
+  method TEXT not_null
+  response_body TEXT
+  api_key_id UUID not_null
+  agent_id UUID references agents(id)
+  created_at TIMESTAMPTZ default now()
+  ip_address TEXT
+  tenant_id UUID references tenants(id)
+  id UUID primary_key default gen_random_uuid()
+  operator_id UUID
+  enable_rls
+  force_rls
+}
+
+table vessel_type_options {
+  value TEXT not_null unique
+  is_active BOOLEAN not_null default true
+  label TEXT not_null
+  id UUID primary_key default uuid_generate_v4()
+  position INT not_null default 0
+  created_at TIMESTAMPTZ not_null default now()
+  updated_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table harbor_seo_overrides {
+  created_at TIMESTAMPTZ default now()
+  meta_description TEXT
+  og_image_url TEXT
+  tenant_id UUID references tenants(id)
+  id UUID primary_key default gen_random_uuid()
+  harbor_id UUID not_null references harbors(id) on_delete cascade
+  updated_at TIMESTAMPTZ default now()
+  agent_id UUID references agents(id) on_delete cascade
+  operator_id UUID references operators(id) on_delete cascade
+  meta_title VARCHAR
+  enable_rls
+  force_rls
+}
+
+table whatsapp_contacts {
+  username VARCHAR
+  created_at TIMESTAMPTZ default now()
+  is_blocked BOOLEAN default false
+  updated_at TIMESTAMPTZ default now()
+  notes TEXT
+  tenant_id UUID references tenants(id)
+  country_code VARCHAR
+  phone_number VARCHAR not_null unique
+  operator_id UUID references operators(id)
+  custom_name VARCHAR
+  bsuid VARCHAR
+  meta_profile_name VARCHAR
+  id UUID primary_key default gen_random_uuid()
+  enable_rls
+  force_rls
+}
+
+table destinations {
+  updated_by UUID not_null
+  slug TEXT not_null unique
+  transportation_info_id TEXT
+  seo_description TEXT
+  display_name TEXT not_null
+  updated_at TIMESTAMPTZ not_null default now()
+  seo_title_id VARCHAR
+  best_time_to_visit_ko TEXT
+  best_time_to_visit_zh TEXT
+  id UUID primary_key default gen_random_uuid()
+  best_time_to_visit TEXT
+  seo_description_id TEXT
+  seo_description_zh TEXT
+  seo_description_ja TEXT
+  translation_hash VARCHAR
+  climate_info_ja TEXT
+  best_time_to_visit_ja TEXT
+  description_zh TEXT
+  seo_title_ko VARCHAR
+  gallery_images JSONB default '[]'
+  display_name_id VARCHAR
+  seo_article_ja TEXT
+  display_name_zh VARCHAR
+  seo_title_zh VARCHAR
+  display_name_ko VARCHAR
+  description TEXT
+  created_by UUID not_null
+  climate_info_zh TEXT
+  best_time_to_visit_id TEXT
+  deleted_at TIMESTAMPTZ
+  display_name_ja VARCHAR
+  latitude DOUBLE PRECISION
+  transportation_info_ko TEXT
+  name TEXT not_null
+  longitude DOUBLE PRECISION
+  name_zh VARCHAR
+  cover_image TEXT
+  highlights JSONB default '[]'
+  languages_spoken JSONB default '[]'
+  name_ja VARCHAR
+  description_ja TEXT
+  position INT not_null default 0
+  transportation_info_ja TEXT
+  name_ko VARCHAR
+  seo_article_id TEXT
+  description_ko TEXT
+  average_trip_duration TEXT
+  seo_article_zh TEXT
+  safety_rating INT
+  is_active BOOLEAN not_null default true
+  description_id TEXT
+  climate_info TEXT
+  budget_level TEXT
+  transportation_info_zh TEXT
+  seo_title TEXT
+  climate_info_id TEXT
+  seo_description_ko TEXT
+  climate_info_ko TEXT
+  seo_article TEXT
+  popular_activities JSONB default '[]'
+  created_at TIMESTAMPTZ not_null default now()
+  seo_article_ko TEXT
+  seo_title_ja VARCHAR
+  travel_tips JSONB default '[]'
+  is_popular BOOLEAN not_null default false
+  name_id VARCHAR
+  seo_keywords TEXT
+  transportation_info TEXT
+  local_currency TEXT
+  enable_rls
+  force_rls
+}
+
+table holds {
+  status TEXT not_null default 'Active'
+  tenant_id UUID references tenants(id)
+  connection_id UUID not_null
+  seats INT not_null
+  is_confirmed BOOLEAN not_null default false
+  expires_at TIMESTAMPTZ not_null
+  id UUID primary_key default gen_random_uuid()
+  operator_id UUID references operators(id)
+  created_at TIMESTAMPTZ not_null default now()
+  idempotency_key TEXT
+  updated_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+table group_inquiries {
+  notes TEXT
+  status VARCHAR not_null default 'new'
+  event_type VARCHAR not_null
+  assigned_to UUID references users(id)
+  travel_date_end DATE
+  group_size INT not_null
+  created_at TIMESTAMPTZ not_null default now()
+  contact_email VARCHAR
+  operator_id UUID references operators(id)
+  travel_date_start DATE
+  id UUID primary_key default gen_random_uuid()
+  tenant_id UUID references tenants(id)
+  contact_phone VARCHAR not_null
+  updated_at TIMESTAMPTZ not_null default now()
+  origin VARCHAR
+  contact_name VARCHAR not_null
+  destination VARCHAR
+  enable_rls
+  force_rls
+}
+
+table operator_boarding_points {
+  is_primary BOOLEAN not_null default false
+  updated_at TIMESTAMPTZ not_null default now()
+  google_maps_url TEXT
+  updated_by UUID not_null
+  is_active BOOLEAN not_null default true
+  created_by UUID not_null
+  tenant_id UUID references tenants(id)
+  address TEXT
+  operator_id UUID not_null references operators(id) on_delete cascade
+  boarding_type VARCHAR not_null default 'main'
+  phone VARCHAR
+  description TEXT
+  latitude DOUBLE PRECISION
+  deleted_at TIMESTAMPTZ
+  name VARCHAR not_null
+  waze_url TEXT
+  id UUID primary_key default gen_random_uuid()
+  longitude DOUBLE PRECISION
+  harbor_id UUID not_null references harbors(id) on_delete cascade
+  created_at TIMESTAMPTZ not_null default now()
+  enable_rls
+  force_rls
+}
+
+unique index odyssey_legs_odyssey_seq on odyssey_legs (odyssey_id, sequence_order)
+unique index pricing_tiers_plan_market_pax on pricing_tiers (plan_id, market, pax_type)
+unique index unique_operator_schedule on operator_schedule_table (operator_id, origin, destination, departure_time)
+unique index unique_postmark_event on postmark_events (message_id, event_type, recipient, processed_at)
+unique index uq_leg_inventory_leg_date on odyssey_leg_inventory (leg_id, service_date)
+unique index uq_page_language on page_translations (page_key, language)
+index idx_ai_knowledge_base_keywords on ai_knowledge_base (keywords)
+index idx_app_chat_messages_created_at on app_chat_messages (created_at)
+index idx_app_chat_messages_sender_type on app_chat_messages (sender_type)
+index idx_app_chat_messages_session_id on app_chat_messages (session_id)
+index idx_app_chat_messages_type on app_chat_messages (session_id, message_type)
+index idx_app_chat_sessions_closed on app_chat_sessions (status = 'closed'::text)
+index idx_app_chat_sessions_created_at on app_chat_sessions (created_at DESC)
+index idx_app_chat_sessions_guest_id on app_chat_sessions (guest_id)
+index idx_app_chat_sessions_status on app_chat_sessions (status)
+index idx_app_chat_sessions_user_id on app_chat_sessions (user_id)
+index idx_articles_author on articles (author_id)
+index idx_articles_category on articles (category)
+index idx_articles_created_at on articles (created_at)
+index idx_articles_deleted_at on articles (deleted_at)
+index idx_articles_featured on articles (is_featured)
+index idx_articles_published_at on articles (published_at)
+index idx_articles_slug on articles (slug)
+index idx_articles_status on articles (status)
+index idx_cf_image_attachments_entity on cloudflare_image_attachments (entity_type, entity_id)
+index idx_cf_image_attachments_featured on cloudflare_image_attachments (is_featured = true)
+index idx_cf_image_attachments_image_id on cloudflare_image_attachments (image_id)
+unique index idx_cf_image_attachments_unique on cloudflare_image_attachments (field_name IS NOT NULL)
+index idx_charters_diathesi_date on charters_diathesi (available_date)
+index idx_charters_diathesi_drasimos on charters_diathesi (drasimos_id)
+index idx_charters_drasimos_category on charters_drasimos (category)
+index idx_charters_drasimos_published on charters_drasimos (is_published)
+index idx_charters_drasimos_skaphos on charters_drasimos (skaphos_id)
+index idx_charters_drasimos_style on charters_drasimos (charter_style)
+index idx_charters_kratisei_date on charters_kratisei (booking_date)
+index idx_charters_kratisei_drasimos on charters_kratisei (drasimos_id)
+index idx_charters_kratisei_status on charters_kratisei (status)
+index idx_charters_skaphos_alieus on charters_skaphos (alieus_id)
+index idx_charters_skaphos_category on charters_skaphos (category)
+index idx_charters_skaphos_destination on charters_skaphos (destination_id IS NOT NULL)
+index idx_charters_skaphos_harbor on charters_skaphos (harbor_id IS NOT NULL)
+index idx_charters_skaphos_type on charters_skaphos (vessel_type)
+index idx_cloudflare_images_deleted_at on cloudflare_images (deleted_at)
+unique index idx_cloudflare_images_image_id on cloudflare_images (image_id)
+index idx_cloudflare_images_uploaded_at on cloudflare_images (uploaded_at DESC)
+index idx_cloudflare_images_uploaded_by on cloudflare_images (uploaded_by)
+index idx_destination_harbors_destination on destination_harbors (destination_id)
+index idx_destination_harbors_harbor on destination_harbors (harbor_id)
+index idx_destination_harbors_primary on destination_harbors (destination_id, is_primary)
+index idx_destinations_active on destinations (is_active)
+index idx_destinations_active_popular on destinations (is_active = true)
+index idx_destinations_created_by on destinations (created_by)
+index idx_destinations_deleted_at on destinations (deleted_at)
+index idx_destinations_popular on destinations (is_popular = true)
+index idx_destinations_position on destinations ("position")
+index idx_destinations_slug on destinations (slug)
+index idx_destinations_updated_by on destinations (updated_by)
+index idx_email_templates_active on email_templates (is_active = true)
+index idx_email_templates_category on email_templates (category)
+index idx_email_templates_slug on email_templates (slug)
+unique index idx_flow_config_active_trigger on whatsapp_flow_config (is_active = true)
+index idx_flow_config_trigger_type on whatsapp_flow_config (trigger_type)
+index idx_group_inquiries_created_at on group_inquiries (created_at DESC)
+index idx_group_inquiries_event_type on group_inquiries (event_type)
+index idx_group_inquiries_status on group_inquiries (status)
+index idx_harbor_images_deleted_at on harbor_images (deleted_at)
+index idx_harbor_images_display_order on harbor_images (harbor_id, display_order)
+index idx_harbor_images_featured on harbor_images (is_featured = true)
+index idx_harbor_images_harbor_id on harbor_images (harbor_id)
+unique index idx_harbor_images_one_featured on harbor_images (deleted_at IS NULL))
+index idx_harbors_active on harbors (is_active)
+index idx_harbors_created_by on harbors (created_by)
+index idx_harbors_facilities on harbors (facilities)
+index idx_harbors_location on harbors (longitude IS NOT NULL))
+index idx_harbors_position on harbors ("position")
+index idx_harbors_slug on harbors (slug)
+index idx_harbors_updated_by on harbors (updated_by)
+index idx_holds_expires_at on holds (expires_at)
+index idx_holds_status on holds (status)
+index idx_idempotency_expires on idempotency_keys (expires_at)
+index idx_leg_inventory_available on odyssey_leg_inventory (capacity - reserved) > 0)
+index idx_leg_inventory_date on odyssey_leg_inventory (service_date)
+index idx_leg_inventory_lookup on odyssey_leg_inventory (leg_id, service_date)
+index idx_leg_inventory_odyssey on odyssey_leg_inventory (odyssey_id)
+index idx_oauth_accounts_provider on oauth_accounts (provider)
+index idx_oauth_accounts_user_id on oauth_accounts (user_id)
+index idx_odyssey_connections_enabled on odyssey_connections (is_enabled = true)
+index idx_odyssey_connections_odyssey on odyssey_connections (odyssey_id)
+index idx_odyssey_connections_origin_dest on odyssey_connections (origin_harbor_id, destination_harbor_id)
+index idx_odyssey_legs_harbors on odyssey_legs (from_harbor_id, to_harbor_id)
+index idx_odyssey_legs_odyssey on odyssey_legs (odyssey_id)
+index idx_odyssey_pricing_fees_plan on odyssey_pricing_fees (plan_id)
+index idx_odyssey_pricing_plans_active on odyssey_pricing_plans (is_active = true)
+index idx_odyssey_pricing_plans_connection on odyssey_pricing_plans (connection_id IS NOT NULL)
+index idx_odyssey_pricing_plans_dates on odyssey_pricing_plans (start_date, end_date)
+index idx_odyssey_pricing_plans_odyssey on odyssey_pricing_plans (odyssey_id)
+index idx_odyssey_pricing_tiers_plan on odyssey_pricing_tiers (plan_id)
+index idx_odysseys_active on odysseys (is_active = true)
+index idx_odysseys_booking_config on odysseys (booking_window_days, sales_lead_time_hours)
+index idx_odysseys_vessel on odysseys (vessel_id)
+index idx_operator_boarding_points_deleted_at on operator_boarding_points (deleted_at IS NULL)
+index idx_operator_boarding_points_location on operator_boarding_points (latitude, longitude)
+index idx_operator_boarding_points_primary on operator_boarding_points (is_primary = true)
+index idx_operator_facilities_deleted_at on operator_facilities (deleted_at IS NULL)
+index idx_operator_facilities_operator_id on operator_facilities (operator_id)
+index idx_operator_offices_is_main on operator_offices (is_main_office = true)
+index idx_operator_offices_operator_id on operator_offices (operator_id)
+index idx_operator_schedule_destination_harbor on operator_schedule_table (destination_harbor_id)
+index idx_operator_schedule_operator on operator_schedule_table (operator_id)
+index idx_operator_schedule_origin_harbor on operator_schedule_table (origin_harbor_id)
+index idx_operators_arrival_dock_id on operators (default_arrival_dock_id)
+index idx_operators_brand_name on operators (deleted_at IS NULL)
+index idx_operators_created_at on operators (created_at)
+index idx_operators_created_by on operators (created_by)
+index idx_operators_deleted_at on operators (deleted_at)
+index idx_operators_departure_dock_id on operators (default_departure_dock_id)
+index idx_operators_is_active on operators (is_active)
+index idx_operators_operator_type on operators (operator_type)
+index idx_operators_parent_id on operators (parent_operator_id)
+index idx_operators_slug on operators (slug)
+index idx_operators_updated_at on operators (updated_at)
+index idx_operators_updated_by on operators (updated_by)
+index idx_promotion_uses_order_id on promotion_uses (order_id)
+index idx_order_modifications_expires on order_modifications (status)::text = 'pending'::text)
+index idx_order_modifications_order on order_modifications (order_id)
+index idx_order_modifications_status on order_modifications (status)::text = 'pending'::text)
+unique index idx_order_modifications_token on order_modifications (approval_token)
+index idx_order_requests_order_id on order_requests (order_id)
+index idx_order_requests_status on order_requests (status)
+index idx_order_requests_user_id on order_requests (user_id)
+index idx_orders_carrier_ids on orders (carrier_ids)
+index idx_orders_contact_email on orders (contact_info ->> 'email'::text)))
+index idx_orders_created_at on orders (created_at DESC)
+index idx_orders_hold_id on orders (hold_id IS NOT NULL)
+index idx_orders_status on orders (status)
+index idx_orders_user_id on orders (user_id IS NOT NULL)
+index idx_orders_operator_id on orders (operator_id IS NOT NULL)
+index idx_orders_voyage_id on orders (voyage_id IS NOT NULL)
+index idx_page_translations_language on page_translations (language)
+index idx_password_resets_expires_at on user_password_resets (expires_at)
+index idx_password_resets_token on user_password_resets (token)
+index idx_password_resets_user_id on user_password_resets (user_id)
+index idx_payment_events_created_at on payment_events (created_at DESC)
+index idx_payment_events_event_type on payment_events (event_type)
+index idx_payment_events_payment_session_id on payment_events (payment_session_id)
+index idx_payment_events_session_id on payment_events (payment_session_id)
+index idx_payment_gateway_configs_active on payment_gateway_configs (is_active = true)
+index idx_payment_gateway_configs_provider on payment_gateway_configs (provider)
+index idx_promotion_uses_promotion_id on promotion_uses (promotion_id)
+index idx_promotions_code on promotions (code)
+index idx_promotions_dates on promotions (starts_at, expires_at)
+index idx_promotions_is_active on promotions (is_active)
+unique index idx_payment_sessions_active_per_order on payment_sessions (ARRAY['Pending'::text, 'AwaitingPayment'::text, 'Authorized'::text]))
+index idx_payment_sessions_expires_at on payment_sessions (expires_at)
+index idx_payment_sessions_order_id on payment_sessions (order_id)
+index idx_payment_sessions_payment_request_id on payment_sessions (payment_request_id IS NOT NULL)
+index idx_payment_sessions_session_id on payment_sessions (session_id)
+index idx_payment_sessions_status on payment_sessions (status)
+index idx_payment_sessions_xendit_session_id on payment_sessions (xendit_session_id IS NOT NULL)
+index idx_popular_tickets_active on popular_tickets (is_active)
+index idx_popular_tickets_active_position on popular_tickets (is_active = true)
+index idx_popular_tickets_operator on popular_tickets (operator_id IS NOT NULL)
+index idx_popular_tickets_position on popular_tickets ("position")
+index idx_postmark_events_created_at on postmark_events (created_at)
+index idx_postmark_events_email on postmark_events (email)
+index idx_postmark_events_event_type on postmark_events (event_type)
+index idx_postmark_events_failed on postmark_events (processing_status)::text = 'failed'::text)
+index idx_postmark_events_message_id on postmark_events (message_id)
+index idx_postmark_events_message_recipient on postmark_events (message_id, recipient)
+index idx_postmark_events_processed_at on postmark_events (processed_at)
+index idx_postmark_events_recipient on postmark_events (recipient)
+index idx_postmark_events_server_id on postmark_events (server_id)
+index idx_postmark_events_status on postmark_events (processing_status)
+index idx_postmark_events_tag on postmark_events (tag)
+index idx_postmark_events_type_recipient_time on postmark_events (event_type, recipient, processed_at DESC)
+index idx_pricing_fees_plan on pricing_fees (plan_id)
+index idx_pricing_plans_dates on pricing_plans (start_date, end_date)
+index idx_pricing_plans_parent_route on pricing_plans (parent_route_id IS NOT NULL)
+index idx_pricing_plans_segment on pricing_plans (segment_id IS NOT NULL)
+index idx_pricing_tiers_plan on pricing_tiers (plan_id)
+index idx_promotion_uses_customer_email on promotion_uses (customer_email)
+index idx_redirects_created_at on redirects (created_at DESC)
+index idx_redirects_is_active on redirects (is_active)
+index idx_redirects_source_path on redirects (source_path)
+index idx_refresh_tokens_created_at on refresh_tokens (created_at)
+index idx_refresh_tokens_expires_at on refresh_tokens (expires_at)
+index idx_refresh_tokens_token on refresh_tokens (token)
+index idx_refresh_tokens_user_id on refresh_tokens (user_id)
+unique index idx_refunds_idempotency on refunds (idempotency_key)
+index idx_refunds_order on refunds (order_id)
+index idx_refunds_session_active on refunds (ARRAY['Pending'::refund_status, 'Succeeded'::refund_status]))
+index idx_registration_otp_codes_email on registration_otp_codes (email)
+index idx_registration_otp_codes_email_code on registration_otp_codes (consumed_at IS NULL)
+index idx_registration_otp_codes_expires_at on registration_otp_codes (expires_at)
+index idx_reservations_created_at on reservations (created_at DESC)
+index idx_reservations_status on reservations (status)
+index idx_saved_passengers_user_id on saved_passengers (user_id)
+index idx_search_location_stats_location on search_location_stats (location_type, location_id)
+index idx_search_location_stats_popularity on search_location_stats (location_type, selection_count DESC)
+index idx_seo_comparisons_published on seo_comparisons (is_published)
+unique index idx_seo_comparisons_slug on seo_comparisons (slug)
+index idx_seo_comparisons_type on seo_comparisons (comparison_type)
+index idx_seo_kairos_destination on seo_kairos (destination)
+index idx_seo_kairos_published on seo_kairos (is_published)
+unique index idx_seo_kairos_slug on seo_kairos (slug)
+index idx_seo_poros_dest_dest_id on seo_poros (dest_destination_id)
+index idx_seo_poros_dest_harbor_id on seo_poros (dest_harbor_id)
+index idx_seo_poros_origin_dest_id on seo_poros (origin_destination_id)
+index idx_seo_poros_origin_destination on seo_poros (origin, destination)
+index idx_seo_poros_origin_harbor_id on seo_poros (origin_harbor_id)
+index idx_seo_poros_published on seo_poros (is_published)
+unique index idx_seo_poros_slug on seo_poros (slug)
+index idx_service_groups_active on service_groups (is_active = true)
+index idx_service_groups_category on service_groups (category)
+index idx_service_groups_class on service_groups (class)
+index idx_service_groups_sort_order on service_groups (sort_order)
+index idx_ssl_certificates_domain_active on ssl_certificates (is_active = true)
+index idx_ssl_certificates_expires_at on ssl_certificates (is_active = true)
+index idx_user_email_verifications_expires_at on user_email_verifications (expires_at)
+index idx_user_email_verifications_user_id on user_email_verifications (user_id)
+unique index idx_user_payment_methods_default on user_payment_methods (is_active = true))
+index idx_user_payment_methods_user_id on user_payment_methods (user_id)
+index idx_users_active on users (is_active)
+index idx_users_created_at on users (created_at)
+index idx_users_deleted_at on users (deleted_at IS NULL)
+index idx_users_email on users (email)
+index idx_users_last_login on users (last_login)
+index idx_users_operator_id on users (operator_id IS NOT NULL)
+index idx_users_password_changed_at on users (password_changed_at)
+index idx_users_phone_numbers on users (phone_numbers)
+index idx_users_role on users (role)
+index idx_users_two_factor_enabled on users (two_factor_enabled)
+index idx_vessel_facilities_deleted_at on vessel_facilities (deleted_at)
+index idx_vessel_facilities_vessel_id on vessel_facilities (vessel_id)
+index idx_vessel_images_deleted_at on vessel_images (deleted_at)
+index idx_vessel_images_display_order on vessel_images (vessel_id, display_order)
+index idx_vessel_images_vessel_id on vessel_images (vessel_id)
+index idx_vessels_active_since on vessels (active_since)
+index idx_vessels_arrival_dock_id on vessels (default_arrival_dock_id)
+index idx_vessels_created_at on vessels (created_at)
+index idx_vessels_created_by on vessels (created_by)
+index idx_vessels_deleted_at on vessels (deleted_at)
+index idx_vessels_departure_dock_id on vessels (default_departure_dock_id)
+index idx_vessels_is_active on vessels (is_active)
+index idx_vessels_operator_id on vessels (operator_id)
+index idx_vessels_slug on vessels (slug)
+index idx_vessels_updated_at on vessels (updated_at)
+index idx_vessels_updated_by on vessels (updated_by)
+index idx_vessels_vessel_class on vessels (vessel_class)
+index idx_vessels_vessel_type on vessels (vessel_type)
+index idx_webhook_logs_provider_created_at on webhook_logs (provider, created_at DESC)
+index idx_webhook_logs_status_created_at on webhook_logs (status, created_at DESC)
+index idx_whatsapp_broadcast_recipients_status on whatsapp_broadcast_recipients (broadcast_id, status)
+index idx_whatsapp_broadcasts_created on whatsapp_broadcasts (created_at DESC)
+index idx_whatsapp_broadcasts_status on whatsapp_broadcasts (status)
+index idx_whatsapp_contact_groups_name on whatsapp_contact_groups (name)
+unique index idx_whatsapp_contacts_bsuid on whatsapp_contacts (bsuid IS NOT NULL)
+index idx_whatsapp_contacts_phone on whatsapp_contacts (phone_number)
+index idx_whatsapp_messages_bsuid on whatsapp_messages (bsuid IS NOT NULL)
+index idx_whatsapp_messages_created on whatsapp_messages (created_at DESC)
+index idx_whatsapp_messages_order on whatsapp_messages (order_id IS NOT NULL)
+index idx_whatsapp_messages_our_phone on whatsapp_messages (our_phone_number_id IS NOT NULL)
+index idx_whatsapp_messages_phone on whatsapp_messages (phone_number)
+index idx_whatsapp_messages_read_status on whatsapp_messages (read_at IS NULL))
+index idx_whatsapp_messages_session on whatsapp_messages (session_id IS NOT NULL)
+index idx_whatsapp_messages_wa_id on whatsapp_messages (wa_message_id IS NOT NULL)
+index idx_whatsapp_phone_configs_phone_number_id on whatsapp_phone_configs (phone_number_id)
+index idx_whatsapp_sessions_phone_active on whatsapp_sessions (status)::text = 'active'::text)
+index idx_whatsapp_sessions_phone_history on whatsapp_sessions (phone_number, created_at DESC)
+index idx_whatsapp_sessions_stale on whatsapp_sessions (status)::text = 'active'::text)
+index idx_user_permissions_user_id on user_permissions (user_id)
+index idx_user_permissions_granted_by on user_permissions (granted_by)
+index idx_agents_slug on agents (slug)
+index idx_agents_is_active on agents (is_active)
+index idx_agent_contracts_agent_id on agent_contracts (agent_id)
+index idx_agent_contracts_operator_id on agent_contracts (operator_id)
+index idx_agent_contracts_is_active on agent_contracts (is_active)
+index idx_orders_agent_id on orders (agent_id)
+index idx_promotions_apply_to_agents on promotions (apply_to_agents = true)
+index idx_settlements_operator on settlements (operator_id IS NOT NULL)
+index idx_settlements_agent on settlements (agent_id IS NOT NULL)
+index idx_settlements_period on settlements (period_start, period_end)
+index idx_settlements_status on settlements (status)
+index idx_settlement_items_settlement on settlement_items (settlement_id)
+index idx_settlement_items_order on settlement_items (order_id)
+index idx_payment_sessions_operator_id on payment_sessions (operator_id)
+index idx_holds_operator_id on holds (operator_id)
+index idx_search_location_stats_agent on search_location_stats (agent_id)
+index idx_search_location_stats_operator on search_location_stats (operator_id)
+index idx_webhook_logs_provider on webhook_logs (provider)
+index idx_webhook_logs_created on webhook_logs (created_at DESC)
+index idx_postmark_events_message on postmark_events (message_id)
+index idx_crr_contract on contract_route_rates (contract_id)
+index idx_crr_route on contract_route_rates (origin_harbor_id, destination_harbor_id)
+index idx_crr_operator on contract_route_rates (operator_id)
+index idx_vehicles_operator on vehicles (deleted_at IS NULL)
+index idx_vehicles_status on vehicles (is_active = true)
+index idx_drivers_operator on drivers (deleted_at IS NULL)
+index idx_drivers_status on drivers (is_active = true)
+index idx_drivers_vehicle on drivers (default_vehicle_id)
+index idx_b2b_clients_operator on b2b_clients (deleted_at IS NULL)
+index idx_b2b_clients_type on b2b_clients (is_active = true)
+index idx_pickup_zones_operator on pickup_zones (deleted_at IS NULL)
+index idx_pickup_zones_boarding on pickup_zones (is_active = true)
+index idx_pickup_zones_location on pickup_zones (is_active = true)
+index idx_transfer_bookings_operator on transfer_bookings (operator_id)
+index idx_transfer_bookings_status on transfer_bookings (operator_id, status)
+index idx_transfer_bookings_pickup_time on transfer_bookings (pickup_time)
+index idx_transfer_bookings_parent on transfer_bookings (parent_order_id IS NOT NULL)
+index idx_transfer_bookings_b2b on transfer_bookings (b2b_client_id IS NOT NULL)
+index idx_transfer_bookings_driver on transfer_bookings (driver_id IS NOT NULL)
+index idx_transfer_bookings_number on transfer_bookings (booking_number IS NOT NULL)
+unique index uq_catalog_make_model on car_catalog (make, model)
+index idx_car_catalog_category on car_catalog (category)
+index idx_car_catalog_make on car_catalog (make)
+unique index idx_operators_linked_agent on operators (linked_agent_id IS NOT NULL)
+unique index unique_operator_config on ai_client_config (operator_id)
+unique index unique_agent_config on ai_client_config (agent_id)
+unique index unique_daily_operator_usage on ai_token_usage (operator_id, usage_date)
+unique index unique_daily_agent_usage on ai_token_usage (agent_id, usage_date)
+index idx_ai_token_usage_operator_date on ai_token_usage (operator_id, usage_date)
+index idx_ai_token_usage_agent_date on ai_token_usage (agent_id, usage_date)
+index idx_usage_key_time on api_key_usage_log (api_key_id, created_at)
+index idx_usage_operator on api_key_usage_log (operator_id)
+unique index idx_api_keys_prefix on api_keys (key_prefix)
+index idx_api_keys_operator on api_keys (operator_id)
+index idx_payment_events_operator_id on payment_events (operator_id)
+index idx_reservations_operator_id on reservations (operator_id)
+index idx_api_keys_agent on api_keys (agent_id IS NOT NULL)
+index idx_usage_agent on api_key_usage_log (agent_id IS NOT NULL)
+index idx_ai_knowledge_base_agent_id on ai_knowledge_base (agent_id)
+index idx_agent_contracts_active_agent on agent_contracts (is_active = true)
+index idx_app_chat_sessions_operator on app_chat_sessions (operator_id)
+index idx_app_chat_sessions_agent on app_chat_sessions (agent_id IS NOT NULL)
+index idx_redirects_operator on redirects (operator_id IS NOT NULL)
+index idx_redirects_agent on redirects (agent_id IS NOT NULL)
+index idx_refunds_operator_id on refunds (operator_id)
+index idx_order_requests_operator_id on order_requests (operator_id)
+index idx_order_modifications_operator_id on order_modifications (operator_id)
+index idx_promotion_uses_operator_id on promotion_uses (operator_id)
+index idx_group_inquiries_operator_id on group_inquiries (operator_id)
+index idx_saved_passengers_operator_id on saved_passengers (operator_id)
+index idx_whatsapp_contact_groups_operator_id on whatsapp_contact_groups (operator_id)
+unique index system_settings_operator_id_unique on system_settings (operator_id)
+unique index uq_tenant_dest on tenant_destination_overrides (destination_id, operator_id, agent_id)
+index idx_tenant_dest_operator on tenant_destination_overrides (operator_id IS NOT NULL)
+index idx_tenant_dest_agent on tenant_destination_overrides (agent_id IS NOT NULL)
+unique index uq_tenant_harbor on tenant_harbor_overrides (harbor_id, operator_id, agent_id)
+index idx_tenant_harbor_operator on tenant_harbor_overrides (operator_id IS NOT NULL)
+index idx_tenant_harbor_agent on tenant_harbor_overrides (agent_id IS NOT NULL)
+index idx_orders_tenant_id on orders (tenant_id)
+index idx_users_tenant_id on users (tenant_id)
+index idx_odysseys_tenant_id on odysseys (tenant_id)
+index idx_whatsapp_messages_tenant_id on whatsapp_messages (tenant_id)
+index idx_whatsapp_sessions_tenant_id on whatsapp_sessions (tenant_id)
+index idx_whatsapp_contacts_tenant_id on whatsapp_contacts (tenant_id)
+index idx_settlements_tenant_id on settlements (tenant_id)
+trigger marketing_config_updated_at on marketing_config before update execute update_marketing_config_updated_at
+trigger update_cloudflare_images_updated_at on cloudflare_images before update execute update_updated_at_column
+trigger update_settlements_updated_at on settlements before update execute update_updated_at_column
+trigger trigger_charters_drasimos_updated_at on charters_drasimos before update execute update_updated_at_column
+trigger update_payment_gateway_configs_updated_at on payment_gateway_configs before update execute update_updated_at_column
+trigger update_reservations_updated_at on reservations before update execute update_updated_at_column
+trigger update_seo_kairos_updated_at on seo_kairos before update execute update_updated_at_column
+trigger trg_search_odysseys on odysseys after insert or delete or update execute notify_search_changed_all
+trigger trigger_charters_diathesi_updated_at on charters_diathesi before update execute update_updated_at_column
+trigger update_destination_seo_overrides_updated_at on destination_seo_overrides before update execute update_updated_at_column
+trigger update_articles_updated_at on articles before update execute update_updated_at_column
+trigger trg_search_leg_inventory on odyssey_leg_inventory after insert or update execute notify_search_changed_date
+trigger trg_pricing_tier_changed on odyssey_pricing_tiers after insert or delete or update execute fn_notify_pricing_changed
+trigger trigger_charters_kratisei_updated_at on charters_kratisei before update execute update_updated_at_column
+trigger trg_search_operators on operators after update execute notify_search_changed_all
+trigger trg_search_connections on odyssey_connections after insert or delete or update execute notify_search_changed_all
+trigger trigger_promotions_updated_at on promotions before update execute update_promotions_updated_at
+trigger update_holds_updated_at on holds before update execute update_updated_at_column
+trigger update_odyssey_pricing_plans_updated_at on odyssey_pricing_plans before update execute update_updated_at_column
+trigger trg_pricing_plan_changed on odyssey_pricing_plans after insert or delete or update execute fn_notify_pricing_changed
+trigger trigger_charters_alieus_updated_at on charters_alieus before update execute update_updated_at_column
+trigger trg_leg_inventory_updated_at on odyssey_leg_inventory before update execute update_leg_inventory_updated_at
+trigger trg_search_pricing_plans on odyssey_pricing_plans after insert or delete or update execute notify_search_changed_all
+trigger set_email_templates_updated_at on email_templates before update execute update_email_templates_updated_at
+trigger update_user_payment_methods_updated_at on user_payment_methods before update execute update_updated_at_column
+trigger update_seo_comparisons_updated_at on seo_comparisons before update execute update_updated_at_column
+trigger update_cloudflare_image_attachments_updated_at on cloudflare_image_attachments before update execute update_updated_at_column
+trigger trigger_update_session_timestamp on app_chat_messages after insert execute update_app_chat_session_timestamp
+trigger update_harbor_seo_overrides_updated_at on harbor_seo_overrides before update execute update_updated_at_column
+trigger trg_inventory_seat_changed on odyssey_leg_inventory after insert or delete or update execute fn_notify_inventory_changed
+trigger update_pricing_plans_updated_at on pricing_plans before update execute update_updated_at_column
+trigger update_payment_sessions_updated_at on payment_sessions before update execute update_updated_at_column
+trigger trg_search_pricing_tiers on odyssey_pricing_tiers after insert or delete or update execute notify_search_changed_all
+trigger trg_search_vessels on vessels after update execute notify_search_changed_all
+trigger trigger_charters_skaphos_updated_at on charters_skaphos before update execute update_updated_at_column
+trigger update_orders_updated_at on orders before update execute update_updated_at_column
+trigger update_seo_poros_updated_at on seo_poros before update execute update_updated_at_column
+
+policy articles_all_policy on articles for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy articles_select_policy on articles for select
+  using $$ (status = 'published'::article_status OR (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid)))) $$
+
+policy charters_diathesi_isolation_policy on charters_diathesi for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy charters_kratisei_isolation_policy on charters_kratisei for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy charters_skaphos_isolation_policy on charters_skaphos for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy cf_attachments_isolation on cloudflare_image_attachments for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy drivers_isolation_policy on drivers for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy odyssey_connections_agent_read on odyssey_connections for select
+  using $$ (get_current_agent_id() IS NOT NULL AND EXISTS ( SELECT 1
+   FROM agent_contracts ac
+  WHERE ((ac.agent_id = get_current_agent_id()) AND (ac.operator_id = odyssey_connections.operator_id) AND (ac.is_active = true)))) $$
+
+policy odyssey_connections_isolation_policy on odyssey_connections for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy odyssey_pricing_plans_agent_read on odyssey_pricing_plans for select
+  using $$ (get_current_agent_id() IS NOT NULL AND EXISTS ( SELECT 1
+   FROM agent_contracts ac
+  WHERE ((ac.agent_id = get_current_agent_id()) AND (ac.operator_id = odyssey_pricing_plans.operator_id) AND (ac.is_active = true)))) $$
+
+policy odyssey_pricing_plans_isolation_policy on odyssey_pricing_plans for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy odyssey_pricing_tiers_agent_read on odyssey_pricing_tiers for select
+  using $$ (get_current_agent_id() IS NOT NULL AND EXISTS ( SELECT 1
+   FROM agent_contracts ac
+  WHERE ((ac.agent_id = get_current_agent_id()) AND (ac.operator_id = odyssey_pricing_tiers.operator_id) AND (ac.is_active = true)))) $$
+
+policy odyssey_pricing_tiers_isolation_policy on odyssey_pricing_tiers for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy odysseys_agent_read on odysseys for select
+  using $$ (get_current_agent_id() IS NOT NULL AND EXISTS ( SELECT 1
+   FROM agent_contracts ac
+  WHERE ((ac.agent_id = get_current_agent_id()) AND (ac.operator_id = odysseys.operator_id) AND (ac.is_active = true)))) $$
+
+policy odysseys_isolation_policy on odysseys for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy operator_boarding_points_isolation_policy on operator_boarding_points for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy operator_facilities_isolation_policy on operator_facilities for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy order_requests_isolation on order_requests for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy payment_events_operator_isolation on payment_events for all
+  using $$ (('true'::text = CURRENT_SETTING('app.is_super_admin''::text')::text) OR ((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text)) $$
+
+policy popular_tickets_isolation_policy on popular_tickets for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy promotions_isolation_policy on promotions for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy transfer_bookings_isolation_policy on transfer_bookings for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy vehicles_isolation_policy on vehicles for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy whatsapp_contact_groups_isolation on whatsapp_contact_groups for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy whatsapp_contacts_isolation_policy on whatsapp_contacts for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy whatsapp_phone_configs_isolation_policy on whatsapp_phone_configs for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy whatsapp_sessions_isolation_policy on whatsapp_sessions for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy harbor_images_admin on harbor_images for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy harbor_images_select on harbor_images for select
+  using $$ true $$
+
+policy tenants_mutation_policy on tenants for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR id = (NULLIF(current_setting('app.current_tenant_id'::text, true), ''::text))::uuid) $$
+
+policy tenants_select_policy on tenants for select
+  using $$ true $$
+
+policy operator_offices_isolation_policy on operator_offices for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy order_modifications_isolation on order_modifications for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy saved_passengers_isolation on saved_passengers for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy tenant_contracts_policy on tenant_contracts for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (principal_tenant_id = (NULLIF(current_setting('app.current_tenant_id'::text, true), ''::text))::uuid OR reseller_tenant_id = (NULLIF(current_setting('app.current_tenant_id'::text, true), ''::text))::uuid)) $$
+
+policy refresh_tokens_isolation on refresh_tokens for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR EXISTS ( SELECT 1
+   FROM users u
+  WHERE ((u.id = refresh_tokens.user_id) AND ((u.operator_id = get_current_operator_id()) OR (u.agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))))) $$
+
+policy whatsapp_messages_isolation_policy on whatsapp_messages for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy vessel_class_options_admin on vessel_class_options for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy vessel_class_options_select on vessel_class_options for select
+  using $$ true $$
+
+policy whatsapp_broadcast_recipients_isolation on whatsapp_broadcast_recipients for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR EXISTS ( SELECT 1
+   FROM whatsapp_broadcasts b
+  WHERE ((b.id = whatsapp_broadcast_recipients.broadcast_id) AND ((get_current_operator_id() IS NOT NULL) AND (b.operator_id = get_current_operator_id()))))) $$
+
+policy destination_harbors_admin on destination_harbors for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy destination_harbors_select on destination_harbors for select
+  using $$ true $$
+
+policy usage_log_insert on api_key_usage_log for insert
+  with_check $$ (('true'::text = CURRENT_SETTING('app.is_super_admin''::text')::text) OR (((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text) OR ((agent_id)::text = CURRENT_SETTING('app.current_agent_id''::text')::text))) $$
+
+policy usage_log_isolation on api_key_usage_log for select
+  using $$ (('true'::text = CURRENT_SETTING('app.is_super_admin''::text')::text) OR (((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text) OR ((agent_id)::text = CURRENT_SETTING('app.current_agent_id''::text')::text))) $$
+
+policy destinations_select on destinations for select
+  using $$ true $$
+
+policy destinations_admin on destinations for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy charters_drasimos_isolation_policy on charters_drasimos for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy cloudflare_images_isolation on cloudflare_images for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy email_templates_isolation_policy on email_templates for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy holds_operator_isolation on holds for all
+  using $$ (('true'::text = CURRENT_SETTING('app.is_super_admin''::text')::text) OR ((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text)) $$
+
+policy odyssey_leg_inventory_agent_read on odyssey_leg_inventory for select
+  using $$ (get_current_agent_id() IS NOT NULL AND EXISTS ( SELECT 1
+   FROM agent_contracts ac
+  WHERE ((ac.agent_id = get_current_agent_id()) AND (ac.operator_id = odyssey_leg_inventory.operator_id) AND (ac.is_active = true)))) $$
+
+policy odyssey_leg_inventory_isolation_policy on odyssey_leg_inventory for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy odyssey_legs_agent_read on odyssey_legs for select
+  using $$ (get_current_agent_id() IS NOT NULL AND EXISTS ( SELECT 1
+   FROM agent_contracts ac
+  WHERE ((ac.agent_id = get_current_agent_id()) AND (ac.operator_id = odyssey_legs.operator_id) AND (ac.is_active = true)))) $$
+
+policy odyssey_legs_isolation_policy on odyssey_legs for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy odyssey_pricing_fees_agent_read on odyssey_pricing_fees for select
+  using $$ (get_current_agent_id() IS NOT NULL AND EXISTS ( SELECT 1
+   FROM agent_contracts ac
+  WHERE ((ac.agent_id = get_current_agent_id()) AND (ac.operator_id = odyssey_pricing_fees.operator_id) AND (ac.is_active = true)))) $$
+
+policy odyssey_pricing_fees_isolation_policy on odyssey_pricing_fees for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy ai_knowledge_base_tenant_policy on ai_knowledge_base for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NULL AND agent_id IS NULL) OR ((get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()) OR (agent_id IS NOT NULL AND ((agent_id)::text = CURRENT_SETTING('app.current_agent_id''::text')::text))))) $$
+
+policy marketing_config_all_policy on marketing_config for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy marketing_config_select_policy on marketing_config for select
+  using $$ true $$
+
+policy postmark_events_insert on postmark_events for insert
+  with_check $$ true $$
+
+policy postmark_events_admin on postmark_events for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy oauth_accounts_isolation on oauth_accounts for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR EXISTS ( SELECT 1
+   FROM users u
+  WHERE ((u.id = oauth_accounts.user_id) AND ((u.operator_id = get_current_operator_id()) OR (u.agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))))) $$
+
+policy orders_isolation_policy on orders for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()) OR (get_current_operator_id() IS NOT NULL AND get_current_operator_id() = ANY (carrier_ids)))) $$
+
+policy search_stats_admin_only on search_location_stats for all
+  using $$ (('true'::text = CURRENT_SETTING('app.is_super_admin''::text')::text) OR (((agent_id)::text = CURRENT_SETTING('app.current_agent_id''::text')::text) OR ((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text))) $$
+
+policy pricing_plans_admin on pricing_plans for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy pricing_plans_select on pricing_plans for select
+  using $$ true $$
+
+policy app_chat_sessions_isolation on app_chat_sessions for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()) OR (get_current_agent_id() IS NOT NULL AND agent_id = get_current_agent_id()))) $$
+
+policy app_chat_messages_isolation on app_chat_messages for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR EXISTS ( SELECT 1
+   FROM app_chat_sessions s
+  WHERE ((s.id = app_chat_messages.session_id) AND (((get_current_operator_id() IS NOT NULL) AND (s.operator_id = get_current_operator_id())) OR ((get_current_agent_id() IS NOT NULL) AND (s.agent_id = get_current_agent_id())))))) $$
+
+policy idempotency_keys_select on idempotency_keys for select
+  using $$ true $$
+
+policy idempotency_keys_insert on idempotency_keys for insert
+  with_check $$ true $$
+
+policy idempotency_keys_admin on idempotency_keys for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy harbors_admin on harbors for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy harbors_select on harbors for select
+  using $$ true $$
+
+policy pricing_fees_admin on pricing_fees for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy pricing_fees_select on pricing_fees for select
+  using $$ true $$
+
+policy redirects_isolation on redirects for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()) OR ((get_current_agent_id() IS NOT NULL AND agent_id = get_current_agent_id()) OR (operator_id IS NULL AND agent_id IS NULL)))) $$
+
+policy operator_schedule_table_isolation_policy on operator_schedule_table for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy payment_gateway_configs_isolation_policy on payment_gateway_configs for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy payment_sessions_operator_isolation on payment_sessions for all
+  using $$ (('true'::text = CURRENT_SETTING('app.is_super_admin''::text')::text) OR ((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text)) $$
+
+policy reservations_operator_isolation on reservations for all
+  using $$ (('true'::text = CURRENT_SETTING('app.is_super_admin''::text')::text) OR ((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text)) $$
+
+policy ssl_certificates_isolation on ssl_certificates for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy system_settings_isolation on system_settings for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy seo_kairos_delete on seo_kairos for delete
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy seo_kairos_update on seo_kairos for update
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy seo_kairos_write on seo_kairos for insert
+  with_check $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy seo_kairos_select on seo_kairos for select
+  using $$ true $$
+
+policy webhook_logs_insert on webhook_logs for insert
+  with_check $$ true $$
+
+policy webhook_logs_admin on webhook_logs for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy seo_poros_select_policy on seo_poros for select
+  using $$ true $$
+
+policy seo_poros_all_policy on seo_poros for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy vessel_images_isolation on vessel_images for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR EXISTS ( SELECT 1
+   FROM vessels v
+  WHERE ((v.id = vessel_images.vessel_id) AND (v.operator_id = get_current_operator_id())))) $$
+
+policy vessel_facilities_isolation on vessel_facilities for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR EXISTS ( SELECT 1
+   FROM vessels v
+  WHERE ((v.id = vessel_facilities.vessel_id) AND (v.operator_id = get_current_operator_id())))) $$
+
+policy users_delete_policy on users for delete
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy users_update_policy on users for update
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy users_insert_policy on users for insert
+  with_check $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy users_select_policy on users for select
+  using $$ true $$
+
+policy registration_otp_select on registration_otp_codes for select
+  using $$ true $$
+
+policy registration_otp_insert on registration_otp_codes for insert
+  with_check $$ true $$
+
+policy registration_otp_admin on registration_otp_codes for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy service_groups_admin on service_groups for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy service_groups_select on service_groups for select
+  using $$ true $$
+
+policy user_payment_methods_isolation on user_payment_methods for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR EXISTS ( SELECT 1
+   FROM users u
+  WHERE ((u.id = user_payment_methods.user_id) AND ((u.operator_id = get_current_operator_id()) OR (u.agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))))) $$
+
+policy seo_comparisons_admin on seo_comparisons for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy seo_comparisons_select on seo_comparisons for select
+  using $$ true $$
+
+policy email_verifications_select on user_email_verifications for select
+  using $$ true $$
+
+policy email_verifications_insert on user_email_verifications for insert
+  with_check $$ true $$
+
+policy email_verifications_admin on user_email_verifications for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy password_resets_select on user_password_resets for select
+  using $$ true $$
+
+policy password_resets_insert on user_password_resets for insert
+  with_check $$ true $$
+
+policy password_resets_admin on user_password_resets for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy vessel_type_options_admin on vessel_type_options for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy vessel_type_options_select on vessel_type_options for select
+  using $$ true $$
+
+policy pricing_tiers_admin on pricing_tiers for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy pricing_tiers_select on pricing_tiers for select
+  using $$ true $$
+
+policy vessels_agent_read on vessels for select
+  using $$ (get_current_agent_id() IS NOT NULL AND EXISTS ( SELECT 1
+   FROM agent_contracts ac
+  WHERE ((ac.agent_id = get_current_agent_id()) AND (ac.operator_id = vessels.operator_id) AND (ac.is_active = true)))) $$
+
+policy vessels_isolation_policy on vessels for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy schedule_patterns_admin on schedule_patterns for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy schedule_patterns_select on schedule_patterns for select
+  using $$ true $$
+
+policy destination_seo_all on destination_seo_overrides for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy destination_seo_select on destination_seo_overrides for select
+  using $$ true $$
+
+policy harbor_seo_all on harbor_seo_overrides for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy harbor_seo_select on harbor_seo_overrides for select
+  using $$ true $$
+
+policy b2b_clients_isolation_policy on b2b_clients for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy page_translations_isolation on page_translations for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()) OR (get_current_agent_id() IS NOT NULL AND agent_id = get_current_agent_id()))) $$
+
+policy charters_alieus_isolation_policy on charters_alieus for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (operator_id IS NULL OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()))) $$
+
+policy settlements_all_policy on settlements for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy settlements_select_policy on settlements for select
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy agents_operator_read on agents for select
+  using $$ (get_current_operator_id() IS NOT NULL AND EXISTS ( SELECT 1
+   FROM agent_contracts ac
+  WHERE ((ac.agent_id = agents.id) AND (ac.operator_id = get_current_operator_id())))) $$
+
+policy agents_isolation on agents for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR id = (current_setting('app.current_agent_id'::text, true))::uuid) $$
+
+policy user_permissions_isolation on user_permissions for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR EXISTS ( SELECT 1
+   FROM users u
+  WHERE ((u.id = user_permissions.user_id) AND ((u.operator_id = get_current_operator_id()) OR (u.agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))))) $$
+
+policy settlement_items_all_policy on settlement_items for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy settlement_items_select_policy on settlement_items for select
+  using $$ EXISTS ( SELECT 1
+   FROM settlements s
+  WHERE ((s.id = settlement_items.settlement_id) AND ((COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text) OR ((s.operator_id IS NOT NULL) AND (s.operator_id = (current_setting('app.current_operator_id'::text, true))::uuid)) OR ((s.agent_id IS NOT NULL) AND (s.agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))))) $$
+
+policy contract_route_rates_isolation on contract_route_rates for all
+  using $$ (((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text) OR COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text) $$
+  with_check $$ (((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text) OR COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text) $$
+
+policy agent_contracts_isolation on agent_contracts for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()) OR (get_current_agent_id() IS NOT NULL AND agent_id = get_current_agent_id()))) $$
+
+policy ai_client_config_tenant_policy on ai_client_config for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()) OR (agent_id IS NOT NULL AND ((agent_id)::text = CURRENT_SETTING('app.current_agent_id''::text')::text)))) $$
+
+policy ai_token_usage_tenant_policy on ai_token_usage for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id()) OR (agent_id IS NOT NULL AND ((agent_id)::text = CURRENT_SETTING('app.current_agent_id''::text')::text)))) $$
+
+policy pickup_zones_isolation_policy on pickup_zones for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy car_catalog_admin on car_catalog for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy car_catalog_select on car_catalog for select
+  using $$ true $$
+
+policy tenant_dest_delete on tenant_destination_overrides for delete
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy tenant_dest_update on tenant_destination_overrides for update
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy tenant_dest_write on tenant_destination_overrides for insert
+  with_check $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy tenant_dest_select on tenant_destination_overrides for select
+  using $$ true $$
+
+policy operators_mutation_policy on operators for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR id = (current_setting('app.current_operator_id'::text, true))::uuid) $$
+
+policy operators_select_policy on operators for select
+  using $$ true $$
+
+policy whatsapp_contact_group_members_isolation on whatsapp_contact_group_members for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR EXISTS ( SELECT 1
+   FROM whatsapp_contact_groups g
+  WHERE ((g.id = whatsapp_contact_group_members.group_id) AND ((g.operator_id IS NULL) OR ((get_current_operator_id() IS NOT NULL) AND (g.operator_id = get_current_operator_id())))))) $$
+
+policy whatsapp_daily_stats_admin_only on whatsapp_daily_stats for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy whatsapp_flow_config_admin_only on whatsapp_flow_config for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy group_inquiries_isolation on group_inquiries for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy promotion_uses_isolation on promotion_uses for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy refunds_isolation on refunds for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy whatsapp_broadcasts_isolation on whatsapp_broadcasts for all
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR (get_current_operator_id() IS NOT NULL AND operator_id = get_current_operator_id())) $$
+
+policy api_keys_operator_isolation on api_keys for all
+  using $$ (('true'::text = CURRENT_SETTING('app.is_super_admin''::text')::text) OR (((operator_id)::text = CURRENT_SETTING('app.current_operator_id''::text')::text) OR ((agent_id)::text = CURRENT_SETTING('app.current_agent_id''::text')::text))) $$
+
+policy platform_reports_operator_read on platform_reports for select
+  using $$ operator_id = (current_setting('app.current_operator_id'::text, true))::uuid $$
+
+policy platform_reports_admin on platform_reports for all
+  using $$ COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text $$
+
+policy tenant_harbor_update on tenant_harbor_overrides for update
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy tenant_harbor_write on tenant_harbor_overrides for insert
+  with_check $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+
+policy tenant_harbor_select on tenant_harbor_overrides for select
+  using $$ true $$
+
+policy tenant_harbor_delete on tenant_harbor_overrides for delete
+  using $$ (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text OR ((operator_id IS NOT NULL AND operator_id = (current_setting('app.current_operator_id'::text, true))::uuid) OR (agent_id IS NOT NULL AND agent_id = (current_setting('app.current_agent_id'::text, true))::uuid))) $$
+

@@ -1,7 +1,7 @@
 //! High-performance pipelining methods for PostgreSQL connection.
 //!
 //! This module contains all the optimized pipeline methods for maximum throughput.
-//! 
+//!
 //! Performance hierarchy (fastest to slowest):
 //! 1. `pipeline_ast_cached` - Parse once, Bind+Execute many (275k q/s)
 //! 2. `pipeline_simple_bytes_fast` - Pre-encoded simple query
@@ -11,10 +11,10 @@
 //! 6. `pipeline_ast` - Full results collection
 //! 7. `query_pipeline` - SQL-based pipelining
 
+use super::{PgConnection, PgError, PgResult};
+use crate::protocol::{AstEncoder, BackendMessage, PgEncoder};
 use bytes::BytesMut;
 use tokio::io::AsyncWriteExt;
-use crate::protocol::{BackendMessage, PgEncoder, AstEncoder};
-use super::{PgConnection, PgError, PgResult};
 
 impl PgConnection {
     /// Execute multiple SQL queries in a single network round-trip (PIPELINING).
@@ -23,22 +23,22 @@ impl PgConnection {
     /// Reduces N queries from N round-trips to 1 round-trip.
     pub async fn query_pipeline(
         &mut self,
-        queries: &[(&str, &[Option<Vec<u8>>])]
+        queries: &[(&str, &[Option<Vec<u8>>])],
     ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
         // Encode all queries into a single buffer
         let mut buf = BytesMut::new();
         for (sql, params) in queries {
             buf.extend(PgEncoder::encode_extended_query(sql, params));
         }
-        
+
         // Send all queries in ONE write
         self.stream.write_all(&buf).await?;
-        
+
         // Collect all results
         let mut all_results: Vec<Vec<Vec<Option<Vec<u8>>>>> = Vec::with_capacity(queries.len());
         let mut current_rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
         let mut queries_completed = 0;
-        
+
         loop {
             let msg = self.recv().await?;
             match msg {
@@ -73,15 +73,15 @@ impl PgConnection {
     /// Returns full results - use `pipeline_ast_fast` for count only.
     pub async fn pipeline_ast(
         &mut self,
-        cmds: &[qail_core::ast::QailCmd]
+        cmds: &[qail_core::ast::QailCmd],
     ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
         let buf = AstEncoder::encode_batch(cmds);
         self.stream.write_all(&buf).await?;
-        
+
         let mut all_results: Vec<Vec<Vec<Option<Vec<u8>>>>> = Vec::with_capacity(cmds.len());
         let mut current_rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
         let mut queries_completed = 0;
-        
+
         loop {
             let msg = self.recv().await?;
             match msg {
@@ -112,17 +112,14 @@ impl PgConnection {
     }
 
     /// FAST AST pipeline - returns only query count, no result parsing.
-    pub async fn pipeline_ast_fast(
-        &mut self,
-        cmds: &[qail_core::ast::QailCmd]
-    ) -> PgResult<usize> {
+    pub async fn pipeline_ast_fast(&mut self, cmds: &[qail_core::ast::QailCmd]) -> PgResult<usize> {
         let buf = AstEncoder::encode_batch(cmds);
-        
+
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
-        
+
         let mut queries_completed = 0;
-        
+
         loop {
             let msg_type = self.recv_msg_type_fast().await?;
             match msg_type {
@@ -142,13 +139,13 @@ impl PgConnection {
     pub async fn pipeline_bytes_fast(
         &mut self,
         wire_bytes: &[u8],
-        expected_queries: usize
+        expected_queries: usize,
     ) -> PgResult<usize> {
         self.stream.write_all(wire_bytes).await?;
         self.stream.flush().await?;
-        
+
         let mut queries_completed = 0;
-        
+
         loop {
             let msg_type = self.recv_msg_type_fast().await?;
             match msg_type {
@@ -167,15 +164,15 @@ impl PgConnection {
     #[inline]
     pub async fn pipeline_simple_fast(
         &mut self,
-        cmds: &[qail_core::ast::QailCmd]
+        cmds: &[qail_core::ast::QailCmd],
     ) -> PgResult<usize> {
         let buf = AstEncoder::encode_batch_simple(cmds);
-        
+
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
-        
+
         let mut queries_completed = 0;
-        
+
         loop {
             let msg_type = self.recv_msg_type_fast().await?;
             match msg_type {
@@ -195,13 +192,13 @@ impl PgConnection {
     pub async fn pipeline_simple_bytes_fast(
         &mut self,
         wire_bytes: &[u8],
-        expected_queries: usize
+        expected_queries: usize,
     ) -> PgResult<usize> {
         self.stream.write_all(wire_bytes).await?;
         self.stream.flush().await?;
-        
+
         let mut queries_completed = 0;
-        
+
         loop {
             let msg_type = self.recv_msg_type_fast().await?;
             match msg_type {
@@ -217,7 +214,7 @@ impl PgConnection {
     }
 
     /// CACHED PREPARED STATEMENT pipeline - Parse once, Bind+Execute many.
-    /// 
+    ///
     /// This achieves ~280k q/s by:
     /// 1. Generate SQL template with $1, $2, etc. placeholders
     /// 2. Parse template ONCE (cached in PostgreSQL)
@@ -225,34 +222,34 @@ impl PgConnection {
     #[inline]
     pub async fn pipeline_ast_cached(
         &mut self,
-        cmds: &[qail_core::ast::QailCmd]
+        cmds: &[qail_core::ast::QailCmd],
     ) -> PgResult<usize> {
         if cmds.is_empty() {
             return Ok(0);
         }
-        
+
         let mut buf = BytesMut::with_capacity(cmds.len() * 64);
-        
+
         for cmd in cmds {
             let (sql, params) = AstEncoder::encode_cmd_sql(cmd);
             let stmt_name = Self::sql_to_stmt_name(&sql);
-            
+
             if !self.prepared_statements.contains_key(&stmt_name) {
                 buf.extend(PgEncoder::encode_parse(&stmt_name, &sql, &[]));
                 self.prepared_statements.insert(stmt_name.clone(), sql);
             }
-            
+
             buf.extend(PgEncoder::encode_bind("", &stmt_name, &params));
             buf.extend(PgEncoder::encode_execute("", 0));
         }
-        
+
         buf.extend(PgEncoder::encode_sync());
-        
+
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
-        
+
         let mut queries_completed = 0;
-        
+
         loop {
             let msg_type = self.recv_msg_type_fast().await?;
             match msg_type {
@@ -291,38 +288,38 @@ impl PgConnection {
     pub async fn pipeline_prepared_fast(
         &mut self,
         stmt: &super::PreparedStatement,
-        params_batch: &[Vec<Option<Vec<u8>>>]
+        params_batch: &[Vec<Option<Vec<u8>>>],
     ) -> PgResult<usize> {
         if params_batch.is_empty() {
             return Ok(0);
         }
-        
+
         // Local buffer - faster than reusing connection buffer
         let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
-        
+
         // Check if statement is already prepared
         let is_new = !self.prepared_statements.contains_key(&stmt.name);
-        
+
         if is_new {
             return Err(PgError::Query(
-                "Statement not prepared. Call prepare() first.".to_string()
+                "Statement not prepared. Call prepare() first.".to_string(),
             ));
         }
-        
+
         // ZERO ALLOCATION: write directly to local buffer
         for params in params_batch {
             PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
             PgEncoder::encode_execute_to(&mut buf);
         }
-        
+
         PgEncoder::encode_sync_to(&mut buf);
-        
+
         // Write and flush
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
-        
+
         let mut queries_completed = 0;
-        
+
         loop {
             let msg_type = self.recv_msg_type_fast().await?;
             match msg_type {
@@ -343,40 +340,42 @@ impl PgConnection {
     /// PreparedStatement handle for use with pipeline_prepared_fast.
     pub async fn prepare(&mut self, sql: &str) -> PgResult<super::PreparedStatement> {
         use super::prepared::sql_bytes_to_stmt_name;
-        
+
         let stmt_name = sql_bytes_to_stmt_name(sql.as_bytes());
-        
+
         // Check if already prepared
         if !self.prepared_statements.contains_key(&stmt_name) {
             // Send Parse + Sync
             let mut buf = BytesMut::with_capacity(sql.len() + 32);
             buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
             buf.extend(PgEncoder::encode_sync());
-            
+
             self.stream.write_all(&buf).await?;
             self.stream.flush().await?;
-            
+
             // Wait for ParseComplete
             loop {
                 let msg_type = self.recv_msg_type_fast().await?;
                 match msg_type {
-                    b'1' => {  // ParseComplete
-                        self.prepared_statements.insert(stmt_name.clone(), sql.to_string());
+                    b'1' => {
+                        // ParseComplete
+                        self.prepared_statements
+                            .insert(stmt_name.clone(), sql.to_string());
                     }
-                    b'Z' => break,  // ReadyForQuery
+                    b'Z' => break, // ReadyForQuery
                     _ => {}
                 }
             }
         }
-        
+
         Ok(super::PreparedStatement {
             name: stmt_name,
             param_count: sql.matches('$').count(),
         })
     }
-    
+
     /// Execute a prepared statement pipeline and return actual results.
-    /// 
+    ///
     /// Unlike `pipeline_prepared_fast` which only counts, this method
     /// parses and returns all row data. Use for fair benchmarking with
     /// result consumption.
@@ -386,55 +385,60 @@ impl PgConnection {
     pub async fn pipeline_prepared_results(
         &mut self,
         stmt: &super::PreparedStatement,
-        params_batch: &[Vec<Option<Vec<u8>>>]
+        params_batch: &[Vec<Option<Vec<u8>>>],
     ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
         if params_batch.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // Check if statement is already prepared
         if !self.prepared_statements.contains_key(&stmt.name) {
             return Err(PgError::Query(
-                "Statement not prepared. Call prepare() first.".to_string()
+                "Statement not prepared. Call prepare() first.".to_string(),
             ));
         }
-        
+
         // Build buffer with Bind+Execute for each query
         let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
-        
+
         for params in params_batch {
             PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
             PgEncoder::encode_execute_to(&mut buf);
         }
-        
+
         PgEncoder::encode_sync_to(&mut buf);
-        
+
         // Write and flush
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
-        
+
         // Collect results using fast inline DataRow parsing
-        let mut all_results: Vec<Vec<Vec<Option<Vec<u8>>>>> = Vec::with_capacity(params_batch.len());
+        let mut all_results: Vec<Vec<Vec<Option<Vec<u8>>>>> =
+            Vec::with_capacity(params_batch.len());
         let mut current_rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
-        
+
         loop {
             let (msg_type, data) = self.recv_with_data_fast().await?;
-            
+
             match msg_type {
-                b'2' => {}  // BindComplete
-                b'T' => {}  // RowDescription
-                b'D' => {   // DataRow
+                b'2' => {} // BindComplete
+                b'T' => {} // RowDescription
+                b'D' => {
+                    // DataRow
                     if let Some(row) = data {
                         current_rows.push(row);
                     }
                 }
-                b'C' => {   // CommandComplete
+                b'C' => {
+                    // CommandComplete
                     all_results.push(std::mem::take(&mut current_rows));
                 }
-                b'n' => {   // NoData
+                b'n' => {
+                    // NoData
                     all_results.push(Vec::new());
                 }
-                b'Z' => {   // ReadyForQuery
+                b'Z' => {
+                    // ReadyForQuery
                     if all_results.len() == params_batch.len() {
                         return Ok(all_results);
                     }
@@ -443,63 +447,68 @@ impl PgConnection {
             }
         }
     }
-    
+
     /// ZERO-COPY pipeline execution with Bytes for column data.
-    /// 
+    ///
     /// Uses reference-counted Bytes slices instead of Vec copies.
     /// This matches C's libpq behavior of returning pointers into internal buffers.
     pub async fn pipeline_prepared_zerocopy(
         &mut self,
         stmt: &super::PreparedStatement,
-        params_batch: &[Vec<Option<Vec<u8>>>]
+        params_batch: &[Vec<Option<Vec<u8>>>],
     ) -> PgResult<Vec<Vec<Vec<Option<bytes::Bytes>>>>> {
         if params_batch.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // Check if statement is already prepared
         if !self.prepared_statements.contains_key(&stmt.name) {
             return Err(PgError::Query(
-                "Statement not prepared. Call prepare() first.".to_string()
+                "Statement not prepared. Call prepare() first.".to_string(),
             ));
         }
-        
+
         // Build buffer with Bind+Execute for each query
         let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
-        
+
         for params in params_batch {
             PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
             PgEncoder::encode_execute_to(&mut buf);
         }
-        
+
         PgEncoder::encode_sync_to(&mut buf);
-        
+
         // Write and flush
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
-        
+
         // Collect results using ZERO-COPY Bytes
-        let mut all_results: Vec<Vec<Vec<Option<bytes::Bytes>>>> = Vec::with_capacity(params_batch.len());
+        let mut all_results: Vec<Vec<Vec<Option<bytes::Bytes>>>> =
+            Vec::with_capacity(params_batch.len());
         let mut current_rows: Vec<Vec<Option<bytes::Bytes>>> = Vec::new();
-        
+
         loop {
             let (msg_type, data) = self.recv_data_zerocopy().await?;
-            
+
             match msg_type {
-                b'2' => {}  // BindComplete
-                b'T' => {}  // RowDescription
-                b'D' => {   // DataRow
+                b'2' => {} // BindComplete
+                b'T' => {} // RowDescription
+                b'D' => {
+                    // DataRow
                     if let Some(row) = data {
                         current_rows.push(row);
                     }
                 }
-                b'C' => {   // CommandComplete
+                b'C' => {
+                    // CommandComplete
                     all_results.push(std::mem::take(&mut current_rows));
                 }
-                b'n' => {   // NoData
+                b'n' => {
+                    // NoData
                     all_results.push(Vec::new());
                 }
-                b'Z' => {   // ReadyForQuery
+                b'Z' => {
+                    // ReadyForQuery
                     if all_results.len() == params_batch.len() {
                         return Ok(all_results);
                     }
@@ -508,47 +517,48 @@ impl PgConnection {
             }
         }
     }
-    
+
     /// ULTRA-FAST pipeline for 2-column SELECT queries.
     /// Optimized for the common "SELECT id, name FROM table" pattern.
     /// Returns (col0, col1) tuples, no Vec per row.
     pub async fn pipeline_prepared_ultra(
         &mut self,
         stmt: &super::PreparedStatement,
-        params_batch: &[Vec<Option<Vec<u8>>>]
+        params_batch: &[Vec<Option<Vec<u8>>>],
     ) -> PgResult<Vec<Vec<(bytes::Bytes, bytes::Bytes)>>> {
         if params_batch.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         if !self.prepared_statements.contains_key(&stmt.name) {
             return Err(PgError::Query(
-                "Statement not prepared. Call prepare() first.".to_string()
+                "Statement not prepared. Call prepare() first.".to_string(),
             ));
         }
-        
+
         // Build buffer
         let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
-        
+
         for params in params_batch {
             PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
             PgEncoder::encode_execute_to(&mut buf);
         }
-        
+
         PgEncoder::encode_sync_to(&mut buf);
-        
+
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
-        
+
         // Pre-allocate with expected capacity
-        let mut all_results: Vec<Vec<(bytes::Bytes, bytes::Bytes)>> = Vec::with_capacity(params_batch.len());
+        let mut all_results: Vec<Vec<(bytes::Bytes, bytes::Bytes)>> =
+            Vec::with_capacity(params_batch.len());
         let mut current_rows: Vec<(bytes::Bytes, bytes::Bytes)> = Vec::with_capacity(16);
-        
+
         loop {
             let (msg_type, data) = self.recv_data_ultra().await?;
-            
+
             match msg_type {
-                b'2' | b'T' => {}  // BindComplete, RowDescription
+                b'2' | b'T' => {} // BindComplete, RowDescription
                 b'D' => {
                     if let Some(row) = data {
                         current_rows.push(row);
@@ -571,4 +581,3 @@ impl PgConnection {
         }
     }
 }
-

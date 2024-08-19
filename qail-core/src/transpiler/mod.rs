@@ -2,27 +2,27 @@
 //!
 //! Converts parsed QAIL commands into executable SQL strings.
 
-pub mod traits;
-pub mod sql;
-pub mod dialect;
 pub mod conditions;
 pub mod ddl;
+pub mod dialect;
 pub mod dml;
+pub mod sql;
+pub mod traits;
 
 // NoSQL transpilers (organized in nosql/ subdirectory)
 pub mod nosql;
-pub use nosql::mongo::ToMongo;
 pub use nosql::dynamo::ToDynamo;
+pub use nosql::mongo::ToMongo;
 pub use nosql::qdrant::ToQdrant;
 
 #[cfg(test)]
 mod tests;
 
 use crate::ast::*;
+pub use conditions::ConditionToSql;
+pub use dialect::Dialect;
 pub use traits::SqlGenerator;
 pub use traits::escape_identifier;
-pub use dialect::Dialect;
-pub use conditions::ConditionToSql;
 
 /// Result of transpilation with extracted parameters.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -91,6 +91,7 @@ impl ToSql for QailCmd {
             Action::DropIndex => format!("DROP INDEX {}", self.table),
             Action::Alter => ddl::build_alter_add_column(self, dialect),
             Action::AlterDrop => ddl::build_alter_drop_column(self, dialect),
+            Action::AlterType => ddl::build_alter_column_type(self, dialect),
             // Stubs
             Action::TxnStart => "BEGIN TRANSACTION;".to_string(), // Default stub
             Action::TxnCommit => "COMMIT;".to_string(),
@@ -107,21 +108,80 @@ impl ToSql for QailCmd {
             // EXPLAIN - wrap SELECT query
             Action::Explain => format!("EXPLAIN {}", dml::select::build_select(self, dialect)),
             // EXPLAIN ANALYZE - execute and analyze query
-            Action::ExplainAnalyze => format!("EXPLAIN ANALYZE {}", dml::select::build_select(self, dialect)),
+            Action::ExplainAnalyze => format!(
+                "EXPLAIN ANALYZE {}",
+                dml::select::build_select(self, dialect)
+            ),
             // LOCK TABLE
             Action::Lock => format!("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE", self.table),
             // CREATE MATERIALIZED VIEW - uses source_query for the view definition
             Action::CreateMaterializedView => {
                 if let Some(source) = &self.source_query {
-                    format!("CREATE MATERIALIZED VIEW {} AS {}", self.table, source.to_sql_with_dialect(dialect))
+                    format!(
+                        "CREATE MATERIALIZED VIEW {} AS {}",
+                        self.table,
+                        source.to_sql_with_dialect(dialect)
+                    )
                 } else {
-                    format!("CREATE MATERIALIZED VIEW {} AS {}", self.table, dml::select::build_select(self, dialect))
+                    format!(
+                        "CREATE MATERIALIZED VIEW {} AS {}",
+                        self.table,
+                        dml::select::build_select(self, dialect)
+                    )
                 }
             }
             // REFRESH MATERIALIZED VIEW
             Action::RefreshMaterializedView => format!("REFRESH MATERIALIZED VIEW {}", self.table),
             // DROP MATERIALIZED VIEW
             Action::DropMaterializedView => format!("DROP MATERIALIZED VIEW {}", self.table),
+            // LISTEN/NOTIFY (Pub/Sub)
+            Action::Listen => {
+                if let Some(ch) = &self.channel {
+                    format!("LISTEN {}", ch)
+                } else {
+                    "LISTEN".to_string()
+                }
+            }
+            Action::Notify => {
+                if let Some(ch) = &self.channel {
+                    if let Some(msg) = &self.payload {
+                        format!("NOTIFY {}, '{}'", ch, msg)
+                    } else {
+                        format!("NOTIFY {}", ch)
+                    }
+                } else {
+                    "NOTIFY".to_string()
+                }
+            }
+            Action::Unlisten => {
+                if let Some(ch) = &self.channel {
+                    format!("UNLISTEN {}", ch)
+                } else {
+                    "UNLISTEN *".to_string()
+                }
+            }
+            // Savepoints
+            Action::Savepoint => {
+                if let Some(name) = &self.savepoint_name {
+                    format!("SAVEPOINT {}", name)
+                } else {
+                    "SAVEPOINT".to_string()
+                }
+            }
+            Action::ReleaseSavepoint => {
+                if let Some(name) = &self.savepoint_name {
+                    format!("RELEASE SAVEPOINT {}", name)
+                } else {
+                    "RELEASE SAVEPOINT".to_string()
+                }
+            }
+            Action::RollbackToSavepoint => {
+                if let Some(name) = &self.savepoint_name {
+                    format!("ROLLBACK TO SAVEPOINT {}", name)
+                } else {
+                    "ROLLBACK TO SAVEPOINT".to_string()
+                }
+            }
         }
     }
 }
@@ -131,15 +191,16 @@ impl ToSqlParameterized for QailCmd {
         // Use the full ToSql implementation which handles CTEs, JOINs, etc.
         // Then post-process to extract named parameters for binding
         let full_sql = self.to_sql_with_dialect(dialect);
-        
+
         // Extract named parameters (those starting with :) from the SQL
         // and replace them with positional parameters ($1, $2, etc.)
         let mut named_params: Vec<String> = Vec::new();
-        let mut seen_params: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut seen_params: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let mut result = String::with_capacity(full_sql.len());
         let mut chars = full_sql.chars().peekable();
         let mut param_index = 1;
-        
+
         while let Some(c) = chars.next() {
             if c == ':' {
                 // Check if this is a Postgres cast (::) - pass through
@@ -161,7 +222,7 @@ impl ToSqlParameterized for QailCmd {
                                 break;
                             }
                         }
-                        
+
                         // Get or assign positional index
                         let idx = if let Some(&existing) = seen_params.get(&param_name) {
                             existing
@@ -172,7 +233,7 @@ impl ToSqlParameterized for QailCmd {
                             param_index += 1;
                             idx
                         };
-                        
+
                         result.push('$');
                         result.push_str(&idx.to_string());
                         continue;
@@ -181,7 +242,7 @@ impl ToSqlParameterized for QailCmd {
             }
             result.push(c);
         }
-        
+
         TranspileResult {
             sql: result,
             params: Vec::new(), // Positional params not used, named_params provides mapping

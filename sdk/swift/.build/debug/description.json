@@ -1,0 +1,676 @@
+{
+  "builtTestProducts" : [
+    {
+      "binaryPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.xctest/Contents/MacOS/QailPackageTests",
+      "packagePath" : "/Users/orion/qail.rs/sdk/swift",
+      "productName" : "QailPackageTests"
+    }
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.Qail-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/sources",
+      "importPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Builders.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Models.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/Sources/Qail/QailClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "Qail",
+      "moduleOutputPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules/Qail.swiftmodule",
+      "objects" : [
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Builders.swift.o",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Models.swift.o",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/QailClient.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx12.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j11",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/include/Qail-Swift.h",
+        "-swift-version",
+        "6",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "swift"
+      ],
+      "outputFileMapPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Builders.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Models.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/QailClient.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules/Qail.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Builders.swift",
+        "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Models.swift",
+        "/Users/orion/qail.rs/sdk/swift/Sources/Qail/QailClient.swift"
+      ],
+      "tempsPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.QailPackageTests-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/sources",
+      "importPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.derived/runner.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules/QailTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "QailPackageTests",
+      "moduleOutputPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules/QailPackageTests.swiftmodule",
+      "objects" : [
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/runner.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx12.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j11",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/include/QailPackageTests-Swift.h",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "swift"
+      ],
+      "outputFileMapPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules/QailPackageTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.derived/runner.swift"
+      ],
+      "tempsPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.QailTests-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailTests.build/sources",
+      "importPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/Tests/QailTests/QailTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules/Qail.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "QailTests",
+      "moduleOutputPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules/QailTests.swiftmodule",
+      "objects" : [
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailTests.build/QailTests.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j11",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "6",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "swift"
+      ],
+      "outputFileMapPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailTests.build/QailTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules/QailTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/orion/qail.rs/sdk/swift/Tests/QailTests/QailTests.swift"
+      ],
+      "tempsPath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailTests.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "Qail" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "Qail",
+      "-package-name",
+      "swift",
+      "-c",
+      "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Builders.swift",
+      "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Models.swift",
+      "/Users/orion/qail.rs/sdk/swift/Sources/Qail/QailClient.swift",
+      "-I",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx12.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j11",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/include/Qail-Swift.h",
+      "-swift-version",
+      "6",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "swift",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "QailPackageTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "QailPackageTests",
+      "-package-name",
+      "swift",
+      "-c",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.derived/runner.swift",
+      "-I",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx12.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j11",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/include/QailPackageTests-Swift.h",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "swift",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "QailTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "QailTests",
+      "-package-name",
+      "swift",
+      "-c",
+      "/Users/orion/qail.rs/sdk/swift/Tests/QailTests/QailTests.swift",
+      "-I",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j11",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "6",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "swift",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "Qail" : [
+
+    ],
+    "QailPackageTests" : [
+      "QailTests",
+      "Qail"
+    ],
+    "QailTests" : [
+      "Qail"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+    "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.derived/runner.swift" : {
+      "inputs" : [
+
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.derived/runner.swift"
+        }
+      ]
+    }
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Builders.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/Sources/Qail/Models.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/Sources/Qail/QailClient.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/sources"
+    },
+    "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.derived/runner.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/sources"
+    },
+    "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Builders.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/Models.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/QailClient.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailTests.build/QailTests.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailPackageTests.product/Objects.LinkFileList"
+    },
+    "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/orion/qail.rs/sdk/swift/Tests/QailTests/QailTests.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/QailTests.build/sources"
+    },
+    "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}

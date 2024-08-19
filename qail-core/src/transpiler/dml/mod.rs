@@ -3,11 +3,11 @@
 //! This module contains functions for generating SELECT, INSERT, UPDATE, DELETE,
 //! and other DML statements.
 
-pub mod select;
-pub mod update;
+pub mod cte;
 pub mod delete;
 pub mod insert;
-pub mod window;
-pub mod cte;
-pub mod upsert;
 pub mod json_table;
+pub mod select;
+pub mod update;
+pub mod upsert;
+pub mod window;

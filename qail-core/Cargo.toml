@@ -1,10 +1,10 @@
 [package]
 name = "qail-core"
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 description = "AST-native query builder - type-safe expressions, zero SQL strings"
 license = "MIT"
-repository = "https://github.com/qail-rs/qail"
+repository = "https://github.com/qail-io/qail"
 readme = "README.md"
 categories = ["database", "parser-implementations"]
 keywords = ["qail", "sql", "parser"]
