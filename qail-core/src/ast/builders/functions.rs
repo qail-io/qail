@@ -1,7 +1,7 @@
 //! Function call builders (COALESCE, REPLACE, SUBSTRING, etc.)
 
-use crate::ast::{BinaryOp, Expr};
 use super::literals::int;
+use crate::ast::{BinaryOp, Expr};
 
 /// Create a function call expression
 pub fn func(name: &str, args: Vec<Expr>) -> FunctionBuilder {
@@ -23,12 +23,16 @@ pub fn nullif(a: impl Into<Expr>, b: impl Into<Expr>) -> FunctionBuilder {
 }
 
 /// REPLACE(source, from, to) function
-/// 
+///
 /// # Example
 /// ```ignore
 /// replace(col("phone"), text("+"), text(""))  // REPLACE(phone, '+', '')
 /// ```
-pub fn replace(source: impl Into<Expr>, from: impl Into<Expr>, to: impl Into<Expr>) -> FunctionBuilder {
+pub fn replace(
+    source: impl Into<Expr>,
+    from: impl Into<Expr>,
+    to: impl Into<Expr>,
+) -> FunctionBuilder {
     func("REPLACE", vec![source.into(), from.into(), to.into()])
 }
 
@@ -64,7 +68,7 @@ impl From<FunctionBuilder> for Expr {
 }
 
 /// SUBSTRING(source FROM start [FOR length])
-/// 
+///
 /// # Example
 /// ```ignore
 /// substring(col("phone"), 2)       // SUBSTRING(phone FROM 2)
@@ -95,7 +99,7 @@ pub fn substring_for(source: impl Into<Expr>, from: i32, length: i32) -> Expr {
 }
 
 /// String concatenation (a || b || c)
-/// 
+///
 /// # Example
 /// ```ignore
 /// concat([col("first_name"), text(" "), col("last_name")])
@@ -118,33 +122,36 @@ impl ConcatBuilder {
         self.alias = Some(name.to_string());
         self.build()
     }
-    
+
     /// Build the final Expr
     pub fn build(self) -> Expr {
         use super::literals::text;
-        
+
         if self.exprs.is_empty() {
             return text("");
         }
-        
+
         let mut iter = self.exprs.into_iter();
         let first = iter.next().unwrap();
-        
-        let result = iter.fold(first, |acc, expr| {
-            Expr::Binary {
-                left: Box::new(acc),
-                op: BinaryOp::Concat,
-                right: Box::new(expr),
-                alias: None,
-            }
+
+        let result = iter.fold(first, |acc, expr| Expr::Binary {
+            left: Box::new(acc),
+            op: BinaryOp::Concat,
+            right: Box::new(expr),
+            alias: None,
         });
-        
+
         // Apply alias to the final result
         if let Some(alias) = self.alias {
             match result {
-                Expr::Binary { left, op, right, .. } => {
-                    Expr::Binary { left, op, right, alias: Some(alias) }
-                }
+                Expr::Binary {
+                    left, op, right, ..
+                } => Expr::Binary {
+                    left,
+                    op,
+                    right,
+                    alias: Some(alias),
+                },
                 other => other,
             }
         } else {

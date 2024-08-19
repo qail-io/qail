@@ -1,12 +1,12 @@
+pub mod analyzer;
 pub mod ast;
 pub mod error;
-pub mod validator;
-pub mod parser;
-pub mod transpiler;
-pub mod schema;
 pub mod fmt;
 pub mod migrate;
-pub mod analyzer;
+pub mod parser;
+pub mod schema;
+pub mod transpiler;
+pub mod validator;
 
 pub use parser::parse;
 

@@ -3,10 +3,11 @@
 //! Provides connection pooling for efficient resource management.
 //! Connections are reused across queries to avoid reconnection overhead.
 
+use super::{PgConnection, PgError, PgResult};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
-use super::{PgConnection, PgResult, PgError};
 
 /// Connection pool configuration.
 #[derive(Clone)]
@@ -31,6 +32,10 @@ pub struct PoolConfig {
     pub acquire_timeout: Duration,
     /// Maximum time to wait when establishing a new connection
     pub connect_timeout: Duration,
+    /// Maximum lifetime of a connection before recycling (None = no limit)
+    pub max_lifetime: Option<Duration>,
+    /// Whether to validate connections with a ping before returning
+    pub test_on_acquire: bool,
 }
 
 impl PoolConfig {
@@ -44,9 +49,11 @@ impl PoolConfig {
             password: None,
             max_connections: 10,
             min_connections: 1,
-            idle_timeout: Duration::from_secs(600),      // 10 minutes
-            acquire_timeout: Duration::from_secs(30),    // 30 seconds
-            connect_timeout: Duration::from_secs(10),    // 10 seconds
+            idle_timeout: Duration::from_secs(600), // 10 minutes
+            acquire_timeout: Duration::from_secs(30), // 30 seconds
+            connect_timeout: Duration::from_secs(10), // 10 seconds
+            max_lifetime: None,                      // No limit by default
+            test_on_acquire: false,                  // Disabled by default for performance
         }
     }
 
@@ -85,12 +92,40 @@ impl PoolConfig {
         self.connect_timeout = timeout;
         self
     }
+
+    /// Set maximum lifetime of a connection before recycling.
+    /// After this duration, connection will be closed and recreated.
+    pub fn max_lifetime(mut self, lifetime: Duration) -> Self {
+        self.max_lifetime = Some(lifetime);
+        self
+    }
+
+    /// Enable connection validation on acquire.
+    /// When enabled, connections are tested with a ping before being returned.
+    pub fn test_on_acquire(mut self, enabled: bool) -> Self {
+        self.test_on_acquire = enabled;
+        self
+    }
+}
+
+/// Pool statistics for monitoring.
+#[derive(Debug, Clone, Default)]
+pub struct PoolStats {
+    /// Number of connections currently in use
+    pub active: usize,
+    /// Number of idle connections available
+    pub idle: usize,
+    /// Number of requests waiting for a connection
+    pub pending: usize,
+    /// Maximum connections configured
+    pub max_size: usize,
+    /// Total connections created since pool start
+    pub total_created: usize,
 }
 
 /// A pooled connection with creation timestamp for idle tracking.
 struct PooledConn {
     conn: PgConnection,
-    #[allow(dead_code)]
     created_at: Instant,
     last_used: Instant,
 }
@@ -104,7 +139,9 @@ pub struct PooledConnection {
 impl PooledConnection {
     /// Get a mutable reference to the underlying connection.
     pub fn get_mut(&mut self) -> &mut PgConnection {
-        self.conn.as_mut().expect("Connection should always be present")
+        self.conn
+            .as_mut()
+            .expect("Connection should always be present")
     }
 }
 
@@ -124,13 +161,17 @@ impl std::ops::Deref for PooledConnection {
     type Target = PgConnection;
 
     fn deref(&self) -> &Self::Target {
-        self.conn.as_ref().expect("Connection should always be present")
+        self.conn
+            .as_ref()
+            .expect("Connection should always be present")
     }
 }
 
 impl std::ops::DerefMut for PooledConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.conn.as_mut().expect("Connection should always be present")
+        self.conn
+            .as_mut()
+            .expect("Connection should always be present")
     }
 }
 
@@ -139,10 +180,24 @@ struct PgPoolInner {
     config: PoolConfig,
     connections: Mutex<Vec<PooledConn>>,
     semaphore: Semaphore,
+    /// Whether the pool has been closed
+    closed: AtomicBool,
+    /// Number of connections currently in use (active)
+    active_count: AtomicUsize,
+    /// Total connections created (for stats)
+    total_created: AtomicUsize,
 }
 
 impl PgPoolInner {
     async fn return_connection(&self, conn: PgConnection) {
+        // Decrement active count
+        self.active_count.fetch_sub(1, Ordering::Relaxed);
+        
+        // Don't return if pool is closed
+        if self.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        
         let mut connections = self.connections.lock().await;
         if connections.len() < self.config.max_connections {
             connections.push(PooledConn {
@@ -158,18 +213,26 @@ impl PgPoolInner {
     /// Get a healthy connection from the pool, or None if pool is empty.
     async fn get_healthy_connection(&self) -> Option<PgConnection> {
         let mut connections = self.connections.lock().await;
-        
+
         while let Some(pooled) = connections.pop() {
             // Check if connection is too old (idle timeout)
             if pooled.last_used.elapsed() > self.config.idle_timeout {
                 // Connection is stale, drop it
                 continue;
             }
-            
+
+            // Check max_lifetime
+            if let Some(max_life) = self.config.max_lifetime
+                && pooled.created_at.elapsed() > max_life
+            {
+                // Connection exceeded max lifetime, recycle it
+                continue;
+            }
+
             // Return the connection
             return Some(pooled.conn);
         }
-        
+
         None
     }
 }
@@ -199,7 +262,7 @@ impl PgPool {
     pub async fn connect(config: PoolConfig) -> PgResult<Self> {
         // Semaphore starts with max_connections permits
         let semaphore = Semaphore::new(config.max_connections);
-        
+
         // Create initial connections (they go to idle pool)
         let mut initial_connections = Vec::new();
         for _ in 0..config.min_connections {
@@ -210,15 +273,16 @@ impl PgPool {
                 last_used: Instant::now(),
             });
         }
-        
-        // NOTE: Don't acquire permits for initial connections!
-        // They are idle (available), not in-use.
-        // Permits are only consumed when acquire() is called.
+
+        let initial_count = initial_connections.len();
 
         let inner = Arc::new(PgPoolInner {
             config,
             connections: Mutex::new(initial_connections),
             semaphore,
+            closed: AtomicBool::new(false),
+            active_count: AtomicUsize::new(0),
+            total_created: AtomicUsize::new(initial_count),
         });
 
         Ok(Self { inner })
@@ -230,16 +294,21 @@ impl PgPool {
     /// Stale connections (idle > idle_timeout) are automatically discarded.
     /// Connection is automatically returned when dropped.
     pub async fn acquire(&self) -> PgResult<PooledConnection> {
+        // Check if pool is closed
+        if self.inner.closed.load(Ordering::Relaxed) {
+            return Err(PgError::Connection("Pool is closed".to_string()));
+        }
+
         // Wait for available slot with timeout
         let acquire_timeout = self.inner.config.acquire_timeout;
-        let permit = tokio::time::timeout(
-            acquire_timeout,
-            self.inner.semaphore.acquire()
-        ).await
-            .map_err(|_| PgError::Connection(format!(
-                "Timed out waiting for connection ({}s)", 
-                acquire_timeout.as_secs()
-            )))?
+        let permit = tokio::time::timeout(acquire_timeout, self.inner.semaphore.acquire())
+            .await
+            .map_err(|_| {
+                PgError::Connection(format!(
+                    "Timed out waiting for connection ({}s)",
+                    acquire_timeout.as_secs()
+                ))
+            })?
             .map_err(|_| PgError::Connection("Pool closed".to_string()))?;
         permit.forget();
 
@@ -248,8 +317,13 @@ impl PgPool {
             conn
         } else {
             // Create new connection
-            Self::create_connection(&self.inner.config).await?
+            let conn = Self::create_connection(&self.inner.config).await?;
+            self.inner.total_created.fetch_add(1, Ordering::Relaxed);
+            conn
         };
+
+        // Increment active count
+        self.inner.active_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(PooledConnection {
             conn: Some(conn),
@@ -262,9 +336,44 @@ impl PgPool {
         self.inner.connections.lock().await.len()
     }
 
+    /// Get the number of connections currently in use.
+    pub fn active_count(&self) -> usize {
+        self.inner.active_count.load(Ordering::Relaxed)
+    }
+
     /// Get the maximum number of connections.
     pub fn max_connections(&self) -> usize {
         self.inner.config.max_connections
+    }
+
+    /// Get comprehensive pool statistics.
+    pub async fn stats(&self) -> PoolStats {
+        let idle = self.inner.connections.lock().await.len();
+        PoolStats {
+            active: self.inner.active_count.load(Ordering::Relaxed),
+            idle,
+            pending: self.inner.config.max_connections
+                - self.inner.semaphore.available_permits()
+                - self.active_count(),
+            max_size: self.inner.config.max_connections,
+            total_created: self.inner.total_created.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Check if the pool is closed.
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Relaxed)
+    }
+
+    /// Close the pool gracefully.
+    ///
+    /// Prevents new connections from being acquired.
+    /// Existing checked-out connections will be dropped when returned.
+    pub async fn close(&self) {
+        self.inner.closed.store(true, Ordering::Relaxed);
+        // Clear idle connections
+        let mut connections = self.inner.connections.lock().await;
+        connections.clear();
     }
 
     /// Create a new connection using the pool configuration.
@@ -277,15 +386,12 @@ impl PgPool {
                     &config.user,
                     &config.database,
                     Some(password),
-                ).await
+                )
+                .await
             }
             None => {
-                PgConnection::connect(
-                    &config.host,
-                    config.port,
-                    &config.user,
-                    &config.database,
-                ).await
+                PgConnection::connect(&config.host, config.port, &config.user, &config.database)
+                    .await
             }
         }
     }

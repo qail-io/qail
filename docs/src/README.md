@@ -101,6 +101,6 @@ QailCmd::get("users").filter("id", Operator::Eq, user_input)
 
 ## Getting Help
 
-- [GitHub Repository](https://github.com/qail-rs/qail)
-- [Issue Tracker](https://github.com/qail-rs/qail/issues)
+- [GitHub Repository](https://github.com/qail-io/qail)
+- [Issue Tracker](https://github.com/qail-io/qail/issues)
 

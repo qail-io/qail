@@ -1,8 +1,8 @@
 //! UPDATE SQL generation.
 
 use crate::ast::*;
-use crate::transpiler::dialect::Dialect;
 use crate::transpiler::conditions::ConditionToSql;
+use crate::transpiler::dialect::Dialect;
 
 /// Generate UPDATE SQL.
 pub fn build_update(cmd: &QailCmd, dialect: Dialect) -> String {
@@ -49,4 +49,3 @@ pub fn build_update(cmd: &QailCmd, dialect: Dialect) -> String {
 
     sql
 }
-

@@ -36,6 +36,6 @@ cargo doc --no-deps --open
 
 View the source on GitHub:
 
-- [qail-core](https://github.com/qail-rs/qail/tree/main/qail-core)
-- [qail-pg](https://github.com/qail-rs/qail/tree/main/qail-pg)
-- [qail-cli](https://github.com/qail-rs/qail/tree/main/qail-cli)
+- [qail-core](https://github.com/qail-io/qail/tree/main/qail-core)
+- [qail-pg](https://github.com/qail-io/qail/tree/main/qail-pg)
+- [qail-cli](https://github.com/qail-io/qail/tree/main/qail-cli)

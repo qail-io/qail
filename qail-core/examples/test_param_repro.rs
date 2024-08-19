@@ -2,12 +2,18 @@ use qail_core::{parse, transpiler::ToSqlParameterized};
 
 fn main() {
     let query = "get::t 'coalesce(uc.unread_count, 0)@unread_count";
-    
+
     match parse(query) {
         Ok(cmd) => {
             let res = cmd.to_sql_parameterized();
             println!("SQL: {}", res.sql);
-            if res.sql.contains("coalesce(uc.unread_count, 0) AS \"unread_count\"") || res.sql.contains("COALESCE(uc.unread_count, 0) AS \"unread_count\"") {
+            if res
+                .sql
+                .contains("coalesce(uc.unread_count, 0) AS \"unread_count\"")
+                || res
+                    .sql
+                    .contains("COALESCE(uc.unread_count, 0) AS \"unread_count\"")
+            {
                 println!("SUCCESS: Alias found correctly.");
             } else {
                 println!("FAILURE: Alias missing in parameterized SQL.");

@@ -38,11 +38,13 @@ impl PgConnection {
     /// Discards all changes since the named savepoint was created,
     /// but keeps the transaction open.
     pub async fn rollback_to(&mut self, name: &str) -> PgResult<()> {
-        self.execute_simple(&format!("ROLLBACK TO SAVEPOINT {}", name)).await
+        self.execute_simple(&format!("ROLLBACK TO SAVEPOINT {}", name))
+            .await
     }
 
     /// Release a savepoint (free resources, if no longer needed).
     pub async fn release_savepoint(&mut self, name: &str) -> PgResult<()> {
-        self.execute_simple(&format!("RELEASE SAVEPOINT {}", name)).await
+        self.execute_simple(&format!("RELEASE SAVEPOINT {}", name))
+            .await
     }
 }

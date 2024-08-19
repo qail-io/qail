@@ -5,13 +5,13 @@
 //!
 //! Returns PyBytes directly for zero-copy to Python.
 
+use crate::cmd::PyQailCmd;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use qail_pg::protocol::AstEncoder;
-use crate::cmd::PyQailCmd;
 
 /// Encode a single QailCmd to PostgreSQL wire protocol bytes.
-/// 
+///
 /// Returns bytes ready to send directly to PostgreSQL TCP socket.
 #[pyfunction]
 pub fn encode_cmd<'py>(py: Python<'py>, cmd: &PyQailCmd) -> Bound<'py, PyBytes> {
@@ -20,7 +20,7 @@ pub fn encode_cmd<'py>(py: Python<'py>, cmd: &PyQailCmd) -> Bound<'py, PyBytes> 
 }
 
 /// Encode multiple QailCmds to wire bytes for pipeline execution.
-/// 
+///
 /// All commands in one buffer for single network round-trip.
 #[pyfunction]
 pub fn encode_batch<'py>(py: Python<'py>, cmds: Vec<PyQailCmd>) -> Bound<'py, PyBytes> {

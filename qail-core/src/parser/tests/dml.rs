@@ -1,5 +1,5 @@
-use crate::parser::parse;
 use crate::ast::*;
+use crate::parser::parse;
 
 #[test]
 fn test_set_command() {
@@ -36,7 +36,10 @@ fn test_update_multiple_values() {
     assert_eq!(payload.kind, CageKind::Payload);
     assert_eq!(payload.conditions.len(), 2);
     assert_eq!(payload.conditions[0].left, Expr::Named("name".to_string()));
-    assert_eq!(payload.conditions[1].left, Expr::Named("active".to_string()));
+    assert_eq!(
+        payload.conditions[1].left,
+        Expr::Named("active".to_string())
+    );
 }
 
 #[test]

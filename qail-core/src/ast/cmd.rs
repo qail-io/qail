@@ -1,5 +1,8 @@
+use crate::ast::{
+    Action, Cage, CageKind, Condition, Expr, GroupByMode, IndexDef, Join, JoinKind, LogicalOp,
+    Operator, SetOp, SortOrder, TableConstraint, Value,
+};
 use serde::{Deserialize, Serialize};
-use crate::ast::{Action, Cage, CageKind, Expr, Condition, GroupByMode, IndexDef, Join, JoinKind, LogicalOp, Operator, SetOp, SortOrder, TableConstraint, Value};
 
 /// The primary command structure representing a parsed QAIL query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +53,15 @@ pub struct QailCmd {
     /// When present, values come from this subquery instead of VALUES clause
     #[serde(default)]
     pub source_query: Option<Box<QailCmd>>,
+    /// Channel name for LISTEN/NOTIFY operations
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// Payload for NOTIFY operations
+    #[serde(default)]
+    pub payload: Option<String>,
+    /// Savepoint name for SAVEPOINT/RELEASE/ROLLBACK TO operations
+    #[serde(default)]
+    pub savepoint_name: Option<String>,
 }
 
 /// CTE (Common Table Expression) definition
@@ -118,6 +130,9 @@ impl Default for QailCmd {
             returning: None,
             on_conflict: None,
             source_query: None,
+            channel: None,
+            payload: None,
+            savepoint_name: None,
         }
     }
 }
@@ -128,20 +143,7 @@ impl QailCmd {
         Self {
             action: Action::Get,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -150,20 +152,7 @@ impl QailCmd {
         Self {
             action: Action::Get,
             table: sql.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -172,20 +161,7 @@ impl QailCmd {
         Self {
             action: Action::Set,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -194,20 +170,7 @@ impl QailCmd {
         Self {
             action: Action::Del,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -216,20 +179,7 @@ impl QailCmd {
         Self {
             action: Action::Add,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -238,58 +188,18 @@ impl QailCmd {
         Self {
             action: Action::Put,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
     /// Create a new EXPORT (COPY TO STDOUT) command for the given table.
-    /// 
+    ///
     /// Used for bulk data export via PostgreSQL COPY protocol.
-    /// 
-    /// # Example
-    /// ```
-    /// use qail_core::ast::{QailCmd, Operator};
-    /// 
-    /// // Export all users
-    /// let cmd = QailCmd::export("users")
-    ///     .columns(["id", "name", "email"]);
-    /// 
-    /// // Export with filter
-    /// let cmd = QailCmd::export("users")
-    ///     .columns(["id", "name"])
-    ///     .filter("active", Operator::Eq, true);
-    /// ```
     pub fn export(table: impl Into<String>) -> Self {
         Self {
             action: Action::Export,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -298,27 +208,14 @@ impl QailCmd {
         Self {
             action: Action::Make,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
     /// Create a new TRUNCATE command for the given table.
-    /// 
+    ///
     /// TRUNCATE is faster than DELETE for removing all rows.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -333,7 +230,7 @@ impl QailCmd {
     }
 
     /// Create an EXPLAIN command to analyze a query's execution plan.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -349,7 +246,7 @@ impl QailCmd {
     }
 
     /// Create an EXPLAIN ANALYZE command to execute and analyze a query.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -365,7 +262,7 @@ impl QailCmd {
     }
 
     /// Create a LOCK TABLE command for explicit table locking.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -381,16 +278,16 @@ impl QailCmd {
     }
 
     /// Create a materialized view from a query.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::{QailCmd, Operator};
-    /// 
+    ///
     /// // Create view definition query
     /// let view_query = QailCmd::get("users")
     ///     .columns(["id", "name"])
     ///     .filter("active", Operator::Eq, true);
-    /// 
+    ///
     /// // Create the materialized view
     /// let cmd = QailCmd::create_materialized_view("active_users", view_query);
     /// // Generates: CREATE MATERIALIZED VIEW active_users AS SELECT id, name FROM users WHERE active = true
@@ -405,7 +302,7 @@ impl QailCmd {
     }
 
     /// Refresh a materialized view to update its data.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -421,7 +318,7 @@ impl QailCmd {
     }
 
     /// Drop a materialized view.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -487,7 +384,7 @@ impl QailCmd {
     // =========================================================================
 
     /// Select all columns (*).
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -499,18 +396,21 @@ impl QailCmd {
     }
 
     /// Select specific columns.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
     /// let cmd = QailCmd::get("users").columns(["id", "email", "name"]);
     /// ```
-    pub fn columns<I, S>(mut self, cols: I) -> Self 
+    pub fn columns<I, S>(mut self, cols: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.columns.extend(cols.into_iter().map(|c| Expr::Named(c.as_ref().to_string())));
+        self.columns.extend(
+            cols.into_iter()
+                .map(|c| Expr::Named(c.as_ref().to_string())),
+        );
         self
     }
 
@@ -521,7 +421,7 @@ impl QailCmd {
     }
 
     /// Add a filter condition with a specific operator.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::{QailCmd, Operator};
@@ -529,17 +429,25 @@ impl QailCmd {
     ///     .filter("age", Operator::Gte, 18)
     ///     .filter("status", Operator::Eq, "active");
     /// ```
-    pub fn filter(mut self, column: impl AsRef<str>, op: Operator, value: impl Into<Value>) -> Self {
+    pub fn filter(
+        mut self,
+        column: impl AsRef<str>,
+        op: Operator,
+        value: impl Into<Value>,
+    ) -> Self {
         // Check if there's already a Filter cage to add to
-        let filter_cage = self.cages.iter_mut().find(|c| matches!(c.kind, CageKind::Filter));
-        
+        let filter_cage = self
+            .cages
+            .iter_mut()
+            .find(|c| matches!(c.kind, CageKind::Filter));
+
         let condition = Condition {
             left: Expr::Named(column.as_ref().to_string()),
             op,
             value: value.into(),
             is_array_unnest: false,
         };
-        
+
         if let Some(cage) = filter_cage {
             cage.conditions.push(condition);
         } else {
@@ -553,7 +461,12 @@ impl QailCmd {
     }
 
     /// Add an OR filter condition.
-    pub fn or_filter(mut self, column: impl AsRef<str>, op: Operator, value: impl Into<Value>) -> Self {
+    pub fn or_filter(
+        mut self,
+        column: impl AsRef<str>,
+        op: Operator,
+        value: impl Into<Value>,
+    ) -> Self {
         self.cages.push(Cage {
             kind: CageKind::Filter,
             conditions: vec![Condition {
@@ -568,7 +481,7 @@ impl QailCmd {
     }
 
     /// Add a WHERE equals condition (shorthand for filter with Eq).
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -579,7 +492,7 @@ impl QailCmd {
     }
 
     /// Add ORDER BY clause.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::{QailCmd, SortOrder};
@@ -602,7 +515,7 @@ impl QailCmd {
     }
 
     /// ORDER BY column DESC shorthand.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -628,7 +541,7 @@ impl QailCmd {
     }
 
     /// Add GROUP BY columns.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -636,19 +549,22 @@ impl QailCmd {
     ///     .columns(["status", "count(*) as cnt"])
     ///     .group_by(["status"]);
     /// ```
-    pub fn group_by<I, S>(mut self, cols: I) -> Self 
+    pub fn group_by<I, S>(mut self, cols: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
         // Use Partition cage kind for GROUP BY (closest match)
-        let conditions: Vec<Condition> = cols.into_iter().map(|c| Condition {
-            left: Expr::Named(c.as_ref().to_string()),
-            op: Operator::Eq,
-            value: Value::Null,
-            is_array_unnest: false,
-        }).collect();
-        
+        let conditions: Vec<Condition> = cols
+            .into_iter()
+            .map(|c| Condition {
+                left: Expr::Named(c.as_ref().to_string()),
+                op: Operator::Eq,
+                value: Value::Null,
+                is_array_unnest: false,
+            })
+            .collect();
+
         self.cages.push(Cage {
             kind: CageKind::Partition,
             conditions,
@@ -664,7 +580,7 @@ impl QailCmd {
     }
 
     /// Add a JOIN.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::{QailCmd, JoinKind};
@@ -672,11 +588,11 @@ impl QailCmd {
     ///     .join(JoinKind::Left, "profiles", "users.id", "profiles.user_id");
     /// ```
     pub fn join(
-        mut self, 
-        kind: JoinKind, 
-        table: impl AsRef<str>, 
-        left_col: impl AsRef<str>, 
-        right_col: impl AsRef<str>
+        mut self,
+        kind: JoinKind,
+        table: impl AsRef<str>,
+        left_col: impl AsRef<str>,
+        right_col: impl AsRef<str>,
     ) -> Self {
         self.joins.push(Join {
             kind,
@@ -693,22 +609,36 @@ impl QailCmd {
     }
 
     /// Left join shorthand.
-    pub fn left_join(self, table: impl AsRef<str>, left_col: impl AsRef<str>, right_col: impl AsRef<str>) -> Self {
+    pub fn left_join(
+        self,
+        table: impl AsRef<str>,
+        left_col: impl AsRef<str>,
+        right_col: impl AsRef<str>,
+    ) -> Self {
         self.join(JoinKind::Left, table, left_col, right_col)
     }
 
     /// Inner join shorthand.
-    pub fn inner_join(self, table: impl AsRef<str>, left_col: impl AsRef<str>, right_col: impl AsRef<str>) -> Self {
+    pub fn inner_join(
+        self,
+        table: impl AsRef<str>,
+        left_col: impl AsRef<str>,
+        right_col: impl AsRef<str>,
+    ) -> Self {
         self.join(JoinKind::Inner, table, left_col, right_col)
     }
 
     /// Set RETURNING clause for INSERT/UPDATE/DELETE.
-    pub fn returning<I, S>(mut self, cols: I) -> Self 
+    pub fn returning<I, S>(mut self, cols: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.returning = Some(cols.into_iter().map(|c| Expr::Named(c.as_ref().to_string())).collect());
+        self.returning = Some(
+            cols.into_iter()
+                .map(|c| Expr::Named(c.as_ref().to_string()))
+                .collect(),
+        );
         self
     }
 
@@ -719,7 +649,7 @@ impl QailCmd {
     }
 
     /// Set values for INSERT.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -727,7 +657,7 @@ impl QailCmd {
     ///     .columns(["email", "name"])
     ///     .values(["alice@example.com", "Alice"]);
     /// ```
-    pub fn values<I, V>(mut self, vals: I) -> Self 
+    pub fn values<I, V>(mut self, vals: I) -> Self
     where
         I: IntoIterator<Item = V>,
         V: Into<Value>,
@@ -735,19 +665,23 @@ impl QailCmd {
         // Use Payload cage kind for INSERT values
         self.cages.push(Cage {
             kind: CageKind::Payload,
-            conditions: vals.into_iter().enumerate().map(|(i, v)| Condition {
-                left: Expr::Named(format!("${}", i + 1)),
-                op: Operator::Eq,
-                value: v.into(),
-                is_array_unnest: false,
-            }).collect(),
+            conditions: vals
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| Condition {
+                    left: Expr::Named(format!("${}", i + 1)),
+                    op: Operator::Eq,
+                    value: v.into(),
+                    is_array_unnest: false,
+                })
+                .collect(),
             logical_op: LogicalOp::And,
         });
         self
     }
 
     /// Set update assignments for SET command.
-    /// 
+    ///
     /// # Example
     /// ```
     /// use qail_core::ast::QailCmd;
@@ -758,15 +692,18 @@ impl QailCmd {
     /// ```
     pub fn set_value(mut self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         // Find or create Payload cage for SET assignments
-        let payload_cage = self.cages.iter_mut().find(|c| matches!(c.kind, CageKind::Payload));
-        
+        let payload_cage = self
+            .cages
+            .iter_mut()
+            .find(|c| matches!(c.kind, CageKind::Payload));
+
         let condition = Condition {
             left: Expr::Named(column.as_ref().to_string()),
             op: Operator::Eq,
             value: value.into(),
             is_array_unnest: false,
         };
-        
+
         if let Some(cage) = payload_cage {
             cage.conditions.push(condition);
         } else {
@@ -784,7 +721,7 @@ impl QailCmd {
     // =========================================================================
 
     /// Wrap this query as a CTE with the given name.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cte = QailCmd::get("employees")
@@ -794,14 +731,16 @@ impl QailCmd {
     /// ```
     pub fn as_cte(self, name: impl Into<String>) -> Self {
         let cte_name = name.into();
-        let columns: Vec<String> = self.columns.iter().filter_map(|c| {
-            match c {
+        let columns: Vec<String> = self
+            .columns
+            .iter()
+            .filter_map(|c| match c {
                 Expr::Named(n) => Some(n.clone()),
                 Expr::Aliased { alias, .. } => Some(alias.clone()),
                 _ => None,
-            }
-        }).collect();
-        
+            })
+            .collect();
+
         Self {
             action: Action::With,
             table: cte_name.clone(),
@@ -818,6 +757,9 @@ impl QailCmd {
             returning: None,
             on_conflict: None,
             source_query: None,
+            channel: None,
+            payload: None,
+            savepoint_name: None,
             ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,
@@ -830,7 +772,7 @@ impl QailCmd {
     }
 
     /// Make this CTE recursive and add the recursive part.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let recursive_cte = base_query
@@ -854,7 +796,7 @@ impl QailCmd {
     }
 
     /// Chain a final SELECT from the CTE.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let final_query = cte.select_from_cte(&["id", "name", "level"]);
@@ -869,7 +811,7 @@ impl QailCmd {
     // =========================================================================
 
     /// Add an expression column (for aggregates, functions, CASE WHEN, etc.)
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// use qail_core::ast::{QailCmd, Expr, AggregateFunc};
@@ -888,8 +830,8 @@ impl QailCmd {
     }
 
     /// Add multiple expression columns.
-    pub fn columns_expr<I>(mut self, exprs: I) -> Self 
-    where 
+    pub fn columns_expr<I>(mut self, exprs: I) -> Self
+    where
         I: IntoIterator<Item = Expr>,
     {
         self.columns.extend(exprs);
@@ -897,7 +839,7 @@ impl QailCmd {
     }
 
     /// Add DISTINCT ON expressions (PostgreSQL-specific).
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmd = QailCmd::get("messages")
@@ -906,20 +848,21 @@ impl QailCmd {
     ///     .order_by("phone_number", SortOrder::Asc)
     ///     .order_by("created_at", SortOrder::Desc);
     /// ```
-    pub fn distinct_on<I, S>(mut self, cols: I) -> Self 
-    where 
+    pub fn distinct_on<I, S>(mut self, cols: I) -> Self
+    where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.distinct_on = cols.into_iter()
+        self.distinct_on = cols
+            .into_iter()
             .map(|c| Expr::Named(c.as_ref().to_string()))
             .collect();
         self
     }
 
     /// Add DISTINCT ON with expression columns.
-    pub fn distinct_on_expr<I>(mut self, exprs: I) -> Self 
-    where 
+    pub fn distinct_on_expr<I>(mut self, exprs: I) -> Self
+    where
         I: IntoIterator<Item = Expr>,
     {
         self.distinct_on = exprs.into_iter().collect();
@@ -927,13 +870,13 @@ impl QailCmd {
     }
 
     /// Add a filter condition using an expression (for JSON, function results, etc.)
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmd = QailCmd::get("orders")
     ///     .filter_cond(Condition {
-    ///         left: Expr::JsonAccess { 
-    ///             column: "data".to_string(), 
+    ///         left: Expr::JsonAccess {
+    ///             column: "data".to_string(),
     ///             path_segments: vec![("status".to_string(), true)],
     ///             alias: None,
     ///         },
@@ -943,8 +886,11 @@ impl QailCmd {
     ///     });
     /// ```
     pub fn filter_cond(mut self, condition: Condition) -> Self {
-        let filter_cage = self.cages.iter_mut().find(|c| matches!(c.kind, CageKind::Filter));
-        
+        let filter_cage = self
+            .cages
+            .iter_mut()
+            .find(|c| matches!(c.kind, CageKind::Filter));
+
         if let Some(cage) = filter_cage {
             cage.conditions.push(condition);
         } else {
@@ -958,7 +904,7 @@ impl QailCmd {
     }
 
     /// Add CTEs to this query.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmd = QailCmd::get("cte_results")
@@ -977,18 +923,18 @@ impl QailCmd {
     }
 
     /// LEFT JOIN with table alias support.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmd = QailCmd::get("users")
     ///     .left_join_as("profiles", "p", "users.id", "p.user_id");
     /// ```
     pub fn left_join_as(
-        mut self, 
-        table: impl AsRef<str>, 
+        mut self,
+        table: impl AsRef<str>,
         alias: impl AsRef<str>,
-        left_col: impl AsRef<str>, 
-        right_col: impl AsRef<str>
+        left_col: impl AsRef<str>,
+        right_col: impl AsRef<str>,
     ) -> Self {
         self.joins.push(Join {
             kind: JoinKind::Left,
@@ -1006,11 +952,11 @@ impl QailCmd {
 
     /// INNER JOIN with table alias support.
     pub fn inner_join_as(
-        mut self, 
-        table: impl AsRef<str>, 
+        mut self,
+        table: impl AsRef<str>,
         alias: impl AsRef<str>,
-        left_col: impl AsRef<str>, 
-        right_col: impl AsRef<str>
+        left_col: impl AsRef<str>,
+        right_col: impl AsRef<str>,
     ) -> Self {
         self.joins.push(Join {
             kind: JoinKind::Inner,
@@ -1027,7 +973,7 @@ impl QailCmd {
     }
 
     /// Set table alias for the main table.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmd = QailCmd::get("users").table_alias("u");
@@ -1053,17 +999,20 @@ impl QailCmd {
     }
 
     /// Group by expressions (for complex GROUP BY like JSON accessors).
-    pub fn group_by_expr<I>(mut self, exprs: I) -> Self 
-    where 
+    pub fn group_by_expr<I>(mut self, exprs: I) -> Self
+    where
         I: IntoIterator<Item = Expr>,
     {
-        let conditions: Vec<Condition> = exprs.into_iter().map(|e| Condition {
-            left: e,
-            op: Operator::Eq,
-            value: Value::Null,
-            is_array_unnest: false,
-        }).collect();
-        
+        let conditions: Vec<Condition> = exprs
+            .into_iter()
+            .map(|e| Condition {
+                left: e,
+                op: Operator::Eq,
+                value: Value::Null,
+                is_array_unnest: false,
+            })
+            .collect();
+
         self.cages.push(Cage {
             kind: CageKind::Partition,
             conditions,
