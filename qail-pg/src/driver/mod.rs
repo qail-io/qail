@@ -34,7 +34,7 @@ pub use connection::PgConnection;
 pub use connection::TlsConfig;
 pub(crate) use connection::{CANCEL_REQUEST_CODE, parse_affected_rows};
 pub use io_backend::{IoBackend, backend_name, detect as detect_io_backend};
-pub use pool::{PgPool, PoolConfig, PooledConnection};
+pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection};
 pub use prepared::PreparedStatement;
 
 use qail_core::ast::QailCmd;
@@ -231,6 +231,34 @@ impl PgDriver {
     pub async fn fetch_one(&mut self, cmd: &QailCmd) -> PgResult<PgRow> {
         let rows = self.fetch_all(cmd).await?;
         rows.into_iter().next().ok_or(PgError::NoRows)
+    }
+
+    /// Execute a QAIL command with PREPARED STATEMENT CACHING.
+    ///
+    /// Like fetch_all(), but caches the prepared statement on the server.
+    /// On first call: sends Parse + Bind + Execute + Sync
+    /// On subsequent calls: sends only Bind + Execute + Sync (much faster!)
+    ///
+    /// Use this for repeated queries with the same AST structure.
+    pub async fn fetch_all_cached(&mut self, cmd: &QailCmd) -> PgResult<Vec<PgRow>> {
+        use crate::protocol::AstEncoder;
+
+        // Generate SQL and params from AST (for caching)
+        let (sql, params) = AstEncoder::encode_cmd_sql(cmd);
+
+        // Use cached query - only parses on first call
+        let raw_rows = self.connection.query_cached(&sql, &params).await?;
+
+        // Convert to PgRow with column info
+        let rows: Vec<PgRow> = raw_rows
+            .into_iter()
+            .map(|data| PgRow {
+                columns: data,
+                column_info: None, // Simple version - no column metadata
+            })
+            .collect();
+
+        Ok(rows)
     }
 
     /// Execute a QAIL command (for mutations) - AST-NATIVE.
