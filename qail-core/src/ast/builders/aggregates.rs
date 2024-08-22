@@ -79,6 +79,61 @@ pub fn max(column: &str) -> AggregateBuilder {
     }
 }
 
+/// ARRAY_AGG(column) - collect all values into an array
+pub fn array_agg(column: &str) -> AggregateBuilder {
+    AggregateBuilder {
+        col: column.to_string(),
+        func: AggregateFunc::ArrayAgg,
+        distinct: false,
+        filter: None,
+        alias: None,
+    }
+}
+
+/// JSON_AGG(column) - aggregate values as JSON array
+pub fn json_agg(column: &str) -> AggregateBuilder {
+    AggregateBuilder {
+        col: column.to_string(),
+        func: AggregateFunc::JsonAgg,
+        distinct: false,
+        filter: None,
+        alias: None,
+    }
+}
+
+/// JSONB_AGG(column) - aggregate values as JSONB array
+pub fn jsonb_agg(column: &str) -> AggregateBuilder {
+    AggregateBuilder {
+        col: column.to_string(),
+        func: AggregateFunc::JsonbAgg,
+        distinct: false,
+        filter: None,
+        alias: None,
+    }
+}
+
+/// BOOL_AND(column) - returns TRUE if all values are true
+pub fn bool_and(column: &str) -> AggregateBuilder {
+    AggregateBuilder {
+        col: column.to_string(),
+        func: AggregateFunc::BoolAnd,
+        distinct: false,
+        filter: None,
+        alias: None,
+    }
+}
+
+/// BOOL_OR(column) - returns TRUE if any value is true
+pub fn bool_or(column: &str) -> AggregateBuilder {
+    AggregateBuilder {
+        col: column.to_string(),
+        func: AggregateFunc::BoolOr,
+        distinct: false,
+        filter: None,
+        alias: None,
+    }
+}
+
 /// Builder for aggregate expressions
 #[derive(Debug, Clone)]
 pub struct AggregateBuilder {

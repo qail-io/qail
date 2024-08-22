@@ -7,8 +7,24 @@ use crate::transpiler::dialect::Dialect;
 /// Generate DELETE SQL.
 pub fn build_delete(cmd: &QailCmd, dialect: Dialect) -> String {
     let generator = dialect.generator();
-    let mut sql = String::from("DELETE FROM ");
+    let mut sql = if cmd.only_table {
+        String::from("DELETE FROM ONLY ")
+    } else {
+        String::from("DELETE FROM ")
+    };
     sql.push_str(&generator.quote_identifier(&cmd.table));
+
+    // USING clause (multi-table delete)
+    if !cmd.using_tables.is_empty() {
+        sql.push_str(" USING ");
+        sql.push_str(
+            &cmd.using_tables
+                .iter()
+                .map(|t| generator.quote_identifier(t))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
 
     // Process WHERE clauses
     let mut where_clauses: Vec<String> = Vec::new();
