@@ -38,6 +38,29 @@ pub trait ExprExt {
     /// col("metadata").path("vessel.0.port")  // metadata->'vessel'->0->>'port'
     /// ```
     fn path(self, dotted_path: &str) -> JsonBuilder;
+
+    /// Cast to a type: CAST(expr AS type)
+    ///
+    /// # Example
+    /// ```ignore
+    /// col("value").cast("int")  // CAST(value AS int)
+    /// ```
+    fn cast(self, target_type: &str) -> Expr;
+
+    /// UPPER(expr)
+    fn upper(self) -> Expr;
+
+    /// LOWER(expr)
+    fn lower(self) -> Expr;
+
+    /// TRIM(expr)
+    fn trim(self) -> Expr;
+
+    /// LENGTH(expr)
+    fn length(self) -> Expr;
+
+    /// ABS(expr)
+    fn abs(self) -> Expr;
 }
 
 impl ExprExt for Expr {
@@ -147,6 +170,54 @@ impl ExprExt for Expr {
             alias: None,
         }
     }
+
+    fn cast(self, target_type: &str) -> Expr {
+        Expr::Cast {
+            expr: Box::new(self),
+            target_type: target_type.to_string(),
+            alias: None,
+        }
+    }
+
+    fn upper(self) -> Expr {
+        Expr::FunctionCall {
+            name: "UPPER".to_string(),
+            args: vec![self],
+            alias: None,
+        }
+    }
+
+    fn lower(self) -> Expr {
+        Expr::FunctionCall {
+            name: "LOWER".to_string(),
+            args: vec![self],
+            alias: None,
+        }
+    }
+
+    fn trim(self) -> Expr {
+        Expr::FunctionCall {
+            name: "TRIM".to_string(),
+            args: vec![self],
+            alias: None,
+        }
+    }
+
+    fn length(self) -> Expr {
+        Expr::FunctionCall {
+            name: "LENGTH".to_string(),
+            args: vec![self],
+            alias: None,
+        }
+    }
+
+    fn abs(self) -> Expr {
+        Expr::FunctionCall {
+            name: "ABS".to_string(),
+            args: vec![self],
+            alias: None,
+        }
+    }
 }
 
 // Implement ExprExt for &str to enable: "col_name".or_default("X")
@@ -189,6 +260,54 @@ impl ExprExt for &str {
             alias: None,
         }
     }
+
+    fn cast(self, target_type: &str) -> Expr {
+        Expr::Cast {
+            expr: Box::new(Expr::Named(self.to_string())),
+            target_type: target_type.to_string(),
+            alias: None,
+        }
+    }
+
+    fn upper(self) -> Expr {
+        Expr::FunctionCall {
+            name: "UPPER".to_string(),
+            args: vec![Expr::Named(self.to_string())],
+            alias: None,
+        }
+    }
+
+    fn lower(self) -> Expr {
+        Expr::FunctionCall {
+            name: "LOWER".to_string(),
+            args: vec![Expr::Named(self.to_string())],
+            alias: None,
+        }
+    }
+
+    fn trim(self) -> Expr {
+        Expr::FunctionCall {
+            name: "TRIM".to_string(),
+            args: vec![Expr::Named(self.to_string())],
+            alias: None,
+        }
+    }
+
+    fn length(self) -> Expr {
+        Expr::FunctionCall {
+            name: "LENGTH".to_string(),
+            args: vec![Expr::Named(self.to_string())],
+            alias: None,
+        }
+    }
+
+    fn abs(self) -> Expr {
+        Expr::FunctionCall {
+            name: "ABS".to_string(),
+            args: vec![Expr::Named(self.to_string())],
+            alias: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -225,5 +344,29 @@ mod tests {
     fn test_str_or_default() {
         let expr = "name".or_default("N/A");
         assert!(matches!(expr, Expr::FunctionCall { name, .. } if name == "COALESCE"));
+    }
+
+    #[test]
+    fn test_cast_fluent() {
+        let expr = col("value").cast("int4");
+        assert!(matches!(expr, Expr::Cast { target_type, .. } if target_type == "int4"));
+    }
+
+    #[test]
+    fn test_upper_fluent() {
+        let expr = col("name").upper();
+        assert!(matches!(expr, Expr::FunctionCall { name, .. } if name == "UPPER"));
+    }
+
+    #[test]
+    fn test_lower_fluent() {
+        let expr = "email".lower();
+        assert!(matches!(expr, Expr::FunctionCall { name, .. } if name == "LOWER"));
+    }
+
+    #[test]
+    fn test_trim_fluent() {
+        let expr = col("text").trim();
+        assert!(matches!(expr, Expr::FunctionCall { name, .. } if name == "TRIM"));
     }
 }

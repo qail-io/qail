@@ -347,20 +347,36 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
         sql.push_str(&cols.join(", "));
     }
 
-    // FROM
-    sql.push_str(" FROM ");
+    // FROM (with optional ONLY for inheritance control)
+    if cmd.only_table {
+        sql.push_str(" FROM ONLY ");
+    } else {
+        sql.push_str(" FROM ");
+    }
     sql.push_str(&generator.quote_identifier(&cmd.table));
 
-    // Check for TABLESAMPLE (Postgres/Standard SQL) - handle early before joins
-    let sample_percent = cmd.cages.iter().find_map(|c| {
-        if let CageKind::Sample(pct) = c.kind {
-            Some(pct)
-        } else {
-            None
+    // TABLESAMPLE - check new sample field first, then legacy CageKind::Sample
+    if let Some((method, percent, seed)) = &cmd.sample {
+        let method_str = match method {
+            SampleMethod::Bernoulli => "BERNOULLI",
+            SampleMethod::System => "SYSTEM",
+        };
+        sql.push_str(&format!(" TABLESAMPLE {}({})", method_str, percent));
+        if let Some(s) = seed {
+            sql.push_str(&format!(" REPEATABLE({})", s));
         }
-    });
-    if let Some(pct) = sample_percent {
-        sql.push_str(&format!(" TABLESAMPLE BERNOULLI({})", pct));
+    } else {
+        // Legacy CageKind::Sample support
+        let sample_percent = cmd.cages.iter().find_map(|c| {
+            if let CageKind::Sample(pct) = c.kind {
+                Some(pct)
+            } else {
+                None
+            }
+        });
+        if let Some(pct) = sample_percent {
+            sql.push_str(&format!(" TABLESAMPLE BERNOULLI({})", pct));
+        }
     }
 
     // JOINS
@@ -572,6 +588,25 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
             SetOp::Except => "EXCEPT",
         };
         sql.push_str(&format!(" {} {}", op_str, build_select(other_cmd, dialect)));
+    }
+
+    // FETCH clause (SQL standard alternative to LIMIT)
+    if let Some((count, with_ties)) = cmd.fetch {
+        if with_ties {
+            sql.push_str(&format!(" FETCH FIRST {} ROWS WITH TIES", count));
+        } else {
+            sql.push_str(&format!(" FETCH FIRST {} ROWS ONLY", count));
+        }
+    }
+
+    // FOR UPDATE/SHARE (row locking)
+    if let Some(lock) = &cmd.lock_mode {
+        match lock {
+            LockMode::Update => sql.push_str(" FOR UPDATE"),
+            LockMode::NoKeyUpdate => sql.push_str(" FOR NO KEY UPDATE"),
+            LockMode::Share => sql.push_str(" FOR SHARE"),
+            LockMode::KeyShare => sql.push_str(" FOR KEY SHARE"),
+        }
     }
 
     sql

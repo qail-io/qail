@@ -20,8 +20,19 @@ pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
         sql.push(')');
     }
 
-    // INSERT...SELECT: use source_query if present
-    if let Some(ref source_query) = cmd.source_query {
+    // OVERRIDING clause for GENERATED columns
+    if let Some(ref overriding) = cmd.overriding {
+        match overriding {
+            OverridingKind::SystemValue => sql.push_str(" OVERRIDING SYSTEM VALUE"),
+            OverridingKind::UserValue => sql.push_str(" OVERRIDING USER VALUE"),
+        }
+    }
+
+    // DEFAULT VALUES - insert a row with all defaults
+    if cmd.default_values {
+        sql.push_str(" DEFAULT VALUES");
+    } else if let Some(ref source_query) = cmd.source_query {
+        // INSERT...SELECT: use source_query if present
         use crate::transpiler::ToSql;
         sql.push(' ');
         sql.push_str(&source_query.to_sql_with_dialect(dialect));
