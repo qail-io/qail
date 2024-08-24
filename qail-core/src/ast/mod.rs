@@ -16,6 +16,7 @@ pub use self::expr::{
 };
 pub use self::joins::Join;
 pub use self::operators::{
-    Action, AggregateFunc, GroupByMode, JoinKind, LogicalOp, ModKind, Operator, SetOp, SortOrder,
+    Action, AggregateFunc, GroupByMode, JoinKind, LockMode, LogicalOp, ModKind, Operator,
+    OverridingKind, SampleMethod, SetOp, SortOrder,
 };
 pub use self::values::Value;

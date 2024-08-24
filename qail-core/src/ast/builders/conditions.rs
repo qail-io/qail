@@ -74,6 +74,43 @@ pub fn ilike(column: &str, pattern: &str) -> Condition {
     make_condition(column, Operator::ILike, Value::String(pattern.to_string()))
 }
 
+/// Create a NOT LIKE condition
+pub fn not_like(column: &str, pattern: &str) -> Condition {
+    make_condition(column, Operator::NotLike, Value::String(pattern.to_string()))
+}
+
+/// Create a BETWEEN condition (column BETWEEN low AND high)
+pub fn between(column: &str, low: impl Into<Value>, high: impl Into<Value>) -> Condition {
+    make_condition(column, Operator::Between, Value::Array(vec![low.into(), high.into()]))
+}
+
+/// Create a NOT BETWEEN condition
+pub fn not_between(column: &str, low: impl Into<Value>, high: impl Into<Value>) -> Condition {
+    make_condition(column, Operator::NotBetween, Value::Array(vec![low.into(), high.into()]))
+}
+
+/// Create a regex match condition (column ~ pattern)
+pub fn regex(column: &str, pattern: &str) -> Condition {
+    make_condition(column, Operator::Regex, Value::String(pattern.to_string()))
+}
+
+/// Create a case-insensitive regex match (column ~* pattern)
+pub fn regex_i(column: &str, pattern: &str) -> Condition {
+    make_condition(column, Operator::RegexI, Value::String(pattern.to_string()))
+}
+
+/// Create an array/JSONB containment condition (column @> value)
+pub fn contains<V: Into<Value>>(column: &str, values: impl IntoIterator<Item = V>) -> Condition {
+    let vals: Vec<Value> = values.into_iter().map(|v| v.into()).collect();
+    make_condition(column, Operator::Contains, Value::Array(vals))
+}
+
+/// Create an array overlap condition (column && values)
+pub fn overlaps<V: Into<Value>>(column: &str, values: impl IntoIterator<Item = V>) -> Condition {
+    let vals: Vec<Value> = values.into_iter().map(|v| v.into()).collect();
+    make_condition(column, Operator::Overlaps, Value::Array(vals))
+}
+
 /// Create a condition with an expression on the left side (for JSON, functions, etc.)
 pub fn cond(left: Expr, op: Operator, value: impl Into<Value>) -> Condition {
     Condition {
@@ -82,4 +119,14 @@ pub fn cond(left: Expr, op: Operator, value: impl Into<Value>) -> Condition {
         value: value.into(),
         is_array_unnest: false,
     }
+}
+
+/// Create a SIMILAR TO pattern condition
+pub fn similar_to(column: &str, pattern: &str) -> Condition {
+    make_condition(column, Operator::SimilarTo, Value::String(pattern.to_string()))
+}
+
+/// Create a JSON key exists condition (column ? 'key')
+pub fn key_exists(column: &str, key: &str) -> Condition {
+    make_condition(column, Operator::KeyExists, Value::String(key.to_string()))
 }
