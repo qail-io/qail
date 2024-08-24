@@ -44,6 +44,24 @@ pub enum ColumnType {
     Time,
     /// BYTEA (binary data)
     Bytea,
+    // ==================== Phase 6: ARRAY/ENUM ====================
+    /// ARRAY type (e.g., text[], integer[])
+    Array(Box<ColumnType>),
+    /// Custom ENUM type
+    Enum {
+        name: String,
+        values: Vec<String>,
+    },
+    /// INT4RANGE, INT8RANGE, etc.
+    Range(String),
+    /// INTERVAL
+    Interval,
+    /// CIDR
+    Cidr,
+    /// INET
+    Inet,
+    /// MACADDR
+    MacAddr,
 }
 
 impl ColumnType {
@@ -71,6 +89,14 @@ impl ColumnType {
             Self::Date => "DATE".to_string(),
             Self::Time => "TIME".to_string(),
             Self::Bytea => "BYTEA".to_string(),
+            // Phase 6: ARRAY/ENUM
+            Self::Array(inner) => format!("{}[]", inner.to_pg_type()),
+            Self::Enum { name, .. } => name.clone(),
+            Self::Range(name) => name.clone(),
+            Self::Interval => "INTERVAL".to_string(),
+            Self::Cidr => "CIDR".to_string(),
+            Self::Inet => "INET".to_string(),
+            Self::MacAddr => "MACADDR".to_string(),
         }
     }
 
@@ -97,7 +123,7 @@ impl ColumnType {
     }
 
     /// Get a human-readable name for error messages.
-    pub const fn name(&self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             Self::Uuid => "UUID",
             Self::Text => "TEXT",
@@ -115,6 +141,13 @@ impl ColumnType {
             Self::Date => "DATE",
             Self::Time => "TIME",
             Self::Bytea => "BYTEA",
+            Self::Array(_) => "ARRAY",
+            Self::Enum { .. } => "ENUM",
+            Self::Range(_) => "RANGE",
+            Self::Interval => "INTERVAL",
+            Self::Cidr => "CIDR",
+            Self::Inet => "INET",
+            Self::MacAddr => "MACADDR",
         }
     }
 }
