@@ -1,6 +1,6 @@
 use crate::ast::{
-    Action, Cage, CageKind, Condition, Expr, GroupByMode, IndexDef, Join, JoinKind, LogicalOp,
-    Operator, SetOp, SortOrder, TableConstraint, Value,
+    Action, Cage, CageKind, Condition, Expr, GroupByMode, IndexDef, Join, JoinKind, LockMode,
+    LogicalOp, Operator, OverridingKind, SampleMethod, SetOp, SortOrder, TableConstraint, Value,
 };
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +62,30 @@ pub struct QailCmd {
     /// Savepoint name for SAVEPOINT/RELEASE/ROLLBACK TO operations
     #[serde(default)]
     pub savepoint_name: Option<String>,
+    /// FROM clause for UPDATE...FROM (multi-table update)
+    #[serde(default)]
+    pub from_tables: Vec<String>,
+    /// USING clause for DELETE...USING (multi-table delete)
+    #[serde(default)]
+    pub using_tables: Vec<String>,
+    /// Row locking mode for SELECT...FOR UPDATE/SHARE
+    #[serde(default)]
+    pub lock_mode: Option<LockMode>,
+    /// FETCH clause: (count, with_ties). Alternative to LIMIT per SQL standard.
+    #[serde(default)]
+    pub fetch: Option<(u64, bool)>,
+    /// DEFAULT VALUES for INSERT (insert a row with all defaults)
+    #[serde(default)]
+    pub default_values: bool,
+    /// OVERRIDING clause for INSERT (SYSTEM VALUE or USER VALUE)
+    #[serde(default)]
+    pub overriding: Option<OverridingKind>,
+    /// TABLESAMPLE: (method, percentage, optional seed for REPEATABLE)
+    #[serde(default)]
+    pub sample: Option<(SampleMethod, f64, Option<u64>)>,
+    /// ONLY - select/update/delete without child tables (inheritance)
+    #[serde(default)]
+    pub only_table: bool,
 }
 
 /// CTE (Common Table Expression) definition
@@ -133,6 +157,14 @@ impl Default for QailCmd {
             channel: None,
             payload: None,
             savepoint_name: None,
+            from_tables: vec![],
+            using_tables: vec![],
+            lock_mode: None,
+            fetch: None,
+            default_values: false,
+            overriding: None,
+            sample: None,
+            only_table: false,
         }
     }
 }
@@ -760,6 +792,14 @@ impl QailCmd {
             channel: None,
             payload: None,
             savepoint_name: None,
+            from_tables: vec![],
+            using_tables: vec![],
+            lock_mode: None,
+            fetch: None,
+            default_values: false,
+            overriding: None,
+            sample: None,
+            only_table: false,
             ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,
@@ -903,6 +943,31 @@ impl QailCmd {
         self
     }
 
+    /// Add a HAVING condition (filter on aggregate results).
+    ///
+    /// # Example
+    /// ```ignore
+    /// use qail_core::ast::builders::*;
+    /// use qail_core::ast::QailCmd;
+    /// 
+    /// // SELECT name, COUNT(*) as cnt FROM users GROUP BY name HAVING cnt > 5
+    /// let cmd = QailCmd::get("users")
+    ///     .column("name")
+    ///     .column_expr(count().alias("cnt"))
+    ///     .group_by(&["name"])
+    ///     .having_cond(gt("cnt", 5));
+    /// ```
+    pub fn having_cond(mut self, condition: Condition) -> Self {
+        self.having.push(condition);
+        self
+    }
+
+    /// Add multiple HAVING conditions.
+    pub fn having_conds(mut self, conditions: impl IntoIterator<Item = Condition>) -> Self {
+        self.having.extend(conditions);
+        self
+    }
+
     /// Add CTEs to this query.
     ///
     /// # Example
@@ -919,6 +984,139 @@ impl QailCmd {
     /// Add a CTE to this query.
     pub fn with_cte(mut self, cte: CTEDef) -> Self {
         self.ctes.push(cte);
+        self
+    }
+
+    /// Add FROM tables for UPDATE...FROM (multi-table update).
+    ///
+    /// # Example
+    /// ```ignore
+    /// // UPDATE orders o SET status = 'shipped' FROM products p WHERE o.product_id = p.id
+    /// let cmd = QailCmd::set("orders")
+    ///     .set_value("status", "shipped")
+    ///     .update_from(&["products"])
+    ///     .filter_cond(eq("orders.product_id", "products.id"));
+    /// ```
+    pub fn update_from<I, S>(mut self, tables: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.from_tables.extend(tables.into_iter().map(|s| s.as_ref().to_string()));
+        self
+    }
+
+    /// Add USING tables for DELETE...USING (multi-table delete).
+    ///
+    /// # Example
+    /// ```ignore
+    /// // DELETE FROM orders USING products WHERE orders.product_id = products.id
+    /// let cmd = QailCmd::del("orders")
+    ///     .delete_using(&["products"])
+    ///     .filter_cond(eq("orders.product_id", "products.id"));
+    /// ```
+    pub fn delete_using<I, S>(mut self, tables: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.using_tables.extend(tables.into_iter().map(|s| s.as_ref().to_string()));
+        self
+    }
+
+    /// Set FOR UPDATE row lock mode.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // SELECT * FROM accounts WHERE id = 1 FOR UPDATE
+    /// let cmd = QailCmd::get("accounts")
+    ///     .filter_cond(eq("id", 1))
+    ///     .for_update();
+    /// ```
+    pub fn for_update(mut self) -> Self {
+        self.lock_mode = Some(LockMode::Update);
+        self
+    }
+
+    /// Set FOR NO KEY UPDATE row lock mode.
+    pub fn for_no_key_update(mut self) -> Self {
+        self.lock_mode = Some(LockMode::NoKeyUpdate);
+        self
+    }
+
+    /// Set FOR SHARE row lock mode.
+    pub fn for_share(mut self) -> Self {
+        self.lock_mode = Some(LockMode::Share);
+        self
+    }
+
+    /// Set FOR KEY SHARE row lock mode.
+    pub fn for_key_share(mut self) -> Self {
+        self.lock_mode = Some(LockMode::KeyShare);
+        self
+    }
+
+    /// Use FETCH instead of LIMIT (SQL standard).
+    /// FETCH FIRST n ROWS ONLY
+    pub fn fetch_first(mut self, count: u64) -> Self {
+        self.fetch = Some((count, false));
+        self
+    }
+
+    /// Use FETCH with WITH TIES.
+    /// FETCH FIRST n ROWS WITH TIES
+    pub fn fetch_with_ties(mut self, count: u64) -> Self {
+        self.fetch = Some((count, true));
+        self
+    }
+
+    /// Insert a row with all default values.
+    /// INSERT INTO table DEFAULT VALUES
+    pub fn default_values(mut self) -> Self {
+        self.default_values = true;
+        self
+    }
+
+    /// Override GENERATED ALWAYS columns.
+    /// INSERT INTO ... OVERRIDING SYSTEM VALUE
+    pub fn overriding_system_value(mut self) -> Self {
+        self.overriding = Some(OverridingKind::SystemValue);
+        self
+    }
+
+    /// Override GENERATED BY DEFAULT columns.
+    /// INSERT INTO ... OVERRIDING USER VALUE
+    pub fn overriding_user_value(mut self) -> Self {
+        self.overriding = Some(OverridingKind::UserValue);
+        self
+    }
+
+    /// Use TABLESAMPLE BERNOULLI (row-level probability).
+    /// FROM table TABLESAMPLE BERNOULLI(percent)
+    pub fn tablesample_bernoulli(mut self, percent: f64) -> Self {
+        self.sample = Some((SampleMethod::Bernoulli, percent, None));
+        self
+    }
+
+    /// Use TABLESAMPLE SYSTEM (block-level sampling).
+    /// FROM table TABLESAMPLE SYSTEM(percent)
+    pub fn tablesample_system(mut self, percent: f64) -> Self {
+        self.sample = Some((SampleMethod::System, percent, None));
+        self
+    }
+
+    /// Add REPEATABLE(seed) for reproducible sampling.
+    pub fn repeatable(mut self, seed: u64) -> Self {
+        if let Some((method, percent, _)) = self.sample {
+            self.sample = Some((method, percent, Some(seed)));
+        }
+        self
+    }
+
+    /// Query ONLY this table, not child tables (PostgreSQL inheritance).
+    /// FROM ONLY table / UPDATE ONLY table / DELETE FROM ONLY table
+    pub fn only(mut self) -> Self {
+        self.only_table = true;
         self
     }
 
