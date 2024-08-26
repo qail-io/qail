@@ -590,182 +590,167 @@ impl LanguageServer for QailLanguageServer {
 
     async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let mut completions = vec![
-            // Actions
+            // === V2 Keyword Syntax (Primary) ===
             CompletionItem {
-                label: "get::".to_string(),
+                label: "get".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("SELECT query".to_string()),
-                insert_text: Some("get::${1:table} : ${2:'_}".to_string()),
+                insert_text: Some("get ${1:table} fields ${2:*}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
             CompletionItem {
-                label: "set::".to_string(),
+                label: "set".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("UPDATE query".to_string()),
                 insert_text: Some(
-                    "set::${1:table} [ ${2:column}=${3:value} ][ ${4:where} ]".to_string(),
+                    "set ${1:table} values ${2:column} = ${3:value} where ${4:condition}".to_string(),
                 ),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
             CompletionItem {
-                label: "del::".to_string(),
+                label: "del".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("DELETE query".to_string()),
-                insert_text: Some("del::${1:table} [ ${2:where} ]".to_string()),
+                insert_text: Some("del ${1:table} where ${2:condition}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
             CompletionItem {
-                label: "add::".to_string(),
+                label: "add".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("INSERT query".to_string()),
-                insert_text: Some("add::${1:table} : ${2:columns} [ ${3:values} ]".to_string()),
+                insert_text: Some("add ${1:table} fields ${2:columns} values ${3:values}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
-            // Modifiers
             CompletionItem {
-                label: "get!::".to_string(),
+                label: "get distinct".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("SELECT DISTINCT".to_string()),
-                insert_text: Some("get!::${1:table} : ${2:column}".to_string()),
+                insert_text: Some("get distinct ${1:table} fields ${2:column}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
             // Aggregates
             CompletionItem {
-                label: "#count".to_string(),
+                label: "count(*)".to_string(),
                 kind: Some(CompletionItemKind::FUNCTION),
                 detail: Some("COUNT aggregate".to_string()),
                 ..Default::default()
             },
             CompletionItem {
-                label: "#sum".to_string(),
+                label: "sum()".to_string(),
                 kind: Some(CompletionItemKind::FUNCTION),
                 detail: Some("SUM aggregate".to_string()),
+                insert_text: Some("sum(${1:column})".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
             CompletionItem {
-                label: "#avg".to_string(),
+                label: "avg()".to_string(),
                 kind: Some(CompletionItemKind::FUNCTION),
                 detail: Some("AVG aggregate".to_string()),
-                ..Default::default()
-            },
-            // Cages
-            CompletionItem {
-                label: "[lim=".to_string(),
-                kind: Some(CompletionItemKind::SNIPPET),
-                detail: Some("LIMIT clause".to_string()),
-                insert_text: Some("[lim=${1:10}]".to_string()),
+                insert_text: Some("avg(${1:column})".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
+            // Clauses
             CompletionItem {
-                label: "[off=".to_string(),
-                kind: Some(CompletionItemKind::SNIPPET),
-                detail: Some("OFFSET clause".to_string()),
-                insert_text: Some("[off=${1:0}]".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            },
-            CompletionItem {
-                label: "[^".to_string(),
-                kind: Some(CompletionItemKind::SNIPPET),
-                detail: Some("ORDER BY ASC".to_string()),
-                insert_text: Some("[^${1:column}]".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            },
-            CompletionItem {
-                label: "[^!".to_string(),
-                kind: Some(CompletionItemKind::SNIPPET),
-                detail: Some("ORDER BY DESC".to_string()),
-                insert_text: Some("[^!${1:column}]".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            },
-            // === V2 Canonical Syntax Completions ===
-            CompletionItem {
-                label: "get (v2)".to_string(),
+                label: "where".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("SELECT query (v2 canonical)".to_string()),
-                insert_text: Some("get ${1:table}\nfields\n  ${2:*}".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            },
-            CompletionItem {
-                label: "with (v2)".to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("CTE definition (v2 canonical)".to_string()),
-                insert_text: Some(
-                    "with ${1:cte_name} =\n  get ${2:table}\n  fields\n    ${3:*}".to_string(),
-                ),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            },
-            CompletionItem {
-                label: "join (v2)".to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("JOIN clause (v2 canonical)".to_string()),
-                insert_text: Some("join ${1:table}\n  on ${2:condition}".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            },
-            CompletionItem {
-                label: "where (v2)".to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("WHERE clause (v2 canonical)".to_string()),
+                detail: Some("WHERE clause".to_string()),
                 insert_text: Some("where ${1:column} = ${2:value}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
             CompletionItem {
-                label: "order by (v2)".to_string(),
+                label: "order by".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("ORDER BY clause (v2 canonical)".to_string()),
-                insert_text: Some("order by\n  ${1:column} ${2|asc,desc|}".to_string()),
+                detail: Some("ORDER BY clause".to_string()),
+                insert_text: Some("order by ${1:column} ${2|asc,desc|}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
             CompletionItem {
-                label: "fields (v2)".to_string(),
+                label: "limit".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("Column projection (v2 canonical)".to_string()),
-                insert_text: Some("fields\n  ${1:column1},\n  ${2:column2}".to_string()),
+                detail: Some("LIMIT clause".to_string()),
+                insert_text: Some("limit ${1:10}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "offset".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("OFFSET clause".to_string()),
+                insert_text: Some("offset ${1:0}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            // Advanced
+            CompletionItem {
+                label: "with".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("CTE (Common Table Expression)".to_string()),
+                insert_text: Some(
+                    "with ${1:cte_name} = get ${2:table} fields ${3:*}".to_string(),
+                ),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "left join".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("LEFT JOIN clause".to_string()),
+                insert_text: Some("left join ${1:table} on ${2:condition}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "inner join".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("INNER JOIN clause".to_string()),
+                insert_text: Some("inner join ${1:table} on ${2:condition}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
         ];
 
-        // Add schema-aware table completions
+        // Add schema-aware table completions (v2 syntax)
         if let Ok(schema_guard) = self.schema.read()
             && let Some(validator) = schema_guard.as_ref()
         {
             for table in validator.table_names() {
                 completions.push(CompletionItem {
-                    label: format!("get::{}'_", table),
+                    label: format!("get {} fields *", table),
                     kind: Some(CompletionItemKind::CLASS),
                     detail: Some(format!("SELECT * FROM {}", table)),
                     ..Default::default()
                 });
                 completions.push(CompletionItem {
-                    label: format!("set::{}", table),
+                    label: format!("set {}", table),
                     kind: Some(CompletionItemKind::CLASS),
                     detail: Some(format!("UPDATE {}", table)),
+                    insert_text: Some(format!("set {} values ${{1:column}} = ${{2:value}} where ${{3:condition}}", table)),
+                    insert_text_format: Some(InsertTextFormat::SNIPPET),
                     ..Default::default()
                 });
                 completions.push(CompletionItem {
-                    label: format!("add::{}", table),
+                    label: format!("add {}", table),
                     kind: Some(CompletionItemKind::CLASS),
                     detail: Some(format!("INSERT INTO {}", table)),
+                    insert_text: Some(format!("add {} fields ${{1:columns}} values ${{2:values}}", table)),
+                    insert_text_format: Some(InsertTextFormat::SNIPPET),
                     ..Default::default()
                 });
                 completions.push(CompletionItem {
-                    label: format!("del::{}", table),
+                    label: format!("del {}", table),
                     kind: Some(CompletionItemKind::CLASS),
                     detail: Some(format!("DELETE FROM {}", table)),
+                    insert_text: Some(format!("del {} where ${{1:condition}}", table)),
+                    insert_text_format: Some(InsertTextFormat::SNIPPET),
                     ..Default::default()
                 });
             }

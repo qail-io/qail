@@ -104,11 +104,11 @@ pub fn show_repl_help() {
     println!("  {}    - Clear screen", ".clear".yellow());
     println!("  {}  - Show symbol reference", ".symbols".yellow());
     println!();
-    println!("{}", "Query Examples (v2.0 syntax):".cyan().bold());
-    println!("  get::users:'_");
-    println!("  get::orders:'id'total[status=$1][lim=10]");
-    println!("  set::users:[verified=true][id=$1]");
-    println!("  get!::products:'category  (DISTINCT)");
-    println!("  get::users<-profiles:'name'avatar  (LEFT JOIN)");
+    println!("{}", "Query Examples (v2 keyword syntax):".cyan().bold());
+    println!("  get users fields *");
+    println!("  get orders fields id, total where status = 'pending' limit 10");
+    println!("  set users values verified = true where id = $1");
+    println!("  add users fields name, email values 'Alice', 'alice@test.com'");
+    println!("  del users where id = $1");
     println!();
 }

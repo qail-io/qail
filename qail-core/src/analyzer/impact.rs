@@ -183,10 +183,12 @@ impl MigrationImpact {
                         references.len()
                     ));
                     for r in references.iter().take(5) {
+                        // Show the specific column that was matched, not just the generic snippet
                         output.push_str(&format!(
-                            "  ❌ {}:{} → {}\n",
+                            "  ❌ {}:{} → uses \"{}\" in {}\n",
                             r.file.display(),
                             r.line,
+                            column,  // The actual matched column
                             r.snippet
                         ));
                     }
