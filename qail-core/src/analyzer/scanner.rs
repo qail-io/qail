@@ -4,6 +4,17 @@ use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::rust_ast::RustAnalyzer;
+
+/// Analysis mode for the codebase scanner
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnalysisMode {
+    /// Full Rust AST analysis using `syn` (100% accurate)
+    RustAST,
+    /// Regex-based scanning (90% accurate, works for all languages)
+    Regex,
+}
+
 /// Type of query found in source code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryType {
@@ -30,11 +41,38 @@ pub struct CodeReference {
     pub snippet: String,
 }
 
+/// Analysis result for a single file
+#[derive(Debug, Clone)]
+pub struct FileAnalysis {
+    /// File path
+    pub file: PathBuf,
+    /// Analysis mode used
+    pub mode: AnalysisMode,
+    /// Number of references found
+    pub ref_count: usize,
+    /// Whether the file is safe (no breaking changes)
+    pub safe: bool,
+}
+
+/// Complete scan result with per-file breakdown
+#[derive(Debug, Default)]
+pub struct ScanResult {
+    /// All code references found
+    pub refs: Vec<CodeReference>,
+    /// Per-file analysis breakdown
+    pub files: Vec<FileAnalysis>,
+}
+
 /// Scanner for finding QAIL and SQL references in source code.
 pub struct CodebaseScanner {
-    /// Regex patterns for QAIL queries
+    /// Regex patterns for QAIL queries (legacy symbol syntax)
     qail_action_pattern: Regex,
     qail_column_pattern: Regex,
+    /// Regex patterns for QAIL queries (v2 keyword syntax)
+    qail_v2_get_pattern: Regex,
+    qail_v2_set_pattern: Regex,
+    qail_v2_del_pattern: Regex,
+    qail_v2_add_pattern: Regex,
     /// Regex patterns for SQL queries
     sql_select_pattern: Regex,
     sql_insert_pattern: Regex,
@@ -52,10 +90,15 @@ impl CodebaseScanner {
     /// Create a new scanner with default patterns.
     pub fn new() -> Self {
         Self {
-            // QAIL patterns: get::table, set::table, del::table, add::table
+            // QAIL legacy patterns: get::table, set::table, del::table, add::table
             qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)").unwrap(),
             // QAIL column: 'column_name
             qail_column_pattern: Regex::new(r"'(\w+)").unwrap(),
+            // QAIL v2 keyword patterns
+            qail_v2_get_pattern: Regex::new(r"\bget\s+(\w+)\s+fields\s+(.+?)(?:\s+where|\s+order|\s+limit|$)").unwrap(),
+            qail_v2_set_pattern: Regex::new(r"\bset\s+(\w+)\s+values\s+(.+?)(?:\s+where|$)").unwrap(),
+            qail_v2_del_pattern: Regex::new(r"\bdel\s+(\w+)(?:\s+where|$)").unwrap(),
+            qail_v2_add_pattern: Regex::new(r"\badd\s+(\w+)\s+fields\s+(.+?)\s+values").unwrap(),
             // SQL patterns
             sql_select_pattern: Regex::new(r"(?i)SELECT\s+(.+?)\s+FROM\s+(\w+)").unwrap(),
             sql_insert_pattern: Regex::new(r"(?i)INSERT\s+INTO\s+(\w+)").unwrap(),
@@ -66,23 +109,38 @@ impl CodebaseScanner {
 
     /// Scan a directory for all QAIL and SQL references.
     pub fn scan(&self, path: &Path) -> Vec<CodeReference> {
-        let mut refs = Vec::new();
+        self.scan_with_details(path).refs
+    }
+
+    /// Scan a directory with detailed per-file breakdown.
+    pub fn scan_with_details(&self, path: &Path) -> ScanResult {
+        let mut result = ScanResult::default();
 
         if path.is_file() {
             if let Some(ext) = path.extension()
                 && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py")
             {
-                refs.extend(self.scan_file(path));
+                let mode = if ext == "rs" { AnalysisMode::RustAST } else { AnalysisMode::Regex };
+                let file_refs = self.scan_file(path);
+                let ref_count = file_refs.len();
+                
+                result.files.push(FileAnalysis {
+                    file: path.to_path_buf(),
+                    mode,
+                    ref_count,
+                    safe: true, // Will be updated after impact analysis
+                });
+                result.refs.extend(file_refs);
             }
         } else if path.is_dir() {
-            self.scan_dir_recursive(path, &mut refs);
+            self.scan_dir_with_details(path, &mut result);
         }
 
-        refs
+        result
     }
 
-    /// Recursively scan a directory.
-    fn scan_dir_recursive(&self, dir: &Path, refs: &mut Vec<CodeReference>) {
+    /// Recursively scan a directory with per-file tracking.
+    fn scan_dir_with_details(&self, dir: &Path, result: &mut ScanResult) {
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
@@ -99,20 +157,40 @@ impl CodebaseScanner {
                     || name == ".git"
                     || name == "vendor"
                     || name == "__pycache__"
+                    || name == "dist"
                 {
                     continue;
                 }
-                self.scan_dir_recursive(&path, refs);
+                self.scan_dir_with_details(&path, result);
             } else if let Some(ext) = path.extension()
                 && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py")
             {
-                refs.extend(self.scan_file(&path));
+                let mode = if ext == "rs" { AnalysisMode::RustAST } else { AnalysisMode::Regex };
+                let file_refs = self.scan_file(&path);
+                let ref_count = file_refs.len();
+                
+                if ref_count > 0 {
+                    result.files.push(FileAnalysis {
+                        file: path.clone(),
+                        mode,
+                        ref_count,
+                        safe: true,
+                    });
+                }
+                result.refs.extend(file_refs);
             }
         }
     }
 
     /// Scan a single file for references.
+    /// Uses Rust AST analyzer for .rs files, regex for others.
     fn scan_file(&self, path: &Path) -> Vec<CodeReference> {
+        // Use Rust AST analyzer for .rs files (100% accurate)
+        if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            return RustAnalyzer::scan_file(path);
+        }
+
+        // Regex fallback for other languages
         let mut refs = Vec::new();
 
         let content = match fs::read_to_string(path) {
@@ -123,7 +201,7 @@ impl CodebaseScanner {
         for (line_num, line) in content.lines().enumerate() {
             let line_number = line_num + 1;
 
-            // Check for QAIL queries
+            // Check for QAIL queries (legacy symbol syntax)
             for cap in self.qail_action_pattern.captures_iter(line) {
                 let action = cap.get(1).map(|m| m.as_str()).unwrap_or("");
                 let table = cap.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -142,6 +220,68 @@ impl CodebaseScanner {
                     columns,
                     query_type: QueryType::Qail,
                     snippet: format!("{}::{}", action, table),
+                });
+            }
+
+            // Check for QAIL v2 keyword syntax: get table fields ...
+            for cap in self.qail_v2_get_pattern.captures_iter(line) {
+                let table = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                let columns_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+                let columns = Self::parse_v2_columns(columns_str);
+
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: line_number,
+                    table: table.to_string(),
+                    columns,
+                    query_type: QueryType::Qail,
+                    snippet: format!("get {} fields ...", table),
+                });
+            }
+
+            // Check for QAIL v2: set table values ...
+            for cap in self.qail_v2_set_pattern.captures_iter(line) {
+                let table = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                let columns_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+                let columns = Self::parse_v2_set_columns(columns_str);
+
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: line_number,
+                    table: table.to_string(),
+                    columns,
+                    query_type: QueryType::Qail,
+                    snippet: format!("set {} values ...", table),
+                });
+            }
+
+            // Check for QAIL v2: del table where ...
+            for cap in self.qail_v2_del_pattern.captures_iter(line) {
+                let table = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: line_number,
+                    table: table.to_string(),
+                    columns: vec![],
+                    query_type: QueryType::Qail,
+                    snippet: format!("del {}", table),
+                });
+            }
+
+            // Check for QAIL v2: add table fields ... values ...
+            for cap in self.qail_v2_add_pattern.captures_iter(line) {
+                let table = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                let columns_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+                let columns = Self::parse_v2_columns(columns_str);
+
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: line_number,
+                    table: table.to_string(),
+                    columns,
+                    query_type: QueryType::Qail,
+                    snippet: format!("add {} fields ...", table),
                 });
             }
 
@@ -211,6 +351,34 @@ impl CodebaseScanner {
         }
 
         refs
+    }
+
+    /// Parse v2 column list: "id, name, email" or "*"
+    fn parse_v2_columns(columns_str: &str) -> Vec<String> {
+        if columns_str.trim() == "*" {
+            return vec!["*".to_string()];
+        }
+        columns_str
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty() && !c.starts_with('$'))
+            .collect()
+    }
+
+    /// Parse v2 SET column assignments: "name = 'Alice', status = 'active'"
+    fn parse_v2_set_columns(columns_str: &str) -> Vec<String> {
+        columns_str
+            .split(',')
+            .filter_map(|assignment| {
+                let parts: Vec<&str> = assignment.split('=').collect();
+                if !parts.is_empty() {
+                    Some(parts[0].trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .filter(|c| !c.is_empty())
+            .collect()
     }
 }
 

@@ -31,7 +31,7 @@ use qail::schema::{OutputFormat as SchemaOutputFormat, check_schema, diff_schema
 #[derive(Parser)]
 #[command(name = "qail")]
 #[command(author = "QAIL Contributors")]
-#[command(version = "0.9.4")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "🪝 QAIL — Schema-First Database Toolkit", long_about = None)]
 #[command(after_help = "EXAMPLES:
     qail pull postgres://...           # Extract schema from DB
@@ -155,6 +155,9 @@ enum MigrateAction {
         /// Codebase path to scan
         #[arg(short, long, default_value = "./src")]
         codebase: String,
+        /// CI/CD mode: output GitHub Actions annotations, exit code 1 on errors
+        #[arg(long)]
+        ci: bool,
     },
     /// Preview migration SQL without executing (dry-run)
     Plan {
@@ -170,6 +173,12 @@ enum MigrateAction {
         schema_diff: String,
         /// Database URL
         url: String,
+        /// Codebase path to scan for breaking changes (blocks if found)
+        #[arg(short, long)]
+        codebase: Option<String>,
+        /// Force migration even if breaking changes detected
+        #[arg(long)]
+        force: bool,
     },
     /// Rollback migrations
     Down {
@@ -279,12 +288,13 @@ async fn main() -> Result<()> {
             MigrateAction::Analyze {
                 schema_diff,
                 codebase,
-            } => migrate_analyze(schema_diff, codebase)?,
+                ci,
+            } => migrate_analyze(schema_diff, codebase, *ci)?,
             MigrateAction::Plan {
                 schema_diff,
                 output,
             } => migrate_plan(schema_diff, output.as_deref())?,
-            MigrateAction::Up { schema_diff, url } => migrate_up(schema_diff, url).await?,
+            MigrateAction::Up { schema_diff, url, codebase, force } => migrate_up(schema_diff, url, codebase.as_deref(), *force).await?,
             MigrateAction::Down { schema_diff, url } => migrate_down(schema_diff, url).await?,
             MigrateAction::Create {
                 name,
