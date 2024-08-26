@@ -32,9 +32,14 @@ pub struct CodeReference {
 
 /// Scanner for finding QAIL and SQL references in source code.
 pub struct CodebaseScanner {
-    /// Regex patterns for QAIL queries
+    /// Regex patterns for QAIL queries (legacy symbol syntax)
     qail_action_pattern: Regex,
     qail_column_pattern: Regex,
+    /// Regex patterns for QAIL queries (v2 keyword syntax)
+    qail_v2_get_pattern: Regex,
+    qail_v2_set_pattern: Regex,
+    qail_v2_del_pattern: Regex,
+    qail_v2_add_pattern: Regex,
     /// Regex patterns for SQL queries
     sql_select_pattern: Regex,
     sql_insert_pattern: Regex,
@@ -52,10 +57,15 @@ impl CodebaseScanner {
     /// Create a new scanner with default patterns.
     pub fn new() -> Self {
         Self {
-            // QAIL patterns: get::table, set::table, del::table, add::table
+            // QAIL legacy patterns: get::table, set::table, del::table, add::table
             qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)").unwrap(),
             // QAIL column: 'column_name
             qail_column_pattern: Regex::new(r"'(\w+)").unwrap(),
+            // QAIL v2 keyword patterns
+            qail_v2_get_pattern: Regex::new(r"\bget\s+(\w+)\s+fields\s+(.+?)(?:\s+where|\s+order|\s+limit|$)").unwrap(),
+            qail_v2_set_pattern: Regex::new(r"\bset\s+(\w+)\s+values\s+(.+?)(?:\s+where|$)").unwrap(),
+            qail_v2_del_pattern: Regex::new(r"\bdel\s+(\w+)(?:\s+where|$)").unwrap(),
+            qail_v2_add_pattern: Regex::new(r"\badd\s+(\w+)\s+fields\s+(.+?)\s+values").unwrap(),
             // SQL patterns
             sql_select_pattern: Regex::new(r"(?i)SELECT\s+(.+?)\s+FROM\s+(\w+)").unwrap(),
             sql_insert_pattern: Regex::new(r"(?i)INSERT\s+INTO\s+(\w+)").unwrap(),
@@ -123,7 +133,7 @@ impl CodebaseScanner {
         for (line_num, line) in content.lines().enumerate() {
             let line_number = line_num + 1;
 
-            // Check for QAIL queries
+            // Check for QAIL queries (legacy symbol syntax)
             for cap in self.qail_action_pattern.captures_iter(line) {
                 let action = cap.get(1).map(|m| m.as_str()).unwrap_or("");
                 let table = cap.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -142,6 +152,68 @@ impl CodebaseScanner {
                     columns,
                     query_type: QueryType::Qail,
                     snippet: format!("{}::{}", action, table),
+                });
+            }
+
+            // Check for QAIL v2 keyword syntax: get table fields ...
+            for cap in self.qail_v2_get_pattern.captures_iter(line) {
+                let table = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                let columns_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+                let columns = Self::parse_v2_columns(columns_str);
+
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: line_number,
+                    table: table.to_string(),
+                    columns,
+                    query_type: QueryType::Qail,
+                    snippet: format!("get {} fields ...", table),
+                });
+            }
+
+            // Check for QAIL v2: set table values ...
+            for cap in self.qail_v2_set_pattern.captures_iter(line) {
+                let table = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                let columns_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+                let columns = Self::parse_v2_set_columns(columns_str);
+
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: line_number,
+                    table: table.to_string(),
+                    columns,
+                    query_type: QueryType::Qail,
+                    snippet: format!("set {} values ...", table),
+                });
+            }
+
+            // Check for QAIL v2: del table where ...
+            for cap in self.qail_v2_del_pattern.captures_iter(line) {
+                let table = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: line_number,
+                    table: table.to_string(),
+                    columns: vec![],
+                    query_type: QueryType::Qail,
+                    snippet: format!("del {}", table),
+                });
+            }
+
+            // Check for QAIL v2: add table fields ... values ...
+            for cap in self.qail_v2_add_pattern.captures_iter(line) {
+                let table = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                let columns_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+                let columns = Self::parse_v2_columns(columns_str);
+
+                refs.push(CodeReference {
+                    file: path.to_path_buf(),
+                    line: line_number,
+                    table: table.to_string(),
+                    columns,
+                    query_type: QueryType::Qail,
+                    snippet: format!("add {} fields ...", table),
                 });
             }
 
@@ -211,6 +283,34 @@ impl CodebaseScanner {
         }
 
         refs
+    }
+
+    /// Parse v2 column list: "id, name, email" or "*"
+    fn parse_v2_columns(columns_str: &str) -> Vec<String> {
+        if columns_str.trim() == "*" {
+            return vec!["*".to_string()];
+        }
+        columns_str
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty() && !c.starts_with('$'))
+            .collect()
+    }
+
+    /// Parse v2 SET column assignments: "name = 'Alice', status = 'active'"
+    fn parse_v2_set_columns(columns_str: &str) -> Vec<String> {
+        columns_str
+            .split(',')
+            .filter_map(|assignment| {
+                let parts: Vec<&str> = assignment.split('=').collect();
+                if !parts.is_empty() {
+                    Some(parts[0].trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .filter(|c| !c.is_empty())
+            .collect()
     }
 }
 
