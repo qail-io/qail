@@ -13,9 +13,10 @@ pub mod special_funcs;
 use crate::ast::*;
 use nom::{
     IResult, Parser,
-    bytes::complete::tag_no_case,
+    branch::alt,
+    bytes::complete::{tag, tag_no_case},
     character::complete::{multispace0, multispace1},
-    combinator::opt,
+    combinator::{opt, value},
     multi::many0,
 };
 // Import parsers from submodules
@@ -70,7 +71,11 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
 
     // Parse action first
     let (input, (action, distinct)) = parse_action(input)?;
-    let (input, _) = multispace1(input)?;
+    // Accept either "::" or whitespace as separator (supports add::table and add table)
+    let (input, _) = alt((
+        value((), tag("::")),
+        value((), multispace1),
+    )).parse(input)?;
 
     // Check for DISTINCT ON (expr1, expr2) after action (Postgres-specific)
     // Supports expressions like: CASE WHEN ... END, functions, columns
