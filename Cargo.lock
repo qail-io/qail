@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "chrono",
  "colored 3.0.0",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "qail-encoder"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "qail-core",
  "qail-pg",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "qail-ffi"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "qail-core",
  "qail-pg",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "qail-go"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "libc",
  "once_cell",
@@ -2092,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "qail-lsp"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "qail-core",
  "serde",
@@ -2103,7 +2103,7 @@ dependencies = [
 
 [[package]]
 name = "qail-mysql"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "bytes",
  "rustls",
@@ -2116,7 +2116,7 @@ dependencies = [
 
 [[package]]
 name = "qail-pg"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "async-trait",
  "base64",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "qail-php"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "libc",
  "once_cell",
@@ -2154,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "qail-py"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "once_cell",
  "pyo3",
@@ -2166,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "qail-wasm"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "js-sys",
  "qail-core",
