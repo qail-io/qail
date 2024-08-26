@@ -183,15 +183,16 @@ impl CodebaseScanner {
     }
 
     /// Scan a single file for references.
-    /// Uses Rust AST analyzer for .rs files, regex for others.
+    /// Uses Rust AST analyzer for .rs files + regex for raw SQL, regex-only for others.
     fn scan_file(&self, path: &Path) -> Vec<CodeReference> {
-        // Use Rust AST analyzer for .rs files (100% accurate)
+        let mut refs = Vec::new();
+        
+        // For Rust files: run AST analyzer first, then also run regex for raw SQL
         if path.extension().map(|e| e == "rs").unwrap_or(false) {
-            return RustAnalyzer::scan_file(path);
+            refs.extend(RustAnalyzer::scan_file(path));
         }
 
-        // Regex fallback for other languages
-        let mut refs = Vec::new();
+        // Regex scanner: for non-Rust files OR for raw SQL detection in Rust files
 
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
