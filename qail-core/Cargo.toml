@@ -1,6 +1,6 @@
 [package]
 name = "qail-core"
-version = "0.11.7"
+version = "0.11.8"
 edition = "2024"
 description = "AST-native query builder - type-safe expressions, zero SQL strings"
 license = "MIT"
@@ -20,6 +20,8 @@ rust_decimal = "1"
 colored = "3"
 strsim = "0.11"
 regex = "1.10"
+syn = { version = "2", features = ["full", "visit", "parsing"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [dev-dependencies]
 
