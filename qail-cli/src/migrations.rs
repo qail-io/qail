@@ -336,14 +336,26 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
                             references.len()
                         );
                         for r in references.iter().take(5) {
-                            println!(
-                                "│ {} {}:{} → uses {} in {}",
-                                "❌".red(),
-                                r.file.display(),
-                                r.line,
-                                column.cyan().bold(),
-                                r.snippet.dimmed()
-                            );
+                            // For raw SQL, show with warning; for QAIL just show normally
+                            if matches!(r.query_type, qail_core::analyzer::QueryType::RawSql) {
+                                println!(
+                                    "│ {} {}:{} → {} uses {}",
+                                    "⚠️  RAW SQL".yellow(),
+                                    r.file.display(),
+                                    r.line,
+                                    r.snippet.cyan(),
+                                    column.red().bold()
+                                );
+                            } else {
+                                println!(
+                                    "│ {} {}:{} → uses {} in {}",
+                                    "❌".red(),
+                                    r.file.display(),
+                                    r.line,
+                                    column.cyan().bold(),
+                                    r.snippet.dimmed()
+                                );
+                            }
                         }
                         println!("└──────────────────────────────────────────────────────┘");
                         println!();
