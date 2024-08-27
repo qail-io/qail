@@ -337,59 +337,100 @@ impl SqlDetectorVisitor {
     fn generate_qail(sql: &str, sql_type: &str) -> String {
         match sql_type {
             "SELECT" => {
-                // Extract table from FROM clause
-                let table = sql
-                    .to_uppercase()
+                // Extract table from FROM clause (case insensitive)
+                let upper = sql.to_uppercase();
+                let table = upper
                     .find("FROM ")
-                    .and_then(|i| {
+                    .map(|i| {
                         let rest = &sql[i + 5..];
-                        rest.split_whitespace().next()
+                        // Table ends at whitespace or WHERE/ORDER/LIMIT
+                        rest.split(|c: char| c.is_whitespace())
+                            .next()
+                            .unwrap_or("table")
                     })
                     .unwrap_or("table")
                     .to_lowercase();
                 
-                format!("QailCmd::get(\"{}\")\n    .columns([\"*\"])", table)
+                // Extract columns (between SELECT and FROM)
+                let columns = upper
+                    .find("SELECT ")
+                    .and_then(|start| {
+                        upper.find("FROM ").map(|end| {
+                            let cols_str = sql[start + 7..end].trim();
+                            if cols_str == "*" {
+                                vec!["*".to_string()]
+                            } else {
+                                cols_str
+                                    .split(',')
+                                    .map(|c| c.trim().to_string())
+                                    .collect()
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| vec!["*".to_string()]);
+                
+                let cols_formatted: Vec<String> = columns
+                    .iter()
+                    .map(|c| format!("\"{}\"", c))
+                    .collect();
+                
+                format!(
+                    "QailCmd::get(\"{}\")\n        .columns([{}])",
+                    table,
+                    cols_formatted.join(", ")
+                )
             }
             "INSERT" => {
-                let table = sql
-                    .to_uppercase()
+                let upper = sql.to_uppercase();
+                let table = upper
                     .find("INTO ")
-                    .and_then(|i| {
+                    .map(|i| {
                         let rest = &sql[i + 5..];
-                        rest.split(|c: char| !c.is_alphanumeric() && c != '_').next()
+                        rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .next()
+                            .unwrap_or("table")
                     })
                     .unwrap_or("table")
                     .to_lowercase();
                 
-                format!("QailCmd::add(\"{}\")\n    // TODO: add .set_value() calls", table)
+                format!(
+                    "QailCmd::add(\"{}\")\n        // TODO: add .set_value(\"col\", value) calls",
+                    table
+                )
             }
             "UPDATE" => {
-                let table = sql
-                    .to_uppercase()
+                let upper = sql.to_uppercase();
+                let table = upper
                     .find("UPDATE ")
-                    .and_then(|i| {
+                    .map(|i| {
                         let rest = &sql[i + 7..];
-                        rest.split_whitespace().next()
+                        rest.split_whitespace().next().unwrap_or("table")
                     })
                     .unwrap_or("table")
                     .to_lowercase();
                 
-                format!("QailCmd::set(\"{}\")\n    // TODO: add .set_value() and .filter() calls", table)
+                format!(
+                    "QailCmd::set(\"{}\")\n        // TODO: add .set_value() and .filter() calls",
+                    table
+                )
             }
             "DELETE" => {
-                let table = sql
-                    .to_uppercase()
+                let upper = sql.to_uppercase();
+                let table = upper
                     .find("FROM ")
-                    .and_then(|i| {
+                    .map(|i| {
                         let rest = &sql[i + 5..];
-                        rest.split_whitespace().next()
+                        rest.split_whitespace().next().unwrap_or("table")
                     })
                     .unwrap_or("table")
                     .to_lowercase();
                 
-                format!("QailCmd::del(\"{}\")\n    // TODO: add .filter() call", table)
+                format!(
+                    "QailCmd::del(\"{}\")\n        // TODO: add .filter() call",
+                    table
+                )
             }
-            _ => format!("// TODO: Convert to QAIL")
+            _ => "// TODO: Convert to QAIL".to_string()
         }
     }
 }
