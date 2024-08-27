@@ -533,15 +533,16 @@ impl LanguageServer for QailLanguageServer {
                 let sql_matches = detect_raw_sql(content);
                 
                 for sql_match in sql_matches {
-                    // Check if match overlaps with requested range
+                    // syn gives: line = 1-indexed, column = 0-indexed
+                    // LSP needs: line = 0-indexed, character = 0-indexed
                     let match_range = Range {
                         start: Position {
                             line: (sql_match.line - 1) as u32,
-                            character: (sql_match.column - 1) as u32,
+                            character: sql_match.column as u32, // already 0-indexed
                         },
                         end: Position {
                             line: (sql_match.end_line - 1) as u32,
-                            character: sql_match.end_column as u32,
+                            character: sql_match.end_column as u32, // already 0-indexed
                         },
                     };
                     

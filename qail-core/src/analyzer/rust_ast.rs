@@ -319,11 +319,14 @@ impl SqlDetectorVisitor {
         let start = span.start();
         let end = span.end();
 
+        // The span includes the quotes, so we use the exact positions
+        // Column is 0-indexed in syn, LSP uses 0-indexed too
+        // But we need to ensure we capture the entire literal including quotes
         self.matches.push(RawSqlMatch {
             line: start.line,
-            column: start.column + 1,
+            column: start.column, // 0-indexed, includes opening quote
             end_line: end.line,
-            end_column: end.column + 1,
+            end_column: end.column, // 0-indexed, should be after closing quote
             sql_type: sql_type.to_string(),
             raw_sql: value.clone(),
             suggested_qail: Self::generate_qail(&value, sql_type),
