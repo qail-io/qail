@@ -40,6 +40,7 @@ pub mod ext;
 pub mod functions;
 pub mod json;
 pub mod literals;
+pub mod shortcuts;
 pub mod time;
 
 // Re-export everything for convenient `use qail_core::ast::builders::*;`
@@ -85,6 +86,9 @@ pub use binary::{BinaryBuilder, binary};
 
 // Extension traits
 pub use ext::ExprExt;
+
+// Shortcuts (ergonomic helpers)
+pub use shortcuts::{count_where, in_list, percentage, recent, recent_col};
 
 #[cfg(test)]
 mod tests {

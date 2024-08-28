@@ -63,6 +63,8 @@ pub enum Value {
     Timestamp(String),
     /// Binary data (bytea)
     Bytes(Vec<u8>),
+    /// AST Expression (for complex expression comparisons like col > NOW() - INTERVAL)
+    Expr(Box<crate::ast::Expr>),
 }
 
 impl std::fmt::Display for Value {
@@ -99,6 +101,7 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "'")
             }
+            Value::Expr(expr) => write!(f, "{}", expr),
         }
     }
 }
