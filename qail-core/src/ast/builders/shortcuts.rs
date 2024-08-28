@@ -7,7 +7,35 @@ use crate::ast::{Condition, Expr, Operator, Value};
 use super::{count_filter, case_when, col, binary, cast, now_minus};
 use crate::ast::BinaryOp;
 
-/// COUNT(*) with WHERE conditions - shorthand for count_filter
+/// Combine multiple conditions with AND logic
+///
+/// # Example
+/// ```ignore
+/// all([eq("direction", "outbound"), recent("24 hours")])
+/// ```
+pub fn all<I>(conditions: I) -> Vec<Condition>
+where
+    I: IntoIterator<Item = Condition>,
+{
+    conditions.into_iter().collect()
+}
+
+/// Combine two conditions with AND logic
+///
+/// # Example
+/// ```ignore
+/// and(eq("direction", "outbound"), recent("24 hours"))
+/// ```
+pub fn and(a: Condition, b: Condition) -> Vec<Condition> {
+    vec![a, b]
+}
+
+/// Combine three conditions with AND logic
+pub fn and3(a: Condition, b: Condition, c: Condition) -> Vec<Condition> {
+    vec![a, b, c]
+}
+
+/// COUNT(*) with single WHERE condition - shorthand for count_filter
 ///
 /// # Example
 /// ```ignore
@@ -16,6 +44,20 @@ use crate::ast::BinaryOp;
 /// ```
 pub fn count_where(condition: Condition) -> super::AggregateBuilder {
     count_filter(vec![condition])
+}
+
+/// COUNT(*) with multiple WHERE conditions (AND) - shorthand for count_filter
+///
+/// # Example
+/// ```ignore
+/// count_where_all([eq("direction", "outbound"), recent("24 hours")])
+///     .alias("messages_sent_24h")
+/// ```
+pub fn count_where_all<I>(conditions: I) -> super::AggregateBuilder
+where
+    I: IntoIterator<Item = Condition>,
+{
+    count_filter(conditions.into_iter().collect())
 }
 
 /// Filter for recent records (created_at > NOW() - INTERVAL)
