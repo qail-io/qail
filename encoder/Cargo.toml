@@ -1,0 +1,24 @@
+[package]
+name = "qail-encoder"
+version = "0.11.10"
+edition = "2024"
+description = "QAIL Encoder - Lightweight wire protocol encoding (no I/O, no TLS)"
+license = "MIT"
+repository = "https://github.com/qail-io/qail"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+qail-core = { path = "../core" }
+qail-pg = { path = "../pg", default-features = false, optional = true }
+
+[features]
+default = []
+response = ["qail-pg"]
+
+# Minimal dependencies - just encoding by default!
+# Enable "response" feature for response parsing
+
+[lints]
+workspace = true

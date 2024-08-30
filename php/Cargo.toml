@@ -1,0 +1,17 @@
+[package]
+name = "qail-php"
+version = "0.11.10"
+edition = "2024"
+description = "QAIL PHP bindings - Rust FFI for PHP FFI"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]  # cdylib for FFI, staticlib for extension
+
+[dependencies]
+qail-core = { path = "../core", version = "0.11.10" }
+qail-pg = { path = "../pg", version = "0.11.10" }
+qail-mysql = { path = "../mysql", version = "0.11.10" }
+libc = "0.2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync"] }
+once_cell = "1.19"

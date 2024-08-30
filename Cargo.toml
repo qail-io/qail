@@ -1,18 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
-    "qail-core",
-    "qail-cli",
-    "qail-lsp",
-    "qail-wasm",
-    "qail-ffi",
-    "qail-encoder",
-    "qail-pg",
-    "qail-py",
-    "qail-go",
-    "qail-php",
-    "qail-daemon",
-    "qail-mysql",
+    "core",
+    "cli",
+    "lsp",
+    "wasm",
+    "ffi",
+    "encoder",
+    "pg",
+    "py",
+    "go",
+    "php",
+    "daemon",
+    "mysql",
 ]
 
 [workspace.lints.rust]
