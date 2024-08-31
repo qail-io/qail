@@ -71,7 +71,32 @@ impl QailLanguageServer {
             });
         }
 
-        // TODO: Add schema-aware completions when Validator exposes table names
+        if let Ok(schema) = self.schema.read()
+            && let Some(validator) = schema.as_ref()
+        {
+            for table in validator.table_names() {
+                items.push(CompletionItem {
+                    label: format!("get::{}", table),
+                    kind: Some(CompletionItemKind::CLASS),
+                    detail: Some(format!("SELECT * FROM {}", table)),
+                    insert_text: Some(format!("get::{}", table)),
+                    ..Default::default()
+                });
+            }
+
+            for table in validator.table_names() {
+                if let Some(cols) = validator.column_names(table) {
+                    for col in cols {
+                        items.push(CompletionItem {
+                            label: format!("{}.{}", table, col),
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some(format!("Column in {}", table)),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
 
         Ok(Some(CompletionResponse::Array(items)))
     }

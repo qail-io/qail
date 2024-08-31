@@ -179,8 +179,8 @@ impl ConditionToSql for Condition {
                 };
                 format!("{} {} {}", col, generator.fuzzy_operator(), val)
             }
-            Operator::In => format!("{} = ANY({})", col, self.value), // TODO: ANY() is Postgres specific, move to generator?
-            Operator::NotIn => format!("{} != ALL({})", col, self.value),
+            Operator::In => generator.in_array(&col, &format!("{}", self.value)),
+            Operator::NotIn => generator.not_in_array(&col, &format!("{}", self.value)),
             Operator::IsNull => format!("{} IS NULL", col),
             Operator::IsNotNull => format!("{} IS NOT NULL", col),
             Operator::Contains => generator.json_contains(&col, &self.to_value_sql(generator)),
@@ -345,9 +345,9 @@ impl ConditionToSql for Condition {
             }
             Operator::IsNull => format!("{} IS NULL", col),
             Operator::IsNotNull => format!("{} IS NOT NULL", col),
-            Operator::In => format!("{} = ANY({})", col, value_placeholder(&self.value, params)),
+            Operator::In => generator.in_array(&col, &value_placeholder(&self.value, params)),
             Operator::NotIn => {
-                format!("{} != ALL({})", col, value_placeholder(&self.value, params))
+                generator.not_in_array(&col, &value_placeholder(&self.value, params))
             }
             Operator::Contains => {
                 generator.json_contains(&col, &value_placeholder(&self.value, params))
