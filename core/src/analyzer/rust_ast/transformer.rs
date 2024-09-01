@@ -77,11 +77,22 @@ fn transform_query(query: &Query) -> String {
     result.push_str("use qail_core::ast::{QailCmd, Operator, Order};\n\n");
 
     if let Some(with) = &query.with {
-        result.push_str("// CTEs detected:\n");
         for cte in &with.cte_tables {
-            result.push_str(&format!("// - {}\n", cte.alias.name));
+            let cte_name = &cte.alias.name;
+            result.push_str(&format!(
+                "// CTE '{}': define as separate query and use .as_cte(\"{}\")\n",
+                cte_name, cte_name
+            ));
+            // Transform the inner CTE query
+            let inner_code = transform_query(&cte.query)
+                .replace("use qail_core::ast::{QailCmd, Operator, Order};\n\n", "")
+                .replace("// Execute with qail-pg driver:\n// let rows = driver.fetch(&cmd).await?;", "")
+                .replace(";\n\n", "")
+                .trim()
+                .to_string();
+            result.push_str(&format!("let {}_cte = {};\n\n", cte_name, inner_code));
         }
-        result.push_str("// TODO: Use .with_cte() for CTE support\n\n");
+        result.push_str("// Then reference CTE in main query using the alias\n\n");
     }
 
     if let SetExpr::Select(select) = query.body.as_ref() {
