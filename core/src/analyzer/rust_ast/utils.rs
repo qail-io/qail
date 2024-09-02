@@ -3,6 +3,7 @@
 /// 
 /// # Example
 /// ```
+/// use qail_core::analyzer::rust_ast::utils::to_pascal_case;
 /// assert_eq!(to_pascal_case("payment_events"), "PaymentEvents");
 /// ```
 pub fn to_pascal_case(s: &str) -> String {

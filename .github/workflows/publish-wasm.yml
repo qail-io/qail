@@ -49,7 +49,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-          WASM_VERSION=$(grep '^version' qail-wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          WASM_VERSION=$(grep '^version' wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           
           echo "Tag version: $TAG_VERSION"
           echo "WASM version: $WASM_VERSION"
@@ -67,7 +67,7 @@ jobs:
 
       - name: Update package.json for npm
         run: |
-          cd qail-wasm/pkg
+          cd wasm/pkg
           # Update package name if needed
           jq '.name = "qail-wasm"' package.json > tmp.json && mv tmp.json package.json
           cat package.json
@@ -75,12 +75,12 @@ jobs:
       - name: Publish to npm
         if: ${{ !inputs.dry_run }}
         run: |
-          cd qail-wasm/pkg
+          cd wasm/pkg
           npm publish --provenance --access public
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
         run: |
           echo "🔍 Dry run - would publish:"
-          cd qail-wasm/pkg
+          cd wasm/pkg
           npm pack --dry-run
