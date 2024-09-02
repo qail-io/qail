@@ -25,11 +25,11 @@ qail-core = "0.9"
 ## Quick Start
 
 ```rust
-use qail_core::ast::{QailCmd, Operator};
+use qail_core::{Qail, Operator};
 use qail_core::ast::builders::*;
 
 // Build a query as typed AST
-let cmd = QailCmd::get("users")
+let cmd = Qail::get("users")
     .columns([col("id"), col("name"), col("email")])
     .filter(eq("active", true))
     .order_by([("created_at", Desc)])
