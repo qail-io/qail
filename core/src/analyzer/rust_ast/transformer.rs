@@ -29,12 +29,19 @@ fn transform_statement(stmt: &Statement) -> String {
         Statement::Query(query) => transform_query(query),
         Statement::Insert(insert) => {
             let table_name = insert.table.to_string();
-            let col_count = insert.columns.len();
-            transform_insert(&table_name, col_count)
+            let columns: Vec<String> = insert.columns.iter().map(|c| c.value.clone()).collect();
+            transform_insert(&table_name, &columns)
         }
         Statement::Update(update) => {
             let table_name = extract_table_factor(&update.table.relation);
-            transform_update(&table_name)
+            let assignments: Vec<(String, String)> = update.assignments.iter()
+                .map(|a| {
+                    let col = a.target.to_string();
+                    let val = format!("{}", a.value);
+                    (col, val)
+                })
+                .collect();
+            transform_update(&table_name, &assignments)
         }
         Statement::Delete(delete) => {
             let table_name = match &delete.from {
@@ -205,25 +212,38 @@ fn transform_order_by(order_by: &[sqlparser::ast::OrderByExpr]) -> String {
 }
 
 /// Transform INSERT to QAIL.
-fn transform_insert(table_name: &str, col_count: usize) -> String {
+fn transform_insert(table_name: &str, columns: &[String]) -> String {
+    let mut set_values = String::new();
+    for col in columns {
+        set_values.push_str(&format!("    .set_value(\"{}\", {}_value)\n", col, col));
+    }
+    if set_values.is_empty() {
+        set_values = "    // Add .set_value(col, val) for each column\n".to_string();
+    }
     format!(
         "use qail_core::ast::QailCmd;\n\n\
-         let cmd = QailCmd::add(\"{}\")\n    \
-         // TODO: add .set_value(\"col\", value) for each of {} columns;\n\n\
+         let cmd = QailCmd::add(\"{}\")\n{};
+
+\
          let result = driver.execute(&cmd).await?;",
-        table_name, col_count
+        table_name, set_values.trim_end()
     )
 }
 
 /// Transform UPDATE to QAIL.
-fn transform_update(table_name: &str) -> String {
+fn transform_update(table_name: &str, assignments: &[(String, String)]) -> String {
+    let mut set_values = String::new();
+    for (col, val) in assignments {
+        set_values.push_str(&format!("    .set_value(\"{}\", {})\n", col, val));
+    }
+    if set_values.is_empty() {
+        set_values = "    // Add .set_value(col, val) for each column\n".to_string();
+    }
     format!(
         "use qail_core::ast::{{QailCmd, Operator}};\n\n\
-         let cmd = QailCmd::set(\"{}\")\n    \
-         // TODO: add .set_value() calls\n    \
-         .filter(\"id\", Operator::Eq, id);\n\n\
+         let cmd = QailCmd::set(\"{}\")\n{}    .filter(\"id\", Operator::Eq, id);\n\n\
          let result = driver.execute(&cmd).await?;",
-        table_name
+        table_name, set_values
     )
 }
 
