@@ -8,7 +8,9 @@ pub mod operators;
 pub mod values;
 
 pub use self::cages::{Cage, CageKind};
-pub use self::cmd::{CTEDef, ConflictAction, OnConflict, QailCmd};
+#[deprecated(since = "0.12.0", note = "Use `Qail` instead of `QailCmd`")]
+pub use self::cmd::QailCmd;
+pub use self::cmd::{CTEDef, ConflictAction, OnConflict};
 pub use self::conditions::Condition;
 pub use self::expr::{
     BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, IndexDef, TableConstraint,
