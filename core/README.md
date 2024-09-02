@@ -7,13 +7,13 @@
 
 ## Why AST-Native?
 
-| Approach | How it works | SQL Injection |
-|----------|--------------|---------------|
-| **Raw SQL** (sqlx) | String literals: `"SELECT * FROM users"` | ⚠️ Possible |
-| **ORM** (diesel, sea-orm) | Macros generate SQL at compile time | ✅ Safe |
-| **AST-Native** (qail) | Typed AST → Wire protocol bytes | ✅ **Impossible** |
+| Approach | How it works | Safety Level |
+|----------|--------------|--------------|
+| **String-based** | SQL as strings | Requires parameterization |
+| **ORM** | Macros generate SQL | Compile-time safe |
+| **AST-Native** (QAIL) | Typed AST → Wire protocol | **Structurally safe** |
 
-QAIL builds queries as an Abstract Syntax Tree that compiles directly to database wire protocol. There's no SQL string generation step—SQL injection isn't just prevented, it's structurally impossible.
+QAIL builds queries as an Abstract Syntax Tree that compiles directly to database wire protocol. There's no SQL string generation step—safety is built into the design.
 
 ## Installation
 
