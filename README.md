@@ -17,7 +17,7 @@ Instead of passing SQL strings through your stack, you work directly with a type
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 1: Intent                                                │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │   let cmd = QailCmd::get("users").filter("id", Eq, 42); │    │
+│  │   let cmd = Qail::get("users").filter("id", Eq, 42); │    │
 │  └─────────────────────────────────────────────────────────┘    │
 │                              │                                   │
 │                              ▼                                   │
@@ -44,7 +44,7 @@ Instead of passing SQL strings through your stack, you work directly with a type
 
 | Old Way (SQL Strings) | QAIL Way (AST-Native) |
 |-----------------------|-----------------------|
-| `"SELECT * FROM users WHERE id = $1"` | `QailCmd::get("users").filter("id", Eq, id)` |
+| `"SELECT * FROM users WHERE id = $1"` | `Qail::get("users").filter("id", Eq, id)` |
 | String concatenation risk | Typed at compile time |
 | Parse SQL at runtime | Compile to bytes directly |
 | Locked to one driver (sqlx, pg) | Runtime-agnostic |
@@ -56,7 +56,7 @@ Instead of passing SQL strings through your stack, you work directly with a type
 ```
 qail.rs/
 ├── core/               # Layer 1: AST + Parser
-│   ├── ast/            #   QailCmd, Expr, Value
+│   ├── ast/            #   Qail, Expr, Value
 │   ├── parser/         #   Text → AST (for CLI, LSP)
 │   └── transpiler/     #   AST → SQL text (legacy path)
 │
@@ -80,11 +80,11 @@ qail.rs/
 ### Rust
 
 ```rust
-use qail_core::ast::QailCmd;
+use qail_core::Qail;
 use qail_pg::{PgEncoder, PgDriver};
 
 // Layer 1: Express intent as AST
-let cmd = QailCmd::get("users")
+let cmd = Qail::get("users")
     .columns(vec!["id", "email"])
     .filter("active", Operator::Eq, true);
 
@@ -114,7 +114,7 @@ qail "get users fields id, email where active = true"
 ### Layer 2: The Brain (Pure Logic)
 
 This is the key innovation. The encoder:
-- Takes a `QailCmd` (AST)
+- Takes a `Qail` (AST)
 - Returns `BytesMut` (wire protocol bytes)
 - Has **zero async**, **zero I/O**, **zero tokio**
 
