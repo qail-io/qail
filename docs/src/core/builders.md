@@ -155,7 +155,7 @@ Here's a complex analytics query using all the builders:
 ```rust
 use qail_core::ast::builders::*;
 
-let stats = QailCmd::get("whatsapp_messages")
+let stats = Qail::get("whatsapp_messages")
     .columns([
         count_distinct("phone_number").alias("total_contacts"),
         count().alias("total_messages"),
@@ -169,7 +169,7 @@ let stats = QailCmd::get("whatsapp_messages")
         ]).alias("unread_messages"),
     ]);
 
-let cmd = QailCmd::get("stats")
+let cmd = Qail::get("stats")
     .with_cte("stats", stats)
     .columns([
         col("total_contacts"),
