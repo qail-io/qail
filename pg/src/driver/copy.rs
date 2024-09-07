@@ -4,7 +4,7 @@
 use super::{PgConnection, PgError, PgResult, parse_affected_rows};
 use crate::protocol::{AstEncoder, BackendMessage, PgEncoder};
 use bytes::BytesMut;
-use qail_core::ast::{Action, QailCmd};
+use qail_core::ast::{Action, Qail};
 use tokio::io::AsyncWriteExt;
 
 impl PgConnection {
@@ -145,21 +145,21 @@ impl PgConnection {
 
     /// Export data using COPY TO STDOUT (AST-native).
     ///
-    /// Takes a QailCmd::Export and returns rows as Vec<Vec<String>>.
+    /// Takes a Qail::Export and returns rows as Vec<Vec<String>>.
     ///
     /// # Example
     /// ```ignore
-    /// let cmd = QailCmd::export("users")
+    /// let cmd = Qail::export("users")
     ///     .columns(["id", "name"])
     ///     .filter("active", true);
     ///
     /// let rows = conn.copy_export(&cmd).await?;
     /// ```
-    pub async fn copy_export(&mut self, cmd: &QailCmd) -> PgResult<Vec<Vec<String>>> {
+    pub async fn copy_export(&mut self, cmd: &Qail) -> PgResult<Vec<Vec<String>>> {
         // Validate action
         if cmd.action != Action::Export {
             return Err(PgError::Query(
-                "copy_export requires QailCmd::Export action".to_string(),
+                "copy_export requires Qail::Export action".to_string(),
             ));
         }
 

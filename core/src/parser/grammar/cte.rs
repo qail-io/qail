@@ -70,7 +70,7 @@ fn parse_cte_definition(input: &str, is_recursive: bool) -> IResult<&str, CTEDef
 
 /// Parse CTE body content as a QAIL query
 /// Falls back to raw SQL storage if parsing fails
-fn parse_cte_body(content: &str) -> QailCmd {
+fn parse_cte_body(content: &str) -> Qail {
     // Try to parse as QAIL query using parent module's parse_root
     match super::parse_root(content) {
         Ok((remaining, cmd)) => {
@@ -78,11 +78,11 @@ fn parse_cte_body(content: &str) -> QailCmd {
                 cmd
             } else {
                 // Partial parse - fall back to raw SQL
-                QailCmd::raw_sql(content)
+                Qail::raw_sql(content)
             }
         }
         Err(_) => {
-            QailCmd::raw_sql(content)
+            Qail::raw_sql(content)
         }
     }
 }

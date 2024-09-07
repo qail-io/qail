@@ -4,7 +4,7 @@ pub trait ToQdrant {
     fn to_qdrant_search(&self) -> String;
 }
 
-impl ToQdrant for QailCmd {
+impl ToQdrant for Qail {
     fn to_qdrant_search(&self) -> String {
         match self.action {
             Action::Get => build_qdrant_search(self),
@@ -18,7 +18,7 @@ impl ToQdrant for QailCmd {
     }
 }
 
-fn build_qdrant_upsert(cmd: &QailCmd) -> String {
+fn build_qdrant_upsert(cmd: &Qail) -> String {
     // POST /collections/{name}/points?wait=true
     // Body: { "points": [ { "id": 1, "vector": [...], "payload": {...} } ] }
     // let mut points = Vec::new(); // Unused
@@ -66,7 +66,7 @@ fn build_qdrant_upsert(cmd: &QailCmd) -> String {
     format!("{{ \"points\": [{}] }}", point)
 }
 
-fn build_qdrant_delete(cmd: &QailCmd) -> String {
+fn build_qdrant_delete(cmd: &Qail) -> String {
     // POST /collections/{name}/points/delete
     // Body: { "points": [1, 2, 3] } OR { "filter": ... }
 
@@ -94,7 +94,7 @@ fn build_qdrant_delete(cmd: &QailCmd) -> String {
     }
 }
 
-fn build_qdrant_search(cmd: &QailCmd) -> String {
+fn build_qdrant_search(cmd: &Qail) -> String {
     // Target endpoint: POST /collections/{collection_name}/points/search
     // Output: JSON Body
 
@@ -169,7 +169,7 @@ fn build_qdrant_search(cmd: &QailCmd) -> String {
     format!("{{ {} }}", parts.join(", "))
 }
 
-fn build_filter(cmd: &QailCmd) -> String {
+fn build_filter(cmd: &Qail) -> String {
     // Qdrant Filter structure: { "must": [ { "key": "city", "match": { "value": "London" } } ] }
     let mut musts = Vec::new();
 
@@ -230,7 +230,7 @@ fn build_filter(cmd: &QailCmd) -> String {
     format!("{{ \"must\": [{}] }}", musts.join(", "))
 }
 
-fn get_cage_val(cmd: &QailCmd, kind_example: CageKind) -> Option<usize> {
+fn get_cage_val(cmd: &Qail, kind_example: CageKind) -> Option<usize> {
     for cage in &cmd.cages {
         if let (CageKind::Limit(n), CageKind::Limit(_)) = (&cage.kind, &kind_example) {
             return Some(*n);

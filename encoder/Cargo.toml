@@ -1,6 +1,6 @@
 [package]
 name = "qail-encoder"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 description = "QAIL Encoder - Lightweight wire protocol encoding (no I/O, no TLS)"
 license = "MIT"

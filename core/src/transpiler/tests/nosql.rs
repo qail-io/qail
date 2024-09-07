@@ -18,7 +18,7 @@ fn test_mongo_output() {
 fn test_mongo_insert() {
     use crate::ast::*;
     // For INSERT, use manual construction since v2 ADD syntax isn't fully implemented
-    let mut cmd = QailCmd::add("users");
+    let mut cmd = Qail::add("users");
     cmd.cages.push(Cage {
         kind: CageKind::Payload,
         conditions: vec![
@@ -42,11 +42,11 @@ fn test_mongo_insert() {
     assert!(mongo.contains("\"name\": \"John\""));
 }
 
-// Mongo join using manual QailCmd construction
+// Mongo join using manual Qail construction
 #[test]
 fn test_mongo_join() {
     use crate::ast::*;
-    let mut cmd = QailCmd::get("users");
+    let mut cmd = Qail::get("users");
     cmd.columns.push(Expr::Named("name".to_string()));
     cmd.columns.push(Expr::Named("email".to_string()));
     cmd.joins.push(Join {
@@ -76,7 +76,7 @@ fn test_dynamo_output() {
 fn test_dynamo_gsi() {
     use crate::ast::*;
     // Use manual construction for meta params like index/consistency
-    let mut cmd = QailCmd::get("users");
+    let mut cmd = Qail::get("users");
     cmd.columns.push(Expr::Named("email".to_string()));
     cmd.cages.push(Cage {
         kind: CageKind::Filter,
@@ -105,7 +105,7 @@ fn test_dynamo_gsi() {
 fn test_qdrant_search() {
     use crate::ast::*;
     // Qdrant with vector search uses special syntax, use manual construction
-    let mut cmd = QailCmd::get("points");
+    let mut cmd = Qail::get("points");
     cmd.columns.push(Expr::Named("id".to_string()));
     cmd.columns.push(Expr::Named("score".to_string()));
     cmd.cages.push(Cage {

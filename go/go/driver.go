@@ -284,46 +284,43 @@ func (c *Conn) readMessageFast(buf []byte) (byte, []byte, error) {
 	return msgType, nil, nil
 }
 
-// FetchAll executes query and returns all rows.
-func (d *Driver) FetchAll(cmd *QailCmd) ([]Row, error) {
+// FetchAll executes a query and returns all rows.
+func (d *Driver) FetchAll(cmd *Qail) ([]Row, error) {
 	c, err := d.getConn()
 	if err != nil {
 		return nil, err
 	}
 	defer d.putConn(c)
-	
-	// Get wire bytes from Rust
-	wireBytes := cmd.Encode()
-	if wireBytes == nil {
-		return nil, errors.New("failed to encode command")
+
+	bytes := cmd.Encode()
+	if bytes == nil {
+		return nil, fmt.Errorf("failed to encode command")
 	}
-	
-	// Send to PostgreSQL
-	if _, err := c.conn.Write(wireBytes); err != nil {
-		return nil, err
+
+	if _, err := c.conn.Write(bytes); err != nil {
+		return nil, fmt.Errorf("write failed: %w", err)
 	}
-	
-	// Read response
+
 	return c.readRows()
 }
 
-// Execute executes a command without returning rows.
-func (d *Driver) Execute(cmd *QailCmd) error {
+// Execute executes a command that doesn't return rows (INSERT/UPDATE/DELETE).
+func (d *Driver) Execute(cmd *Qail) error {
 	c, err := d.getConn()
 	if err != nil {
 		return err
 	}
 	defer d.putConn(c)
-	
-	wireBytes := cmd.Encode()
-	if wireBytes == nil {
-		return errors.New("failed to encode command")
+
+	bytes := cmd.Encode()
+	if bytes == nil {
+		return fmt.Errorf("failed to encode command")
 	}
-	
-	if _, err := c.conn.Write(wireBytes); err != nil {
-		return err
+
+	if _, err := c.conn.Write(bytes); err != nil {
+		return fmt.Errorf("write failed: %w", err)
 	}
-	
+
 	// Read until ReadyForQuery
 	for {
 		msgType, data, err := c.readMessage()
@@ -340,7 +337,7 @@ func (d *Driver) Execute(cmd *QailCmd) error {
 }
 
 // BatchExecute executes multiple commands in single round-trip.
-func (d *Driver) BatchExecute(cmds []*QailCmd) (int, error) {
+func (d *Driver) BatchExecute(cmds []*Qail) (int, error) {
 	c, err := d.getConn()
 	if err != nil {
 		return 0, err

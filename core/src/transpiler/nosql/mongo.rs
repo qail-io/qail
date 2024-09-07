@@ -4,7 +4,7 @@ pub trait ToMongo {
     fn to_mongo(&self) -> String;
 }
 
-impl ToMongo for QailCmd {
+impl ToMongo for Qail {
     fn to_mongo(&self) -> String {
         match self.action {
             Action::Get => {
@@ -28,7 +28,7 @@ impl ToMongo for QailCmd {
     }
 }
 
-fn build_aggregate(cmd: &QailCmd) -> String {
+fn build_aggregate(cmd: &Qail) -> String {
     let mut stages = Vec::new();
 
     // 1. $match
@@ -83,7 +83,7 @@ fn build_aggregate(cmd: &QailCmd) -> String {
     format!("db.{}.aggregate([{}])", cmd.table, stages.join(", "))
 }
 
-fn build_find(cmd: &QailCmd) -> String {
+fn build_find(cmd: &Qail) -> String {
     let query = build_query_filter(cmd);
     let projection = build_projection(cmd);
 
@@ -115,7 +115,7 @@ fn build_find(cmd: &QailCmd) -> String {
     mongo
 }
 
-fn build_update(cmd: &QailCmd) -> String {
+fn build_update(cmd: &Qail) -> String {
     let query = build_query_filter(cmd);
     // Payload logic for $set would go here
     let mut update_doc = String::from("{ $set: { ");
@@ -149,7 +149,7 @@ fn build_update(cmd: &QailCmd) -> String {
     format!("db.{}.updateMany({}, {})", cmd.table, query, update_doc)
 }
 
-fn build_insert(cmd: &QailCmd) -> String {
+fn build_insert(cmd: &Qail) -> String {
     let mut doc = String::from("{ ");
     let mut first = true;
 
@@ -178,7 +178,7 @@ fn build_insert(cmd: &QailCmd) -> String {
     format!("db.{}.insertOne({})", cmd.table, doc)
 }
 
-fn build_upsert(cmd: &QailCmd) -> String {
+fn build_upsert(cmd: &Qail) -> String {
     // Similar to update but with upsert: true
     let query = build_query_filter(cmd);
 
@@ -216,12 +216,12 @@ fn build_upsert(cmd: &QailCmd) -> String {
     )
 }
 
-fn build_delete(cmd: &QailCmd) -> String {
+fn build_delete(cmd: &Qail) -> String {
     let query = build_query_filter(cmd);
     format!("db.{}.deleteMany({})", cmd.table, query)
 }
 
-fn build_query_filter(cmd: &QailCmd) -> String {
+fn build_query_filter(cmd: &Qail) -> String {
     let mut query_parts = Vec::new();
 
     for cage in &cmd.cages {
@@ -264,7 +264,7 @@ fn build_query_filter(cmd: &QailCmd) -> String {
     format!("{{ {} }}", query_parts.join(", "))
 }
 
-fn build_projection(cmd: &QailCmd) -> String {
+fn build_projection(cmd: &Qail) -> String {
     if cmd.columns.is_empty() {
         return "{}".to_string();
     }

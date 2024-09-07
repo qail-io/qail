@@ -67,11 +67,11 @@ impl PgConnection {
         }
     }
 
-    /// Execute multiple QailCmd ASTs in a single network round-trip.
+    /// Execute multiple Qail ASTs in a single network round-trip.
     ///
     pub async fn pipeline_ast(
         &mut self,
-        cmds: &[qail_core::ast::QailCmd],
+        cmds: &[qail_core::ast::Qail],
     ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
         let buf = AstEncoder::encode_batch(cmds);
         self.stream.write_all(&buf).await?;
@@ -110,7 +110,7 @@ impl PgConnection {
     }
 
     /// FAST AST pipeline - returns only query count, no result parsing.
-    pub async fn pipeline_ast_fast(&mut self, cmds: &[qail_core::ast::QailCmd]) -> PgResult<usize> {
+    pub async fn pipeline_ast_fast(&mut self, cmds: &[qail_core::ast::Qail]) -> PgResult<usize> {
         let buf = AstEncoder::encode_batch(cmds);
 
         self.stream.write_all(&buf).await?;
@@ -162,7 +162,7 @@ impl PgConnection {
     #[inline]
     pub async fn pipeline_simple_fast(
         &mut self,
-        cmds: &[qail_core::ast::QailCmd],
+        cmds: &[qail_core::ast::Qail],
     ) -> PgResult<usize> {
         let buf = AstEncoder::encode_batch_simple(cmds);
 
@@ -220,7 +220,7 @@ impl PgConnection {
     #[inline]
     pub async fn pipeline_ast_cached(
         &mut self,
-        cmds: &[qail_core::ast::QailCmd],
+        cmds: &[qail_core::ast::Qail],
     ) -> PgResult<usize> {
         if cmds.is_empty() {
             return Ok(0);

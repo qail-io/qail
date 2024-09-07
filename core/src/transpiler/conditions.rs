@@ -44,7 +44,7 @@ impl ParamContext {
 /// 3. If multiple parts:
 ///    - If first part matches table name or any join alias -> Treat as "Table"."Col".
 ///    - Else -> Treat as "Col"->"Field" (JSON).
-fn resolve_col_syntax(col: &str, cmd: &QailCmd, generator: &dyn SqlGenerator) -> String {
+fn resolve_col_syntax(col: &str, cmd: &Qail, generator: &dyn SqlGenerator) -> String {
     if col.starts_with('{') && col.ends_with('}') {
         return col[1..col.len() - 1].to_string();
     }
@@ -84,21 +84,21 @@ fn resolve_col_syntax(col: &str, cmd: &QailCmd, generator: &dyn SqlGenerator) ->
 
 #[allow(clippy::borrowed_box)]
 pub trait ConditionToSql {
-    fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&QailCmd>) -> String;
+    fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&Qail>) -> String;
     fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String;
 
     /// Convert condition to SQL with parameterized values.
     fn to_sql_parameterized(
         &self,
         generator: &Box<dyn SqlGenerator>,
-        context: Option<&QailCmd>,
+        context: Option<&Qail>,
         params: &mut ParamContext,
     ) -> String;
 }
 
 impl ConditionToSql for Condition {
     /// Convert condition to SQL string.
-    fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&QailCmd>) -> String {
+    fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&Qail>) -> String {
         let col = match &self.left {
             Expr::Named(name) => {
                 if name.starts_with('{') && name.ends_with('}') {
@@ -260,7 +260,7 @@ impl ConditionToSql for Condition {
                 // Determine if it's "table"."col" or just "col"
                 // Use resolve_col_syntax logic? Or simply quote?
                 // Usually Join ON RHS is just an identifier, but transpiler logic in resolve_col_syntax
-                // requires a QailCmd context which we don't have here efficiently (we have context: Option<&QailCmd> in other methods but strictly to_value_sql signature is fixed?).
+                // requires a Qail context which we don't have here efficiently (we have context: Option<&Qail> in other methods but strictly to_value_sql signature is fixed?).
                 // Wait, to_value_sql signature is: fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String
                 // We don't have context here.
                 // However, we can use a basic split check or just quote full string.
@@ -284,7 +284,7 @@ impl ConditionToSql for Condition {
     fn to_sql_parameterized(
         &self,
         generator: &Box<dyn SqlGenerator>,
-        context: Option<&QailCmd>,
+        context: Option<&Qail>,
         params: &mut ParamContext,
     ) -> String {
         let col = match &self.left {

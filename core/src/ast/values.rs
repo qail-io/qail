@@ -1,4 +1,4 @@
-use crate::ast::QailCmd;
+use crate::ast::Qail;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -41,7 +41,7 @@ pub enum Value {
     NamedParam(String),
     Function(String),
     Array(Vec<Value>),
-    Subquery(Box<QailCmd>),
+    Subquery(Box<Qail>),
     Column(String),
     Uuid(Uuid),
     NullUuid,
