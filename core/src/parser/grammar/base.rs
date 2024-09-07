@@ -145,7 +145,7 @@ pub fn parse_action(input: &str) -> IResult<&str, (Action, bool)> {
 }
 
 /// Parse transaction commands: begin, commit, rollback
-pub fn parse_txn_command(input: &str) -> IResult<&str, QailCmd> {
+pub fn parse_txn_command(input: &str) -> IResult<&str, Qail> {
     let (input, action) = alt((
         value(Action::TxnStart, tag_no_case("begin")),
         value(Action::TxnCommit, tag_no_case("commit")),
@@ -155,7 +155,7 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, QailCmd> {
 
     Ok((
         input,
-        QailCmd {
+        Qail {
             action,
             table: String::new(),
             columns: vec![],

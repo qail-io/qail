@@ -9,12 +9,12 @@ Two driver implementations:
 
 Usage:
     import asyncio
-    from qail import QailCmd, AsyncPgDriver, Operator
+    from qail import Qail, AsyncPgDriver, Operator
 
     async def main():
         driver = await AsyncPgDriver.connect("localhost", 5432, "user", "db", "pass")
         
-        cmd = (QailCmd.get("users")
+        cmd = (Qail.get("users")
                .columns(["id", "name"])
                .filter("active", Operator.eq(), True)
                .limit(10))
@@ -27,7 +27,7 @@ Usage:
 """
 
 # Native Rust classes
-from .qail import QailCmd, PgDriver, Operator, Row
+from .qail import Qail, PgDriver, Operator, Row
 
 # Sync encoder functions (for native Python async driver)
 from .qail import encode_cmd, encode_batch
@@ -36,7 +36,7 @@ from .qail import encode_cmd, encode_batch
 from .driver import PgDriver as AsyncPgDriver
 
 __all__ = [
-    "QailCmd", "Operator", "Row",
+    "Qail", "Operator", "Row",
     "PgDriver",        # Tokio-based (backward compat)
     "AsyncPgDriver",   # Native asyncio (faster)
     "encode_cmd", "encode_batch",

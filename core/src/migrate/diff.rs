@@ -1,16 +1,16 @@
 //! Schema Diff Visitor
 //!
-//! Computes the difference between two schemas and generates QailCmd operations.
+//! Computes the difference between two schemas and generates Qail operations.
 //! Now with intent-awareness from MigrationHint.
 
 use super::schema::{MigrationHint, Schema};
-use crate::ast::{Action, Constraint, Expr, IndexDef, QailCmd};
+use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
 
 /// Compute the difference between two schemas.
 ///
-/// Returns a Vec<QailCmd> representing the operations needed to migrate
+/// Returns a Vec<Qail> representing the operations needed to migrate
 /// from `old` to `new`. Respects MigrationHint for intent-aware diffing.
-pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
+pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
     let mut cmds = Vec::new();
 
     // Process migration hints first (intent-aware)
@@ -22,7 +22,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                     && from_table == to_table
                 {
                     // Same table rename - use ALTER TABLE RENAME COLUMN
-                    cmds.push(QailCmd {
+                    cmds.push(Qail {
                         action: Action::Mod,
                         table: from_table.to_string(),
                         columns: vec![Expr::Named(format!("{} -> {}", from_col, to_col))],
@@ -32,7 +32,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
             }
             MigrationHint::Transform { expression, target } => {
                 if let Some((table, _col)) = parse_table_col(target) {
-                    cmds.push(QailCmd {
+                    cmds.push(Qail {
                         action: Action::Set,
                         table: table.to_string(),
                         columns: vec![Expr::Named(format!("/* TRANSFORM: {} */", expression))],
@@ -47,7 +47,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                 if target.contains('.') {
                     // Drop column
                     if let Some((table, col)) = parse_table_col(target) {
-                        cmds.push(QailCmd {
+                        cmds.push(Qail {
                             action: Action::AlterDrop,
                             table: table.to_string(),
                             columns: vec![Expr::Named(col.to_string())],
@@ -56,7 +56,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                     }
                 } else {
                     // Drop table
-                    cmds.push(QailCmd {
+                    cmds.push(Qail {
                         action: Action::Drop,
                         table: target.clone(),
                         ..Default::default()
@@ -103,7 +103,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                 })
                 .collect();
 
-            cmds.push(QailCmd {
+            cmds.push(Qail {
                 action: Action::Make,
                 table: name.clone(),
                 columns,
@@ -119,7 +119,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                 |h| matches!(h, MigrationHint::Drop { target, confirmed: true } if target == name),
             );
             if !already_dropped {
-                cmds.push(QailCmd {
+                cmds.push(Qail {
                     action: Action::Drop,
                     table: name.clone(),
                     ..Default::default()
@@ -155,7 +155,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                             constraints.push(Constraint::Default(def.clone()));
                         }
 
-                        cmds.push(QailCmd {
+                        cmds.push(Qail {
                             action: Action::Alter,
                             table: name.clone(),
                             columns: vec![Expr::Def {
@@ -177,7 +177,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                     });
 
                     if !is_rename_source {
-                        cmds.push(QailCmd {
+                        cmds.push(Qail {
                             action: Action::AlterDrop,
                             table: name.clone(),
                             columns: vec![Expr::Named(col.name.clone())],
@@ -195,7 +195,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
 
                     if old_type != new_type {
                         // Type changed - ALTER COLUMN TYPE
-                        cmds.push(QailCmd {
+                        cmds.push(Qail {
                             action: Action::AlterType,
                             table: name.clone(),
                             columns: vec![Expr::Def {
@@ -215,7 +215,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
     for new_idx in &new.indexes {
         let exists = old.indexes.iter().any(|i| i.name == new_idx.name);
         if !exists {
-            cmds.push(QailCmd {
+            cmds.push(Qail {
                 action: Action::Index,
                 table: String::new(),
                 index_def: Some(IndexDef {
@@ -233,7 +233,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
     for old_idx in &old.indexes {
         let exists = new.indexes.iter().any(|i| i.name == old_idx.name);
         if !exists {
-            cmds.push(QailCmd {
+            cmds.push(Qail {
                 action: Action::DropIndex,
                 table: old_idx.name.clone(),
                 ..Default::default()

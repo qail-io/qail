@@ -3,7 +3,7 @@
 //! This daemon handles all PostgreSQL communication, allowing Go/Python/etc
 //! to communicate via Unix socket without CGO overhead.
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use qail_pg::PgDriver;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -248,8 +248,8 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
             let mut state = state.write().await;
             match &mut state.driver {
                 Some(driver) => {
-                    // Build QailCmd
-                    let mut cmd = QailCmd::get(&table);
+                    // Build Qail
+                    let mut cmd = Qail::get(&table);
                     for col in &columns {
                         cmd = cmd.column(col);
                     }
@@ -287,7 +287,7 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
                     let mut results = Vec::with_capacity(queries.len());
 
                     for q in queries {
-                        let mut cmd = QailCmd::get(&q.table);
+                        let mut cmd = Qail::get(&q.table);
                         for col in &q.columns {
                             cmd = cmd.column(col);
                         }
@@ -327,11 +327,11 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
             let mut state = state.write().await;
             match &mut state.driver {
                 Some(driver) => {
-                    // Build QailCmd list for pipeline
-                    let cmds: Vec<QailCmd> = queries
+                    // Build Qail list for pipeline
+                    let cmds: Vec<Qail> = queries
                         .iter()
                         .map(|q| {
-                            let mut cmd = QailCmd::get(&q.table);
+                            let mut cmd = Qail::get(&q.table);
                             for col in &q.columns {
                                 cmd = cmd.column(col);
                             }
@@ -378,11 +378,11 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
             let mut state = state.write().await;
             match &mut state.driver {
                 Some(driver) => {
-                    // Build QailCmd list for pipeline
-                    let cmds: Vec<QailCmd> = queries
+                    // Build Qail list for pipeline
+                    let cmds: Vec<Qail> = queries
                         .iter()
                         .map(|q| {
-                            let mut cmd = QailCmd::get(&q.table);
+                            let mut cmd = Qail::get(&q.table);
                             for col in &q.columns {
                                 cmd = cmd.column(col);
                             }
