@@ -3,7 +3,7 @@ use crate::ast::*;
 // use super::traits::SqlGenerator;
 
 /// Generate CREATE TABLE SQL.
-pub fn build_create_table(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let mut sql = String::new();
     sql.push_str("CREATE TABLE ");
@@ -115,7 +115,7 @@ pub fn build_create_table(cmd: &QailCmd, dialect: Dialect) -> String {
 }
 
 /// Generate ALTER TABLE SQL.
-pub fn build_alter_table(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_alter_table(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let mut stmts = Vec::new();
     let table_name = generator.quote_identifier(&cmd.table);
@@ -179,7 +179,7 @@ pub fn build_alter_table(cmd: &QailCmd, dialect: Dialect) -> String {
 }
 
 /// Generate CREATE INDEX SQL.
-pub fn build_create_index(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_create_index(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     match &cmd.index_def {
         Some(idx) => {
@@ -219,7 +219,7 @@ fn map_type(t: &str) -> &str {
 }
 
 // Stub
-pub fn build_alter_column(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_alter_column(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
 
@@ -278,7 +278,7 @@ pub fn build_alter_column(cmd: &QailCmd, dialect: Dialect) -> String {
 }
 
 /// Generate ALTER TABLE ADD COLUMN SQL (for migrations).
-pub fn build_alter_add_column(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
 
@@ -321,7 +321,7 @@ pub fn build_alter_add_column(cmd: &QailCmd, dialect: Dialect) -> String {
 }
 
 /// Generate ALTER TABLE DROP COLUMN SQL (for migrations).
-pub fn build_alter_drop_column(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_alter_drop_column(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
 
@@ -342,7 +342,7 @@ pub fn build_alter_drop_column(cmd: &QailCmd, dialect: Dialect) -> String {
 }
 
 /// Generate ALTER TABLE ALTER COLUMN TYPE SQL (for migrations).
-pub fn build_alter_column_type(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_alter_column_type(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
 

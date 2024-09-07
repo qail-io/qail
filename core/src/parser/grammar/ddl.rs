@@ -11,7 +11,7 @@ use nom::{
 };
 
 /// Parse CREATE TABLE: make users id:uuid:pk, name:varchar:notnull
-pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, QailCmd> {
+pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Qail> {
     let (input, columns) = separated_list1(
         (multispace0, char(','), multispace0),
         parse_column_definition,
@@ -23,7 +23,7 @@ pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Q
 
     Ok((
         input,
-        QailCmd {
+        Qail {
             action: Action::Make,
             table: table.to_string(),
             columns,
@@ -147,7 +147,7 @@ pub fn parse_constraint(input: &str) -> IResult<&str, Constraint> {
 }
 
 /// Parse CREATE INDEX: index idx_name on table_name col1, col2 [unique]
-pub fn parse_create_index(input: &str) -> IResult<&str, QailCmd> {
+pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
     let (input, _) = tag_no_case("index").parse(input)?;
     let (input, _) = multispace1(input)?;
 
@@ -168,7 +168,7 @@ pub fn parse_create_index(input: &str) -> IResult<&str, QailCmd> {
 
     Ok((
         input,
-        QailCmd {
+        Qail {
             action: Action::Index,
             table: String::new(),
             columns: vec![],
