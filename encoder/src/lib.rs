@@ -138,8 +138,8 @@ pub extern "C" fn qail_encode_get(
         }
     };
 
-    // Build QailCmd
-    let mut cmd = qail_core::ast::QailCmd::get(table_str);
+    // Build Qail
+    let mut cmd = qail_core::ast::Qail::get(table_str);
 
     // Parse columns
     if !columns.is_null() {
@@ -215,7 +215,7 @@ pub extern "C" fn qail_encode_uniform_batch(
     };
 
     // Build the base command
-    let mut base_cmd = qail_core::ast::QailCmd::get(table_str);
+    let mut base_cmd = qail_core::ast::Qail::get(table_str);
 
     if !columns.is_null() {
         if let Ok(cols_str) = unsafe { CStr::from_ptr(columns) }.to_str() {

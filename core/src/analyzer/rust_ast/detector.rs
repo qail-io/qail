@@ -75,12 +75,12 @@ impl QailVisitor {
         strings
     }
 
-    /// Check if this is a QailCmd constructor call (generic - detects ALL constructors)
+    /// Check if this is a Qail constructor call (generic - detects ALL constructors)
     fn check_qailcmd_call(&mut self, path: &syn::ExprPath, args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>) {
         let segments: Vec<_> = path.path.segments.iter().map(|s| s.ident.to_string()).collect();
         
-        // Match QailCmd::* where * is any method
-        if segments.len() >= 2 && segments[0] == "QailCmd" {
+        // Match Qail::* where * is any method
+        if segments.len() >= 2 && segments[0] == "Qail" {
             let action = &segments[1];
             
             let mut columns = Vec::new();
@@ -100,7 +100,7 @@ impl QailVisitor {
                     table: table.clone(),
                     columns,
                     line: self.line_from_span(path.path.segments.first().map(|s| s.ident.span()).unwrap_or_else(Span::call_site)),
-                    snippet: format!("QailCmd::{}(\"{}\")", action, table),
+                    snippet: format!("Qail::{}(\"{}\")", action, table),
                 });
             }
         }
@@ -175,7 +175,7 @@ impl RustAnalyzer {
 
         for p in visitor.patterns {
             if !p.table.is_empty() {
-                // This is a table reference (QailCmd::get("table"))
+                // This is a table reference (Qail::get("table"))
                 current_table = p.table.clone();
                 merged_refs.push(CodeReference {
                     file: path.to_path_buf(),
@@ -347,7 +347,7 @@ mod tests {
     fn test_parse_qailcmd_get() {
         let code = r#"
             fn query() {
-                let cmd = QailCmd::get("users")
+                let cmd = Qail::get("users")
                     .filter("status", Operator::Eq, "active")
                     .columns(["id", "name", "email"]);
             }
@@ -376,7 +376,7 @@ mod tests {
         let matches = detect_raw_sql(code);
         assert!(!matches.is_empty());
         assert_eq!(matches[0].sql_type, "SELECT");
-        assert!(matches[0].suggested_qail.contains("QailCmd::get"));
+        assert!(matches[0].suggested_qail.contains("Qail::get"));
     }
 
     #[test]

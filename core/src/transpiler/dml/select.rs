@@ -4,7 +4,7 @@ use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
-pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
 
     // CTE prefix: WITH cte1 AS (...), cte2 AS (...)
@@ -610,7 +610,7 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
 fn render_expr_for_orderby(
     expr: &Expr,
     generator: &Box<dyn crate::transpiler::SqlGenerator>,
-    cmd: &QailCmd,
+    cmd: &Qail,
 ) -> String {
     match expr {
         Expr::Named(name) => {

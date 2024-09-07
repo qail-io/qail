@@ -82,11 +82,11 @@ impl SqlPattern for DeletePattern {
         let mut lines = Vec::new();
 
         if ctx.include_imports {
-            lines.push("use qail_core::ast::{QailCmd, Operator};".to_string());
+            lines.push("use qail_core::ast::{Qail, Operator};".to_string());
             lines.push(String::new());
         }
 
-        let mut chain = format!("let cmd = QailCmd::del(\"{}\")", table);
+        let mut chain = format!("let cmd = Qail::del(\"{}\")", table);
 
         if let Some(f) = filter {
             let value = match &f.value {

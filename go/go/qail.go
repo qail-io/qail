@@ -22,28 +22,29 @@ package qail
 #include <stdint.h>
 
 // Command handle (opaque)
-typedef void* QailCmdHandle;
+// Command handle (opaque)
+typedef void* QailHandle;
 
 // Create commands
-extern QailCmdHandle qail_get(const char* table);
-extern QailCmdHandle qail_add(const char* table);
-extern QailCmdHandle qail_set(const char* table);
-extern QailCmdHandle qail_del(const char* table);
+extern QailHandle qail_get(const char* table);
+extern QailHandle qail_add(const char* table);
+extern QailHandle qail_set(const char* table);
+extern QailHandle qail_del(const char* table);
 
 // Build command
-extern void qail_cmd_column(QailCmdHandle handle, const char* col);
-extern void qail_cmd_filter_int(QailCmdHandle handle, const char* col, int op, int64_t value);
-extern void qail_cmd_filter_str(QailCmdHandle handle, const char* col, int op, const char* value);
-extern void qail_cmd_filter_bool(QailCmdHandle handle, const char* col, int op, int value);
-extern void qail_cmd_limit(QailCmdHandle handle, int64_t limit);
-extern void qail_cmd_offset(QailCmdHandle handle, int64_t offset);
+extern void qail_column(QailHandle handle, const char* col);
+extern void qail_filter_int(QailHandle handle, const char* col, int op, int64_t value);
+extern void qail_filter_str(QailHandle handle, const char* col, int op, const char* value);
+extern void qail_filter_bool(QailHandle handle, const char* col, int op, int value);
+extern void qail_limit(QailHandle handle, int64_t limit);
+extern void qail_offset(QailHandle handle, int64_t offset);
 
 // Encode
-extern uint8_t* qail_cmd_encode(QailCmdHandle handle, size_t* out_len);
-extern uint8_t* qail_batch_encode(QailCmdHandle* handles, size_t count, size_t* out_len);
+extern uint8_t* qail_encode(QailHandle handle, size_t* out_len);
+extern uint8_t* qail_batch_encode(QailHandle* handles, size_t count, size_t* out_len);
 
 // Free
-extern void qail_cmd_free(QailCmdHandle handle);
+extern void qail_free(QailHandle handle);
 extern void qail_bytes_free(uint8_t* ptr, size_t len);
 
 // OPTIMIZED: Single CGO call for entire batch!
@@ -83,97 +84,97 @@ const (
 	Lte = 5
 )
 
-// QailCmd represents an AST-native query command.
-type QailCmd struct {
-	handle C.QailCmdHandle
+// Qail represents an AST-native query command.
+type Qail struct {
+	handle C.QailHandle
 }
 
 // Get creates a SELECT command.
-func Get(table string) *QailCmd {
+func Get(table string) *Qail {
 	cTable := C.CString(table)
 	defer C.free(unsafe.Pointer(cTable))
-	return &QailCmd{handle: C.qail_get(cTable)}
+	return &Qail{handle: C.qail_get(cTable)}
 }
 
 // Add creates an INSERT command.
-func Add(table string) *QailCmd {
+func Add(table string) *Qail {
 	cTable := C.CString(table)
 	defer C.free(unsafe.Pointer(cTable))
-	return &QailCmd{handle: C.qail_add(cTable)}
+	return &Qail{handle: C.qail_add(cTable)}
 }
 
 // Set creates an UPDATE command.
-func Set(table string) *QailCmd {
+func Set(table string) *Qail {
 	cTable := C.CString(table)
 	defer C.free(unsafe.Pointer(cTable))
-	return &QailCmd{handle: C.qail_set(cTable)}
+	return &Qail{handle: C.qail_set(cTable)}
 }
 
 // Del creates a DELETE command.
-func Del(table string) *QailCmd {
+func Del(table string) *Qail {
 	cTable := C.CString(table)
 	defer C.free(unsafe.Pointer(cTable))
-	return &QailCmd{handle: C.qail_del(cTable)}
+	return &Qail{handle: C.qail_del(cTable)}
 }
 
 // Columns adds columns to select.
-func (c *QailCmd) Columns(cols ...string) *QailCmd {
+func (c *Qail) Columns(cols ...string) *Qail {
 	for _, col := range cols {
 		cCol := C.CString(col)
-		C.qail_cmd_column(c.handle, cCol)
+		C.qail_column(c.handle, cCol)
 		C.free(unsafe.Pointer(cCol))
 	}
 	return c
 }
 
 // Column adds a single column.
-func (c *QailCmd) Column(col string) *QailCmd {
+func (c *Qail) Column(col string) *Qail {
 	cCol := C.CString(col)
 	defer C.free(unsafe.Pointer(cCol))
-	C.qail_cmd_column(c.handle, cCol)
+	C.qail_column(c.handle, cCol)
 	return c
 }
 
 // Filter adds a WHERE condition with int value.
-func (c *QailCmd) Filter(col string, op int, value interface{}) *QailCmd {
+func (c *Qail) Filter(col string, op int, value interface{}) *Qail {
 	cCol := C.CString(col)
 	defer C.free(unsafe.Pointer(cCol))
 	
 	switch v := value.(type) {
 	case int:
-		C.qail_cmd_filter_int(c.handle, cCol, C.int(op), C.int64_t(v))
+		C.qail_filter_int(c.handle, cCol, C.int(op), C.int64_t(v))
 	case int64:
-		C.qail_cmd_filter_int(c.handle, cCol, C.int(op), C.int64_t(v))
+		C.qail_filter_int(c.handle, cCol, C.int(op), C.int64_t(v))
 	case string:
 		cVal := C.CString(v)
-		C.qail_cmd_filter_str(c.handle, cCol, C.int(op), cVal)
+		C.qail_filter_str(c.handle, cCol, C.int(op), cVal)
 		C.free(unsafe.Pointer(cVal))
 	case bool:
 		bVal := 0
 		if v {
 			bVal = 1
 		}
-		C.qail_cmd_filter_bool(c.handle, cCol, C.int(op), C.int(bVal))
+		C.qail_filter_bool(c.handle, cCol, C.int(op), C.int(bVal))
 	}
 	return c
 }
 
 // Limit sets the LIMIT clause.
-func (c *QailCmd) Limit(limit int64) *QailCmd {
-	C.qail_cmd_limit(c.handle, C.int64_t(limit))
+func (c *Qail) Limit(limit int64) *Qail {
+	C.qail_limit(c.handle, C.int64_t(limit))
 	return c
 }
 
 // Offset sets the OFFSET clause.
-func (c *QailCmd) Offset(offset int64) *QailCmd {
-	C.qail_cmd_offset(c.handle, C.int64_t(offset))
+func (c *Qail) Offset(offset int64) *Qail {
+	C.qail_offset(c.handle, C.int64_t(offset))
 	return c
 }
 
 // Encode returns PostgreSQL wire protocol bytes for this command.
-func (c *QailCmd) Encode() []byte {
+func (c *Qail) Encode() []byte {
 	var outLen C.size_t
-	ptr := C.qail_cmd_encode(c.handle, &outLen)
+	ptr := C.qail_encode(c.handle, &outLen)
 	if ptr == nil {
 		return nil
 	}
@@ -185,22 +186,22 @@ func (c *QailCmd) Encode() []byte {
 }
 
 // Free releases the command handle.
-func (c *QailCmd) Free() {
+func (c *Qail) Free() {
 	if c.handle != nil {
-		C.qail_cmd_free(c.handle)
+		C.qail_free(c.handle)
 		c.handle = nil
 	}
 }
 
 // EncodeBatch encodes multiple commands in a single CGO call.
 // This is the key optimization for beating pgx.
-func EncodeBatch(cmds []*QailCmd) []byte {
+func EncodeBatch(cmds []*Qail) []byte {
 	if len(cmds) == 0 {
 		return nil
 	}
 	
 	// Build array of handles
-	handles := make([]C.QailCmdHandle, len(cmds))
+	handles := make([]C.QailHandle, len(cmds))
 	for i, cmd := range cmds {
 		handles[i] = cmd.handle
 	}

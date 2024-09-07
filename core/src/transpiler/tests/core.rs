@@ -68,11 +68,11 @@ fn test_fuzzy_match() {
     );
 }
 
-// OR conditions - using manual QailCmd construction
+// OR conditions - using manual Qail construction
 #[test]
 fn test_or_conditions() {
     use crate::ast::*;
-    let mut cmd = QailCmd::get("users");
+    let mut cmd = Qail::get("users");
     cmd.cages.push(Cage {
         kind: CageKind::Filter,
         conditions: vec![
@@ -98,7 +98,7 @@ fn test_or_conditions() {
 #[test]
 fn test_array_unnest() {
     use crate::ast::*;
-    let mut cmd = QailCmd::get("users");
+    let mut cmd = Qail::get("users");
     cmd.cages.push(Cage {
         kind: CageKind::Filter,
         conditions: vec![Condition {
@@ -116,7 +116,7 @@ fn test_array_unnest() {
 #[test]
 fn test_left_join() {
     use crate::ast::*;
-    let mut cmd = QailCmd::get("users");
+    let mut cmd = Qail::get("users");
     cmd.joins.push(Join {
         table: "posts".to_string(),
         kind: JoinKind::Left,
@@ -131,7 +131,7 @@ fn test_left_join() {
 #[test]
 fn test_right_join() {
     use crate::ast::*;
-    let mut cmd = QailCmd::get("users");
+    let mut cmd = Qail::get("users");
     cmd.joins.push(Join {
         table: "posts".to_string(),
         kind: JoinKind::Right,
@@ -145,7 +145,7 @@ fn test_right_join() {
 #[test]
 fn test_distinct() {
     use crate::ast::*;
-    let mut cmd = QailCmd::get("users");
+    let mut cmd = Qail::get("users");
     cmd.distinct = true;
     cmd.columns.push(Expr::Named("role".to_string()));
     let sql = cmd.to_sql();
@@ -155,8 +155,8 @@ fn test_distinct() {
 
 #[test]
 fn test_transactions() {
-    use crate::ast::{Action, QailCmd};
-    let mut cmd = QailCmd::get("users");
+    use crate::ast::{Action, Qail};
+    let mut cmd = Qail::get("users");
     cmd.action = Action::TxnStart;
     assert!(cmd.to_sql().contains("BEGIN"));
 

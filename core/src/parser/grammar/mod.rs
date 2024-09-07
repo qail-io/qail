@@ -28,7 +28,7 @@ use self::joins::*;
 
 /// Parse a QAIL query with comment preprocessing.
 /// This is the recommended entry point - handles SQL comment stripping.
-pub fn parse(input: &str) -> Result<QailCmd, String> {
+pub fn parse(input: &str) -> Result<Qail, String> {
     let cleaned = strip_sql_comments(input);
     match parse_root(&cleaned) {
         Ok((_, cmd)) => Ok(cmd),
@@ -38,7 +38,7 @@ pub fn parse(input: &str) -> Result<QailCmd, String> {
 
 /// Parse a QAIL query (root entry point).
 /// Note: Does NOT strip comments. Use `parse()` for automatic comment handling.
-pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
+pub fn parse_root(input: &str) -> IResult<&str, Qail> {
     let input = input.trim();
 
     // Try transaction commands first (single keywords)
@@ -187,7 +187,7 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
 
     Ok((
         input,
-        QailCmd {
+        Qail {
             action,
             table: table.to_string(),
             columns: columns.unwrap_or_else(|| vec![Expr::Star]),

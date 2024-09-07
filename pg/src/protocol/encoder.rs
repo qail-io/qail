@@ -1,12 +1,12 @@
 //! PostgreSQL Encoder (Visitor Pattern)
 //!
-//! Compiles QailCmd AST into PostgreSQL wire protocol bytes.
+//! Compiles Qail AST into PostgreSQL wire protocol bytes.
 //! This is pure, synchronous computation - no I/O, no async.
 //!
 //! # Architecture
 //!
 //! Layer 2 of the QAIL architecture:
-//! - Input: QailCmd (AST)
+//! - Input: Qail (AST)
 //! - Output: BytesMut (ready to send over the wire)
 //!
 //! The async I/O layer (Layer 3) consumes these bytes.
@@ -14,7 +14,7 @@
 use bytes::BytesMut;
 
 ///
-/// Takes a QailCmd and produces wire protocol bytes.
+/// Takes a Qail and produces wire protocol bytes.
 /// This is the "Visitor" in the visitor pattern.
 pub struct PgEncoder;
 
