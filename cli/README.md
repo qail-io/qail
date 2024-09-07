@@ -5,6 +5,9 @@
 [![Crates.io](https://img.shields.io/crates/v/qail.svg)](https://crates.io/crates/qail)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
+> [!CAUTION]
+> **Alpha Software**: QAIL is currently in **alpha**. While we strive for stability, the API is evolving to ensure it remains ergonomic and truly AST-native. **Do not use in production environments yet.**
+
 ## Installation
 
 ```bash
@@ -99,5 +102,3 @@ MIT
 
 We welcome issue reports on GitHub! Please provide detailed descriptions to help us reproduce and fix the problem. We aim to address critical issues within 1-5 business days.
 
-> [!CAUTION]
-> **Alpha Software**: QAIL is currently in **alpha**. While we strive for stability, the API is evolving to ensure it remains ergonomic and truly AST-native. **Do not use in production environments yet.**
