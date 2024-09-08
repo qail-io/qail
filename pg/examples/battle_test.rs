@@ -4,7 +4,6 @@
 
 use qail_pg::driver::PgDriver;
 use qail_core::prelude::{Qail, Operator, SortOrder};
-use qail_core::transpiler::ToSql;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
