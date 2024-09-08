@@ -27,8 +27,8 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
     while let Some(line) = lines.next() {
         let line = line.trim();
 
-        // Skip empty lines and comments
-        if line.is_empty() || line.starts_with('#') {
+        // Skip empty lines, # comments, -- comments, and version directives
+        if line.is_empty() || line.starts_with('#') || line.starts_with("--") {
             continue;
         }
 
