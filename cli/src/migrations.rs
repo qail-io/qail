@@ -11,6 +11,7 @@
 use anyhow::Result;
 use colored::*;
 use qail_core::migrate::{diff_schemas, parse_qail};
+use qail_core::prelude::{Action, Expr};
 use qail_pg::driver::PgDriver;
 
 use crate::sql_gen::{cmd_to_sql, generate_rollback_sql};
@@ -858,6 +859,59 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
     if cmds.is_empty() {
         println!("{}", "No rollbacks to apply.".green());
         return Ok(());
+    }
+
+    // Check for unsafe type casts (e.g., TEXT -> INT)
+    let unsafe_type_changes: Vec<_> = cmds
+        .iter()
+        .filter(|cmd| cmd.action == Action::AlterType)
+        .filter_map(|cmd| {
+            if let Some(Expr::Def { name, data_type, .. }) = cmd.columns.first() {
+                // These type changes are unsafe without USING clause
+                let target = data_type.as_str();
+                if target == "INT" || target == "BIGINT" || target == "INTEGER"
+                    || target == "BOOLEAN" || target == "UUID"
+                {
+                    Some(format!("{}.{} → {}", cmd.table, name, target))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !unsafe_type_changes.is_empty() {
+        println!();
+        println!(
+            "{} {}",
+            "⚠️ Unsafe type changes detected!".yellow().bold(),
+            "Rollback may fail.".dimmed()
+        );
+        println!("{}", "━".repeat(50).dimmed());
+        for change in &unsafe_type_changes {
+            println!("  {} {}", "•".red(), change.yellow());
+        }
+        println!("{}", "━".repeat(50).dimmed());
+        println!(
+            "{}",
+            "These type narrowing operations require explicit USING clause.".dimmed()
+        );
+        println!(
+            "{}",
+            "PostgreSQL cannot automatically cast TEXT → INT.".dimmed()
+        );
+        println!();
+        print!("Continue anyway? [y/N] ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("{}", "Rollback cancelled.".yellow());
+            return Ok(());
+        }
     }
 
     println!("{} {} rollback(s) to apply", "Found:".cyan(), cmds.len());
