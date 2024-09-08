@@ -8,7 +8,7 @@
 //!
 //! Run: cargo run --release --example million_complex
 
-use qail_core::ast::{Operator, QailCmd};
+use qail_core::ast::{Operator, Qail};
 use qail_pg::PgConnection;
 use std::time::Instant;
 
@@ -31,9 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 1: Simple SELECT
     // ========================
     println!("1️⃣  SIMPLE SELECT (baseline)");
-    let simple_cmds: Vec<QailCmd> = (1..=QUERIES_PER_BATCH)
+    let simple_cmds: Vec<Qail> = (1..=QUERIES_PER_BATCH)
         .map(|i| {
-            QailCmd::get("harbors")
+            Qail::get("harbors")
                 .columns(["id", "name"])
                 .limit((i % 10 + 1) as i64)
         })
@@ -55,9 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 2: SELECT with WHERE
     // ========================
     println!("\n2️⃣  SELECT with WHERE clause");
-    let where_cmds: Vec<QailCmd> = (1..=QUERIES_PER_BATCH)
+    let where_cmds: Vec<Qail> = (1..=QUERIES_PER_BATCH)
         .map(|i| {
-            QailCmd::get("harbors")
+            Qail::get("harbors")
                 .columns(["id", "name", "country", "latitude", "longitude"])
                 .filter("name", Operator::Like, format!("%harbor{}%", i % 10))
                 .limit(10)
@@ -80,9 +80,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 3: SELECT with ORDER BY
     // ========================
     println!("\n3️⃣  SELECT with ORDER BY");
-    let order_cmds: Vec<QailCmd> = (1..=QUERIES_PER_BATCH)
+    let order_cmds: Vec<Qail> = (1..=QUERIES_PER_BATCH)
         .map(|i| {
-            QailCmd::get("harbors")
+            Qail::get("harbors")
                 .columns(["id", "name", "country"])
                 .filter("name", Operator::Like, format!("%{}%", i % 10))
                 .order_by("name", qail_core::ast::SortOrder::Asc)
@@ -106,9 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 4: Many columns
     // ========================
     println!("\n4️⃣  SELECT with MANY columns");
-    let many_col_cmds: Vec<QailCmd> = (1..=QUERIES_PER_BATCH)
+    let many_col_cmds: Vec<Qail> = (1..=QUERIES_PER_BATCH)
         .map(|i| {
-            QailCmd::get("harbors")
+            Qail::get("harbors")
                 .columns([
                     "id",
                     "name",
