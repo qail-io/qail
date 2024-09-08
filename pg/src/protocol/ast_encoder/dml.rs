@@ -40,28 +40,28 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 
         if join.on_true {
             buf.extend_from_slice(b" ON TRUE");
-        } else if let Some(conditions) = &join.on {
-            if !conditions.is_empty() {
-                buf.extend_from_slice(b" ON ");
-                for (i, cond) in conditions.iter().enumerate() {
-                    if i > 0 {
-                        buf.extend_from_slice(b" AND ");
-                    }
-                    encode_expr(&cond.left, buf);
-                    buf.extend_from_slice(b" = ");
-                    encode_join_value(&cond.value, buf);
+        } else if let Some(conditions) = &join.on
+            && !conditions.is_empty()
+        {
+            buf.extend_from_slice(b" ON ");
+            for (i, cond) in conditions.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b" AND ");
                 }
+                encode_expr(&cond.left, buf);
+                buf.extend_from_slice(b" = ");
+                encode_join_value(&cond.value, buf);
             }
         }
     }
 
     // WHERE
     let filter_cage = cmd.cages.iter().find(|c| c.kind == CageKind::Filter);
-    if let Some(cage) = filter_cage {
-        if !cage.conditions.is_empty() {
-            buf.extend_from_slice(b" WHERE ");
-            encode_conditions(&cage.conditions, buf, params);
-        }
+    if let Some(cage) = filter_cage
+        && !cage.conditions.is_empty()
+    {
+        buf.extend_from_slice(b" WHERE ");
+        encode_conditions(&cage.conditions, buf, params);
     }
 
     // ORDER BY
@@ -150,11 +150,11 @@ fn encode_single_cte(cte: &CTEDef, buf: &mut BytesMut, params: &mut Vec<Option<V
     encode_select(&cte.base_query, buf, params);
 
     // Recursive part (UNION ALL)
-    if cte.recursive {
-        if let Some(ref recursive_query) = cte.recursive_query {
-            buf.extend_from_slice(b" UNION ALL ");
-            encode_select(recursive_query, buf, params);
-        }
+    if cte.recursive
+        && let Some(ref recursive_query) = cte.recursive_query
+    {
+        buf.extend_from_slice(b" UNION ALL ");
+        encode_select(recursive_query, buf, params);
     }
 
     buf.extend_from_slice(b")");
@@ -203,11 +203,11 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     }
 
     // WHERE
-    if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter) {
-        if !cage.conditions.is_empty() {
-            buf.extend_from_slice(b" WHERE ");
-            encode_conditions(&cage.conditions, buf, params);
-        }
+    if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter)
+        && !cage.conditions.is_empty()
+    {
+        buf.extend_from_slice(b" WHERE ");
+        encode_conditions(&cage.conditions, buf, params);
     }
 }
 
@@ -217,11 +217,11 @@ pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     buf.extend_from_slice(cmd.table.as_bytes());
 
     // WHERE
-    if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter) {
-        if !cage.conditions.is_empty() {
-            buf.extend_from_slice(b" WHERE ");
-            encode_conditions(&cage.conditions, buf, params);
-        }
+    if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter)
+        && !cage.conditions.is_empty()
+    {
+        buf.extend_from_slice(b" WHERE ");
+        encode_conditions(&cage.conditions, buf, params);
     }
 }
 
