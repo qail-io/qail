@@ -67,49 +67,63 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
         }
     }
 
-    // Detect new tables
-    for (name, table) in &new.tables {
-        if !old.tables.contains_key(name) {
-            // New table - CREATE TABLE
-            let columns: Vec<Expr> = table
-                .columns
-                .iter()
-                .map(|col| {
-                    let mut constraints = Vec::new();
-                    if col.primary_key {
-                        constraints.push(Constraint::PrimaryKey);
-                    }
-                    if col.nullable {
-                        constraints.push(Constraint::Nullable);
-                    }
-                    if col.unique {
-                        constraints.push(Constraint::Unique);
-                    }
-                    if let Some(def) = &col.default {
-                        constraints.push(Constraint::Default(def.clone()));
-                    }
-                    if let Some(ref fk) = col.foreign_key {
-                        constraints.push(Constraint::References(format!(
-                            "{}({})",
-                            fk.table, fk.column
-                        )));
-                    }
+    // Collect new tables (not in old schema), sorted by FK dependencies
+    let mut new_table_names: Vec<&String> = new
+        .tables
+        .keys()
+        .filter(|name| !old.tables.contains_key(*name))
+        .collect();
 
-                    Expr::Def {
-                        name: col.name.clone(),
-                        data_type: col.data_type.to_pg_type(),
-                        constraints,
-                    }
-                })
-                .collect();
+    // Simple FK-aware sort: tables with no FK deps first, then others
+    // This handles the common case of parent -> child relationships
+    new_table_names.sort_by_key(|name| {
+        new.tables
+            .get(*name)
+            .map(|t| t.columns.iter().filter(|c| c.foreign_key.is_some()).count())
+            .unwrap_or(0)
+    });
 
-            cmds.push(Qail {
-                action: Action::Make,
-                table: name.clone(),
-                columns,
-                ..Default::default()
-            });
-        }
+    // Generate CREATE TABLE commands in dependency order
+    for name in new_table_names {
+        let table = &new.tables[name];
+        let columns: Vec<Expr> = table
+            .columns
+            .iter()
+            .map(|col| {
+                let mut constraints = Vec::new();
+                if col.primary_key {
+                    constraints.push(Constraint::PrimaryKey);
+                }
+                if col.nullable {
+                    constraints.push(Constraint::Nullable);
+                }
+                if col.unique {
+                    constraints.push(Constraint::Unique);
+                }
+                if let Some(def) = &col.default {
+                    constraints.push(Constraint::Default(def.clone()));
+                }
+                if let Some(ref fk) = col.foreign_key {
+                    constraints.push(Constraint::References(format!(
+                        "{}({})",
+                        fk.table, fk.column
+                    )));
+                }
+
+                Expr::Def {
+                    name: col.name.clone(),
+                    data_type: col.data_type.to_pg_type(),
+                    constraints,
+                }
+            })
+            .collect();
+
+        cmds.push(Qail {
+            action: Action::Make,
+            table: name.clone(),
+            columns,
+            ..Default::default()
+        });
     }
 
     // Detect dropped tables (only if not already handled by hints)
@@ -293,4 +307,88 @@ mod tests {
         assert!(cmds.iter().any(|c| matches!(c.action, Action::Mod)));
         assert!(!cmds.iter().any(|c| matches!(c.action, Action::AlterDrop)));
     }
+
+    /// Regression test: FK parent tables must be created before child tables
+    #[test]
+    fn test_fk_ordering_parent_before_child() {
+        use super::super::types::ColumnType;
+        
+        let old = Schema::default();
+        
+        let mut new = Schema::default();
+        // Child table with FK to parent
+        new.add_table(
+            Table::new("child")
+                .column(Column::new("id", ColumnType::Serial).primary_key())
+                .column(Column::new("parent_id", ColumnType::Int).references("parent", "id")),
+        );
+        // Parent table (no FK)
+        new.add_table(
+            Table::new("parent")
+                .column(Column::new("id", ColumnType::Serial).primary_key())
+                .column(Column::new("name", ColumnType::Text)),
+        );
+
+        let cmds = diff_schemas(&old, &new);
+        
+        // Should have 2 CREATE TABLE commands
+        let make_cmds: Vec<_> = cmds.iter().filter(|c| matches!(c.action, Action::Make)).collect();
+        assert_eq!(make_cmds.len(), 2);
+        
+        // Parent (0 FKs) should come BEFORE child (1 FK)
+        let parent_idx = make_cmds.iter().position(|c| c.table == "parent").unwrap();
+        let child_idx = make_cmds.iter().position(|c| c.table == "child").unwrap();
+        assert!(parent_idx < child_idx, "parent table should be created before child with FK");
+    }
+
+    /// Regression test: Multiple FK dependencies should be sorted correctly
+    #[test]
+    fn test_fk_ordering_multiple_dependencies() {
+        use super::super::types::ColumnType;
+        
+        let old = Schema::default();
+        
+        let mut new = Schema::default();
+        // Table with 2 FKs (should be last)
+        new.add_table(
+            Table::new("order_items")
+                .column(Column::new("id", ColumnType::Serial).primary_key())
+                .column(Column::new("order_id", ColumnType::Int).references("orders", "id"))
+                .column(Column::new("product_id", ColumnType::Int).references("products", "id")),
+        );
+        // Table with 1 FK (should be middle)
+        new.add_table(
+            Table::new("orders")
+                .column(Column::new("id", ColumnType::Serial).primary_key())
+                .column(Column::new("user_id", ColumnType::Int).references("users", "id")),
+        );
+        // Table with 0 FKs (should be first)
+        new.add_table(
+            Table::new("users")
+                .column(Column::new("id", ColumnType::Serial).primary_key()),
+        );
+        new.add_table(
+            Table::new("products")
+                .column(Column::new("id", ColumnType::Serial).primary_key()),
+        );
+
+        let cmds = diff_schemas(&old, &new);
+        
+        let make_cmds: Vec<_> = cmds.iter().filter(|c| matches!(c.action, Action::Make)).collect();
+        assert_eq!(make_cmds.len(), 4);
+        
+        // Get positions
+        let users_idx = make_cmds.iter().position(|c| c.table == "users").unwrap();
+        let products_idx = make_cmds.iter().position(|c| c.table == "products").unwrap();
+        let orders_idx = make_cmds.iter().position(|c| c.table == "orders").unwrap();
+        let items_idx = make_cmds.iter().position(|c| c.table == "order_items").unwrap();
+        
+        // Tables with 0 FKs should come first
+        assert!(users_idx < orders_idx, "users (0 FK) before orders (1 FK)");
+        assert!(products_idx < items_idx, "products (0 FK) before order_items (2 FK)");
+        
+        // orders (1 FK) should come before order_items (2 FKs)
+        assert!(orders_idx < items_idx, "orders (1 FK) before order_items (2 FK)");
+    }
 }
+
