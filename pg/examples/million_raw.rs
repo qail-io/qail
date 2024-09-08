@@ -1,4 +1,4 @@
-//! RAW SQL BENCHMARK - No QailCmd overhead
+//! RAW SQL BENCHMARK - No Qail overhead
 //!
 //! Tests absolute maximum by writing SQL directly to wire protocol.
 //! This bypasses ALL QAIL overhead to find the I/O ceiling.

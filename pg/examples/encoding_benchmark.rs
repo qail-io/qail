@@ -7,7 +7,7 @@
 //!
 //! Run: cargo run --release --example encoding_benchmark
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use std::time::Instant;
 
 const ITERATIONS: usize = 1_000_000;
@@ -18,7 +18,7 @@ fn main() {
     println!("Iterations: {}\n", ITERATIONS);
 
     // Build a sample command
-    let sample_cmd = QailCmd::get("harbors")
+    let sample_cmd = Qail::get("harbors")
         .columns(["id", "name", "city", "country"])
         .limit(10);
 

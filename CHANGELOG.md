@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2025-12-30
+
+### Fixed
+- **Docs:** Updated incorrect version numbers in READMEs (was referencing 0.9).
+- **Docs:** Fixed alignment issues in website examples.
+
 ## [0.13.0] - 2025-12-30
 
 ### Breaking Changes ⚠️
@@ -19,4 +25,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Core:** Added `impl Default` for `Qail` struct.
 - **Go:** Updated Go bindings to support new `Qail` struct name and FFI symbols.
-
