@@ -829,27 +829,29 @@ pub async fn migrate_up(schema_diff_path: &str, url: &str, codebase: Option<&str
 pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
     println!("{} {}", "Migrating DOWN:".cyan().bold(), url.yellow());
 
-    // For rollback, we reverse the diff: old becomes new, new becomes old
+    // For rollback, user provides: current_schema:target_schema
+    // Example: "v2.qail:v1.qail" means rollback from v2 to v1
     let cmds = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
         let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
-        let old_path = parts[0];
-        let new_path = parts[1];
+        let current_path = parts[0];  // What we have now
+        let target_path = parts[1];   // What we want to go back to
 
-        // Swap: rollback means going from new -> old
-        let old_content = std::fs::read_to_string(new_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-        let new_content = std::fs::read_to_string(old_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
+        // Read in natural order: old = current, new = target
+        let current_content = std::fs::read_to_string(current_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read current schema: {}", e))?;
+        let target_content = std::fs::read_to_string(target_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read target schema: {}", e))?;
 
-        let old_schema = parse_qail(&old_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
-        let new_schema = parse_qail(&new_content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
+        let current_schema = parse_qail(&current_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse current schema: {}", e))?;
+        let target_schema = parse_qail(&target_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse target schema: {}", e))?;
 
-        diff_schemas(&old_schema, &new_schema)
+        // Diff from current -> target gives us the operations to rollback
+        diff_schemas(&current_schema, &target_schema)
     } else {
         println!("{}", "Warning: Rollback requires two .qail files".yellow());
-        println!("  Use format: qail migrate down old.qail:new.qail <url>");
+        println!("  Use format: qail migrate down current.qail:target.qail <url>");
         return Ok(());
     };
 
