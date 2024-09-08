@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2025-12-31
+
+### Added
+- **Schema:** Added `version` field to `Schema` struct for version directive support (`-- qail: version=N`).
+
+### Fixed
+- **CLI:** `migrate down` now uses natural `current:target` argument order instead of confusing swap logic.
+- **CLI:** `migrate` parser now correctly handles `--` SQL-style comments and version directives.
+- **Code:** Collapsed nested if statements using Rust 2024 let-chains (clippy fixes).
+
 ## [0.13.1] - 2025-12-30
 
 ### Fixed
