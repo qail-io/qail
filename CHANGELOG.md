@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **CLI:** `migrate down` now uses natural `current:target` argument order instead of confusing swap logic.
 - **CLI:** `migrate` parser now correctly handles `--` SQL-style comments and version directives.
+- **DDL:** Foreign key `REFERENCES` constraint now correctly emitted in CREATE TABLE statements.
 - **Code:** Collapsed nested if statements using Rust 2024 let-chains (clippy fixes).
 
 ## [0.13.1] - 2025-12-30
