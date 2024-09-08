@@ -24,6 +24,9 @@ use serde::{Deserialize, Serialize};
 /// Schema containing all table definitions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Schema {
+    /// Schema format version (extracted from `-- qail: version=N` directive)
+    #[serde(default)]
+    pub version: Option<u32>,
     pub tables: Vec<TableDef>,
 }
 
@@ -392,11 +395,28 @@ fn parse_table(input: &str) -> IResult<&str, TableDef> {
 
 /// Parse complete schema file
 fn parse_schema(input: &str) -> IResult<&str, Schema> {
+    // Extract version directive before parsing
+    let version = extract_version_directive(input);
+    
     let (input, _) = ws_and_comments(input)?;
     let (input, tables) = many0(parse_table).parse(input)?;
     let (input, _) = ws_and_comments(input)?;
 
-    Ok((input, Schema { tables }))
+    Ok((input, Schema { version, tables }))
+}
+
+/// Extract version from `-- qail: version=N` directive
+fn extract_version_directive(input: &str) -> Option<u32> {
+    for line in input.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("-- qail:") {
+            let rest = rest.trim();
+            if let Some(version_str) = rest.strip_prefix("version=") {
+                return version_str.trim().parse().ok();
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -546,5 +566,28 @@ mod tests {
 
         let salary = employees.find_column("salary").expect("salary not found");
         assert_eq!(salary.check, Some("salary > 0".to_string()));
+    }
+
+    #[test]
+    fn test_version_directive() {
+        let input = r#"
+            -- qail: version=1
+            table users (
+                id uuid primary_key
+            )
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        assert_eq!(schema.version, Some(1));
+        assert_eq!(schema.tables.len(), 1);
+
+        // Without version directive
+        let input_no_version = r#"
+            table items (
+                id uuid primary_key
+            )
+        "#;
+        let schema2 = Schema::parse(input_no_version).expect("parse failed");
+        assert_eq!(schema2.version, None);
     }
 }

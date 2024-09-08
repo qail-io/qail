@@ -326,26 +326,26 @@ pub fn encode_conditions(
                 continue;
             }
             Operator::Between => {
-                if let Value::Array(vals) = &cond.value {
-                    if vals.len() >= 2 {
-                        buf.extend_from_slice(b" BETWEEN ");
-                        encode_value(&vals[0], buf, params);
-                        buf.extend_from_slice(b" AND ");
-                        encode_value(&vals[1], buf, params);
-                        continue;
-                    }
+                if let Value::Array(vals) = &cond.value
+                    && vals.len() >= 2
+                {
+                    buf.extend_from_slice(b" BETWEEN ");
+                    encode_value(&vals[0], buf, params);
+                    buf.extend_from_slice(b" AND ");
+                    encode_value(&vals[1], buf, params);
+                    continue;
                 }
                 buf.extend_from_slice(b" = ");
             }
             Operator::NotBetween => {
-                if let Value::Array(vals) = &cond.value {
-                    if vals.len() >= 2 {
-                        buf.extend_from_slice(b" NOT BETWEEN ");
-                        encode_value(&vals[0], buf, params);
-                        buf.extend_from_slice(b" AND ");
-                        encode_value(&vals[1], buf, params);
-                        continue;
-                    }
+                if let Value::Array(vals) = &cond.value
+                    && vals.len() >= 2
+                {
+                    buf.extend_from_slice(b" NOT BETWEEN ");
+                    encode_value(&vals[0], buf, params);
+                    buf.extend_from_slice(b" AND ");
+                    encode_value(&vals[1], buf, params);
+                    continue;
                 }
                 buf.extend_from_slice(b" = ");
             }
