@@ -113,6 +113,34 @@ pub enum Expr {
     /// Literal value (string, number) for use in expressions
     /// e.g., '62', 0, 'active'
     Literal(Value),
+    /// Array constructor: ARRAY[expr1, expr2, ...]
+    ArrayConstructor {
+        elements: Vec<Expr>,
+        alias: Option<String>,
+    },
+    /// Row constructor: ROW(expr1, expr2, ...) or (expr1, expr2, ...)
+    RowConstructor {
+        elements: Vec<Expr>,
+        alias: Option<String>,
+    },
+    /// Array/string subscript: arr[index]
+    Subscript {
+        expr: Box<Expr>,
+        index: Box<Expr>,
+        alias: Option<String>,
+    },
+    /// Collation: expr COLLATE "collation_name"
+    Collate {
+        expr: Box<Expr>,
+        collation: String,
+        alias: Option<String>,
+    },
+    /// Field selection from composite: (row).field
+    FieldAccess {
+        expr: Box<Expr>,
+        field: String,
+        alias: Option<String>,
+    },
 }
 
 impl std::fmt::Display for Expr {
@@ -292,6 +320,55 @@ impl std::fmt::Display for Expr {
                 Ok(())
             }
             Expr::Literal(value) => write!(f, "{}", value),
+            Expr::ArrayConstructor { elements, alias } => {
+                write!(f, "ARRAY[")?;
+                for (i, elem) in elements.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", elem)?;
+                }
+                write!(f, "]")?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::RowConstructor { elements, alias } => {
+                write!(f, "ROW(")?;
+                for (i, elem) in elements.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", elem)?;
+                }
+                write!(f, ")")?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::Subscript { expr, index, alias } => {
+                write!(f, "{}[{}]", expr, index)?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::Collate { expr, collation, alias } => {
+                write!(f, "{} COLLATE \"{}\"", expr, collation)?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::FieldAccess { expr, field, alias } => {
+                write!(f, "({}).{}", expr, field)?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
         }
     }
 }

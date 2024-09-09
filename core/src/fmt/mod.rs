@@ -300,6 +300,42 @@ impl Formatter {
                 let prefix = match kind { crate::ast::ModKind::Add => "+", crate::ast::ModKind::Drop => "-" };
                 write!(self.buffer, "{}{}", prefix, col)?;
             }
+            Expr::ArrayConstructor { elements, alias } => {
+                write!(self.buffer, "ARRAY[")?;
+                for (i, elem) in elements.iter().enumerate() {
+                    if i > 0 { write!(self.buffer, ", ")?; }
+                    self.format_column(elem)?;
+                }
+                write!(self.buffer, "]")?;
+                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+            }
+            Expr::RowConstructor { elements, alias } => {
+                write!(self.buffer, "ROW(")?;
+                for (i, elem) in elements.iter().enumerate() {
+                    if i > 0 { write!(self.buffer, ", ")?; }
+                    self.format_column(elem)?;
+                }
+                write!(self.buffer, ")")?;
+                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+            }
+            Expr::Subscript { expr, index, alias } => {
+                self.format_column(expr)?;
+                write!(self.buffer, "[")?;
+                self.format_column(index)?;
+                write!(self.buffer, "]")?;
+                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+            }
+            Expr::Collate { expr, collation, alias } => {
+                self.format_column(expr)?;
+                write!(self.buffer, " COLLATE \"{}\"", collation)?;
+                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+            }
+            Expr::FieldAccess { expr, field, alias } => {
+                write!(self.buffer, "(")?;
+                self.format_column(expr)?;
+                write!(self.buffer, ").{}", field)?;
+                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+            }
         }
         Ok(())
     }

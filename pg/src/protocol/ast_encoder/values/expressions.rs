@@ -219,6 +219,64 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
                 buf.extend_from_slice(name.as_bytes());
             }
         }
+        Expr::ArrayConstructor { elements, alias } => {
+            buf.extend_from_slice(b"ARRAY[");
+            for (i, elem) in elements.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                encode_column_expr(elem, buf);
+            }
+            buf.extend_from_slice(b"]");
+            if let Some(a) = alias {
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(a.as_bytes());
+            }
+        }
+        Expr::RowConstructor { elements, alias } => {
+            buf.extend_from_slice(b"ROW(");
+            for (i, elem) in elements.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                encode_column_expr(elem, buf);
+            }
+            buf.extend_from_slice(b")");
+            if let Some(a) = alias {
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(a.as_bytes());
+            }
+        }
+        Expr::Subscript { expr, index, alias } => {
+            encode_column_expr(expr, buf);
+            buf.extend_from_slice(b"[");
+            encode_column_expr(index, buf);
+            buf.extend_from_slice(b"]");
+            if let Some(a) = alias {
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(a.as_bytes());
+            }
+        }
+        Expr::Collate { expr, collation, alias } => {
+            encode_column_expr(expr, buf);
+            buf.extend_from_slice(b" COLLATE \"");
+            buf.extend_from_slice(collation.as_bytes());
+            buf.extend_from_slice(b"\"");
+            if let Some(a) = alias {
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(a.as_bytes());
+            }
+        }
+        Expr::FieldAccess { expr, field, alias } => {
+            buf.extend_from_slice(b"(");
+            encode_column_expr(expr, buf);
+            buf.extend_from_slice(b").");
+            buf.extend_from_slice(field.as_bytes());
+            if let Some(a) = alias {
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(a.as_bytes());
+            }
+        }
         _ => buf.extend_from_slice(b"*"),
     }
 }
