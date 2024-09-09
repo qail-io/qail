@@ -15,8 +15,18 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 
     buf.extend_from_slice(b"SELECT ");
 
-    // DISTINCT
-    if cmd.distinct {
+    // DISTINCT ON (col1, col2, ...)
+    if !cmd.distinct_on.is_empty() {
+        buf.extend_from_slice(b"DISTINCT ON (");
+        for (i, expr) in cmd.distinct_on.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b", ");
+            }
+            encode_expr(expr, buf);
+        }
+        buf.extend_from_slice(b") ");
+    } else if cmd.distinct {
+        // Regular DISTINCT (mutually exclusive with DISTINCT ON)
         buf.extend_from_slice(b"DISTINCT ");
     }
 

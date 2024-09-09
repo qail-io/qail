@@ -57,7 +57,8 @@ pub enum Expr {
     Window {
         name: String,
         func: String,
-        params: Vec<Value>,
+        /// Function arguments as expressions (e.g., for SUM(amount), use Expr::Named("amount"))
+        params: Vec<Expr>,
         partition: Vec<String>,
         order: Vec<Cage>,
         frame: Option<WindowFrame>,
