@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] - 2025-12-31
+
+### Added
+
+**Wire Protocol Encoders (AST-Native):**
+- `DISTINCT ON (col1, col2, ...)` queries
+- `COUNT(*) FILTER (WHERE ...)` aggregate syntax
+- Window `FRAME` clause (`ROWS/RANGE BETWEEN ... AND ...`)
+- `GROUP BY` with `ROLLUP`, `CUBE`, and `GROUPING SETS`
+- `CREATE VIEW` and `DROP VIEW` DDL
+- Comprehensive tests: `complex_test.rs`, `expr_test.rs`
+
+**Expression System (100% Grammar Coverage):**
+- `Expr::ArrayConstructor` - `ARRAY[col1, col2, ...]`
+- `Expr::RowConstructor` - `ROW(a, b, c)`
+- `Expr::Subscript` - Array/string subscripting `arr[1]`
+- `Expr::Collate` - Collation expressions `col COLLATE "C"`
+- `Expr::FieldAccess` - Composite field selection `(row).field`
+- `GroupByMode::GroupingSets(Vec<Vec<String>>)` - `GROUPING SETS ((a, b), (c))`
+- `Action::CreateView` and `Action::DropView` for view management
+
+**CLI Improvements:**
+- `qail diff --pretty` displays `MigrationClass` (reversible/data-losing/irreversible)
+
+### Changed
+- `Expr::Window.params` from `Vec<Value>` to `Vec<Expr>` for native AST philosophy
+- Expression, DML, and DDL coverage now 100% for standard PostgreSQL
+
+## [0.14.1] - 2025-12-31
+
+### Fixed
+- **PG:** Critical bug in `encode_update()` where column names were encoded as `$1` placeholders instead of actual column names when using `.columns().values()` pattern.
+
+### Added
+- **PG:** Comprehensive battle test suite (`battle_test.rs`) with 19 query operations covering INSERT, SELECT, UPDATE, DELETE, JOINs, pagination, and DISTINCT.
+- **PG:** Modularized `values.rs` into `values/` directory with `expressions.rs` for better extensibility.
+
 ## [0.14.0] - 2025-12-31
 
 ### Added

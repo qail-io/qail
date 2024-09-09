@@ -181,6 +181,23 @@ impl ToSql for Qail {
                     "ROLLBACK TO SAVEPOINT".to_string()
                 }
             }
+            // Views
+            Action::CreateView => {
+                if let Some(source) = &self.source_query {
+                    format!(
+                        "CREATE VIEW {} AS {}",
+                        self.table,
+                        source.to_sql_with_dialect(dialect)
+                    )
+                } else {
+                    format!(
+                        "CREATE VIEW {} AS {}",
+                        self.table,
+                        dml::select::build_select(self, dialect)
+                    )
+                }
+            }
+            Action::DropView => format!("DROP VIEW IF EXISTS {}", self.table),
         }
     }
 }
