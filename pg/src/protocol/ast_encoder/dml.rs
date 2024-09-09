@@ -3,7 +3,7 @@
 //! SELECT, INSERT, UPDATE, DELETE, EXPORT, and CTE statements.
 
 use bytes::BytesMut;
-use qail_core::ast::{CTEDef, CageKind, JoinKind, Qail, SortOrder};
+use qail_core::ast::{CTEDef, CageKind, Expr, GroupByMode, JoinKind, Qail, SortOrder};
 
 use super::helpers::write_usize;
 use super::values::{encode_columns, encode_conditions, encode_expr, encode_join_value, encode_value};
@@ -72,6 +72,68 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     {
         buf.extend_from_slice(b" WHERE ");
         encode_conditions(&cage.conditions, buf, params);
+    }
+
+    // GROUP BY with ROLLUP/CUBE/GROUPING SETS
+    let group_cols: Vec<&str> = cmd.columns.iter()
+        .filter_map(|e| match e {
+            Expr::Named(name) => Some(name.as_str()),
+            Expr::Aliased { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    
+    // Only output GROUP BY if we have aggregates and non-aggregate columns
+    let has_aggregates = cmd.columns.iter().any(|e| matches!(e, Expr::Aggregate { .. }));
+    if has_aggregates && !group_cols.is_empty() {
+        buf.extend_from_slice(b" GROUP BY ");
+        match &cmd.group_by_mode {
+            GroupByMode::Simple => {
+                for (i, col) in group_cols.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(col.as_bytes());
+                }
+            }
+            GroupByMode::Rollup => {
+                buf.extend_from_slice(b"ROLLUP(");
+                for (i, col) in group_cols.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(col.as_bytes());
+                }
+                buf.extend_from_slice(b")");
+            }
+            GroupByMode::Cube => {
+                buf.extend_from_slice(b"CUBE(");
+                for (i, col) in group_cols.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(col.as_bytes());
+                }
+                buf.extend_from_slice(b")");
+            }
+            GroupByMode::GroupingSets(sets) => {
+                buf.extend_from_slice(b"GROUPING SETS (");
+                for (i, set) in sets.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(b"(");
+                    for (j, col) in set.iter().enumerate() {
+                        if j > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        buf.extend_from_slice(col.as_bytes());
+                    }
+                    buf.extend_from_slice(b")");
+                }
+                buf.extend_from_slice(b")");
+            }
+        }
     }
 
     // ORDER BY

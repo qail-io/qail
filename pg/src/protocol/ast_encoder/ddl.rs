@@ -223,3 +223,22 @@ pub fn encode_alter_column_type(cmd: &Qail, buf: &mut BytesMut) {
         }
     }
 }
+
+/// Encode CREATE VIEW statement.
+/// CREATE VIEW name AS SELECT ...
+pub fn encode_create_view(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+    buf.extend_from_slice(b"CREATE VIEW ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" AS ");
+    
+    // The source_query contains the SELECT statement for the view
+    if let Some(ref source) = cmd.source_query {
+        super::dml::encode_select(source, buf, params);
+    }
+}
+
+/// Encode DROP VIEW statement.
+pub fn encode_drop_view(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"DROP VIEW IF EXISTS ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}

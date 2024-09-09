@@ -57,6 +57,11 @@ pub enum Action {
     Savepoint,
     ReleaseSavepoint,
     RollbackToSavepoint,
+    // Views
+    /// CREATE VIEW name AS SELECT ...
+    CreateView,
+    /// DROP VIEW name
+    DropView,
 }
 
 impl std::fmt::Display for Action {
@@ -98,6 +103,8 @@ impl std::fmt::Display for Action {
             Action::Savepoint => write!(f, "SAVEPOINT"),
             Action::ReleaseSavepoint => write!(f, "RELEASE_SAVEPOINT"),
             Action::RollbackToSavepoint => write!(f, "ROLLBACK_TO_SAVEPOINT"),
+            Action::CreateView => write!(f, "CREATE_VIEW"),
+            Action::DropView => write!(f, "DROP_VIEW"),
         }
     }
 }
@@ -296,7 +303,7 @@ pub enum ModKind {
 }
 
 /// GROUP BY mode for advanced aggregations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum GroupByMode {
     /// Standard GROUP BY
     #[default]
@@ -305,6 +312,8 @@ pub enum GroupByMode {
     Rollup,
     /// CUBE - all combinations of subtotals
     Cube,
+    /// GROUPING SETS - explicit grouping sets: GROUPING SETS ((a, b), (c))
+    GroupingSets(Vec<Vec<String>>),
 }
 
 /// Row locking mode for SELECT...FOR UPDATE/SHARE

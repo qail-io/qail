@@ -135,13 +135,11 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
                 println!("  {}", sql);
             }
         }
+    } else if ci_mode {
+        print_ci_breaking_changes(&impact, code_path);
+        std::process::exit(1);
     } else {
-        if ci_mode {
-            print_ci_breaking_changes(&impact, code_path);
-            std::process::exit(1);
-        } else {
-            print_human_breaking_changes(&impact);
-        }
+        print_human_breaking_changes(&impact);
     }
 
     Ok(())
