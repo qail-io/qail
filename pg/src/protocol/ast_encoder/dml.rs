@@ -3,7 +3,7 @@
 //! SELECT, INSERT, UPDATE, DELETE, EXPORT, and CTE statements.
 
 use bytes::BytesMut;
-use qail_core::ast::{CTEDef, CageKind, JoinKind, Qail, SortOrder};
+use qail_core::ast::{CTEDef, CageKind, Expr, GroupByMode, JoinKind, Qail, SortOrder};
 
 use super::helpers::write_usize;
 use super::values::{encode_columns, encode_conditions, encode_expr, encode_join_value, encode_value};
@@ -15,8 +15,18 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 
     buf.extend_from_slice(b"SELECT ");
 
-    // DISTINCT
-    if cmd.distinct {
+    // DISTINCT ON (col1, col2, ...)
+    if !cmd.distinct_on.is_empty() {
+        buf.extend_from_slice(b"DISTINCT ON (");
+        for (i, expr) in cmd.distinct_on.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b", ");
+            }
+            encode_expr(expr, buf);
+        }
+        buf.extend_from_slice(b") ");
+    } else if cmd.distinct {
+        // Regular DISTINCT (mutually exclusive with DISTINCT ON)
         buf.extend_from_slice(b"DISTINCT ");
     }
 
@@ -62,6 +72,68 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     {
         buf.extend_from_slice(b" WHERE ");
         encode_conditions(&cage.conditions, buf, params);
+    }
+
+    // GROUP BY with ROLLUP/CUBE/GROUPING SETS
+    let group_cols: Vec<&str> = cmd.columns.iter()
+        .filter_map(|e| match e {
+            Expr::Named(name) => Some(name.as_str()),
+            Expr::Aliased { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    
+    // Only output GROUP BY if we have aggregates and non-aggregate columns
+    let has_aggregates = cmd.columns.iter().any(|e| matches!(e, Expr::Aggregate { .. }));
+    if has_aggregates && !group_cols.is_empty() {
+        buf.extend_from_slice(b" GROUP BY ");
+        match &cmd.group_by_mode {
+            GroupByMode::Simple => {
+                for (i, col) in group_cols.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(col.as_bytes());
+                }
+            }
+            GroupByMode::Rollup => {
+                buf.extend_from_slice(b"ROLLUP(");
+                for (i, col) in group_cols.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(col.as_bytes());
+                }
+                buf.extend_from_slice(b")");
+            }
+            GroupByMode::Cube => {
+                buf.extend_from_slice(b"CUBE(");
+                for (i, col) in group_cols.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(col.as_bytes());
+                }
+                buf.extend_from_slice(b")");
+            }
+            GroupByMode::GroupingSets(sets) => {
+                buf.extend_from_slice(b"GROUPING SETS (");
+                for (i, set) in sets.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(b"(");
+                    for (j, col) in set.iter().enumerate() {
+                        if j > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        buf.extend_from_slice(col.as_bytes());
+                    }
+                    buf.extend_from_slice(b")");
+                }
+                buf.extend_from_slice(b")");
+            }
+        }
     }
 
     // ORDER BY
@@ -190,15 +262,32 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     buf.extend_from_slice(cmd.table.as_bytes());
     buf.extend_from_slice(b" SET ");
 
-    // SET clause
+    // SET clause - pair columns with payload values
     if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Payload) {
-        for (i, cond) in cage.conditions.iter().enumerate() {
-            if i > 0 {
-                buf.extend_from_slice(b", ");
+        // Use cmd.columns if available (from .columns([...]).values([...]) pattern)
+        // Otherwise use cage.conditions.left (from .set("col", value) pattern)
+        if !cmd.columns.is_empty() {
+            // Zip columns with values
+            for (i, (col, cond)) in cmd.columns.iter().zip(cage.conditions.iter()).enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                // Column name from cmd.columns
+                encode_expr(col, buf);
+                buf.extend_from_slice(b" = ");
+                // Value from payload condition
+                encode_value(&cond.value, buf, params);
             }
-            encode_expr(&cond.left, buf);
-            buf.extend_from_slice(b" = ");
-            encode_value(&cond.value, buf, params);
+        } else {
+            // Fallback to old behavior (direct set)
+            for (i, cond) in cage.conditions.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                encode_expr(&cond.left, buf);
+                buf.extend_from_slice(b" = ");
+                encode_value(&cond.value, buf, params);
+            }
         }
     }
 

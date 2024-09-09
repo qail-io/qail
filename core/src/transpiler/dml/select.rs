@@ -534,6 +534,12 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                 sql.push_str(&format!("ROLLUP({})", non_aggregated_cols.join(", ")))
             }
             GroupByMode::Cube => sql.push_str(&format!("CUBE({})", non_aggregated_cols.join(", "))),
+            GroupByMode::GroupingSets(ref sets) => {
+                let sets_str: Vec<String> = sets.iter()
+                    .map(|s| format!("({})", s.join(", ")))
+                    .collect();
+                sql.push_str(&format!("GROUPING SETS ({})", sets_str.join(", ")));
+            }
         }
     }
 
