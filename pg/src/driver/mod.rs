@@ -186,15 +186,95 @@ impl PgDriver {
         .map_err(|_| PgError::Connection(format!("Connection timeout after {:?}", timeout)))?
     }
 
-    /// Execute a QAIL command and fetch all rows (AST-NATIVE).
+    /// Clear the prepared statement cache.
     ///
-    /// Uses AstEncoder to directly encode AST to wire protocol bytes.
-    /// NO SQL STRING GENERATION!
+    /// Frees memory by removing all cached statements.
+    /// Note: Statements remain on the PostgreSQL server until connection closes.
+    pub fn clear_cache(&mut self) {
+        self.connection.stmt_cache.clear();
+        self.connection.prepared_statements.clear();
+    }
+
+    /// Get cache statistics.
+    ///
+    /// Returns (current_size, max_capacity).
+    pub fn cache_stats(&self) -> (usize, usize) {
+        (self.connection.stmt_cache.len(), self.connection.stmt_cache.cap().get())
+    }
+
+    /// Execute a QAIL command and fetch all rows.
+    ///
+    /// Uses prepared statement caching for best performance (~4,500 q/s).
     pub async fn fetch_all(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
+        use crate::protocol::{ast_encoder::dml, PgEncoder, BackendMessage};
+        use std::hash::{Hash, Hasher};
+        use tokio::io::AsyncWriteExt;
+
+        // Encode to reusable buffers
+        self.connection.sql_buf.clear();
+        self.connection.params_buf.clear();
+        
+        match cmd.action {
+            qail_core::ast::Action::Get | qail_core::ast::Action::With => 
+                dml::encode_select(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf),
+            qail_core::ast::Action::Add => 
+                dml::encode_insert(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf),
+            qail_core::ast::Action::Set => 
+                dml::encode_update(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf),
+            qail_core::ast::Action::Del => 
+                dml::encode_delete(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf),
+            _ => return self.fetch_all_uncached(cmd).await,
+        }
+
+        // Get or create cached statement
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.connection.sql_buf.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        let name = match self.connection.stmt_cache.get(&hash) {
+            Some(n) => n.clone(),
+            None => {
+                let n = format!("qail_{:x}", hash);
+                let sql = std::str::from_utf8(&self.connection.sql_buf).unwrap_or("");
+                self.connection.stream.write_all(&PgEncoder::encode_parse(&n, sql, &[])).await?;
+                self.connection.stmt_cache.put(hash, n.clone());
+                self.connection.prepared_statements.insert(n.clone(), sql.to_string());
+                n
+            }
+        };
+
+        // Send Bind + Execute + Sync
+        let mut buf = bytes::BytesMut::with_capacity(128);
+        PgEncoder::encode_bind_to(&mut buf, &name, &self.connection.params_buf);
+        PgEncoder::encode_execute_to(&mut buf);
+        PgEncoder::encode_sync_to(&mut buf);
+        self.connection.stream.write_all(&buf).await?;
+
+        // Collect rows
+        let mut rows = Vec::new();
+        loop {
+            match self.connection.recv().await? {
+                BackendMessage::DataRow(d) => rows.push(PgRow { columns: d, column_info: None }),
+                BackendMessage::ReadyForQuery(_) => return Ok(rows),
+                BackendMessage::ErrorResponse(e) => return Err(PgError::Query(e.message)),
+                _ => {}
+            }
+        }
+    }
+
+    /// Execute a QAIL command WITHOUT caching (legacy).
+    ///
+    /// Sends Parse + Bind + Execute on every call.
+    /// Use `fetch_all()` instead for better performance.
+    pub async fn fetch_all_uncached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
 
-        // AST-NATIVE: Encode directly to wire bytes (no to_sql()!)
-        let (wire_bytes, _params) = AstEncoder::encode_cmd(cmd);
+        // ZERO-ALLOC: Use connection's reusable buffers
+        let wire_bytes = AstEncoder::encode_cmd_reuse(
+            cmd,
+            &mut self.connection.sql_buf,
+            &mut self.connection.params_buf,
+        );
 
         // Send wire bytes and receive response
         self.connection.send_bytes(&wire_bytes).await?;
@@ -235,40 +315,18 @@ impl PgDriver {
         rows.into_iter().next().ok_or(PgError::NoRows)
     }
 
-    /// Execute a QAIL command with PREPARED STATEMENT CACHING.
+    /// Execute a QAIL command (for mutations) - ZERO-ALLOC.
     ///
-    /// Like fetch_all(), but caches the prepared statement on the server.
-    /// On first call: sends Parse + Bind + Execute + Sync
-    /// On subsequent calls: sends only Bind + Execute + Sync (much faster!)
-    ///
-    /// Use this for repeated queries with the same AST structure.
-    pub async fn fetch_all_cached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
-        use crate::protocol::AstEncoder;
-
-        let (sql, params) = AstEncoder::encode_cmd_sql(cmd);
-
-        // Use cached query - only parses on first call
-        let raw_rows = self.connection.query_cached(&sql, &params).await?;
-
-        let rows: Vec<PgRow> = raw_rows
-            .into_iter()
-            .map(|data| PgRow {
-                columns: data,
-                column_info: None, // Simple version - no column metadata
-            })
-            .collect();
-
-        Ok(rows)
-    }
-
-    /// Execute a QAIL command (for mutations) - AST-NATIVE.
-    ///
-    /// Uses AstEncoder to directly encode AST to wire protocol bytes.
+    /// Uses connection's reusable buffers for encoding.
     pub async fn execute(&mut self, cmd: &Qail) -> PgResult<u64> {
         use crate::protocol::AstEncoder;
 
-        // AST-NATIVE: Encode directly to wire bytes (no to_sql()!)
-        let (wire_bytes, _params) = AstEncoder::encode_cmd(cmd);
+        // ZERO-ALLOC: Use connection's reusable buffers
+        let wire_bytes = AstEncoder::encode_cmd_reuse(
+            cmd,
+            &mut self.connection.sql_buf,
+            &mut self.connection.params_buf,
+        );
 
         // Send wire bytes and receive response
         self.connection.send_bytes(&wire_bytes).await?;

@@ -16,7 +16,7 @@
 
 mod batch;
 mod ddl;
-mod dml;
+pub(crate) mod dml;  // pub(crate) for internal use in driver
 mod helpers;
 mod values;
 
@@ -59,6 +59,45 @@ impl AstEncoder {
         let wire = batch::build_extended_query(&sql_bytes, &params);
 
         (wire, params)
+    }
+
+    /// Encode a Qail using CALLER'S BUFFERS (ZERO-ALLOC).
+    ///
+    /// Clears and reuses the provided buffers to avoid allocations.
+    /// Returns wire protocol bytes ready to send.
+    #[inline]
+    pub fn encode_cmd_reuse(
+        cmd: &Qail,
+        sql_buf: &mut BytesMut,
+        params: &mut Vec<Option<Vec<u8>>>,
+    ) -> BytesMut {
+        // Clear buffers (but keep capacity!)
+        sql_buf.clear();
+        params.clear();
+
+        match cmd.action {
+            Action::Get | Action::With => dml::encode_select(cmd, sql_buf, params),
+            Action::Add => dml::encode_insert(cmd, sql_buf, params),
+            Action::Set => dml::encode_update(cmd, sql_buf, params),
+            Action::Del => dml::encode_delete(cmd, sql_buf, params),
+            Action::Export => dml::encode_export(cmd, sql_buf, params),
+            Action::Make => ddl::encode_make(cmd, sql_buf),
+            Action::Index => ddl::encode_index(cmd, sql_buf),
+            Action::Drop => ddl::encode_drop_table(cmd, sql_buf),
+            Action::DropIndex => ddl::encode_drop_index(cmd, sql_buf),
+            Action::Alter => ddl::encode_alter_add_column(cmd, sql_buf),
+            Action::AlterDrop => ddl::encode_alter_drop_column(cmd, sql_buf),
+            Action::AlterType => ddl::encode_alter_column_type(cmd, sql_buf),
+            Action::CreateView => ddl::encode_create_view(cmd, sql_buf, params),
+            Action::DropView => ddl::encode_drop_view(cmd, sql_buf),
+            _ => panic!(
+                "Unsupported action {:?} in AST-native encoder.",
+                cmd.action
+            ),
+        }
+
+        // Build wire protocol (reuses internal allocation in batch module)
+        batch::build_extended_query(sql_buf, params)
     }
 
     /// Encode a Qail to SQL string + params (for prepared statement caching).
