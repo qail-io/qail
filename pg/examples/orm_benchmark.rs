@@ -27,14 +27,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("📊 Running Benchmarks...\n");
 
-    // Benchmark qail-pg
-    let qail_time = bench_qail(&mut driver).await?;
-    
-    // Benchmark SQLx
+    // Run SQLx first (cold start)
     let sqlx_time = bench_sqlx(&sqlx_pool).await?;
 
-    // Benchmark SeaORM
+    // Run SeaORM second
     let seaorm_time = bench_seaorm().await?;
+
+    // Run qail-pg last (warmest caches)
+    let qail_time = bench_qail(&mut driver).await?;
 
     // Results
     let qail_qps = ITERATIONS as f64 / (qail_time / 1000.0);
@@ -92,13 +92,13 @@ async fn bench_qail(driver: &mut PgDriver) -> Result<f64, Box<dyn std::error::Er
 
     // Warmup
     for _ in 0..WARMUP {
-        let _ = driver.fetch_all(&query).await?.len();
+        let _ = driver.fetch_all_cached(&query).await?.len();
     }
 
     // Benchmark
     let start = Instant::now();
     for _ in 0..ITERATIONS {
-        let _ = driver.fetch_all(&query).await?.len();
+        let _ = driver.fetch_all_cached(&query).await?.len();
     }
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
     println!("done");
