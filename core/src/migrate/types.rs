@@ -4,7 +4,6 @@
 
 use std::fmt;
 
-///
 /// This replaces runtime strings with a compile-time enum, enabling:
 /// - Type safety (no typos like "uuud" instead of "uuid")
 /// - Compile-time validation (e.g., can this be a primary key?)
@@ -47,7 +46,6 @@ pub enum ColumnType {
 
 impl ColumnType {
     /// Convert to PostgreSQL type string.
-    ///
     /// This is the ONLY place where we convert to SQL strings.
     /// All builder logic works with the enum.
     pub fn to_pg_type(&self) -> String {
@@ -82,7 +80,6 @@ impl ColumnType {
     }
 
     /// Check if this type can be a primary key.
-    ///
     /// Compile-time validation: TEXT, JSONB, BYTEA cannot be PKs.
     pub const fn can_be_primary_key(&self) -> bool {
         matches!(
@@ -92,7 +89,6 @@ impl ColumnType {
     }
 
     /// Check if this type supports indexing.
-    ///
     /// Most types support indexing except large binary/JSON types.
     pub const fn supports_indexing(&self) -> bool {
         !matches!(self, Self::Jsonb | Self::Bytea)
@@ -140,7 +136,6 @@ impl fmt::Display for ColumnType {
 }
 
 /// Parse a string into ColumnType (for backward compatibility with .qail files).
-///
 /// This is ONLY used when parsing .qail text files, not in the builder API.
 impl std::str::FromStr for ColumnType {
     type Err = ();

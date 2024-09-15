@@ -28,7 +28,6 @@ pub struct AstEncoder;
 
 impl AstEncoder {
     /// Encode a Qail directly to Extended Query protocol bytes.
-    ///
     /// Returns (wire_bytes, extracted_params_as_bytes)
     pub fn encode_cmd(cmd: &Qail) -> (BytesMut, Vec<Option<Vec<u8>>>) {
         let mut sql_buf = BytesMut::with_capacity(256);
@@ -62,7 +61,6 @@ impl AstEncoder {
     }
 
     /// Encode a Qail using CALLER'S BUFFERS (ZERO-ALLOC).
-    ///
     /// Clears and reuses the provided buffers to avoid allocations.
     /// Returns wire protocol bytes ready to send.
     #[inline]

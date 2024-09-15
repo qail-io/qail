@@ -5,7 +5,6 @@ use crate::ast::*;
 /// Context for parameterized query building.
 #[derive(Debug, Default)]
 pub struct ParamContext {
-    /// Current parameter index (1-based for Postgres $1, $2, etc.)
     pub index: usize,
     /// Collected parameter values in order
     pub params: Vec<Value>,
@@ -37,7 +36,6 @@ impl ParamContext {
     }
 }
 
-///
 /// Heuristic:
 /// 1. Split by '.'
 /// 2. If single part -> quote_identifier

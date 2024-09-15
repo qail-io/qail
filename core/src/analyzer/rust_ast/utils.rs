@@ -1,6 +1,5 @@
 
 /// Convert snake_case to PascalCase for type names.
-/// 
 /// # Example
 /// ```
 /// use qail_core::analyzer::rust_ast::utils::to_pascal_case;

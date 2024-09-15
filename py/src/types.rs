@@ -7,7 +7,6 @@ use pyo3::prelude::*;
 use qail_core::ast::{Operator, Value};
 
 /// Python-exposed Operator enum.
-///
 /// Uses static methods instead of enum variants for Pythonic API.
 #[pyclass(name = "Operator")]
 #[derive(Clone)]
@@ -148,7 +147,6 @@ impl PyOperator {
 }
 
 /// Convert a Python object to a QAIL Value.
-///
 /// Supports: None, bool, int, float, str, list
 pub fn py_to_value(ob: &Bound<'_, PyAny>) -> PyResult<Value> {
     // None -> Null

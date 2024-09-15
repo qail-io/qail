@@ -112,7 +112,6 @@ pub extern "C" fn qail_validate(qail: *const c_char) -> i32 {
 // ============================================================================
 
 /// Encode a SELECT query to PostgreSQL wire protocol bytes.
-///
 /// Returns 0 on success, non-zero on error.
 /// Caller must free with qail_free_bytes().
 #[unsafe(no_mangle)]
@@ -330,13 +329,11 @@ fn encode_simple_query(sql: &str) -> Vec<u8> {
 // ============================================================================
 
 /// Encode a Parse message to prepare a statement.
-///
 /// # Arguments
 /// * `name` - Statement name (use "" for unnamed)
 /// * `sql` - SQL with $1, $2, etc placeholders
 /// * `out_ptr` - Output pointer for allocated bytes
 /// * `out_len` - Output length
-///
 /// Returns 0 on success.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_encode_parse(
@@ -406,14 +403,12 @@ pub extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut usize) -
 
 /// Encode a batch of Bind + Execute pairs for pipeline mode.
 /// This is the hot path for prepared statement performance.
-///
 /// # Arguments
 /// * `statement` - Prepared statement name
 /// * `params` - Array of parameter strings (all queries use same single param)
 /// * `count` - Number of Bind+Execute pairs to generate
 /// * `out_ptr` - Output pointer for allocated bytes
 /// * `out_len` - Output length
-///
 /// Each query in batch uses params[i % params_count] as its parameter.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_encode_bind_execute_batch(

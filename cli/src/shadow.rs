@@ -25,9 +25,7 @@ pub struct ShadowState {
     /// Shadow database URL
     pub shadow_url: String,
     pub is_ready: bool,
-    /// Number of tables synced
     pub tables_synced: u64,
-    /// Number of rows synced
     pub rows_synced: u64,
 }
 

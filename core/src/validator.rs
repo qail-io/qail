@@ -241,12 +241,12 @@ impl Validator {
         }
 
         for join in &cmd.joins {
-            // Validate join table exists
+
             if let Err(e) = self.validate_table(&join.table) {
                 errors.push(e);
             }
 
-            // Validate columns in ON conditions
+
             if let Some(conditions) = &join.on {
                 for cond in conditions {
                     if let Some(name) = Self::extract_column_name(&cond.left)

@@ -109,7 +109,6 @@ impl From<std::io::Error> for PgError {
 /// Result type for PostgreSQL operations.
 pub type PgResult<T> = Result<T, PgError>;
 
-///
 /// Combines the pure encoder (Layer 2) with async I/O (Layer 3).
 pub struct PgDriver {
     #[allow(dead_code)]
@@ -123,7 +122,6 @@ impl PgDriver {
     }
 
     /// Builder pattern for ergonomic connection configuration.
-    ///
     /// # Example
     /// ```ignore
     /// let driver = PgDriver::builder()
@@ -159,9 +157,7 @@ impl PgDriver {
     }
 
     /// Connect to PostgreSQL with a connection timeout.
-    ///
     /// If the connection cannot be established within the timeout, returns an error.
-    ///
     /// # Example
     /// ```ignore
     /// use std::time::Duration;
@@ -186,7 +182,6 @@ impl PgDriver {
         .map_err(|_| PgError::Connection(format!("Connection timeout after {:?}", timeout)))?
     }
     /// Clear the prepared statement cache.
-    ///
     /// Frees memory by removing all cached statements.
     /// Note: Statements remain on the PostgreSQL server until connection closes.
     pub fn clear_cache(&mut self) {
@@ -195,18 +190,15 @@ impl PgDriver {
     }
 
     /// Get cache statistics.
-    ///
     /// Returns (current_size, max_capacity).
     pub fn cache_stats(&self) -> (usize, usize) {
         (self.connection.stmt_cache.len(), self.connection.stmt_cache.cap().get())
     }
 
     /// Execute a QAIL command and fetch all rows (CACHED + ZERO-ALLOC).
-    ///
     /// **Default method** - uses prepared statement caching for best performance.
     /// On first call: sends Parse + Bind + Execute + Sync
     /// On subsequent calls with same SQL: sends only Bind + Execute (SKIPS Parse!)
-    ///
     /// Uses LRU cache with max 1000 statements (auto-evicts oldest).
     pub async fn fetch_all(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         // Delegate to fetch_all_cached for cached-by-default behavior
@@ -214,23 +206,19 @@ impl PgDriver {
     }
 
     /// Execute a QAIL command and fetch all rows (UNCACHED).
-    ///
     /// Sends Parse + Bind + Execute on every call.
     /// Use for one-off queries or when caching is not desired.
     pub async fn fetch_all_uncached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
 
-        // ZERO-ALLOC: Use connection's reusable buffers
         let wire_bytes = AstEncoder::encode_cmd_reuse(
             cmd,
             &mut self.connection.sql_buf,
             &mut self.connection.params_buf,
         );
 
-        // Send wire bytes and receive response
         self.connection.send_bytes(&wire_bytes).await?;
 
-        // Collect results
         let mut rows: Vec<PgRow> = Vec::new();
         let mut column_info: Option<Arc<ColumnInfo>> = None;
 
@@ -261,20 +249,17 @@ impl PgDriver {
     }
 
     /// Execute a QAIL command and fetch all rows (FAST VERSION).
-    ///
     /// Uses optimized recv_with_data_fast for faster response parsing.
     /// Skips column metadata collection for maximum speed.
     pub async fn fetch_all_fast(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
 
-        // ZERO-ALLOC: Use connection's reusable buffers
         let wire_bytes = AstEncoder::encode_cmd_reuse(
             cmd,
             &mut self.connection.sql_buf,
             &mut self.connection.params_buf,
         );
 
-        // Send wire bytes
         self.connection.send_bytes(&wire_bytes).await?;
 
         // Collect results using FAST receiver
@@ -308,18 +293,14 @@ impl PgDriver {
     }
 
     /// Execute a QAIL command with PREPARED STATEMENT CACHING (ZERO-ALLOC).
-    ///
     /// Like fetch_all(), but caches the prepared statement on the server.
     /// On first call: sends Parse + Bind + Execute + Sync
     /// On subsequent calls: sends only Bind + Execute + Sync (SKIPS Parse!)
-    ///
-    /// Uses connection's reusable buffers for zero-allocation encoding.
     pub async fn fetch_all_cached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        // ZERO-ALLOC: Use connection's reusable buffers  
         self.connection.sql_buf.clear();
         self.connection.params_buf.clear();
         
@@ -345,19 +326,15 @@ impl PgDriver {
             }
         }
 
-        // Hash the SQL bytes to get cache key
         let mut hasher = DefaultHasher::new();
         self.connection.sql_buf.hash(&mut hasher);
         let sql_hash = hasher.finish();
 
-        // Check if we have a cached prepared statement (LRU)
         let stmt_name = if let Some(name) = self.connection.stmt_cache.get(&sql_hash) {
             name.clone()
         } else {
-            // Generate new statement name
             let name = format!("qail_{:x}", sql_hash);
             
-            // Send Parse message (only on first call)
             use crate::protocol::PgEncoder;
             use tokio::io::AsyncWriteExt;
             
@@ -365,7 +342,6 @@ impl PgDriver {
             let parse_msg = PgEncoder::encode_parse(&name, sql_str, &[]);
             self.connection.stream.write_all(&parse_msg).await?;
             
-            // Cache the statement name (LRU auto-evicts if full)
             self.connection.stmt_cache.put(sql_hash, name.clone());
             self.connection.prepared_statements.insert(name.clone(), sql_str.to_string());
             
@@ -382,7 +358,6 @@ impl PgDriver {
         PgEncoder::encode_sync_to(&mut buf);
         self.connection.stream.write_all(&buf).await?;
 
-        // Collect results
         let mut rows: Vec<PgRow> = Vec::new();
         loop {
             let msg = self.connection.recv().await?;
@@ -409,19 +384,15 @@ impl PgDriver {
     }
 
     /// Execute a QAIL command (for mutations) - ZERO-ALLOC.
-    ///
-    /// Uses connection's reusable buffers for encoding.
     pub async fn execute(&mut self, cmd: &Qail) -> PgResult<u64> {
         use crate::protocol::AstEncoder;
 
-        // ZERO-ALLOC: Use connection's reusable buffers
         let wire_bytes = AstEncoder::encode_cmd_reuse(
             cmd,
             &mut self.connection.sql_buf,
             &mut self.connection.params_buf,
         );
 
-        // Send wire bytes and receive response
         self.connection.send_bytes(&wire_bytes).await?;
 
         let mut affected = 0u64;
@@ -466,10 +437,8 @@ impl PgDriver {
     }
 
     /// Create a named savepoint within the current transaction.
-    ///
     /// Savepoints allow partial rollback within a transaction.
     /// Use `rollback_to()` to return to this savepoint.
-    ///
     /// # Example
     /// ```ignore
     /// driver.begin().await?;
@@ -484,7 +453,6 @@ impl PgDriver {
     }
 
     /// Rollback to a previously created savepoint.
-    ///
     /// Discards all changes since the named savepoint was created,
     /// but keeps the transaction open.
     pub async fn rollback_to(&mut self, name: &str) -> PgResult<()> {
@@ -492,7 +460,6 @@ impl PgDriver {
     }
 
     /// Release a savepoint (free resources, if no longer needed).
-    ///
     /// After release, the savepoint cannot be rolled back to.
     pub async fn release_savepoint(&mut self, name: &str) -> PgResult<()> {
         self.connection.release_savepoint(name).await
@@ -501,9 +468,7 @@ impl PgDriver {
     // ==================== BATCH TRANSACTIONS ====================
 
     /// Execute multiple commands in a single atomic transaction.
-    ///
     /// All commands succeed or all are rolled back.
-    ///
     /// # Example
     /// ```ignore
     /// let cmds = vec![
@@ -532,10 +497,6 @@ impl PgDriver {
     // ==================== STATEMENT TIMEOUT ====================
 
     /// Set statement timeout for this connection (in milliseconds).
-    ///
-    /// Queries that exceed this time will be cancelled.
-    /// This is a production safety feature.
-    ///
     /// # Example
     /// ```ignore
     /// driver.set_statement_timeout(30_000).await?; // 30 seconds
@@ -553,9 +514,6 @@ impl PgDriver {
     // ==================== PIPELINE (BATCH) ====================
 
     /// Execute multiple Qail ASTs in a single network round-trip (PIPELINING).
-    ///
-    /// This is the high-performance path for batch operations.
-    ///
     /// # Example
     /// ```ignore
     /// let cmds: Vec<Qail> = (1..=1000)
@@ -569,10 +527,6 @@ impl PgDriver {
     }
 
     /// Execute multiple Qail ASTs and return full row data.
-    ///
-    /// Unlike `pipeline_batch` which only returns count, this method
-    /// collects and returns all row data from each query.
-    ///
     pub async fn pipeline_fetch(&mut self, cmds: &[Qail]) -> PgResult<Vec<Vec<PgRow>>> {
         let raw_results = self.connection.pipeline_ast(cmds).await?;
 
@@ -592,15 +546,11 @@ impl PgDriver {
     }
 
     /// Prepare a SQL statement for repeated execution.
-    ///
     pub async fn prepare(&mut self, sql: &str) -> PgResult<PreparedStatement> {
         self.connection.prepare(sql).await
     }
 
     /// Execute a prepared statement pipeline in FAST mode (count only).
-    ///
-    /// This is the fastest possible path - Parse once, Bind+Execute many.
-    /// Matches native Rust benchmark performance (~355k q/s).
     pub async fn pipeline_prepared_fast(
         &mut self,
         stmt: &PreparedStatement,
@@ -614,7 +564,6 @@ impl PgDriver {
     // ==================== LEGACY/BOOTSTRAP ====================
 
     /// Execute a raw SQL string.
-    ///
     /// ⚠️ **Discouraged**: Violates AST-native philosophy.
     /// Use for bootstrap DDL only (e.g., migration table creation).
     /// For transactions, use `begin()`, `commit()`, `rollback()`.
@@ -623,16 +572,13 @@ impl PgDriver {
     }
 
     /// Bulk insert data using PostgreSQL COPY protocol (AST-native).
-    ///
     /// Uses a Qail::Add to get validated table and column names from the AST,
     /// not user-provided strings. This is the sound, AST-native approach.
-    ///
     /// # Example
     /// ```ignore
     /// // Create a Qail::Add to define table and columns
     /// let cmd = Qail::add("users")
     ///     .columns(["id", "name", "email"]);
-    ///
     /// // Bulk insert rows
     /// let rows: Vec<Vec<Value>> = vec![
     ///     vec![Value::Int(1), Value::String("Alice"), Value::String("alice@ex.com")],
@@ -647,7 +593,7 @@ impl PgDriver {
     ) -> PgResult<u64> {
         use qail_core::ast::Action;
 
-        // Validate this is an Add command
+
         if cmd.action != Action::Add {
             return Err(PgError::Query(
                 "copy_bulk requires Qail::Add action".to_string(),
@@ -681,14 +627,11 @@ impl PgDriver {
     }
 
     /// **Fastest** bulk insert using pre-encoded COPY data.
-    ///
     /// Accepts raw COPY text format bytes. Use when caller has already
     /// encoded rows to avoid any encoding overhead.
-    ///
     /// # Format
     /// Data should be tab-separated rows with newlines (COPY text format):
     /// `1\thello\t3.14\n2\tworld\t2.71\n`
-    ///
     /// # Example
     /// ```ignore
     /// let cmd = Qail::add("users").columns(["id", "name"]);
@@ -729,10 +672,8 @@ impl PgDriver {
     }
 
     /// Stream large result sets using PostgreSQL cursors.
-    ///
     /// This method uses DECLARE CURSOR internally to stream rows in batches,
     /// avoiding loading the entire result set into memory.
-    ///
     /// # Example
     /// ```ignore
     /// let cmd = Qail::get("large_table");
@@ -783,7 +724,6 @@ impl PgDriver {
             all_batches.push(pg_rows);
         }
 
-        // Cleanup
         self.connection.close_cursor(&cursor_name).await?;
         self.connection.commit().await?;
 
@@ -796,7 +736,6 @@ impl PgDriver {
 // ============================================================================
 
 /// Builder for creating PgDriver connections with named parameters.
-///
 /// # Example
 /// ```ignore
 /// let driver = PgDriver::builder()

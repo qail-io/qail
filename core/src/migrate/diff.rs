@@ -7,7 +7,6 @@ use super::schema::{MigrationHint, Schema};
 use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
 
 /// Compute the difference between two schemas.
-///
 /// Returns a Vec<Qail> representing the operations needed to migrate
 /// from `old` to `new`. Respects MigrationHint for intent-aware diffing.
 pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {

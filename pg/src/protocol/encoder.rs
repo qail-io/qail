@@ -13,14 +13,12 @@
 
 use bytes::BytesMut;
 
-///
 /// Takes a Qail and produces wire protocol bytes.
 /// This is the "Visitor" in the visitor pattern.
 pub struct PgEncoder;
 
 impl PgEncoder {
     /// Encode a raw SQL string as a Simple Query message.
-    ///
     /// Wire format:
     /// - 'Q' (1 byte) - message type
     /// - length (4 bytes, big-endian, includes self)
@@ -64,7 +62,6 @@ impl PgEncoder {
     // ==================== Extended Query Protocol ====================
 
     /// Encode a Parse message (prepare a statement).
-    ///
     /// Wire format:
     /// - 'P' (1 byte) - message type
     /// - length (4 bytes)
@@ -105,7 +102,6 @@ impl PgEncoder {
     }
 
     /// Encode a Bind message (bind parameters to a prepared statement).
-    ///
     /// Wire format:
     /// - 'B' (1 byte) - message type
     /// - length (4 bytes)
@@ -163,7 +159,6 @@ impl PgEncoder {
     }
 
     /// Encode an Execute message (execute a bound portal).
-    ///
     /// Wire format:
     /// - 'E' (1 byte) - message type
     /// - length (4 bytes)
@@ -193,7 +188,6 @@ impl PgEncoder {
     }
 
     /// Encode a Describe message (get statement/portal metadata).
-    ///
     /// Wire format:
     /// - 'D' (1 byte) - message type
     /// - length (4 bytes)
@@ -223,7 +217,6 @@ impl PgEncoder {
     }
 
     /// Encode a complete extended query pipeline (OPTIMIZED).
-    ///
     /// This combines Parse + Bind + Execute + Sync in a single buffer.
     /// Zero intermediate allocations - writes directly to pre-sized BytesMut.
     pub fn encode_extended_query(sql: &str, params: &[Option<Vec<u8>>]) -> BytesMut {
@@ -400,7 +393,6 @@ impl PgEncoder {
     }
 
     /// Encode Bind message - ULTRA OPTIMIZED.
-    ///
     /// - Direct integer writes (no temp arrays)
     /// - Borrowed params (zero-copy)
     /// - Single allocation check
@@ -470,7 +462,6 @@ impl PgEncoder {
     // Keep the original methods for compatibility
 
     /// Encode Bind message directly into existing buffer (ZERO ALLOCATION).
-    ///
     /// This is the hot path optimization - no intermediate Vec allocation.
     #[inline]
     pub fn encode_bind_to(buf: &mut BytesMut, statement: &str, params: &[Option<Vec<u8>>]) {
@@ -482,7 +473,6 @@ impl PgEncoder {
             .sum();
         let content_len = 1 + statement.len() + 1 + 2 + 2 + params_size + 2;
 
-        // Reserve space upfront
         buf.reserve(1 + 4 + content_len);
 
         // Message type 'B'

@@ -198,7 +198,6 @@ pub extern "C" fn qail_string_free(ptr: *mut c_char) {
 // ==================== Connection Functions (NEW) ====================
 
 /// Connect to PostgreSQL and return a connection handle.
-///
 /// Returns NULL on connection failure.
 /// Caller must call qail_disconnect() to free the connection.
 #[unsafe(no_mangle)]
@@ -242,7 +241,6 @@ pub extern "C" fn qail_disconnect(conn: *mut QailConnection) {
 }
 
 /// Prepare a SQL statement for pipelined execution.
-///
 /// Returns NULL on failure.
 /// Caller must call qail_prepared_free() to free the handle.
 #[unsafe(no_mangle)]
@@ -284,18 +282,14 @@ pub extern "C" fn qail_prepared_free(stmt: *mut QailPreparedStatement) {
 }
 
 /// Execute a prepared statement N times with different parameters.
-///
 /// TRUE PIPELINING: All queries sent in ONE network packet,
 /// all responses read in ONE round-trip.
-///
 /// # Arguments
 /// * `conn` - Connection handle from qail_connect()
 /// * `stmt` - Prepared statement from qail_prepare()
 /// * `params` - Array of null-terminated C strings (one per query)
 /// * `count` - Number of queries to execute
-///
 /// # Returns
-/// Number of queries completed, or -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_pipeline_exec(
     conn: *mut QailConnection,
@@ -341,7 +335,6 @@ pub extern "C" fn qail_pipeline_exec(
 }
 
 /// Execute pipeline and return results as JSON.
-///
 /// Returns pointer to JSON string with all rows.
 /// Caller must call qail_string_free() to free.
 #[unsafe(no_mangle)]
@@ -436,17 +429,13 @@ pub extern "C" fn qail_pipeline_exec_json(
 }
 
 /// Simplified pipeline execution - takes limit values as int64 array.
-///
 /// This is easier to call from PHP than passing char** arrays.
-///
 /// # Arguments
 /// * `conn` - Connection handle from qail_connect()
 /// * `stmt` - Prepared statement from qail_prepare()
 /// * `limits` - Array of i64 limit values (one per query)
 /// * `count` - Number of queries to execute
-///
 /// # Returns
-/// Number of queries completed, or -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_pipeline_exec_limits(
     conn: *mut QailConnection,
@@ -498,10 +487,8 @@ pub struct QailCopyStream {
 }
 
 /// Start a COPY stream for bulk inserts.
-///
 /// Returns a handle for streaming rows, or NULL on failure.
 /// Call qail_copy_row() to add rows, then qail_copy_end() to commit.
-///
 /// # Example (PHP)
 /// ```php
 /// $copy = qail_copy_start($conn, "users", "id,name,email");
@@ -543,7 +530,6 @@ pub extern "C" fn qail_copy_start(
 }
 
 /// Add a row to the COPY stream (3-column version for users table).
-///
 /// Returns 1 on success, 0 on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_copy_row_3(
@@ -684,7 +670,6 @@ pub extern "C" fn qail_copy_row_6(
 }
 
 /// End the COPY stream and commit to PostgreSQL.
-///
 /// Returns number of rows inserted, or -1 on failure.
 /// Frees the stream handle.
 #[unsafe(no_mangle)]
@@ -735,19 +720,15 @@ pub extern "C" fn qail_copy_cancel(stream: *mut QailCopyStream) {
 // ==================== Direct MySQL→PostgreSQL Migration ====================
 
 /// Direct Rust-to-Rust MySQL → PostgreSQL migration.
-///
 /// Bypasses PHP loop entirely for maximum throughput.
 /// Expected: 600K+ rows/s vs 330K rows/s with PHP loop.
-///
 /// # Arguments
 /// * `mysql_host`, `mysql_port`, `mysql_user`, `mysql_pass`, `mysql_db` - MySQL connection
 /// * `pg_conn` - Existing PostgreSQL connection from qail_connect()
 /// * `sql` - SELECT query to execute on MySQL
 /// * `pg_table` - Target PostgreSQL table name
 /// * `pg_columns` - Comma-separated column names for COPY
-///
 /// # Returns
-/// Number of rows migrated, or -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_mysql_to_pg(
     mysql_host: *const c_char,

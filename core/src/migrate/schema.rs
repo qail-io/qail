@@ -194,7 +194,6 @@ impl Schema {
     }
 
     /// Validate all foreign key references in the schema.
-    ///
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
 
@@ -263,7 +262,6 @@ impl Column {
     }
 
     /// Set as primary key with compile-time validation.
-    ///
     /// Validates that the column type can be a primary key.
     /// Panics at runtime if type doesn't support PK (caught in tests).
     pub fn primary_key(mut self) -> Self {
@@ -281,7 +279,6 @@ impl Column {
     }
 
     /// Set as unique with compile-time validation.
-    ///
     /// Validates that the column type supports indexing.
     pub fn unique(mut self) -> Self {
         if !self.data_type.supports_indexing() {
@@ -302,7 +299,6 @@ impl Column {
     }
 
     /// Add a foreign key reference to another table.
-    ///
     /// # Example
     /// ```ignore
     /// Column::new("user_id", ColumnType::Uuid)

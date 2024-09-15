@@ -62,19 +62,12 @@ impl TlsConfig {
 pub struct PgConnection {
     pub(crate) stream: PgStream,
     pub(crate) buffer: BytesMut,
-    /// Write buffer for batching outgoing messages (reduces syscalls)
     pub(crate) write_buf: BytesMut,
-    /// Reusable SQL encoding buffer (ZERO-ALLOC serialization)
     pub(crate) sql_buf: BytesMut,
-    /// Reusable params buffer (ZERO-ALLOC)
     pub(crate) params_buf: Vec<Option<Vec<u8>>>,
-    /// Cache of prepared statements: stmt_name -> SQL text
     pub(crate) prepared_statements: HashMap<String, String>,
-    /// LRU cache: SQL hash -> stmt_name (bounded, auto-evicts old statements)
     pub(crate) stmt_cache: LruCache<u64, String>,
-    /// Backend process ID (for query cancellation)  
     pub(crate) process_id: i32,
-    /// Backend secret key (for query cancellation)
     pub(crate) secret_key: i32,
 }
 
@@ -194,14 +187,12 @@ impl PgConnection {
     }
 
     /// Connect with mutual TLS (client certificate authentication).
-    ///
     /// # Arguments
     /// * `host` - PostgreSQL server hostname
     /// * `port` - PostgreSQL server port
     /// * `user` - Database user
     /// * `database` - Database name
     /// * `config` - TLS configuration with client cert/key
-    ///
     /// # Example
     /// ```ignore
     /// let config = TlsConfig {
@@ -209,7 +200,6 @@ impl PgConnection {
     ///     client_key_pem: include_bytes!("client.key").to_vec(),
     ///     ca_cert_pem: Some(include_bytes!("ca.crt").to_vec()),
     /// };
-    ///
     /// let conn = PgConnection::connect_mtls("localhost", 5432, "user", "db", config).await?;
     /// ```
     pub async fn connect_mtls(
