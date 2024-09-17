@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance (Zero-Alloc Encoding + LRU Cache)
 - **PG:** `fetch_all()` now uses prepared statement caching by default (~5,000 q/s)
 - **PG:** Added reusable `sql_buf` and `params_buf` to `PgConnection` - zero heap allocations
-- **PG:** Bounded LRU cache for statements (default: 1000 max, auto-evicts oldest)
+- **PG:** Bounded LRU cache for statements (default: 100 max, auto-evicts oldest)
 - **PG:** New `clear_cache()` and `cache_stats()` methods for cache management
 - **PG:** `fetch_all_uncached()` available for one-off queries
 

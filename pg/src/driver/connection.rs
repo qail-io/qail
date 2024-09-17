@@ -98,7 +98,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16), // SQL encoding buffer
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
+            stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
@@ -170,7 +170,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
+            stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
@@ -279,7 +279,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
+            stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
@@ -315,7 +315,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
+            stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
