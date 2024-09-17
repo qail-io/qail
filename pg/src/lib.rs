@@ -1,4 +1,11 @@
-//! QAIL PostgreSQL Driver
+//! PostgreSQL driver with AST-native wire encoding.
+//!
+//! **Features:** Zero-alloc encoding, LRU cache (100 max), connection pooling, COPY protocol.
+//!
+//! ```ignore
+//! let mut driver = PgDriver::connect("localhost", 5432, "user", "db").await?;
+//! let rows = driver.fetch_all(&Qail::get("users").limit(10)).await?;
+//! ```
 
 pub mod driver;
 pub mod protocol;
