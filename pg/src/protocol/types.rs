@@ -121,7 +121,6 @@ pub fn is_array_oid(oid: u32) -> bool {
 // ==================== UUID Encoding/Decoding ====================
 
 /// Encode a UUID string to 16-byte binary format for PostgreSQL wire protocol.
-///
 /// # Example
 /// ```
 /// use qail_pg::protocol::types::encode_uuid;
@@ -179,7 +178,6 @@ pub fn decode_uuid(bytes: &[u8]) -> Result<String, String> {
 // ==================== JSON Encoding/Decoding ====================
 
 /// Encode JSON value for PostgreSQL JSONB wire format (version byte + JSON text).
-///
 /// # Example
 /// ```
 /// use qail_pg::protocol::types::encode_jsonb;
@@ -218,7 +216,6 @@ pub fn decode_json(bytes: &[u8]) -> Result<String, String> {
 // ==================== Array Encoding/Decoding ====================
 
 /// Decode a PostgreSQL text-format array like {a,b,c} to Vec<String>.
-///
 /// This handles the common text-format arrays returned by PostgreSQL.
 pub fn decode_text_array(s: &str) -> Vec<String> {
     if s.is_empty() || s == "{}" {

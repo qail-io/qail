@@ -449,7 +449,6 @@ pub fn encode_conditions(
 }
 
 /// Encode value - extract to parameter or inline.
-/// Uses pre-computed lookup tables for zero allocation in common cases.
 pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
     match value {
         Value::Null => {

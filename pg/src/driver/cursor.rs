@@ -4,7 +4,6 @@ use super::{PgConnection, PgResult};
 
 impl PgConnection {
     /// Declare a cursor for streaming large result sets.
-    ///
     /// This uses PostgreSQL's DECLARE CURSOR to avoid loading all rows into memory.
     pub(crate) async fn declare_cursor(&mut self, name: &str, sql: &str) -> PgResult<()> {
         let declare_sql = format!("DECLARE {} CURSOR FOR {}", name, sql);
@@ -12,7 +11,6 @@ impl PgConnection {
     }
 
     /// Fetch rows from a cursor in batches.
-    ///
     pub(crate) async fn fetch_cursor(
         &mut self,
         name: &str,

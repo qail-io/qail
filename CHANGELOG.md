@@ -5,12 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.7] - 2026-01-01
+
+### Enterprise Shadow Migrations
+- **COPY Streaming:** Zero-dependency data sync via COPY TO/FROM protocol
+- **State Persistence:** `_qail_shadow_state` table stores diff commands for recovery
+- **Safe Promote (Option B):** Apply migration to primary, don't swap databases
+- **Column Intersection:** Sync handles ADD/DROP COLUMN scenarios correctly
+- **Data Drift Warning:** Promote warns about changes since shadow sync
+
+### Stress Tested
+- Promote without shadow → proper error message
+- Double abort → idempotent
+- ADD COLUMN migration → fixed column intersection bug
+- Full promote workflow → verified migration applied to primary
+
+## [0.14.6] - 2026-01-01
+
+### Fixed
+- **CLI:** Shadow migration bug - now applies base schema (CREATE TABLEs) before diff commands
+- **Core:** Added `schema_to_commands()` function for AST-native schema conversion
+- **Docs:** Updated Migration Impact Analyzer documentation with real test output
+
+### Performance
+- **PG Pool:** 10-connection pool benchmark: **1.3M queries/second** (78M queries in 60s)
+- **Benchmark:** Single connection: 336K q/s → Pool: 1.3M q/s (~4x throughput)
+
+### Added
+- **CLI:** Shadow migration now shows `[1.5/4]` step for base schema application
+- **Docs:** Added Rollback Safety Analysis table to analyzer docs
+- **Docs:** Added CI/CD integration section with GitHub Actions `--ci` flag
+
 ## [0.14.4] - 2025-12-31
 
 ### Performance (Zero-Alloc Encoding + LRU Cache)
 - **PG:** `fetch_all()` now uses prepared statement caching by default (~5,000 q/s)
 - **PG:** Added reusable `sql_buf` and `params_buf` to `PgConnection` - zero heap allocations
-- **PG:** Bounded LRU cache for statements (default: 1000 max, auto-evicts oldest)
+- **PG:** Bounded LRU cache for statements (default: 100 max, auto-evicts oldest)
 - **PG:** New `clear_cache()` and `cache_stats()` methods for cache management
 - **PG:** `fetch_all_uncached()` available for one-off queries
 

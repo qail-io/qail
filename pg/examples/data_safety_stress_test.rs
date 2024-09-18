@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .on_delete(FkAction::Cascade)),
     );
 
-    // Validate schema - should PASS
+
     match schema.validate() {
         Ok(_) => {
             println!("✅ Valid FK reference (stress_orders.user_id → stress_users.id)");
@@ -315,7 +315,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n⚠️  Some tests failed - review output above");
     }
 
-    // Cleanup
     let _ = driver.execute_raw("DROP TABLE IF EXISTS stress_orders CASCADE").await;
     let _ = driver.execute_raw("DROP TABLE IF EXISTS stress_users CASCADE").await;
     println!("\n✅ Cleaned up test tables");

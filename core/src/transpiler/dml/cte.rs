@@ -5,7 +5,6 @@ use crate::transpiler::dialect::Dialect;
 use crate::transpiler::dml::select::build_select;
 
 /// Generate CTE SQL with support for multiple CTEs and RECURSIVE.
-///
 /// Supports:
 /// - Single CTE: `WITH x AS (...) SELECT ...`
 /// - Multiple CTEs: `WITH x AS (...), y AS (...), z AS (...) SELECT ...`

@@ -38,7 +38,6 @@ impl std::error::Error for TypeError {}
 /// Trait for converting PostgreSQL binary/text data to Rust types.
 pub trait FromPg: Sized {
     /// Convert from PostgreSQL wire format.
-    ///
     /// # Arguments
     /// * `bytes` - Raw bytes from PostgreSQL (may be text or binary format)
     /// * `oid` - PostgreSQL type OID

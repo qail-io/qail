@@ -23,7 +23,6 @@ pub fn nullif(a: impl Into<Expr>, b: impl Into<Expr>) -> FunctionBuilder {
 }
 
 /// REPLACE(source, from, to) function
-///
 /// # Example
 /// ```ignore
 /// replace(col("phone"), text("+"), text(""))  // REPLACE(phone, '+', '')
@@ -37,7 +36,6 @@ pub fn replace(
 }
 
 /// STRING_AGG(column, delimiter) - concatenate all values with delimiter
-///
 /// # Example
 /// ```ignore
 /// string_agg("name", ", ")  // STRING_AGG(name, ', ')
@@ -81,7 +79,6 @@ impl From<FunctionBuilder> for Expr {
 }
 
 /// SUBSTRING(source FROM start [FOR length])
-///
 /// # Example
 /// ```ignore
 /// substring(col("phone"), 2)       // SUBSTRING(phone FROM 2)
@@ -112,7 +109,6 @@ pub fn substring_for(source: impl Into<Expr>, from: i32, length: i32) -> Expr {
 }
 
 /// String concatenation (a || b || c)
-///
 /// # Example
 /// ```ignore
 /// concat([col("first_name"), text(" "), col("last_name")])

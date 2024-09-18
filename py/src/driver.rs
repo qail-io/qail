@@ -23,7 +23,6 @@ static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
 });
 
 /// Python-exposed PostgreSQL driver.
-///
 /// Uses blocking API with GIL release for maximum performance.
 /// All I/O is done in Rust Tokio runtime.
 #[pyclass(name = "PgDriver")]
@@ -34,7 +33,6 @@ pub struct PyPgDriver {
 #[pymethods]
 impl PyPgDriver {
     /// Connect to PostgreSQL with password authentication.
-    ///
     /// BLOCKING with GIL release - Python can do other work while connecting.
     #[staticmethod]
     fn connect(
@@ -80,7 +78,6 @@ impl PyPgDriver {
     }
 
     /// Fetch all rows from a query.
-    ///
     /// BLOCKING with GIL release. AST → wire protocol → Postgres.
     fn fetch_all(&self, py: Python<'_>, cmd: &PyQail) -> PyResult<Vec<PyRow>> {
         let cmd_clone = cmd.inner.clone();
@@ -101,9 +98,7 @@ impl PyPgDriver {
     }
 
     /// Execute a batch of commands in a single round-trip.
-    ///
     /// HIGH PERFORMANCE: All commands pipelined, GIL released.
-    /// This is the fastest path for bulk operations.
     fn pipeline_batch(&self, py: Python<'_>, cmds: Vec<PyQail>) -> PyResult<usize> {
         let inner_cmds: Vec<_> = cmds.into_iter().map(|c| c.inner).collect();
         let driver_arc = Arc::clone(&self.inner);
@@ -187,7 +182,6 @@ impl PyPgDriver {
     }
 
     /// Bulk insert using PostgreSQL COPY protocol.
-    ///
     /// HIGH PERFORMANCE: Uses COPY FROM STDIN for maximum throughput.
     /// Requires Qail::Add with columns specified.
     fn copy_bulk(
@@ -239,10 +233,8 @@ impl PyPgDriver {
     }
 
     /// **Fastest** bulk insert using pre-encoded COPY data.
-    ///
     /// Accepts raw bytes in COPY text format (tab-separated, newline-terminated).
     /// Use when caller has already encoded rows to avoid PyO3 extraction overhead.
-    ///
     /// Example:
     ///     data = b"1\thello\t3.14\n2\tworld\t2.71\n"
     ///     driver.copy_bulk_bytes(cmd, data)
