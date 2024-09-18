@@ -358,11 +358,15 @@ pub async fn abort_shadow(primary_url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run shadow migration (create, apply, sync, display status)
-pub async fn run_shadow_migration(primary_url: &str, cmds: &[Qail]) -> Result<ShadowState> {
+/// Run shadow migration (create, apply old schema, apply diff, sync, display status)
+pub async fn run_shadow_migration(primary_url: &str, old_cmds: &[Qail], diff_cmds: &[Qail]) -> Result<ShadowState> {
     let mut state = create_shadow_database(primary_url).await?;
 
-    apply_migrations_to_shadow(&mut state, cmds).await?;
+    // Step 1: Apply OLD schema to create base tables
+    apply_base_schema_to_shadow(&mut state, old_cmds).await?;
+    
+    // Step 2: Apply DIFF commands (migrations)
+    apply_migrations_to_shadow(&mut state, diff_cmds).await?;
 
     sync_data_to_shadow(&mut state).await?;
 
@@ -371,4 +375,32 @@ pub async fn run_shadow_migration(primary_url: &str, cmds: &[Qail]) -> Result<Sh
     display_shadow_status(&state);
 
     Ok(state)
+}
+
+/// Apply base schema to shadow (CREATE TABLEs from old.qail)
+async fn apply_base_schema_to_shadow(state: &mut ShadowState, cmds: &[Qail]) -> Result<()> {
+    println!("  {} Applying base schema to shadow...", "[1.5/4]".cyan());
+
+    let (host, port, user, password, _) = parse_pg_url(&state.primary_url)?;
+
+    let mut shadow_driver = if let Some(pwd) = password {
+        PgDriver::connect_with_password(&host, port, &user, &state.shadow_name, &pwd)
+            .await
+            .map_err(|e| anyhow!("Failed to connect to shadow: {}", e))?
+    } else {
+        PgDriver::connect(&host, port, &user, &state.shadow_name)
+            .await
+            .map_err(|e| anyhow!("Failed to connect to shadow: {}", e))?
+    };
+
+    for (i, cmd) in cmds.iter().enumerate() {
+        shadow_driver
+            .execute(cmd)
+            .await
+            .map_err(|e| anyhow!("Base schema {} failed on shadow: {}", i + 1, e))?;
+    }
+
+    println!("    {} {} tables/indexes created", "✓".green(), cmds.len());
+
+    Ok(())
 }

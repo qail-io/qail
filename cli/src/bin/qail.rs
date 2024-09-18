@@ -6,7 +6,7 @@
 //!
 //! ```bash
 //! # Parse and transpile a query
-//! qail "get::users:'_[active=true][lim=10]"
+//! qail "Qail::get(\"users\").filter(\"active\", true).limit(10)"
 //!
 //! # Interactive REPL mode
 //! qail repl
@@ -215,9 +215,9 @@ enum MigrateAction {
     },
 }
 
-/// Parse schema diff string (old.qail:new.qail) into migration commands
-fn parse_schema_diff(schema_diff: &str) -> Result<Vec<qail_core::ast::Qail>> {
-    use qail_core::migrate::{diff_schemas, parse_qail};
+/// Parse schema diff and also return old schema commands (for shadow migration)
+fn parse_schema_diff_with_old(schema_diff: &str) -> Result<(Vec<qail_core::ast::Qail>, Vec<qail_core::ast::Qail>)> {
+    use qail_core::migrate::{diff_schemas, parse_qail, schema_to_commands};
 
     if schema_diff.contains(':') && !schema_diff.starts_with("postgres") {
         let parts: Vec<&str> = schema_diff.splitn(2, ':').collect();
@@ -234,7 +234,10 @@ fn parse_schema_diff(schema_diff: &str) -> Result<Vec<qail_core::ast::Qail>> {
         let new_schema = parse_qail(&new_content)
             .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
-        Ok(diff_schemas(&old_schema, &new_schema))
+        let old_cmds = schema_to_commands(&old_schema);
+        let diff_cmds = diff_schemas(&old_schema, &new_schema);
+        
+        Ok((old_cmds, diff_cmds))
     } else {
         Err(anyhow::anyhow!(
             "Please provide two .qail files: old.qail:new.qail"
@@ -302,8 +305,8 @@ async fn main() -> Result<()> {
                 qail::migrations::migrate_create(name, depends.as_deref(), author.as_deref())?;
             }
             MigrateAction::Shadow { schema_diff, url } => {
-                let cmds = parse_schema_diff(schema_diff)?;
-                qail::shadow::run_shadow_migration(url, &cmds).await?;
+                let (old_cmds, diff_cmds) = parse_schema_diff_with_old(schema_diff)?;
+                qail::shadow::run_shadow_migration(url, &old_cmds, &diff_cmds).await?;
             }
             MigrateAction::Promote { url } => {
                 qail::shadow::promote_shadow(url).await?;

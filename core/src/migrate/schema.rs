@@ -512,6 +512,78 @@ pub fn to_qail_string(schema: &Schema) -> String {
     output
 }
 
+/// Convert a Schema to a list of Qail commands (CREATE TABLE, CREATE INDEX).
+/// Used by shadow migration to apply the base schema before applying diffs.
+pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
+    use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
+    
+    let mut cmds = Vec::new();
+    
+    // Sort tables to handle dependencies (tables with FK refs should come after their targets)
+    let mut table_order: Vec<&Table> = schema.tables.values().collect();
+    table_order.sort_by(|a, b| {
+        let a_has_fk = a.columns.iter().any(|c| c.foreign_key.is_some());
+        let b_has_fk = b.columns.iter().any(|c| c.foreign_key.is_some());
+        a_has_fk.cmp(&b_has_fk)
+    });
+    
+    for table in table_order {
+        // Build columns using Expr::Def exactly like diff.rs does
+        let columns: Vec<Expr> = table.columns.iter().map(|col| {
+            let mut constraints = Vec::new();
+            
+            if col.primary_key {
+                constraints.push(Constraint::PrimaryKey);
+            }
+            if col.nullable {
+                constraints.push(Constraint::Nullable);
+            }
+            if col.unique {
+                constraints.push(Constraint::Unique);
+            }
+            if let Some(def) = &col.default {
+                constraints.push(Constraint::Default(def.clone()));
+            }
+            if let Some(ref fk) = col.foreign_key {
+                constraints.push(Constraint::References(format!(
+                    "{}({})",
+                    fk.table, fk.column
+                )));
+            }
+            
+            Expr::Def {
+                name: col.name.clone(),
+                data_type: col.data_type.to_pg_type(),
+                constraints,
+            }
+        }).collect();
+        
+        cmds.push(Qail {
+            action: Action::Make,
+            table: table.name.clone(),
+            columns,
+            ..Default::default()
+        });
+    }
+    
+    // Add indexes using IndexDef like diff.rs
+    for idx in &schema.indexes {
+        cmds.push(Qail {
+            action: Action::Index,
+            table: String::new(),
+            index_def: Some(IndexDef {
+                name: idx.name.clone(),
+                table: idx.table.clone(),
+                columns: idx.columns.clone(),
+                unique: idx.unique,
+            }),
+            ..Default::default()
+        });
+    }
+    
+    cmds
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
