@@ -215,8 +215,8 @@ enum MigrateAction {
     },
 }
 
-/// Parse schema diff and also return old schema commands (for shadow migration)
-fn parse_schema_diff_with_old(schema_diff: &str) -> Result<(Vec<qail_core::ast::Qail>, Vec<qail_core::ast::Qail>)> {
+/// Parse schema diff and also return old schema commands, diff commands, and paths (for shadow migration)
+fn parse_schema_diff_with_old(schema_diff: &str) -> Result<(Vec<qail_core::ast::Qail>, Vec<qail_core::ast::Qail>, String, String)> {
     use qail_core::migrate::{diff_schemas, parse_qail, schema_to_commands};
 
     if schema_diff.contains(':') && !schema_diff.starts_with("postgres") {
@@ -237,7 +237,7 @@ fn parse_schema_diff_with_old(schema_diff: &str) -> Result<(Vec<qail_core::ast::
         let old_cmds = schema_to_commands(&old_schema);
         let diff_cmds = diff_schemas(&old_schema, &new_schema);
         
-        Ok((old_cmds, diff_cmds))
+        Ok((old_cmds, diff_cmds, old_path.to_string(), new_path.to_string()))
     } else {
         Err(anyhow::anyhow!(
             "Please provide two .qail files: old.qail:new.qail"
@@ -305,8 +305,8 @@ async fn main() -> Result<()> {
                 qail::migrations::migrate_create(name, depends.as_deref(), author.as_deref())?;
             }
             MigrateAction::Shadow { schema_diff, url } => {
-                let (old_cmds, diff_cmds) = parse_schema_diff_with_old(schema_diff)?;
-                qail::shadow::run_shadow_migration(url, &old_cmds, &diff_cmds).await?;
+                let (old_cmds, diff_cmds, old_path, new_path) = parse_schema_diff_with_old(schema_diff)?;
+                qail::shadow::run_shadow_migration(url, &old_cmds, &diff_cmds, &old_path, &new_path).await?;
             }
             MigrateAction::Promote { url } => {
                 qail::shadow::promote_shadow(url).await?;

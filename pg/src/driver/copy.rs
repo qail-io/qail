@@ -199,4 +199,45 @@ impl PgConnection {
             }
         }
     }
+
+    /// Export data using raw COPY TO STDOUT, returning raw bytes.
+    /// Format: tab-separated values, newline-terminated rows.
+    /// Suitable for direct re-import via copy_in_raw.
+    pub async fn copy_out_raw(&mut self, sql: &str) -> PgResult<Vec<u8>> {
+        // Send COPY command
+        let bytes = PgEncoder::encode_query_string(sql);
+        self.stream.write_all(&bytes).await?;
+
+        // Wait for CopyOutResponse
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CopyOutResponse { .. } => break,
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+
+        // Receive CopyData messages until CopyDone
+        let mut data = Vec::new();
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CopyData(chunk) => {
+                    data.extend_from_slice(&chunk);
+                }
+                BackendMessage::CopyDone => {}
+                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(data);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
 }

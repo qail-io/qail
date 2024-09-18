@@ -671,6 +671,24 @@ impl PgDriver {
         self.connection.copy_in_raw(table, &columns, data).await
     }
 
+    /// Export table data using PostgreSQL COPY TO STDOUT (zero-copy streaming).
+    /// Returns rows as tab-separated bytes for direct re-import via copy_bulk_bytes.
+    /// # Example
+    /// ```ignore
+    /// let data = driver.copy_export_table("users", &["id", "name"]).await?;
+    /// shadow_driver.copy_bulk_bytes(&cmd, &data).await?;
+    /// ```
+    pub async fn copy_export_table(
+        &mut self,
+        table: &str,
+        columns: &[String],
+    ) -> PgResult<Vec<u8>> {
+        let cols = columns.join(", ");
+        let sql = format!("COPY {} ({}) TO STDOUT", table, cols);
+        
+        self.connection.copy_out_raw(&sql).await
+    }
+
     /// Stream large result sets using PostgreSQL cursors.
     /// This method uses DECLARE CURSOR internally to stream rows in batches,
     /// avoiding loading the entire result set into memory.
