@@ -7,15 +7,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// A prepared statement handle with pre-computed statement name.
-///
 /// This eliminates per-query hash computation and HashMap lookup.
 /// Create once, execute many times.
-///
 /// # Example
 /// ```ignore
 /// // Prepare once (compute hash + register with PostgreSQL)
 /// let stmt = conn.prepare("SELECT id, name FROM users WHERE id = $1").await?;
-///
 /// // Execute many times (no hash, no lookup!)
 /// for id in 1..1000 {
 ///     conn.execute_prepared(&stmt, &[Some(id.to_string().into_bytes())]).await?;
@@ -25,14 +22,12 @@ use std::hash::{Hash, Hasher};
 pub struct PreparedStatement {
     /// Pre-computed statement name (e.g., "s1234567890abcdef")
     pub(crate) name: String,
-    /// Number of parameters (reserved for future validation)
     #[allow(dead_code)]
     pub(crate) param_count: usize,
 }
 
 impl PreparedStatement {
     /// Create a new prepared statement handle from SQL bytes.
-    ///
     /// This hashes the SQL bytes directly without String allocation.
     #[inline]
     pub fn from_sql_bytes(sql_bytes: &[u8]) -> Self {
@@ -59,7 +54,6 @@ impl PreparedStatement {
 }
 
 /// Hash SQL bytes directly to statement name (no String allocation).
-///
 /// This is faster than hashing a String because:
 /// 1. No UTF-8 validation
 /// 2. No heap allocation for String

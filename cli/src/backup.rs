@@ -14,7 +14,6 @@ pub struct MigrationImpact {
     pub table: String,
     /// Type of operation
     pub operation: String,
-    /// Number of rows affected
     pub rows_affected: u64,
     /// Columns being dropped (if any)
     pub dropped_columns: Vec<String>,

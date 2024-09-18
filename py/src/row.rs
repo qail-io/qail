@@ -63,7 +63,6 @@ impl PyRow {
         }
     }
 
-    /// Number of columns.
     fn __len__(&self) -> usize {
         self.inner.columns.len()
     }

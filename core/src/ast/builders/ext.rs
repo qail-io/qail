@@ -7,7 +7,6 @@ use crate::ast::Expr;
 /// Extension trait to add fluent methods to Expr
 pub trait ExprExt {
     /// Add an alias to this expression.
-    ///
     /// # Example
     /// ```ignore
     /// col("name").with_alias("user_name")
@@ -15,7 +14,6 @@ pub trait ExprExt {
     fn with_alias(self, alias: &str) -> Expr;
 
     /// COALESCE with a default value.
-    ///
     /// # Example
     /// ```ignore
     /// col("name").or_default("Unknown")  // COALESCE(name, 'Unknown')
@@ -23,7 +21,6 @@ pub trait ExprExt {
     fn or_default(self, default: impl Into<Expr>) -> Expr;
 
     /// JSON text extraction (column->>'key').
-    ///
     /// # Example
     /// ```ignore
     /// col("contact_info").json("phone")  // contact_info->>'phone'
@@ -31,7 +28,6 @@ pub trait ExprExt {
     fn json(self, key: &str) -> JsonBuilder;
 
     /// JSON path extraction with dot notation.
-    ///
     /// # Example
     /// ```ignore
     /// col("metadata").path("vessel.0.port")  // metadata->'vessel'->0->>'port'
@@ -39,7 +35,6 @@ pub trait ExprExt {
     fn path(self, dotted_path: &str) -> JsonBuilder;
 
     /// Cast to a type: CAST(expr AS type)
-    ///
     /// # Example
     /// ```ignore
     /// col("value").cast("int")  // CAST(value AS int)

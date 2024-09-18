@@ -250,11 +250,9 @@ pub extern "C" fn qail_free_bytes(ptr: *mut u8, len: usize) {
 use qail_pg::protocol::AstEncoder;
 
 /// Encode a QAIL GET query to PostgreSQL wire protocol bytes.
-///
 /// Returns pointer to bytes via out_ptr, length via out_len.
 /// Returns 0 on success, non-zero on error.
 /// Caller must free the bytes with qail_free_bytes(out_ptr, out_len).
-///
 /// # Example (C):
 /// ```c
 /// uint8_t* bytes;
@@ -275,7 +273,7 @@ pub extern "C" fn qail_encode_get(
 ) -> i32 {
     clear_error();
 
-    // Validate inputs
+
     if table.is_null() || out_ptr.is_null() || out_len.is_null() {
         set_error("NULL pointer argument".to_string());
         return -1;
@@ -340,10 +338,8 @@ pub extern "C" fn qail_encode_get(
 }
 
 /// Encode a batch of GET queries to wire protocol bytes.
-///
 /// Encodes multiple queries for pipeline execution (single round-trip).
 /// Each query is: table, columns (comma-sep), limit.
-///
 /// # Parameters
 /// - tables: null-terminated array of table names
 /// - columns_arr: null-terminated array of column specs (comma-sep or "*")
@@ -351,7 +347,6 @@ pub extern "C" fn qail_encode_get(
 /// - count: number of queries
 /// - out_ptr: receives pointer to encoded bytes
 /// - out_len: receives length of bytes
-///
 /// # Example (C):
 /// ```c
 /// const char* tables[] = {"users", "orders", NULL};
@@ -451,10 +446,8 @@ pub extern "C" fn qail_encode_batch_get(
 }
 
 /// Encode a UNIFORM batch of identical GET queries.
-///
 /// This is the HIGH-PERFORMANCE path: encode ONCE, execute MANY times.
 /// All queries in the batch are identical (same table, columns, limit).
-///
 /// # Parameters
 /// - table: Table name
 /// - columns: Columns (comma-separated or "*")
@@ -462,12 +455,10 @@ pub extern "C" fn qail_encode_batch_get(
 /// - count: Number of queries in batch
 /// - out_ptr: Receives pointer to encoded bytes
 /// - out_len: Receives byte length
-///
 /// # Usage Pattern (Python):
 /// ```python
 /// # Encode ONCE at startup
 /// batch_bytes = qail_encode_uniform_batch("harbors", "id,name", 10, 10000)
-///
 /// # Execute MANY times in hot loop
 /// for _ in range(5000):
 ///     writer.write(batch_bytes)  # Same bytes, no FFI call!

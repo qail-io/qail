@@ -3,9 +3,7 @@
 use crate::ast::*;
 use crate::transpiler::dialect::Dialect;
 
-///
 /// QAIL Syntax: `jtable::orders.items [$[*]] :product_name=$.name,quantity=$.qty`
-///
 /// Generates:
 /// ```sql
 /// SELECT jt.* FROM orders,

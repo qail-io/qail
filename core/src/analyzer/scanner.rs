@@ -44,7 +44,6 @@ pub struct FileAnalysis {
     pub file: PathBuf,
     /// Analysis mode used
     pub mode: AnalysisMode,
-    /// Number of references found
     pub ref_count: usize,
     pub safe: bool,
 }

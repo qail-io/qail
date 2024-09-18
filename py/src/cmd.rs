@@ -5,7 +5,6 @@ use pyo3::prelude::*;
 use qail_core::ast::{JoinKind, Operator, Qail, SortOrder};
 
 /// Python-exposed Qail AST builder.
-///
 /// All methods return `Self` for fluent chaining.
 #[pyclass(name = "Qail")]
 #[derive(Clone)]
