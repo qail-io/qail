@@ -54,7 +54,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("SeaORM:  {:.0}% slower ({:.0} fewer q/s)", seaorm_diff, qail_qps - seaorm_qps);
     println!("SQLx:    {:.0}% slower ({:.0} fewer q/s)", sqlx_diff, qail_qps - sqlx_qps);
 
-    // Cleanup
     cleanup(&mut driver).await?;
     println!("\n🧹 Cleanup complete");
 

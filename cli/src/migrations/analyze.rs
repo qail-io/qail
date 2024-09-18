@@ -6,7 +6,7 @@ use qail_core::migrate::{diff_schemas, parse_qail};
 
 use crate::sql_gen::cmd_to_sql;
 
-/// Analyze migration impact on codebase before executing.
+/// Analyze migration impact. See [full docs](https://qail.rs/docs/features/analyzer.html).
 pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: bool) -> Result<()> {
     use qail_core::analyzer::{CodebaseScanner, MigrationImpact};
     use std::path::Path;

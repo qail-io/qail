@@ -1,5 +1,4 @@
 /// WhatsApp Insights Query - QAIL Builder API Example
-///
 /// This demonstrates how to build the complex WhatsApp insights query
 /// using QAIL's programmatic builder API with all the new features:
 /// - COUNT(DISTINCT col)

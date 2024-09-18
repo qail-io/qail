@@ -72,7 +72,6 @@ impl Schema {
     }
 
     /// Load schema from QAIL schema format (schema.qail).
-    ///
     /// Parses text like:
     /// ```text
     ///     id string not null,

@@ -63,7 +63,6 @@ impl MigrationMeta {
 }
 
 /// Parse migration metadata from file content.
-///
 /// Looks for lines starting with `-- migration:`, `-- depends:`, `-- author:`, `-- created:`.
 pub fn parse_migration_meta(content: &str) -> Option<MigrationMeta> {
     let mut meta = MigrationMeta::default();

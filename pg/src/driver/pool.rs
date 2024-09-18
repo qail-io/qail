@@ -11,26 +11,16 @@ use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Clone)]
 pub struct PoolConfig {
-    /// Host address
     pub host: String,
-    /// Port number
     pub port: u16,
-    /// Username
     pub user: String,
-    /// Database name
     pub database: String,
-    /// Password (optional for trust mode)
     pub password: Option<String>,
-    /// Maximum number of connections
     pub max_connections: usize,
-    /// Minimum number of idle connections to maintain
     pub min_connections: usize,
-    /// Maximum time a connection can be idle before being closed
     pub idle_timeout: Duration,
-    /// Maximum time to wait for a connection from the pool
     pub acquire_timeout: Duration,
     pub connect_timeout: Duration,
-    /// Maximum lifetime of a connection before recycling (None = no limit)
     pub max_lifetime: Option<Duration>,
     pub test_on_acquire: bool,
 }
@@ -90,14 +80,12 @@ impl PoolConfig {
     }
 
     /// Set maximum lifetime of a connection before recycling.
-    /// After this duration, connection will be closed and recreated.
     pub fn max_lifetime(mut self, lifetime: Duration) -> Self {
         self.max_lifetime = Some(lifetime);
         self
     }
 
     /// Enable connection validation on acquire.
-    /// When enabled, connections are tested with a ping before being returned.
     pub fn test_on_acquire(mut self, enabled: bool) -> Self {
         self.test_on_acquire = enabled;
         self
@@ -107,15 +95,11 @@ impl PoolConfig {
 /// Pool statistics for monitoring.
 #[derive(Debug, Clone, Default)]
 pub struct PoolStats {
-    /// Number of connections currently in use
     pub active: usize,
-    /// Number of idle connections available
     pub idle: usize,
-    /// Number of requests waiting for a connection
     pub pending: usize,
     /// Maximum connections configured
     pub max_size: usize,
-    /// Total connections created since pool start
     pub total_created: usize,
 }
 
@@ -144,7 +128,6 @@ impl PooledConnection {
 impl Drop for PooledConnection {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            // Return connection to pool
             let pool = self.pool.clone();
             tokio::spawn(async move {
                 pool.return_connection(conn).await;
@@ -177,18 +160,16 @@ struct PgPoolInner {
     connections: Mutex<Vec<PooledConn>>,
     semaphore: Semaphore,
     closed: AtomicBool,
-    /// Number of connections currently in use (active)
     active_count: AtomicUsize,
-    /// Total connections created (for stats)
     total_created: AtomicUsize,
 }
 
 impl PgPoolInner {
     async fn return_connection(&self, conn: PgConnection) {
-        // Decrement active count
+
         self.active_count.fetch_sub(1, Ordering::Relaxed);
         
-        // Don't return if pool is closed
+
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
@@ -201,7 +182,7 @@ impl PgPoolInner {
                 last_used: Instant::now(),
             });
         }
-        // Connection dropped if pool is full
+
         self.semaphore.add_permits(1);
     }
 
@@ -222,7 +203,6 @@ impl PgPoolInner {
                 continue;
             }
 
-            // Return the connection
             return Some(pooled.conn);
         }
 
@@ -230,19 +210,15 @@ impl PgPoolInner {
     }
 }
 
-///
 /// # Example
 /// ```ignore
 /// let config = PoolConfig::new("localhost", 5432, "user", "db")
 ///     .password("secret")
 ///     .max_connections(20);
-///
 /// let pool = PgPool::connect(config).await?;
-///
 /// // Get a connection from the pool
 /// let mut conn = pool.acquire().await?;
 /// conn.simple_query("SELECT 1").await?;
-/// // Connection automatically returned when dropped
 /// ```
 #[derive(Clone)]
 pub struct PgPool {
@@ -280,10 +256,6 @@ impl PgPool {
     }
 
     /// Acquire a connection from the pool.
-    ///
-    /// Waits if all connections are in use (up to acquire_timeout).
-    /// Stale connections (idle > idle_timeout) are automatically discarded.
-    /// Connection is automatically returned when dropped.
     pub async fn acquire(&self) -> PgResult<PooledConnection> {
         if self.inner.closed.load(Ordering::Relaxed) {
             return Err(PgError::Connection("Pool is closed".to_string()));
@@ -311,7 +283,7 @@ impl PgPool {
             conn
         };
 
-        // Increment active count
+
         self.inner.active_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(PooledConnection {
@@ -355,12 +327,9 @@ impl PgPool {
     }
 
     /// Close the pool gracefully.
-    ///
-    /// Prevents new connections from being acquired.
-    /// Existing checked-out connections will be dropped when returned.
     pub async fn close(&self) {
         self.inner.closed.store(true, Ordering::Relaxed);
-        // Clear idle connections
+
         let mut connections = self.inner.connections.lock().await;
         connections.clear();
     }

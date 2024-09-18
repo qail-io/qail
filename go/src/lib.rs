@@ -248,7 +248,6 @@ fn int_to_operator(op: c_int) -> Operator {
 
 /// Encode SELECT directly without intermediate handle.
 /// ONE CGO call instead of 5+!
-///
 /// columns: comma-separated column names (e.g., "id,name")
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_encode_select_fast(
@@ -290,7 +289,6 @@ pub extern "C" fn qail_encode_select_fast(
 
 /// Encode batch of SELECT queries with same structure but different limits.
 /// Returns all wire bytes in one buffer.
-///
 /// ONE CGO call for entire batch!
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_encode_select_batch_fast(

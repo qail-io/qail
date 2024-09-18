@@ -401,7 +401,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n⚠️  {} tests need review", failed);
     }
 
-    // Cleanup
     let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_order_items CASCADE").await;
     let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_orders CASCADE").await;
     let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_products CASCADE").await;

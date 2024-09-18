@@ -103,7 +103,6 @@ fn parse_subquery_value(input: &str) -> IResult<&str, Value> {
 }
 
 /// Parse ON CONFLICT clause: conflict (col1, col2) update col = val OR conflict (col) nothing
-///
 /// Syntax:
 /// - `conflict (col1, col2) nothing` -> ON CONFLICT (col1, col2) DO NOTHING
 /// - `conflict (col1) update col2 = val` -> ON CONFLICT (col1) DO UPDATE SET col2 = val
@@ -203,7 +202,6 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
 }
 
 /// Parse: from (get ...) - source query for INSERT...SELECT
-///
 /// Syntax: `from (get table fields col1, col2 where ...)`
 pub fn parse_source_query(input: &str) -> IResult<&str, Box<crate::ast::Qail>> {
     let (input, _) = multispace0(input)?;

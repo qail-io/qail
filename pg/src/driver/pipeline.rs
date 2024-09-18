@@ -17,9 +17,6 @@ use tokio::io::AsyncWriteExt;
 
 impl PgConnection {
     /// Execute multiple SQL queries in a single network round-trip (PIPELINING).
-    ///
-    /// This sends all queries at once, then reads all responses.
-    /// Reduces N queries from N round-trips to 1 round-trip.
     pub async fn query_pipeline(
         &mut self,
         queries: &[(&str, &[Option<Vec<u8>>])],
@@ -68,7 +65,6 @@ impl PgConnection {
     }
 
     /// Execute multiple Qail ASTs in a single network round-trip.
-    ///
     pub async fn pipeline_ast(
         &mut self,
         cmds: &[qail_core::ast::Qail],
@@ -212,8 +208,6 @@ impl PgConnection {
     }
 
     /// CACHED PREPARED STATEMENT pipeline - Parse once, Bind+Execute many.
-    ///
-    /// This achieves ~280k q/s by:
     /// 1. Generate SQL template with $1, $2, etc. placeholders
     /// 2. Parse template ONCE (cached in PostgreSQL)
     /// 3. Send Bind+Execute for each instance (params differ per query)
@@ -263,14 +257,9 @@ impl PgConnection {
     }
 
     /// ZERO-LOOKUP prepared statement pipeline.
-    ///
-    /// Uses pre-computed PreparedStatement handle to eliminate:
     /// - Hash computation per query
     /// - HashMap lookup per query
     /// - String allocation for stmt_name
-    ///
-    /// This is the fastest possible path for repeated identical queries.
-    ///
     /// # Example
     /// ```ignore
     /// // Prepare once (outside timing loop):
@@ -278,7 +267,6 @@ impl PgConnection {
     /// let params_batch: Vec<Vec<Option<Vec<u8>>>> = (1..=1000)
     ///     .map(|i| vec![Some(i.to_string().into_bytes())])
     ///     .collect();
-    ///
     /// // Execute many (no hash, no lookup!):
     /// conn.pipeline_prepared_fast(&stmt, &params_batch).await?;
     /// ```
@@ -311,7 +299,6 @@ impl PgConnection {
 
         PgEncoder::encode_sync_to(&mut buf);
 
-        // Write and flush
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
 
@@ -332,8 +319,6 @@ impl PgConnection {
     }
 
     /// Prepare a statement and return a handle for fast execution.
-    ///
-    /// This registers the statement with PostgreSQL and returns a
     /// PreparedStatement handle for use with pipeline_prepared_fast.
     pub async fn prepare(&mut self, sql: &str) -> PgResult<super::PreparedStatement> {
         use super::prepared::sql_bytes_to_stmt_name;
@@ -341,7 +326,6 @@ impl PgConnection {
         let stmt_name = sql_bytes_to_stmt_name(sql.as_bytes());
 
         if !self.prepared_statements.contains_key(&stmt_name) {
-            // Send Parse + Sync
             let mut buf = BytesMut::with_capacity(sql.len() + 32);
             buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
             buf.extend(PgEncoder::encode_sync());
@@ -370,13 +354,7 @@ impl PgConnection {
         })
     }
 
-    /// Execute a prepared statement pipeline and return actual results.
-    ///
-    /// Unlike `pipeline_prepared_fast` which only counts, this method
-    /// parses and returns all row data. Use for fair benchmarking with
-    ///
-    /// Returns: Vec of query results, each containing Vec of rows,
-    /// where each row is Vec<Option<Vec<u8>>> (column values).
+    /// Execute a prepared statement pipeline and return all row data.
     pub async fn pipeline_prepared_results(
         &mut self,
         stmt: &super::PreparedStatement,
@@ -401,7 +379,6 @@ impl PgConnection {
 
         PgEncoder::encode_sync_to(&mut buf);
 
-        // Write and flush
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
 
@@ -442,9 +419,6 @@ impl PgConnection {
     }
 
     /// ZERO-COPY pipeline execution with Bytes for column data.
-    ///
-    /// Uses reference-counted Bytes slices instead of Vec copies.
-    /// This matches C's libpq behavior of returning pointers into internal buffers.
     pub async fn pipeline_prepared_zerocopy(
         &mut self,
         stmt: &super::PreparedStatement,
@@ -469,7 +443,6 @@ impl PgConnection {
 
         PgEncoder::encode_sync_to(&mut buf);
 
-        // Write and flush
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
 
@@ -510,7 +483,6 @@ impl PgConnection {
     }
 
     /// ULTRA-FAST pipeline for 2-column SELECT queries.
-    /// Optimized for the common "SELECT id, name FROM table" pattern.
     pub async fn pipeline_prepared_ultra(
         &mut self,
         stmt: &super::PreparedStatement,

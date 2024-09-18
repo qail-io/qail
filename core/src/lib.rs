@@ -1,3 +1,12 @@
+//! Type-safe SQL query builder with AST-native design.
+//!
+//! Build queries as typed AST, not strings. Zero SQL injection risk.
+//!
+//! ```ignore
+//! use qail_core::ast::{Qail, Operator};
+//! let cmd = Qail::get("users").column("name").filter("active", Operator::Eq, true);
+//! ```
+
 pub mod analyzer;
 pub mod ast;
 pub mod error;

@@ -13,7 +13,6 @@ pub fn star() -> Expr {
 }
 
 /// Create a parameter placeholder ($n)
-///
 /// # Example
 /// ```ignore
 /// param(1)  // $1

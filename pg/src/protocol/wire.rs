@@ -8,7 +8,6 @@
 pub enum FrontendMessage {
     /// Startup message (sent first, no type byte)
     Startup { user: String, database: String },
-    /// Password response
     PasswordMessage(String),
     Query(String),
     /// Parse (prepared statement)

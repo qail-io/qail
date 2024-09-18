@@ -8,7 +8,6 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
 /// Compute mysql_native_password authentication response (legacy).
-///
 /// Formula: SHA1(password) XOR SHA1(scramble + SHA1(SHA1(password)))
 pub fn mysql_native_password(password: &[u8], scramble: &[u8]) -> [u8; 20] {
     let hash1 = Sha1::digest(password);
@@ -27,7 +26,6 @@ pub fn mysql_native_password(password: &[u8], scramble: &[u8]) -> [u8; 20] {
 }
 
 /// Compute caching_sha2_password authentication response (MySQL 8+).
-///
 /// Formula: SHA256(password) XOR SHA256(SHA256(SHA256(password)) + scramble)
 pub fn caching_sha2_password(password: &[u8], scramble: &[u8]) -> [u8; 32] {
     // SHA256(password)
