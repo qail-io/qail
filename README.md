@@ -137,19 +137,38 @@ driver.send(&bytes).await?;
 
 ## Performance
 
-QAIL's AST-native architecture and wire-level pipelining deliver exceptional performance:
+QAIL's AST-native architecture delivers **146% faster** query execution than SQLx:
 
-| Benchmark | QAIL | tokio-postgres | SQLx | QAIL Advantage |
-|-----------|------|----------------|------|----------------|
-| **Sequential** | 33K q/s | 25K q/s | 11K q/s | **1.3x - 3x** |
-| **Pipeline (10K batch)** | **347K q/s** | 27K q/s | N/A | **12.8x** |
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4ade80'}}}%%
+xychart-beta
+    title "Queries Per Second (Higher is Better)"
+    x-axis ["SQLx", "SeaORM", "QAIL"]
+    y-axis "QPS" 0 --> 30000
+    bar [10718, 13405, 25825]
+```
 
-### Why QAIL is Faster
+### Fair Benchmark Results
 
-1. **Wire-level Pipelining**: Batch 10,000+ queries in a single TCP write
-2. **AST-native Encoding**: No SQL string generation in hot path
-3. **Zero-allocation Encoders**: Pre-computed buffer sizes
-4. **Prepared Statement Caching**: Hash-based auto-caching
+| Driver | Latency | QPS | vs QAIL |
+|--------|---------|-----|---------|
+| SQLx | 93μs | 10,718 | 141% slower |
+| SeaORM | 75μs | 13,405 | 93% slower |
+| **QAIL** | **39μs** | **25,825** | baseline |
+
+> **Methodology**: SELECT with WHERE + ORDER BY + LIMIT returning 25 rows.
+> TCP localhost, prepared statement caching enabled on all drivers.
+> Run: `cargo run --release --example fair_benchmark`
+
+### Why QAIL is 146% Faster
+
+Most drivers spend CPU cycles re-serializing the same query structure for every request. QAIL treats SQL as an AST, not a string:
+
+1. **Pre-Computed Wire Bytes**: QAIL calculates static parts of the Postgres Wire Protocol (headers, query structure) once during AST build.
+
+2. **Zero-Alloc Hot Path**: When you execute a cached query, QAIL only serializes parameters into a pre-allocated reusable buffer (`BytesMut`). The rest is `memcpy`.
+
+3. **No String Hashing**: We don't hash the SQL string to find prepared statements. We use the AST's structural ID — O(1) lookup.
 
 ## Supported Databases
 
