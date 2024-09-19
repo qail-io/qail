@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.8] - 2026-01-01
+
+### Production Hardening
+- **PG:** `close()` async method sends Terminate packet ('X') for graceful shutdown
+- **PG:** `Drop` impl sends Terminate via `try_write()` for TCP/Unix sockets
+- **CLI:** Identity column support (GENERATED ALWAYS AS IDENTITY) in introspection
+- **Core:** SERIAL→INTEGER conversion for ALTER TABLE commands
+
+### Verified
+- Pool overhead: **9.5μs/checkout** (excellent - microseconds, not milliseconds)
+- 3D/4D arrays: Work correctly (not a bug)
+- All chaos tests passed: Type Torture, Pool Starvation, Zombie Client
+
 ## [0.14.7] - 2026-01-01
 
 ### Enterprise Shadow Migrations
