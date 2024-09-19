@@ -198,10 +198,13 @@ enum MigrateAction {
     },
     /// Apply migration to shadow database (blue-green)
     Shadow {
-        /// Schema diff (old.qail:new.qail)
+        /// Schema diff (old.qail:new.qail) or just new.qail with --live
         schema_diff: String,
         /// Database URL
         url: String,
+        /// Use live database introspection instead of old.qail file (catches drift)
+        #[arg(long)]
+        live: bool,
     },
     /// Promote shadow database to primary
     Promote {
@@ -304,9 +307,15 @@ async fn main() -> Result<()> {
             } => {
                 qail::migrations::migrate_create(name, depends.as_deref(), author.as_deref())?;
             }
-            MigrateAction::Shadow { schema_diff, url } => {
-                let (old_cmds, diff_cmds, old_path, new_path) = parse_schema_diff_with_old(schema_diff)?;
-                qail::shadow::run_shadow_migration(url, &old_cmds, &diff_cmds, &old_path, &new_path).await?;
+            MigrateAction::Shadow { schema_diff, url, live } => {
+                if *live {
+                    // Live introspection mode: introspect primary, compare with new.qail
+                    qail::shadow::run_shadow_migration_live(url, schema_diff).await?;
+                } else {
+                    // File-based mode: old.qail:new.qail
+                    let (old_cmds, diff_cmds, old_path, new_path) = parse_schema_diff_with_old(schema_diff)?;
+                    qail::shadow::run_shadow_migration(url, &old_cmds, &diff_cmds, &old_path, &new_path).await?;
+                }
             }
             MigrateAction::Promote { url } => {
                 qail::shadow::promote_shadow(url).await?;

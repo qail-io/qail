@@ -167,13 +167,20 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                         if let Some(def) = &col.default {
                             constraints.push(Constraint::Default(def.clone()));
                         }
+                        // SERIAL is a pseudo-type only valid in CREATE TABLE
+                        // For ALTER TABLE ADD COLUMN, convert to INTEGER/BIGINT
+                        let data_type = match &col.data_type {
+                            super::types::ColumnType::Serial => "INTEGER".to_string(),
+                            super::types::ColumnType::BigSerial => "BIGINT".to_string(),
+                            other => other.to_pg_type(),
+                        };
 
                         cmds.push(Qail {
                             action: Action::Alter,
                             table: name.clone(),
                             columns: vec![Expr::Def {
                                 name: col.name.clone(),
-                                data_type: col.data_type.to_pg_type(),
+                                data_type,
                                 constraints,
                             }],
                             ..Default::default()
@@ -208,12 +215,19 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
 
                     if old_type != new_type {
                         // Type changed - ALTER COLUMN TYPE
+                        // SERIAL is pseudo-type only valid in CREATE TABLE
+                        let safe_new_type = match &new_col.data_type {
+                            super::types::ColumnType::Serial => "INTEGER".to_string(),
+                            super::types::ColumnType::BigSerial => "BIGINT".to_string(),
+                            _ => new_type,
+                        };
+                        
                         cmds.push(Qail {
                             action: Action::AlterType,
                             table: name.clone(),
                             columns: vec![Expr::Def {
                                 name: new_col.name.clone(),
-                                data_type: new_type,
+                                data_type: safe_new_type,
                                 constraints: vec![],
                             }],
                             ..Default::default()
