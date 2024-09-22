@@ -9,7 +9,7 @@ use super::helpers::write_usize;
 use super::values::{encode_columns, encode_conditions, encode_expr, encode_join_value, encode_value};
 
 /// Encode SELECT statement directly to bytes.
-pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
     // CTE prefix
     encode_cte_prefix(cmd, buf, params);
 
@@ -71,7 +71,7 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         && !cage.conditions.is_empty()
     {
         buf.extend_from_slice(b" WHERE ");
-        encode_conditions(&cage.conditions, buf, params);
+        encode_conditions(&cage.conditions, buf, params)?;
     }
 
     // GROUP BY with ROLLUP/CUBE/GROUPING SETS
@@ -175,6 +175,7 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
             break;
         }
     }
+    Ok(())
 }
 
 /// Encode CTE prefix: WITH [RECURSIVE] cte1 AS (...), cte2 AS (...)
@@ -219,21 +220,21 @@ fn encode_single_cte(cte: &CTEDef, buf: &mut BytesMut, params: &mut Vec<Option<V
     buf.extend_from_slice(b" AS (");
 
     // Encode base query recursively
-    encode_select(&cte.base_query, buf, params);
+    encode_select(&cte.base_query, buf, params).ok();
 
     // Recursive part (UNION ALL)
     if cte.recursive
         && let Some(ref recursive_query) = cte.recursive_query
     {
         buf.extend_from_slice(b" UNION ALL ");
-        encode_select(recursive_query, buf, params);
+        encode_select(recursive_query, buf, params).ok();
     }
 
     buf.extend_from_slice(b")");
 }
 
 /// Encode INSERT statement.
-pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
     buf.extend_from_slice(b"INSERT INTO ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
@@ -250,14 +251,15 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
             if i > 0 {
                 buf.extend_from_slice(b", ");
             }
-            encode_value(&cond.value, buf, params);
+            encode_value(&cond.value, buf, params)?;
         }
         buf.extend_from_slice(b")");
     }
+    Ok(())
 }
 
 /// Encode UPDATE statement.
-pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
     buf.extend_from_slice(b"UPDATE ");
     buf.extend_from_slice(cmd.table.as_bytes());
     buf.extend_from_slice(b" SET ");
@@ -276,7 +278,7 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
                 encode_expr(col, buf);
                 buf.extend_from_slice(b" = ");
                 // Value from payload condition
-                encode_value(&cond.value, buf, params);
+                encode_value(&cond.value, buf, params)?;
             }
         } else {
             // Fallback to old behavior (direct set)
@@ -286,7 +288,7 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
                 }
                 encode_expr(&cond.left, buf);
                 buf.extend_from_slice(b" = ");
-                encode_value(&cond.value, buf, params);
+                encode_value(&cond.value, buf, params)?;
             }
         }
     }
@@ -296,12 +298,13 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         && !cage.conditions.is_empty()
     {
         buf.extend_from_slice(b" WHERE ");
-        encode_conditions(&cage.conditions, buf, params);
+        encode_conditions(&cage.conditions, buf, params)?;
     }
+    Ok(())
 }
 
 /// Encode DELETE statement.
-pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
     buf.extend_from_slice(b"DELETE FROM ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
@@ -310,13 +313,15 @@ pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         && !cage.conditions.is_empty()
     {
         buf.extend_from_slice(b" WHERE ");
-        encode_conditions(&cage.conditions, buf, params);
+        encode_conditions(&cage.conditions, buf, params)?;
     }
+    Ok(())
 }
 
 /// Encode EXPORT command as COPY (SELECT ...) TO STDOUT.
-pub fn encode_export(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+pub fn encode_export(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
     buf.extend_from_slice(b"COPY (");
-    encode_select(cmd, buf, params);
+    encode_select(cmd, buf, params)?;
     buf.extend_from_slice(b") TO STDOUT");
+    Ok(())
 }

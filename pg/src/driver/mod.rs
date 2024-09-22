@@ -307,16 +307,16 @@ impl PgDriver {
         // Encode SQL to reusable buffer
         match cmd.action {
             qail_core::ast::Action::Get | qail_core::ast::Action::With => {
-                crate::protocol::ast_encoder::dml::encode_select(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf);
+                crate::protocol::ast_encoder::dml::encode_select(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf).ok();
             }
             qail_core::ast::Action::Add => {
-                crate::protocol::ast_encoder::dml::encode_insert(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf);
+                crate::protocol::ast_encoder::dml::encode_insert(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf).ok();
             }
             qail_core::ast::Action::Set => {
-                crate::protocol::ast_encoder::dml::encode_update(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf);
+                crate::protocol::ast_encoder::dml::encode_update(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf).ok();
             }
             qail_core::ast::Action::Del => {
-                crate::protocol::ast_encoder::dml::encode_delete(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf);
+                crate::protocol::ast_encoder::dml::encode_delete(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf).ok();
             }
             _ => {
                 // Fallback for unsupported actions
@@ -568,7 +568,7 @@ impl PgDriver {
     /// Use for bootstrap DDL only (e.g., migration table creation).
     /// For transactions, use `begin()`, `commit()`, `rollback()`.
     pub async fn execute_raw(&mut self, sql: &str) -> PgResult<()> {
-        // Reject NULL bytes - they corrupt PostgreSQL connection state
+        // Reject literal NULL bytes - they corrupt PostgreSQL connection state
         if sql.as_bytes().contains(&0) {
             return Err(crate::PgError::Protocol(
                 "SQL contains NULL byte (0x00) which is invalid in PostgreSQL".to_string(),
