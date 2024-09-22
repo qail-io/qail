@@ -67,14 +67,29 @@ impl QdrantDriver {
         // Extract limit and offset from cages
         let (limit, offset) = self.extract_limit_offset(cmd);
         
-        // Encode request using cmd fields directly
-        let body = protocol::encode_search_request(
-            &vector,
-            limit,
-            offset,
-            cmd.score_threshold,
-            cmd.with_vector,
-        );
+        // Extract filter conditions from cages (excluding Limit/Offset/Vector cages)
+        let filter_conditions = self.extract_filter_conditions(cmd);
+        
+        // Build body - with or without filter
+        let body = if filter_conditions.is_empty() {
+            protocol::encode_search_request(
+                &vector,
+                limit,
+                offset,
+                cmd.score_threshold,
+                cmd.with_vector,
+            )
+        } else {
+            let filter = protocol::encode_conditions_to_filter(&filter_conditions, false);
+            protocol::encode_search_request_with_filter(
+                &vector,
+                limit,
+                offset,
+                cmd.score_threshold,
+                cmd.with_vector,
+                filter,
+            )
+        };
         
         // Make HTTP request
         let url = format!("{}/collections/{}/points/search", self.base_url, collection);
@@ -245,6 +260,16 @@ impl QdrantDriver {
         }
         
         (limit, offset)
+    }
+
+    /// Extract filter conditions from Qail cages.
+    /// Only includes Filter cages, excludes Limit/Offset/Sort/Payload.
+    fn extract_filter_conditions(&self, cmd: &Qail) -> Vec<qail_core::ast::Condition> {
+        cmd.cages
+            .iter()
+            .filter(|cage| matches!(cage.kind, CageKind::Filter))
+            .flat_map(|cage| cage.conditions.clone())
+            .collect()
     }
 }
 
