@@ -317,7 +317,7 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
 }
 
 /// Parse a point ID from JSON.
-fn parse_point_id(value: &JsonValue) -> Option<PointId> {
+pub fn parse_point_id(value: &JsonValue) -> Option<PointId> {
     if let Some(s) = value.as_str() {
         Some(PointId::Uuid(s.to_string()))
     } else if let Some(n) = value.as_u64() {
@@ -328,7 +328,7 @@ fn parse_point_id(value: &JsonValue) -> Option<PointId> {
 }
 
 /// Parse payload from JSON object.
-fn parse_payload(value: &JsonValue) -> crate::point::Payload {
+pub fn parse_payload(value: &JsonValue) -> crate::point::Payload {
     let mut payload = crate::point::Payload::new();
     
     if let Some(obj) = value.as_object() {
