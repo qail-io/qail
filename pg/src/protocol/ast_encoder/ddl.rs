@@ -233,7 +233,7 @@ pub fn encode_create_view(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Optio
     
     // The source_query contains the SELECT statement for the view
     if let Some(ref source) = cmd.source_query {
-        super::dml::encode_select(source, buf, params);
+        super::dml::encode_select(source, buf, params).ok();
     }
 }
 
