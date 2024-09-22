@@ -192,6 +192,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
                 Expr::Named(format!("'\\x{}'", hex))
             }
             Value::Expr(expr) => (*expr).clone(),
+            Value::Vector(v) => Expr::Named(format!("[{} floats]", v.len())),
         }),
         // Fall back to full expression parsing
         parse_expression,

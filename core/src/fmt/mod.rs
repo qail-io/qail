@@ -438,6 +438,14 @@ impl Formatter {
                 write!(self.buffer, ")")?;
             }
             Value::Expr(expr) => write!(self.buffer, "{}", expr)?,
+            Value::Vector(v) => {
+                write!(self.buffer, "[")?;
+                for (i, val) in v.iter().enumerate() {
+                    if i > 0 { write!(self.buffer, ", ")?; }
+                    write!(self.buffer, "{}", val)?;
+                }
+                write!(self.buffer, "]")?;
+            }
         }
         Ok(())
     }
