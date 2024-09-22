@@ -24,3 +24,10 @@ tokio-test = "0.4"
 
 [build-dependencies]
 tonic-build = "0.13"
+
+[lints.rust]
+warnings = "deny"
+unused = "deny"
+dead_code = "deny"
+unused_imports = "deny"
+unused_variables = "deny"

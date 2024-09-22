@@ -1,12 +1,14 @@
 //! Qdrant driver - main client interface.
 
-use crate::error::{QdrantError, QdrantResult};
+use crate::error::QdrantResult;
 use crate::point::{Point, PointId, ScoredPoint};
 use qail_core::ast::Qail;
 
 /// Qdrant driver for vector database operations.
 pub struct QdrantDriver {
+    #[allow(dead_code)]
     host: String,
+    #[allow(dead_code)]
     port: u16,
     // TODO: Add gRPC channel when implementing
 }
@@ -44,7 +46,7 @@ impl QdrantDriver {
     ///         .limit(10)
     /// ).await?;
     /// ```
-    pub async fn search(&mut self, cmd: &Qail) -> QdrantResult<Vec<ScoredPoint>> {
+    pub async fn search(&mut self, _cmd: &Qail) -> QdrantResult<Vec<ScoredPoint>> {
         // TODO: Encode Qail to gRPC request, execute, decode response
         Ok(Vec::new())
     }
@@ -57,13 +59,13 @@ impl QdrantDriver {
     ///     Point::new("id1", vec![0.1, 0.2, 0.3]).with_payload("name", "Product 1"),
     /// ]).await?;
     /// ```
-    pub async fn upsert(&mut self, collection: &str, points: &[Point]) -> QdrantResult<()> {
+    pub async fn upsert(&mut self, _collection: &str, _points: &[Point]) -> QdrantResult<()> {
         // TODO: Implement upsert via gRPC
         Ok(())
     }
 
     /// Delete points by ID.
-    pub async fn delete(&mut self, collection: &str, ids: &[PointId]) -> QdrantResult<()> {
+    pub async fn delete(&mut self, _collection: &str, _ids: &[PointId]) -> QdrantResult<()> {
         // TODO: Implement delete via gRPC
         Ok(())
     }
@@ -71,16 +73,16 @@ impl QdrantDriver {
     /// Create a new collection.
     pub async fn create_collection(
         &mut self,
-        name: &str,
-        vector_size: u64,
-        distance: Distance,
+        _name: &str,
+        _vector_size: u64,
+        _distance: Distance,
     ) -> QdrantResult<()> {
         // TODO: Implement collection creation
         Ok(())
     }
 
     /// Delete a collection.
-    pub async fn delete_collection(&mut self, name: &str) -> QdrantResult<()> {
+    pub async fn delete_collection(&mut self, _name: &str) -> QdrantResult<()> {
         // TODO: Implement collection deletion
         Ok(())
     }
