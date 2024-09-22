@@ -51,6 +51,10 @@ pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Q
             overriding: None,
             sample: None,
             only_table: false,
+            vector: None,
+            score_threshold: None,
+            vector_name: None,
+            with_vector: false,
         },
     ))
 }
@@ -201,6 +205,10 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
             overriding: None,
             sample: None,
             only_table: false,
+            vector: None,
+            score_threshold: None,
+            vector_name: None,
+            with_vector: false,
         },
     ))
 }

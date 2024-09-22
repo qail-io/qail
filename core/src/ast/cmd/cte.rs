@@ -72,6 +72,10 @@ impl Qail {
             overriding: None,
             sample: None,
             only_table: false,
+            vector: None,
+            score_threshold: None,
+            vector_name: None,
+            with_vector: false,
             ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,

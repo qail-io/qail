@@ -59,19 +59,21 @@ impl QdrantDriver {
     pub async fn search(&self, cmd: &Qail) -> QdrantResult<Vec<ScoredPoint>> {
         let collection = &cmd.table;
         
-        // Extract vector from cages or conditions
-        let vector = self.extract_vector(cmd)?;
+        // Extract vector from Qail (new field) or fallback to cages
+        let vector = cmd.vector.clone()
+            .or_else(|| self.extract_vector_from_cages(cmd).ok())
+            .ok_or_else(|| QdrantError::Encode("No vector found in search command".to_string()))?;
         
         // Extract limit and offset from cages
         let (limit, offset) = self.extract_limit_offset(cmd);
         
-        // Encode request
+        // Encode request using cmd fields directly
         let body = protocol::encode_search_request(
             &vector,
             limit,
             offset,
-            None, // score_threshold
-            false, // with_vector
+            cmd.score_threshold,
+            cmd.with_vector,
         );
         
         // Make HTTP request
@@ -215,8 +217,8 @@ impl QdrantDriver {
         Ok(collections)
     }
 
-    /// Extract vector from Qail command.
-    fn extract_vector(&self, cmd: &Qail) -> QdrantResult<Vec<f32>> {
+    /// Extract vector from Qail cages (fallback for backward compatibility).
+    fn extract_vector_from_cages(&self, cmd: &Qail) -> QdrantResult<Vec<f32>> {
         // Look for Value::Vector in cages conditions
         for cage in &cmd.cages {
             for cond in &cage.conditions {
@@ -226,7 +228,7 @@ impl QdrantDriver {
             }
         }
         
-        Err(QdrantError::Encode("No vector found in search command".to_string()))
+        Err(QdrantError::Encode("No vector found in cages".to_string()))
     }
 
     /// Extract limit and offset from Qail cages.
