@@ -62,6 +62,13 @@ pub enum Action {
     CreateView,
     /// DROP VIEW name
     DropView,
+    // Vector database operations
+    /// Vector similarity search (Qdrant)
+    Search,
+    /// Insert or update points (Qdrant)
+    Upsert,
+    /// Paginated iteration over points (Qdrant)
+    Scroll,
 }
 
 impl std::fmt::Display for Action {
@@ -105,6 +112,9 @@ impl std::fmt::Display for Action {
             Action::RollbackToSavepoint => write!(f, "ROLLBACK_TO_SAVEPOINT"),
             Action::CreateView => write!(f, "CREATE_VIEW"),
             Action::DropView => write!(f, "DROP_VIEW"),
+            Action::Search => write!(f, "SEARCH"),
+            Action::Upsert => write!(f, "UPSERT"),
+            Action::Scroll => write!(f, "SCROLL"),
         }
     }
 }
