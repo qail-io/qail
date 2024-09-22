@@ -79,6 +79,80 @@ impl Point {
     }
 }
 
+/// Sparse vector - only non-zero indices and their values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SparseVector {
+    /// Indices of non-zero elements.
+    pub indices: Vec<u32>,
+    /// Values at those indices.
+    pub values: Vec<f32>,
+}
+
+impl SparseVector {
+    /// Create a sparse vector from indices and values.
+    pub fn new(indices: Vec<u32>, values: Vec<f32>) -> Self {
+        Self { indices, values }
+    }
+
+    /// Create from a dense vector (only keeps non-zero elements).
+    pub fn from_dense(dense: &[f32], threshold: f32) -> Self {
+        let mut indices = Vec::new();
+        let mut values = Vec::new();
+        for (i, &v) in dense.iter().enumerate() {
+            if v.abs() > threshold {
+                indices.push(i as u32);
+                values.push(v);
+            }
+        }
+        Self { indices, values }
+    }
+}
+
+/// Vector type that can be named or anonymous.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum VectorData {
+    /// Single unnamed vector.
+    Single(Vec<f32>),
+    /// Named vectors (for multi-vector collections).
+    Named(HashMap<String, Vec<f32>>),
+    /// Sparse vector.
+    Sparse { indices: Vec<u32>, values: Vec<f32> },
+}
+
+/// A point with named vector support (for multi-vector collections).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiVectorPoint {
+    pub id: PointId,
+    /// Named vectors - key is vector name, value is the embedding.
+    pub vectors: HashMap<String, Vec<f32>>,
+    #[serde(default)]
+    pub payload: Payload,
+}
+
+impl MultiVectorPoint {
+    /// Create a new multi-vector point.
+    pub fn new(id: impl Into<PointId>) -> Self {
+        Self {
+            id: id.into(),
+            vectors: HashMap::new(),
+            payload: HashMap::new(),
+        }
+    }
+
+    /// Add a named vector.
+    pub fn with_vector(mut self, name: impl Into<String>, vector: Vec<f32>) -> Self {
+        self.vectors.insert(name.into(), vector);
+        self
+    }
+
+    /// Add payload field.
+    pub fn with_payload(mut self, key: impl Into<String>, value: impl Into<PayloadValue>) -> Self {
+        self.payload.insert(key.into(), value.into());
+        self
+    }
+}
+
 /// Search result - point with similarity score.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScoredPoint {
