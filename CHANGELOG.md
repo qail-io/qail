@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.9] - 2026-01-01
+
+### Security
+- **PG:** Reject literal NULL bytes (0x00) in `execute_raw()` - prevents connection state pollution
+- **PG:** `encode_value()` returns `Result<(), EncodeError>` for proper error handling
+- **PG:** New `EncodeError` type in `ast_encoder::error` module
+
+### Refactored
+- DML encoders (`encode_select`, `encode_insert`, `encode_update`, `encode_delete`, `encode_export`) now return `Result`
+- Clippy-clean: all `unit_arg` warnings fixed in match blocks
+
 ## [0.14.8] - 2026-01-01
 
 ### Production Hardening
