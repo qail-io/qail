@@ -22,6 +22,7 @@
 
 pub mod driver;
 pub mod error;
+pub mod grpc_transport;
 pub mod point;
 pub mod pool;
 pub mod proto_encoder;
