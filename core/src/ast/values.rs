@@ -52,6 +52,8 @@ pub enum Value {
     Bytes(Vec<u8>),
     /// AST Expression (for complex expression comparisons like col > NOW() - INTERVAL)
     Expr(Box<crate::ast::Expr>),
+    /// Vector embedding for similarity search (Qdrant)
+    Vector(Vec<f32>),
 }
 
 impl std::fmt::Display for Value {
@@ -89,6 +91,14 @@ impl std::fmt::Display for Value {
                 write!(f, "'")
             }
             Value::Expr(expr) => write!(f, "{}", expr),
+            Value::Vector(v) => {
+                write!(f, "[")?;
+                for (i, val) in v.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", val)?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }

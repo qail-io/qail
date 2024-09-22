@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.10] - 2026-01-01
+
+### New Crate
+- **qail-qdrant:** ALPHA Qdrant vector database driver
+  - REST/JSON protocol encoding (AST-native)
+  - `QdrantDriver` with HTTP client (reqwest)
+  - Search, upsert, delete, collection management
+  - `Point`, `PointId`, `Payload`, `ScoredPoint` types
+
+### Core AST Extensions
+- `Action::Search`, `Action::Upsert`, `Action::Scroll` for vector operations
+- `Value::Vector(Vec<f32>)` for embeddings
+
 ## [0.14.9] - 2026-01-01
 
 ### Security
