@@ -89,6 +89,7 @@ impl Qail {
     /// use qail_core::prelude::*;
     ///
     /// // Collection with separate "title" and "content" vectors
+    /// let title_embedding = vec![0.1, 0.2, 0.3];
     /// let cmd = Qail::search("articles")
     ///     .vector_name("title")
     ///     .vector(title_embedding);
@@ -104,6 +105,7 @@ impl Qail {
     /// ```
     /// use qail_core::prelude::*;
     ///
+    /// let embedding = vec![0.1, 0.2, 0.3];
     /// let cmd = Qail::search("products")
     ///     .vector(embedding)
     ///     .with_vectors();

@@ -357,10 +357,8 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
 pub fn parse_point_id(value: &JsonValue) -> Option<PointId> {
     if let Some(s) = value.as_str() {
         Some(PointId::Uuid(s.to_string()))
-    } else if let Some(n) = value.as_u64() {
-        Some(PointId::Num(n))
     } else {
-        None
+        value.as_u64().map(PointId::Num)
     }
 }
 

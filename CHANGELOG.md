@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.14.10] - 2026-01-01
 
-### New Crate
-- **qail-qdrant:** ALPHA Qdrant vector database driver
-  - REST/JSON protocol encoding (AST-native)
-  - `QdrantDriver` with HTTP client (reqwest)
+### New Crate: qail-qdrant
+- **Zero-Copy gRPC Driver:** High-performance Qdrant client
+  - `proto_encoder.rs`: Direct protobuf wire encoding with memcpy for vectors
+  - `proto_decoder.rs`: Zero-copy response parsing (SearchResponse, ScoredPoint)
+  - `grpc_transport.rs`: Raw HTTP/2 gRPC using h2 crate
+  - `GrpcDriver`: Combines encoder + transport for 13% faster than official client
+- **REST Driver:** `QdrantDriver` with HTTP client (reqwest)
   - Search, upsert, delete, collection management
   - `Point`, `PointId`, `Payload`, `ScoredPoint` types
+- **Benchmark:** QAIL 1.13x faster than official qdrant-client (199µs vs 225µs)
+  - Encoding overhead: only 133ns (0.1% of latency)
 
 ### Core AST Extensions
 - `Action::Search`, `Action::Upsert`, `Action::Scroll` for vector operations

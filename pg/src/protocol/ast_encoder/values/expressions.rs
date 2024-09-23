@@ -555,6 +555,20 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
         Value::Expr(expr) => {
             encode_column_expr(expr, buf);
         }
+        Value::Vector(vec) => {
+            // Encode vector as PostgreSQL array format: '{1.0,2.0,3.0}'
+            let mut arr_buf = Vec::with_capacity(vec.len() * 12 + 2);
+            arr_buf.push(b'{');
+            for (i, v) in vec.iter().enumerate() {
+                if i > 0 {
+                    arr_buf.push(b',');
+                }
+                arr_buf.extend_from_slice(v.to_string().as_bytes());
+            }
+            arr_buf.push(b'}');
+            params.push(Some(arr_buf));
+            write_param_placeholder(buf, params.len());
+        }
     }
     Ok(())
 }
