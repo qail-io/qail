@@ -103,59 +103,6 @@ impl QdrantDriver {
         decoder::decode_search_response(&response)
     }
 
-    /// Search multiple vectors concurrently using HTTP/2 pipelining.
-    ///
-    /// This sends all requests concurrently over a single h2 connection,
-    /// achieving 2-3x speedup compared to sequential searches.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let vectors = vec![vec1, vec2, vec3];
-    /// let results = driver.search_batch("products", &vectors, 10, None).await?;
-    /// ```
-    pub async fn search_batch(
-        &mut self,
-        collection: &str,
-        vectors: &[Vec<f32>],
-        limit: u64,
-        score_threshold: Option<f32>,
-    ) -> QdrantResult<Vec<Vec<ScoredPoint>>> {
-        use futures_util::future::join_all;
-        
-        // Encode all requests first (reuse buffer for each)
-        let mut encoded_requests = Vec::with_capacity(vectors.len());
-        
-        for vector in vectors {
-            self.buffer.clear();
-            encoder::encode_search_proto(
-                &mut self.buffer,
-                collection,
-                vector,
-                limit,
-                score_threshold,
-                None,
-            );
-            encoded_requests.push(self.buffer.split().freeze());
-        }
-
-        // Send all requests concurrently using HTTP/2 multiplexing
-        let mut futures = Vec::with_capacity(encoded_requests.len());
-        for request in encoded_requests {
-            futures.push(self.client.search(request));
-        }
-
-        // Wait for all responses
-        let responses = join_all(futures).await;
-
-        // Decode all responses
-        let mut results = Vec::with_capacity(responses.len());
-        for response in responses {
-            let decoded = decoder::decode_search_response(&response?)?;
-            results.push(decoded);
-        }
-
-        Ok(results)
-    }
     /// Search using QAIL AST.
     ///
     /// Extracts vector, collection, limit from the Qail command.
