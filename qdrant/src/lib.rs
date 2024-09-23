@@ -26,6 +26,7 @@ pub mod grpc_driver;
 pub mod grpc_transport;
 pub mod point;
 pub mod pool;
+pub mod proto_decoder;
 pub mod proto_encoder;
 pub mod protocol;
 
