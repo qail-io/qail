@@ -11,6 +11,10 @@ use std::time::Instant;
 use qail_qdrant::{GrpcDriver, QdrantDriver, Point, Distance};
 use qail_qdrant::proto_encoder;
 
+// Official client
+use qdrant_client::Qdrant;
+use qdrant_client::qdrant::SearchPointsBuilder;
+
 const COLLECTION_NAME: &str = "benchmark_collection";
 const VECTOR_DIM: usize = 1536; // OpenAI embedding dimension
 const NUM_POINTS: usize = 1000;
@@ -19,13 +23,14 @@ const NUM_SEARCHES: usize = 1000;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║     QAIL Zero-Copy gRPC vs REST Benchmark                    ║");
+    println!("║  QAIL Zero-Copy vs Official qdrant-client Benchmark          ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
     // Setup
     println!("📦 Setting up benchmark...");
     let rest_driver = QdrantDriver::connect("localhost", 6333).await?;
     let mut grpc_driver = GrpcDriver::connect("localhost", 6334).await?;
+    let official_client = Qdrant::from_url("http://localhost:6334").build()?;
 
     // Cleanup and create collection
     let _ = rest_driver.delete_collection(COLLECTION_NAME).await;
@@ -63,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Benchmark 1: Encoding Speed (proto_encoder only)
     // ═══════════════════════════════════════════════════════════════
     println!("═══════════════════════════════════════════════════════════════");
-    println!("📊 Benchmark 1: Proto Encoding Speed ({} iterations)", NUM_SEARCHES);
+    println!("📊 Benchmark 1: QAIL Proto Encoding Speed ({} iterations)", NUM_SEARCHES);
     println!("───────────────────────────────────────────────────────────────");
 
     let mut buffer = BytesMut::with_capacity(VECTOR_DIM * 4 + 256);
@@ -90,46 +95,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Buffer size:   {} bytes/request\n", buffer.len());
 
     // ═══════════════════════════════════════════════════════════════
-    // Benchmark 2: REST Search (QdrantDriver)
+    // Benchmark 2: Official qdrant-client (gRPC with tonic/prost)
     // ═══════════════════════════════════════════════════════════════
     println!("═══════════════════════════════════════════════════════════════");
-    println!("📊 Benchmark 2: REST Search ({} iterations)", NUM_SEARCHES);
+    println!("📊 Benchmark 2: Official qdrant-client ({} iterations)", NUM_SEARCHES);
     println!("───────────────────────────────────────────────────────────────");
 
     // Warmup
     for vector in query_vectors.iter().take(10) {
-        let _ = rest_driver.search(
-            &qail_core::ast::Qail::search(COLLECTION_NAME)
-                .vector(vector.clone())
-                .limit(10)
+        let _ = official_client.search_points(
+            SearchPointsBuilder::new(COLLECTION_NAME, vector.clone(), 10)
         ).await;
     }
 
-    let rest_start = Instant::now();
-    let mut rest_results = 0;
+    let official_start = Instant::now();
+    let mut official_results = 0;
     for vector in &query_vectors {
-        let results = rest_driver.search(
-            &qail_core::ast::Qail::search(COLLECTION_NAME)
-                .vector(vector.clone())
-                .limit(10)
+        let results = official_client.search_points(
+            SearchPointsBuilder::new(COLLECTION_NAME, vector.clone(), 10)
         ).await?;
-        rest_results += results.len();
+        official_results += results.result.len();
     }
-    let rest_duration = rest_start.elapsed();
+    let official_duration = official_start.elapsed();
     
-    let rest_per_op = rest_duration / NUM_SEARCHES as u32;
-    let rest_ops_per_sec = NUM_SEARCHES as f64 / rest_duration.as_secs_f64();
+    let official_per_op = official_duration / NUM_SEARCHES as u32;
+    let official_ops_per_sec = NUM_SEARCHES as f64 / official_duration.as_secs_f64();
     
-    println!("   Total time:    {:?}", rest_duration);
-    println!("   Per operation: {:?}", rest_per_op);
-    println!("   Throughput:    {:.0} ops/sec", rest_ops_per_sec);
-    println!("   Total results: {}\n", rest_results);
+    println!("   Total time:    {:?}", official_duration);
+    println!("   Per operation: {:?}", official_per_op);
+    println!("   Throughput:    {:.0} ops/sec", official_ops_per_sec);
+    println!("   Total results: {}\n", official_results);
 
     // ═══════════════════════════════════════════════════════════════
-    // Benchmark 3: gRPC Search (GrpcDriver with zero-copy)
+    // Benchmark 3: QAIL gRPC (Zero-Copy)
     // ═══════════════════════════════════════════════════════════════
     println!("═══════════════════════════════════════════════════════════════");
-    println!("📊 Benchmark 3: gRPC Search - Zero Copy ({} iterations)", NUM_SEARCHES);
+    println!("📊 Benchmark 3: QAIL gRPC Zero-Copy ({} iterations)", NUM_SEARCHES);
     println!("───────────────────────────────────────────────────────────────");
 
     // Warmup
@@ -137,46 +138,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = grpc_driver.search(COLLECTION_NAME, vector, 10, None).await;
     }
 
-    let grpc_start = Instant::now();
-    let mut grpc_results = 0;
+    let qail_start = Instant::now();
+    let mut qail_results = 0;
     for vector in &query_vectors {
         let results = grpc_driver.search(COLLECTION_NAME, vector, 10, None).await?;
-        grpc_results += results.len();
+        qail_results += results.len();
     }
-    let grpc_duration = grpc_start.elapsed();
+    let qail_duration = qail_start.elapsed();
     
-    let grpc_per_op = grpc_duration / NUM_SEARCHES as u32;
-    let grpc_ops_per_sec = NUM_SEARCHES as f64 / grpc_duration.as_secs_f64();
+    let qail_per_op = qail_duration / NUM_SEARCHES as u32;
+    let qail_ops_per_sec = NUM_SEARCHES as f64 / qail_duration.as_secs_f64();
     
-    println!("   Total time:    {:?}", grpc_duration);
-    println!("   Per operation: {:?}", grpc_per_op);
-    println!("   Throughput:    {:.0} ops/sec", grpc_ops_per_sec);
-    println!("   Total results: {}\n", grpc_results);
+    println!("   Total time:    {:?}", qail_duration);
+    println!("   Per operation: {:?}", qail_per_op);
+    println!("   Throughput:    {:.0} ops/sec", qail_ops_per_sec);
+    println!("   Total results: {}\n", qail_results);
 
     // ═══════════════════════════════════════════════════════════════
     // Summary
     // ═══════════════════════════════════════════════════════════════
     println!("═══════════════════════════════════════════════════════════════");
-    println!("📈 Summary");
+    println!("📈 Summary: QAIL vs Official Client");
     println!("───────────────────────────────────────────────────────────────");
     
-    let speedup = rest_duration.as_secs_f64() / grpc_duration.as_secs_f64();
-    let latency_reduction_pct = (1.0 - grpc_duration.as_secs_f64() / rest_duration.as_secs_f64()) * 100.0;
+    let qail_vs_official = official_duration.as_secs_f64() / qail_duration.as_secs_f64();
     
-    println!("   REST latency:     {:?}/op", rest_per_op);
-    println!("   gRPC latency:     {:?}/op", grpc_per_op);
+    println!("   Official client: {:?}/op ({:.0} ops/sec)", official_per_op, official_ops_per_sec);
+    println!("   QAIL zero-copy:  {:?}/op ({:.0} ops/sec)", qail_per_op, qail_ops_per_sec);
     println!("   ────────────────────────────");
     
-    if speedup > 1.0 {
-        println!("   🚀 gRPC is {:.2}x faster than REST", speedup);
-        println!("   📉 Latency reduced by {:.1}%", latency_reduction_pct);
+    if qail_vs_official > 1.0 {
+        println!("   🚀 QAIL is {:.2}x faster than official client", qail_vs_official);
+    } else if qail_vs_official > 0.95 {
+        println!("   ≈  QAIL is comparable to official client ({:.2}x)", qail_vs_official);
     } else {
-        println!("   ⚠️  REST is {:.2}x faster than gRPC", 1.0 / speedup);
+        println!("   ⚠️  Official client is {:.2}x faster than QAIL", 1.0 / qail_vs_official);
+        println!("      (Room for optimization in transport layer)");
     }
     
-    println!("\n   Encoding overhead: {:?} ({:.1}% of gRPC latency)",
+    println!("\n   Encoding overhead: {:?} ({:.1}% of QAIL latency)",
         encode_per_op,
-        (encode_per_op.as_nanos() as f64 / grpc_per_op.as_nanos() as f64) * 100.0
+        (encode_per_op.as_nanos() as f64 / qail_per_op.as_nanos() as f64) * 100.0
     );
 
     // Cleanup
