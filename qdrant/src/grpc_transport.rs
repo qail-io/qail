@@ -26,13 +26,9 @@ const POINTS_SERVICE: &str = "qdrant.Points";
 // gRPC method paths
 const METHOD_SEARCH: &str = "/qdrant.Points/Search";
 const METHOD_UPSERT: &str = "/qdrant.Points/Upsert";
-#[allow(dead_code)]
 const METHOD_DELETE: &str = "/qdrant.Points/Delete";
-#[allow(dead_code)]
 const METHOD_GET: &str = "/qdrant.Points/Get";
-#[allow(dead_code)]
 const METHOD_SCROLL: &str = "/qdrant.Points/Scroll";
-#[allow(dead_code)]
 const METHOD_RECOMMEND: &str = "/qdrant.Points/Recommend";
 
 /// gRPC client for Qdrant.
@@ -174,6 +170,26 @@ impl GrpcClient {
     /// Upsert using pre-encoded protobuf.
     pub async fn upsert(&self, encoded_request: Bytes) -> QdrantResult<Bytes> {
         self.call(METHOD_UPSERT, encoded_request).await
+    }
+
+    /// Delete points using pre-encoded protobuf.
+    pub async fn delete(&self, encoded_request: Bytes) -> QdrantResult<Bytes> {
+        self.call(METHOD_DELETE, encoded_request).await
+    }
+
+    /// Get points by ID using pre-encoded protobuf.
+    pub async fn get(&self, encoded_request: Bytes) -> QdrantResult<Bytes> {
+        self.call(METHOD_GET, encoded_request).await
+    }
+
+    /// Scroll through points using pre-encoded protobuf.
+    pub async fn scroll(&self, encoded_request: Bytes) -> QdrantResult<Bytes> {
+        self.call(METHOD_SCROLL, encoded_request).await
+    }
+
+    /// Recommend similar points using pre-encoded protobuf.
+    pub async fn recommend(&self, encoded_request: Bytes) -> QdrantResult<Bytes> {
+        self.call(METHOD_RECOMMEND, encoded_request).await
     }
 }
 
