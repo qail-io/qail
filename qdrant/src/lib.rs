@@ -2,44 +2,42 @@
 //!
 //! ⚠️ **BETA** - This crate is under active development. API may change.
 //!
-//! Native Rust driver with AST-based query building for vector similarity search.
+//! Native Rust driver with zero-copy gRPC and AST-based query building.
 //!
 //! # Example
 //! ```ignore
 //! use qail_core::prelude::*;
 //! use qail_qdrant::QdrantDriver;
 //!
-//! let driver = QdrantDriver::connect("localhost", 6333).await?;
+//! let driver = QdrantDriver::connect("localhost", 6334).await?;
 //!
 //! // Vector similarity search
-//! let results = driver.search(
-//!     Qail::search("products")
-//!         .vector(embedding)
-//!         .filter("category", Operator::Eq, "electronics")
-//!         .limit(10)
-//! ).await?;
+//! let results = driver.search("products", &embedding, 10, None).await?;
 //! ```
 
 pub mod driver;
 pub mod error;
-pub mod grpc_driver;
 pub mod grpc_transport;
 pub mod point;
-pub mod pool;
 pub mod proto_decoder;
 pub mod proto_encoder;
 pub mod protocol;
 
-pub use driver::{QdrantDriver, Distance};
+pub use driver::QdrantDriver;
 pub use error::{QdrantError, QdrantResult};
-pub use grpc_driver::GrpcDriver;
 pub use point::{Point, PointId, Payload, SparseVector, VectorData, MultiVectorPoint};
-pub use pool::{QdrantPool, PoolConfig, PooledConnection};
 
 /// Re-export qail-core prelude for convenience.
 pub mod prelude {
     pub use qail_core::prelude::*;
     pub use crate::{QdrantDriver, QdrantError, QdrantResult, Point, PointId, Payload};
     pub use crate::{SparseVector, VectorData, MultiVectorPoint};
-    pub use crate::{QdrantPool, PoolConfig};
+}
+
+/// Distance metrics for vector similarity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Distance {
+    Cosine,
+    Euclidean,
+    Dot,
 }

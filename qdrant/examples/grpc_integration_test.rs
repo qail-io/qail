@@ -6,7 +6,7 @@
 //! Start with: docker run -p 6334:6334 qdrant/qdrant
 
 use bytes::BytesMut;
-use qail_qdrant::{GrpcDriver, QdrantResult, Distance};
+use qail_qdrant::{QdrantDriver, QdrantResult, Distance};
 use qail_qdrant::proto_encoder;
 
 const COLLECTION_NAME: &str = "grpc_test_collection";
@@ -17,7 +17,7 @@ async fn main() -> QdrantResult<()> {
 
     // 1. Connect via gRPC
     println!("1. Connecting to Qdrant gRPC (localhost:6334)...");
-    let mut driver = match GrpcDriver::connect("localhost", 6334).await {
+    let mut driver = match QdrantDriver::connect("localhost", 6334).await {
         Ok(d) => {
             println!("   ✓ Connected via gRPC/HTTP2");
             d
