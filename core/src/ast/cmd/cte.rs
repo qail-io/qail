@@ -81,6 +81,9 @@ impl Qail {
             on_disk: None,
             function_def: None,
             trigger_def: None,
+            raw_value: None,
+            redis_ttl: None,
+            redis_set_condition: None,
             ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,

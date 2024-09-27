@@ -10,6 +10,23 @@ cargo install qail
 
 ## Commands
 
+### `qail init`
+
+Initialize a new QAIL project with interactive setup:
+
+```bash
+qail init
+# 🪝 QAIL Project Initialization
+# Project name: my_app
+# Select database mode:
+#   1. PostgreSQL only
+#   2. Qdrant only
+#   3. Hybrid (PostgreSQL + Qdrant)
+# ...
+```
+
+Generates `qail.toml` and necessary migration files.
+
 ### `qail parse`
 
 Parse QAIL text syntax to SQL:
@@ -71,6 +88,20 @@ Rollback migrations:
 ```bash
 qail migrate down old.qail:new.qail postgres://...
 ```
+
+### `qail migrate apply`
+
+Apply file-based migrations from `migrations/` directory:
+
+```bash
+qail migrate apply
+# → Found 1 migrations to apply
+# ✓ Connected to qail_test
+#   → 001_qail_queue.up.qail... ✓
+# ✓ All migrations applied successfully!
+```
+
+Reads `qail.toml` for database connection if not provided via `--url`.
 
 ### `qail migrate plan`
 
@@ -155,6 +186,35 @@ qail lint schema.qail --strict
 | Uppercase table names | ⚠️ WARNING | Use snake_case |
 | SERIAL vs UUID | ℹ️ INFO | Consider UUID for distributed |
 | Nullable without default | ℹ️ INFO | Consider default value |
+
+### `qail sync generate`
+
+Generate trigger migrations from `[[sync]]` rules in `qail.toml`:
+
+```bash
+qail sync generate
+# → Generating sync triggers...
+# ✓ Created migrations/002_qail_sync_triggers.up.qail
+```
+
+Used in Hybrid mode to automatically create PostgreSQL triggers that push changes to the `_qail_queue` table.
+
+### `qail worker`
+
+Start the background worker to sync data from PostgreSQL to Qdrant:
+
+```bash
+qail worker --interval 1000 --batch 100
+# 👷 QAIL Hybrid Worker v0.14.12
+# 🔌 Qdrant: Connected (localhost:6334)
+# 🐘 Postgres: Connected (5 connections)
+# 
+# [2026-01-02 10:00:00] 🔄 Syncing... (pending: 0)
+```
+
+**Options:**
+- `--interval <ms>`: Polling interval (default: 1000ms)
+- `--batch <size>`: Batch size for sync (default: 100)
 
 ### `qail migrate status`
 
