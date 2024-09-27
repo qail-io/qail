@@ -24,6 +24,7 @@
 - [Impact Analyzer](./features/analyzer.md)
 - [Foreign Keys](./features/foreign-keys.md)
 - [Connection Pooling](./features/connection-pool.md)
+- [Hybrid Architecture](./features/hybrid.md)
 - [Type System](./features/types.md)
 
 # Reference

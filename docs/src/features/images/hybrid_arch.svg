@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200">
+  <defs>
+    <style>
+      .box { fill: #1e293b; stroke: #3b82f6; stroke-width: 2; }
+      .text { font-family: sans-serif; fill: #e2e8f0; font-size: 14px; text-anchor: middle; dominant-baseline: middle; }
+      .arrow { stroke: #94a3b8; stroke-width: 2; marker-end: url(#arrowhead); }
+      .label { font-family: sans-serif; fill: #94a3b8; font-size: 12px; text-anchor: middle; background: #0f172a; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
+    </marker>
+  </defs>
+
+  <!-- PostgreSQL -->
+  <rect x="50" y="50" width="120" height="60" rx="4" class="box" />
+  <text x="110" y="80" class="text">PostgreSQL</text>
+
+  <!-- qail_queue -->
+  <rect x="250" y="50" width="120" height="60" rx="4" class="box" style="stroke-dasharray: 4;" />
+  <text x="310" y="80" class="text">_qail_queue</text>
+
+  <!-- qail worker -->
+  <rect x="450" y="50" width="120" height="60" rx="4" class="box" />
+  <text x="510" y="80" class="text">qail worker</text>
+
+  <!-- Qdrant -->
+  <rect x="650" y="50" width="120" height="60" rx="4" class="box" style="stroke: #ef4444;" />
+  <text x="710" y="80" class="text">Qdrant</text>
+
+  <!-- Arrows -->
+  <line x1="170" y1="80" x2="241" y2="80" class="arrow" />
+  <text x="205" y="70" class="label">Trigger</text>
+
+  <line x1="370" y1="80" x2="441" y2="80" class="arrow" />
+  <text x="405" y="70" class="label">Polls</text>
+
+  <line x1="570" y1="80" x2="641" y2="80" class="arrow" />
+  <text x="605" y="70" class="label">Syncs</text>
+
+</svg>

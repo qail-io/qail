@@ -85,6 +85,16 @@ pub struct Qail {
     /// Trigger definition (CREATE TRIGGER)
     #[serde(default)]
     pub trigger_def: Option<crate::ast::TriggerDef>,
+    // Redis fields
+    /// Raw binary value for Redis SET
+    #[serde(default)]
+    pub raw_value: Option<Vec<u8>>,
+    /// TTL in seconds for Redis operations
+    #[serde(default)]
+    pub redis_ttl: Option<i64>,
+    /// SET condition (NX = only if not exists, XX = only if exists)
+    #[serde(default)]
+    pub redis_set_condition: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,6 +171,10 @@ impl Default for Qail {
             // Procedural objects
             function_def: None,
             trigger_def: None,
+            // Redis fields
+            raw_value: None,
+            redis_ttl: None,
+            redis_set_condition: None,
         }
     }
 }
