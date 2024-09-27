@@ -112,6 +112,18 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
             // Expr values shouldn't appear in COPY - output NULL
             buf.extend_from_slice(b"\\N");
         }
+        Value::Vector(vec) => {
+            // PostgreSQL array format for vectors: {1.0,2.0,3.0}
+            buf.extend_from_slice(b"{");
+            for (i, v) in vec.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b",");
+                }
+                let mut tmp = ryu::Buffer::new();
+                buf.extend_from_slice(tmp.format(*v).as_bytes());
+            }
+            buf.extend_from_slice(b"}");
+        }
     }
 }
 
