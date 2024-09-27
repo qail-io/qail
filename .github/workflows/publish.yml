@@ -47,15 +47,17 @@ jobs:
           PG_VERSION=$(grep '^version' pg/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           CLI_VERSION=$(grep '^version' cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           QDRANT_VERSION=$(grep '^version' qdrant/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          REDIS_VERSION=$(grep '^version' redis/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           
           echo "Tag version: $TAG_VERSION"
           echo "Core version: $CORE_VERSION"
           echo "PG version: $PG_VERSION"
           echo "CLI version: $CLI_VERSION"
           echo "Qdrant version: $QDRANT_VERSION"
+          echo "Redis version: $REDIS_VERSION"
           
-          if [ "$CORE_VERSION" != "$TAG_VERSION" ] || [ "$PG_VERSION" != "$TAG_VERSION" ] || [ "$CLI_VERSION" != "$TAG_VERSION" ] || [ "$QDRANT_VERSION" != "$TAG_VERSION" ]; then
-            echo "❌ Version mismatch! Tag: $TAG_VERSION, Core: $CORE_VERSION, PG: $PG_VERSION, CLI: $CLI_VERSION, Qdrant: $QDRANT_VERSION"
+          if [ "$CORE_VERSION" != "$TAG_VERSION" ] || [ "$PG_VERSION" != "$TAG_VERSION" ] || [ "$CLI_VERSION" != "$TAG_VERSION" ] || [ "$QDRANT_VERSION" != "$TAG_VERSION" ] || [ "$REDIS_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch! Tag: $TAG_VERSION, Core: $CORE_VERSION, PG: $PG_VERSION, CLI: $CLI_VERSION, Qdrant: $QDRANT_VERSION, Redis: $REDIS_VERSION"
             exit 1
           fi
           echo "✅ All versions match tag"
@@ -103,6 +105,18 @@ jobs:
           sleep 30
           cargo update  # Force refresh crates.io index
 
+      - name: Publish qail-redis
+        if: ${{ !inputs.dry_run }}
+        run: cargo publish -p qail-redis || echo "qail-redis already published, skipping"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: Wait for qail-redis to be available
+        if: ${{ !inputs.dry_run }}
+        run: |
+          sleep 30
+          cargo update  # Force refresh crates.io index
+
       - name: Publish qail (CLI)
         if: ${{ !inputs.dry_run }}
         run: cargo publish -p qail || echo "qail already published, skipping"
@@ -116,4 +130,6 @@ jobs:
           cargo publish -p qail-core --dry-run
           cargo publish -p qail-pg --dry-run
           cargo publish -p qail-qdrant --dry-run
+          cargo publish -p qail-redis --dry-run
           cargo publish -p qail --dry-run
+

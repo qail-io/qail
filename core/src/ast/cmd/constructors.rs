@@ -125,4 +125,98 @@ impl Qail {
             ..Default::default()
         }
     }
+
+    // ========== Redis Operations ==========
+    // "Redis stores time — QAIL decides."
+
+    /// Create a Redis GET command.
+    /// 
+    /// ```ignore
+    /// Qail::redis_get("session:123")
+    /// ```
+    pub fn redis_get(key: impl Into<String>) -> Self {
+        Self {
+            action: Action::RedisGet,
+            table: key.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Redis SET command.
+    /// Use `.redis_ex()` or `.redis_px()` to add TTL.
+    /// 
+    /// ```ignore
+    /// Qail::redis_set("key", "value").redis_ex(3600)
+    /// ```
+    pub fn redis_set(key: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
+        Self {
+            action: Action::RedisSet,
+            table: key.into(),
+            raw_value: Some(value.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Redis DEL command.
+    pub fn redis_del(key: impl Into<String>) -> Self {
+        Self {
+            action: Action::RedisDel,
+            table: key.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Redis INCR command.
+    pub fn redis_incr(key: impl Into<String>) -> Self {
+        Self {
+            action: Action::RedisIncr,
+            table: key.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Redis DECR command.
+    pub fn redis_decr(key: impl Into<String>) -> Self {
+        Self {
+            action: Action::RedisDecr,
+            table: key.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Redis TTL command.
+    pub fn redis_ttl(key: impl Into<String>) -> Self {
+        Self {
+            action: Action::RedisTtl,
+            table: key.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Redis EXPIRE command.
+    pub fn redis_expire(key: impl Into<String>, seconds: i64) -> Self {
+        Self {
+            action: Action::RedisExpire,
+            table: key.into(),
+            redis_ttl: Some(seconds),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Redis EXISTS command.
+    pub fn redis_exists(key: impl Into<String>) -> Self {
+        Self {
+            action: Action::RedisExists,
+            table: key.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Redis PING command.
+    pub fn redis_ping() -> Self {
+        Self {
+            action: Action::RedisPing,
+            ..Default::default()
+        }
+    }
 }

@@ -2720,6 +2720,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qail-redis"
+version = "0.14.12"
+dependencies = [
+ "bytes",
+ "qail-core",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-test",
+]
+
+[[package]]
 name = "qail-wasm"
 version = "0.14.12"
 dependencies = [
