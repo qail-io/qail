@@ -6,7 +6,8 @@
 //! Start with: docker run -p 6334:6334 qdrant/qdrant
 
 use bytes::BytesMut;
-use qail_qdrant::{QdrantDriver, QdrantResult, Distance};
+use qail_qdrant::prelude::Distance;
+use qail_qdrant::{QdrantDriver, QdrantResult};
 use qail_qdrant::encoder;
 
 const COLLECTION_NAME: &str = "grpc_test_collection";
@@ -32,13 +33,13 @@ async fn main() -> QdrantResult<()> {
 
     // 2. Create collection (via REST for now - collection ops use different proto)
     println!("\n2. Creating collection '{}' (via REST)...", COLLECTION_NAME);
-    let rest_driver = qail_qdrant::QdrantDriver::connect("localhost", 6333).await?;
+    let mut rest_driver = qail_qdrant::QdrantDriver::connect("localhost", 6333).await?;
     
     // Clean up first
     let _ = rest_driver.delete_collection(COLLECTION_NAME).await;
     
     rest_driver
-        .create_collection(COLLECTION_NAME, 4, Distance::Cosine)
+        .create_collection(COLLECTION_NAME, 4, Distance::Cosine, false)
         .await?;
     println!("   ✓ Collection created with 4D vectors, Cosine distance");
 
@@ -54,7 +55,7 @@ async fn main() -> QdrantResult<()> {
     ];
     
     // Use REST for upsert (proto encoder for upsert needs more work)
-    rest_driver.upsert(COLLECTION_NAME, &points).await?;
+    rest_driver.upsert(COLLECTION_NAME, &points, true).await?;
     println!("   ✓ Inserted 3 points");
 
     // 4. Search via gRPC with zero-copy encoding

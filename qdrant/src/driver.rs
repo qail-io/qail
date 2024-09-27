@@ -199,7 +199,49 @@ impl QdrantDriver {
         // Send via gRPC (split to avoid clone)
         let request_bytes = self.buffer.split().freeze();
         let _response = self.client.upsert(request_bytes).await?;
+        Ok(())
+    }
 
+    /// Create a collection with specific vector parameters.
+    pub async fn create_collection(
+        &mut self,
+        collection_name: &str,
+        vector_size: u64,
+        distance: qail_core::ast::Distance,
+        on_disk: bool,
+    ) -> QdrantResult<()> {
+        self.buffer.clear();
+        encoder::encode_create_collection_proto(
+            &mut self.buffer,
+            collection_name,
+            vector_size,
+            distance,
+            on_disk,
+        );
+        let request = self.buffer.split().freeze();
+        self.client.create_collection(request).await?;
+        Ok(())
+    }
+
+    /// Delete a collection.
+    pub async fn delete_collection(&mut self, collection_name: &str) -> QdrantResult<()> {
+        self.buffer.clear();
+        encoder::encode_delete_collection_proto(&mut self.buffer, collection_name);
+        let request = self.buffer.split().freeze();
+        self.client.delete_collection(request).await?;
+        Ok(())
+    }
+
+    /// Delete points by ID from a collection.
+    pub async fn delete_points(
+        &mut self,
+        collection_name: &str,
+        point_ids: &[u64],
+    ) -> QdrantResult<()> {
+        self.buffer.clear();
+        encoder::encode_delete_points_proto(&mut self.buffer, collection_name, point_ids);
+        let request = self.buffer.split().freeze();
+        self.client.delete(request).await?;
         Ok(())
     }
 }

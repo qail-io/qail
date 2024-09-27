@@ -250,6 +250,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                     table: new_idx.table.clone(),
                     columns: new_idx.columns.clone(),
                     unique: new_idx.unique,
+                    index_type: None,
                 }),
                 ..Default::default()
             });

@@ -76,6 +76,11 @@ impl Qail {
             score_threshold: None,
             vector_name: None,
             with_vector: false,
+            vector_size: None,
+            distance: None,
+            on_disk: None,
+            function_def: None,
+            trigger_def: None,
             ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,

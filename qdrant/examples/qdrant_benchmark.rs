@@ -8,7 +8,8 @@
 
 use bytes::BytesMut;
 use std::time::Instant;
-use qail_qdrant::{QdrantDriver, Point, Distance};
+use qail_qdrant::prelude::Distance;
+use qail_qdrant::{QdrantDriver, Point};
 use qail_qdrant::encoder;
 
 // Official client
@@ -28,14 +29,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Setup
     println!("📦 Setting up benchmark...");
-    let rest_driver = QdrantDriver::connect("localhost", 6333).await?;
+    let mut rest_driver = QdrantDriver::connect("localhost", 6333).await?;
     let mut grpc_driver = QdrantDriver::connect("localhost", 6334).await?;
     let official_client = Qdrant::from_url("http://localhost:6334").build()?;
 
     // Cleanup and create collection
     let _ = rest_driver.delete_collection(COLLECTION_NAME).await;
     rest_driver
-        .create_collection(COLLECTION_NAME, VECTOR_DIM as u64, Distance::Cosine)
+        .create_collection(COLLECTION_NAME, VECTOR_DIM as u64, Distance::Cosine, false)
         .await?;
     println!("   ✓ Collection '{}' created ({} dimensions)", COLLECTION_NAME, VECTOR_DIM);
 
@@ -51,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vector: Vec<f32> = (0..VECTOR_DIM)
                 .map(|j| {
                     let seed = (i * 31 + j * 17) as f32;
-                    (seed.sin() * 0.5 + (seed / 100.0).cos() * 0.3 + (seed / 1000.0).sin() * 0.2)
+                    seed.sin() * 0.5 + (seed / 100.0).cos() * 0.3 + (seed / 1000.0).sin() * 0.2
                 })
                 .collect();
             
@@ -66,13 +67,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_payload("category", categories[i % categories.len()].to_string())
                 .with_payload("brand", brands[i % brands.len()].to_string())
                 .with_payload("price", (i % 100 + 10) as i64)
-                .with_payload("rating", ((i % 50) as f64 / 10.0))
-                .with_payload("in_stock", (i % 3 != 0))
+                .with_payload("rating", (i % 50) as f64 / 10.0)
+                .with_payload("in_stock", i % 3 != 0)
         })
         .collect();
 
     // Insert via REST
-    rest_driver.upsert(COLLECTION_NAME, &points).await?;
+    rest_driver.upsert(COLLECTION_NAME, &points, true).await?;
     println!("   ✓ Points inserted with complex metadata\n");
 
     // Generate query vectors that are similar to existing points (ensure hits)
