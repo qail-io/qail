@@ -224,6 +224,9 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
             on_disk: None,
             function_def: None,
             trigger_def: None,
+            raw_value: None,
+            redis_ttl: None,
+            redis_set_condition: None,
         },
     ))
 }
