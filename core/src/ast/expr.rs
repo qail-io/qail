@@ -441,6 +441,9 @@ pub struct IndexDef {
     /// Columns to index (ordered)
     pub columns: Vec<String>,
     pub unique: bool,
+    /// Index type (e.g., "keyword", "integer", "float", "geo", "text")
+    #[serde(default)]
+    pub index_type: Option<String>,
 }
 
 /// Table-level constraints for composite keys
@@ -471,3 +474,43 @@ impl From<&String> for Expr {
         Expr::Named(s.clone())
     }
 }
+
+// ==================== Function and Trigger Definitions ====================
+
+/// PostgreSQL function definition
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunctionDef {
+    pub name: String,
+    pub returns: String,  // e.g., "trigger", "integer", "void"
+    pub body: String,     // The function body (PL/pgSQL code)
+    pub language: Option<String>,  // Default: plpgsql
+}
+
+/// Trigger timing (BEFORE or AFTER)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+/// Trigger event types
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+    Truncate,
+}
+
+/// PostgreSQL trigger definition
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerDef {
+    pub name: String,
+    pub table: String,
+    pub timing: TriggerTiming,
+    pub events: Vec<TriggerEvent>,
+    pub for_each_row: bool,
+    pub execute_function: String,
+}
+

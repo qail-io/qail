@@ -22,7 +22,8 @@ use qail_core::transpiler::{Dialect, ToSql};
 use qail::introspection;
 use qail::lint::lint_schema;
 use qail::migrations::{
-    migrate_analyze, migrate_down, migrate_plan, migrate_status, migrate_up, watch_schema,
+    migrate_analyze, migrate_apply, migrate_down, migrate_plan, migrate_status, migrate_up,
+    watch_schema, MigrateDirection,
 };
 use qail::repl::run_repl;
 use qail::schema::{OutputFormat as SchemaOutputFormat, check_schema, diff_schemas_cmd};
@@ -81,6 +82,15 @@ impl From<CliDialect> for Dialect {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a new QAIL project
+    Init {
+        /// Project name
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Database mode (postgres, qdrant, hybrid)
+        #[arg(short, long)]
+        mode: Option<String>,
+    },
     /// Parse and explain a QAIL query
     Explain { query: String },
     Repl,
@@ -140,6 +150,33 @@ enum Commands {
         #[command(subcommand)]
         action: MigrateAction,
     },
+    /// Vector database operations (Qdrant)
+    Vector {
+        #[command(subcommand)]
+        action: VectorAction,
+    },
+    /// Sync operations for hybrid mode (PostgreSQL + Qdrant)
+    Sync {
+        #[command(subcommand)]
+        action: SyncAction,
+    },
+    /// Run the sync worker daemon (polls _qail_queue)
+    Worker {
+        /// Poll interval in milliseconds
+        #[arg(short, long, default_value = "1000")]
+        interval: u64,
+        /// Batch size per poll
+        #[arg(short, long, default_value = "100")]
+        batch: u32,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum SyncAction {
+    /// Generate trigger migrations from [[sync]] rules in qail.toml
+    Generate,
+    /// List configured sync rules
+    List,
 }
 
 #[derive(Subcommand, Clone)]
@@ -185,6 +222,12 @@ enum MigrateAction {
         /// Database URL
         url: String,
     },
+    /// Apply migrations from migrations/ folder (reads .qail files)
+    Apply {
+        /// Database URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
+    },
     /// Create a new named migration file
     Create {
         /// Name for the migration (e.g., add_user_avatars)
@@ -214,6 +257,57 @@ enum MigrateAction {
     /// Abort shadow migration (drop shadow)
     Abort {
         /// Database URL
+        url: String,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum VectorAction {
+    /// Create a vector collection
+    Create {
+        /// Collection name
+        collection: String,
+        /// Vector size (dimensions, e.g., 1536 for OpenAI)
+        #[arg(short, long)]
+        size: u64,
+        /// Distance metric (cosine, euclid, dot)
+        #[arg(short, long, default_value = "cosine")]
+        distance: String,
+        /// Qdrant URL (e.g., http://localhost:6334)
+        url: String,
+    },
+    /// Drop a vector collection
+    Drop {
+        /// Collection name
+        collection: String,
+        /// Qdrant URL
+        url: String,
+    },
+    /// Create backup snapshot of a collection
+    Backup {
+        /// Collection name
+        collection: String,
+        /// Output file path (optional, downloads to local file)
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Qdrant REST URL (e.g., http://localhost:6333)
+        url: String,
+    },
+    /// Restore collection from snapshot
+    Restore {
+        /// Collection name
+        collection: String,
+        /// Snapshot file path or URL
+        #[arg(short, long)]
+        snapshot: String,
+        /// Qdrant REST URL
+        url: String,
+    },
+    /// List available snapshots
+    Snapshots {
+        /// Collection name
+        collection: String,
+        /// Qdrant REST URL
         url: String,
     },
 }
@@ -253,6 +347,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
+        Some(Commands::Init { name, mode }) => {
+            qail::init::run_init(name.clone(), mode.clone())?;
+        }
         Some(Commands::Explain { query }) => explain_query(query),
         Some(Commands::Repl) => run_repl(),
         Some(Commands::Symbols) => show_symbols(),
@@ -300,6 +397,27 @@ async fn main() -> Result<()> {
             } => migrate_plan(schema_diff, output.as_deref())?,
             MigrateAction::Up { schema_diff, url, codebase, force } => migrate_up(schema_diff, url, codebase.as_deref(), *force).await?,
             MigrateAction::Down { schema_diff, url } => migrate_down(schema_diff, url).await?,
+            MigrateAction::Apply { url } => {
+                // Get URL from qail.toml if not provided
+                let db_url = if let Some(u) = url {
+                    u.clone()
+                } else {
+                    // Try to load from qail.toml
+                    let config_path = std::path::Path::new("qail.toml");
+                    if config_path.exists() {
+                        let content = std::fs::read_to_string(config_path)?;
+                        let config: toml::Value = toml::from_str(&content)?;
+                        config.get("postgres")
+                            .and_then(|p| p.get("url"))
+                            .and_then(|u| u.as_str())
+                            .map(|s| s.to_string())
+                            .ok_or_else(|| anyhow::anyhow!("No postgres.url in qail.toml"))?
+                    } else {
+                        anyhow::bail!("No URL provided and qail.toml not found");
+                    }
+                };
+                migrate_apply(&db_url, MigrateDirection::Up).await?;
+            }
             MigrateAction::Create {
                 name,
                 depends,
@@ -323,6 +441,48 @@ async fn main() -> Result<()> {
             MigrateAction::Abort { url } => {
                 qail::shadow::abort_shadow(url).await?;
             }
+        },
+        Some(Commands::Vector { action }) => match action {
+            VectorAction::Create { collection, size, distance, url } => {
+                qail::vector::vector_create(collection, *size, distance, url).await?;
+            }
+            VectorAction::Drop { collection, url } => {
+                qail::vector::vector_drop(collection, url).await?;
+            }
+            VectorAction::Backup { collection, output, url } => {
+                let snapshot = qail::snapshot::snapshot_create(collection, url).await?;
+                if let Some(out_path) = output {
+                    qail::snapshot::snapshot_download(collection, &snapshot.name, out_path, url).await?;
+                }
+            }
+            VectorAction::Restore { collection, snapshot, url } => {
+                qail::snapshot::snapshot_restore(collection, snapshot, url).await?;
+            }
+            VectorAction::Snapshots { collection, url } => {
+                let snapshots = qail::snapshot::snapshot_list(collection, url).await?;
+                if snapshots.is_empty() {
+                    println!("No snapshots found for '{}'", collection);
+                } else {
+                    println!("Snapshots for '{}':", collection);
+                    for s in snapshots {
+                        println!("  {} ({} bytes, created: {})", 
+                            s.name, 
+                            s.size,
+                            s.creation_time.as_deref().unwrap_or("unknown"));
+                    }
+                }
+            }
+        },
+        Some(Commands::Sync { action }) => match action {
+            SyncAction::Generate => {
+                qail::sync::generate_sync_triggers()?;
+            }
+            SyncAction::List => {
+                qail::sync::list_sync_rules()?;
+            }
+        },
+        Some(Commands::Worker { interval, batch }) => {
+            qail::worker::run_worker(*interval, *batch).await?;
         },
         None => {
             if let Some(query) = &cli.query {

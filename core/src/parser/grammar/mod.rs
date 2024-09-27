@@ -215,6 +215,15 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
             overriding: None,
             sample: None,
             only_table: false,
+            vector: None,
+            score_threshold: None,
+            vector_name: None,
+            with_vector: false,
+            vector_size: None,
+            distance: None,
+            on_disk: None,
+            function_def: None,
+            trigger_def: None,
         },
     ))
 }

@@ -577,6 +577,50 @@ impl PgDriver {
         self.connection.execute_simple(sql).await
     }
 
+    /// Execute a raw SQL query and return rows.
+    /// ⚠️ **Discouraged**: Violates AST-native philosophy.
+    /// Use for bootstrap/admin queries only.
+    pub async fn fetch_raw(&mut self, sql: &str) -> PgResult<Vec<PgRow>> {
+        if sql.as_bytes().contains(&0) {
+            return Err(crate::PgError::Protocol(
+                "SQL contains NULL byte (0x00) which is invalid in PostgreSQL".to_string(),
+            ));
+        }
+        
+        use tokio::io::AsyncWriteExt;
+        use crate::protocol::PgEncoder;
+        
+        // Use simple query protocol (no prepared statements)
+        let msg = PgEncoder::encode_query_string(sql);
+        self.connection.stream.write_all(&msg).await?;
+        
+        let mut rows: Vec<PgRow> = Vec::new();
+        let mut column_info: Option<std::sync::Arc<ColumnInfo>> = None;
+        
+        loop {
+            let msg = self.connection.recv().await?;
+            match msg {
+                crate::protocol::BackendMessage::RowDescription(fields) => {
+                    column_info = Some(std::sync::Arc::new(ColumnInfo::from_fields(&fields)));
+                }
+                crate::protocol::BackendMessage::DataRow(data) => {
+                    rows.push(PgRow {
+                        columns: data,
+                        column_info: column_info.clone(),
+                    });
+                }
+                crate::protocol::BackendMessage::CommandComplete(_) => {}
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    return Ok(rows);
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Bulk insert data using PostgreSQL COPY protocol (AST-native).
     /// Uses a Qail::Add to get validated table and column names from the AST,
     /// not user-provided strings. This is the sound, AST-native approach.

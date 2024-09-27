@@ -112,6 +112,43 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
     serde_json::to_vec(&request).unwrap_or_default()
 }
 
+/// Encode an upsert request for multi-vector points (named vectors).
+///
+/// For collections with multiple vector fields (e.g., "title", "content").
+pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoint]) -> Vec<u8> {
+    use crate::point::MultiVectorPoint;
+    
+    let points_json: Vec<JsonValue> = points
+        .iter()
+        .map(|p: &MultiVectorPoint| {
+            let id = match &p.id {
+                PointId::Uuid(s) => json!(s),
+                PointId::Num(n) => json!(n),
+            };
+            
+            let payload: JsonValue = p.payload
+                .iter()
+                .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
+                .collect();
+            
+            // Named vectors as object
+            let vectors: JsonValue = p.vectors
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect();
+            
+            json!({
+                "id": id,
+                "vector": vectors,
+                "payload": payload,
+            })
+        })
+        .collect();
+    
+    let request = json!({ "points": points_json });
+    serde_json::to_vec(&request).unwrap_or_default()
+}
+
 /// Encode a delete request to JSON.
 ///
 /// Generates JSON for POST /collections/{collection}/points/delete
@@ -149,6 +186,147 @@ pub fn encode_create_collection_request(
     serde_json::to_vec(&request).unwrap_or_default()
 }
 
+/// Convert QAIL conditions to Qdrant filter format.
+///
+/// Qdrant uses `must`, `should`, `must_not` arrays for filtering.
+/// Each condition becomes a clause in `must` (AND logic).
+///
+/// # Example
+/// ```ignore
+/// use qail_core::ast::{Condition, Operator, Expr, Value};
+///
+/// let conditions = vec![
+///     Condition { left: Expr::Named("category".into()), op: Operator::Eq, value: Value::String("electronics".into()), is_array_unnest: false },
+///     Condition { left: Expr::Named("price".into()), op: Operator::Lt, value: Value::Int(1000), is_array_unnest: false },
+/// ];
+///
+/// let filter = encode_conditions_to_filter(&conditions, false);
+/// // Returns: {"must": [{"key": "category", "match": {"value": "electronics"}}, {"key": "price", "range": {"lt": 1000}}]}
+/// ```
+pub fn encode_conditions_to_filter(conditions: &[qail_core::ast::Condition], is_or: bool) -> JsonValue {
+    use qail_core::ast::{Expr, Operator, Value};
+    
+    let clauses: Vec<JsonValue> = conditions
+        .iter()
+        .filter_map(|cond| {
+            // Extract field name from left expression
+            let key = match &cond.left {
+                Expr::Named(name) => name.clone(),
+                Expr::Aliased { name, .. } => name.clone(),
+                _ => return None,
+            };
+            
+            // Convert operator and value to Qdrant filter clause
+            let clause = match (&cond.op, &cond.value) {
+                // Match (equality)
+                (Operator::Eq, Value::String(s)) => json!({
+                    "key": key,
+                    "match": { "value": s }
+                }),
+                (Operator::Eq, Value::Int(n)) => json!({
+                    "key": key,
+                    "match": { "value": n }
+                }),
+                (Operator::Eq, Value::Bool(b)) => json!({
+                    "key": key,
+                    "match": { "value": b }
+                }),
+                
+                // Range operators
+                (Operator::Gt, Value::Int(n)) => json!({
+                    "key": key,
+                    "range": { "gt": n }
+                }),
+                (Operator::Gt, Value::Float(f)) => json!({
+                    "key": key,
+                    "range": { "gt": f }
+                }),
+                (Operator::Gte, Value::Int(n)) => json!({
+                    "key": key,
+                    "range": { "gte": n }
+                }),
+                (Operator::Gte, Value::Float(f)) => json!({
+                    "key": key,
+                    "range": { "gte": f }
+                }),
+                (Operator::Lt, Value::Int(n)) => json!({
+                    "key": key,
+                    "range": { "lt": n }
+                }),
+                (Operator::Lt, Value::Float(f)) => json!({
+                    "key": key,
+                    "range": { "lt": f }
+                }),
+                (Operator::Lte, Value::Int(n)) => json!({
+                    "key": key,
+                    "range": { "lte": n }
+                }),
+                (Operator::Lte, Value::Float(f)) => json!({
+                    "key": key,
+                    "range": { "lte": f }
+                }),
+                
+                // In / NotIn (array membership)
+                (Operator::In, Value::Array(arr)) => {
+                    let values: Vec<JsonValue> = arr.iter().filter_map(value_to_json).collect();
+                    json!({
+                        "key": key,
+                        "match": { "any": values }
+                    })
+                },
+                
+                // IsNull / IsNotNull
+                (Operator::IsNull, _) => json!({
+                    "is_null": { "key": key }
+                }),
+                (Operator::IsNotNull, _) => json!({
+                    "is_empty": { "key": key, "is_empty": false }
+                }),
+                
+                // Text/keyword match with contains
+                (Operator::Contains | Operator::Like, Value::String(s)) => json!({
+                    "key": key,
+                    "match": { "text": s }
+                }),
+                
+                // Default: try match for other types
+                (_, Value::String(s)) => json!({
+                    "key": key,
+                    "match": { "value": s }
+                }),
+                (_, Value::Int(n)) => json!({
+                    "key": key,
+                    "match": { "value": n }
+                }),
+                
+                _ => return None,
+            };
+            
+            Some(clause)
+        })
+        .collect();
+    
+    // Use "should" for OR, "must" for AND
+    if is_or {
+        json!({ "should": clauses })
+    } else {
+        json!({ "must": clauses })
+    }
+}
+
+/// Convert Value to JsonValue for filter encoding.
+fn value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
+    use qail_core::ast::Value;
+    match value {
+        Value::String(s) => Some(json!(s)),
+        Value::Int(n) => Some(json!(n)),
+        Value::Float(f) => Some(json!(f)),
+        Value::Bool(b) => Some(json!(b)),
+        Value::Null => Some(JsonValue::Null),
+        _ => None,
+    }
+}
+
 /// Decode search response from JSON.
 pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
     let response: JsonValue = serde_json::from_slice(data)
@@ -176,18 +354,16 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
 }
 
 /// Parse a point ID from JSON.
-fn parse_point_id(value: &JsonValue) -> Option<PointId> {
+pub fn parse_point_id(value: &JsonValue) -> Option<PointId> {
     if let Some(s) = value.as_str() {
         Some(PointId::Uuid(s.to_string()))
-    } else if let Some(n) = value.as_u64() {
-        Some(PointId::Num(n))
     } else {
-        None
+        value.as_u64().map(PointId::Num)
     }
 }
 
 /// Parse payload from JSON object.
-fn parse_payload(value: &JsonValue) -> crate::point::Payload {
+pub fn parse_payload(value: &JsonValue) -> crate::point::Payload {
     let mut payload = crate::point::Payload::new();
     
     if let Some(obj) = value.as_object() {
@@ -298,5 +474,60 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].score, 0.95);
         assert_eq!(results[1].score, 0.80);
+    }
+
+    #[test]
+    fn test_encode_conditions_to_filter() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+        
+        let conditions = vec![
+            Condition {
+                left: Expr::Named("category".to_string()),
+                op: Operator::Eq,
+                value: Value::String("electronics".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("price".to_string()),
+                op: Operator::Lt,
+                value: Value::Int(1000),
+                is_array_unnest: false,
+            },
+        ];
+        
+        let filter = encode_conditions_to_filter(&conditions, false);
+        
+        // Should have "must" with 2 clauses
+        assert!(filter["must"].is_array());
+        let must = filter["must"].as_array().unwrap();
+        assert_eq!(must.len(), 2);
+        
+        // First clause: category match
+        assert_eq!(must[0]["key"], "category");
+        assert_eq!(must[0]["match"]["value"], "electronics");
+        
+        // Second clause: price range
+        assert_eq!(must[1]["key"], "price");
+        assert_eq!(must[1]["range"]["lt"], 1000);
+    }
+
+    #[test]
+    fn test_encode_conditions_to_filter_or() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+        
+        let conditions = vec![
+            Condition {
+                left: Expr::Named("status".to_string()),
+                op: Operator::Eq,
+                value: Value::String("active".to_string()),
+                is_array_unnest: false,
+            },
+        ];
+        
+        let filter = encode_conditions_to_filter(&conditions, true);
+        
+        // Should have "should" instead of "must"
+        assert!(filter["should"].is_array());
+        assert!(filter["must"].is_null());
     }
 }
