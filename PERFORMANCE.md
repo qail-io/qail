@@ -7,6 +7,20 @@ Historical benchmark results for QAIL PostgreSQL driver.
 
 ---
 
+## v0.14.13 (2026-01-02)
+
+Unified Qail AST for Redis added - **no regression, actually faster!**
+
+| Driver | μs/query | QPS | vs QAIL |
+|--------|----------|-----|---------|
+| **QAIL** | 39.1 | 25,554 | - |
+| SeaORM | 71.0 | 14,093 | 81% slower |
+| SQLx | 97.8 | 10,228 | 150% slower |
+
+*+14% faster than v0.14.9 (44.8μs → 39.1μs)*
+
+---
+
 ## v0.14.9 (2026-01-01)
 
 NULL byte protection added - no regression.
