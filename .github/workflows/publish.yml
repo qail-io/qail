@@ -75,7 +75,9 @@ jobs:
 
       - name: Wait for qail-core to be available
         if: ${{ !inputs.dry_run }}
-        run: sleep 30
+        run: |
+          sleep 30
+          cargo update  # Force refresh crates.io index
 
       - name: Publish qail-pg
         if: ${{ !inputs.dry_run }}
@@ -85,7 +87,9 @@ jobs:
 
       - name: Wait for qail-pg to be available
         if: ${{ !inputs.dry_run }}
-        run: sleep 30
+        run: |
+          sleep 30
+          cargo update  # Force refresh crates.io index
 
       - name: Publish qail-qdrant
         if: ${{ !inputs.dry_run }}
@@ -95,7 +99,9 @@ jobs:
 
       - name: Wait for qail-qdrant to be available
         if: ${{ !inputs.dry_run }}
-        run: sleep 30
+        run: |
+          sleep 30
+          cargo update  # Force refresh crates.io index
 
       - name: Publish qail (CLI)
         if: ${{ !inputs.dry_run }}

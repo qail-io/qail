@@ -1,0 +1,272 @@
+//! qail init - Project initialization
+//!
+//! Interactive setup for QAIL projects with support for:
+//! - PostgreSQL only
+//! - Qdrant only
+//! - Hybrid (PostgreSQL + Qdrant with sync)
+
+use anyhow::Result;
+use colored::*;
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
+
+/// Database mode for the project.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    Postgres,
+    Qdrant,
+    Hybrid,
+}
+
+impl Mode {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "postgres" | "pg" | "1" => Some(Mode::Postgres),
+            "qdrant" | "q" | "2" => Some(Mode::Qdrant),
+            "hybrid" | "h" | "3" => Some(Mode::Hybrid),
+            _ => None,
+        }
+    }
+}
+
+/// Deployment type.
+#[derive(Debug, Clone, Copy)]
+pub enum Deployment {
+    Host,
+    Docker,
+    Podman,
+}
+
+impl Deployment {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "host" | "local" | "1" => Some(Deployment::Host),
+            "docker" | "d" | "2" => Some(Deployment::Docker),
+            "podman" | "p" | "3" => Some(Deployment::Podman),
+            _ => None,
+        }
+    }
+}
+
+/// Project configuration collected from prompts.
+pub struct InitConfig {
+    pub name: String,
+    pub mode: Mode,
+    pub deployment: Deployment,
+    pub postgres_url: Option<String>,
+    pub qdrant_url: Option<String>,
+}
+
+/// Run the interactive init process.
+pub fn run_init(name: Option<String>, mode_arg: Option<String>) -> Result<()> {
+    println!("{}", "🪝 QAIL Project Initialization".cyan().bold());
+    println!();
+
+    // 1. Project name
+    let name = match name {
+        Some(n) => n,
+        None => prompt("Project name", "my_app")?,
+    };
+
+    // 2. Mode selection
+    let mode = match mode_arg.and_then(|m| Mode::from_str(&m)) {
+        Some(m) => m,
+        None => {
+            println!("\n{}", "Select database mode:".white().bold());
+            println!("  {} PostgreSQL only", "1.".dimmed());
+            println!("  {} Qdrant only", "2.".dimmed());
+            println!("  {} Hybrid (PostgreSQL + Qdrant)", "3.".dimmed());
+            let choice = prompt("Mode [1/2/3]", "1")?;
+            Mode::from_str(&choice).unwrap_or(Mode::Postgres)
+        }
+    };
+
+    // 3. Deployment type
+    println!("\n{}", "Select deployment type:".white().bold());
+    println!("  {} Host (local install)", "1.".dimmed());
+    println!("  {} Docker", "2.".dimmed());
+    println!("  {} Podman", "3.".dimmed());
+    let deployment_choice = prompt("Deployment [1/2/3]", "1")?;
+    let deployment = Deployment::from_str(&deployment_choice).unwrap_or(Deployment::Host);
+
+    // 4. Database URLs
+    let postgres_url = if mode == Mode::Postgres || mode == Mode::Hybrid {
+        Some(prompt("PostgreSQL URL", "postgres://localhost/mydb")?)
+    } else {
+        None
+    };
+
+    let qdrant_url = if mode == Mode::Qdrant || mode == Mode::Hybrid {
+        Some(prompt("Qdrant URL", "http://localhost:6333")?)
+    } else {
+        None
+    };
+
+    let config = InitConfig {
+        name,
+        mode,
+        deployment,
+        postgres_url,
+        qdrant_url,
+    };
+
+    println!();
+
+    // Generate files
+    generate_qail_toml(&config)?;
+    
+    if config.mode == Mode::Hybrid {
+        generate_queue_migration()?;
+    }
+
+    println!();
+    println!("{} Project '{}' initialized!", "✓".green(), config.name.yellow());
+    println!();
+    
+    match config.mode {
+        Mode::Postgres => {
+            println!("Next steps:");
+            println!("  {} Run 'qail pull' to introspect existing schema", "1.".dimmed());
+            println!("  {} Or create schema.qail manually", "2.".dimmed());
+        }
+        Mode::Qdrant => {
+            println!("Next steps:");
+            println!("  {} Run 'qail vector create <collection>' to create collections", "1.".dimmed());
+        }
+        Mode::Hybrid => {
+            println!("Next steps:");
+            println!("  {} Run 'qail migrate up' to create _qail_queue table", "1.".dimmed());
+            println!("  {} Configure [[sync]] rules in qail.toml", "2.".dimmed());
+            println!("  {} Run 'qail worker' to start sync daemon", "3.".dimmed());
+        }
+    }
+
+    Ok(())
+}
+
+/// Prompt user for input with a default value.
+fn prompt(question: &str, default: &str) -> Result<String> {
+    print!("{} [{}]: ", question.white(), default.dimmed());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if input.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(input.to_string())
+    }
+}
+
+/// Generate qail.toml configuration file.
+fn generate_qail_toml(config: &InitConfig) -> Result<()> {
+    let mode_str = match config.mode {
+        Mode::Postgres => "postgres",
+        Mode::Qdrant => "qdrant",
+        Mode::Hybrid => "hybrid",
+    };
+
+    let mut content = format!(
+        r#"# QAIL Project Configuration
+# Generated by: qail init
+
+[project]
+name = "{}"
+mode = "{}"
+"#,
+        config.name, mode_str
+    );
+
+    if let Some(url) = &config.postgres_url {
+        content.push_str(&format!(
+            r#"
+[postgres]
+url = "{}"
+"#,
+            url
+        ));
+    }
+
+    if let Some(url) = &config.qdrant_url {
+        content.push_str(&format!(
+            r#"
+[qdrant]
+url = "{}"
+grpc = "{}:6334"
+"#,
+            url,
+            url.trim_end_matches(":6333")
+        ));
+    }
+
+    if config.mode == Mode::Hybrid {
+        content.push_str(
+            r#"
+# Sync rules - define which tables sync to Qdrant
+# [[sync]]
+# source_table = "products"
+# trigger_column = "description"
+# target_collection = "products_search"
+# embedding_model = "candle:bert-base"
+"#,
+        );
+    }
+
+    fs::write("qail.toml", content)?;
+    println!("{} Created qail.toml", "✓".green());
+    Ok(())
+}
+
+/// Generate the _qail_queue migration for hybrid mode.
+fn generate_queue_migration() -> Result<()> {
+    let migrations_dir = Path::new("migrations");
+    if !migrations_dir.exists() {
+        fs::create_dir(migrations_dir)?;
+    }
+
+    let up_content = r#"-- QAIL Sync Queue - Outbox Pattern
+-- Auto-generated by qail init
+-- Enables async sync between PostgreSQL and Qdrant
+
+table _qail_queue (
+  id serial primary_key,
+  ref_table text not_null,
+  ref_id text not_null,
+  operation text not_null,
+  payload jsonb,
+  status text default 'pending',
+  retry_count int default 0,
+  error_message text,
+  created_at timestamptz default NOW(),
+  processed_at timestamptz
+)
+
+-- Indexes (applied separately)
+-- CREATE INDEX idx_qail_queue_poll ON _qail_queue (status, id);
+-- CREATE INDEX idx_qail_queue_ref ON _qail_queue (ref_table, ref_id);
+"#;
+
+    let down_content = r#"# QAIL Sync Queue - Rollback
+# Auto-generated by qail init
+
+drop index idx_qail_queue_ref
+drop index idx_qail_queue_poll
+drop table _qail_queue
+"#;
+
+    fs::write(
+        migrations_dir.join("001_qail_queue.up.qail"),
+        up_content,
+    )?;
+    fs::write(
+        migrations_dir.join("001_qail_queue.down.qail"),
+        down_content,
+    )?;
+
+    println!("{} Created migrations/001_qail_queue.up.qail", "✓".green());
+    println!("{} Created migrations/001_qail_queue.down.qail", "✓".green());
+    Ok(())
+}

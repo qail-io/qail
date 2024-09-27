@@ -199,8 +199,53 @@ impl ToSql for Qail {
             }
             Action::DropView => format!("DROP VIEW IF EXISTS {}", self.table),
             // Vector database operations - use qail-qdrant driver instead
-            Action::Search | Action::Upsert | Action::Scroll => {
+            operators::Action::Search | operators::Action::Upsert | operators::Action::Scroll => {
                 format!("-- Vector operation {:?} not supported in SQL. Use qail-qdrant driver.", self.action)
+            }
+            operators::Action::CreateCollection | operators::Action::DeleteCollection => {
+                format!("-- Vector DDL {:?} not supported in SQL. Use qail-qdrant driver.", self.action)
+            }
+            // Function and Trigger operations
+            operators::Action::CreateFunction => {
+                if let Some(func) = &self.function_def {
+                    let lang = func.language.as_deref().unwrap_or("plpgsql");
+                    format!(
+                        "CREATE OR REPLACE FUNCTION {}() RETURNS {} LANGUAGE {} AS $$ {} $$",
+                        func.name, func.returns, lang, func.body
+                    )
+                } else {
+                    "-- CreateFunction requires function_def".to_string()
+                }
+            }
+            operators::Action::DropFunction => {
+                format!("DROP FUNCTION IF EXISTS {}()", self.table)
+            }
+            operators::Action::CreateTrigger => {
+                if let Some(trig) = &self.trigger_def {
+                    let timing = match trig.timing {
+                        crate::ast::TriggerTiming::Before => "BEFORE",
+                        crate::ast::TriggerTiming::After => "AFTER",
+                        crate::ast::TriggerTiming::InsteadOf => "INSTEAD OF",
+                    };
+                    let events: Vec<&str> = trig.events.iter().map(|e| match e {
+                        crate::ast::TriggerEvent::Insert => "INSERT",
+                        crate::ast::TriggerEvent::Update => "UPDATE",
+                        crate::ast::TriggerEvent::Delete => "DELETE",
+                        crate::ast::TriggerEvent::Truncate => "TRUNCATE",
+                    }).collect();
+                    let for_each = if trig.for_each_row { "FOR EACH ROW" } else { "FOR EACH STATEMENT" };
+                    // Prepend DROP for idempotency - PostgreSQL has no CREATE OR REPLACE TRIGGER
+                    format!(
+                        "DROP TRIGGER IF EXISTS {} ON {};\nCREATE TRIGGER {} {} {} ON {} {} EXECUTE FUNCTION {}()",
+                        trig.name, trig.table,
+                        trig.name, timing, events.join(" OR "), trig.table, for_each, trig.execute_function
+                    )
+                } else {
+                    "-- CreateTrigger requires trigger_def".to_string()
+                }
+            }
+            operators::Action::DropTrigger => {
+                format!("DROP TRIGGER IF EXISTS {} ON {}", self.table, self.table)
             }
         }
     }

@@ -5,14 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.12] - 2026-01-02
+
+### Hybrid Architecture (PostgreSQL ↔ Qdrant)
+- **`qail worker` daemon:** Polls `_qail_queue` outbox table and syncs to Qdrant
+  - Connection retry with exponential backoff (500ms → 30s, 10 attempts)
+  - Circuit breaker: 5 consecutive errors trigger auto-reconnect
+  - Per-item error handling: never crashes, marks failed items with `retry_count`
+- **`qail migrate apply` command:** Applies `.qail` files from migrations/ folder
+  - Reads from `qail.toml` postgres.url automatically
+  - Parses Schema syntax (`table name (...)`) and generates DDL
+  - Supports function/trigger translation from QAIL to PL/pgSQL
+- **`qail sync generate` command:** Generates trigger migrations from `[[sync]]` rules
+- **`qail init` hybrid mode:** Creates `_qail_queue` table migration
+
+### Qdrant Proto Fixes (4 critical encoding bugs)
+- **Distance enum:** Fixed values (Cosine=1, Euclid=2, Dot=3 per Qdrant proto)
+- **CreateCollection:** Fixed `vectors_config` field from 2 to 10 (0x52)
+- **PointStruct:** Fixed `vectors` field from 3 to 4 (0x22)
+- **Vector encoding:** Simplified to use deprecated packed floats (works correctly)
+
+### Fixed
+- Clippy warnings: `derivable_impls`, `sort_by_key`, `collapsible_if`, deref
+- Init generates Schema-compatible `.qail` syntax (parentheses + commas)
+
+## [0.14.11] - 2026-01-01
+
+### Qdrant Performance (4x Speedup)
+- **HTTP/2 Batch Pipelining:** `search_batch()` multiplexes requests over single connection (4.00x faster than sequential)
+- **Connection Pooling:** `QdrantPool` with semaphore concurrency (1.46x faster)
+- **Zero-Allocation Buffer:** Removed `BytesMut::clone()` in favor of `split()` for true zero-copy
+- **Documentation:** Added `PERFORMANCE.md` Qdrant section and new benchmark web page
+
 ## [0.14.10] - 2026-01-01
 
-### New Crate
-- **qail-qdrant:** ALPHA Qdrant vector database driver
-  - REST/JSON protocol encoding (AST-native)
-  - `QdrantDriver` with HTTP client (reqwest)
+### New Crate: qail-qdrant
+- **Zero-Copy gRPC Driver:** High-performance Qdrant client
+  - `proto_encoder.rs`: Direct protobuf wire encoding with memcpy for vectors
+  - `proto_decoder.rs`: Zero-copy response parsing (SearchResponse, ScoredPoint)
+  - `grpc_transport.rs`: Raw HTTP/2 gRPC using h2 crate
+  - `GrpcDriver`: Combines encoder + transport for 13% faster than official client
+- **REST Driver:** `QdrantDriver` with HTTP client (reqwest)
   - Search, upsert, delete, collection management
   - `Point`, `PointId`, `Payload`, `ScoredPoint` types
+- **Benchmark:** QAIL 1.13x faster than official qdrant-client (199µs vs 225µs)
+  - Encoding overhead: only 133ns (0.1% of latency)
 
 ### Core AST Extensions
 - `Action::Search`, `Action::Upsert`, `Action::Scroll` for vector operations
