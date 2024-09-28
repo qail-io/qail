@@ -32,6 +32,7 @@ mod transaction;
 pub use connection::PgConnection;
 pub use connection::TlsConfig;
 pub(crate) use connection::{CANCEL_REQUEST_CODE, parse_affected_rows};
+pub use cancel::CancelToken;
 pub use io_backend::{IoBackend, backend_name, detect as detect_io_backend};
 pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection};
 pub use prepared::PreparedStatement;
@@ -83,6 +84,8 @@ pub enum PgError {
     NoRows,
     /// I/O error
     Io(std::io::Error),
+    /// Encoding error (parameter limit, etc.)
+    Encode(String),
 }
 
 impl std::fmt::Display for PgError {
@@ -94,6 +97,7 @@ impl std::fmt::Display for PgError {
             PgError::Query(e) => write!(f, "Query error: {}", e),
             PgError::NoRows => write!(f, "No rows returned"),
             PgError::Io(e) => write!(f, "I/O error: {}", e),
+            PgError::Encode(e) => write!(f, "Encode error: {}", e),
         }
     }
 }
@@ -222,6 +226,8 @@ impl PgDriver {
         let mut rows: Vec<PgRow> = Vec::new();
         let mut column_info: Option<Arc<ColumnInfo>> = None;
 
+        let mut error: Option<PgError> = None;
+
         loop {
             let msg = self.connection.recv().await?;
             match msg {
@@ -231,17 +237,24 @@ impl PgDriver {
                     column_info = Some(Arc::new(ColumnInfo::from_fields(&fields)));
                 }
                 crate::protocol::BackendMessage::DataRow(data) => {
-                    rows.push(PgRow {
-                        columns: data,
-                        column_info: column_info.clone(),
-                    });
+                    if error.is_none() {
+                        rows.push(PgRow {
+                            columns: data,
+                            column_info: column_info.clone(),
+                        });
+                    }
                 }
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
                     return Ok(rows);
                 }
                 crate::protocol::BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
                 }
                 _ => {}
             }
@@ -264,24 +277,51 @@ impl PgDriver {
 
         // Collect results using FAST receiver
         let mut rows: Vec<PgRow> = Vec::new();
+        let mut error: Option<PgError> = None;
 
         loop {
-            let (msg_type, data) = self.connection.recv_with_data_fast().await?;
-            match msg_type {
-                b'D' => {
-                    // DataRow
-                    if let Some(columns) = data {
-                        rows.push(PgRow {
-                            columns,
-                            column_info: None, // Skip metadata for speed
-                        });
+            let res = self.connection.recv_with_data_fast().await;
+            match res {
+                Ok((msg_type, data)) => {
+                    match msg_type {
+                        b'D' => {
+                             // DataRow
+                            if error.is_none() {
+                                if let Some(columns) = data {
+                                    rows.push(PgRow {
+                                        columns,
+                                        column_info: None, // Skip metadata for speed
+                                    });
+                                }
+                            }
+                        }
+                        b'Z' => {
+                            // ReadyForQuery
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(rows);
+                        }
+                        _ => {} // 1, 2, C, T - skip Parse/Bind/CommandComplete/RowDescription
                     }
                 }
-                b'Z' => {
-                    // ReadyForQuery
-                    return Ok(rows);
+                Err(e) => {
+                   // recv_with_data_fast returns Err on ErrorResponse automatically.
+                   // We need to capture it and continue draining.
+                   // BUT recv_with_data_fast doesn't return the error *message type* if it fails.
+                   // It returns PgError::Query(msg).
+                   // So we capture the error, but we must continue RECVing until ReadyForQuery.
+                   // However, recv_with_data_fast will KEEP returning Err(Query) if the buffer has E?
+                   // No, recv_with_data_fast consumes the E message before returning Err.
+                   
+                   if error.is_none() {
+                       error = Some(e);
+                   }
+                   // Continue loop to drain until ReadyForQuery... 
+                   // BUT wait, does recv_with_data_fast handle the *rest* of the stream?
+                   // If we call it again, it will read the NEXT message.
+                   // So we just continue.
                 }
-                _ => {} // 1, 2, C, T - skip Parse/Bind/CommandComplete/RowDescription
             }
         }
     }
@@ -353,12 +393,15 @@ impl PgDriver {
         use tokio::io::AsyncWriteExt;
         
         let mut buf = bytes::BytesMut::with_capacity(128);
-        PgEncoder::encode_bind_to(&mut buf, &stmt_name, &self.connection.params_buf);
+        PgEncoder::encode_bind_to(&mut buf, &stmt_name, &self.connection.params_buf)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
         self.connection.stream.write_all(&buf).await?;
 
         let mut rows: Vec<PgRow> = Vec::new();
+        let mut error: Option<PgError> = None;
+
         loop {
             let msg = self.connection.recv().await?;
             match msg {
@@ -366,17 +409,28 @@ impl PgDriver {
                 | crate::protocol::BackendMessage::BindComplete => {}
                 crate::protocol::BackendMessage::RowDescription(_) => {}
                 crate::protocol::BackendMessage::DataRow(data) => {
-                    rows.push(PgRow {
-                        columns: data,
-                        column_info: None,
-                    });
+                    if error.is_none() {
+                        rows.push(PgRow {
+                            columns: data,
+                            column_info: None,
+                        });
+                    }
                 }
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
                     return Ok(rows);
                 }
                 crate::protocol::BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                        // Invalidate cache to prevent "prepared statement does not exist"
+                        // on next retry if the error happened during Parse/Bind.
+                        self.connection.stmt_cache.clear();
+                        self.connection.prepared_statements.clear();
+                    }
                 }
                 _ => {}
             }
@@ -396,6 +450,8 @@ impl PgDriver {
         self.connection.send_bytes(&wire_bytes).await?;
 
         let mut affected = 0u64;
+        let mut error: Option<PgError> = None;
+
         loop {
             let msg = self.connection.recv().await?;
             match msg {
@@ -404,15 +460,22 @@ impl PgDriver {
                 crate::protocol::BackendMessage::RowDescription(_) => {}
                 crate::protocol::BackendMessage::DataRow(_) => {}
                 crate::protocol::BackendMessage::CommandComplete(tag) => {
-                    if let Some(n) = tag.split_whitespace().last() {
-                        affected = n.parse().unwrap_or(0);
+                    if error.is_none() {
+                        if let Some(n) = tag.split_whitespace().last() {
+                            affected = n.parse().unwrap_or(0);
+                        }
                     }
                 }
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
                     return Ok(affected);
                 }
                 crate::protocol::BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
                 }
                 _ => {}
             }
@@ -597,6 +660,9 @@ impl PgDriver {
         let mut rows: Vec<PgRow> = Vec::new();
         let mut column_info: Option<std::sync::Arc<ColumnInfo>> = None;
         
+
+        let mut error: Option<PgError> = None;
+
         loop {
             let msg = self.connection.recv().await?;
             match msg {
@@ -604,17 +670,24 @@ impl PgDriver {
                     column_info = Some(std::sync::Arc::new(ColumnInfo::from_fields(&fields)));
                 }
                 crate::protocol::BackendMessage::DataRow(data) => {
-                    rows.push(PgRow {
-                        columns: data,
-                        column_info: column_info.clone(),
-                    });
+                    if error.is_none() {
+                        rows.push(PgRow {
+                            columns: data,
+                            column_info: column_info.clone(),
+                        });
+                    }
                 }
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
                     return Ok(rows);
                 }
                 crate::protocol::BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
                 }
                 _ => {}
             }

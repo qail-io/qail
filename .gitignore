@@ -60,3 +60,6 @@ bench/benchmarks/fifty_million_consume
 # Go bench
 go/go/bench/
 pg/examples/*.go
+
+# Security: Battle tests (internal hardening, not for distribution)
+pg/examples/battle*.rs
