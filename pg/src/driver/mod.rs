@@ -286,13 +286,11 @@ impl PgDriver {
                     match msg_type {
                         b'D' => {
                              // DataRow
-                            if error.is_none() {
-                                if let Some(columns) = data {
-                                    rows.push(PgRow {
-                                        columns,
-                                        column_info: None, // Skip metadata for speed
-                                    });
-                                }
+                            if error.is_none() && let Some(columns) = data {
+                                rows.push(PgRow {
+                                    columns,
+                                    column_info: None, // Skip metadata for speed
+                                });
                             }
                         }
                         b'Z' => {
@@ -460,10 +458,8 @@ impl PgDriver {
                 crate::protocol::BackendMessage::RowDescription(_) => {}
                 crate::protocol::BackendMessage::DataRow(_) => {}
                 crate::protocol::BackendMessage::CommandComplete(tag) => {
-                    if error.is_none() {
-                        if let Some(n) = tag.split_whitespace().last() {
-                            affected = n.parse().unwrap_or(0);
-                        }
+                    if error.is_none() && let Some(n) = tag.split_whitespace().last() {
+                        affected = n.parse().unwrap_or(0);
                     }
                 }
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
