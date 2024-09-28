@@ -8,6 +8,8 @@ use colored::*;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Queue item from _qail_queue table
@@ -212,8 +214,32 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
     let mut total_processed = 0u64;
     let start_time = Instant::now();
     let mut consecutive_errors = 0u32;
+    let mut last_janitor_run = Instant::now();
+    const JANITOR_INTERVAL_SECS: u64 = 60;
 
-    loop {
+    // Run initial janitor sweep on startup (recover any zombie jobs from previous crash)
+    println!("{} Running startup zombie job recovery...", "→".cyan());
+    match recover_stale_jobs(&mut pg).await {
+        Ok(recovered) if recovered > 0 => {
+            println!("{} Recovered {} zombie jobs from previous worker crash", "✓".green(), recovered);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            println!("{} Janitor sweep failed: {}", "!".yellow(), e);
+        }
+    }
+
+    // Graceful shutdown: spawn signal handler
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            println!("\n🛑 Shutdown signal received. Finishing current batch...");
+            running_clone.store(false, Ordering::SeqCst);
+        }
+    });
+
+    while running.load(Ordering::SeqCst) {
         // Check for too many consecutive errors (circuit breaker)
         if consecutive_errors >= 5 {
             println!("{} Too many consecutive errors, reconnecting...", "!".yellow());
@@ -245,6 +271,14 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
             continue;
         }
 
+        // Periodic janitor: recover zombie jobs every 60 seconds
+        if last_janitor_run.elapsed().as_secs() >= JANITOR_INTERVAL_SECS {
+            if let Ok(recovered) = recover_stale_jobs(&mut pg).await && recovered > 0 {
+                println!("🧹 Janitor: Recovered {} zombie jobs", recovered);
+            }
+            last_janitor_run = Instant::now();
+        }
+
         // Poll for pending items
         let items = match fetch_pending_items(&mut pg, batch_size).await {
             Ok(items) => {
@@ -267,7 +301,7 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
         println!("{} Processing {} items...", "→".cyan(), items.len());
 
         for item in items {
-            let result = process_item(&item, &sync_rules, &mut qdrant, &embedding_model).await;
+            let result = process_item(&item, &sync_rules, &mut pg, &mut qdrant, &embedding_model).await;
             
             match result {
                 Ok(_) => {
@@ -298,6 +332,10 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
         let rate = if elapsed > 0 { total_processed / elapsed } else { total_processed };
         println!("{} Processed {} total ({}/sec)", "✓".green(), total_processed, rate);
     }
+
+    // Graceful shutdown complete
+    println!("✅ Graceful shutdown complete. Processed {} total items.", total_processed);
+    Ok(())
 }
 
 fn load_config() -> Result<WorkerConfig> {
@@ -375,6 +413,7 @@ async fn fetch_pending_items(pg: &mut qail_pg::PgDriver, limit: u32) -> Result<V
             SELECT id
             FROM _qail_queue
             WHERE status = 'pending'
+              AND retry_count < 5  -- Poison Pill protection: skip jobs that failed too many times
             ORDER BY id ASC
             LIMIT {}
             FOR UPDATE SKIP LOCKED
@@ -403,6 +442,7 @@ async fn fetch_pending_items(pg: &mut qail_pg::PgDriver, limit: u32) -> Result<V
 async fn process_item(
     item: &QueueItem,
     sync_rules: &std::collections::HashMap<String, &SyncRule>,
+    pg: &mut qail_pg::PgDriver,
     qdrant: &mut qail_qdrant::QdrantDriver,
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<()> {
@@ -411,23 +451,44 @@ async fn process_item(
 
     match item.operation.as_str() {
         "UPSERT" => {
-            // Extract text from payload
-            let text = extract_text_from_payload(&item.payload, rule.trigger_column.as_deref())?;
+            // READ-REPAIR PATTERN: Do NOT use stale payload from queue!
+            // The queue is a "dirty flag", not a source of truth.
+            // Always fetch FRESH data from the source table to prevent time-travel bugs.
             
-            // Generate embedding
-            let vector = embedding_model.embed(&text);
+            let trigger_col = rule.trigger_column.as_deref().unwrap_or("description");
+            let fetch_sql = format!(
+                "SELECT {} FROM {} WHERE id = {}",
+                trigger_col, item.ref_table, item.ref_id
+            );
             
-            // Upsert to Qdrant
-            let point = qail_qdrant::Point {
-                id: qail_qdrant::PointId::Num(item.ref_id.parse().unwrap_or(0)),
-                vector,
-                payload: std::collections::HashMap::new(),
-            };
-            
-            qdrant.upsert(&rule.target_collection, &[point], true).await?;
+            match pg.fetch_raw(&fetch_sql).await {
+                Ok(rows) if !rows.is_empty() => {
+                    // Row exists - extract fresh text and upsert
+                    let text = rows[0].get_string(0)
+                        .ok_or_else(|| anyhow::anyhow!("No text in column '{}'", trigger_col))?;
+                    
+                    // Generate embedding from FRESH data
+                    let vector = embedding_model.embed(&text);
+                    
+                    // Upsert to Qdrant
+                    let point = qail_qdrant::Point {
+                        id: qail_qdrant::PointId::Num(item.ref_id.parse().unwrap_or(0)),
+                        vector,
+                        payload: std::collections::HashMap::new(),
+                    };
+                    
+                    qdrant.upsert(&rule.target_collection, &[point], true).await?;
+                }
+                Ok(_) | Err(_) => {
+                    // Row doesn't exist - treat as DELETE
+                    // This handles the case where the row was deleted after the queue event
+                    let point_id = item.ref_id.parse().unwrap_or(0);
+                    qdrant.delete_points(&rule.target_collection, &[point_id]).await?;
+                }
+            }
         }
         "DELETE" => {
-            // Delete from Qdrant
+            // Deletes are idempotent and safe to execute out-of-order
             let point_id = item.ref_id.parse().unwrap_or(0);
             qdrant.delete_points(&rule.target_collection, &[point_id]).await?;
         }
@@ -437,22 +498,6 @@ async fn process_item(
     }
     
     Ok(())
-}
-
-fn extract_text_from_payload(payload: &Option<serde_json::Value>, trigger_col: Option<&str>) -> Result<String> {
-    let payload = payload.as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Missing payload for embedding"))?;
-    
-    if let Some(col) = trigger_col {
-        // Extract specific column
-        payload.get(col)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("Missing column '{}' in payload", col))
-    } else {
-        // Use entire payload as JSON string
-        Ok(serde_json::to_string(payload)?)
-    }
 }
 
 async fn mark_processed(pg: &mut qail_pg::PgDriver, id: i64) -> Result<()> {
@@ -473,3 +518,34 @@ async fn mark_failed(pg: &mut qail_pg::PgDriver, id: i64, error: &str) -> Result
     pg.execute_raw(&sql).await?;
     Ok(())
 }
+
+/// Janitor: Recover zombie jobs (crashed workers left jobs in 'processing' state)
+/// This runs periodically to reset stale jobs back to 'pending' for retry.
+async fn recover_stale_jobs(pg: &mut qail_pg::PgDriver) -> Result<u64> {
+    // Reset jobs that have been 'processing' for more than 10 minutes
+    // These are likely from crashed workers
+    let sql = r#"
+        UPDATE _qail_queue 
+        SET status = 'pending', retry_count = retry_count + 1 
+        WHERE status = 'processing' 
+          AND processed_at < NOW() - INTERVAL '10 minutes'
+    "#;
+    
+    pg.execute_raw(sql).await?;
+    
+    // Count how many were recovered (for logging)
+    let count_sql = r#"
+        SELECT COUNT(*) as count FROM _qail_queue 
+        WHERE status = 'pending' 
+          AND retry_count > 0 
+          AND processed_at >= NOW() - INTERVAL '1 minute'
+    "#;
+    
+    let rows = pg.fetch_raw(count_sql).await.unwrap_or_default();
+    let recovered = rows.first()
+        .and_then(|r| r.get_i64(0))
+        .unwrap_or(0) as u64;
+    
+    Ok(recovered)
+}
+
