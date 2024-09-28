@@ -6,6 +6,8 @@ use super::{PgConnection, PgError, PgResult};
 use crate::protocol::{BackendMessage, FrontendMessage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+const MAX_MESSAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GB
+
 impl PgConnection {
     /// Send a frontend message.
     pub async fn send(&mut self, msg: FrontendMessage) -> PgResult<()> {
@@ -25,6 +27,13 @@ impl PgConnection {
                     self.buffer[3],
                     self.buffer[4],
                 ]) as usize;
+
+                if msg_len > MAX_MESSAGE_SIZE {
+                    return Err(PgError::Protocol(format!(
+                        "Message too large: {} bytes (max {})",
+                        msg_len, MAX_MESSAGE_SIZE
+                    )));
+                }
 
                 if self.buffer.len() > msg_len {
                     // We have a complete message - zero-copy split
@@ -85,6 +94,13 @@ impl PgConnection {
                     self.buffer[4],
                 ]) as usize;
 
+                if msg_len > MAX_MESSAGE_SIZE {
+                    return Err(PgError::Protocol(format!(
+                        "Message too large: {} bytes (max {})",
+                        msg_len, MAX_MESSAGE_SIZE
+                    )));
+                }
+
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
 
@@ -130,6 +146,13 @@ impl PgConnection {
                     self.buffer[3],
                     self.buffer[4],
                 ]) as usize;
+
+                if msg_len > MAX_MESSAGE_SIZE {
+                    return Err(PgError::Protocol(format!(
+                        "Message too large: {} bytes (max {})",
+                        msg_len, MAX_MESSAGE_SIZE
+                    )));
+                }
 
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
@@ -219,6 +242,13 @@ impl PgConnection {
                     self.buffer[4],
                 ]) as usize;
 
+                if msg_len > MAX_MESSAGE_SIZE {
+                    return Err(PgError::Protocol(format!(
+                        "Message too large: {} bytes (max {})",
+                        msg_len, MAX_MESSAGE_SIZE
+                    )));
+                }
+
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
 
@@ -300,6 +330,13 @@ impl PgConnection {
                     self.buffer[3],
                     self.buffer[4],
                 ]) as usize;
+
+                if msg_len > MAX_MESSAGE_SIZE {
+                    return Err(PgError::Protocol(format!(
+                        "Message too large: {} bytes (max {})",
+                        msg_len, MAX_MESSAGE_SIZE
+                    )));
+                }
 
                 if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];

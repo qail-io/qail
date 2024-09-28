@@ -350,7 +350,7 @@ pub fn encode_conditions(
     conditions: &[Condition],
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
-) -> Result<(), super::super::error::EncodeError> {
+) -> Result<(), crate::protocol::EncodeError> {
     for (i, cond) in conditions.iter().enumerate() {
         if i > 0 {
             buf.extend_from_slice(b" AND ");
@@ -451,8 +451,8 @@ pub fn encode_conditions(
 
 /// Encode value - extract to parameter or inline.
 /// Returns Err if the value contains invalid data (e.g., NULL byte in string).
-pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::super::error::EncodeError> {
-    use super::super::error::EncodeError;
+pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
+    use crate::protocol::EncodeError;
     
     match value {
         Value::Null => {

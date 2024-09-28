@@ -17,7 +17,7 @@
 mod batch;
 mod ddl;
 pub(crate) mod dml;  // pub(crate) for internal use in driver
-pub mod error;
+pub use crate::protocol::EncodeError;
 mod helpers;
 mod values;
 
@@ -56,7 +56,8 @@ impl AstEncoder {
         }
 
         let sql_bytes = sql_buf.freeze();
-        let wire = batch::build_extended_query(&sql_bytes, &params);
+        let wire = batch::build_extended_query(&sql_bytes, &params)
+            .expect("Parameter limit exceeded in AST encoder");
 
         (wire, params)
     }
@@ -97,6 +98,7 @@ impl AstEncoder {
 
         // Build wire protocol (reuses internal allocation in batch module)
         batch::build_extended_query(sql_buf, params)
+            .expect("Parameter limit exceeded in AST encoder")
     }
 
     /// Encode a Qail to SQL string + params (for prepared statement caching).

@@ -12,6 +12,7 @@
 //! The async I/O layer (Layer 3) consumes these bytes.
 
 use bytes::BytesMut;
+use super::EncodeError;
 
 /// Takes a Qail and produces wire protocol bytes.
 /// This is the "Visitor" in the visitor pattern.
@@ -111,7 +112,11 @@ impl PgEncoder {
     /// - parameter count (2 bytes)
     /// - for each parameter: length (4 bytes, -1 for NULL), data
     /// - result format count (2 bytes) - we use 0 (all text)
-    pub fn encode_bind(portal: &str, statement: &str, params: &[Option<Vec<u8>>]) -> BytesMut {
+    pub fn encode_bind(portal: &str, statement: &str, params: &[Option<Vec<u8>>]) -> Result<BytesMut, EncodeError> {
+        if params.len() > i16::MAX as usize {
+            return Err(EncodeError::TooManyParameters(params.len()));
+        }
+
         let mut buf = BytesMut::new();
 
         // Message type 'B'
@@ -155,7 +160,7 @@ impl PgEncoder {
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(&content);
 
-        buf
+        Ok(buf)
     }
 
     /// Encode an Execute message (execute a bound portal).
@@ -219,7 +224,11 @@ impl PgEncoder {
     /// Encode a complete extended query pipeline (OPTIMIZED).
     /// This combines Parse + Bind + Execute + Sync in a single buffer.
     /// Zero intermediate allocations - writes directly to pre-sized BytesMut.
-    pub fn encode_extended_query(sql: &str, params: &[Option<Vec<u8>>]) -> BytesMut {
+    pub fn encode_extended_query(sql: &str, params: &[Option<Vec<u8>>]) -> Result<BytesMut, EncodeError> {
+        if params.len() > i16::MAX as usize {
+            return Err(EncodeError::TooManyParameters(params.len()));
+        }
+
         // Calculate total size upfront to avoid reallocations
         // Bind: 1 + 4 + 1 + 1 + 2 + 2 + params_data + 2 = 13 + params_data
         // Execute: 1 + 4 + 1 + 4 = 10
@@ -269,7 +278,7 @@ impl PgEncoder {
         // ===== SYNC =====
         buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
 
-        buf
+        Ok(buf)
     }
 }
 
@@ -327,7 +336,7 @@ mod tests {
             Some(b"42".to_vec()),
             None, // NULL
         ];
-        let bytes = PgEncoder::encode_bind("", "", &params);
+        let bytes = PgEncoder::encode_bind("", "", &params).unwrap();
 
         // Message type 'B'
         assert_eq!(bytes[0], b'B');
@@ -352,7 +361,7 @@ mod tests {
     #[test]
     fn test_encode_extended_query() {
         let params = vec![Some(b"hello".to_vec())];
-        let bytes = PgEncoder::encode_extended_query("SELECT $1", &params);
+        let bytes = PgEncoder::encode_extended_query("SELECT $1", &params).unwrap();
 
         // Should contain all 4 message types: P, B, E, S
         assert!(bytes.windows(1).any(|w| w == [b'P']));
@@ -397,7 +406,11 @@ impl PgEncoder {
     /// - Borrowed params (zero-copy)
     /// - Single allocation check
     #[inline]
-    pub fn encode_bind_ultra<'a>(buf: &mut BytesMut, statement: &str, params: &[Param<'a>]) {
+    pub fn encode_bind_ultra<'a>(buf: &mut BytesMut, statement: &str, params: &[Param<'a>]) -> Result<(), EncodeError> {
+        if params.len() > i16::MAX as usize {
+            return Err(EncodeError::TooManyParameters(params.len()));
+        }
+
         // Calculate content length upfront
         let params_size: usize = params
             .iter()
@@ -443,6 +456,7 @@ impl PgEncoder {
 
         // Result format codes count (0 = default text)
         Self::put_i16_be(buf, 0);
+        Ok(())
     }
 
     /// Encode Execute message - ULTRA OPTIMIZED.
@@ -464,7 +478,11 @@ impl PgEncoder {
     /// Encode Bind message directly into existing buffer (ZERO ALLOCATION).
     /// This is the hot path optimization - no intermediate Vec allocation.
     #[inline]
-    pub fn encode_bind_to(buf: &mut BytesMut, statement: &str, params: &[Option<Vec<u8>>]) {
+    pub fn encode_bind_to(buf: &mut BytesMut, statement: &str, params: &[Option<Vec<u8>>]) -> Result<(), EncodeError> {
+        if params.len() > i16::MAX as usize {
+            return Err(EncodeError::TooManyParameters(params.len()));
+        }
+
         // Calculate content length upfront
         // portal(1) + statement(len+1) + format_codes(2) + param_count(2) + params_data + result_format(2)
         let params_size: usize = params
@@ -507,6 +525,7 @@ impl PgEncoder {
 
         // Result format codes count (0 = default text)
         Self::put_i16_be(buf, 0);
+        Ok(())
     }
 
     /// Encode Execute message directly into existing buffer (ZERO ALLOCATION).
