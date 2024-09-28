@@ -7,11 +7,12 @@ use super::PgRow;
 
 impl PgRow {
     /// Get a column value as String.
+    /// Returns None if the value is NULL or invalid UTF-8.
     pub fn get_string(&self, idx: usize) -> Option<String> {
         self.columns
             .get(idx)?
             .as_ref()
-            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
     }
 
     /// Get a column value as i32.

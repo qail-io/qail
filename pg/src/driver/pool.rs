@@ -123,6 +123,17 @@ impl PooledConnection {
             .as_mut()
             .expect("Connection should always be present")
     }
+
+    /// Get a token to cancel the currently running query.
+    pub fn cancel_token(&self) -> crate::driver::CancelToken {
+        let (process_id, secret_key) = self.conn.as_ref().expect("Connection missing").get_cancel_key();
+        crate::driver::CancelToken {
+            host: self.pool.config.host.clone(),
+            port: self.pool.config.port,
+            process_id,
+            secret_key,
+        }
+    }
 }
 
 impl Drop for PooledConnection {

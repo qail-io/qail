@@ -7,7 +7,10 @@ pub mod auth;
 pub mod copy_encoder;
 pub mod encoder;
 pub mod types;
+pub mod error;
 pub mod wire;
+
+pub use error::EncodeError;
 
 pub use ast_encoder::AstEncoder;
 pub use auth::ScramClient;
