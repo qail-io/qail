@@ -7,8 +7,14 @@ use qail_core::ast::{Action, Qail};
 
 use super::dml::{encode_delete, encode_insert, encode_select, encode_update};
 
+use crate::protocol::EncodeError;
+
 /// Build Extended Query protocol: Parse + Bind + Execute + Sync.
-pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> BytesMut {
+pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<BytesMut, EncodeError> {
+    if params.len() > i16::MAX as usize {
+        return Err(EncodeError::TooManyParameters(params.len()));
+    }
+
     let params_size: usize = params
         .iter()
         .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
@@ -54,7 +60,7 @@ pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> BytesMut 
     // ===== SYNC =====
     buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
 
-    buf
+    Ok(buf)
 }
 
 /// Encode multiple Qails as a pipeline batch.

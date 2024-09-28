@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.14] - 2026-01-02
+
+### Security Hardening (Battle-Tested)
+
+- **Fixed Protocol Desync:** Transaction errors now properly invalidate prepared statement cache
+- **Fixed OOM Attack Vector:** Added `MAX_MESSAGE_SIZE` (1GB) check in all recv methods
+- **Fixed Parameter Overflow:** Added client-side check for > 32,767 params (`EncodeError::TooManyParameters`)
+- **Added `PgError::Encode` variant:** Consistent error propagation for encoding failures
+- **Strict UTF-8 Validation:** `PgRow::get_string()` now returns `None` for invalid UTF-8 instead of replacement
+
+### New Features
+
+- **Query Cancellation:** Added `CancelToken` and `PooledConnection::cancel_token()` for query cancellation
+- **Worker Skip Locked:** Upgraded `qail worker` to use atomic `FOR UPDATE SKIP LOCKED` pattern
+
+### Fixed
+
+- All encoder methods (`encode_bind`, `encode_extended_query`, etc.) now return `Result`
+- Refactored `EncodeError` to shared `pg/src/protocol/error.rs`
+
 ## [0.14.13] - 2026-01-02
 
 ### New Crate: qail-redis — Unified Qail AST

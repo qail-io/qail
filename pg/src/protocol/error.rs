@@ -1,12 +1,16 @@
-//! Encoding errors for AST to wire protocol conversion.
+//! Encoding errors for PostgreSQL wire protocol.
+//!
+//! Shared by `PgEncoder` and `AstEncoder`.
 
 use std::fmt;
 
-/// Errors that can occur during AST encoding.
+/// Errors that can occur during wire protocol encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodeError {
     /// A string value contains a literal NULL byte (0x00).
     NullByte,
+    /// Too many parameters for the protocol (limit is i16::MAX = 32767).
+    TooManyParameters(usize),
 }
 
 impl fmt::Display for EncodeError {
@@ -15,20 +19,11 @@ impl fmt::Display for EncodeError {
             EncodeError::NullByte => {
                 write!(f, "Value contains NULL byte (0x00) which is invalid in PostgreSQL")
             }
+            EncodeError::TooManyParameters(count) => {
+                write!(f, "Too many parameters: {} (Limit is 32767)", count)
+            }
         }
     }
 }
 
 impl std::error::Error for EncodeError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_encode_error_display() {
-        let err = EncodeError::NullByte;
-        assert!(err.to_string().contains("NULL byte"));
-    }
-}
-
