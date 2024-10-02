@@ -50,8 +50,40 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
                     if i > 0 {
                         buf.extend_from_slice(b" AND ");
                     }
-                    // Encode condition inline (no params for filter conditions)
-                    buf.extend_from_slice(cond.to_string().as_bytes());
+                    // Encode condition inline using AST encoder (not to_string())
+                    encode_expr(&cond.left, buf);
+                    buf.extend_from_slice(b" ");
+                    encode_operator(&cond.op, buf);
+                    buf.extend_from_slice(b" ");
+                    // Handle Value::Expr specially for complex expressions like NOW() - INTERVAL
+                    match &cond.value {
+                        Value::Expr(expr) => encode_column_expr(expr, buf),
+                        Value::String(s) => {
+                            buf.extend_from_slice(b"'");
+                            buf.extend_from_slice(s.as_bytes());
+                            buf.extend_from_slice(b"'");
+                        }
+                        Value::Int(n) => buf.extend_from_slice(n.to_string().as_bytes()),
+                        Value::Bool(b) => buf.extend_from_slice(if *b { b"TRUE" } else { b"FALSE" }),
+                        Value::Null => buf.extend_from_slice(b"NULL"),
+                        Value::Array(arr) => {
+                            buf.extend_from_slice(b"(");
+                            for (j, v) in arr.iter().enumerate() {
+                                if j > 0 {
+                                    buf.extend_from_slice(b", ");
+                                }
+                                if let Value::String(s) = v {
+                                    buf.extend_from_slice(b"'");
+                                    buf.extend_from_slice(s.as_bytes());
+                                    buf.extend_from_slice(b"'");
+                                } else {
+                                    buf.extend_from_slice(v.to_string().as_bytes());
+                                }
+                            }
+                            buf.extend_from_slice(b")");
+                        }
+                        _ => buf.extend_from_slice(cond.value.to_string().as_bytes()),
+                    }
                 }
                 buf.extend_from_slice(b")");
             }
@@ -323,7 +355,8 @@ pub fn encode_expr(expr: &Expr, buf: &mut BytesMut) {
         Expr::Named(name) => buf.extend_from_slice(name.as_bytes()),
         Expr::Star => buf.extend_from_slice(b"*"),
         Expr::Aliased { name, .. } => buf.extend_from_slice(name.as_bytes()),
-        _ => buf.extend_from_slice(b"*"),
+        // Delegate complex expressions to the full encoder
+        _ => encode_column_expr(expr, buf),
     }
 }
 
