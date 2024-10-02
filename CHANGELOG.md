@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.15] - 2026-01-02
+
+### Critical Bug Fixes
+
+- **Fixed SCRAM-SHA-256 Authentication:** Critical bug where `connect_with_password()` function signature had `database` and `password` parameters in unexpected order. Callers were passing `(host, port, user, password, database)` but signature was `(host, port, user, database, password)`, causing password auth to fail with wrong credentials.
+- **Fixed INSERT Column Ordering:** `set_value()` pattern was generating INSERT without column names, causing PostgreSQL to expect values in table column order. Now extracts column names from `condition.left` when `cmd.columns` is empty.
+- **Fixed INSERT RETURNING:** Added RETURNING clause encoding for `returning_all()` to work properly.
+
+### New Features
+
+- **`PgDriver::connect_env()`:** Native DATABASE_URL parsing - no more manual URL extraction
+- **`PgDriver::connect_url(url)`:** Connect using any PostgreSQL URL string
+- Full URL parsing with proper auth, host:port, and database extraction
+
 ## [0.14.14] - 2026-01-02
 
 ### Security Hardening (Battle-Tested)
