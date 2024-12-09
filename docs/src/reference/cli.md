@@ -228,6 +228,39 @@ qail migrate status postgres://...
 #   ✓ Migration history table is ready
 ```
 
+### `qail exec`
+
+Execute type-safe QAIL statements against a database:
+
+```bash
+# Inline QAIL execution
+qail exec "get users fields id, email where active = true" --url postgres://...
+qail exec "add::users" --url postgres://... --tx
+
+# From file
+qail exec -f seed.qail --url postgres://...
+
+# Dry-run (preview generated SQL)
+qail exec "get::users" --dry-run
+# 📋 Parsed 1 QAIL statement(s)
+# 🔍 DRY-RUN MODE - Generated SQL:
+# Statement 1:
+#   SELECT * FROM users
+# No changes made.
+```
+
+**Options:**
+- `-f, --file <FILE>`: Path to `.qail` file with statements (one per line)
+- `-u, --url <URL>`: Database connection URL
+- `--tx`: Wrap all statements in a transaction
+- `--dry-run`: Preview generated SQL without executing
+
+**Features:**
+- Type-safe execution via QAIL AST (`driver.execute(ast)`)
+- Batch execution (multiple statements per file)
+- Transaction support with automatic rollback on error
+- Comments supported (`#` and `--`)
+
 ### `qail fmt`
 
 Format QAIL text:
