@@ -182,16 +182,34 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
             }
         }
         Expr::JsonAccess { column, path_segments, alias } => {
+            // Wrap in parentheses to avoid operator precedence issues with || (concat)
+            buf.extend_from_slice(b"(");
             buf.extend_from_slice(column.as_bytes());
             for (key, as_text) in path_segments {
+                // Check if key is an integer (array index)
+                let is_integer = key.parse::<i64>().is_ok();
+                
                 if *as_text {
-                    buf.extend_from_slice(b"->>'");
+                    if is_integer {
+                        buf.extend_from_slice(b"->>");
+                        buf.extend_from_slice(key.as_bytes());
+                    } else {
+                        buf.extend_from_slice(b"->>'");
+                        buf.extend_from_slice(key.as_bytes());
+                        buf.extend_from_slice(b"'");
+                    }
                 } else {
-                    buf.extend_from_slice(b"->'");
+                    if is_integer {
+                        buf.extend_from_slice(b"->");
+                        buf.extend_from_slice(key.as_bytes());
+                    } else {
+                        buf.extend_from_slice(b"->'");
+                        buf.extend_from_slice(key.as_bytes());
+                        buf.extend_from_slice(b"'");
+                    }
                 }
-                buf.extend_from_slice(key.as_bytes());
-                buf.extend_from_slice(b"'");
             }
+            buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
                 buf.extend_from_slice(a.as_bytes());
