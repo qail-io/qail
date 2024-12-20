@@ -10,16 +10,15 @@
 //! await init();
 //!
 //! // Parse and get SQL directly
-//! const sql = parseAndTranspile("get::users:'_[active=true]");
+//! const sql = parseAndTranspile("get users fields * where active = true");
 //! console.log(sql); // "SELECT * FROM users WHERE active = true"
 //!
 //! // Schema operations
-//! const createTable = parseAndTranspile("make::users:'id:uuid^pk = uuid()'email:varchar^uniq");
+//! const createTable = parseAndTranspile("make users fields id UUID, email VARCHAR");
 //! console.log(createTable); // "CREATE TABLE users (...)"
 //!
-//! // Index creation
-//! const index = parseAndTranspile("index::idx_email^on(users:'email)^unique");
-//! console.log(index); // "CREATE UNIQUE INDEX idx_email ON users (email)"
+//! // With filters
+//! const filtered = parseAndTranspile("get users fields id, name where role = 'admin'");
 //! ```
 
 use qail_core::transpiler::ToSql;

@@ -36,6 +36,7 @@ pub use cancel::CancelToken;
 pub use io_backend::{IoBackend, backend_name, detect as detect_io_backend};
 pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection};
 pub use prepared::PreparedStatement;
+pub use row::QailRow;
 
 use qail_core::ast::Qail;
 use std::collections::HashMap;
@@ -290,6 +291,25 @@ impl PgDriver {
     pub async fn fetch_all(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         // Delegate to fetch_all_cached for cached-by-default behavior
         self.fetch_all_cached(cmd).await
+    }
+
+    /// Execute a QAIL command and fetch all rows as a typed struct.
+    /// Requires the target type to implement `QailRow` trait.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let users: Vec<User> = driver.fetch_typed::<User>(&query).await?;
+    /// ```
+    pub async fn fetch_typed<T: row::QailRow>(&mut self, cmd: &Qail) -> PgResult<Vec<T>> {
+        let rows = self.fetch_all(cmd).await?;
+        Ok(rows.iter().map(T::from_row).collect())
+    }
+
+    /// Execute a QAIL command and fetch a single row as a typed struct.
+    /// Returns None if no rows are returned.
+    pub async fn fetch_one_typed<T: row::QailRow>(&mut self, cmd: &Qail) -> PgResult<Option<T>> {
+        let rows = self.fetch_all(cmd).await?;
+        Ok(rows.first().map(T::from_row))
     }
 
     /// Execute a QAIL command and fetch all rows (UNCACHED).

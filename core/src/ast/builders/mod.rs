@@ -42,6 +42,7 @@ pub mod json;
 pub mod literals;
 pub mod shortcuts;
 pub mod time;
+pub mod typed;
 
 // Re-export everything for convenient `use qail_core::ast::builders::*;`
 

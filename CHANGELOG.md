@@ -5,6 +5,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.20] - 2026-01-10
+
+### Breaking Changes ⚠️
+
+- **v2 Syntax Only:** Removed v1 horizontal syntax (`get::table:'col[cond]`). Parser now only accepts v2 keyword syntax:
+  - ✅ `get users fields id, email where active = true`
+  - ❌ `get::users:'id'email[active=true]` — **Now a parse error!**
+
+### New Features
+
+- **Compile-Time Type Safety (`qail types`):** Full Diesel-like type checking for QAIL queries
+  - `qail types schema.qail -o schema.rs` — generate typed Rust schema
+  - `TypedColumn<T>` for each column with SQL→Rust type mapping
+  - `typed_eq()`, `typed_ne()`, `typed_gt()`, `typed_lt()` builder methods
+  - `ColumnValue<T>` trait enforces compile-time type compatibility
+  - Reserved keywords escaped automatically (`type` → `r#type`)
+
+### Fixed
+
+- **Example gating:** `battle_qail_row` example now requires `--features chrono,uuid`
+
+### Updated
+
+- All doc comments, tests, examples updated to v2 syntax
+- Scanner regex patterns kept for legacy codebase detection (`qail migrate analyze`)
+
+
+## [0.14.18] - 2026-01-09
+
+### New Features
+
+- **`qail exec` Command:** Type-safe QAIL AST execution for seeding and admin tasks
+  - `qail exec "get users fields *" --url postgres://...` — execute QAIL query
+  - `qail exec -f seed.qail --url postgres://...` — execute from file
+  - `--tx` flag wraps all statements in a transaction with auto-rollback on error
+  - `--dry-run` previews generated SQL without executing
+  - Batch execution: one QAIL statement per line in `.qail` files
+  - Comments supported (`#` and `--`)
+
+### Documentation
+
+- Updated CLI doc comments to v2 QAIL syntax examples
+- Added `qail exec` to CLI reference documentation
+
+## [0.14.17] - 2026-01-02
+
+### New Features
+
+- **`QailRow` Trait:** Native struct mapping without proc macros
+  - Implement `columns()` and `from_row()` for automatic struct mapping
+  - No external dependencies - pure trait-based approach
+- **`fetch_typed::<T>()` Method:** Automatic struct conversion
+  - `let users: Vec<User> = driver.fetch_typed::<User>(&query).await?`
+  - Supports any type implementing `QailRow`
+- **`fetch_one_typed::<T>()` Method:** Single-row typed fetch
+  - Returns `Option<T>` for zero-or-one row queries
+
+### Bug Fixes
+
+- **Fixed JSON Array Index Encoding:** Integer keys now output `->0` instead of `->'0'`
+  - Before: `metadata->'vessel_bookings'->'0'->>'field'` ❌
+  - After: `metadata->'vessel_bookings'->0->>'field'` ✅
+- **Fixed JSON Operator Precedence:** Added parentheses around `JsonAccess` expressions
+  - Prevents `A || B || C->'d'` from being parsed as `((A||B)||C)->'d'`
+
+
+## [0.14.16] - 2026-01-02
+
+### Critical Bug Fixes
+
+- **Fixed ORDER BY Multi-Cage Encoding:** Critical bug where encoder only processed the FIRST `.order_by()` call and ignored subsequent ones due to `break;` statement. This caused `DISTINCT ON` queries with multiple ORDER BY columns to return random rows instead of the most recent.
+- **Fixed `encode_expr` Fallback:** Unhandled Expr variants (JsonAccess, FunctionCall, etc.) now delegate to full encoder instead of outputting `*`.
+- **Fixed Partition Cage Encoding:** `.group_by_expr()` now properly encodes explicit GROUP BY expressions.
+
+### New Features
+
+- **Ergonomic Row Extraction:** Added unwrap-free helper methods to `PgRow`:
+  - `text(idx)` - Returns String, defaults to empty
+  - `text_or(idx, default)` - Returns String with custom default
+  - `int(idx)` - Returns i64, defaults to 0
+  - `float(idx)` - Returns f64, defaults to 0.0
+  - `boolean(idx)` - Returns bool, defaults to false
+  - `datetime(idx)` - Returns `Option<DateTime<Utc>>` (feature: `chrono`)
+  - `uuid_typed(idx)` - Returns `Option<Uuid>` (feature: `uuid`)
+
 ## [0.14.15] - 2026-01-02
 
 ### Critical Bug Fixes

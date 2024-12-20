@@ -17,7 +17,7 @@ pub enum AnalysisMode {
 /// Type of query found in source code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryType {
-    /// Native QAIL query (get::, set::, del::, add::)
+    /// Native QAIL query (v2: get users, or legacy v1: get::users)
     Qail,
     RawSql,
 }
@@ -84,7 +84,7 @@ impl CodebaseScanner {
     /// Create a new scanner with default patterns.
     pub fn new() -> Self {
         Self {
-            // QAIL legacy patterns: get::table, set::table, del::table, add::table
+            // QAIL legacy v1 patterns: get::table (for scanning old codebases)
             qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)").unwrap(),
             // QAIL column: 'column_name
             qail_column_pattern: Regex::new(r"'(\w+)").unwrap(),
