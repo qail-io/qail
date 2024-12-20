@@ -235,13 +235,13 @@ Execute type-safe QAIL statements against a database:
 ```bash
 # Inline QAIL execution
 qail exec "get users fields id, email where active = true" --url postgres://...
-qail exec "add::users" --url postgres://... --tx
+qail exec "add users fields name, email values 'Alice', 'a@test.com'" --url postgres://... --tx
 
 # From file
 qail exec -f seed.qail --url postgres://...
 
 # Dry-run (preview generated SQL)
-qail exec "get::users" --dry-run
+qail exec "get users fields *" --dry-run
 # 📋 Parsed 1 QAIL statement(s)
 # 🔍 DRY-RUN MODE - Generated SQL:
 # Statement 1:

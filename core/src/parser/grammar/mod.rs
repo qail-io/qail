@@ -13,10 +13,9 @@ pub mod special_funcs;
 use crate::ast::*;
 use nom::{
     IResult, Parser,
-    branch::alt,
-    bytes::complete::{tag, tag_no_case},
+    bytes::complete::tag_no_case,
     character::complete::{multispace0, multispace1},
-    combinator::{opt, value},
+    combinator::opt,
     multi::many0,
 };
 use self::base::*;
@@ -68,11 +67,8 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
     };
 
     let (input, (action, distinct)) = parse_action(input)?;
-    // Accept either "::" or whitespace as separator (supports add::table and add table)
-    let (input, _) = alt((
-        value((), tag("::")),
-        value((), multispace1),
-    )).parse(input)?;
+    // v2 syntax only: whitespace separator between action and table
+    let (input, _) = multispace1(input)?;
 
     // Supports expressions like: CASE WHEN ... END, functions, columns
     let (input, distinct_on) = if distinct {

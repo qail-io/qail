@@ -5,12 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.20] - 2026-01-10
+
+### Breaking Changes ⚠️
+
+- **v2 Syntax Only:** Removed v1 horizontal syntax (`get::table:'col[cond]`). Parser now only accepts v2 keyword syntax:
+  - ✅ `get users fields id, email where active = true`
+  - ❌ `get::users:'id'email[active=true]` — **Now a parse error!**
+
+### New Features
+
+- **Compile-Time Type Safety (`qail types`):** Full Diesel-like type checking for QAIL queries
+  - `qail types schema.qail -o schema.rs` — generate typed Rust schema
+  - `TypedColumn<T>` for each column with SQL→Rust type mapping
+  - `typed_eq()`, `typed_ne()`, `typed_gt()`, `typed_lt()` builder methods
+  - `ColumnValue<T>` trait enforces compile-time type compatibility
+  - Reserved keywords escaped automatically (`type` → `r#type`)
+
+### Fixed
+
+- **Example gating:** `battle_qail_row` example now requires `--features chrono,uuid`
+
+### Updated
+
+- All doc comments, tests, examples updated to v2 syntax
+- Scanner regex patterns kept for legacy codebase detection (`qail migrate analyze`)
+
+
 ## [0.14.18] - 2026-01-09
 
 ### New Features
 
 - **`qail exec` Command:** Type-safe QAIL AST execution for seeding and admin tasks
-  - `qail exec "get::users" --url postgres://...` — execute QAIL query
+  - `qail exec "get users fields *" --url postgres://...` — execute QAIL query
   - `qail exec -f seed.qail --url postgres://...` — execute from file
   - `--tx` flag wraps all statements in a transaction with auto-rollback on error
   - `--dry-run` previews generated SQL without executing

@@ -4,9 +4,9 @@
 //!
 //! # Example
 //! ```bash
-//! qail exec "add::users" --url postgres://...
+//! qail exec "add users fields name, email values 'Alice', 'a@test.com'" --url postgres://...
 //! qail exec -f seed.qail --url postgres://... --tx
-//! qail exec "get::users" --dry-run
+//! qail exec "get users" --dry-run
 //! ```
 
 use anyhow::Result;

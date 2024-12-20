@@ -9,7 +9,7 @@
 //!   get orders where user_id = :user_id order by created_at desc
 //!
 //! execute create_user(email: String, name: String):
-//!   add::users : email, name [ :email, :name ]
+//!   add users fields email, name values :email, :name
 //! ```
 
 use nom::{
@@ -281,7 +281,7 @@ mod tests {
     fn test_parse_execute() {
         let input = r#"
             execute create_user(email: String, name: String):
-              add::users : email, name [ :email, :name ]
+              add users fields email, name values :email, :name
         "#;
 
         let qf = QueryFile::parse(input).expect("parse failed");
@@ -302,7 +302,7 @@ mod tests {
               get users order by created_at desc
             
             execute delete_user(id: Uuid):
-              del::users where id = :id
+              del users where id = :id
         "#;
 
         let qf = QueryFile::parse(input).expect("parse failed");
