@@ -15,10 +15,10 @@ query find_by_email(email: String) -> Option<User>:
   get users where email = :email limit 1
 
 execute create_user(email: String, name: String):
-  add::users : email, name [ :email, :name ]
+  add users fields email, name values :email, :name
 
 execute delete_user(id: Uuid):
-  del::users where id = :id
+  del users where id = :id
 "#;
 
     println!("Testing query file parsing...\n");

@@ -205,6 +205,124 @@ impl Validator {
             _ => None,
         }
     }
+    
+    /// Get column type for a table.column
+    pub fn get_column_type(&self, table: &str, column: &str) -> Option<&String> {
+        self.column_types.get(table)?.get(column)
+    }
+    
+    /// Validate that a Value's type matches the expected column type.
+    /// Returns Ok(()) if compatible, Err with TypeMismatch if not.
+    pub fn validate_value_type(
+        &self,
+        table: &str,
+        column: &str,
+        value: &crate::ast::Value,
+    ) -> Result<(), ValidationError> {
+        use crate::ast::Value;
+        
+        // Get the expected type for this column
+        let expected_type = match self.get_column_type(table, column) {
+            Some(t) => t.to_uppercase(),
+            None => return Ok(()), // Column type unknown, skip validation
+        };
+        
+        // NULL is always allowed (for nullable columns)
+        if matches!(value, Value::Null | Value::NullUuid) {
+            return Ok(());
+        }
+        
+        // Param and NamedParam are runtime values - can't validate at compile time
+        if matches!(value, Value::Param(_) | Value::NamedParam(_) | Value::Function(_) | Value::Subquery(_) | Value::Expr(_)) {
+            return Ok(());
+        }
+        
+        // Map Value variant to its type name
+        let value_type = match value {
+            Value::Bool(_) => "BOOLEAN",
+            Value::Int(_) => "INT",
+            Value::Float(_) => "FLOAT",
+            Value::String(_) => "TEXT",
+            Value::Uuid(_) => "UUID",
+            Value::Array(_) => "ARRAY",
+            Value::Column(_) => return Ok(()), // Column reference, type checked elsewhere
+            Value::Interval { .. } => "INTERVAL",
+            Value::Timestamp(_) => "TIMESTAMP",
+            Value::Bytes(_) => "BYTEA",
+            Value::Vector(_) => "VECTOR",
+            _ => return Ok(()), // Unknown value type, skip
+        };
+        
+        // Check compatibility
+        if !Self::types_compatible(&expected_type, value_type) {
+            return Err(ValidationError::TypeMismatch {
+                table: table.to_string(),
+                column: column.to_string(),
+                expected: expected_type,
+                got: value_type.to_string(),
+            });
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if expected column type is compatible with value type.
+    /// Allows flexible matching (e.g., INT matches INT4, BIGINT, INTEGER, etc.)
+    fn types_compatible(expected: &str, value_type: &str) -> bool {
+        let expected = expected.to_uppercase();
+        let value_type = value_type.to_uppercase();
+        
+        // Exact match
+        if expected == value_type {
+            return true;
+        }
+        
+        // Integer family
+        let int_types = ["INT", "INT4", "INT8", "INTEGER", "BIGINT", "SMALLINT", "SERIAL", "BIGSERIAL"];
+        if int_types.contains(&expected.as_str()) && value_type == "INT" {
+            return true;
+        }
+        
+        // Float family
+        let float_types = ["FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DECIMAL", "NUMERIC", "REAL"];
+        if float_types.contains(&expected.as_str()) && (value_type == "FLOAT" || value_type == "INT") {
+            return true;
+        }
+        
+        // Text family - TEXT is very flexible in PostgreSQL
+        let text_types = ["TEXT", "VARCHAR", "CHAR", "CHARACTER", "CITEXT", "NAME"];
+        if text_types.contains(&expected.as_str()) && value_type == "TEXT" {
+            return true;
+        }
+        
+        // Boolean
+        if (expected == "BOOLEAN" || expected == "BOOL") && value_type == "BOOLEAN" {
+            return true;
+        }
+        
+        // UUID
+        if expected == "UUID" && (value_type == "UUID" || value_type == "TEXT") {
+            return true;
+        }
+        
+        // Timestamp family
+        let ts_types = ["TIMESTAMP", "TIMESTAMPTZ", "DATE", "TIME", "TIMETZ"];
+        if ts_types.contains(&expected.as_str()) && (value_type == "TIMESTAMP" || value_type == "TEXT") {
+            return true;
+        }
+        
+        // JSONB/JSON accepts almost anything
+        if expected == "JSONB" || expected == "JSON" {
+            return true;
+        }
+        
+        // Arrays
+        if expected.contains("[]") || expected.starts_with("_") {
+            return value_type == "ARRAY";
+        }
+        
+        false
+    }
 
     /// Validate an entire Qail against the schema.
     pub fn validate_command(&self, cmd: &Qail) -> ValidationResult {
@@ -228,13 +346,23 @@ impl Validator {
                     // For join conditions, column might be qualified (table.column)
                     if name.contains('.') {
                         let parts: Vec<&str> = name.split('.').collect();
-                        if parts.len() == 2
-                            && let Err(e) = self.validate_column(parts[0], parts[1])
-                        {
+                        if parts.len() == 2 {
+                            if let Err(e) = self.validate_column(parts[0], parts[1]) {
+                                errors.push(e);
+                            }
+                            // Type validation for qualified column
+                            if let Err(e) = self.validate_value_type(parts[0], parts[1], &cond.value) {
+                                errors.push(e);
+                            }
+                        }
+                    } else {
+                        if let Err(e) = self.validate_column(&cmd.table, &name) {
                             errors.push(e);
                         }
-                    } else if let Err(e) = self.validate_column(&cmd.table, &name) {
-                        errors.push(e);
+                        // Type validation for unqualified column
+                        if let Err(e) = self.validate_value_type(&cmd.table, &name, &cond.value) {
+                            errors.push(e);
+                        }
                     }
                 }
             }
