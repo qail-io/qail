@@ -5,8 +5,8 @@
 //! # Usage
 //!
 //! ```bash
-//! # Parse and transpile a query
-//! qail "Qail::get(\"users\").filter(\"active\", true).limit(10)"
+//! # Parse and transpile a query (v2 keyword syntax)
+//! qail "get users fields id, email where active = true limit 10"
 //!
 //! # Interactive REPL mode
 //! qail repl
@@ -98,7 +98,7 @@ enum Commands {
     Symbols,
     /// Generate a migration file
     Mig {
-        /// The QAIL migration command (e.g., make::users...)
+        /// The QAIL migration command (e.g., make users fields id UUID, email VARCHAR)
         query: String,
         /// Optional name for the migration
         #[arg(short, long)]
@@ -168,6 +168,32 @@ enum Commands {
         /// Batch size per poll
         #[arg(short, long, default_value = "100")]
         batch: u32,
+    },
+    /// Execute type-safe QAIL statements
+    Exec {
+        /// QAIL query string (e.g., "add users fields name, email values 'test', 'a@b.com'")
+        query: Option<String>,
+        /// Path to .qail file
+        #[arg(short, long)]
+        file: Option<String>,
+        /// Database URL
+        #[arg(short, long)]
+        url: Option<String>,
+        /// Wrap all statements in a transaction
+        #[arg(long)]
+        tx: bool,
+        /// Dry-run: print generated SQL without executing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Generate typed Rust schema from schema.qail
+    Types {
+        /// Path to schema.qail file
+        #[arg(default_value = "schema.qail")]
+        schema: String,
+        /// Output file path (prints to stdout if not specified)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 
@@ -483,6 +509,18 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Worker { interval, batch }) => {
             qail::worker::run_worker(*interval, *batch).await?;
+        },
+        Some(Commands::Exec { query, file, url, tx, dry_run }) => {
+            qail::exec::run_exec(qail::exec::ExecConfig {
+                query: query.clone(),
+                file: file.clone(),
+                url: url.clone(),
+                tx: *tx,
+                dry_run: *dry_run,
+            }).await?;
+        },
+        Some(Commands::Types { schema, output }) => {
+            qail::types::generate_types(&schema, output.as_deref())?;
         },
         None => {
             if let Some(query) = &cli.query {

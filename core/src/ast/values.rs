@@ -153,3 +153,48 @@ impl From<Option<Uuid>> for Value {
         }
     }
 }
+
+impl From<Option<String>> for Value {
+    fn from(opt: Option<String>) -> Self {
+        match opt {
+            Some(s) => Value::String(s),
+            None => Value::Null,
+        }
+    }
+}
+
+impl<'a> From<Option<&'a str>> for Value {
+    fn from(opt: Option<&'a str>) -> Self {
+        match opt {
+            Some(s) => Value::String(s.to_string()),
+            None => Value::Null,
+        }
+    }
+}
+
+impl From<Option<i64>> for Value {
+    fn from(opt: Option<i64>) -> Self {
+        match opt {
+            Some(n) => Value::Int(n),
+            None => Value::Null,
+        }
+    }
+}
+
+impl From<Option<i32>> for Value {
+    fn from(opt: Option<i32>) -> Self {
+        match opt {
+            Some(n) => Value::Int(n as i64),
+            None => Value::Null,
+        }
+    }
+}
+
+impl From<Option<bool>> for Value {
+    fn from(opt: Option<bool>) -> Self {
+        match opt {
+            Some(b) => Value::Bool(b),
+            None => Value::Null,
+        }
+    }
+}
