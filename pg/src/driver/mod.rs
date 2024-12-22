@@ -200,6 +200,8 @@ impl PgDriver {
     /// 
     /// Format: `postgresql://user:password@host:port/database`
     /// or `postgres://user:password@host:port/database`
+    /// 
+    /// URL percent-encoding is automatically decoded for user and password.
     fn parse_database_url(url: &str) -> PgResult<(String, u16, String, String, Option<String>)> {
         // Remove scheme (postgresql:// or postgres://)
         let after_scheme = url.split("://").nth(1)
@@ -216,9 +218,13 @@ impl PgDriver {
         let (user, password) = if let Some(auth) = auth_part {
             let parts: Vec<&str> = auth.splitn(2, ':').collect();
             if parts.len() == 2 {
-                (parts[0].to_string(), Some(parts[1].to_string()))
+                // URL-decode both user and password
+                (
+                    Self::percent_decode(parts[0]),
+                    Some(Self::percent_decode(parts[1])),
+                )
             } else {
-                (parts[0].to_string(), None)
+                (Self::percent_decode(parts[0]), None)
             }
         } else {
             return Err(PgError::Connection("Invalid DATABASE_URL: missing user".to_string()));
@@ -242,6 +248,37 @@ impl PgDriver {
         };
         
         Ok((host, port, user, database, password))
+    }
+    
+    /// Decode URL percent-encoded string.
+    /// Handles common encodings: %20 (space), %2B (+), %3D (=), %40 (@), %2F (/), etc.
+    fn percent_decode(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                // Try to parse next two chars as hex
+                let hex: String = chars.by_ref().take(2).collect();
+                if hex.len() == 2 {
+                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                        result.push(byte as char);
+                        continue;
+                    }
+                }
+                // If parsing failed, keep original
+                result.push('%');
+                result.push_str(&hex);
+            } else if c == '+' {
+                // '+' often represents space in query strings (form encoding)
+                // But in path components, keep as-is. PostgreSQL URLs use path encoding.
+                result.push('+');
+            } else {
+                result.push(c);
+            }
+        }
+        
+        result
     }
 
     /// Connect to PostgreSQL with a connection timeout.

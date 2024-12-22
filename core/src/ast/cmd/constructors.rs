@@ -219,4 +219,52 @@ impl Qail {
             ..Default::default()
         }
     }
+
+    // PostgreSQL Pub/Sub (LISTEN/NOTIFY)
+    
+    /// Create a LISTEN command to subscribe to a channel.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmd = Qail::listen("orders");
+    /// // Generates: LISTEN orders
+    /// ```
+    pub fn listen(channel: impl Into<String>) -> Self {
+        Self {
+            action: Action::Listen,
+            channel: Some(channel.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Create an UNLISTEN command to unsubscribe from a channel.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmd = Qail::unlisten("orders");
+    /// // Generates: UNLISTEN orders
+    /// ```
+    pub fn unlisten(channel: impl Into<String>) -> Self {
+        Self {
+            action: Action::Unlisten,
+            channel: Some(channel.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Create a NOTIFY command to send a message to a channel.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmd = Qail::notify("orders", "new_order:123");
+    /// // Generates: NOTIFY orders, 'new_order:123'
+    /// ```
+    pub fn notify(channel: impl Into<String>, payload: impl Into<String>) -> Self {
+        Self {
+            action: Action::Notify,
+            channel: Some(channel.into()),
+            payload: Some(payload.into()),
+            ..Default::default()
+        }
+    }
 }

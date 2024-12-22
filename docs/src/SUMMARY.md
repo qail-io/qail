@@ -27,6 +27,7 @@
 - [Connection Pooling](./features/connection-pool.md)
 - [Hybrid Architecture](./features/hybrid.md)
 - [Type System](./features/types.md)
+- [Type Safety](./features/type-safety.md)
 
 # Reference
 

@@ -107,26 +107,18 @@ impl Qail {
         self.filter(column, Operator::Eq, value)
     }
 
-    // ============================================================
-    // FLUENT FILTER SHORTCUTS (ergonomic API)
-    // ============================================================
 
-    /// Filter: column = value (shorter alias for where_eq)
     pub fn eq(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Eq, value)
     }
 
-    /// Filter: column != value
     pub fn ne(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Ne, value)
     }
 
-    /// Filter: column > value
     pub fn gt(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Gt, value)
     }
-
-    /// Filter: column >= value
     pub fn gte(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Gte, value)
     }
@@ -136,32 +128,26 @@ impl Qail {
         self.filter(column, Operator::Lt, value)
     }
 
-    /// Filter: column <= value
     pub fn lte(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Lte, value)
     }
 
-    /// Filter: column IS NULL
     pub fn is_null(self, column: impl AsRef<str>) -> Self {
         self.filter(column, Operator::IsNull, Value::Null)
     }
 
-    /// Filter: column IS NOT NULL
     pub fn is_not_null(self, column: impl AsRef<str>) -> Self {
         self.filter(column, Operator::IsNotNull, Value::Null)
     }
 
-    /// Filter: column LIKE pattern
     pub fn like(self, column: impl AsRef<str>, pattern: impl Into<Value>) -> Self {
         self.filter(column, Operator::Like, pattern)
     }
 
-    /// Filter: column ILIKE pattern (case-insensitive)
     pub fn ilike(self, column: impl AsRef<str>, pattern: impl Into<Value>) -> Self {
         self.filter(column, Operator::ILike, pattern)
     }
 
-    /// Filter: column IN (values)
     pub fn in_vals<I, V>(self, column: impl AsRef<str>, values: I) -> Self
     where
         I: IntoIterator<Item = V>,
