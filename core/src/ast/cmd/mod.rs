@@ -8,93 +8,88 @@ use serde::{Deserialize, Serialize};
 pub struct Qail {
     pub action: Action,
     pub table: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<Expr>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub joins: Vec<Join>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cages: Vec<Cage>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub distinct: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_def: Option<IndexDef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub table_constraints: Vec<TableConstraint>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub set_ops: Vec<(SetOp, Box<Qail>)>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub having: Vec<Condition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "GroupByMode::is_simple")]
     pub group_by_mode: GroupByMode,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ctes: Vec<CTEDef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub distinct_on: Vec<Expr>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returning: Option<Vec<Expr>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_conflict: Option<OnConflict>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_query: Option<Box<Qail>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub savepoint_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub from_tables: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub using_tables: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock_mode: Option<LockMode>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch: Option<(u64, bool)>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub default_values: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overriding: Option<OverridingKind>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<(SampleMethod, f64, Option<u64>)>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub only_table: bool,
     // Vector database fields (Qdrant)
-    /// Vector embedding for similarity search
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector: Option<Vec<f32>>,
-    /// Minimum similarity score threshold
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_threshold: Option<f32>,
-    /// Named vector field (for collections with multiple vectors)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_name: Option<String>,
-    /// Whether to return vectors in search results
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub with_vector: bool,
-    /// Vector dimensions (e.g., 1536)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_size: Option<u64>,
-    /// Distance metric (Cosine, Euclid, Dot)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance: Option<Distance>,
-    /// Storage optimized for disk (mmap)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_disk: Option<bool>,
     // PostgreSQL procedural objects
-    /// Function definition (CREATE FUNCTION)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub function_def: Option<crate::ast::FunctionDef>,
-    /// Trigger definition (CREATE TRIGGER)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_def: Option<crate::ast::TriggerDef>,
     // Redis fields
-    /// Raw binary value for Redis SET
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_value: Option<Vec<u8>>,
-    /// TTL in seconds for Redis operations
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_ttl: Option<i64>,
-    /// SET condition (NX = only if not exists, XX = only if exists)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_set_condition: Option<String>,
+}
+
+/// Helper for skip_serializing_if on bool fields
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

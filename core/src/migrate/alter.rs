@@ -169,7 +169,6 @@ impl AlterTable {
         self
     }
 
-    /// ALTER COLUMN SET DEFAULT
     pub fn set_default(mut self, column: impl Into<String>, expr: impl Into<String>) -> Self {
         self.ops.push(AlterOp::SetDefault {
             column: column.into(),
@@ -178,13 +177,11 @@ impl AlterTable {
         self
     }
 
-    /// ALTER COLUMN DROP DEFAULT
     pub fn drop_default(mut self, column: impl Into<String>) -> Self {
         self.ops.push(AlterOp::DropDefault(column.into()));
         self
     }
 
-    /// ADD CONSTRAINT
     pub fn add_constraint(
         mut self,
         name: impl Into<String>,
@@ -197,7 +194,6 @@ impl AlterTable {
         self
     }
 
-    /// DROP CONSTRAINT
     pub fn drop_constraint(mut self, name: impl Into<String>) -> Self {
         self.ops.push(AlterOp::DropConstraint {
             name: name.into(),
@@ -206,7 +202,6 @@ impl AlterTable {
         self
     }
 
-    /// DROP CONSTRAINT CASCADE
     pub fn drop_constraint_cascade(mut self, name: impl Into<String>) -> Self {
         self.ops.push(AlterOp::DropConstraint {
             name: name.into(),
@@ -215,25 +210,21 @@ impl AlterTable {
         self
     }
 
-    /// RENAME TO new_name
     pub fn rename_to(mut self, name: impl Into<String>) -> Self {
         self.ops.push(AlterOp::RenameTable(name.into()));
         self
     }
 
-    /// SET SCHEMA
     pub fn set_schema(mut self, schema: impl Into<String>) -> Self {
         self.ops.push(AlterOp::SetSchema(schema.into()));
         self
     }
 
-    /// ENABLE ROW LEVEL SECURITY
     pub fn enable_rls(mut self) -> Self {
         self.ops.push(AlterOp::SetRowLevelSecurity(true));
         self
     }
 
-    /// DISABLE ROW LEVEL SECURITY
     pub fn disable_rls(mut self) -> Self {
         self.ops.push(AlterOp::SetRowLevelSecurity(false));
         self
