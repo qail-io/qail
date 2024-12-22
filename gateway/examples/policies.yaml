@@ -1,0 +1,39 @@
+# QAIL Gateway Row-Level Security Policies
+#
+# Filter placeholders:
+#   $user_id  - Replaced with auth.user_id
+#   $role     - Replaced with auth.role
+#   $tenant_id - Replaced with auth.tenant_id (if set)
+#
+# Operations: read, create, update, delete
+
+policies:
+  # Multi-tenant isolation: users can only see their own tenant's data
+  - name: tenant_isolation
+    table: "*"
+    filter: "tenant_id = $tenant_id"
+    operations: [read, create, update, delete]
+
+  # Users can only access their own orders
+  - name: user_orders
+    table: orders
+    filter: "user_id = $user_id"
+    operations: [read, update]
+
+  # Admins have full access to everything
+  - name: admin_full_access
+    table: "*"
+    role: admin
+    operations: [read, create, update, delete]
+
+  # Public read-only access to products
+  - name: public_products
+    table: products
+    filter: "is_public = true"
+    operations: [read]
+
+  # Soft-delete: hide deleted records
+  - name: hide_deleted
+    table: "*"
+    filter: "deleted_at IS NULL"
+    operations: [read]

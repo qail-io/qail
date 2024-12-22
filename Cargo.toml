@@ -15,6 +15,7 @@ members = [
     "mysql",
     "qdrant",
     "redis",
+    "gateway",
 ]
 
 [workspace.lints.rust]

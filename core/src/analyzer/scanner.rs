@@ -25,24 +25,18 @@ pub enum QueryType {
 /// A reference to a query in source code.
 #[derive(Debug, Clone)]
 pub struct CodeReference {
-    /// File path where the reference was found
     pub file: PathBuf,
-    /// Line number (1-indexed)
     pub line: usize,
     pub table: String,
     pub columns: Vec<String>,
-    /// Type of query
     pub query_type: QueryType,
-    /// Code snippet containing the reference
     pub snippet: String,
 }
 
 /// Analysis result for a single file
 #[derive(Debug, Clone)]
 pub struct FileAnalysis {
-    /// File path
     pub file: PathBuf,
-    /// Analysis mode used
     pub mode: AnalysisMode,
     pub ref_count: usize,
     pub safe: bool,
@@ -51,9 +45,7 @@ pub struct FileAnalysis {
 /// Complete scan result with per-file breakdown
 #[derive(Debug, Default)]
 pub struct ScanResult {
-    /// All code references found
     pub refs: Vec<CodeReference>,
-    /// Per-file analysis breakdown
     pub files: Vec<FileAnalysis>,
 }
 
@@ -62,12 +54,10 @@ pub struct CodebaseScanner {
     /// Regex patterns for QAIL queries (legacy symbol syntax)
     qail_action_pattern: Regex,
     qail_column_pattern: Regex,
-    /// Regex patterns for QAIL queries (v2 keyword syntax)
     qail_v2_get_pattern: Regex,
     qail_v2_set_pattern: Regex,
     qail_v2_del_pattern: Regex,
     qail_v2_add_pattern: Regex,
-    /// Regex patterns for SQL queries
     sql_select_pattern: Regex,
     sql_insert_pattern: Regex,
     sql_update_pattern: Regex,
@@ -84,16 +74,12 @@ impl CodebaseScanner {
     /// Create a new scanner with default patterns.
     pub fn new() -> Self {
         Self {
-            // QAIL legacy v1 patterns: get::table (for scanning old codebases)
             qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)").unwrap(),
-            // QAIL column: 'column_name
             qail_column_pattern: Regex::new(r"'(\w+)").unwrap(),
-            // QAIL v2 keyword patterns
             qail_v2_get_pattern: Regex::new(r"\bget\s+(\w+)\s+fields\s+(.+?)(?:\s+where|\s+order|\s+limit|$)").unwrap(),
             qail_v2_set_pattern: Regex::new(r"\bset\s+(\w+)\s+values\s+(.+?)(?:\s+where|$)").unwrap(),
             qail_v2_del_pattern: Regex::new(r"\bdel\s+(\w+)(?:\s+where|$)").unwrap(),
             qail_v2_add_pattern: Regex::new(r"\badd\s+(\w+)\s+fields\s+(.+?)\s+values").unwrap(),
-            // SQL patterns
             sql_select_pattern: Regex::new(r"(?i)SELECT\s+(.+?)\s+FROM\s+(\w+)").unwrap(),
             sql_insert_pattern: Regex::new(r"(?i)INSERT\s+INTO\s+(\w+)").unwrap(),
             sql_update_pattern: Regex::new(r"(?i)UPDATE\s+(\w+)\s+SET").unwrap(),
