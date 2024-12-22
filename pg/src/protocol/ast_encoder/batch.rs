@@ -9,7 +9,8 @@ use super::dml::{encode_delete, encode_insert, encode_select, encode_update};
 
 use crate::protocol::EncodeError;
 
-/// Build Extended Query protocol: Parse + Bind + Execute + Sync.
+/// Build Extended Query protocol: Parse + Bind + Describe + Execute + Sync.
+/// Includes Describe to get RowDescription (column metadata).
 pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<BytesMut, EncodeError> {
     if params.len() > i16::MAX as usize {
         return Err(EncodeError::TooManyParameters(params.len()));
@@ -19,7 +20,8 @@ pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<By
         .iter()
         .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
         .sum();
-    let total_size = 9 + sql.len() + 13 + params_size + 10 + 5;
+    // Extra 6 bytes for Describe message ('D' + len + 'P' + null)
+    let total_size = 9 + sql.len() + 13 + params_size + 6 + 10 + 5;
 
     let mut buf = BytesMut::with_capacity(total_size);
 
@@ -50,6 +52,13 @@ pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<By
         }
     }
     buf.extend_from_slice(&0i16.to_be_bytes()); // Result format
+
+    // ===== DESCRIBE (Portal) =====
+    // Send Describe to get RowDescription with column names
+    buf.extend_from_slice(b"D");
+    buf.extend_from_slice(&6i32.to_be_bytes()); // Length: 4 + 1 + 1
+    buf.extend_from_slice(&[b'P']); // Describe Portal (not Statement)
+    buf.extend_from_slice(&[0]); // Unnamed portal
 
     // ===== EXECUTE =====
     buf.extend_from_slice(b"E");

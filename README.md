@@ -3,134 +3,64 @@
 > **The world's first AST-native PostgreSQL driver. No SQL strings. No ORM. Just bytes.**
 
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
+[![Docs](https://img.shields.io/badge/docs-qail.io-blue)](https://qail.io/docs)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.14.21-green)](CHANGELOG.md)
 
 ---
 
-## The Vision
+## What is QAIL?
 
-QAIL is not a query transpiler or ORM. **QAIL is a native AST PostgreSQL driver.**
+QAIL is a **native AST PostgreSQL driver**. Instead of passing SQL strings through your stack, you work directly with a typed AST (Abstract Syntax Tree). This AST compiles directly to PostgreSQL wire protocol bytes — no string interpolation, no SQL injection, no parsing at runtime.
 
-Instead of passing SQL strings through your stack, you work directly with a typed AST (Abstract Syntax Tree). This AST compiles directly to PostgreSQL wire protocol bytes — no string interpolation, no SQL injection, no parsing at runtime.
+```rust
+// Traditional: String → Parse → Execute
+sqlx::query!("SELECT id, email FROM users WHERE active = $1", true)
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Layer 1: Intent                                                │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │   let cmd = Qail::get("users").filter("id", Eq, 42); │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                              │                                   │
-│                              ▼                                   │
-│  Layer 2: Brain (Pure Logic - NO ASYNC)                         │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │   let bytes = PgEncoder::encode(&cmd);  // → BytesMut   │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                              │                                   │
-│                              ▼                                   │
-│  Layer 3: Muscle (Async I/O - Tokio)                            │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │   stream.write_all(&bytes).await?;                      │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                              │                                   │
-│                              ▼                                   │
-│  Layer 4: Database                                              │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │   PostgreSQL / MySQL / etc.                             │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Why This Matters
-
-| Old Way (SQL Strings) | QAIL Way (AST-Native) |
-|-----------------------|-----------------------|
-| `"SELECT * FROM users WHERE id = $1"` | `Qail::get("users").filter("id", Eq, id)` |
-| String concatenation risk | Typed at compile time |
-| Parse SQL at runtime | Compile to bytes directly |
-| Locked to one driver (sqlx, pg) | Runtime-agnostic |
-
----
-
-## Architecture
-
-```
-qail.rs/
-├── core/               # Layer 1: AST + Parser
-│   ├── ast/            #   Qail, Expr, Value
-│   ├── parser/         #   Text → AST (for CLI, LSP)
-│   └── transpiler/     #   AST → SQL text (legacy path)
-│
-├── pg/                 # PostgreSQL Driver (Rust)
-│   ├── protocol/       #   Layer 2: AST → BytesMut (pure, sync)
-│   └── driver/         #   Layer 3: Async I/O (tokio)
-│
-├── encoder/            # Lightweight FFI (no tokio/TLS)
-│                       #   For language bindings: Zig, Go, etc.
-│
-├── cli/                # Command-line tool
-├── lsp/                # Language server
-├── wasm/               # Browser playground
-└── ffi/                # C-API for other languages
+// QAIL: AST → Binary → Execute (no parsing!)
+Qail::get("users").columns(["id", "email"]).eq("active", true)
 ```
 
 ---
 
 ## Quick Start
 
-### Rust
-
 ```rust
 use qail_core::Qail;
-use qail_pg::{PgEncoder, PgDriver};
+use qail_pg::PgDriver;
 
-// Layer 1: Express intent as AST
-let cmd = Qail::get("users")
-    .columns(vec!["id", "email"])
-    .filter("active", Operator::Eq, true);
+// Connect
+let mut driver = PgDriver::connect("localhost", 5432, "user", "mydb").await?;
 
-// Layer 2: Compile to wire protocol (pure, sync)
-let bytes = PgEncoder::encode_simple_query(&cmd);
+// Build query as AST
+let query = Qail::get("users")
+    .columns(["id", "email", "name"])
+    .eq("active", true)
+    .order_by("created_at", Desc)
+    .limit(10);
 
-// Layer 3: Send over network (async)
-let mut driver = PgDriver::connect("localhost", 5432, "user", "db").await?;
-let rows = driver.fetch_all(&cmd).await?;
+// Execute (AST → binary wire protocol → Postgres)
+let rows = driver.fetch_all(&query).await?;
+
+for row in rows {
+    println!("{}: {}", row.get::<i32>(0), row.get::<&str>(1));
+}
 ```
 
-### CLI (for migration / debugging)
+### CLI
 
 ```bash
 # Install
 cargo install qail
 
-# Transpile QAIL text to SQL (legacy mode)
-qail "get users fields id, email where active = true"
-# → SELECT id, email FROM users WHERE active = true
-```
+# Execute query
+qail exec "get users 'id'email[active=true]" --db postgres://localhost/mydb
 
----
+# Pull schema from database
+qail pull postgres://localhost/mydb
 
-## The Three Layers
-
-### Layer 2: The Brain (Pure Logic)
-
-This is the key innovation. The encoder:
-- Takes a `Qail` (AST)
-- Returns `BytesMut` (wire protocol bytes)
-- Has **zero async**, **zero I/O**, **zero tokio**
-
-```rust
-// This is PURE computation - can compile to WASM
-let bytes = PgEncoder::encode_simple_query(&cmd);
-```
-
-### Layer 3: The Muscle (Async Runtime)
-
-The only place where tokio lives. If a better runtime emerges, only this layer changes:
-
-```rust
-// Currently uses tokio - swappable in the future
-let mut driver = PgDriver::connect(...).await?;
-driver.send(&bytes).await?;
+# Generate typed Rust schema
+qail types schema.qail > src/generated/schema.rs
 ```
 
 ---
@@ -139,72 +69,133 @@ driver.send(&bytes).await?;
 
 QAIL's AST-native architecture delivers **146% faster** query execution than SQLx:
 
-```mermaid
-xychart-beta
-    title "Queries Per Second (Higher is Better)"
-    x-axis ["SQLx", "SeaORM", "QAIL"]
-    y-axis "QPS" 0 --> 30000
-    bar [10718, 13405, 25825]
-```
-
-### Fair Benchmark Results
-
 | Driver | Latency | QPS | vs QAIL |
 |--------|---------|-----|---------|
-| SQLx | 93μs | 10,718 | 141% slower |
-| SeaORM | 75μs | 13,405 | 93% slower |
-| **QAIL** | **39μs** | **25,825** | baseline |
+| SQLx | 93µs | 10,718 | 141% slower |
+| SeaORM | 75µs | 13,405 | 93% slower |
+| **QAIL** | **39µs** | **25,825** | baseline |
 
-> **Methodology**: SELECT with WHERE + ORDER BY + LIMIT returning 25 rows.
-> TCP localhost, prepared statement caching enabled on all drivers.
-> Run: `cargo run --release --example fair_benchmark`
+### Why QAIL is Faster
 
-### Why QAIL is 146% Faster
-
-Most drivers spend CPU cycles re-serializing the same query structure for every request. QAIL treats SQL as an AST, not a string:
-
-1. **Pre-Computed Wire Bytes**: QAIL calculates static parts of the Postgres Wire Protocol (headers, query structure) once during AST build.
-
-2. **Zero-Alloc Hot Path**: When you execute a cached query, QAIL only serializes parameters into a pre-allocated reusable buffer (`BytesMut`). The rest is `memcpy`.
-
-3. **No String Hashing**: We don't hash the SQL string to find prepared statements. We use the AST's structural ID — O(1) lookup.
-
-## Supported Databases
-
-| Database | Status | Crate |
-|----------|--------|-------|
-| PostgreSQL | ✅ Production | `qail-pg` |
-| MySQL | � In Progress | `qail-mysql` |
-| SQLite | 📋 Planned | `qail-sqlite` |
-
-Each database has its own wire protocol, so each gets its own encoder.
+1. **Pre-Computed Wire Bytes**: Static parts pre-computed during AST build
+2. **Zero-Alloc Hot Path**: Only parameters serialized at execution
+3. **No SQL Parsing**: AST → binary, no string → AST → binary
 
 ---
 
-## Contributing
+## Architecture
+
+```
+qail.rs/
+├── core/          # AST + Parser + Validator + Codegen
+├── pg/            # PostgreSQL Driver (binary protocol)
+├── cli/           # Command-line tool
+├── lsp/           # Language server for IDEs
+├── wasm/          # Browser playground
+├── ffi/           # C-API for FFI
+├── go/            # Go bindings
+└── py/            # Python bindings
+```
+
+---
+
+## Features
+
+### Compile-Time Validation
+
+```rust
+// At build time, QAIL validates against schema.qail:
+// ✅ Table exists?
+// ✅ Column exists?
+// ✅ Type compatible?
+
+let q = Qail::get("users")  // ✅ users table exists
+    .columns(["id", "email"])  // ✅ columns exist
+    .eq("active", true);  // ✅ active is BOOLEAN
+```
+
+### Migrations
 
 ```bash
-git clone https://github.com/qail-io/qail.git
-cd qail
-cargo test
+# Create migration
+qail migrate create add_users_table
+
+# Apply migrations
+qail migrate up --db $DATABASE_URL
+
+# Rollback
+qail migrate down --db $DATABASE_URL
 ```
+
+### Type-Safe Schema
+
+```bash
+# Generate typed Rust from schema.qail
+qail types schema.qail > src/schema.rs
+```
+
+```rust
+// Generated: src/schema.rs
+pub struct Users;
+impl Users {
+    pub fn id() -> TypedColumn<i32> { ... }
+    pub fn email() -> TypedColumn<String> { ... }
+    pub fn active() -> TypedColumn<bool> { ... }
+}
+
+// Usage with compile-time type checking
+Qail::get(Users)
+    .columns([Users::id(), Users::email()])
+    .eq(Users::active(), true)  // Type checked!
+```
+
+---
+
+## Production Use
+
+QAIL is used in production at [ExampleApp](https://example.com) — a ferry booking platform handling real transactions.
+
+### Binary Size Optimization (engine-example-com)
+
+| Dependency | Before | After | Replacement |
+|------------|--------|-------|-------------|
+| AWS SDK | 67 MB | 55 MB | Custom SigV4 |
+| async-graphql | 55 MB | 52 MB | Removed |
+| openssl | 52 MB | 46 MB | x509-parser |
+| **Total** | **67 MB** | **46 MB** | **-31%** |
+
+---
+
+## Roadmap
+
+### Current (v0.14.x)
+- ✅ AST-native query builder
+- ✅ Binary wire protocol
+- ✅ Compile-time validation
+- ✅ Migrations with impact analysis
+- ✅ Type generation
+
+### Future (v1.0)
+- 🔜 QAIL Gateway (replace REST/GraphQL)
+- 🔜 Row-level security policies
+- 🔜 Client SDKs (JavaScript, Swift)
+- 🔜 Real-time subscriptions
+
+---
+
+## Documentation
+
+- 📖 [Full Documentation](https://qail.io/docs)
+- 🎮 [Playground](https://qail.io/play)
+- 📊 [Benchmarks](https://qail.io/benchmarks)
 
 ---
 
 ## License
 
-MIT © 2025 QAIL Contributors
-
----
+MIT © 2025-2026 QAIL Contributors
 
 <p align="center">
   <strong>Built with 🦀 Rust</strong><br>
-  <a href="https://qail.rs">qail.rs</a>
+  <a href="https://qail.io">qail.io</a>
 </p>
-
-## 🤝 Contributing & Support
-
-We welcome issue reports on GitHub! Please provide detailed descriptions to help us reproduce and fix the problem. We aim to address critical issues within 1-5 business days.
-
-> [!CAUTION]
-> **Alpha Software**: QAIL is currently in **alpha**. While we strive for stability, the API is evolving to ensure it remains ergonomic and truly AST-native. **Do not use in production environments yet.**
