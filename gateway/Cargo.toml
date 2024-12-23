@@ -49,6 +49,9 @@ futures = "0.3"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
+# Cache
+dashmap = "6"
+
 [features]
 default = []
 

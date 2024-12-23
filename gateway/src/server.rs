@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use url::Url;
 
+use crate::cache::QueryCache;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
 use crate::policy::PolicyEngine;
@@ -19,6 +20,7 @@ pub struct GatewayState {
     pub pool: PgPool,
     pub policy_engine: PolicyEngine,
     pub schema_validator: SchemaValidator,
+    pub cache: QueryCache,
     pub config: GatewayConfig,
 }
 
@@ -60,6 +62,16 @@ impl Gateway {
             schema_validator.load_from_file(schema_path)?;
         }
         
+        // Initialize cache
+        let cache_config = self.config.cache_config();
+        tracing::info!(
+            "Query cache: enabled={}, max_entries={}, ttl={}s",
+            cache_config.enabled,
+            cache_config.max_entries,
+            cache_config.ttl.as_secs()
+        );
+        let cache = QueryCache::new(cache_config);
+        
         // Create connection pool
         tracing::info!("Creating connection pool...");
         let pool_config = parse_database_url(&self.config.database_url)?;
@@ -74,6 +86,7 @@ impl Gateway {
             pool,
             policy_engine,
             schema_validator,
+            cache,
             config: self.config.clone(),
         }));
         
