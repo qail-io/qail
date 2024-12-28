@@ -141,6 +141,18 @@ pub enum Expr {
         field: String,
         alias: Option<String>,
     },
+    /// Scalar subquery: (SELECT ... LIMIT 1)
+    /// Used in COALESCE, comparisons, etc.
+    Subquery {
+        query: Box<super::Qail>,
+        alias: Option<String>,
+    },
+    /// EXISTS subquery: EXISTS(SELECT ...)
+    Exists {
+        query: Box<super::Qail>,
+        negated: bool, // NOT EXISTS
+        alias: Option<String>,
+    },
 }
 
 impl std::fmt::Display for Expr {
@@ -364,6 +376,24 @@ impl std::fmt::Display for Expr {
             }
             Expr::FieldAccess { expr, field, alias } => {
                 write!(f, "({}).{}", expr, field)?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::Subquery { query, alias } => {
+                // Use Debug format since Qail doesn't implement Display
+                write!(f, "({:?})", query)?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::Exists { query, negated, alias } => {
+                if *negated {
+                    write!(f, "NOT ")?;
+                }
+                write!(f, "EXISTS ({:?})", query)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }
