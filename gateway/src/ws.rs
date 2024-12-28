@@ -18,63 +18,50 @@ use tokio::sync::mpsc;
 use crate::auth::extract_auth_from_headers;
 use crate::GatewayState;
 
-/// WebSocket subscription message from client
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsClientMessage {
-    /// Subscribe to a channel: { "type": "subscribe", "channel": "orders" }
     #[serde(rename = "subscribe")]
     Subscribe { channel: String },
     
-    /// Unsubscribe from a channel: { "type": "unsubscribe", "channel": "orders" }
     #[serde(rename = "unsubscribe")]
     Unsubscribe { channel: String },
     
-    /// Execute a query: { "type": "query", "qail": "get users limit 10" }
     #[serde(rename = "query")]
     Query { qail: String },
     
-    /// Ping to keep connection alive
     #[serde(rename = "ping")]
     Ping,
 }
 
-/// WebSocket message to client
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum WsServerMessage {
-    /// Subscription confirmed
     #[serde(rename = "subscribed")]
     Subscribed { channel: String },
     
-    /// Unsubscription confirmed
     #[serde(rename = "unsubscribed")]
     Unsubscribed { channel: String },
     
-    /// Notification from NOTIFY
     #[serde(rename = "notification")]
     Notification {
         channel: String,
         payload: String,
     },
     
-    /// Query result
     #[serde(rename = "result")]
     Result {
         rows: Vec<serde_json::Value>,
         count: usize,
     },
     
-    /// Error message
     #[serde(rename = "error")]
     Error { message: String },
     
-    /// Pong response
     #[serde(rename = "pong")]
     Pong,
 }
 
-/// WebSocket upgrade handler
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
@@ -86,14 +73,11 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state, auth.user_id))
 }
 
-/// Handle WebSocket connection
 async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>, user_id: String) {
     let (mut sender, mut receiver) = socket.split();
     
-    // Channel for sending messages to client
     let (tx, mut rx) = mpsc::channel::<WsServerMessage>(32);
     
-    // Spawn task to send messages to WebSocket
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let text = match serde_json::to_string(&msg) {
@@ -110,10 +94,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>, user_id: Str
         }
     });
     
-    // Track subscribed channels
     let mut subscribed_channels: Vec<String> = Vec::new();
     
-    // Process incoming messages
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(text) => {

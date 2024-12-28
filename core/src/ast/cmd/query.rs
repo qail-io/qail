@@ -331,4 +331,51 @@ impl Qail {
             None => self, // Skip entirely, don't add column
         }
     }
+    
+    /// Add ON CONFLICT DO UPDATE clause for UPSERT operations.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// Qail::add("users")
+    ///     .set_value("id", 1)
+    ///     .set_value("name", "Alice")
+    ///     .on_conflict_update(&["id"], &[("name", Expr::Named("EXCLUDED.name".into()))])
+    /// ```
+    pub fn on_conflict_update<S>(mut self, conflict_cols: &[S], updates: &[(S, Expr)]) -> Self
+    where
+        S: AsRef<str>,
+    {
+        use super::{OnConflict, ConflictAction};
+        
+        self.on_conflict = Some(OnConflict {
+            columns: conflict_cols.iter().map(|c| c.as_ref().to_string()).collect(),
+            action: ConflictAction::DoUpdate {
+                assignments: updates.iter()
+                    .map(|(col, expr)| (col.as_ref().to_string(), expr.clone()))
+                    .collect(),
+            },
+        });
+        self
+    }
+    
+    /// Add ON CONFLICT DO NOTHING clause (ignore duplicates).
+    /// 
+    /// # Example
+    /// ```ignore
+    /// Qail::add("users")
+    ///     .set_value("id", 1)
+    ///     .on_conflict_nothing(&["id"])
+    /// ```
+    pub fn on_conflict_nothing<S>(mut self, conflict_cols: &[S]) -> Self
+    where
+        S: AsRef<str>,
+    {
+        use super::{OnConflict, ConflictAction};
+        
+        self.on_conflict = Some(OnConflict {
+            columns: conflict_cols.iter().map(|c| c.as_ref().to_string()).collect(),
+            action: ConflictAction::DoNothing,
+        });
+        self
+    }
 }

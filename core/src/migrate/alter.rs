@@ -19,11 +19,8 @@ use super::types::ColumnType;
 #[derive(Debug, Clone)]
 pub enum AlterOp {
     AddColumn(Column),
-    /// DROP COLUMN
     DropColumn { name: String, cascade: bool },
-    /// RENAME COLUMN old TO new
     RenameColumn { from: String, to: String },
-    /// ALTER COLUMN SET DATA TYPE
     AlterType {
         column: String,
         new_type: ColumnType,
@@ -31,20 +28,15 @@ pub enum AlterOp {
     },
     SetNotNull(String),
     DropNotNull(String),
-    /// ALTER COLUMN SET DEFAULT
     SetDefault { column: String, expr: String },
     DropDefault(String),
-    /// ADD CONSTRAINT
     AddConstraint {
         name: String,
         constraint: TableConstraint,
     },
-    /// DROP CONSTRAINT
     DropConstraint { name: String, cascade: bool },
-    /// RENAME TO
     RenameTable(String),
     SetSchema(String),
-    /// ENABLE/DISABLE ROW LEVEL SECURITY
     SetRowLevelSecurity(bool),
 }
 
@@ -132,7 +124,6 @@ impl AlterTable {
         self
     }
 
-    /// ALTER COLUMN SET DATA TYPE
     pub fn set_type(mut self, column: impl Into<String>, new_type: ColumnType) -> Self {
         self.ops.push(AlterOp::AlterType {
             column: column.into(),
@@ -142,7 +133,6 @@ impl AlterTable {
         self
     }
 
-    /// ALTER COLUMN SET DATA TYPE USING expr
     pub fn set_type_using(
         mut self,
         column: impl Into<String>,

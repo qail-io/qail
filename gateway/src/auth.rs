@@ -11,10 +11,8 @@ use std::collections::HashMap;
 /// JWT claims structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtClaims {
-    /// Subject (user ID)
     pub sub: String,
     pub exp: usize,
-    /// Role
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
@@ -26,23 +24,15 @@ pub struct JwtClaims {
 /// User context extracted from authentication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthContext {
-    /// User ID
     pub user_id: String,
-    
-    /// User role (for policy evaluation)
     pub role: String,
-    
-    /// Tenant/organization ID (for multi-tenancy)
     #[serde(default)]
     pub tenant_id: Option<String>,
-    
-    /// Additional claims from JWT
     #[serde(default)]
     pub claims: HashMap<String, serde_json::Value>,
 }
 
 impl AuthContext {
-    /// Create an anonymous context (for public queries)
     pub fn anonymous() -> Self {
         Self {
             user_id: "anonymous".to_string(),
@@ -52,29 +42,21 @@ impl AuthContext {
         }
     }
     
-    /// Check if user has a specific role
     pub fn has_role(&self, role: &str) -> bool {
         self.role == role
     }
     
-    /// Check if user is authenticated (not anonymous)
     pub fn is_authenticated(&self) -> bool {
         self.user_id != "anonymous"
     }
 }
 
-/// JWT configuration
 #[derive(Debug, Clone)]
 pub struct JwtConfig {
-    /// Secret key for HS256
     pub secret: Option<String>,
-    /// Public key for RS256 (PEM format)
     pub public_key: Option<String>,
-    /// Algorithm (HS256, RS256, etc.)
     pub algorithm: Algorithm,
-    /// Issuer to validate
     pub issuer: Option<String>,
-    /// Audience to validate
     pub audience: Option<String>,
 }
 
@@ -90,7 +72,6 @@ impl Default for JwtConfig {
     }
 }
 
-/// Validate a JWT token and extract auth context
 pub fn validate_jwt(token: &str, config: &JwtConfig) -> Result<AuthContext, GatewayError> {
     let decoding_key = match config.algorithm {
         Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
