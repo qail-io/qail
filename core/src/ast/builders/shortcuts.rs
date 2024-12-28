@@ -7,6 +7,57 @@ use crate::ast::{Condition, Expr, Operator, Value};
 use super::{count_filter, case_when, col, binary, cast, now_minus};
 use crate::ast::BinaryOp;
 
+/// Combine two expressions with OR logic: (left OR right)
+/// 
+/// # Example
+/// ```ignore
+/// // (h.photo_url IS NOT NULL OR EXISTS(...))
+/// or_expr(is_not_null_expr("photo_url"), exists(subquery))
+/// ```
+pub fn or_expr(left: impl Into<Expr>, right: impl Into<Expr>) -> Expr {
+    Expr::Binary {
+        left: Box::new(left.into()),
+        op: BinaryOp::Or,
+        right: Box::new(right.into()),
+        alias: None,
+    }
+}
+
+/// Combine two expressions with AND logic: (left AND right)
+pub fn and_expr(left: impl Into<Expr>, right: impl Into<Expr>) -> Expr {
+    Expr::Binary {
+        left: Box::new(left.into()),
+        op: BinaryOp::And,
+        right: Box::new(right.into()),
+        alias: None,
+    }
+}
+
+/// Create a "column IS NOT NULL" expression
+/// 
+/// # Example
+/// ```ignore
+/// is_not_null_expr("photo_url")  // photo_url IS NOT NULL
+/// ```
+pub fn is_not_null_expr(column: impl AsRef<str>) -> Expr {
+    Expr::Binary {
+        left: Box::new(Expr::Named(column.as_ref().to_string())),
+        op: BinaryOp::IsNotNull,
+        right: Box::new(Expr::Literal(Value::Null)), // Placeholder, not used
+        alias: None,
+    }
+}
+
+/// Create a "column IS NULL" expression
+pub fn is_null_expr(column: impl AsRef<str>) -> Expr {
+    Expr::Binary {
+        left: Box::new(Expr::Named(column.as_ref().to_string())),
+        op: BinaryOp::IsNull,
+        right: Box::new(Expr::Literal(Value::Null)),
+        alias: None,
+    }
+}
+
 /// Combine multiple conditions with AND logic
 /// # Example
 /// ```ignore

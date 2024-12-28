@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Binary operators for expressions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
+    // Arithmetic
     Concat,
     Add,
     Sub,
@@ -11,6 +12,19 @@ pub enum BinaryOp {
     Div,
     /// Modulo (%)
     Rem,
+    // Logical
+    And,
+    Or,
+    // Comparison
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    // Null checks (unary but represented as binary with null right)
+    IsNull,
+    IsNotNull,
 }
 
 impl std::fmt::Display for BinaryOp {
@@ -22,6 +36,16 @@ impl std::fmt::Display for BinaryOp {
             BinaryOp::Mul => write!(f, "*"),
             BinaryOp::Div => write!(f, "/"),
             BinaryOp::Rem => write!(f, "%"),
+            BinaryOp::And => write!(f, "AND"),
+            BinaryOp::Or => write!(f, "OR"),
+            BinaryOp::Eq => write!(f, "="),
+            BinaryOp::Ne => write!(f, "<>"),
+            BinaryOp::Gt => write!(f, ">"),
+            BinaryOp::Gte => write!(f, ">="),
+            BinaryOp::Lt => write!(f, "<"),
+            BinaryOp::Lte => write!(f, "<="),
+            BinaryOp::IsNull => write!(f, "IS NULL"),
+            BinaryOp::IsNotNull => write!(f, "IS NOT NULL"),
         }
     }
 }
