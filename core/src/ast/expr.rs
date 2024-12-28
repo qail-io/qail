@@ -382,8 +382,7 @@ impl std::fmt::Display for Expr {
                 Ok(())
             }
             Expr::Subquery { query, alias } => {
-                // Use Debug format since Qail doesn't implement Display
-                write!(f, "({:?})", query)?;
+                write!(f, "({})", query)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }
@@ -393,7 +392,7 @@ impl std::fmt::Display for Expr {
                 if *negated {
                     write!(f, "NOT ")?;
                 }
-                write!(f, "EXISTS ({:?})", query)?;
+                write!(f, "EXISTS ({})", query)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }
