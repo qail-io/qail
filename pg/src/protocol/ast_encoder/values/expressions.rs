@@ -653,6 +653,11 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
             params.push(Some(arr_buf));
             write_param_placeholder(buf, params.len());
         }
+        Value::Json(json) => {
+            // JSONB: encode as text parameter with escaping
+            params.push(Some(json.as_bytes().to_vec()));
+            write_param_placeholder(buf, params.len());
+        }
     }
     Ok(())
 }

@@ -250,6 +250,7 @@ impl Validator {
             Value::Timestamp(_) => "TIMESTAMP",
             Value::Bytes(_) => "BYTEA",
             Value::Vector(_) => "VECTOR",
+            Value::Json(_) => "JSONB",
             _ => return Ok(()), // Unknown value type, skip
         };
         

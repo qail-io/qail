@@ -33,7 +33,7 @@ pub fn parse_interval(input: &str) -> IResult<&str, Value> {
     Ok((input, Value::Interval { amount, unit }))
 }
 
-/// Parse value: string, number, bool, null, $param, :named_param, interval
+/// Parse value: string, number, bool, null, $param, :named_param, interval, JSON
 pub fn parse_value(input: &str) -> IResult<&str, Value> {
     alt((
         // Parameter: $1, $2
@@ -53,6 +53,10 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
         value(Value::Bool(false), tag_no_case("false")),
         // Null
         value(Value::Null, tag_no_case("null")),
+        // Triple-quoted multi-line string (must come before single/double quotes)
+        parse_triple_quoted_string,
+        // JSON object literal: { ... } or array: [ ... ]
+        parse_json_literal,
         // String (double quoted) - allow empty strings
         map(
             delimited(
@@ -84,6 +88,95 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
         }),
     ))
     .parse(input)
+}
+
+/// Parse triple-quoted multi-line string: '''content''' or """content"""
+fn parse_triple_quoted_string(input: &str) -> IResult<&str, Value> {
+    alt((
+        // Triple single quotes
+        map(
+            delimited(
+                tag("'''"),
+                nom::bytes::complete::take_until("'''"),
+                tag("'''"),
+            ),
+            |s: &str| Value::String(s.to_string()),
+        ),
+        // Triple double quotes
+        map(
+            delimited(
+                tag("\"\"\""),
+                nom::bytes::complete::take_until("\"\"\""),
+                tag("\"\"\""),
+            ),
+            |s: &str| Value::String(s.to_string()),
+        ),
+    ))
+    .parse(input)
+}
+
+/// Parse JSON object literal: { key: value, ... } or array: [...]
+/// This captures the entire JSON structure as a string for Value::Json
+fn parse_json_literal(input: &str) -> IResult<&str, Value> {
+    // Determine if it's an object or array
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag)));
+    }
+    
+    let (open_char, close_char) = match trimmed.chars().next() {
+        Some('{') => ('{', '}'),
+        Some('[') => ('[', ']'),
+        _ => return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
+    };
+    
+    // Count brackets to find matching close
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    let mut end_pos = 0;
+    
+    for (i, c) in trimmed.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        
+        if c == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+        
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        
+        if !in_string {
+            if c == open_char {
+                depth += 1;
+            } else if c == close_char {
+                depth -= 1;
+                if depth == 0 {
+                    end_pos = i + 1;
+                    break;
+                }
+            }
+        }
+    }
+    
+    if depth != 0 || end_pos == 0 {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Eof)));
+    }
+    
+    let json_str = &trimmed[..end_pos];
+    let _remaining = &trimmed[end_pos..];
+    
+    // Calculate how much of original input we consumed (account for leading whitespace)
+    let consumed = input.len() - trimmed.len() + end_pos;
+    let remaining_original = &input[consumed..];
+    
+    Ok((remaining_original, Value::Json(json_str.to_string())))
 }
 
 /// Parse comparison operator

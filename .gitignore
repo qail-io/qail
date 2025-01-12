@@ -63,3 +63,4 @@ pg/examples/*.go
 
 # Security: Battle tests (internal hardening, not for distribution)
 pg/examples/battle*.rs
+qail.toml

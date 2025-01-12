@@ -20,8 +20,122 @@ pub struct ExecConfig {
     pub query: Option<String>,
     pub file: Option<String>,
     pub url: Option<String>,
+    pub ssh: Option<String>,
     pub tx: bool,
     pub dry_run: bool,
+}
+
+/// SSH tunnel wrapper - kills tunnel on drop
+struct SshTunnel {
+    child: std::process::Child,
+    local_port: u16,
+}
+
+impl SshTunnel {
+    /// Create an SSH tunnel to a remote host
+    /// Forwards local_port -> remote_host:remote_port via ssh_host
+    async fn new(ssh_host: &str, remote_host: &str, remote_port: u16) -> Result<Self> {
+        use std::process::{Command, Stdio};
+        
+        // Find available local port
+        let local_port = Self::find_available_port()?;
+        
+        // Construct SSH tunnel command
+        // ssh -N -L local_port:remote_host:remote_port ssh_host
+        let child = Command::new("ssh")
+            .args([
+                "-N",  // No remote command
+                "-L", &format!("{}:{}:{}", local_port, remote_host, remote_port),
+                ssh_host,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to spawn SSH tunnel: {}", e))?;
+        
+        // Wait a moment for tunnel to establish
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        Ok(Self { child, local_port })
+    }
+    
+    fn find_available_port() -> Result<u16> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        Ok(port)
+    }
+    
+    fn local_port(&self) -> u16 {
+        self.local_port
+    }
+}
+
+impl Drop for SshTunnel {
+    fn drop(&mut self) {
+        // Kill the SSH tunnel process
+        let _ = self.child.kill();
+    }
+}
+
+fn split_qail_statements(content: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_triple_single = false;
+    let mut in_triple_double = false;
+    let mut chars = content.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        // Check for triple quotes
+        if c == '\'' && !in_triple_double {
+            if chars.peek() == Some(&'\'') {
+                chars.next();
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                    current.push_str("'''");
+                    in_triple_single = !in_triple_single;
+                    continue;
+                } else {
+                    current.push_str("''");
+                    continue;
+                }
+            }
+        } else if c == '"' && !in_triple_single {
+            if chars.peek() == Some(&'"') {
+                chars.next();
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    current.push_str("\"\"\"");
+                    in_triple_double = !in_triple_double;
+                    continue;
+                } else {
+                    current.push_str("\"\"");
+                    continue;
+                }
+            }
+        }
+        
+        // Handle newlines - statement boundary if not in multi-line string
+        if c == '\n' && !in_triple_single && !in_triple_double {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("--") {
+                statements.push(current.trim().to_string());
+            }
+            current.clear();
+            continue;
+        }
+        
+        current.push(c);
+    }
+    
+    // Don't forget the last statement
+    let trimmed = current.trim();
+    if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("--") {
+        statements.push(current.trim().to_string());
+    }
+    
+    statements
 }
 
 /// Run the exec command (type-safe QAIL AST only)
@@ -36,23 +150,19 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
         anyhow::bail!("Either QAIL query or --file must be provided");
     };
 
-    // Parse QAIL statements (one per line)
-    let lines: Vec<&str> = content
-        .lines()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty() && !s.starts_with('#') && !s.starts_with("--"))
-        .collect();
-
-    if lines.is_empty() {
+    // Split into statements, handling multi-line strings
+    let statements_str = split_qail_statements(&content);
+    
+    if statements_str.is_empty() {
         println!("{}", "No QAIL statements to execute.".yellow());
         return Ok(());
     }
 
     // Parse all QAIL statements into ASTs
     let mut statements: Vec<Qail> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        let ast = qail_core::parse(line)
-            .map_err(|e| anyhow::anyhow!("Parse error at line {}: {} in '{}'", i + 1, e, line))?;
+    for (i, stmt) in statements_str.iter().enumerate() {
+        let ast = qail_core::parse(stmt)
+            .map_err(|e| anyhow::anyhow!("Parse error at statement {}: {}", i + 1, e))?;
         statements.push(ast);
     }
 
@@ -93,9 +203,40 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
         }
     };
 
+    // Set up SSH tunnel if requested
+    let _tunnel: Option<SshTunnel>;
+    let connect_url = if let Some(ssh_host) = &config.ssh {
+        println!("{} Opening SSH tunnel to {}...", "🔐".cyan(), ssh_host.green());
+        
+        // Parse the URL to extract host and port
+        let parsed = url::Url::parse(&db_url)
+            .map_err(|e| anyhow::anyhow!("Invalid database URL: {}", e))?;
+        
+        let remote_host = parsed.host_str().unwrap_or("localhost");
+        let remote_port = parsed.port().unwrap_or(5432);
+        
+        // Create tunnel
+        let tunnel = SshTunnel::new(ssh_host, remote_host, remote_port).await?;
+        let local_port = tunnel.local_port();
+        
+        // Rewrite URL to use tunnel
+        let mut tunneled_url = parsed.clone();
+        tunneled_url.set_host(Some("127.0.0.1")).ok();
+        tunneled_url.set_port(Some(local_port)).ok();
+        
+        println!("{} Tunnel established: localhost:{} -> {}:{}", 
+            "✓".green(), local_port, remote_host, remote_port);
+        
+        _tunnel = Some(tunnel);
+        tunneled_url.to_string()
+    } else {
+        _tunnel = None;
+        db_url
+    };
+
     // Connect to database
     println!("{} Connecting to database...", "🔌".cyan());
-    let mut driver = PgDriver::connect_url(&db_url).await
+    let mut driver = PgDriver::connect_url(&connect_url).await
         .map_err(|e| anyhow::anyhow!("Connection failed: {}", e))?;
 
     // Execute statements using type-safe AST

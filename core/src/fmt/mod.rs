@@ -459,6 +459,7 @@ impl Formatter {
                 }
                 write!(self.buffer, "]")?;
             }
+            Value::Json(json) => write!(self.buffer, "'{}'::jsonb", json.replace('\'', "''"))?,
         }
         Ok(())
     }
