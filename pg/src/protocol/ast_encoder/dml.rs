@@ -155,7 +155,7 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     let sort_cages: Vec<_> = cmd.cages.iter()
         .filter_map(|cage| {
             if let CageKind::Sort(order) = &cage.kind {
-                Some((cage, order.clone()))
+                Some((cage, *order))
             } else {
                 None
             }
@@ -292,6 +292,43 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
             encode_value(&cond.value, buf, params)?;
         }
         buf.extend_from_slice(b")");
+    }
+    
+    // ON CONFLICT clause (UPSERT support)
+    if let Some(ref on_conflict) = cmd.on_conflict {
+        use qail_core::ast::ConflictAction;
+        
+        buf.extend_from_slice(b" ON CONFLICT ");
+        
+        // Conflict target columns
+        if !on_conflict.columns.is_empty() {
+            buf.extend_from_slice(b"(");
+            for (i, col) in on_conflict.columns.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                buf.extend_from_slice(col.as_bytes());
+            }
+            buf.extend_from_slice(b") ");
+        }
+        
+        // Conflict action
+        match &on_conflict.action {
+            ConflictAction::DoNothing => {
+                buf.extend_from_slice(b"DO NOTHING");
+            }
+            ConflictAction::DoUpdate { assignments } => {
+                buf.extend_from_slice(b"DO UPDATE SET ");
+                for (i, (col, expr)) in assignments.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(col.as_bytes());
+                    buf.extend_from_slice(b" = ");
+                    encode_expr(expr, buf);
+                }
+            }
+        }
     }
     
     // RETURNING clause

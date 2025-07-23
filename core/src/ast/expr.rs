@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Binary operators for expressions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
+    // Arithmetic
     Concat,
     Add,
     Sub,
@@ -11,6 +12,19 @@ pub enum BinaryOp {
     Div,
     /// Modulo (%)
     Rem,
+    // Logical
+    And,
+    Or,
+    // Comparison
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    // Null checks (unary but represented as binary with null right)
+    IsNull,
+    IsNotNull,
 }
 
 impl std::fmt::Display for BinaryOp {
@@ -22,6 +36,16 @@ impl std::fmt::Display for BinaryOp {
             BinaryOp::Mul => write!(f, "*"),
             BinaryOp::Div => write!(f, "/"),
             BinaryOp::Rem => write!(f, "%"),
+            BinaryOp::And => write!(f, "AND"),
+            BinaryOp::Or => write!(f, "OR"),
+            BinaryOp::Eq => write!(f, "="),
+            BinaryOp::Ne => write!(f, "<>"),
+            BinaryOp::Gt => write!(f, ">"),
+            BinaryOp::Gte => write!(f, ">="),
+            BinaryOp::Lt => write!(f, "<"),
+            BinaryOp::Lte => write!(f, "<="),
+            BinaryOp::IsNull => write!(f, "IS NULL"),
+            BinaryOp::IsNotNull => write!(f, "IS NOT NULL"),
         }
     }
 }
@@ -139,6 +163,18 @@ pub enum Expr {
     FieldAccess {
         expr: Box<Expr>,
         field: String,
+        alias: Option<String>,
+    },
+    /// Scalar subquery: (SELECT ... LIMIT 1)
+    /// Used in COALESCE, comparisons, etc.
+    Subquery {
+        query: Box<super::Qail>,
+        alias: Option<String>,
+    },
+    /// EXISTS subquery: EXISTS(SELECT ...)
+    Exists {
+        query: Box<super::Qail>,
+        negated: bool, // NOT EXISTS
         alias: Option<String>,
     },
 }
@@ -364,6 +400,23 @@ impl std::fmt::Display for Expr {
             }
             Expr::FieldAccess { expr, field, alias } => {
                 write!(f, "({}).{}", expr, field)?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::Subquery { query, alias } => {
+                write!(f, "({})", query)?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::Exists { query, negated, alias } => {
+                if *negated {
+                    write!(f, "NOT ")?;
+                }
+                write!(f, "EXISTS ({})", query)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }

@@ -204,3 +204,14 @@ impl Qail {
         self
     }
 }
+
+impl std::fmt::Display for Qail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Use the Formatter from the fmt module for canonical output
+        use crate::fmt::Formatter;
+        match Formatter::new().format(self) {
+            Ok(s) => write!(f, "{}", s),
+            Err(_) => write!(f, "{:?}", self), // Fallback to Debug
+        }
+    }
+}
