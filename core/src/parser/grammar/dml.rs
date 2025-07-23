@@ -193,6 +193,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
             }
             Value::Expr(expr) => (*expr).clone(),
             Value::Vector(v) => Expr::Named(format!("[{} floats]", v.len())),
+            Value::Json(json) => Expr::Named(format!("'{}'::jsonb", json.replace('\'', "''"))),
         }),
         // Fall back to full expression parsing
         parse_expression,

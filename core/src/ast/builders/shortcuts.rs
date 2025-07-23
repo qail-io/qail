@@ -7,6 +7,57 @@ use crate::ast::{Condition, Expr, Operator, Value};
 use super::{count_filter, case_when, col, binary, cast, now_minus};
 use crate::ast::BinaryOp;
 
+/// Combine two expressions with OR logic: (left OR right)
+/// 
+/// # Example
+/// ```ignore
+/// // (h.photo_url IS NOT NULL OR EXISTS(...))
+/// or_expr(is_not_null_expr("photo_url"), exists(subquery))
+/// ```
+pub fn or_expr(left: impl Into<Expr>, right: impl Into<Expr>) -> Expr {
+    Expr::Binary {
+        left: Box::new(left.into()),
+        op: BinaryOp::Or,
+        right: Box::new(right.into()),
+        alias: None,
+    }
+}
+
+/// Combine two expressions with AND logic: (left AND right)
+pub fn and_expr(left: impl Into<Expr>, right: impl Into<Expr>) -> Expr {
+    Expr::Binary {
+        left: Box::new(left.into()),
+        op: BinaryOp::And,
+        right: Box::new(right.into()),
+        alias: None,
+    }
+}
+
+/// Create a "column IS NOT NULL" expression
+/// 
+/// # Example
+/// ```ignore
+/// is_not_null_expr("photo_url")  // photo_url IS NOT NULL
+/// ```
+pub fn is_not_null_expr(column: impl AsRef<str>) -> Expr {
+    Expr::Binary {
+        left: Box::new(Expr::Named(column.as_ref().to_string())),
+        op: BinaryOp::IsNotNull,
+        right: Box::new(Expr::Literal(Value::Null)), // Placeholder, not used
+        alias: None,
+    }
+}
+
+/// Create a "column IS NULL" expression
+pub fn is_null_expr(column: impl AsRef<str>) -> Expr {
+    Expr::Binary {
+        left: Box::new(Expr::Named(column.as_ref().to_string())),
+        op: BinaryOp::IsNull,
+        right: Box::new(Expr::Literal(Value::Null)),
+        alias: None,
+    }
+}
+
 /// Combine multiple conditions with AND logic
 /// # Example
 /// ```ignore
@@ -162,3 +213,42 @@ mod tests {
         assert!(matches!(expr, Expr::Case { alias: Some(a), .. } if a == "rate"));
     }
 }
+
+/// Create an EXISTS subquery expression
+/// 
+/// # Example
+/// ```ignore
+/// // EXISTS(SELECT 1 FROM harbor_images WHERE harbor_id = h.id)
+/// exists(Qail::get("harbor_images").eq("harbor_id", col_ref).limit(1))
+/// ```
+pub fn exists(query: crate::ast::Qail) -> Expr {
+    Expr::Exists {
+        query: Box::new(query),
+        negated: false,
+        alias: None,
+    }
+}
+
+/// Create a NOT EXISTS subquery expression
+pub fn not_exists(query: crate::ast::Qail) -> Expr {
+    Expr::Exists {
+        query: Box::new(query),
+        negated: true,
+        alias: None,
+    }
+}
+
+/// Create a scalar subquery expression
+/// 
+/// # Example
+/// ```ignore
+/// // (SELECT image_url FROM harbor_images WHERE ... ORDER BY ... LIMIT 1)
+/// subquery(Qail::get("harbor_images").column("image_url").eq("harbor_id", id).limit(1))
+/// ```
+pub fn subquery(query: crate::ast::Qail) -> Expr {
+    Expr::Subquery {
+        query: Box::new(query),
+        alias: None,
+    }
+}
+

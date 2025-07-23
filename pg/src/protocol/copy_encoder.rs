@@ -124,6 +124,18 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
             }
             buf.extend_from_slice(b"}");
         }
+        Value::Json(json) => {
+            // JSONB as raw JSON text (escape backslashes for COPY format)
+            for c in json.bytes() {
+                match c {
+                    b'\\' => buf.extend_from_slice(b"\\\\"),
+                    b'\t' => buf.extend_from_slice(b"\\t"),
+                    b'\n' => buf.extend_from_slice(b"\\n"),
+                    b'\r' => buf.extend_from_slice(b"\\r"),
+                    _ => buf.extend_from_slice(&[c]),
+                }
+            }
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 //! Gateway configuration
 
 use serde::Deserialize;
+use std::time::Duration;
 
 /// Main gateway configuration
 #[derive(Debug, Clone, Deserialize)]
@@ -20,9 +21,23 @@ pub struct GatewayConfig {
     /// Enable CORS
     #[serde(default = "default_true")]
     pub cors_enabled: bool,
+    
+    /// Enable query caching
+    #[serde(default = "default_true")]
+    pub cache_enabled: bool,
+    
+    /// Maximum cache entries
+    #[serde(default = "default_cache_max")]
+    pub cache_max_entries: usize,
+    
+    /// Cache TTL in seconds
+    #[serde(default = "default_cache_ttl")]
+    pub cache_ttl_seconds: u64,
 }
 
 fn default_true() -> bool { true }
+fn default_cache_max() -> usize { 1000 }
+fn default_cache_ttl() -> u64 { 60 }
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -32,6 +47,20 @@ impl Default for GatewayConfig {
             policy_path: None,
             bind_address: "0.0.0.0:8080".to_string(),
             cors_enabled: true,
+            cache_enabled: true,
+            cache_max_entries: 1000,
+            cache_ttl_seconds: 60,
+        }
+    }
+}
+
+impl GatewayConfig {
+    /// Get cache configuration
+    pub fn cache_config(&self) -> crate::cache::CacheConfig {
+        crate::cache::CacheConfig {
+            enabled: self.cache_enabled,
+            max_entries: self.cache_max_entries,
+            ttl: Duration::from_secs(self.cache_ttl_seconds),
         }
     }
 }

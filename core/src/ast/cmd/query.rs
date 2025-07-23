@@ -331,4 +331,109 @@ impl Qail {
             None => self, // Skip entirely, don't add column
         }
     }
+    
+    /// Set column to COALESCE(new_value, existing_column) for partial updates.
+    /// 
+    /// This is useful for UPDATE operations where you want to keep the existing
+    /// value if the new value is NULL.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// Qail::set("users")
+    ///     .set_coalesce("name", "Alice")  // name = COALESCE('Alice', name)
+    ///     .eq("id", 1)
+    /// ```
+    pub fn set_coalesce(mut self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
+        use crate::ast::builders::coalesce;
+        
+        let col_name = column.as_ref().to_string();
+        let coalesce_expr = coalesce([
+            Expr::Literal(value.into()),
+            Expr::Named(col_name.clone()),
+        ]).build();
+        
+        let payload_cage = self
+            .cages
+            .iter_mut()
+            .find(|c| matches!(c.kind, CageKind::Payload));
+
+        let condition = Condition {
+            left: Expr::Named(col_name),
+            op: Operator::Eq,
+            value: Value::Expr(Box::new(coalesce_expr)),
+            is_array_unnest: false,
+        };
+
+        if let Some(cage) = payload_cage {
+            cage.conditions.push(condition);
+        } else {
+            self.cages.push(Cage {
+                kind: CageKind::Payload,
+                conditions: vec![condition],
+                logical_op: LogicalOp::And,
+            });
+        }
+        self
+    }
+    
+    /// Set column to COALESCE(new_value, existing_column) only if value is Some.
+    /// 
+    /// Combines set_coalesce() with optional handling - if None, still adds
+    /// the COALESCE with NULL as the first argument (so existing value is kept).
+    pub fn set_coalesce_opt<T>(self, column: impl AsRef<str>, value: Option<T>) -> Self
+    where
+        T: Into<Value>,
+    {
+        match value {
+            Some(v) => self.set_coalesce(column, v),
+            None => self, // Skip - existing value will be kept
+        }
+    }
+    
+    /// Add ON CONFLICT DO UPDATE clause for UPSERT operations.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// Qail::add("users")
+    ///     .set_value("id", 1)
+    ///     .set_value("name", "Alice")
+    ///     .on_conflict_update(&["id"], &[("name", Expr::Named("EXCLUDED.name".into()))])
+    /// ```
+    pub fn on_conflict_update<S>(mut self, conflict_cols: &[S], updates: &[(S, Expr)]) -> Self
+    where
+        S: AsRef<str>,
+    {
+        use super::{OnConflict, ConflictAction};
+        
+        self.on_conflict = Some(OnConflict {
+            columns: conflict_cols.iter().map(|c| c.as_ref().to_string()).collect(),
+            action: ConflictAction::DoUpdate {
+                assignments: updates.iter()
+                    .map(|(col, expr)| (col.as_ref().to_string(), expr.clone()))
+                    .collect(),
+            },
+        });
+        self
+    }
+    
+    /// Add ON CONFLICT DO NOTHING clause (ignore duplicates).
+    /// 
+    /// # Example
+    /// ```ignore
+    /// Qail::add("users")
+    ///     .set_value("id", 1)
+    ///     .on_conflict_nothing(&["id"])
+    /// ```
+    pub fn on_conflict_nothing<S>(mut self, conflict_cols: &[S]) -> Self
+    where
+        S: AsRef<str>,
+    {
+        use super::{OnConflict, ConflictAction};
+        
+        self.on_conflict = Some(OnConflict {
+            columns: conflict_cols.iter().map(|c| c.as_ref().to_string()).collect(),
+            action: ConflictAction::DoNothing,
+        });
+        self
+    }
 }
