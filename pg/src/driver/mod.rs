@@ -260,11 +260,11 @@ impl PgDriver {
             if c == '%' {
                 // Try to parse next two chars as hex
                 let hex: String = chars.by_ref().take(2).collect();
-                if hex.len() == 2 {
-                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                        result.push(byte as char);
-                        continue;
-                    }
+                if hex.len() == 2
+                    && let Ok(byte) = u8::from_str_radix(&hex, 16)
+                {
+                    result.push(byte as char);
+                    continue;
                 }
                 // If parsing failed, keep original
                 result.push('%');

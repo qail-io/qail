@@ -94,8 +94,7 @@ enum Commands {
     /// Parse and explain a QAIL query
     Explain { query: String },
     Repl,
-    /// Show the symbol reference
-    Symbols,
+
     /// Generate a migration file
     Mig {
         /// The QAIL migration command (e.g., make users fields id UUID, email VARCHAR)
@@ -105,6 +104,32 @@ enum Commands {
         name: Option<String>,
     },
     /// Introspect database schema and output schema.qail
+    #[command(after_help = r#"WHAT IT DOES:
+    Connects to a live database and extracts the complete schema as a .qail file.
+    Tables, columns, types, constraints, indexes - everything.
+
+OUTPUT:
+    Prints schema.qail to stdout. Redirect to save:
+    
+    qail pull postgres://user:pass@host/db > schema.qail
+
+USE CASES:
+    • Start managing an existing database with QAIL
+    • Create a baseline before making changes
+    • Compare live schema vs expected schema (drift detection)
+    • Generate types from production schema
+
+EXAMPLES:
+    # Pull from local database
+    qail pull postgres://localhost/mydb > schema.qail
+    
+    # Pull from remote (via SSH tunnel first)
+    ssh -L 5432:localhost:5432 myserver
+    qail pull postgres://user:pass@localhost/db > schema.qail
+    
+    # Compare with expected
+    qail pull postgres://... > live.qail
+    qail diff expected.qail live.qail"#)]
     Pull {
         /// Database connection URL (postgres:// or mysql://)
         url: String,
@@ -146,21 +171,117 @@ enum Commands {
         auto_apply: bool,
     },
     /// Apply migrations from schema diff
+    #[command(after_help = r#"WORKFLOW:
+    1. Edit schema.qail (your desired state)
+    2. qail migrate plan old.qail:new.qail     # Preview SQL
+    3. qail migrate analyze old:new -c ./src   # Check for breaking changes
+    4. qail migrate up old:new postgres://...  # Apply
+
+SUBCOMMANDS:
+    status   - Show migration history for a database
+    plan     - Generate SQL from schema diff (dry-run)
+    analyze  - Scan codebase for breaking changes before migrating
+    up       - Apply migrations forward
+    down     - Rollback migrations
+    apply    - Run all pending migrations from migrations/ folder
+    create   - Generate a new named migration file
+    shadow   - Apply to shadow database (blue-green deployment)
+    promote  - Swap shadow to primary
+    abort    - Drop shadow database
+
+SCHEMA DIFF FORMAT:
+    old.qail:new.qail    Compare two files
+    
+EXAMPLES:
+    # Preview migration SQL
+    qail migrate plan v1.qail:v2.qail
+    
+    # Apply with safety check
+    qail migrate up v1:v2 postgres://... -c ./src
+    
+    # Blue-green deployment
+    qail migrate shadow schema.qail postgres://... --live
+    qail migrate promote postgres://...
+    
+    # CI/CD integration
+    qail migrate analyze old:new --ci  # Fails if breaking changes"#)]
     Migrate {
         #[command(subcommand)]
         action: MigrateAction,
     },
     /// Vector database operations (Qdrant)
+    #[command(after_help = r#"QDRANT OPERATIONS:
+    QAIL integrates with Qdrant vector database for hybrid PostgreSQL + vector search.
+
+SUBCOMMANDS:
+    create    - Create a new vector collection
+    drop      - Delete a collection
+    backup    - Snapshot a collection
+    restore   - Restore from snapshot
+    snapshots - List available snapshots
+
+EXAMPLES:
+    # Create collection for OpenAI embeddings (1536 dimensions)
+    qail vector create products --size 1536 --distance cosine http://localhost:6334
+    
+    # Backup before changes
+    qail vector backup products -o products_backup.snapshot http://localhost:6333
+    
+    # Restore from backup
+    qail vector restore products -s products_backup.snapshot http://localhost:6333
+    
+    # Clean up
+    qail vector drop products http://localhost:6334"#)]
     Vector {
         #[command(subcommand)]
         action: VectorAction,
     },
     /// Sync operations for hybrid mode (PostgreSQL + Qdrant)
+    #[command(after_help = r#"HYBRID MODE:
+    QAIL can sync data between PostgreSQL and Qdrant automatically.
+    Define [[sync]] rules in qail.toml, then generate triggers.
+
+SUBCOMMANDS:
+    generate - Create PostgreSQL triggers from qail.toml [[sync]] rules
+    list     - Show configured sync rules
+
+QAIL.TOML CONFIG:
+    [[sync]]
+    table = "products"
+    collection = "products_vectors"
+    embedding_column = "embedding"
+    id_column = "id"
+    payload = ["name", "category", "price"]
+
+EXAMPLES:
+    # Generate trigger SQL
+    qail sync generate
+    
+    # View configured rules
+    qail sync list"#)]
     Sync {
         #[command(subcommand)]
         action: SyncAction,
     },
     /// Run the sync worker daemon (polls _qail_queue)
+    #[command(after_help = r#"WHAT IT DOES:
+    Polls PostgreSQL _qail_queue table for pending vector sync operations.
+    Processes inserts/updates/deletes and syncs to Qdrant.
+
+REQUIREMENTS:
+    • PostgreSQL with _qail_queue table (created by qail sync generate)
+    • Qdrant running and accessible
+    • qail.toml with postgres.url and qdrant.url configured
+
+EXAMPLES:
+    # Run with defaults (1s interval, 100 batch)
+    qail worker
+    
+    # Faster polling for real-time sync
+    qail worker -i 100 -b 50
+    
+    # Production (run as systemd service)
+    qail worker -i 500 -b 200"#)]
     Worker {
         /// Poll interval in milliseconds
         #[arg(short, long, default_value = "1000")]
@@ -170,15 +291,91 @@ enum Commands {
         batch: u32,
     },
     /// Execute type-safe QAIL statements
+    #[command(after_help = r#"SYNTAX:
+    add <table> fields <col1>, <col2> values <val1>, <val2>
+    set <table>[id = $1] fields name = 'new', updated_at = now
+    del <table>[id = $1]
+    get <table>'id'name[active = true]
+
+VALUE TYPES:
+    Strings      'hello', "world"
+    Numbers      42, -3.14
+    Booleans     true, false
+    Null         null
+    Parameters   $1, $2 (positional) or :name, :user_id (named)
+    Intervals    24h, 7d, 30m, 1y, 6mo (auto-converts to INTERVAL)
+    JSON         ["a", "b"], {"key": "value"} (auto-converts to ::jsonb)
+    NOW          now (current timestamp)
+
+MULTI-LINE STRINGS:
+    Use triple quotes for HTML, markdown, or long text:
+    
+    add articles fields content values '''
+    <article>
+      <p>Multi-line content preserved.</p>
+    </article>
+    '''
+
+JSON VALUES:
+    Arrays and objects auto-convert to PostgreSQL jsonb:
+    
+    add users fields tags values ["admin", "vip"]
+    add config fields data values {"theme": "dark", "count": 42}
+
+FILE FORMAT (.qail):
+    One statement per line (unless in triple quotes).
+    Comments: # or -- at line start.
+    
+    # Insert user
+    add users fields email, name values 'a@b.com', 'Alice'
+    
+    # Update with named param
+    set users[id = :id] fields name = :name
+    
+    # Delete old records
+    del logs[created_at < 30d]
+
+SSH TUNNELING:
+    Access remote databases through SSH jump host:
+    
+    qail exec -f seed.qail --ssh myserver --url postgres://user:pass@localhost:5432/db
+    
+    This creates: local:random_port -> myserver:5432 tunnel automatically.
+
+TRANSACTIONS:
+    Wrap multiple statements in a single transaction (rollback on error):
+    
+    qail exec -f batch.qail --url postgres://... --tx
+
+DRY-RUN:
+    Preview generated SQL without executing:
+    
+    qail exec -f data.qail --dry-run
+
+EXAMPLES:
+    # Inline insert
+    qail exec "add users fields name, active values 'Alice', true" --url postgres://...
+    
+    # From file with SSH tunnel
+    qail exec -f seed.qail --ssh staging --url postgres://...
+    
+    # Transactional batch
+    qail exec -f migrations.qail --url postgres://... --tx
+    
+    # Preview SQL only
+    qail exec -f data.qail --dry-run"#)]
     Exec {
         /// QAIL query string (e.g., "add users fields name, email values 'test', 'a@b.com'")
         query: Option<String>,
-        /// Path to .qail file
+        /// Path to .qail file (supports multi-line with triple quotes)
         #[arg(short, long)]
         file: Option<String>,
         /// Database URL
         #[arg(short, long)]
         url: Option<String>,
+        /// SSH host for tunneling (e.g., "example" or "user@host")
+        #[arg(long)]
+        ssh: Option<String>,
         /// Wrap all statements in a transaction
         #[arg(long)]
         tx: bool,
@@ -378,7 +575,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Explain { query }) => explain_query(query),
         Some(Commands::Repl) => run_repl(),
-        Some(Commands::Symbols) => show_symbols(),
+
         Some(Commands::Mig { query, name }) => {
             generate_migration(query, name.clone())?;
         }
@@ -510,17 +707,18 @@ async fn main() -> Result<()> {
         Some(Commands::Worker { interval, batch }) => {
             qail::worker::run_worker(*interval, *batch).await?;
         },
-        Some(Commands::Exec { query, file, url, tx, dry_run }) => {
+        Some(Commands::Exec { query, file, url, ssh, tx, dry_run }) => {
             qail::exec::run_exec(qail::exec::ExecConfig {
                 query: query.clone(),
                 file: file.clone(),
                 url: url.clone(),
+                ssh: ssh.clone(),
                 tx: *tx,
                 dry_run: *dry_run,
             }).await?;
         },
         Some(Commands::Types { schema, output }) => {
-            qail::types::generate_types(&schema, output.as_deref())?;
+            qail::types::generate_types(schema, output.as_deref())?;
         },
         None => {
             if let Some(query) = &cli.query {
@@ -628,41 +826,4 @@ fn explain_query(query: &str) {
     }
 }
 
-pub fn show_symbols() {
-    println!("{}", "🪝 QAIL Symbol Reference (v2.0)".cyan().bold());
-    println!();
 
-    let symbols = [
-        ("::", "separator", "Table delimiter", "FROM"),
-        ("'", "field", "Column selector", "SELECT col"),
-        ("'_", "all", "All columns", "SELECT *"),
-        ("[", "filter", "WHERE condition", "WHERE ..."),
-        ("]", "close", "End filter/modifier", ""),
-        ("[]", "values", "Insert values", "VALUES (...)"),
-        ("$", "param", "Placeholder", "$1, $2"),
-        ("<-", "left", "LEFT JOIN", "LEFT JOIN"),
-        ("->", "inner", "INNER JOIN", "JOIN"),
-        ("<>", "full", "FULL OUTER JOIN", "FULL JOIN"),
-        ("!", "distinct", "DISTINCT modifier", "SELECT DISTINCT"),
-    ];
-
-    println!(
-        "{:10} {:15} {:30} {}",
-        "Symbol".white().bold(),
-        "Name".white().bold(),
-        "Function".white().bold(),
-        "SQL Equivalent".white().bold()
-    );
-    println!("{}", "─".repeat(80).dimmed());
-
-    for (symbol, name, function, sql) in symbols {
-        println!(
-            "{:10} {:15} {:30} {}",
-            symbol.cyan().bold(),
-            name.yellow(),
-            function.white(),
-            sql.dimmed()
-        );
-    }
-    println!();
-}

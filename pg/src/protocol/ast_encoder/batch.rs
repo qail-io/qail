@@ -57,7 +57,7 @@ pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<By
     // Send Describe to get RowDescription with column names
     buf.extend_from_slice(b"D");
     buf.extend_from_slice(&6i32.to_be_bytes()); // Length: 4 + 1 + 1
-    buf.extend_from_slice(&[b'P']); // Describe Portal (not Statement)
+    buf.extend_from_slice(b"P"); // Describe Portal (not Statement)
     buf.extend_from_slice(&[0]); // Unnamed portal
 
     // ===== EXECUTE =====

@@ -14,7 +14,6 @@ pub fn run_repl() {
         "Type queries to see generated SQL. Commands:".dimmed()
     );
     println!("  {}  - Exit the REPL", ".exit".yellow());
-    println!("  {} - Show symbol reference", ".help".yellow());
     println!("  {} - Clear screen", ".clear".yellow());
     println!();
 
@@ -56,14 +55,7 @@ pub fn run_repl() {
                         print!("\x1B[2J\x1B[1;1H");
                         continue;
                     }
-                    ".symbols" | "symbols" => {
-                        println!(
-                            "{}",
-                            "Type 'qail symbols' in a terminal to see the full symbol reference."
-                                .dimmed()
-                        );
-                        continue;
-                    }
+
                     _ => {}
                 }
 
@@ -102,7 +94,7 @@ pub fn show_repl_help() {
     println!("  {}     - Exit the REPL", ".exit".yellow());
     println!("  {}     - Show this help", ".help".yellow());
     println!("  {}    - Clear screen", ".clear".yellow());
-    println!("  {}  - Show symbol reference", ".symbols".yellow());
+    println!("  {}    - Clear screen", ".clear".yellow());
     println!();
     println!("{}", "Query Examples (v2 keyword syntax):".cyan().bold());
     println!("  get users fields *");
