@@ -2761,6 +2761,7 @@ dependencies = [
  "chrono",
  "colored 3.0.0",
  "nom",
+ "once_cell",
  "proc-macro2",
  "quote",
  "regex",
