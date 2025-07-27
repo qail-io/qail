@@ -142,7 +142,7 @@ pub extern "C" fn qail_encode_batch(
 pub extern "C" fn qail_bytes_free(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
         unsafe {
-            let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len));
+            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len));
         }
     }
 }

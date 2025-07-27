@@ -2,16 +2,11 @@ use crate::transpiler::sql::postgres::PostgresGenerator;
 use crate::transpiler::sql::sqlite::SqliteGenerator;
 use crate::transpiler::traits::SqlGenerator;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Dialect {
+    #[default]
     Postgres,
     SQLite,
-}
-
-impl Default for Dialect {
-    fn default() -> Self {
-        Self::Postgres
-    }
 }
 
 impl Dialect {
