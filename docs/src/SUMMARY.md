@@ -24,6 +24,8 @@
 - [Data-Safe Migrations](./features/data-safe-migrations.md)
 - [Impact Analyzer](./features/analyzer.md)
 - [Foreign Keys](./features/foreign-keys.md)
+- [First-Class Relations](./features/relations.md)
+- [Typed Codegen](./features/typed-codegen.md)
 - [Connection Pooling](./features/connection-pool.md)
 - [Hybrid Architecture](./features/hybrid.md)
 - [Type System](./features/types.md)

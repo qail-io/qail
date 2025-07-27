@@ -22,12 +22,27 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-/// Table schema information with column types
+/// Foreign key relationship definition
+#[derive(Debug, Clone)]
+pub struct ForeignKey {
+    /// Column in this table that references another table
+    pub column: String,
+    /// Name of referenced table
+    pub ref_table: String,
+    /// Column in referenced table
+    pub ref_column: String,
+}
+
+/// Table schema information with column types and relations
 #[derive(Debug, Clone)]
 pub struct TableSchema {
     pub name: String,
     /// Column name -> Column type (e.g., "id" -> "UUID", "name" -> "TEXT")
     pub columns: HashMap<String, String>,
+    /// Column name -> Access Policy (Default: "Public", can be "Protected")
+    pub policies: HashMap<String, String>,
+    /// Foreign key relationships to other tables
+    pub foreign_keys: Vec<ForeignKey>,
 }
 
 /// Parsed schema from schema.qail file
@@ -49,6 +64,8 @@ impl Schema {
         let mut schema = Schema::default();
         let mut current_table: Option<String> = None;
         let mut current_columns: HashMap<String, String> = HashMap::new();
+        let mut current_policies: HashMap<String, String> = HashMap::new();
+        let mut current_fks: Vec<ForeignKey> = Vec::new();
 
         for line in content.lines() {
             let line = line.trim();
@@ -65,6 +82,8 @@ impl Schema {
                     schema.tables.insert(table_name.clone(), TableSchema {
                         name: table_name,
                         columns: std::mem::take(&mut current_columns),
+                        policies: std::mem::take(&mut current_policies),
+                        foreign_keys: std::mem::take(&mut current_fks),
                     });
                 }
                 
@@ -81,17 +100,41 @@ impl Schema {
                     schema.tables.insert(table_name.clone(), TableSchema {
                         name: table_name,
                         columns: std::mem::take(&mut current_columns),
+                        policies: std::mem::take(&mut current_policies),
+                        foreign_keys: std::mem::take(&mut current_fks),
                     });
                 }
             }
-            // Column definition: column_name TYPE [constraints]
+            // Column definition: column_name TYPE [constraints] [ref:table.column] [protected]
             // Format from qail pull: "flow_name VARCHAR not_null"
+            // New format with FK: "user_id UUID ref:users.id"
+            // New format with Policy: "password_hash TEXT protected"
             else if current_table.is_some() && !line.starts_with('#') && !line.is_empty() {
-                let mut parts = line.split_whitespace();
-                if let Some(col_name) = parts.next() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(col_name) = parts.first() {
                     // Second word is the type (default to TEXT if missing)
-                    let col_type = parts.next().unwrap_or("TEXT").to_uppercase();
+                    let col_type = parts.get(1).copied().unwrap_or("TEXT").to_uppercase();
                     current_columns.insert(col_name.to_string(), col_type);
+                    
+                    // Check for policies and foreign keys
+                    let mut policy = "Public".to_string();
+                    
+                    for part in parts.iter().skip(2) {
+                        if *part == "protected" {
+                            policy = "Protected".to_string();
+                        } else if let Some(ref_spec) = part.strip_prefix("ref:") {
+                            // Parse "table.column" or ">table.column"
+                            let ref_spec = ref_spec.trim_start_matches('>');
+                            if let Some((ref_table, ref_col)) = ref_spec.split_once('.') {
+                                current_fks.push(ForeignKey {
+                                    column: col_name.to_string(),
+                                    ref_table: ref_table.to_string(),
+                                    ref_column: ref_col.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    current_policies.insert(col_name.to_string(), policy);
                 }
             }
         }
@@ -166,6 +209,8 @@ impl Schema {
                 self.tables.insert(table_name.clone(), TableSchema {
                     name: table_name,
                     columns: HashMap::new(),
+                    policies: HashMap::new(),
+                    foreign_keys: vec![],
                 });
                 changes += 1;
             }
@@ -222,6 +267,8 @@ impl Schema {
                     self.tables.insert(table.clone(), TableSchema {
                         name: table,
                         columns: cols,
+                        policies: HashMap::new(),
+                        foreign_keys: vec![],
                     });
                     changes += 1;
                 }
@@ -881,3 +928,255 @@ let query = Qail::get("posts")
         assert!(usages[0].columns.contains(&"author".to_string()));
     }
 }
+
+// =============================================================================
+// Typed Schema Codegen
+// =============================================================================
+
+/// Map QAIL types to Rust types for TypedColumn<T>
+fn qail_type_to_rust(qail_type: &str) -> &'static str {
+    match qail_type.to_uppercase().as_str() {
+        "UUID" => "uuid::Uuid",
+        "TEXT" | "VARCHAR" | "CHAR" | "STRING" => "String",
+        "INT" | "INTEGER" | "INT4" | "SERIAL" => "i32",
+        "BIGINT" | "INT8" | "BIGSERIAL" => "i64",
+        "SMALLINT" | "INT2" => "i16",
+        "FLOAT" | "FLOAT4" | "REAL" => "f32",
+        "DOUBLE" | "FLOAT8" | "DOUBLE PRECISION" => "f64",
+        "DECIMAL" | "NUMERIC" => "rust_decimal::Decimal",
+        "BOOL" | "BOOLEAN" => "bool",
+        "TIMESTAMP" | "TIMESTAMPTZ" => "chrono::DateTime<chrono::Utc>",
+        "DATE" => "chrono::NaiveDate",
+        "TIME" | "TIMETZ" => "chrono::NaiveTime",
+        "JSON" | "JSONB" => "serde_json::Value",
+        "BYTEA" | "BLOB" => "Vec<u8>",
+        _ => "String", // Default to String for unknown types
+    }
+}
+
+/// Convert table/column names to valid Rust identifiers
+fn to_rust_ident(name: &str) -> String {
+    // Handle Rust keywords
+    let name = match name {
+        "type" => "r#type",
+        "match" => "r#match",
+        "ref" => "r#ref",
+        "self" => "r#self",
+        "mod" => "r#mod",
+        "use" => "r#use",
+        _ => name,
+    };
+    name.to_string()
+}
+
+/// Convert table name to PascalCase struct name
+fn to_struct_name(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>() + &name[1..])
+        .unwrap_or_default()
+}
+
+/// Generate typed Rust module from schema.
+/// 
+/// # Usage in consumer's build.rs:
+/// ```ignore
+/// fn main() {
+///     let out_dir = std::env::var("OUT_DIR").unwrap();
+///     qail_core::build::generate_typed_schema("schema.qail", &format!("{}/schema.rs", out_dir)).unwrap();
+///     println!("cargo:rerun-if-changed=schema.qail");
+/// }
+/// ```
+/// 
+/// Then in the consumer's lib.rs:
+/// ```ignore
+/// include!(concat!(env!("OUT_DIR"), "/schema.rs"));
+/// ```
+pub fn generate_typed_schema(schema_path: &str, output_path: &str) -> Result<(), String> {
+    let schema = Schema::parse_file(schema_path)?;
+    let code = generate_schema_code(&schema);
+    
+    fs::write(output_path, code)
+        .map_err(|e| format!("Failed to write schema module to '{}': {}", output_path, e))?;
+    
+    Ok(())
+}
+
+/// Generate typed Rust code from schema (does not write to file)
+pub fn generate_schema_code(schema: &Schema) -> String {
+    let mut code = String::new();
+    
+    // Header
+    code.push_str("//! Auto-generated typed schema from schema.qail\n");
+    code.push_str("//! Do not edit manually - regenerate with `cargo build`\n\n");
+    code.push_str("#![allow(dead_code, non_upper_case_globals)]\n\n");
+    code.push_str("use qail_core::typed::{Table, TypedColumn, RelatedTo, Public, Protected};\n\n");
+    
+    // Sort tables for deterministic output
+    let mut tables: Vec<_> = schema.tables.values().collect();
+    tables.sort_by(|a, b| a.name.cmp(&b.name));
+    
+    for table in &tables {
+        let mod_name = to_rust_ident(&table.name);
+        let struct_name = to_struct_name(&table.name);
+        
+        code.push_str(&format!("/// Typed schema for `{}` table\n", table.name));
+        code.push_str(&format!("pub mod {} {{\n", mod_name));
+        code.push_str("    use super::*;\n\n");
+        
+        // Table struct implementing Table trait
+        code.push_str(&format!("    /// Table marker for `{}`\n", table.name));
+        code.push_str("    #[derive(Debug, Clone, Copy)]\n");
+        code.push_str(&format!("    pub struct {};\n\n", struct_name));
+        
+        code.push_str(&format!("    impl Table for {} {{\n", struct_name));
+        code.push_str(&format!("        fn table_name() -> &'static str {{ \"{}\" }}\n", table.name));
+        code.push_str("    }\n\n");
+        
+        code.push_str(&format!("    impl From<{}> for String {{\n", struct_name));
+        code.push_str(&format!("        fn from(_: {}) -> String {{ \"{}\".to_string() }}\n", struct_name, table.name));
+        code.push_str("    }\n\n");
+
+        code.push_str(&format!("    impl AsRef<str> for {} {{\n", struct_name));
+        code.push_str(&format!("        fn as_ref(&self) -> &str {{ \"{}\" }}\n", table.name));
+        code.push_str("    }\n\n");
+        
+        // Table constant for convenience
+        code.push_str(&format!("    /// The `{}` table\n", table.name));
+        code.push_str(&format!("    pub const table: {} = {};\n\n", struct_name, struct_name));
+        
+        // Sort columns for deterministic output
+        let mut columns: Vec<_> = table.columns.iter().collect();
+        columns.sort_by(|a, b| a.0.cmp(b.0));
+        
+        // Column constants
+        for (col_name, col_type) in columns {
+            let rust_type = qail_type_to_rust(col_type);
+            let col_ident = to_rust_ident(col_name);
+            let policy = table.policies.get(col_name).map(|s| s.as_str()).unwrap_or("Public");
+            let rust_policy = if policy == "Protected" { "Protected" } else { "Public" };
+            
+            code.push_str(&format!("    /// Column `{}.{}` ({}) - {}\n", table.name, col_name, col_type, policy));
+            code.push_str(&format!(
+                "    pub const {}: TypedColumn<{}, {}> = TypedColumn::new(\"{}\", \"{}\");\n",
+                col_ident, rust_type, rust_policy, table.name, col_name
+            ));
+        }
+        
+        code.push_str("}\n\n");
+    }
+    
+    // ==========================================================================
+    // Generate RelatedTo impls for compile-time relationship checking
+    // ==========================================================================
+    
+    code.push_str("// =============================================================================\n");
+    code.push_str("// Compile-Time Relationship Safety (RelatedTo impls)\n");
+    code.push_str("// =============================================================================\n\n");
+    
+    for table in &tables {
+        for fk in &table.foreign_keys {
+            // table.column refs ref_table.ref_column
+            // This means: table is related TO ref_table (forward)
+            // AND: ref_table is related FROM table (reverse - parent has many children)
+            
+            let from_mod = to_rust_ident(&table.name);
+            let from_struct = to_struct_name(&table.name);
+            let to_mod = to_rust_ident(&fk.ref_table);
+            let to_struct = to_struct_name(&fk.ref_table);
+            
+            // Forward: From table (child) -> Referenced table (parent)
+            // Example: posts -> users (posts.user_id -> users.id)
+            code.push_str(&format!(
+                "/// {} has a foreign key to {} via {}.{}\n",
+                table.name, fk.ref_table, table.name, fk.column
+            ));
+            code.push_str(&format!(
+                "impl RelatedTo<{}::{}> for {}::{} {{\n",
+                to_mod, to_struct, from_mod, from_struct
+            ));
+            code.push_str(&format!(
+                "    fn join_columns() -> (&'static str, &'static str) {{ (\"{}\", \"{}\") }}\n",
+                fk.column, fk.ref_column
+            ));
+            code.push_str("}\n\n");
+            
+            // Reverse: Referenced table (parent) -> From table (child)
+            // Example: users -> posts (users.id -> posts.user_id)
+            // This allows: Qail::get(users::table).join_related(posts::table)
+            code.push_str(&format!(
+                "/// {} is referenced by {} via {}.{}\n",
+                fk.ref_table, table.name, table.name, fk.column
+            ));
+            code.push_str(&format!(
+                "impl RelatedTo<{}::{}> for {}::{} {{\n",
+                from_mod, from_struct, to_mod, to_struct
+            ));
+            code.push_str(&format!(
+                "    fn join_columns() -> (&'static str, &'static str) {{ (\"{}\", \"{}\") }}\n",
+                fk.ref_column, fk.column
+            ));
+            code.push_str("}\n\n");
+        }
+    }
+    
+    code
+}
+
+#[cfg(test)]
+mod codegen_tests {
+    use super::*;
+    
+    #[test]
+    fn test_generate_schema_code() {
+        let schema_content = r#"
+table users {
+    id UUID primary_key
+    email TEXT not_null
+    age INT
+}
+
+table posts {
+    id UUID primary_key
+    user_id UUID ref:users.id
+    title TEXT
+}
+"#;
+        
+        let schema = Schema::parse(schema_content).unwrap();
+        let code = generate_schema_code(&schema);
+        
+        // Verify module structure
+        assert!(code.contains("pub mod users {"));
+        assert!(code.contains("pub mod posts {"));
+        
+        // Verify table structs
+        assert!(code.contains("pub struct Users;"));
+        assert!(code.contains("pub struct Posts;"));
+        
+        // Verify columns
+        assert!(code.contains("pub const id: TypedColumn<uuid::Uuid, Public>"));
+        assert!(code.contains("pub const email: TypedColumn<String, Public>"));
+        assert!(code.contains("pub const age: TypedColumn<i32, Public>"));
+        
+        // Verify RelatedTo impls for compile-time relationship checking
+        assert!(code.contains("impl RelatedTo<users::Users> for posts::Posts"));
+        assert!(code.contains("impl RelatedTo<posts::Posts> for users::Users"));
+    }
+
+    #[test]
+    fn test_generate_protected_column() {
+        let schema_content = r#"
+table secrets {
+    id UUID primary_key
+    token TEXT protected
+}
+"#;
+        let schema = Schema::parse(schema_content).unwrap();
+        let code = generate_schema_code(&schema);
+        
+        // Verify Protected policy
+        assert!(code.contains("pub const token: TypedColumn<String, Protected>"));
+    }
+}
+

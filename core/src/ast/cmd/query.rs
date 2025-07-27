@@ -254,6 +254,66 @@ impl Qail {
     ) -> Self {
         self.join(JoinKind::Inner, table, left_col, right_col)
     }
+    
+    /// Join a related table using schema-defined foreign key relationship.
+    /// 
+    /// This is the "First-Class Relations" API - it automatically infers
+    /// the join condition from the schema's `ref:` definitions.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// // Schema: posts.user_id UUID ref:users.id
+    /// 
+    /// // Instead of:
+    /// Qail::get("users").left_join("posts", "users.id", "posts.user_id")
+    /// 
+    /// // Simply:
+    /// Qail::get("users").join_on("posts")
+    /// ```
+    /// 
+    /// # Panics
+    /// Panics if no relation is found between the current table and the target.
+    /// Load relations first using `schema::load_schema_relations()`.
+    pub fn join_on(self, related_table: impl AsRef<str>) -> Self {
+        let related = related_table.as_ref();
+        
+        // Try: current table -> related (forward relation)
+        if let Some((from_col, to_col)) = crate::schema::lookup_relation(&self.table, related) {
+            return self.left_join(related, &from_col, &to_col);
+        }
+        
+        // Try: related -> current table (reverse relation)
+        if let Some((from_col, to_col)) = crate::schema::lookup_relation(related, &self.table) {
+            // Reverse: related.from_col references self.to_col
+            return self.left_join(related, &to_col, &from_col);
+        }
+        
+        panic!(
+            "No relation found between '{}' and '{}'. \
+             Define a ref: in schema.qail or use load_schema_relations() first.",
+            self.table, related
+        );
+    }
+    
+    /// Join a related table if relation exists, otherwise no-op.
+    /// 
+    /// This is the safe version of `join_on()` that doesn't panic.
+    pub fn join_on_optional(self, related_table: impl AsRef<str>) -> Self {
+        let related = related_table.as_ref();
+        
+        // Try forward relation
+        if let Some((from_col, to_col)) = crate::schema::lookup_relation(&self.table, related) {
+            return self.left_join(related, &from_col, &to_col);
+        }
+        
+        // Try reverse relation
+        if let Some((from_col, to_col)) = crate::schema::lookup_relation(related, &self.table) {
+            return self.left_join(related, &to_col, &from_col);
+        }
+        
+        // No relation found, return self unchanged
+        self
+    }
 
     pub fn returning<I, S>(mut self, cols: I) -> Self
     where
