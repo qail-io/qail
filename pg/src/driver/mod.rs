@@ -25,6 +25,7 @@ mod pipeline;
 mod pool;
 mod prepared;
 mod query;
+pub mod rls;
 mod row;
 mod stream;
 mod transaction;
@@ -36,6 +37,7 @@ pub use cancel::CancelToken;
 pub use io_backend::{IoBackend, backend_name, detect as detect_io_backend};
 pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection};
 pub use prepared::PreparedStatement;
+pub use rls::RlsContext;
 pub use row::QailRow;
 
 use qail_core::ast::Qail;
@@ -118,12 +120,14 @@ pub type PgResult<T> = Result<T, PgError>;
 pub struct PgDriver {
     #[allow(dead_code)]
     connection: PgConnection,
+    /// Current RLS context, if set. Used for multi-tenant data isolation.
+    rls_context: Option<RlsContext>,
 }
 
 impl PgDriver {
     /// Create a new driver with an existing connection.
     pub fn new(connection: PgConnection) -> Self {
-        Self { connection }
+        Self { connection, rls_context: None }
     }
 
     /// Builder pattern for ergonomic connection configuration.
@@ -708,6 +712,45 @@ impl PgDriver {
     /// Reset statement timeout to default (no limit).
     pub async fn reset_statement_timeout(&mut self) -> PgResult<()> {
         self.execute_raw("RESET statement_timeout").await
+    }
+
+    // ==================== RLS (MULTI-TENANT) ====================
+
+    /// Set the RLS context for multi-tenant data isolation.
+    ///
+    /// Configures PostgreSQL session variables (`app.current_operator_id`, etc.)
+    /// so that RLS policies automatically filter data by tenant.
+    ///
+    /// Since `PgDriver` takes `&mut self`, the borrow checker guarantees
+    /// that `set_config` and all subsequent queries execute on the **same
+    /// connection** — no pool race conditions possible.
+    ///
+    /// # Example
+    /// ```ignore
+    /// driver.set_rls_context(RlsContext::operator("op-123")).await?;
+    /// let orders = driver.fetch_all(&Qail::get("orders")).await?;
+    /// // orders only contains rows where operator_id = 'op-123'
+    /// ```
+    pub async fn set_rls_context(&mut self, ctx: rls::RlsContext) -> PgResult<()> {
+        let sql = rls::context_to_sql(&ctx);
+        self.execute_raw(&sql).await?;
+        self.rls_context = Some(ctx);
+        Ok(())
+    }
+
+    /// Clear the RLS context, resetting session variables to safe defaults.
+    ///
+    /// After clearing, all RLS-protected queries will return zero rows
+    /// (empty operator_id matches nothing).
+    pub async fn clear_rls_context(&mut self) -> PgResult<()> {
+        self.execute_raw(rls::reset_sql()).await?;
+        self.rls_context = None;
+        Ok(())
+    }
+
+    /// Get the current RLS context, if any.
+    pub fn rls_context(&self) -> Option<&rls::RlsContext> {
+        self.rls_context.as_ref()
     }
 
     // ==================== PIPELINE (BATCH) ====================
