@@ -356,6 +356,35 @@ impl PgPool {
         })
     }
 
+    /// Acquire a connection with RLS context pre-configured.
+    ///
+    /// Sets PostgreSQL session variables for tenant isolation before
+    /// returning the connection. When the connection is dropped, it
+    /// automatically clears the RLS context before returning to the pool.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use qail_core::rls::RlsContext;
+    ///
+    /// let mut conn = pool.acquire_with_rls(
+    ///     RlsContext::operator("550e8400-e29b-41d4-a716-446655440000")
+    /// ).await?;
+    /// // All queries through `conn` are now scoped to this operator
+    /// ```
+    pub async fn acquire_with_rls(
+        &self,
+        ctx: qail_core::rls::RlsContext,
+    ) -> PgResult<PooledConnection> {
+        let mut conn = self.acquire().await?;
+
+        // Set RLS context on the raw connection
+        let sql = super::rls::context_to_sql(&ctx);
+        let pg_conn = conn.get_mut();
+        pg_conn.execute_simple(&sql).await?;
+
+        Ok(conn)
+    }
+
     /// Get the current number of idle connections.
     pub async fn idle_count(&self) -> usize {
         self.inner.connections.lock().await.len()
