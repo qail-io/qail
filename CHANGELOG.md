@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-02-07
+
+### Added
+
+- **Core:** `RlsContext` in `qail_core::rls` — shared multi-tenant context for all drivers (pg, qdrant, redis)
+  - `RlsContext::operator()`, `::agent()`, `::operator_and_agent()`, `::super_admin()` constructors
+  - `has_operator()`, `has_agent()`, `bypasses_rls()` query methods
+  - `Display` impl for logging/debugging
+- **PG:** Driver-level RLS support for multi-tenant SaaS:
+  - `PgDriver::set_rls_context(ctx)` — sets PostgreSQL session variables via `set_config()`
+  - `PgDriver::clear_rls_context()` — resets to safe defaults
+  - `PgDriver::rls_context()` — getter for current context
+  - `PgPool::acquire_with_rls(ctx)` — acquire connection with pre-configured tenant isolation
+- **PG:** `rls` module with PostgreSQL-specific SQL generation (`context_to_sql`, `reset_sql`)
+
 ## [0.14.21] - 2026-01-10
 
 ### Fixed
