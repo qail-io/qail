@@ -195,3 +195,14 @@ This is the **Hasura approach**. Makes PostgreSQL RLS policies a backup rather t
 
 - [ ] `schema.qail` extensions: `bucket`, `queue`, `topic`
 - [ ] `build.rs` validates resources exist in Terraform/AWS
+
+---
+
+## Current Status (Feb 7, 2026)
+
+### SaaS Isolation (RLS) Implementation ✅
+- [x] **Driver-Level Context:** `PgDriver::set_rls_context()` implemented.
+- [x] **Repository Migration:** `QailOrderRepository` and `User/Customer` handlers migrated to use `set_rls_context(super_admin)`.
+- [x] **Endpoint Verification:** verified `users`, `customers` (fixed casing bug), and `orders` endpoints in staging.
+- [x] **Sales Channel Logic:** `list_orders` enriched with operator/agent resolution (`{Operator} via {Agent}`).
+- [ ] **Migration Pending:** Move 'ExampleApp' from Operator role to Agent role (DB migration). 

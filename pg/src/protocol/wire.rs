@@ -80,6 +80,9 @@ pub enum BackendMessage {
     EmptyQueryResponse,
     /// Notice response (warning/info messages, not errors)
     NoticeResponse(ErrorFields),
+    /// Parameter description (OIDs of parameters in a prepared statement)
+    /// Sent by server in response to Describe(Statement)
+    ParameterDescription(Vec<u32>),
 }
 
 /// Transaction status
@@ -278,6 +281,7 @@ impl BackendMessage {
             b'1' => BackendMessage::ParseComplete,
             b'2' => BackendMessage::BindComplete,
             b'n' => BackendMessage::NoData,
+            b't' => Self::decode_parameter_description(payload)?,
             b'G' => Self::decode_copy_in_response(payload)?,
             b'H' => Self::decode_copy_out_response(payload)?,
             b'd' => BackendMessage::CopyData(payload.to_vec()),
@@ -498,6 +502,25 @@ impl BackendMessage {
             }
         }
         Ok(fields)
+    }
+
+    fn decode_parameter_description(payload: &[u8]) -> Result<Self, String> {
+        let count = if payload.len() >= 2 {
+            i16::from_be_bytes([payload[0], payload[1]]) as usize
+        } else {
+            0
+        };
+        let mut oids = Vec::with_capacity(count);
+        let mut pos = 2;
+        for _ in 0..count {
+            if pos + 4 <= payload.len() {
+                oids.push(u32::from_be_bytes([
+                    payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3],
+                ]));
+                pos += 4;
+            }
+        }
+        Ok(BackendMessage::ParameterDescription(oids))
     }
 
     fn decode_copy_in_response(payload: &[u8]) -> Result<Self, String> {
