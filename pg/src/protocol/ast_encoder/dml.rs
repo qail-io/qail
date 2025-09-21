@@ -382,6 +382,13 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         buf.extend_from_slice(b" WHERE ");
         encode_conditions(&cage.conditions, buf, params)?;
     }
+
+    // RETURNING clause
+    if let Some(ref ret_cols) = cmd.returning {
+        buf.extend_from_slice(b" RETURNING ");
+        encode_columns(ret_cols, buf);
+    }
+
     Ok(())
 }
 
@@ -397,6 +404,13 @@ pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         buf.extend_from_slice(b" WHERE ");
         encode_conditions(&cage.conditions, buf, params)?;
     }
+
+    // RETURNING clause
+    if let Some(ref ret_cols) = cmd.returning {
+        buf.extend_from_slice(b" RETURNING ");
+        encode_columns(ret_cols, buf);
+    }
+
     Ok(())
 }
 

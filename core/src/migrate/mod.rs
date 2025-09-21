@@ -21,12 +21,14 @@ pub mod alter;
 pub mod diff;
 pub mod named_migration;
 pub mod parser;
+pub mod policy;
 pub mod schema;
 pub mod types;
 
 pub use alter::{AlterOp, AlterTable, TableConstraint};
 pub use diff::diff_schemas;
 pub use named_migration::{MigrationMeta, parse_migration_meta, validate_dependencies};
+pub use policy::{RlsPolicy, PolicyTarget, PolicyPermissiveness, tenant_check, session_bool_check};
 pub use parser::parse_qail;
 pub use schema::{
     CheckConstraint, CheckExpr, Column, Deferrable, FkAction, ForeignKey, Generated, Index,

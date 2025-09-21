@@ -179,6 +179,7 @@ mod advanced;
 mod constructors;
 mod cte;
 mod query;
+mod rls;
 mod vector;
 
 // Deprecated methods kept in main module for backward compatibility
