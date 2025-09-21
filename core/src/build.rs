@@ -342,13 +342,21 @@ fn extract_column_from_create(line: &str) -> Option<String> {
     let line = line.trim();
     
     // Skip keywords and constraints
+    // IMPORTANT: Must check for word boundaries to avoid matching column names
+    // that happen to start with a keyword (e.g., created_at starts with CREATE,
+    // primary_contact starts with PRIMARY, check_status starts with CHECK, etc.)
     let line_upper = line.to_uppercase();
-    if line_upper.starts_with("CREATE") || 
-       line_upper.starts_with("PRIMARY") ||
-       line_upper.starts_with("FOREIGN") ||
-       line_upper.starts_with("UNIQUE") ||
-       line_upper.starts_with("CHECK") ||
-       line_upper.starts_with("CONSTRAINT") ||
+    let starts_with_keyword = |kw: &str| -> bool {
+        line_upper.starts_with(kw)
+            && line_upper[kw.len()..].starts_with(|c: char| c == ' ' || c == '(')
+    };
+    
+    if starts_with_keyword("CREATE") || 
+       starts_with_keyword("PRIMARY") ||
+       starts_with_keyword("FOREIGN") ||
+       starts_with_keyword("UNIQUE") ||
+       starts_with_keyword("CHECK") ||
+       starts_with_keyword("CONSTRAINT") ||
        line_upper.starts_with(")") ||
        line_upper.starts_with("(") ||
        line.is_empty() {
@@ -1180,3 +1188,91 @@ table secrets {
     }
 }
 
+
+
+#[cfg(test)]
+mod migration_parser_tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_contracts_migration_parses_all_columns() {
+        let sql = r#"
+CREATE TABLE agent_contracts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    operator_id UUID NOT NULL REFERENCES operators(id) ON DELETE CASCADE,
+    pricing_model VARCHAR(20) NOT NULL CHECK (pricing_model IN ('commission', 'static_markup', 'net_rate')),
+    commission_percent DECIMAL(5,2),
+    static_markup DECIMAL(10,2),
+    is_active BOOLEAN DEFAULT true,
+    valid_from DATE,
+    valid_until DATE,
+    approved_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    UNIQUE(agent_id, operator_id)
+);
+"#;
+
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(sql);
+        
+        let table = schema.tables.get("agent_contracts")
+            .expect("agent_contracts table should exist");
+        
+        for col in &["id", "agent_id", "operator_id", "pricing_model",
+                      "commission_percent", "static_markup", "is_active",
+                      "valid_from", "valid_until", "approved_by",
+                      "created_at", "updated_at"] {
+            assert!(
+                table.columns.contains_key(*col),
+                "Missing column: '{}'. Found: {:?}",
+                col, table.columns.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Regression test: column names that START with SQL keywords must parse correctly.
+    /// e.g., created_at starts with CREATE, primary_contact starts with PRIMARY, etc.
+    #[test]
+    fn test_keyword_prefixed_column_names_are_not_skipped() {
+        let sql = r#"
+CREATE TABLE edge_cases (
+    id UUID PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL,
+    created_by UUID,
+    primary_contact VARCHAR(255),
+    check_status VARCHAR(20),
+    unique_code VARCHAR(50),
+    foreign_ref UUID,
+    constraint_name VARCHAR(100),
+    PRIMARY KEY (id),
+    CHECK (check_status IN ('pending', 'active')),
+    UNIQUE (unique_code),
+    CONSTRAINT fk_ref FOREIGN KEY (foreign_ref) REFERENCES other(id)
+);
+"#;
+
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(sql);
+        
+        let table = schema.tables.get("edge_cases")
+            .expect("edge_cases table should exist");
+        
+        // These column names start with SQL keywords — all must be found
+        for col in &["created_at", "created_by", "primary_contact",
+                      "check_status", "unique_code", "foreign_ref",
+                      "constraint_name"] {
+            assert!(
+                table.columns.contains_key(*col),
+                "Column '{}' should NOT be skipped just because it starts with a SQL keyword. Found: {:?}",
+                col, table.columns.keys().collect::<Vec<_>>()
+            );
+        }
+        
+        // These are constraint keywords, not columns — must NOT appear
+        // (PRIMARY KEY, CHECK, UNIQUE, CONSTRAINT lines should be skipped)
+        assert!(!table.columns.contains_key("primary"),
+            "Constraint keyword 'PRIMARY' should not be treated as a column");
+    }
+}
