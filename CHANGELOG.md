@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.15.2] - 2026-02-07
+## [0.15.6] - 2026-02-07
 
 ### Added
 
@@ -19,6 +19,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `PgDriver::rls_context()` — getter for current context
   - `PgPool::acquire_with_rls(ctx)` — acquire connection with pre-configured tenant isolation
 - **PG:** `rls` module with PostgreSQL-specific SQL generation (`context_to_sql`, `reset_sql`)
+- **PG:** Pool-level RLS auto-clear on Drop — `PooledConnection` now resets tenant context via `reset_sql()` before returning dirty connections to pool (prevents cross-tenant data leakage)
+- **Core:** AST-native RLS Policy Definition API (`qail_core::migrate::policy`):
+  - `RlsPolicy` builder with `for_all()`, `for_select()`, `restrictive()`, `to_role()`, `using(Expr)`, `with_check(Expr)`
+  - `tenant_check()`, `session_bool_check()`, `or()`, `and()` — typed AST combinators (no raw SQL)
+  - `PolicyTarget`, `PolicyPermissiveness` enums
+- **Core:** `AlterOp::ForceRowLevelSecurity(bool)` + `AlterTable::force_rls()` / `no_force_rls()` builders
+- **Core:** Policy transpiler (`qail_core::transpiler::policy`):
+  - `create_policy_sql()` — `RlsPolicy` → `CREATE POLICY ... USING (...) WITH CHECK (...)`
+  - `drop_policy_sql()` — `DROP POLICY IF EXISTS ... ON ...`
+  - `alter_table_sql()` — full `AlterOp` → SQL transpiler (ENABLE/DISABLE/FORCE RLS, ADD/DROP COLUMN, etc.)
+  - `rls_setup_sql()` — convenience: ENABLE + FORCE + CREATE POLICY in one call
+  - `check_expr_to_sql()` — `CheckExpr` AST → SQL
+- **Core:** AST-level Tenant Injection API (`qail_core::rls::tenant`):
+  - `TenantRegistry` — tracks which tables require tenant-scope injection
+  - `register_tenant_table()`, `register_tenant_tables()`, `lookup_tenant_column()`, `load_tenant_tables()`
+  - Auto-detection via `from_build_schema()`: tables with `operator_id` column are auto-registered
+- **Core:** `Qail::with_rls(ctx)` — one-call AST-level tenant isolation:
+  - `GET/SET/DEL` → injects `WHERE operator_id = $value` filter
+  - `ADD/Upsert` → auto-sets `operator_id` in INSERT payload
+  - Super admins and unregistered tables bypass injection
 
 ## [0.14.21] - 2026-01-10
 

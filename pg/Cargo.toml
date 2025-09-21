@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.15.5"
+version = "0.15.6"
 edition = "2024"
 description = "Fastest async PostgreSQL driver - AST to wire protocol, optional io_uring on Linux"
 license = "MIT"
@@ -17,7 +17,7 @@ chrono = ["dep:chrono"]
 uuid = ["dep:uuid"]
 
 [dependencies]
-qail-core = { version = "0.15.5", path = "../core" }
+qail-core = { version = "0.15.6", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 async-trait = "0.1"
@@ -51,6 +51,10 @@ uuid = { version = "1.9", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-uring = { version = "0.5", optional = true }
 io-uring = { version = "0.7", optional = true }
+
+[[example]]
+name = "battle_qail_row"
+required-features = ["chrono", "uuid"]
 
 [lints]
 workspace = true
