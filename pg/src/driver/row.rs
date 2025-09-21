@@ -249,6 +249,58 @@ impl PgRow {
             .map(|idx| self.is_null(idx))
             .unwrap_or(true)
     }
+
+    /// Get a timestamp column by name.
+    pub fn get_timestamp_by_name(&self, name: &str) -> Option<String> {
+        self.get_timestamp(self.column_index(name)?)
+    }
+
+    /// Get a text array column by name.
+    pub fn get_text_array_by_name(&self, name: &str) -> Option<Vec<String>> {
+        self.get_text_array(self.column_index(name)?)
+    }
+
+    /// Get an integer array column by name.
+    pub fn get_int_array_by_name(&self, name: &str) -> Option<Vec<i64>> {
+        self.get_int_array(self.column_index(name)?)
+    }
+
+    // ==================== ERGONOMIC BY-NAME SHORTCUTS ====================
+    // These mirror the positional shortcuts (text, boolean, int, etc.)
+    // but use column names — safe with RETURNING * regardless of column order.
+
+    /// Get string by column name, defaulting to empty string.
+    /// Example: `row.text_by_name("name")` instead of `row.get_string_by_name("name").unwrap_or_default()`
+    pub fn text_by_name(&self, name: &str) -> String {
+        self.get_string_by_name(name).unwrap_or_default()
+    }
+
+    /// Get bool by column name, defaulting to false.
+    pub fn boolean_by_name(&self, name: &str) -> bool {
+        self.get_bool_by_name(name).unwrap_or(false)
+    }
+
+    /// Get i64 by column name, defaulting to 0.
+    pub fn int_by_name(&self, name: &str) -> i64 {
+        self.get_i64_by_name(name).unwrap_or(0)
+    }
+
+    /// Get f64 by column name, defaulting to 0.0.
+    pub fn float_by_name(&self, name: &str) -> f64 {
+        self.get_f64_by_name(name).unwrap_or(0.0)
+    }
+
+    /// Parse timestamp by column name as DateTime<Utc>.
+    #[cfg(feature = "chrono")]
+    pub fn datetime_by_name(&self, name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.datetime(self.column_index(name)?)
+    }
+
+    /// Parse UUID by column name as uuid::Uuid type.
+    #[cfg(feature = "uuid")]
+    pub fn uuid_typed_by_name(&self, name: &str) -> Option<uuid::Uuid> {
+        self.uuid_typed(self.column_index(name)?)
+    }
 }
 
 #[cfg(test)]

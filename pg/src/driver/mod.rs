@@ -474,10 +474,12 @@ impl PgDriver {
         rows.into_iter().next().ok_or(PgError::NoRows)
     }
 
-    /// Execute a QAIL command with PREPARED STATEMENT CACHING (ZERO-ALLOC).
+    /// Execute a QAIL command with PREPARED STATEMENT CACHING.
     /// Like fetch_all(), but caches the prepared statement on the server.
-    /// On first call: sends Parse + Bind + Execute + Sync
+    /// On first call: sends Parse + Describe + Bind + Execute + Sync
     /// On subsequent calls: sends only Bind + Execute + Sync (SKIPS Parse!)
+    /// Column metadata (RowDescription) is cached alongside the statement
+    /// so that by-name column access works on every call.
     pub async fn fetch_all_cached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
         use std::collections::hash_map::DefaultHasher;
@@ -512,6 +514,8 @@ impl PgDriver {
         self.connection.sql_buf.hash(&mut hasher);
         let sql_hash = hasher.finish();
 
+        let is_cache_miss = !self.connection.stmt_cache.contains(&sql_hash);
+
         let stmt_name = if let Some(name) = self.connection.stmt_cache.get(&sql_hash) {
             name.clone()
         } else {
@@ -521,8 +525,12 @@ impl PgDriver {
             use tokio::io::AsyncWriteExt;
             
             let sql_str = std::str::from_utf8(&self.connection.sql_buf).unwrap_or("");
+            
+            // Send Parse + Describe(Statement) to get RowDescription on first call
             let parse_msg = PgEncoder::encode_parse(&name, sql_str, &[]);
+            let describe_msg = PgEncoder::encode_describe(false, &name);
             self.connection.stream.write_all(&parse_msg).await?;
+            self.connection.stream.write_all(&describe_msg).await?;
             
             self.connection.stmt_cache.put(sql_hash, name.clone());
             self.connection.prepared_statements.insert(name.clone(), sql_str.to_string());
@@ -541,7 +549,11 @@ impl PgDriver {
         PgEncoder::encode_sync_to(&mut buf);
         self.connection.stream.write_all(&buf).await?;
 
+        // On cache hit, use the previously cached ColumnInfo
+        let cached_column_info = self.connection.column_info_cache.get(&sql_hash).cloned();
+
         let mut rows: Vec<PgRow> = Vec::new();
+        let mut column_info: Option<Arc<ColumnInfo>> = cached_column_info;
         let mut error: Option<PgError> = None;
 
         loop {
@@ -549,16 +561,29 @@ impl PgDriver {
             match msg {
                 crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
-                crate::protocol::BackendMessage::RowDescription(_) => {}
+                crate::protocol::BackendMessage::ParameterDescription(_) => {
+                    // Sent after Describe(Statement) — ignore
+                }
+                crate::protocol::BackendMessage::RowDescription(fields) => {
+                    // Received after Describe(Statement) on cache miss
+                    let info = Arc::new(ColumnInfo::from_fields(&fields));
+                    if is_cache_miss {
+                        self.connection.column_info_cache.insert(sql_hash, info.clone());
+                    }
+                    column_info = Some(info);
+                }
                 crate::protocol::BackendMessage::DataRow(data) => {
                     if error.is_none() {
                         rows.push(PgRow {
                             columns: data,
-                            column_info: None,
+                            column_info: column_info.clone(),
                         });
                     }
                 }
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
+                crate::protocol::BackendMessage::NoData => {
+                    // Sent by Describe for statements that return no data (e.g. pure UPDATE without RETURNING)
+                }
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
                         return Err(err);
@@ -572,6 +597,7 @@ impl PgDriver {
                         // on next retry if the error happened during Parse/Bind.
                         self.connection.stmt_cache.clear();
                         self.connection.prepared_statements.clear();
+                        self.connection.column_info_cache.clear();
                     }
                 }
                 _ => {}

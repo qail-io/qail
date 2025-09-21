@@ -27,6 +27,8 @@
 /// - **PostgreSQL**: Sets session variables referenced by RLS policies
 /// - **Qdrant**: Filters vector searches by tenant metadata
 /// - **Redis**: Prefixes keys with tenant identifier
+
+pub mod tenant;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RlsContext {
     /// The operator (vendor) this context is scoped to.
