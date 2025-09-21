@@ -38,6 +38,7 @@ pub enum AlterOp {
     RenameTable(String),
     SetSchema(String),
     SetRowLevelSecurity(bool),
+    ForceRowLevelSecurity(bool),
 }
 
 /// Table-level constraints
@@ -217,6 +218,18 @@ impl AlterTable {
 
     pub fn disable_rls(mut self) -> Self {
         self.ops.push(AlterOp::SetRowLevelSecurity(false));
+        self
+    }
+
+    /// FORCE ROW LEVEL SECURITY — policies apply even to table owner.
+    pub fn force_rls(mut self) -> Self {
+        self.ops.push(AlterOp::ForceRowLevelSecurity(true));
+        self
+    }
+
+    /// NO FORCE ROW LEVEL SECURITY — owner bypasses policies (default).
+    pub fn no_force_rls(mut self) -> Self {
+        self.ops.push(AlterOp::ForceRowLevelSecurity(false));
         self
     }
 }
