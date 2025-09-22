@@ -1,8 +1,8 @@
 # QAIL Documentation
 
-> **The AST-Native Query Compiler**
+> **The AST-Native Query Compiler with Built-in Row-Level Security**
 
-QAIL compiles typed query ASTs directly to database wire protocols. No SQL strings. No injection surface. Just pure, type-safe queries.
+QAIL compiles typed query ASTs directly to database wire protocols. No SQL strings. No injection surface. Built-in multi-tenant data isolation via RLS. The only Rust PostgreSQL driver with AST-level tenant injection.
 
 ## Philosophy: AST = Meaning
 
@@ -72,6 +72,10 @@ let rows = driver.query(&cmd).await?;
 | LOCK TABLE | ✅ |
 | Connection Timeout | ✅ |
 | Materialized Views | ✅ |
+| Row-Level Security (RLS) | ✅ |
+| Multi-Tenant Isolation | ✅ |
+| TypedQail<T> Relations | ✅ |
+| Protected Columns | ✅ |
 
 > **Note:** QAIL's AST-native design eliminates SQL injection by construction — no strings, no injection surface. Query plan caching (`prepare()`, `pipeline_prepared_fast()`) is purely a PostgreSQL performance optimization, not a security measure.
 
