@@ -418,6 +418,159 @@ impl WithCap for Qail {
     }
 }
 
+// =============================================================================
+// TypedQail: Table-Typed Query Builder (Compile-Time Relation Safety)
+// =============================================================================
+
+/// A table-typed query wrapper that carries the source table type `T`.
+/// 
+/// This enables compile-time relationship checking via `RelatedTo<Target>`
+/// trait bounds, preventing invalid joins at the type level.
+/// 
+/// # Example
+/// ```ignore
+/// use schema::{users, posts, products};
+/// 
+/// // Compiles ✓ — users RelatedTo posts (via ref:users.id)
+/// Qail::typed(users::table).join_related(posts::table).build()
+/// 
+/// // Compile ERROR — "Users: RelatedTo<Products> is not satisfied"
+/// Qail::typed(users::table).join_related(products::table).build()
+/// ```
+#[derive(Debug, Clone)]
+pub struct TypedQail<T: Table> {
+    inner: Qail,
+    _table: PhantomData<T>,
+}
+
+impl Qail {
+    /// Create a typed query builder that carries the table type.
+    /// 
+    /// This enables `join_related()` with compile-time relationship checking.
+    /// 
+    /// ```ignore
+    /// Qail::typed(users::table)
+    ///     .join_related(posts::table)     // Compiles ✓
+    ///     .typed_eq(users::age(), 25)
+    ///     .build()
+    /// ```
+    pub fn typed<T: Table + Into<String>>(table: T) -> TypedQail<T> {
+        TypedQail {
+            inner: Qail::get(table),
+            _table: PhantomData,
+        }
+    }
+}
+
+impl<T: Table> TypedQail<T> {
+    /// Join a related table with compile-time relationship checking.
+    /// 
+    /// Only compiles if `T: RelatedTo<U>` is satisfied.
+    /// The `RelatedTo` impls are generated from `ref:` annotations in schema.qail.
+    /// 
+    /// ```ignore
+    /// // posts has: user_id UUID ref:users.id
+    /// // Generated: impl RelatedTo<posts::Posts> for users::Users
+    /// 
+    /// Qail::typed(users::table)
+    ///     .join_related(posts::table)   // Compiles ✓
+    ///     .build()
+    /// ```
+    pub fn join_related<U: Table>(mut self, _target: U) -> Self
+    where
+        T: RelatedTo<U>,
+    {
+        let (from_col, to_col) = T::join_columns();
+        self.inner = self.inner.left_join(U::table_name(), from_col, to_col);
+        self
+    }
+    
+    /// Add a typed column to the query.
+    pub fn typed_column<C>(mut self, col: TypedColumn<C>) -> Self {
+        use crate::ast::Expr;
+        self.inner.columns.push(Expr::Named(col.name().to_string()));
+        self
+    }
+    
+    /// Add multiple typed columns to the query.
+    pub fn typed_columns<C>(mut self, cols: impl IntoIterator<Item = TypedColumn<C>>) -> Self {
+        use crate::ast::Expr;
+        for col in cols {
+            self.inner.columns.push(Expr::Named(col.name().to_string()));
+        }
+        self
+    }
+    
+    /// Type-safe equality filter.
+    pub fn typed_eq<C, V>(mut self, col: TypedColumn<C>, value: V) -> Self
+    where
+        V: Into<crate::ast::Value> + ColumnValue<C>,
+    {
+        self.inner = self.inner.typed_eq(col, value);
+        self
+    }
+    
+    /// Type-safe filter with custom operator.
+    pub fn typed_filter<C, V>(mut self, col: TypedColumn<C>, op: crate::ast::Operator, value: V) -> Self
+    where
+        V: Into<crate::ast::Value> + ColumnValue<C>,
+    {
+        self.inner = self.inner.typed_filter(col, op, value);
+        self
+    }
+    
+    /// Add a string-based filter (untyped).
+    pub fn filter(mut self, column: impl AsRef<str>, op: crate::ast::Operator, value: impl Into<crate::ast::Value>) -> Self {
+        self.inner = self.inner.filter(column, op, value);
+        self
+    }
+    
+    /// Add a string-based column (untyped).
+    pub fn column(mut self, name: impl AsRef<str>) -> Self {
+        self.inner = self.inner.column(name);
+        self
+    }
+
+    /// Set limit.
+    pub fn limit(mut self, n: i64) -> Self {
+        self.inner = self.inner.limit(n);
+        self
+    }
+    
+    /// Set offset.
+    pub fn offset(mut self, n: i64) -> Self {
+        self.inner = self.inner.offset(n);
+        self
+    }
+    
+    /// Add ordering.
+    pub fn order_by(mut self, column: impl AsRef<str>, order: crate::ast::SortOrder) -> Self {
+        self.inner = self.inner.order_by(column, order);
+        self
+    }
+    
+    /// Upgrade to capability-aware query.
+    pub fn with_cap<C: Capability>(self, cap: &C) -> CapQuery<C> {
+        self.inner.with_cap(cap)
+    }
+    
+    /// Apply RLS context (tenant scoping).
+    pub fn with_rls(mut self, ctx: &crate::rls::RlsContext) -> Self {
+        self.inner = self.inner.with_rls(ctx);
+        self
+    }
+    
+    /// Finish building and return the inner Qail.
+    pub fn build(self) -> Qail {
+        self.inner
+    }
+    
+    /// Get a reference to the inner Qail.
+    pub fn inner(&self) -> &Qail {
+        &self.inner
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -499,6 +652,123 @@ mod tests {
         assert!(sql.contains("email"), "Should have email column");
         assert!(sql.contains("password_hash"), "Should have password_hash column");
     }
+    
+    // =========================================================================
+    // TypedQail + join_related tests
+    // =========================================================================
+    
+    struct Users;
+    impl Table for Users { fn table_name() -> &'static str { "users" } }
+    impl AsRef<str> for Users { fn as_ref(&self) -> &str { "users" } }
+    impl From<Users> for String { fn from(_: Users) -> String { "users".into() } }
+    
+    struct Posts;
+    impl Table for Posts { fn table_name() -> &'static str { "posts" } }
+    impl AsRef<str> for Posts { fn as_ref(&self) -> &str { "posts" } }
+    impl From<Posts> for String { fn from(_: Posts) -> String { "posts".into() } }
+    
+    struct Products;
+    impl Table for Products { fn table_name() -> &'static str { "products" } }
+    impl AsRef<str> for Products { fn as_ref(&self) -> &str { "products" } }
+    impl From<Products> for String { fn from(_: Products) -> String { "products".into() } }
+    
+    // Users has many Posts (users.id -> posts.user_id)
+    impl RelatedTo<Posts> for Users {
+        fn join_columns() -> (&'static str, &'static str) { ("id", "user_id") }
+    }
+    // Reverse: Posts belongs to Users
+    impl RelatedTo<Users> for Posts {
+        fn join_columns() -> (&'static str, &'static str) { ("user_id", "id") }
+    }
+    // Note: NO RelatedTo<Products> for Users — join_related(Products) should NOT compile
+    
+    #[test]
+    fn test_typed_qail_entry_point() {
+        use crate::transpiler::ToSql;
+        
+        let query = Qail::typed(Users).build();
+        let sql = query.to_sql();
+        assert!(sql.contains("users"), "Should query users table");
+    }
+    
+    #[test]
+    fn test_typed_qail_join_related() {
+        use crate::transpiler::ToSql;
+        
+        let query = Qail::typed(Users)
+            .join_related(Posts)
+            .build();
+        
+        let sql = query.to_sql();
+        assert!(sql.contains("LEFT JOIN posts"), "Should have LEFT JOIN posts");
+        assert!(sql.contains("id"), "Should have join column");
+        assert!(sql.contains("user_id"), "Should have FK column");
+    }
+    
+    #[test]
+    fn test_typed_qail_reverse_join() {
+        use crate::transpiler::ToSql;
+        
+        // Posts -> Users (reverse direction)
+        let query = Qail::typed(Posts)
+            .join_related(Users)
+            .build();
+        
+        let sql = query.to_sql();
+        assert!(sql.contains("LEFT JOIN users"), "Should have LEFT JOIN users");
+    }
+    
+    #[test]
+    fn test_typed_qail_with_columns_and_filter() {
+        use crate::transpiler::ToSql;
+        
+        let email: TypedColumn<String> = TypedColumn::new("users", "email");
+        let age: TypedColumn<i64> = TypedColumn::new("users", "age");
+        
+        let query = Qail::typed(Users)
+            .typed_column(email)
+            .typed_eq(age, 25i64)
+            .build();
+        
+        let sql = query.to_sql();
+        assert!(sql.contains("email"), "Should have email column");
+        assert!(sql.contains("age"), "Should have age filter");
+    }
+    
+    #[test]
+    fn test_typed_qail_typed_columns_batch() {
+        let col1: TypedColumn<String> = TypedColumn::new("users", "name");
+        let col2: TypedColumn<String> = TypedColumn::new("users", "email");
+        
+        let query = Qail::typed(Users)
+            .typed_columns(vec![col1, col2])
+            .build();
+        
+        assert_eq!(query.columns.len(), 2, "Should have 2 columns");
+    }
+    
+    #[test]
+    fn test_typed_qail_full_chain() {
+        use crate::transpiler::ToSql;
+        use crate::ast::SortOrder;
+        
+        let query = Qail::typed(Users)
+            .join_related(Posts)
+            .column("email")
+            .filter("age", crate::ast::Operator::Gt, 18)
+            .order_by("created_at", SortOrder::Desc)
+            .limit(10)
+            .build();
+        
+        let sql = query.to_sql();
+        assert!(sql.contains("LEFT JOIN posts"), "join");
+        assert!(sql.contains("email"), "column");
+        assert!(sql.contains("age"), "filter");
+        assert!(sql.contains("LIMIT 10"), "limit");
+    }
+    
+    // NOTE: The following should NOT compile — proving compile-time safety:
+    // Qail::typed(Users).join_related(Products)  // ERROR: Users: RelatedTo<Products> not satisfied
 }
 
 

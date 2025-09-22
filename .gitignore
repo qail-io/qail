@@ -65,3 +65,4 @@ pg/examples/*.go
 pg/examples/battle*.rs
 qail.toml
 multi_ops_agent_plan.md
+pg/examples/battle_qail_row.rs
