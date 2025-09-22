@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.7] - 2026-02-08
+
+### Added
+
+- **Core:** `TypedQail<T>` — table-typed query wrapper for compile-time relationship safety
+  - `Qail::typed(table)` creates a typed builder carrying the source table type
+  - `join_related(target)` with `RelatedTo<T>` trait bound — compiler rejects invalid joins
+  - `typed_column()`, `typed_columns()` for batch typed column selection
+  - `typed_eq()`, `typed_filter()` for type-safe filtering
+  - Delegation: `with_cap()`, `with_rls()`, `limit()`, `offset()`, `order_by()`
+- **Roadmap:** Section 1 (First-Class Relations) — all 4 phases marked complete
+
 ## [0.15.6] - 2026-02-07
 
 ### Added
