@@ -43,6 +43,9 @@ pub struct TableSchema {
     pub policies: HashMap<String, String>,
     /// Foreign key relationships to other tables
     pub foreign_keys: Vec<ForeignKey>,
+    /// Whether this table has Row-Level Security enabled
+    /// Auto-detected: table has `operator_id` column OR has `rls` keyword in schema.qail
+    pub rls_enabled: bool,
 }
 
 /// Parsed schema from schema.qail file
@@ -66,6 +69,7 @@ impl Schema {
         let mut current_columns: HashMap<String, String> = HashMap::new();
         let mut current_policies: HashMap<String, String> = HashMap::new();
         let mut current_fks: Vec<ForeignKey> = Vec::new();
+        let mut current_rls_flag = false;
 
         for line in content.lines() {
             let line = line.trim();
@@ -75,34 +79,42 @@ impl Schema {
                 continue;
             }
 
-            // Table definition: table name {
-            if line.starts_with("table ") && line.ends_with('{') {
+            // Table definition: table name { [rls]
+            if line.starts_with("table ") && (line.ends_with('{') || line.contains('{')) {
                 // Save previous table if any
                 if let Some(table_name) = current_table.take() {
+                    // Auto-detect RLS: table has operator_id column or was marked `rls`
+                    let has_rls = current_rls_flag || current_columns.contains_key("operator_id");
                     schema.tables.insert(table_name.clone(), TableSchema {
                         name: table_name,
                         columns: std::mem::take(&mut current_columns),
                         policies: std::mem::take(&mut current_policies),
                         foreign_keys: std::mem::take(&mut current_fks),
+                        rls_enabled: has_rls,
                     });
                 }
                 
-                // Parse new table name
-                let name = line.trim_start_matches("table ")
-                    .trim_end_matches('{')
-                    .trim()
-                    .to_string();
+                // Parse new table name, check for `rls` keyword
+                // Format: "table bookings rls {" or "table bookings {"
+                let after_table = line.trim_start_matches("table ");
+                let before_brace = after_table.split('{').next().unwrap_or("").trim();
+                let parts: Vec<&str> = before_brace.split_whitespace().collect();
+                let name = parts.first().unwrap_or(&"").to_string();
+                current_rls_flag = parts.iter().any(|p| *p == "rls");
                 current_table = Some(name);
             }
             // End of table definition
             else if line == "}" {
                 if let Some(table_name) = current_table.take() {
+                    let has_rls = current_rls_flag || current_columns.contains_key("operator_id");
                     schema.tables.insert(table_name.clone(), TableSchema {
                         name: table_name,
                         columns: std::mem::take(&mut current_columns),
                         policies: std::mem::take(&mut current_policies),
                         foreign_keys: std::mem::take(&mut current_fks),
+                        rls_enabled: has_rls,
                     });
+                    current_rls_flag = false;
                 }
             }
             // Column definition: column_name TYPE [constraints] [ref:table.column] [protected]
@@ -145,6 +157,19 @@ impl Schema {
     /// Check if table exists
     pub fn has_table(&self, name: &str) -> bool {
         self.tables.contains_key(name)
+    }
+
+    /// Get all table names that have RLS enabled
+    pub fn rls_tables(&self) -> Vec<&str> {
+        self.tables.iter()
+            .filter(|(_, ts)| ts.rls_enabled)
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Check if a specific table has RLS enabled
+    pub fn is_rls_table(&self, name: &str) -> bool {
+        self.tables.get(name).map_or(false, |t| t.rls_enabled)
     }
 
     /// Get table schema
@@ -211,6 +236,7 @@ impl Schema {
                     columns: HashMap::new(),
                     policies: HashMap::new(),
                     foreign_keys: vec![],
+                    rls_enabled: false,
                 });
                 changes += 1;
             }
@@ -269,6 +295,7 @@ impl Schema {
                         columns: cols,
                         policies: HashMap::new(),
                         foreign_keys: vec![],
+                        rls_enabled: false,
                     });
                     changes += 1;
                 }
@@ -519,6 +546,8 @@ pub struct QailUsage {
     pub columns: Vec<String>,
     pub action: String,
     pub is_cte_ref: bool,
+    /// Whether this query chain includes `.with_rls(` call
+    pub has_rls: bool,
 }
 
 /// Scan Rust source files for QAIL usage patterns
@@ -603,6 +632,9 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
                     // Check if this is a CTE reference
                     let is_cte_ref = cte_names.contains(&table);
                     
+                    // Check if this query chain includes .with_rls(
+                    let has_rls = full_chain.contains(".with_rls(");
+                    
                     // Extract column names from the full chain
                     let columns = extract_columns(&full_chain);
                     
@@ -613,6 +645,7 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
                         columns,
                         action: action.to_string(),
                         is_cte_ref,
+                        has_rls,
                     });
                     
                     // Skip to end of chain
@@ -690,7 +723,7 @@ fn extract_columns(line: &str) -> Vec<String> {
 }
 
 /// Validate QAIL usage against schema using the smart Validator
-/// Provides "Did you mean?" suggestions for typos and type validation
+/// Provides "Did you mean?" suggestions for typos, type validation, and RLS audit
 pub fn validate_against_schema(schema: &Schema, usages: &[QailUsage]) -> Vec<String> {
     use crate::validator::Validator;
     
@@ -706,6 +739,7 @@ pub fn validate_against_schema(schema: &Schema, usages: &[QailUsage]) -> Vec<Str
     }
     
     let mut errors = Vec::new();
+    let mut rls_warnings = Vec::new();
 
     for usage in usages {
         // Skip CTE alias refs - these are defined in code, not in schema
@@ -727,12 +761,23 @@ pub fn validate_against_schema(schema: &Schema, usages: &[QailUsage]) -> Vec<Str
                         errors.push(format!("{}:{}: {}", usage.file, usage.line, e));
                     }
                 }
+                
+                // RLS Audit: warn if query targets RLS-enabled table without .with_rls()
+                if schema.is_rls_table(&usage.table) && !usage.has_rls {
+                    rls_warnings.push(format!(
+                        "{}:{}: ⚠️ RLS AUDIT: Qail::{}(\"{}\") has no .with_rls() — table has RLS enabled, query may leak tenant data",
+                        usage.file, usage.line, usage.action.to_lowercase(), usage.table
+                    ));
+                }
             }
             Err(e) => {
                 errors.push(format!("{}:{}: {}", usage.file, usage.line, e));
             }
         }
     }
+    
+    // Append RLS warnings (non-fatal, but visible)
+    errors.extend(rls_warnings);
 
     errors
 }
