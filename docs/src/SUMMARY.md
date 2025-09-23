@@ -30,7 +30,7 @@
 - [Hybrid Architecture](./features/hybrid.md)
 - [Type System](./features/types.md)
 - [Type Safety](./features/type-safety.md)
-
+- [Row-Level Security (RLS)](./features/rls.md)
 # Reference
 
 - [CLI Commands](./reference/cli.md)
