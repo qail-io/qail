@@ -16,6 +16,7 @@ members = [
     "qdrant",
     "redis",
     "gateway",
+    "workflow",
 ]
 
 [workspace.lints.rust]
