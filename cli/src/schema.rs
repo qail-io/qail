@@ -16,7 +16,8 @@ pub enum OutputFormat {
 }
 
 /// Validate a QAIL schema file with detailed error reporting.
-pub fn check_schema(schema_path: &str) -> Result<()> {
+/// When `src_dir` is provided, also scans source for query validation + RLS audit.
+pub fn check_schema(schema_path: &str, src_dir: Option<&str>, migrations_dir: &str) -> Result<()> {
     if schema_path.contains(':') && !schema_path.starts_with("postgres") {
         let parts: Vec<&str> = schema_path.splitn(2, ':').collect();
         if parts.len() == 2 {
@@ -75,6 +76,96 @@ pub fn check_schema(schema_path: &str) -> Result<()> {
                     "✓".green(),
                     unique_constraints
                 );
+            }
+
+            // Source scan + RLS audit (when --src is provided)
+            if let Some(src) = src_dir {
+                println!();
+                println!("{}", "── Source Validation & RLS Audit ──".cyan().bold());
+
+                // Use build module's Schema (has rls_enabled detection)
+                let mut build_schema = qail_core::build::Schema::parse(&content)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse schema for audit: {}", e))?;
+
+                // Merge migrations if directory exists
+                let mig_path = std::path::Path::new(migrations_dir);
+                if mig_path.exists() {
+                    let merged = build_schema.merge_migrations(migrations_dir).unwrap_or(0);
+                    if merged > 0 {
+                        println!("  {} Merged {} schema changes from {}", "✓".green(), merged, migrations_dir);
+                    }
+                }
+
+                // Show RLS-enabled tables
+                let rls_tables = build_schema.rls_tables();
+                if rls_tables.is_empty() {
+                    println!("  {} No RLS-enabled tables detected", "ℹ".dimmed());
+                } else {
+                    println!("  {} {} RLS-enabled table(s): {}",
+                        "🔐".to_string().green(),
+                        rls_tables.len(),
+                        rls_tables.join(", ").yellow()
+                    );
+                }
+
+                // Scan source files
+                let usages = qail_core::build::scan_source_files(src);
+
+                if usages.is_empty() {
+                    println!("  {} No Qail queries found in {}", "ℹ".dimmed(), src);
+                } else {
+                    // Run validation + RLS audit
+                    let errors = qail_core::build::validate_against_schema(&build_schema, &usages);
+
+                    // Separate schema errors from RLS warnings
+                    let schema_errors: Vec<_> = errors.iter().filter(|e| !e.contains("RLS AUDIT")).collect();
+                    let rls_warnings: Vec<_> = errors.iter().filter(|e| e.contains("RLS AUDIT")).collect();
+
+                    // Query stats
+                    let total_queries = usages.len();
+                    let rls_scoped = usages.iter().filter(|u| u.has_rls).count();
+                    let on_rls_tables = usages.iter().filter(|u| build_schema.is_rls_table(&u.table)).count();
+
+                    println!("  {} {} queries scanned in {}",
+                        "✓".green(), total_queries, src
+                    );
+
+                    // Schema validation results
+                    if schema_errors.is_empty() {
+                        println!("  {} All queries valid against schema", "✓".green());
+                    } else {
+                        println!("  {} {} schema error(s):", "✗".red(), schema_errors.len());
+                        for err in &schema_errors {
+                            println!("    {}", err.red());
+                        }
+                    }
+
+                    // RLS audit results
+                    if on_rls_tables > 0 {
+                        let coverage = if on_rls_tables > 0 {
+                            (rls_scoped as f64 / on_rls_tables as f64 * 100.0) as u32
+                        } else {
+                            100
+                        };
+
+                        println!();
+                        println!("  {} RLS Coverage: {}/{} queries scoped ({}%)",
+                            if rls_warnings.is_empty() { "✓".green() } else { "⚠".yellow() },
+                            rls_scoped,
+                            on_rls_tables,
+                            if coverage == 100 { format!("{}", coverage).green() } else { format!("{}", coverage).yellow() }
+                        );
+
+                        if !rls_warnings.is_empty() {
+                            println!();
+                            println!("  {} {} unscoped query(ies) on RLS tables:", "⚠".yellow(), rls_warnings.len());
+                            for warn in &rls_warnings {
+                                // Extract file:line from warning for clean display
+                                println!("    {}", warn.yellow());
+                            }
+                        }
+                    }
+                }
             }
 
             Ok(())
