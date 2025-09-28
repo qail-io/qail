@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use colored::*;
-use qail_core::prelude::Qail;
-use qail_pg::driver::PgDriver;
+use qail_core::prelude::*;
+use qail_pg::PgDriver;
 
 use crate::migrations::migration_table_ddl;
 use crate::util::parse_pg_url;
@@ -30,26 +30,76 @@ pub async fn migrate_status(url: &str) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create migration table: {}", e))?;
 
-    // Query migration history (AST-native)
-    let status_cmd = Qail::get("_qail_migrations");
-
-    // Status check: attempt to fetch from migration table
     println!("  Database: {}", database.yellow());
     println!("  Migration table: {}", "_qail_migrations".green());
     println!();
 
-    // Try to fetch (AST-native check)
-    let check_result = driver.fetch_all(&status_cmd).await;
+    // Query migration history with column data
+    let status_cmd = Qail::get("_qail_migrations")
+        .columns(vec!["version", "name", "applied_at", "checksum"])
+        .order_by("applied_at", SortOrder::Desc);
 
-    match check_result {
-        Ok(rows) => {
+    match driver.query_ast(&status_cmd).await {
+        Ok(result) => {
+            if result.rows.is_empty() {
+                println!("  {} No migrations applied yet", "○".dimmed());
+                println!();
+                println!("  Run {} to apply migrations", "qail migrate up".cyan());
+                return Ok(());
+            }
+
+            // Print migration history table
             println!(
-                "  {} Migration history table is ready ({} records)",
+                "  {} {} migration(s) applied\n",
                 "✓".green(),
-                rows.len()
+                result.rows.len().to_string().green()
             );
+
+            // Header
+            println!(
+                "  {}  {}  {}  {}",
+                format!("{:<14}", "VERSION").cyan().bold(),
+                format!("{:<30}", "NAME").cyan().bold(),
+                format!("{:<25}", "APPLIED AT").cyan().bold(),
+                "CHECKSUM".cyan().bold(),
+            );
+            println!(
+                "  {}",
+                "─".repeat(85).dimmed()
+            );
+
+            // Rows
+            for row in &result.rows {
+                let version = row.first().and_then(|v| v.as_ref()).map(|s| s.as_str()).unwrap_or("?");
+                let name = row.get(1).and_then(|v| v.as_ref()).map(|s| s.as_str()).unwrap_or("-");
+                let applied_at = row.get(2).and_then(|v| v.as_ref()).map(|s| s.as_str()).unwrap_or("-");
+                let checksum = row.get(3).and_then(|v| v.as_ref()).map(|s| s.as_str()).unwrap_or("-");
+
+                // Truncate checksum for display
+                let checksum_short = if checksum.len() > 12 {
+                    format!("{}…", &checksum[..12])
+                } else {
+                    checksum.to_string()
+                };
+
+                // Truncate applied_at to remove microseconds
+                let applied_short = if applied_at.len() > 19 {
+                    &applied_at[..19]
+                } else {
+                    applied_at
+                };
+
+                println!(
+                    "  {:<14}  {:<30}  {:<25}  {}",
+                    version.white(),
+                    name,
+                    applied_short.dimmed(),
+                    checksum_short.dimmed(),
+                );
+            }
+
             println!();
-            println!("  Run {} to apply migrations", "qail migrate up".cyan());
+            println!("  Run {} to rollback", "qail migrate down".cyan());
         }
         Err(_) => {
             println!("  {} No migrations applied yet", "○".dimmed());

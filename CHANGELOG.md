@@ -16,6 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `typed_eq()`, `typed_filter()` for type-safe filtering
   - Delegation: `with_cap()`, `with_rls()`, `limit()`, `offset()`, `order_by()`
 - **Roadmap:** Section 1 (First-Class Relations) — all 4 phases marked complete
+- **PG:** `PgDriver::query_ast()` — like `execute()` but returns `QueryResult` with column names + row data (for SELECT/GET)
+- **PG:** `QueryResult` struct — decoded column headers from `RowDescription` + text rows from `DataRow`
+- **CLI:** `qail exec` now displays SELECT results as formatted tables with column headers, separators, NULL (`∅`), and row count
+- **Core:** `table[filter]` shorthand — `get users[active = true]` desugars to `get users where active = true`
+  - Handles nested brackets, quoted strings, and existing WHERE clauses
+- **CLI:** `qail migrate status` now displays rich tabular output with version, name, applied_at, and checksum
+- **CLI:** `qail migrate reset <schema> <url>` — one-command drop-all + clear history + re-apply target schema
+- **CLI:** `qail exec --json` — pipe-friendly JSON output for SELECT queries, suppresses all decorative output
+- **CLI:** `qail diff --live --url <db>` — schema drift detection, introspects live DB and compares against `.qail` file
+- **Core:** `cnt` / `count` action — `cnt users[active = true]` → `SELECT COUNT(*) FROM users WHERE active = true`
+- **CLI:** `qail init` now supports `--url` and `--deployment` flags for non-interactive/CI mode
+- **CLI:** Comprehensive `--help` text added to all `exec` and `migrate` subcommands with examples
+
+### Fixed
+
+- **Core:** `RENAME COLUMN` panic — `Action::Mod` was unsupported in AST encoder, added `encode_rename_column`
+- **Core:** Duplicate `AlterDrop` — drop hint + auto-detected column drop both emitted the same ALTER DROP
+- **Core:** FK ordering on `DROP TABLE` — `diff_schemas` now sorts dropped tables in reverse FK order (children before parents)
 
 ## [0.15.6] - 2026-02-07
 

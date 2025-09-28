@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     Get,
+    Cnt,
     Set,
     Del,
     Add,
@@ -67,6 +68,7 @@ impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Action::Get => write!(f, "GET"),
+            Action::Cnt => write!(f, "CNT"),
             Action::Set => write!(f, "SET"),
             Action::Del => write!(f, "DEL"),
             Action::Add => write!(f, "ADD"),
