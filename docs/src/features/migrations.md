@@ -115,3 +115,59 @@ qail sync generate
 | `rename table.old -> table.new` | Rename column (not drop+add) |
 | `transform expr -> table.col` | Data transformation hint |
 | `drop confirm table.col` | Explicit drop confirmation |
+
+---
+
+## 3. Drift Detection (v0.15.8)
+
+Compare a live database against a `.qail` schema file to find unexpected drift:
+
+```bash
+qail diff _ schema.qail --live --url postgres://localhost/mydb
+# Drift detection: [live DB] → schema.qail
+#   → Introspecting live database...
+#     80 tables, 287 indexes introspected
+#
+#   ✅ No drift detected — live DB matches schema file.
+```
+
+If drift exists, it shows categorized changes with risk levels:
+
+```bash
+# 🔴 HIGH   — missing column (was dropped outside migrations)
+# 🟡 MEDIUM — index mismatch
+# 🟢 LOW    — default value difference
+```
+
+---
+
+## 4. Migration Reset (v0.15.8)
+
+Nuclear option for development — drops everything and recreates from schema:
+
+```bash
+qail migrate reset schema.qail postgres://...
+# Phase 1: DROP all tables (FK-ordered)
+# Phase 2: CLEAR migration history
+# Phase 3: CREATE from schema
+# ✓ Reset complete
+```
+
+> ⚠️ **Warning:** This is destructive. Use only in development or staging.
+
+---
+
+## 5. Migration Status (v0.15.8)
+
+Rich tabular view of migration history:
+
+```bash
+qail migrate status postgres://...
+# 📋 Migration Status — mydb
+# ┌──────────┬────────────────────┬─────────────────────┬──────────────┐
+# │ Version  │ Name               │ Applied At          │ Checksum     │
+# ├──────────┼────────────────────┼─────────────────────┼──────────────┤
+# │ 001      │ qail_queue         │ 2026-02-01 10:00:00 │ a3b8d1...    │
+# └──────────┴────────────────────┴─────────────────────┴──────────────┘
+```
+
