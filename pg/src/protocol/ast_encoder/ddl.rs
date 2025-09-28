@@ -224,6 +224,24 @@ pub fn encode_alter_column_type(cmd: &Qail, buf: &mut BytesMut) {
     }
 }
 
+/// Encode ALTER TABLE RENAME COLUMN statement.
+/// The `Mod` action stores renames as `Expr::Named("old_name -> new_name")`.
+pub fn encode_rename_column(cmd: &Qail, buf: &mut BytesMut) {
+    for col in &cmd.columns {
+        if let Expr::Named(rename_str) = col {
+            // Parse "old_name -> new_name" format
+            if let Some((old, new)) = rename_str.split_once(" -> ") {
+                buf.extend_from_slice(b"ALTER TABLE ");
+                buf.extend_from_slice(cmd.table.as_bytes());
+                buf.extend_from_slice(b" RENAME COLUMN ");
+                buf.extend_from_slice(old.trim().as_bytes());
+                buf.extend_from_slice(b" TO ");
+                buf.extend_from_slice(new.trim().as_bytes());
+            }
+        }
+    }
+}
+
 /// Encode CREATE VIEW statement.
 /// CREATE VIEW name AS SELECT ...
 pub fn encode_create_view(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {

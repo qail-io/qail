@@ -321,3 +321,83 @@ pub fn diff_schemas_cmd(
 
     Ok(())
 }
+
+/// Live drift detection: introspect live DB as "old", diff against .qail file as "new".
+/// Usage: `qail diff _ new.qail --live --url postgresql://...`
+pub async fn diff_live(
+    db_url: &str,
+    new_path: &str,
+    format: OutputFormat,
+    dialect: Dialect,
+) -> Result<()> {
+    use qail_pg::driver::PgDriver;
+
+    println!(
+        "{} {} → {}",
+        "Drift detection:".cyan().bold(),
+        "[live DB]".yellow(),
+        new_path.yellow()
+    );
+
+    // Step 1: Connect and introspect live schema
+    println!("  {} Introspecting live database...", "→".dimmed());
+    let mut driver = PgDriver::connect_url(db_url).await
+        .map_err(|e| anyhow::anyhow!("Connection failed: {}", e))?;
+    let live_schema = crate::shadow::introspect_schema(&mut driver).await?;
+    println!(
+        "    {} tables, {} indexes introspected",
+        live_schema.tables.len().to_string().green(),
+        live_schema.indexes.len().to_string().green()
+    );
+
+    // Step 2: Parse target schema file
+    let new_content = std::fs::read_to_string(new_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read schema '{}': {}", new_path, e))?;
+    let new_schema = parse_qail(&new_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
+
+    // Step 3: Diff live → target
+    let cmds = diff_schemas(&live_schema, &new_schema);
+
+    if cmds.is_empty() {
+        println!("\n{}", "✅ No drift detected — live DB matches schema file.".green().bold());
+        return Ok(());
+    }
+
+    println!(
+        "\n{} {} drift(s) detected:\n",
+        "⚠️".yellow(),
+        cmds.len().to_string().red().bold()
+    );
+
+    match format {
+        OutputFormat::Sql => {
+            for cmd in &cmds {
+                println!("{};", cmd.to_sql_with_dialect(dialect));
+            }
+        }
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&cmds)?);
+        }
+        OutputFormat::Pretty => {
+            for (i, cmd) in cmds.iter().enumerate() {
+                let class = classify_migration(cmd);
+                let class_str = match class {
+                    MigrationClass::Reversible => "reversible".green(),
+                    MigrationClass::DataLosing => "data-losing".red(),
+                    MigrationClass::Irreversible => "irreversible".red().bold(),
+                };
+                println!(
+                    "{} {} {}",
+                    format!("{}.", i + 1).cyan(),
+                    format!("{}", cmd.action).yellow(),
+                    cmd.table.white()
+                );
+                println!("   {}", cmd.to_sql_with_dialect(dialect).dimmed());
+                println!("   Class: {}", class_str);
+            }
+        }
+    }
+
+    Ok(())
+}
