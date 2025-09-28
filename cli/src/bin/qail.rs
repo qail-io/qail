@@ -22,8 +22,8 @@ use qail_core::transpiler::{Dialect, ToSql};
 use qail::introspection;
 use qail::lint::lint_schema;
 use qail::migrations::{
-    migrate_analyze, migrate_apply, migrate_down, migrate_plan, migrate_status, migrate_up,
-    watch_schema, MigrateDirection,
+    migrate_analyze, migrate_apply, migrate_down, migrate_plan, migrate_reset, migrate_status,
+    migrate_up, watch_schema, MigrateDirection,
 };
 use qail::repl::run_repl;
 use qail::schema::{OutputFormat as SchemaOutputFormat, check_schema, diff_schemas_cmd};
@@ -83,6 +83,13 @@ impl From<CliDialect> for Dialect {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new QAIL project
+    #[command(after_help = r#"EXAMPLES:
+    # Interactive mode
+    qail init
+    
+    # Non-interactive mode (CI/scripting)
+    qail init --name myapp --mode postgres --url postgres://localhost/mydb
+    qail init --name myapp --mode hybrid --url postgres://localhost/mydb --deployment docker"#)]
     Init {
         /// Project name
         #[arg(short, long)]
@@ -90,9 +97,16 @@ enum Commands {
         /// Database mode (postgres, qdrant, hybrid)
         #[arg(short, long)]
         mode: Option<String>,
+        /// Database URL (skips interactive prompt)
+        #[arg(short, long)]
+        url: Option<String>,
+        /// Deployment type: host, docker, podman (default: host)
+        #[arg(long)]
+        deployment: Option<String>,
     },
     /// Parse and explain a QAIL query
     Explain { query: String },
+    /// Interactive QAIL REPL — type queries, see SQL in real-time
     Repl,
 
     /// Generate a migration file
@@ -149,13 +163,19 @@ EXAMPLES:
     },
     /// Diff two schema files and show migration AST
     Diff {
-        /// Old schema .qail file
+        /// Old schema .qail file (not required with --live)
         old: String,
         /// New schema .qail file
         new: String,
         /// Output format (sql or json)
         #[arg(short, long, value_enum, default_value = "sql")]
         format: OutputFormat,
+        /// Use live database introspection as "old" schema (drift detection)
+        #[arg(long)]
+        live: bool,
+        /// Database URL (required with --live)
+        #[arg(long)]
+        url: Option<String>,
     },
     /// Lint schema for best practices and potential issues
     Lint {
@@ -302,6 +322,7 @@ EXAMPLES:
     set <table>[id = $1] fields name = 'new', updated_at = now
     del <table>[id = $1]
     get <table>'id'name[active = true]
+    cnt <table>[active = true]
 
 VALUE TYPES:
     Strings      'hello', "world"
@@ -362,6 +383,13 @@ EXAMPLES:
     # Inline insert
     qail exec "add users fields name, active values 'Alice', true" --url postgres://...
     
+    # Query with table display
+    qail exec "get users'id'name'email[active = true]" --url postgres://...
+    
+    # JSON output for scripting (pipe to jq)
+    qail exec "get users" --url postgres://... --json
+    qail exec "get users" --url postgres://... --json | jq '.[].email'
+    
     # From file with SSH tunnel
     qail exec -f seed.qail --ssh staging --url postgres://...
     
@@ -388,6 +416,9 @@ EXAMPLES:
         /// Dry-run: print generated SQL without executing
         #[arg(long)]
         dry_run: bool,
+        /// Output SELECT results as JSON array
+        #[arg(long)]
+        json: bool,
     },
     /// Generate typed Rust schema from schema.qail
     Types {
@@ -411,8 +442,18 @@ enum SyncAction {
 #[derive(Subcommand, Clone)]
 enum MigrateAction {
     /// Show migration status and history
+    #[command(after_help = r#"EXAMPLES:
+    qail migrate status postgres://user:pass@localhost:5432/mydb
+
+    Output includes version, name, applied_at, and checksum for each migration."#)]
     Status { url: String },
     /// Analyze migration impact on codebase before executing
+    #[command(after_help = r#"EXAMPLES:
+    # Scan ./src for queries affected by schema changes
+    qail migrate analyze v1.qail:v2.qail -c ./src
+    
+    # CI mode: exits 1 if breaking changes found, outputs GitHub annotations
+    qail migrate analyze v1.qail:v2.qail --ci"#)]
     Analyze {
         /// Schema diff (old.qail:new.qail)
         schema_diff: String,
@@ -424,6 +465,12 @@ enum MigrateAction {
         ci: bool,
     },
     /// Preview migration SQL without executing (dry-run)
+    #[command(after_help = r#"EXAMPLES:
+    # Preview migration between two schema versions
+    qail migrate plan v1.qail:v2.qail
+    
+    # Save generated SQL to a file
+    qail migrate plan v1.qail:v2.qail -o migration.sql"#)]
     Plan {
         /// Schema diff (old.qail:new.qail)
         schema_diff: String,
@@ -432,6 +479,18 @@ enum MigrateAction {
         output: Option<String>,
     },
     /// Apply migrations (forward)
+    #[command(after_help = r#"SCHEMA DIFF FORMAT:
+    old.qail:new.qail — two schema files separated by colon
+
+EXAMPLES:
+    # Apply migration
+    qail migrate up v1.qail:v2.qail postgres://user@localhost/mydb
+    
+    # Apply with breaking-change check against source code
+    qail migrate up v1.qail:v2.qail postgres://... -c ./src
+    
+    # Force apply even if breaking changes detected
+    qail migrate up v1.qail:v2.qail postgres://... -c ./src --force"#)]
     Up {
         /// Schema diff file or inline diff
         schema_diff: String,
@@ -445,6 +504,9 @@ enum MigrateAction {
         force: bool,
     },
     /// Rollback migrations
+    #[command(after_help = r#"EXAMPLES:
+    # Rollback: reverses the diff (old becomes target, new becomes source)
+    qail migrate down v1.qail:v2.qail postgres://user@localhost/mydb"#)]
     Down {
         /// Schema diff file or inline diff
         schema_diff: String,
@@ -452,12 +514,27 @@ enum MigrateAction {
         url: String,
     },
     /// Apply migrations from migrations/ folder (reads .qail files)
+    #[command(after_help = r#"WHAT IT DOES:
+    Scans migrations/ directory for .qail files, determines which have not
+    been applied to the database, and runs them in order.
+
+EXAMPLES:
+    # Apply pending migrations (URL from qail.toml)
+    qail migrate apply
+    
+    # Apply with explicit URL
+    qail migrate apply --url postgres://user@localhost/mydb"#)]
     Apply {
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
         url: Option<String>,
     },
     /// Create a new named migration file
+    #[command(after_help = r#"EXAMPLES:
+    qail migrate create add_user_avatars
+    qail migrate create add_user_avatars --author "orion" --depends add_users
+    
+    Creates: migrations/<timestamp>_add_user_avatars.qail"#)]
     Create {
         /// Name for the migration (e.g., add_user_avatars)
         name: String,
@@ -469,6 +546,14 @@ enum MigrateAction {
         author: Option<String>,
     },
     /// Apply migration to shadow database (blue-green)
+    #[command(after_help = r#"BLUE-GREEN MIGRATION WORKFLOW:
+    1. qail migrate shadow v1:v2 postgres://...     # Create shadow + apply + sync
+    2. Test against shadow database
+    3. qail migrate promote postgres://...           # Apply to primary, drop shadow
+       OR qail migrate abort postgres://...          # Drop shadow, keep primary
+
+    With --live (drift-safe):
+    qail migrate shadow schema.qail postgres://... --live"#)]
     Shadow {
         /// Schema diff (old.qail:new.qail) or just new.qail with --live
         schema_diff: String,
@@ -485,6 +570,26 @@ enum MigrateAction {
     },
     /// Abort shadow migration (drop shadow)
     Abort {
+        /// Database URL
+        url: String,
+    },
+    /// Reset database: drop all, clear history, re-apply target schema
+    #[command(after_help = r#"WHAT IT DOES:
+    Three-phase atomic reset:
+      1. DROP all objects found in the target schema
+      2. CLEAR _qail_migrations history table
+      3. CREATE all objects from the target schema
+    
+    Each phase runs in its own transaction for safety.
+
+EXAMPLES:
+    qail migrate reset schema.qail postgres://user@localhost/mydb
+
+WARNING:
+    This is destructive — all data in matching tables will be lost."#)]
+    Reset {
+        /// Target schema file (.qail)
+        schema: String,
         /// Database URL
         url: String,
     },
@@ -576,8 +681,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::Init { name, mode }) => {
-            qail::init::run_init(name.clone(), mode.clone())?;
+        Some(Commands::Init { name, mode, url, deployment }) => {
+            qail::init::run_init(name.clone(), mode.clone(), url.clone(), deployment.clone())?;
         }
         Some(Commands::Explain { query }) => explain_query(query),
         Some(Commands::Repl) => run_repl(),
@@ -594,14 +699,21 @@ async fn main() -> Result<()> {
         Some(Commands::Check { schema, src, migrations }) => {
             check_schema(schema, src.as_deref(), migrations)?;
         }
-        Some(Commands::Diff { old, new, format }) => {
+        Some(Commands::Diff { old, new, format, live, url }) => {
             let schema_fmt = match format {
                 OutputFormat::Sql => SchemaOutputFormat::Sql,
                 OutputFormat::Json => SchemaOutputFormat::Json,
                 OutputFormat::Pretty => SchemaOutputFormat::Pretty,
             };
             let dialect: Dialect = cli.dialect.clone().into();
-            diff_schemas_cmd(old, new, schema_fmt, dialect)?;
+            if *live {
+                // Live drift detection: introspect DB as "old", compare with file as "new"
+                let db_url = url.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("--url is required with --live"))?;
+                qail::schema::diff_live(db_url, new, schema_fmt, dialect).await?;
+            } else {
+                diff_schemas_cmd(old, new, schema_fmt, dialect)?;
+            }
         }
         Some(Commands::Lint { schema, strict }) => {
             lint_schema(schema, *strict)?;
@@ -626,6 +738,7 @@ async fn main() -> Result<()> {
             } => migrate_plan(schema_diff, output.as_deref())?,
             MigrateAction::Up { schema_diff, url, codebase, force } => migrate_up(schema_diff, url, codebase.as_deref(), *force).await?,
             MigrateAction::Down { schema_diff, url } => migrate_down(schema_diff, url).await?,
+            MigrateAction::Reset { schema, url } => migrate_reset(schema, url).await?,
             MigrateAction::Apply { url } => {
                 // Get URL from qail.toml if not provided
                 let db_url = if let Some(u) = url {
@@ -713,7 +826,7 @@ async fn main() -> Result<()> {
         Some(Commands::Worker { interval, batch }) => {
             qail::worker::run_worker(*interval, *batch).await?;
         },
-        Some(Commands::Exec { query, file, url, ssh, tx, dry_run }) => {
+        Some(Commands::Exec { query, file, url, ssh, tx, dry_run, json }) => {
             qail::exec::run_exec(qail::exec::ExecConfig {
                 query: query.clone(),
                 file: file.clone(),
@@ -721,6 +834,7 @@ async fn main() -> Result<()> {
                 ssh: ssh.clone(),
                 tx: *tx,
                 dry_run: *dry_run,
+                json: *json,
             }).await?;
         },
         Some(Commands::Types { schema, output }) => {

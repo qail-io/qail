@@ -26,13 +26,79 @@ use self::joins::*;
 // use self::expressions::*; // Used in clauses module
 
 /// Parse a QAIL query with comment preprocessing.
-/// This is the recommended entry point - handles SQL comment stripping.
+/// This is the recommended entry point - handles SQL comment stripping
+/// and `table[filter]` shorthand desugaring.
 pub fn parse(input: &str) -> Result<Qail, String> {
     let cleaned = strip_sql_comments(input);
-    match parse_root(&cleaned) {
-        Ok((_, cmd)) => Ok(cmd),
+    // Desugar table[filter] shorthand: "set users[active = true] fields ..."
+    // → "set users fields ... where active = true"
+    let desugared = desugar_bracket_filter(&cleaned);
+    match parse_root(&desugared) {
+        Ok(("", cmd)) => Ok(cmd),
+        Ok((remaining, _)) => Err(format!(
+            "Unexpected trailing content: '{}'", remaining
+        )),
         Err(e) => Err(format!("Parse error: {:?}", e)),
     }
+}
+
+/// Desugar `table[filter]` shorthand into `table ... where filter`.
+/// Transforms: `action table[cond] rest` → `action table rest where cond`
+fn desugar_bracket_filter(input: &str) -> String {
+    let trimmed = input.trim();
+    // Find the opening bracket after the table name
+    // Must be: action<ws>table[...] — the [ must immediately follow the table name
+    if let Some(bracket_start) = trimmed.find('[') {
+        // Ensure the bracket is in the table position (after action + space + identifier)
+        let before_bracket = &trimmed[..bracket_start];
+        // There should be at least "action table" before the bracket
+        if !before_bracket.contains(' ') {
+            return trimmed.to_string();
+        }
+
+        // Find matching closing bracket, respecting nesting and quotes
+        let after_bracket = &trimmed[bracket_start + 1..];
+        let mut depth = 1;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut bracket_end = None;
+
+        for (i, c) in after_bracket.char_indices() {
+            match c {
+                '\'' if !in_double_quote => in_single_quote = !in_single_quote,
+                '"' if !in_single_quote => in_double_quote = !in_double_quote,
+                '[' if !in_single_quote && !in_double_quote => depth += 1,
+                ']' if !in_single_quote && !in_double_quote => {
+                    depth -= 1;
+                    if depth == 0 {
+                        bracket_end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(end_pos) = bracket_end {
+            let filter = &after_bracket[..end_pos];
+            let rest = &after_bracket[end_pos + 1..].trim();
+
+            // Check if there's already a "where" in the rest
+            let rest_lower = rest.to_lowercase();
+            if rest_lower.contains("where ") || rest_lower.contains("where\n") {
+                // Already has WHERE — append with AND
+                return format!(
+                    "{} {} AND {}",
+                    before_bracket, rest, filter
+                );
+            } else if rest.is_empty() {
+                return format!("{} where {}", before_bracket, filter);
+            } else {
+                return format!("{} {} where {}", before_bracket, rest, filter);
+            }
+        }
+    }
+    trimmed.to_string()
 }
 
 /// Parse a QAIL query (root entry point).
