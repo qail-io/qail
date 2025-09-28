@@ -126,19 +126,32 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
     }
 
     // Detect dropped tables (only if not already handled by hints)
-    for name in old.tables.keys() {
-        if !new.tables.contains_key(name) {
-            let already_dropped = new.migrations.iter().any(
-                |h| matches!(h, MigrationHint::Drop { target, confirmed: true } if target == name),
-            );
-            if !already_dropped {
-                cmds.push(Qail {
-                    action: Action::Drop,
-                    table: name.clone(),
-                    ..Default::default()
-                });
-            }
-        }
+    // Sort in REVERSE FK order: tables with FK dependencies are dropped FIRST
+    // (children before parents) to avoid "cannot drop because other objects depend" errors
+    let mut dropped_tables: Vec<&String> = old.tables.keys()
+        .filter(|name| {
+            !new.tables.contains_key(*name) && !new.migrations.iter().any(
+                |h| matches!(h, MigrationHint::Drop { target, confirmed: true } if target == *name),
+            )
+        })
+        .collect();
+
+    // Sort: tables with MORE FK references come first (children before parents)
+    dropped_tables.sort_by_key(|name| {
+        std::cmp::Reverse(
+            old.tables
+                .get(*name)
+                .map(|t| t.columns.iter().filter(|c| c.foreign_key.is_some()).count())
+                .unwrap_or(0)
+        )
+    });
+
+    for name in dropped_tables {
+        cmds.push(Qail {
+            action: Action::Drop,
+            table: name.clone(),
+            ..Default::default()
+        });
     }
 
     // Detect column changes in existing tables
@@ -196,7 +209,11 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                         matches!(h, MigrationHint::Rename { from, .. } if from.ends_with(&format!(".{}", col.name)))
                     });
 
-                    if !is_rename_source {
+                    let is_drop_hinted = new.migrations.iter().any(|h| {
+                        matches!(h, MigrationHint::Drop { target, confirmed: true } if target == &format!("{}.{}", name, col.name))
+                    });
+
+                    if !is_rename_source && !is_drop_hinted {
                         cmds.push(Qail {
                             action: Action::AlterDrop,
                             table: name.clone(),

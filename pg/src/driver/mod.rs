@@ -116,6 +116,15 @@ impl From<std::io::Error> for PgError {
 /// Result type for PostgreSQL operations.
 pub type PgResult<T> = Result<T, PgError>;
 
+/// Result of a query that returns rows (SELECT/GET).
+#[derive(Debug, Clone)]
+pub struct QueryResult {
+    /// Column names from RowDescription.
+    pub columns: Vec<String>,
+    /// Rows of text-decoded values (None = NULL).
+    pub rows: Vec<Vec<Option<String>>>,
+}
+
 /// Combines the pure encoder (Layer 2) with async I/O (Layer 3).
 pub struct PgDriver {
     #[allow(dead_code)]
@@ -637,6 +646,59 @@ impl PgDriver {
                         return Err(err);
                     }
                     return Ok(affected);
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Query a QAIL command and return rows (for SELECT/GET queries).
+    /// Like `execute()` but collects RowDescription + DataRow messages
+    /// instead of discarding them.
+    pub async fn query_ast(&mut self, cmd: &Qail) -> PgResult<QueryResult> {
+        use crate::protocol::AstEncoder;
+
+        let wire_bytes = AstEncoder::encode_cmd_reuse(
+            cmd,
+            &mut self.connection.sql_buf,
+            &mut self.connection.params_buf,
+        );
+
+        self.connection.send_bytes(&wire_bytes).await?;
+
+        let mut columns: Vec<String> = Vec::new();
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        let mut error: Option<PgError> = None;
+
+        loop {
+            let msg = self.connection.recv().await?;
+            match msg {
+                crate::protocol::BackendMessage::ParseComplete
+                | crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::RowDescription(fields) => {
+                    columns = fields.into_iter().map(|f| f.name).collect();
+                }
+                crate::protocol::BackendMessage::DataRow(data) => {
+                    if error.is_none() {
+                        let row: Vec<Option<String>> = data
+                            .into_iter()
+                            .map(|col| col.map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
+                            .collect();
+                        rows.push(row);
+                    }
+                }
+                crate::protocol::BackendMessage::CommandComplete(_) => {}
+                crate::protocol::BackendMessage::NoData => {}
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    return Ok(QueryResult { columns, rows });
                 }
                 crate::protocol::BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {

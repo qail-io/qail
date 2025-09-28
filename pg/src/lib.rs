@@ -13,7 +13,7 @@ pub mod types;
 
 pub use driver::{
     PgConnection, PgDriver, PgDriverBuilder, PgError, PgPool, PgResult, PgRow, PoolConfig, PoolStats,
-    PooledConnection, QailRow,
+    PooledConnection, QailRow, QueryResult,
 };
 pub use protocol::PgEncoder;
 pub use types::{Date, FromPg, Json, Numeric, Time, Timestamp, ToPg, TypeError, Uuid};

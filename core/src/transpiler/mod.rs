@@ -79,6 +79,19 @@ impl ToSql for Qail {
     fn to_sql_with_dialect(&self, dialect: Dialect) -> String {
         match self.action {
             Action::Get => dml::select::build_select(self, dialect),
+            Action::Cnt => {
+                // Build a count query: SELECT COUNT(*) FROM table WHERE ...
+                let mut count_ast = self.clone();
+                count_ast.action = Action::Get;
+                count_ast.columns = vec![Expr::Aggregate {
+                    col: "*".to_string(),
+                    func: AggregateFunc::Count,
+                    distinct: false,
+                    filter: None,
+                    alias: None,
+                }];
+                dml::select::build_select(&count_ast, dialect)
+            }
             Action::Set => dml::update::build_update(self, dialect),
             Action::Del => dml::delete::build_delete(self, dialect),
             Action::Add => dml::insert::build_insert(self, dialect),

@@ -5,7 +5,7 @@
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-qail.rs-blue)](https://qail.rs/docs)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.15.7-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.15.8-green)](CHANGELOG.md)
 
 ---
 
@@ -55,17 +55,26 @@ let rows = driver.fetch_all(&query).await?;
 # Install
 cargo install qail
 
-# Execute query
-qail exec "get users 'id'email[active=true]" --db postgres://localhost/mydb
+# Initialize a project
+qail init --name myapp --mode postgres --url postgres://localhost/mydb
 
-# Pull schema from database
-qail pull postgres://localhost/mydb
+# Execute queries
+qail exec "get users'id'email[active=true]" --url postgres://localhost/mydb
+qail exec "cnt orders[status = 'paid']" --url postgres://...  # COUNT(*)
+qail exec "get users" --url postgres://... --json | jq '.[].email'
+
+# Schema management
+qail pull postgres://localhost/mydb           # Introspect → schema.qail
+qail diff old.qail new.qail                   # Compare schemas
+qail diff _ schema.qail --live --url pg://... # Drift detection vs live DB
+
+# Migrations
+qail migrate up v1:v2 postgres://...
+qail migrate reset schema.qail postgres://... # Nuclear: drop + recreate
+qail migrate status postgres://...            # Rich tabular status
 
 # Generate typed Rust schema
 qail types schema.qail > src/generated/schema.rs
-
-# SSH tunnel support
-qail exec "get users" --db postgres://remote/db --ssh user@bastion
 ```
 
 ---
@@ -89,7 +98,7 @@ let ctx = RlsContext::super_admin();                // Bypasses RLS
 Qail::get("bookings").with_rls(&ctx)
 ```
 
-### 🔗 Compile-Time Relation Safety (v0.15.7)
+### 🔗 Compile-Time Relation Safety (v0.15.8)
 
 `TypedQail<T>` carries table types through the builder chain. Invalid joins fail at compile time:
 
@@ -137,9 +146,11 @@ Qail::get(users::TABLE)
 ### ⚡ AST-Native Migrations
 
 ```bash
-qail migrate create add_users_table
-qail migrate up --db $DATABASE_URL
-qail migrate plan old.qail new.qail   # Preview with impact analysis
+qail migrate plan old.qail new.qail       # Preview with impact analysis
+qail migrate up v1:v2 postgres://... -c ./src  # Apply with codebase check
+qail migrate reset schema.qail postgres://...  # Atomic drop + recreate
+qail diff _ schema.qail --live --url pg://...  # Drift detection
+qail migrate status postgres://...            # Rich tabular history
 ```
 
 ---
@@ -181,7 +192,7 @@ qail.rs/
 
 ---
 
-## Status (v0.15.7)
+## Status (v0.15.8)
 
 | Feature | Status |
 |---------|--------|
