@@ -365,3 +365,139 @@ pub fn build_alter_column_type(cmd: &Qail, dialect: Dialect) -> String {
 
     parts.join(";\n")
 }
+
+// ============================================================================
+// Phase 7: Extensions, Comments, Sequences
+// ============================================================================
+
+/// Generate CREATE EXTENSION IF NOT EXISTS SQL.
+pub fn build_create_extension(cmd: &Qail, _dialect: Dialect) -> String {
+    // table field holds extension name, columns[0] may hold schema, columns[1] may hold version
+    let mut sql = format!("CREATE EXTENSION IF NOT EXISTS \"{}\"", cmd.table);
+
+    for col in &cmd.columns {
+        match col {
+            Expr::Named(val) if val.starts_with("SCHEMA ") => {
+                sql.push_str(&format!(" {}", val));
+            }
+            Expr::Named(val) if val.starts_with("VERSION ") => {
+                sql.push_str(&format!(" {}", val));
+            }
+            _ => {}
+        }
+    }
+
+    sql
+}
+
+/// Generate DROP EXTENSION IF EXISTS SQL.
+pub fn build_drop_extension(cmd: &Qail, _dialect: Dialect) -> String {
+    format!("DROP EXTENSION IF EXISTS \"{}\"", cmd.table)
+}
+
+/// Generate COMMENT ON SQL.
+pub fn build_comment_on(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+
+    // table field holds the target: "TABLE tablename" or "COLUMN table.column"
+    // columns[0] holds the comment text as Expr::Named
+    let comment_text = cmd
+        .columns
+        .first()
+        .map(|c| match c {
+            Expr::Named(s) => s.clone(),
+            _ => String::new(),
+        })
+        .unwrap_or_default();
+
+    // Escape single quotes in comment text
+    let escaped = comment_text.replace('\'', "''");
+
+    if cmd.table.contains('.') {
+        // COMMENT ON COLUMN table.column IS '...'
+        let parts: Vec<&str> = cmd.table.splitn(2, '.').collect();
+        format!(
+            "COMMENT ON COLUMN {}.{} IS '{}'",
+            generator.quote_identifier(parts[0]),
+            generator.quote_identifier(parts[1]),
+            escaped
+        )
+    } else {
+        // COMMENT ON TABLE table IS '...'
+        format!(
+            "COMMENT ON TABLE {} IS '{}'",
+            generator.quote_identifier(&cmd.table),
+            escaped
+        )
+    }
+}
+
+/// Generate CREATE SEQUENCE SQL.
+pub fn build_create_sequence(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    let mut sql = format!("CREATE SEQUENCE {}", generator.quote_identifier(&cmd.table));
+
+    for col in &cmd.columns {
+        if let Expr::Named(opt) = col {
+            sql.push(' ');
+            sql.push_str(opt);
+        }
+    }
+
+    sql
+}
+
+/// Generate DROP SEQUENCE SQL.
+pub fn build_drop_sequence(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    format!(
+        "DROP SEQUENCE IF EXISTS {}",
+        generator.quote_identifier(&cmd.table)
+    )
+}
+
+/// Generate CREATE TYPE ... AS ENUM SQL.
+pub fn build_create_enum(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    let values: Vec<String> = cmd
+        .columns
+        .iter()
+        .filter_map(|c| match c {
+            Expr::Named(v) => Some(format!("'{}'", v)),
+            _ => None,
+        })
+        .collect();
+
+    format!(
+        "CREATE TYPE {} AS ENUM ({})",
+        generator.quote_identifier(&cmd.table),
+        values.join(", ")
+    )
+}
+
+/// Generate DROP TYPE SQL.
+pub fn build_drop_enum(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    format!(
+        "DROP TYPE IF EXISTS {}",
+        generator.quote_identifier(&cmd.table)
+    )
+}
+
+/// Generate ALTER TYPE ... ADD VALUE SQL.
+pub fn build_alter_enum_add_value(cmd: &Qail, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    let mut parts = Vec::new();
+
+    for col in &cmd.columns {
+        if let Expr::Named(val) = col {
+            parts.push(format!(
+                "ALTER TYPE {} ADD VALUE IF NOT EXISTS '{}'",
+                generator.quote_identifier(&cmd.table),
+                val
+            ));
+        }
+    }
+
+    parts.join(";\n")
+}
