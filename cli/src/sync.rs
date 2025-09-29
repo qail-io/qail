@@ -59,14 +59,11 @@ pub fn generate_sync_triggers() -> Result<()> {
         return Ok(());
     }
 
-    // 2. Generate trigger migration
-    let migrations_dir = Path::new("migrations");
-    if !migrations_dir.exists() {
-        fs::create_dir(migrations_dir)?;
-    }
+    // 2. Resolve deltas directory
+    let migrations_dir = crate::migrations::resolve_deltas_dir(true)?;
 
     // Find next migration number
-    let next_num = find_next_migration_number(migrations_dir)?;
+    let next_num = find_next_migration_number(&migrations_dir)?;
     
     let up_path = migrations_dir.join(format!("{:03}_qail_sync_triggers.up.qail", next_num));
     let down_path = migrations_dir.join(format!("{:03}_qail_sync_triggers.down.qail", next_num));
