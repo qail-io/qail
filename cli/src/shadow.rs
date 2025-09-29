@@ -249,6 +249,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         schema.tables.insert(table_name.clone(), Table {
             name: table_name.clone(),
             columns,
+            multi_column_fks: vec![],
         });
     }
     
@@ -288,6 +289,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             where_clause: None,
             include: vec![],
             concurrently: false,
+            expressions: vec![],
         });
     }
     

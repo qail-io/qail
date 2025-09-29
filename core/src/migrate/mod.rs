@@ -31,7 +31,9 @@ pub use named_migration::{MigrationMeta, parse_migration_meta, validate_dependen
 pub use policy::{RlsPolicy, PolicyTarget, PolicyPermissiveness, tenant_check, session_bool_check};
 pub use parser::parse_qail;
 pub use schema::{
-    CheckConstraint, CheckExpr, Column, Deferrable, FkAction, ForeignKey, Generated, Index,
-    IndexMethod, MigrationHint, Schema, Table, to_qail_string, schema_to_commands,
+    CheckConstraint, CheckExpr, Column, Comment, CommentTarget, Deferrable, EnumType, Extension,
+    FkAction, ForeignKey, Generated, Grant, GrantAction, Index, IndexMethod, MigrationHint,
+    MultiColumnForeignKey, Privilege, Schema, SchemaFunctionDef, SchemaTriggerDef, Sequence, Table,
+    ViewDef, to_qail_string, schema_to_commands,
 };
 pub use types::ColumnType;
