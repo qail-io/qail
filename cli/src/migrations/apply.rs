@@ -8,34 +8,107 @@ use qail_core::parser::schema::Schema;
 use std::fs;
 use std::path::Path;
 
+/// A discovered migration, from either flat or subdirectory layout.
+struct MigrationFile {
+    /// Sort key (directory/file name prefix)
+    sort_key: String,
+    /// Display name
+    display_name: String,
+    /// Full path to the .qail file
+    path: std::path::PathBuf,
+}
+
+/// Discover migration files in both flat and subdirectory layouts.
+///
+/// Supported layouts:
+///   Flat:   `migrations/001_name.up.qail`
+///   Subdir: `migrations/20251207000000_name/up.qail`
+///
+/// Raw `.sql` files are rejected to enforce the type-safe barrier.
+fn discover_migrations(
+    migrations_dir: &Path,
+    direction: MigrateDirection,
+) -> Result<Vec<MigrationFile>> {
+    let suffix = match direction {
+        MigrateDirection::Up => "up",
+        MigrateDirection::Down => "down",
+    };
+
+    let mut migrations = Vec::new();
+
+    for entry in fs::read_dir(migrations_dir)?.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+
+        if path.is_dir() {
+            // Subdirectory layout: look for up.qail / down.qail inside
+            let qail_file = path.join(format!("{}.qail", suffix));
+            let sql_file = path.join(format!("{}.sql", suffix));
+
+            if sql_file.exists() && !qail_file.exists() {
+                eprintln!(
+                    "  {} {}/{}.sql found but .sql is not supported — convert to .qail",
+                    "⚠".yellow(),
+                    name_str,
+                    suffix
+                );
+                continue;
+            }
+
+            if qail_file.exists() {
+                migrations.push(MigrationFile {
+                    sort_key: name_str.clone(),
+                    display_name: format!("{}/{}.qail", name_str, suffix),
+                    path: qail_file,
+                });
+            }
+        } else if path.is_file() {
+            // Flat layout: NNN_name.up.qail / NNN_name.down.qail
+            let flat_suffix = format!(".{}.qail", suffix);
+            if name_str.ends_with(&flat_suffix) {
+                migrations.push(MigrationFile {
+                    sort_key: name_str.clone(),
+                    display_name: name_str.clone(),
+                    path: path.clone(),
+                });
+            } else if name_str.ends_with(&format!(".{}.sql", suffix)) {
+                eprintln!(
+                    "  {} {} — .sql migrations are not supported, convert to .qail",
+                    "⚠".yellow(),
+                    name_str
+                );
+            }
+        }
+    }
+
+    // Sort by name (works for both `001_` and `20251207000000_` prefixes)
+    migrations.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+
+    Ok(migrations)
+}
+
 /// Apply all pending migrations from the migrations/ folder
 pub async fn migrate_apply(url: &str, direction: MigrateDirection) -> Result<()> {
-    let migrations_dir = Path::new("migrations");
-    
-    if !migrations_dir.exists() {
-        anyhow::bail!("migrations/ directory not found. Run 'qail init' first.");
-    }
-    
-    // Get migration files sorted by name
-    let suffix = match direction {
-        MigrateDirection::Up => ".up.qail",
-        MigrateDirection::Down => ".down.qail",
-    };
-    
-    let mut migration_files: Vec<_> = fs::read_dir(migrations_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().to_string_lossy().ends_with(suffix))
-        .collect();
-    
-    migration_files.sort_by_key(|e| e.file_name());
-    
-    if migration_files.is_empty() {
+    let migrations_dir = super::resolve_deltas_dir(false)?;
+
+    let migrations = discover_migrations(&migrations_dir, direction)?;
+
+    if migrations.is_empty() {
+        let suffix = match direction {
+            MigrateDirection::Up => "up.qail",
+            MigrateDirection::Down => "down.qail",
+        };
         println!("{} No {} migrations found", "!".yellow(), suffix);
         return Ok(());
     }
-    
-    println!("{} Found {} migrations to apply\n", "→".cyan(), migration_files.len());
-    
+
+    println!(
+        "{} Found {} migrations to apply\n",
+        "→".cyan(),
+        migrations.len()
+    );
+
     // Connect to database
     let (host, port, user, database, password) = parse_postgres_url(url)?;
     let mut pg = if let Some(password) = password {
@@ -43,31 +116,31 @@ pub async fn migrate_apply(url: &str, direction: MigrateDirection) -> Result<()>
     } else {
         qail_pg::PgDriver::connect(&host, port, &user, &database).await?
     };
-    
+
     println!("{} Connected to {}", "✓".green(), database.cyan());
-    
+
     // Apply each migration
-    for entry in migration_files {
-        let filename = entry.file_name();
-        let filename_str = filename.to_string_lossy();
-        let path = entry.path();
-        
-        print!("  {} {}... ", "→".cyan(), filename_str);
-        
-        let content = fs::read_to_string(&path)
-            .context(format!("Failed to read {}", path.display()))?;
-        
+    for mig in &migrations {
+        print!("  {} {}... ", "→".cyan(), mig.display_name);
+
+        let content = fs::read_to_string(&mig.path)
+            .context(format!("Failed to read {}", mig.path.display()))?;
+
         // Try to parse as schema and generate DDL
         let sql = parse_qail_to_sql(&content)?;
-        
+
         // Execute the SQL
-        pg.execute_raw(&sql).await
-            .context(format!("Failed to execute migration {}", filename_str))?;
-        
+        pg.execute_raw(&sql)
+            .await
+            .context(format!("Failed to execute migration {}", mig.display_name))?;
+
         println!("{}", "✓".green());
     }
-    
-    println!("\n{} All migrations applied successfully!", "✓".green().bold());
+
+    println!(
+        "\n{} All migrations applied successfully!",
+        "✓".green().bold()
+    );
     Ok(())
 }
 

@@ -11,7 +11,6 @@ use colored::*;
 /// └── 20251231093400_add_users.down.qail
 /// ```
 pub fn migrate_create(name: &str, depends: Option<&str>, author: Option<&str>) -> Result<()> {
-    use std::path::Path;
 
     println!("{}", "📝 Creating Migration".cyan().bold());
     println!();
@@ -19,12 +18,8 @@ pub fn migrate_create(name: &str, depends: Option<&str>, author: Option<&str>) -
     let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
     let created = chrono::Local::now().to_rfc3339();
 
-    // Ensure migrations directory exists
-    let migrations_dir = Path::new("migrations");
-    if !migrations_dir.exists() {
-        std::fs::create_dir_all(migrations_dir)?;
-        println!("  Created {} directory", "migrations/".yellow());
-    }
+    // Ensure deltas directory exists
+    let migrations_dir = super::resolve_deltas_dir(true)?;
 
     // Build metadata header
     let mut meta_lines = vec![
