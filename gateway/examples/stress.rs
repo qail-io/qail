@@ -271,7 +271,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config.base_url,
             &m,
             |client, base, metrics, _| async move {
-                let req = client.get(format!("{}/api/users?limit=5", base));
+                let req = client.get(format!("{}/api/harbors?limit=5", base));
                 do_request(&metrics, req).await;
             },
         )
@@ -298,9 +298,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config.base_url,
             &m,
             |client, base, metrics, i| async move {
-                // Vary the query slightly to test cache behavior
+                // Round-robin across tables to test cache + pool behavior
+                let tables = ["harbors", "vessels", "odysseys", "operators", "destinations"];
+                let table = tables[(i as usize) % tables.len()];
                 let limit = (i % 10) + 1;
-                let req = client.get(format!("{}/api/users?limit={}", base, limit));
+                let req = client.get(format!("{}/api/{}?limit={}", base, table, limit));
                 do_request(&metrics, req).await;
             },
         )
@@ -324,11 +326,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &m,
             |client, base, metrics, i| async move {
                 let body = serde_json::json!({
-                    "email": format!("stress-{}@test.com", i),
-                    "name": format!("Stress User {}", i),
+                    "name": format!("StressHarbor-{}", i),
+                    "slug": format!("stress-harbor-{}", i),
+                    "is_active": false,
                 });
                 let req = client
-                    .post(format!("{}/api/users", base))
+                    .post(format!("{}/api/harbors", base))
                     .json(&body);
                 do_request(&metrics, req).await;
             },
@@ -356,30 +359,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             |client, base, metrics, i| async move {
                 let op = i % 10;
                 match op {
-                    // 60% reads
-                    0..=5 => {
-                        let req = client.get(format!("{}/api/users?limit=10", base));
+                    // 60% reads across tables
+                    0..=2 => {
+                        let req = client.get(format!("{}/api/harbors?limit=10", base));
+                        do_request(&metrics, req).await;
+                    }
+                    3..=4 => {
+                        let req = client.get(format!("{}/api/vessels?limit=10", base));
+                        do_request(&metrics, req).await;
+                    }
+                    5 => {
+                        let req = client.get(format!("{}/api/odysseys?limit=10", base));
                         do_request(&metrics, req).await;
                     }
                     // 20% creates
                     6..=7 => {
                         let body = serde_json::json!({
-                            "email": format!("mixed-{}@test.com", i),
-                            "name": format!("Mixed User {}", i),
+                            "name": format!("Mixed-Harbor-{}", i),
+                            "slug": format!("mixed-harbor-{}", i),
+                            "is_active": false,
                         });
                         let req = client
-                            .post(format!("{}/api/users", base))
+                            .post(format!("{}/api/harbors", base))
                             .json(&body);
                         do_request(&metrics, req).await;
                     }
-                    // 10% list orders (different table)
+                    // 10% operators
                     8 => {
-                        let req = client.get(format!("{}/api/orders?limit=5", base));
+                        let req = client.get(format!("{}/api/operators?limit=5", base));
                         do_request(&metrics, req).await;
                     }
-                    // 10% list products (different table)
+                    // 10% destinations
                     _ => {
-                        let req = client.get(format!("{}/api/products?limit=5", base));
+                        let req = client.get(format!("{}/api/destinations?limit=5", base));
                         do_request(&metrics, req).await;
                     }
                 }
@@ -403,8 +415,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &client,
             &config.base_url,
             &m,
-            |client, base, metrics, _| async move {
-                let req = client.get(format!("{}/api/users?limit=1", base));
+            |client, base, metrics, i| async move {
+                let tables = ["harbors", "vessels", "odysseys", "operators"];
+                let table = tables[(i as usize) % tables.len()];
+                let req = client.get(format!("{}/api/{}?limit=1", base, table));
                 do_request(&metrics, req).await;
             },
         )
@@ -440,15 +454,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config.base_url,
             &m,
             |client, base, metrics, i| async move {
-                // Use a fake UUID — gateway will either return 404 or empty results
-                // This still exercises the nested route parsing + SQL generation
-                let fake_id = format!(
-                    "00000000-0000-0000-0000-{:012x}",
-                    (i % 256)
-                );
+                // Use real operator UUIDs to test nested routes with actual joins
+                let operator_ids = [
+                    "680a70b3-7fb4-431b-9168-e3f6143e80da",
+                    "12cbe5f9-5923-4c27-b001-e67fefffa68d",
+                    "aed2742d-b456-4ba8-8a36-d9bdc868874c",
+                    "f070bf51-7211-4497-bee5-a59920584fca",
+                    "a6fda6c9-2ac6-4263-a3f8-e8b94b5d0153",
+                ];
+                let op_id = operator_ids[(i as usize) % operator_ids.len()];
+                // Alternate between vessels and odysseys nested under operators
+                let child = if i % 2 == 0 { "vessels" } else { "odysseys" };
                 let req = client.get(format!(
-                    "{}/api/users/{}/orders?limit=10",
-                    base, fake_id
+                    "{}/api/operators/{}/{}?limit=10",
+                    base, op_id, child
                 ));
                 do_request(&metrics, req).await;
             },
