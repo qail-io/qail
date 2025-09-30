@@ -49,6 +49,29 @@ impl AuthContext {
     pub fn is_authenticated(&self) -> bool {
         self.user_id != "anonymous"
     }
+
+    /// Convert gateway AuthContext to PgDriver's RlsContext for Postgres-native RLS.
+    ///
+    /// Mapping:
+    /// - `tenant_id` → `operator_id`
+    /// - `claims["agent_id"]` → `agent_id`
+    /// - `role == "super_admin"` → `is_super_admin`
+    pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {
+        let operator_id = self.tenant_id.clone().unwrap_or_default();
+        let agent_id = self
+            .claims
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let is_super_admin = self.role == "super_admin";
+
+        qail_core::rls::RlsContext {
+            operator_id,
+            agent_id,
+            is_super_admin,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
