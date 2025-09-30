@@ -33,6 +33,42 @@ impl PoolConfig {
         self.max_connections = max;
         self
     }
+
+    /// Create config from centralized `QailConfig`.
+    ///
+    /// Reads `[qdrant]` section; returns `None` if section is absent.
+    /// Uses gRPC endpoint (port 6334) by default.
+    pub fn from_qail_config(qail: &qail_core::config::QailConfig) -> Option<Self> {
+        let qdrant = qail.qdrant.as_ref()?;
+
+        // Parse gRPC host:port from the grpc field, or derive from url
+        let (host, port) = if let Some(ref grpc) = qdrant.grpc {
+            if grpc.contains(':') {
+                let mut parts = grpc.rsplitn(2, ':');
+                let port = parts.next().and_then(|s| s.parse().ok()).unwrap_or(6334u16);
+                let host = parts.next().unwrap_or("localhost").to_string();
+                (host, port)
+            } else {
+                (grpc.clone(), 6334)
+            }
+        } else {
+            // Derive from REST url, switch to gRPC port
+            let host = qdrant.url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .split(':')
+                .next()
+                .unwrap_or("localhost")
+                .to_string();
+            (host, 6334)
+        };
+
+        Some(Self {
+            max_connections: qdrant.max_connections,
+            host,
+            port,
+        })
+    }
 }
 
 impl Default for PoolConfig {

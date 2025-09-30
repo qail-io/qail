@@ -1,0 +1,577 @@
+//! Centralized configuration for the Qail ecosystem.
+//!
+//! Reads `qail.toml` with env-expansion (`${VAR}`, `${VAR:-default}`)
+//! and layered priority: Env > TOML > Defaults.
+//!
+//! # Example
+//! ```ignore
+//! let config = QailConfig::load()?;
+//! let pg_url = config.postgres_url();
+//! ```
+
+use serde::Deserialize;
+use std::path::Path;
+
+/// Error type for configuration loading.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("Config file not found: {0}")]
+    NotFound(String),
+
+    #[error("Failed to read config: {0}")]
+    Read(#[from] std::io::Error),
+
+    #[error("Failed to parse TOML: {0}")]
+    Parse(#[from] toml::de::Error),
+
+    #[error("Missing required environment variable: {0}")]
+    MissingEnvVar(String),
+}
+
+pub type ConfigResult<T> = Result<T, ConfigError>;
+
+// ────────────────────────────────────────────────────────────
+// Top-level config
+// ────────────────────────────────────────────────────────────
+
+/// Root config — deserialized from `qail.toml`.
+///
+/// All sections are optional for backward compatibility.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct QailConfig {
+    #[serde(default)]
+    pub project: ProjectConfig,
+
+    #[serde(default)]
+    pub postgres: PostgresConfig,
+
+    #[serde(default)]
+    pub redis: Option<RedisConfig>,
+
+    #[serde(default)]
+    pub qdrant: Option<QdrantConfig>,
+
+    #[serde(default)]
+    pub gateway: Option<GatewayConfig>,
+
+    #[serde(default)]
+    pub sync: Vec<SyncRule>,
+}
+
+// ────────────────────────────────────────────────────────────
+// Section structs
+// ────────────────────────────────────────────────────────────
+
+/// `[project]` — project metadata.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectConfig {
+    #[serde(default = "default_project_name")]
+    pub name: String,
+
+    #[serde(default = "default_mode")]
+    pub mode: String,
+
+    /// Default `.qail` schema file path.
+    pub schema: Option<String>,
+
+    /// Migrations directory override (default: `deltas/`).
+    pub migrations_dir: Option<String>,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            name: default_project_name(),
+            mode: default_mode(),
+            schema: None,
+            migrations_dir: None,
+        }
+    }
+}
+
+fn default_project_name() -> String { "qail-app".to_string() }
+fn default_mode() -> String { "postgres".to_string() }
+
+/// `[postgres]` — PostgreSQL connection and pool settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostgresConfig {
+    /// Connection URL. Supports `${VAR}` expansion.
+    #[serde(default = "default_pg_url")]
+    pub url: String,
+
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+
+    #[serde(default = "default_min_connections")]
+    pub min_connections: usize,
+
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_secs: u64,
+
+    #[serde(default = "default_acquire_timeout")]
+    pub acquire_timeout_secs: u64,
+
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_secs: u64,
+
+    #[serde(default)]
+    pub test_on_acquire: bool,
+
+    /// RLS defaults.
+    #[serde(default)]
+    pub rls: Option<RlsConfig>,
+}
+
+impl Default for PostgresConfig {
+    fn default() -> Self {
+        Self {
+            url: default_pg_url(),
+            max_connections: default_max_connections(),
+            min_connections: default_min_connections(),
+            idle_timeout_secs: default_idle_timeout(),
+            acquire_timeout_secs: default_acquire_timeout(),
+            connect_timeout_secs: default_connect_timeout(),
+            test_on_acquire: false,
+            rls: None,
+        }
+    }
+}
+
+fn default_pg_url() -> String { "postgres://postgres@localhost:5432/postgres".to_string() }
+fn default_max_connections() -> usize { 10 }
+fn default_min_connections() -> usize { 1 }
+fn default_idle_timeout() -> u64 { 600 }
+fn default_acquire_timeout() -> u64 { 30 }
+fn default_connect_timeout() -> u64 { 10 }
+
+/// `[postgres.rls]` — RLS default settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RlsConfig {
+    /// Postgres role used for application connections.
+    pub default_role: Option<String>,
+
+    /// Role name that bypasses RLS.
+    pub super_admin_role: Option<String>,
+}
+
+/// `[redis]` — Redis connection settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RedisConfig {
+    #[serde(default = "default_redis_host")]
+    pub host: String,
+
+    #[serde(default = "default_redis_port")]
+    pub port: u16,
+
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+
+    /// Optional password (supports `${VAR:-}` expansion).
+    pub password: Option<String>,
+}
+
+fn default_redis_host() -> String { "127.0.0.1".to_string() }
+fn default_redis_port() -> u16 { 6379 }
+
+/// `[qdrant]` — Qdrant connection settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct QdrantConfig {
+    #[serde(default = "default_qdrant_url")]
+    pub url: String,
+
+    /// gRPC endpoint (defaults to port 6334).
+    pub grpc: Option<String>,
+
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+}
+
+fn default_qdrant_url() -> String { "http://localhost:6333".to_string() }
+
+/// `[gateway]` — Gateway server settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayConfig {
+    #[serde(default = "default_bind")]
+    pub bind: String,
+
+    #[serde(default = "default_true")]
+    pub cors: bool,
+
+    /// Path to policy file.
+    pub policy: Option<String>,
+
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
+}
+
+fn default_bind() -> String { "0.0.0.0:8080".to_string() }
+fn default_true() -> bool { true }
+
+/// `[gateway.cache]` — query cache settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_cache_max")]
+    pub max_entries: usize,
+
+    #[serde(default = "default_cache_ttl")]
+    pub ttl_secs: u64,
+}
+
+fn default_cache_max() -> usize { 1000 }
+fn default_cache_ttl() -> u64 { 60 }
+
+/// `[[sync]]` — Qdrant sync rule (unchanged from existing CLI).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncRule {
+    pub source_table: String,
+    pub target_collection: String,
+
+    #[serde(default)]
+    pub trigger_column: Option<String>,
+
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+}
+
+// ────────────────────────────────────────────────────────────
+// Config loading
+// ────────────────────────────────────────────────────────────
+
+impl QailConfig {
+    /// Load config from `./qail.toml` in the current directory.
+    pub fn load() -> ConfigResult<Self> {
+        Self::load_from("qail.toml")
+    }
+
+    /// Load config from a specific file path.
+    pub fn load_from(path: impl AsRef<Path>) -> ConfigResult<Self> {
+        let path = path.as_ref();
+
+        if !path.exists() {
+            return Err(ConfigError::NotFound(path.display().to_string()));
+        }
+
+        let raw = std::fs::read_to_string(path)?;
+
+        // Phase 1: Expand ${VAR} and ${VAR:-default} in raw TOML text
+        let expanded = expand_env(&raw)?;
+
+        // Phase 2: Parse TOML
+        let mut config: QailConfig = toml::from_str(&expanded)?;
+
+        // Phase 3: Apply env var overrides (highest priority)
+        config.apply_env_overrides();
+
+        Ok(config)
+    }
+
+    /// Convenience: get the resolved PostgreSQL URL.
+    pub fn postgres_url(&self) -> &str {
+        &self.postgres.url
+    }
+
+    /// Apply env var overrides (env > TOML > defaults).
+    fn apply_env_overrides(&mut self) {
+        // DATABASE_URL overrides postgres.url
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            self.postgres.url = url;
+        }
+
+        // REDIS_URL overrides redis host+port (format: host:port)
+        if let Ok(url) = std::env::var("REDIS_URL") {
+            let redis = self.redis.get_or_insert(RedisConfig {
+                host: default_redis_host(),
+                port: default_redis_port(),
+                max_connections: default_max_connections(),
+                password: None,
+            });
+            // Parse host:port or just host
+            if let Some((host, port_str)) = url.rsplit_once(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    redis.host = host.to_string();
+                    redis.port = port;
+                } else {
+                    redis.host = url;
+                }
+            } else {
+                redis.host = url;
+            }
+        }
+
+        // QDRANT_URL overrides qdrant.url
+        if let (Ok(url), Some(ref mut q)) = (std::env::var("QDRANT_URL"), self.qdrant.as_mut()) {
+            q.url = url;
+        }
+
+        // QAIL_BIND overrides gateway.bind
+        if let (Ok(bind), Some(ref mut gw)) = (std::env::var("QAIL_BIND"), self.gateway.as_mut()) {
+            gw.bind = bind;
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+// Env expansion
+// ────────────────────────────────────────────────────────────
+
+/// Expand `${VAR}` and `${VAR:-default}` patterns in a string.
+///
+/// - `${VAR}` — required, errors if not set
+/// - `${VAR:-default}` — optional, uses `default` if not set
+/// - `$$` — literal `$`
+pub fn expand_env(input: &str) -> ConfigResult<String> {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            match chars.peek() {
+                Some('$') => {
+                    // Escaped: $$ → $
+                    chars.next();
+                    result.push('$');
+                }
+                Some('{') => {
+                    chars.next(); // consume '{'
+                    let mut var_expr = String::new();
+                    let mut depth = 1;
+
+                    for c in chars.by_ref() {
+                        if c == '{' {
+                            depth += 1;
+                        } else if c == '}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        var_expr.push(c);
+                    }
+
+                    // Parse VAR:-default
+                    let (var_name, default_val) = if let Some(idx) = var_expr.find(":-") {
+                        (&var_expr[..idx], Some(&var_expr[idx + 2..]))
+                    } else {
+                        (var_expr.as_str(), None)
+                    };
+
+                    match std::env::var(var_name) {
+                        Ok(val) => result.push_str(&val),
+                        Err(_) => {
+                            if let Some(default) = default_val {
+                                result.push_str(default);
+                            } else {
+                                return Err(ConfigError::MissingEnvVar(var_name.to_string()));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Plain `$` not followed by `{` or `$`, keep as-is
+                    result.push('$');
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Ok(result)
+}
+
+// ────────────────────────────────────────────────────────────
+// Tests
+// ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: safely set and remove env vars in tests.
+    /// SAFETY: Tests run with `--test-threads=1` or use unique var names.
+    unsafe fn set_env(key: &str, val: &str) {
+        unsafe { std::env::set_var(key, val) };
+    }
+
+    unsafe fn unset_env(key: &str) {
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn test_expand_env_required_var() {
+        unsafe { set_env("QAIL_TEST_VAR", "hello") };
+        let result = expand_env("prefix_${QAIL_TEST_VAR}_suffix").unwrap();
+        assert_eq!(result, "prefix_hello_suffix");
+        unsafe { unset_env("QAIL_TEST_VAR") };
+    }
+
+    #[test]
+    fn test_expand_env_missing_required() {
+        unsafe { unset_env("QAIL_MISSING_VAR_XYZ") };
+        let result = expand_env("${QAIL_MISSING_VAR_XYZ}");
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(ConfigError::MissingEnvVar(ref v)) if v == "QAIL_MISSING_VAR_XYZ")
+        );
+    }
+
+    #[test]
+    fn test_expand_env_default_value() {
+        unsafe { unset_env("QAIL_OPT_VAR") };
+        let result = expand_env("${QAIL_OPT_VAR:-fallback}").unwrap();
+        assert_eq!(result, "fallback");
+    }
+
+    #[test]
+    fn test_expand_env_default_empty() {
+        unsafe { unset_env("QAIL_OPT_EMPTY") };
+        let result = expand_env("${QAIL_OPT_EMPTY:-}").unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_expand_env_set_overrides_default() {
+        unsafe { set_env("QAIL_SET_VAR", "real") };
+        let result = expand_env("${QAIL_SET_VAR:-fallback}").unwrap();
+        assert_eq!(result, "real");
+        unsafe { unset_env("QAIL_SET_VAR") };
+    }
+
+    #[test]
+    fn test_expand_env_escaped_dollar() {
+        let result = expand_env("price: $$100").unwrap();
+        assert_eq!(result, "price: $100");
+    }
+
+    #[test]
+    fn test_expand_env_no_expansion() {
+        let result = expand_env("plain text no vars").unwrap();
+        assert_eq!(result, "plain text no vars");
+    }
+
+    #[test]
+    fn test_expand_env_postgres_url() {
+        unsafe { set_env("QAIL_DB_USER", "admin") };
+        unsafe { set_env("QAIL_DB_PASS", "s3cret") };
+        let result =
+            expand_env("postgres://${QAIL_DB_USER}:${QAIL_DB_PASS}@localhost:5432/mydb").unwrap();
+        assert_eq!(result, "postgres://admin:s3cret@localhost:5432/mydb");
+        unsafe { unset_env("QAIL_DB_USER") };
+        unsafe { unset_env("QAIL_DB_PASS") };
+    }
+
+    #[test]
+    fn test_parse_minimal_toml() {
+        let toml_str = r#"
+[project]
+name = "test"
+mode = "postgres"
+
+[postgres]
+url = "postgres://localhost/test"
+"#;
+        let config: QailConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.project.name, "test");
+        assert_eq!(config.postgres.url, "postgres://localhost/test");
+        assert_eq!(config.postgres.max_connections, 10); // default
+        assert!(config.redis.is_none());
+        assert!(config.gateway.is_none());
+    }
+
+    #[test]
+    fn test_parse_full_toml() {
+        let toml_str = r#"
+[project]
+name = "fulltest"
+mode = "hybrid"
+schema = "schema.qail"
+migrations_dir = "deltas"
+
+[postgres]
+url = "postgres://localhost/test"
+max_connections = 25
+min_connections = 5
+idle_timeout_secs = 300
+
+[postgres.rls]
+default_role = "app_user"
+super_admin_role = "super_admin"
+
+[redis]
+host = "10.0.0.1"
+port = 6380
+max_connections = 20
+
+[qdrant]
+url = "http://qdrant:6333"
+grpc = "qdrant:6334"
+max_connections = 15
+
+[gateway]
+bind = "0.0.0.0:9090"
+cors = false
+policy = "policies.yaml"
+
+[gateway.cache]
+enabled = true
+max_entries = 5000
+ttl_secs = 120
+
+[[sync]]
+source_table = "products"
+target_collection = "products_search"
+trigger_column = "description"
+embedding_model = "candle:bert-base"
+"#;
+        let config: QailConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.project.name, "fulltest");
+        assert_eq!(config.postgres.max_connections, 25);
+        assert_eq!(config.postgres.min_connections, 5);
+
+        let rls = config.postgres.rls.unwrap();
+        assert_eq!(rls.default_role.unwrap(), "app_user");
+
+        let redis = config.redis.unwrap();
+        assert_eq!(redis.host, "10.0.0.1");
+        assert_eq!(redis.port, 6380);
+
+        let qdrant = config.qdrant.unwrap();
+        assert_eq!(qdrant.max_connections, 15);
+
+        let gw = config.gateway.unwrap();
+        assert_eq!(gw.bind, "0.0.0.0:9090");
+        assert!(!gw.cors);
+
+        let cache = gw.cache.unwrap();
+        assert_eq!(cache.max_entries, 5000);
+
+        assert_eq!(config.sync.len(), 1);
+        assert_eq!(config.sync[0].source_table, "products");
+    }
+
+    #[test]
+    fn test_backward_compat_existing_toml() {
+        // Existing qail.toml format must still parse
+        let toml_str = r#"
+[project]
+name = "legacy"
+mode = "postgres"
+
+[postgres]
+url = "postgres://localhost/legacy"
+"#;
+        let config: QailConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.project.name, "legacy");
+        assert_eq!(config.postgres.url, "postgres://localhost/legacy");
+        // All new fields should have defaults
+        assert_eq!(config.postgres.max_connections, 10);
+        assert!(config.postgres.rls.is_none());
+        assert!(config.redis.is_none());
+        assert!(config.qdrant.is_none());
+        assert!(config.gateway.is_none());
+    }
+}
+

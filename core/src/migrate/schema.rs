@@ -529,16 +529,11 @@ pub struct Grant {
     pub to_role: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum GrantAction {
+    #[default]
     Grant,
     Revoke,
-}
-
-impl Default for GrantAction {
-    fn default() -> Self {
-        GrantAction::Grant
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

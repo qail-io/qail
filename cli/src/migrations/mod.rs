@@ -46,21 +46,19 @@ use std::path::{Path, PathBuf};
 /// Returns the resolved path, or an error if none exist and `create` is false.
 pub fn resolve_deltas_dir(create_if_missing: bool) -> anyhow::Result<PathBuf> {
     // 1. Check qail.toml for explicit override
-    if let Ok(content) = std::fs::read_to_string("qail.toml") {
-        if let Ok(config) = toml::from_str::<toml::Value>(&content) {
-            if let Some(dir) = config
-                .get("project")
-                .and_then(|p| p.get("migrations_dir"))
-                .and_then(|v| v.as_str())
-            {
-                let path = PathBuf::from(dir);
-                if path.exists() || create_if_missing {
-                    if create_if_missing && !path.exists() {
-                        std::fs::create_dir_all(&path)?;
-                    }
-                    return Ok(path);
-                }
+    if let Ok(content) = std::fs::read_to_string("qail.toml")
+        && let Ok(config) = toml::from_str::<toml::Value>(&content)
+        && let Some(dir) = config
+            .get("project")
+            .and_then(|p| p.get("migrations_dir"))
+            .and_then(|v| v.as_str())
+    {
+        let path = PathBuf::from(dir);
+        if path.exists() || create_if_missing {
+            if create_if_missing && !path.exists() {
+                std::fs::create_dir_all(&path)?;
             }
+            return Ok(path);
         }
     }
 

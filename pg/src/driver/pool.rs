@@ -90,6 +90,74 @@ impl PoolConfig {
         self.test_on_acquire = enabled;
         self
     }
+
+    /// Create a `PoolConfig` from a centralized `QailConfig`.
+    ///
+    /// Parses `postgres.url` for host/port/user/database/password
+    /// and applies pool tuning from `[postgres]` section.
+    pub fn from_qail_config(qail: &qail_core::config::QailConfig) -> PgResult<Self> {
+        let pg = &qail.postgres;
+        let (host, port, user, database, password) = parse_pg_url(&pg.url)?;
+
+        let mut config = PoolConfig::new(&host, port, &user, &database)
+            .max_connections(pg.max_connections)
+            .min_connections(pg.min_connections)
+            .idle_timeout(Duration::from_secs(pg.idle_timeout_secs))
+            .acquire_timeout(Duration::from_secs(pg.acquire_timeout_secs))
+            .connect_timeout(Duration::from_secs(pg.connect_timeout_secs))
+            .test_on_acquire(pg.test_on_acquire);
+
+        if let Some(ref pw) = password {
+            config = config.password(pw);
+        }
+
+        Ok(config)
+    }
+}
+
+/// Parse a postgres URL into (host, port, user, database, password).
+fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, Option<String>)> {
+    let url = url.trim_start_matches("postgres://").trim_start_matches("postgresql://");
+
+    let (credentials, host_part) = if url.contains('@') {
+        let mut parts = url.splitn(2, '@');
+        let creds = parts.next().unwrap_or("");
+        let host = parts.next().unwrap_or("localhost/postgres");
+        (Some(creds), host)
+    } else {
+        (None, url)
+    };
+
+    let (host_port, database) = if host_part.contains('/') {
+        let mut parts = host_part.splitn(2, '/');
+        (parts.next().unwrap_or("localhost"), parts.next().unwrap_or("postgres").to_string())
+    } else {
+        (host_part, "postgres".to_string())
+    };
+
+    let (host, port) = if host_port.contains(':') {
+        let mut parts = host_port.split(':');
+        let h = parts.next().unwrap_or("localhost").to_string();
+        let p = parts.next().and_then(|s| s.parse().ok()).unwrap_or(5432u16);
+        (h, p)
+    } else {
+        (host_port.to_string(), 5432u16)
+    };
+
+    let (user, password) = if let Some(creds) = credentials {
+        if creds.contains(':') {
+            let mut parts = creds.splitn(2, ':');
+            let u = parts.next().unwrap_or("postgres").to_string();
+            let p = parts.next().map(|s| s.to_string());
+            (u, p)
+        } else {
+            (creds.to_string(), None)
+        }
+    } else {
+        ("postgres".to_string(), None)
+    };
+
+    Ok((host, port, user, database, password))
 }
 
 /// Pool statistics for monitoring.
@@ -305,6 +373,19 @@ pub struct PgPool {
 }
 
 impl PgPool {
+    /// Create a pool from `qail.toml` (loads and parses automatically).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let pool = PgPool::from_config().await?;
+    /// ```
+    pub async fn from_config() -> PgResult<Self> {
+        let qail = qail_core::config::QailConfig::load()
+            .map_err(|e| PgError::Connection(format!("Config error: {}", e)))?;
+        let config = PoolConfig::from_qail_config(&qail)?;
+        Self::connect(config).await
+    }
+
     /// Create a new connection pool.
     pub async fn connect(config: PoolConfig) -> PgResult<Self> {
         // Semaphore starts with max_connections permits

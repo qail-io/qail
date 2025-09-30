@@ -100,7 +100,7 @@ impl Schema {
                 let before_brace = after_table.split('{').next().unwrap_or("").trim();
                 let parts: Vec<&str> = before_brace.split_whitespace().collect();
                 let name = parts.first().unwrap_or(&"").to_string();
-                current_rls_flag = parts.iter().any(|p| *p == "rls");
+                current_rls_flag = parts.contains(&"rls");
                 current_table = Some(name);
             }
             // End of table definition
@@ -169,7 +169,7 @@ impl Schema {
 
     /// Check if a specific table has RLS enabled
     pub fn is_rls_table(&self, name: &str) -> bool {
-        self.tables.get(name).map_or(false, |t| t.rls_enabled)
+        self.tables.get(name).is_some_and(|t| t.rls_enabled)
     }
 
     /// Get table schema
@@ -375,7 +375,7 @@ fn extract_column_from_create(line: &str) -> Option<String> {
     let line_upper = line.to_uppercase();
     let starts_with_keyword = |kw: &str| -> bool {
         line_upper.starts_with(kw)
-            && line_upper[kw.len()..].starts_with(|c: char| c == ' ' || c == '(')
+            && line_upper[kw.len()..].starts_with([' ', '('])
     };
     
     if starts_with_keyword("CREATE") || 

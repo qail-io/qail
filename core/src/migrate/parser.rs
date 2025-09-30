@@ -385,7 +385,7 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
         let mut tokens_str = rest.split('{').nth(1).unwrap_or("").to_string();
 
         if !tokens_str.contains('}') {
-            while let Some(line) = lines.next() {
+            for line in lines.by_ref() {
                 let line = line.trim();
                 tokens_str.push(' ');
                 tokens_str.push_str(line);
@@ -461,7 +461,7 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
         let mut values_str = rest.split('{').nth(1).unwrap_or("").to_string();
 
         if !values_str.contains('}') {
-            while let Some(line) = lines.next() {
+            for line in lines.by_ref() {
                 let line = line.trim();
                 values_str.push(' ');
                 values_str.push_str(line);
@@ -546,7 +546,7 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
 
         if !body.contains("$$") {
             // Multi-line: read until closing $$
-            while let Some(line) = lines.next() {
+            for line in lines.by_ref() {
                 if line.contains("$$") {
                     let before_closing = line.split("$$").next().unwrap_or("");
                     body.push('\n');
@@ -621,7 +621,7 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
         let mut body_str = after_first_dollar;
 
         if !body_str.contains("$$") {
-            while let Some(line) = lines.next() {
+            for line in lines.by_ref() {
                 if line.contains("$$") {
                     let before = line.split("$$").next().unwrap_or("");
                     body_str.push('\n');
@@ -671,12 +671,12 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
     // Collect events (INSERT, UPDATE, DELETE, etc.) until "execute"
     let mut events = Vec::new();
     let mut exec_idx = None;
-    for j in (on_idx + 3)..parts.len() {
-        if parts[j].eq_ignore_ascii_case("execute") {
+    for (j, part) in parts.iter().enumerate().skip(on_idx + 3) {
+        if part.eq_ignore_ascii_case("execute") {
             exec_idx = Some(j);
             break;
         }
-        let evt = parts[j].to_uppercase();
+        let evt = part.to_uppercase();
         if evt != "OR" {
             events.push(evt);
         }
