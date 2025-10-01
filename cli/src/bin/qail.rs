@@ -26,6 +26,7 @@ use qail::migrations::{
     migrate_up, watch_schema, MigrateDirection,
 };
 use qail::repl::run_repl;
+use qail::resolve::resolve_db_url;
 use qail::schema::{OutputFormat as SchemaOutputFormat, check_schema, diff_schemas_cmd};
 
 #[derive(Parser)]
@@ -122,31 +123,31 @@ enum Commands {
     Connects to a live database and extracts the complete schema as a .qail file.
     Tables, columns, types, constraints, indexes - everything.
 
-OUTPUT:
-    Prints schema.qail to stdout. Redirect to save:
-    
-    qail pull postgres://user:pass@host/db > schema.qail
-
-USE CASES:
-    • Start managing an existing database with QAIL
-    • Create a baseline before making changes
-    • Compare live schema vs expected schema (drift detection)
-    • Generate types from production schema
+URL RESOLUTION:
+    1. --url flag (highest priority)
+    2. DATABASE_URL env var
+    3. [postgres].url in qail.toml
 
 EXAMPLES:
-    # Pull from local database
-    qail pull postgres://localhost/mydb > schema.qail
+    # Pull using qail.toml config (no URL needed!)
+    qail pull
     
-    # Pull from remote (via SSH tunnel first)
-    ssh -L 5432:localhost:5432 myserver
-    qail pull postgres://user:pass@localhost/db > schema.qail
+    # Pull with explicit URL
+    qail pull --url postgres://localhost/mydb
+    
+    # Pull from remote via SSH tunnel
+    qail pull --ssh staging
     
     # Compare with expected
-    qail pull postgres://... > live.qail
+    qail pull > live.qail
     qail diff expected.qail live.qail"#)]
     Pull {
-        /// Database connection URL (postgres:// or mysql://)
-        url: String,
+        /// Database connection URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
+        /// SSH host for tunneling (e.g., "example" or "user@host")
+        #[arg(long)]
+        ssh: Option<String>,
     },
     /// Format a QAIL query to canonical v2 syntax
     Fmt { query: String },
@@ -443,10 +444,15 @@ enum SyncAction {
 enum MigrateAction {
     /// Show migration status and history
     #[command(after_help = r#"EXAMPLES:
-    qail migrate status postgres://user:pass@localhost:5432/mydb
+    qail migrate status
+    qail migrate status --url postgres://user:pass@localhost:5432/mydb
 
     Output includes version, name, applied_at, and checksum for each migration."#)]
-    Status { url: String },
+    Status {
+        /// Database URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
+    },
     /// Analyze migration impact on codebase before executing
     #[command(after_help = r#"EXAMPLES:
     # Scan ./src for queries affected by schema changes
@@ -494,8 +500,9 @@ EXAMPLES:
     Up {
         /// Schema diff file or inline diff
         schema_diff: String,
-        /// Database URL
-        url: String,
+        /// Database URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
         /// Codebase path to scan for breaking changes (blocks if found)
         #[arg(short, long)]
         codebase: Option<String>,
@@ -510,8 +517,9 @@ EXAMPLES:
     Down {
         /// Schema diff file or inline diff
         schema_diff: String,
-        /// Database URL
-        url: String,
+        /// Database URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
     },
     /// Apply migrations from migrations/ folder (reads .qail files)
     #[command(after_help = r#"WHAT IT DOES:
@@ -557,21 +565,24 @@ EXAMPLES:
     Shadow {
         /// Schema diff (old.qail:new.qail) or just new.qail with --live
         schema_diff: String,
-        /// Database URL
-        url: String,
+        /// Database URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
         /// Use live database introspection instead of old.qail file (catches drift)
         #[arg(long)]
         live: bool,
     },
     /// Promote shadow database to primary
     Promote {
-        /// Database URL
-        url: String,
+        /// Database URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
     },
     /// Abort shadow migration (drop shadow)
     Abort {
-        /// Database URL
-        url: String,
+        /// Database URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
     },
     /// Reset database: drop all, clear history, re-apply target schema
     #[command(after_help = r#"WHAT IT DOES:
@@ -590,8 +601,9 @@ WARNING:
     Reset {
         /// Target schema file (.qail)
         schema: String,
-        /// Database URL
-        url: String,
+        /// Database URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
     },
 }
 
@@ -690,8 +702,9 @@ async fn main() -> Result<()> {
         Some(Commands::Mig { query, name }) => {
             generate_migration(query, name.clone())?;
         }
-        Some(Commands::Pull { url }) => {
-            introspection::pull_schema(url, introspection::SchemaOutputFormat::Qail).await?;
+        Some(Commands::Pull { url, ssh: _ssh }) => {
+            let db_url = resolve_db_url(url.as_deref())?;
+            introspection::pull_schema(&db_url, introspection::SchemaOutputFormat::Qail).await?;
         }
         Some(Commands::Fmt { query }) => {
             format_query(query)?;
@@ -708,9 +721,8 @@ async fn main() -> Result<()> {
             let dialect: Dialect = cli.dialect.clone().into();
             if *live {
                 // Live drift detection: introspect DB as "old", compare with file as "new"
-                let db_url = url.as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("--url is required with --live"))?;
-                qail::schema::diff_live(db_url, new, schema_fmt, dialect).await?;
+                let db_url = resolve_db_url(url.as_deref())?;
+                qail::schema::diff_live(&db_url, new, schema_fmt, dialect).await?;
             } else {
                 diff_schemas_cmd(old, new, schema_fmt, dialect)?;
             }
@@ -726,7 +738,10 @@ async fn main() -> Result<()> {
             watch_schema(schema, url.as_deref(), *auto_apply).await?;
         }
         Some(Commands::Migrate { action }) => match action {
-            MigrateAction::Status { url } => migrate_status(url).await?,
+            MigrateAction::Status { url } => {
+                let db_url = resolve_db_url(url.as_deref())?;
+                migrate_status(&db_url).await?;
+            }
             MigrateAction::Analyze {
                 schema_diff,
                 codebase,
@@ -736,28 +751,20 @@ async fn main() -> Result<()> {
                 schema_diff,
                 output,
             } => migrate_plan(schema_diff, output.as_deref())?,
-            MigrateAction::Up { schema_diff, url, codebase, force } => migrate_up(schema_diff, url, codebase.as_deref(), *force).await?,
-            MigrateAction::Down { schema_diff, url } => migrate_down(schema_diff, url).await?,
-            MigrateAction::Reset { schema, url } => migrate_reset(schema, url).await?,
+            MigrateAction::Up { schema_diff, url, codebase, force } => {
+                let db_url = resolve_db_url(url.as_deref())?;
+                migrate_up(schema_diff, &db_url, codebase.as_deref(), *force).await?;
+            }
+            MigrateAction::Down { schema_diff, url } => {
+                let db_url = resolve_db_url(url.as_deref())?;
+                migrate_down(schema_diff, &db_url).await?;
+            }
+            MigrateAction::Reset { schema, url } => {
+                let db_url = resolve_db_url(url.as_deref())?;
+                migrate_reset(schema, &db_url).await?;
+            }
             MigrateAction::Apply { url } => {
-                // Get URL from qail.toml if not provided
-                let db_url = if let Some(u) = url {
-                    u.clone()
-                } else {
-                    // Try to load from qail.toml
-                    let config_path = std::path::Path::new("qail.toml");
-                    if config_path.exists() {
-                        let content = std::fs::read_to_string(config_path)?;
-                        let config: toml::Value = toml::from_str(&content)?;
-                        config.get("postgres")
-                            .and_then(|p| p.get("url"))
-                            .and_then(|u| u.as_str())
-                            .map(|s| s.to_string())
-                            .ok_or_else(|| anyhow::anyhow!("No postgres.url in qail.toml"))?
-                    } else {
-                        anyhow::bail!("No URL provided and qail.toml not found");
-                    }
-                };
+                let db_url = resolve_db_url(url.as_deref())?;
                 migrate_apply(&db_url, MigrateDirection::Up).await?;
             }
             MigrateAction::Create {
@@ -768,20 +775,21 @@ async fn main() -> Result<()> {
                 qail::migrations::migrate_create(name, depends.as_deref(), author.as_deref())?;
             }
             MigrateAction::Shadow { schema_diff, url, live } => {
+                let db_url = resolve_db_url(url.as_deref())?;
                 if *live {
-                    // Live introspection mode: introspect primary, compare with new.qail
-                    qail::shadow::run_shadow_migration_live(url, schema_diff).await?;
+                    qail::shadow::run_shadow_migration_live(&db_url, schema_diff).await?;
                 } else {
-                    // File-based mode: old.qail:new.qail
                     let (old_cmds, diff_cmds, old_path, new_path) = parse_schema_diff_with_old(schema_diff)?;
-                    qail::shadow::run_shadow_migration(url, &old_cmds, &diff_cmds, &old_path, &new_path).await?;
+                    qail::shadow::run_shadow_migration(&db_url, &old_cmds, &diff_cmds, &old_path, &new_path).await?;
                 }
             }
             MigrateAction::Promote { url } => {
-                qail::shadow::promote_shadow(url).await?;
+                let db_url = resolve_db_url(url.as_deref())?;
+                qail::shadow::promote_shadow(&db_url).await?;
             }
             MigrateAction::Abort { url } => {
-                qail::shadow::abort_shadow(url).await?;
+                let db_url = resolve_db_url(url.as_deref())?;
+                qail::shadow::abort_shadow(&db_url).await?;
             }
         },
         Some(Commands::Vector { action }) => match action {
