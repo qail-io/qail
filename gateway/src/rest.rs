@@ -23,6 +23,7 @@ use qail_core::ast::{JoinKind, Operator, Value as QailValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::auth::extract_auth_from_headers;
 use crate::handler::row_to_json;
@@ -111,7 +112,7 @@ pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
         router = router.route(&path, get(list_handler).post(create_handler));
 
         if has_pk {
-            let id_path = format!("/api/{}/:id", table_name);
+            let id_path = format!("/api/{}/{{id}}", table_name);
 
             // GET /api/{table}/:id — get by PK
             // PATCH /api/{table}/:id — update
@@ -126,7 +127,7 @@ pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
             // Nested routes: GET /api/{parent}/:id/{child}
             let children = state.schema.children_of(table_name);
             for (child_table, _fk_col, _pk_col) in &children {
-                let nested_path = format!("/api/{}/:id/{}", table_name, child_table);
+                let nested_path = format!("/api/{}/{{id}}/{}", table_name, child_table);
                 tracing::info!("  AUTO-REST nested: {} → GET", nested_path);
                 router = router.route(&nested_path, get(nested_list_handler));
             }
@@ -259,6 +260,10 @@ async fn get_by_id_handler(
 ) -> Result<Json<SingleResponse>, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+
+    // Validate UUID format before hitting the database
+    Uuid::parse_str(&id)
+        .map_err(|_| ApiError::parse_error(format!("Invalid UUID: {}", id)))?;
 
     let table = state
         .schema
@@ -393,6 +398,10 @@ async fn update_handler(
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
 
+    // Validate UUID format
+    Uuid::parse_str(&id)
+        .map_err(|_| ApiError::parse_error(format!("Invalid UUID: {}", id)))?;
+
     let table = state
         .schema
         .table(&table_name)
@@ -468,6 +477,10 @@ async fn delete_handler(
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
 
+    // Validate UUID format
+    Uuid::parse_str(&id)
+        .map_err(|_| ApiError::parse_error(format!("Invalid UUID: {}", id)))?;
+
     let table = state
         .schema
         .table(&table_name)
@@ -531,6 +544,10 @@ async fn nested_list_handler(
     }
     let parent_table = parts[1].to_string();
     let child_table = parts[3].to_string();
+
+    // Validate parent UUID format
+    Uuid::parse_str(&parent_id)
+        .map_err(|_| ApiError::parse_error(format!("Invalid UUID: {}", parent_id)))?;
 
     // Look up FK relation: child → parent
     let (fk_col, _pk_col) = state

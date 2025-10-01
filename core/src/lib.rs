@@ -7,6 +7,7 @@
 //! let cmd = Qail::get("users").column("name").filter("active", Operator::Eq, true);
 //! ```
 
+#[cfg(feature = "analyzer")]
 pub mod analyzer;
 pub mod ast;
 pub mod build;
@@ -18,6 +19,7 @@ pub mod migrate;
 pub mod parser;
 pub mod rls;
 pub mod schema;
+#[cfg(feature = "analyzer")]
 pub mod transformer;
 pub mod transpiler;
 pub mod typed;

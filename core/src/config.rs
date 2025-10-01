@@ -120,6 +120,10 @@ pub struct PostgresConfig {
     /// RLS defaults.
     #[serde(default)]
     pub rls: Option<RlsConfig>,
+
+    /// SSH tunnel host for remote connections (e.g., "example" or "user@host").
+    #[serde(default)]
+    pub ssh: Option<String>,
 }
 
 impl Default for PostgresConfig {
@@ -133,6 +137,7 @@ impl Default for PostgresConfig {
             connect_timeout_secs: default_connect_timeout(),
             test_on_acquire: false,
             rls: None,
+            ssh: None,
         }
     }
 }
