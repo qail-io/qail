@@ -379,8 +379,7 @@ table comments {
 }
 
 use std::collections::HashMap;
-use std::sync::RwLock;
-use once_cell::sync::Lazy;
+use std::sync::{LazyLock, RwLock};
 
 #[derive(Debug, Default)]
 pub struct RelationRegistry {
@@ -445,8 +444,8 @@ impl RelationRegistry {
 }
 
 /// Global mutable registry for runtime schema loading.
-pub static RUNTIME_RELATIONS: Lazy<RwLock<RelationRegistry>> = 
-    Lazy::new(|| RwLock::new(RelationRegistry::new()));
+pub static RUNTIME_RELATIONS: LazyLock<RwLock<RelationRegistry>> = 
+    LazyLock::new(|| RwLock::new(RelationRegistry::new()));
 
 /// Load relations from a schema.qail file into the runtime registry.
 /// Returns the number of relations loaded.

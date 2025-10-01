@@ -2830,12 +2830,10 @@ version = "0.16.0"
 dependencies = [
  "chrono",
  "nom 8.0.0",
- "once_cell",
  "proc-macro2",
  "proptest",
  "quote",
  "regex",
- "rust_decimal",
  "serde",
  "serde_json",
  "sqlparser",
@@ -2946,7 +2944,6 @@ dependencies = [
 name = "qail-pg"
 version = "0.16.0"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "bytes",
  "chrono",
