@@ -14,7 +14,7 @@ name = "qail-lsp"
 path = "src/main.rs"
 
 [dependencies]
-qail-core = { path = "../core", version = "0.16.0" }
+qail-core = { path = "../core", version = "0.16.0", features = ["analyzer"] }
 tower-lsp = { version = "0.20", features = ["proposed"] }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
