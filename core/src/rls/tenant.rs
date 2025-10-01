@@ -12,8 +12,9 @@
 //! assert_eq!(lookup_tenant_column("migrations"), None);
 //! ```
 
-use std::sync::{LazyLock, RwLock};
+use std::sync::LazyLock;
 use std::collections::HashMap;
+use std::sync::RwLock;
 
 /// Registry of tables that participate in tenant-scope isolation.
 ///
