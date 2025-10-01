@@ -10,7 +10,7 @@ use nom::{
     sequence::{delimited, preceded},
 };
 
-/// Parse CREATE TABLE: make users id:uuid:pk, name:varchar:notnull
+/// Parse CREATE TABLE: make users id:uuid:pk, name:varchar, bio:text:nullable
 pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Qail> {
     let (input, columns) = separated_list1(
         (multispace0, char(','), multispace0),
@@ -113,7 +113,10 @@ pub fn parse_column_definition(input: &str) -> IResult<&str, Expr> {
     let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)?;
     let (input, _) = char(':').parse(input)?;
 
-    let (input, data_type) = take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)?;
+    let (input, data_type) = recognize((
+        take_while1(|c: char| c.is_alphanumeric() || c == '_'),
+        opt(delimited(char('('), take_while1(|c: char| c != ')'), char(')'))),
+    )).parse(input)?;
 
     let (input, constraints) = many0(preceded(char(':'), parse_constraint)).parse(input)?;
 
@@ -127,7 +130,7 @@ pub fn parse_column_definition(input: &str) -> IResult<&str, Expr> {
     ))
 }
 
-/// Parse column constraint: pk, unique, notnull, default=value, check=expr
+/// Parse column constraint: pk, unique, nullable, default=value, check=expr
 pub fn parse_constraint(input: &str) -> IResult<&str, Constraint> {
     alt((
         // Primary key
@@ -136,9 +139,9 @@ pub fn parse_constraint(input: &str) -> IResult<&str, Constraint> {
         // Unique
         value(Constraint::Unique, tag_no_case("unique")),
         value(Constraint::Unique, tag_no_case("uniq")),
-        // Not null (opposite of nullable)
-        value(Constraint::Nullable, tag_no_case("notnull")),
-        value(Constraint::Nullable, tag_no_case("nn")),
+        // Nullable (column allows NULL; without this, columns default to NOT NULL)
+        value(Constraint::Nullable, tag_no_case("nullable")),
+        value(Constraint::Nullable, tag_no_case("null")),
         // Default value: default=uuid() or default=0
         map(
             preceded(
