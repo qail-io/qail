@@ -113,7 +113,10 @@ pub fn parse_column_definition(input: &str) -> IResult<&str, Expr> {
     let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)?;
     let (input, _) = char(':').parse(input)?;
 
-    let (input, data_type) = take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)?;
+    let (input, data_type) = recognize((
+        take_while1(|c: char| c.is_alphanumeric() || c == '_'),
+        opt(delimited(char('('), take_while1(|c: char| c != ')'), char(')'))),
+    )).parse(input)?;
 
     let (input, constraints) = many0(preceded(char(':'), parse_constraint)).parse(input)?;
 
