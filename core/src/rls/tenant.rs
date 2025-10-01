@@ -12,7 +12,7 @@
 //! assert_eq!(lookup_tenant_column("migrations"), None);
 //! ```
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -83,8 +83,8 @@ impl TenantRegistry {
 }
 
 /// Global tenant registry, loaded at startup.
-pub static TENANT_TABLES: Lazy<RwLock<TenantRegistry>> =
-    Lazy::new(|| RwLock::new(TenantRegistry::new()));
+pub static TENANT_TABLES: LazyLock<RwLock<TenantRegistry>> =
+    LazyLock::new(|| RwLock::new(TenantRegistry::new()));
 
 /// Register a single table as tenant-scoped at runtime.
 ///
