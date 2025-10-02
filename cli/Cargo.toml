@@ -17,16 +17,19 @@ clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
-rustyline = "14.0"
+rustyline = { version = "14.0", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "fs"] }
-url = "2.5"
-notify-debouncer-full = "0.4"
+notify-debouncer-full = { version = "0.4", optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 toml = "0.8"
 
 [features]
 default = []
+repl = ["dep:rustyline"]
+watch = ["dep:notify-debouncer-full"]
 vector = ["dep:qail-qdrant", "dep:reqwest"]
+full = ["repl", "watch", "vector"]
 
 [lints]
 workspace = true
+

@@ -23,8 +23,11 @@ use qail::introspection;
 use qail::lint::lint_schema;
 use qail::migrations::{
     migrate_analyze, migrate_apply, migrate_down, migrate_plan, migrate_reset, migrate_status,
-    migrate_up, watch_schema, MigrateDirection,
+    migrate_up, MigrateDirection,
 };
+#[cfg(feature = "watch")]
+use qail::migrations::watch_schema;
+#[cfg(feature = "repl")]
 use qail::repl::run_repl;
 use qail::resolve::resolve_db_url;
 use qail::schema::{OutputFormat as SchemaOutputFormat, check_schema, diff_schemas_cmd};
@@ -108,6 +111,7 @@ enum Commands {
     /// Parse and explain a QAIL query
     Explain { query: String },
     /// Interactive QAIL REPL — type queries, see SQL in real-time
+    #[cfg(feature = "repl")]
     Repl,
 
     /// Generate a migration file
@@ -186,7 +190,8 @@ EXAMPLES:
         #[arg(long)]
         strict: bool,
     },
-    /// Watch schema file for changes and auto-generate migrations
+    /// Watch schema file for changes and auto-generate migrations [requires --features watch]
+    #[cfg(feature = "watch")]
     Watch {
         /// Schema file to watch
         schema: String,
@@ -701,6 +706,7 @@ async fn main() -> Result<()> {
             qail::init::run_init(name.clone(), mode.clone(), url.clone(), deployment.clone())?;
         }
         Some(Commands::Explain { query }) => explain_query(query),
+        #[cfg(feature = "repl")]
         Some(Commands::Repl) => run_repl(),
 
         Some(Commands::Mig { query, name }) => {
@@ -734,6 +740,7 @@ async fn main() -> Result<()> {
         Some(Commands::Lint { schema, strict }) => {
             lint_schema(schema, *strict)?;
         }
+        #[cfg(feature = "watch")]
         Some(Commands::Watch {
             schema,
             url,

@@ -21,6 +21,7 @@ mod reset;
 mod status;
 pub mod types;
 mod up;
+#[cfg(feature = "watch")]
 mod watch;
 
 pub use analyze::migrate_analyze;
@@ -31,6 +32,7 @@ pub use plan::migrate_plan;
 pub use reset::migrate_reset;
 pub use status::migrate_status;
 pub use up::migrate_up;
+#[cfg(feature = "watch")]
 pub use watch::watch_schema;
 
 use qail_core::parser::schema::Schema;

@@ -8,6 +8,7 @@ pub mod exec;
 pub mod introspection;
 pub mod lint;
 pub mod migrations;
+#[cfg(feature = "repl")]
 pub mod repl;
 pub mod schema;
 pub mod shadow;
