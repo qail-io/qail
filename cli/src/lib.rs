@@ -15,6 +15,8 @@ pub mod sql_gen;
 pub mod types;
 pub mod util;
 pub mod resolve;
+pub mod colors;
+pub mod time;
 #[cfg(feature = "vector")]
 pub mod vector;
 #[cfg(feature = "vector")]

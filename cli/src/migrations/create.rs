@@ -1,7 +1,7 @@
 //! Migration creation
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 
 /// Create a new named migration file pair (up + down) with timestamp prefix.
 /// ## Generated Files
@@ -15,8 +15,8 @@ pub fn migrate_create(name: &str, depends: Option<&str>, author: Option<&str>) -
     println!("{}", "📝 Creating Migration".cyan().bold());
     println!();
 
-    let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
-    let created = chrono::Local::now().to_rfc3339();
+    let timestamp = crate::time::timestamp_version();
+    let created = crate::time::timestamp_rfc3339();
 
     // Ensure deltas directory exists
     let migrations_dir = super::resolve_deltas_dir(true)?;

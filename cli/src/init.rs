@@ -6,7 +6,7 @@
 //! - Hybrid (PostgreSQL + Qdrant with sync)
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use std::fs;
 use std::io::{self, Write};
 

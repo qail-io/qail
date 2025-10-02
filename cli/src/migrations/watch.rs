@@ -1,7 +1,7 @@
 //! Schema watch mode
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use qail_core::migrate::{diff_schemas, parse_qail};
 
 use crate::sql_gen::cmd_to_sql;
@@ -35,7 +35,7 @@ pub async fn watch_schema(schema_path: &str, db_url: Option<&str>, auto_apply: b
 
     println!(
         "[{}] Initial schema loaded: {} tables",
-        chrono::Local::now().format("%H:%M:%S").to_string().dimmed(),
+        crate::time::timestamp_short().dimmed(),
         last_schema.tables.len()
     );
 
@@ -49,7 +49,7 @@ pub async fn watch_schema(schema_path: &str, db_url: Option<&str>, auto_apply: b
             Ok(Ok(events)) => {
                 for event in events {
                     if event.paths.iter().any(|p| p.ends_with(schema_path)) {
-                        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+                        let now = crate::time::timestamp_short();
 
                         let content = match std::fs::read_to_string(schema_path) {
                             Ok(c) => c,

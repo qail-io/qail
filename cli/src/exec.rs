@@ -44,7 +44,7 @@
 //! ```
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use qail_core::prelude::*;
 use qail_core::transpiler::ToSql;
 use qail_pg::PgDriver;
