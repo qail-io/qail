@@ -236,7 +236,8 @@ EXAMPLES:
         #[command(subcommand)]
         action: MigrateAction,
     },
-    /// Vector database operations (Qdrant)
+    /// Vector database operations (Qdrant) [requires --features vector]
+    #[cfg(feature = "vector")]
     #[command(after_help = r#"QDRANT OPERATIONS:
     QAIL integrates with Qdrant vector database for hybrid PostgreSQL + vector search.
 
@@ -309,6 +310,8 @@ EXAMPLES:
     
     # Production (run as systemd service)
     qail worker -i 500 -b 200"#)]
+    /// Hybrid sync worker [requires --features vector]
+    #[cfg(feature = "vector")]
     Worker {
         /// Poll interval in milliseconds
         #[arg(short, long, default_value = "1000")]
@@ -607,6 +610,7 @@ WARNING:
     },
 }
 
+#[cfg(feature = "vector")]
 #[derive(Subcommand, Clone)]
 enum VectorAction {
     /// Create a vector collection
@@ -792,6 +796,7 @@ async fn main() -> Result<()> {
                 qail::shadow::abort_shadow(&db_url).await?;
             }
         },
+        #[cfg(feature = "vector")]
         Some(Commands::Vector { action }) => match action {
             VectorAction::Create { collection, size, distance, url } => {
                 qail::vector::vector_create(collection, *size, distance, url).await?;
@@ -831,6 +836,7 @@ async fn main() -> Result<()> {
                 qail::sync::list_sync_rules()?;
             }
         },
+        #[cfg(feature = "vector")]
         Some(Commands::Worker { interval, batch }) => {
             qail::worker::run_worker(*interval, *batch).await?;
         },
