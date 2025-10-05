@@ -5,7 +5,7 @@
 //! Equivalent to: down (current → empty) + clear history + up (empty → target)
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use qail_core::migrate::{diff_schemas, parse_qail};
 use qail_pg::PgDriver;
 
@@ -119,7 +119,7 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
         }
 
         // Record migration
-        let version = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
+        let version = crate::time::timestamp_version();
         let name = format!("reset_{}", version);
         let checksum = {
             use std::hash::{Hash, Hasher};

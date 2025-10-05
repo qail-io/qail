@@ -4,7 +4,7 @@
 //! Snapshots are REST-only (not gRPC) and stored as .tar archives.
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 

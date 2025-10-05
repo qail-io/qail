@@ -1,7 +1,7 @@
 //! Schema validation and diff operations
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use qail_core::migrate::{diff_schemas, parse_qail};
 use qail_core::prelude::*;
 use qail_core::transpiler::Dialect;
