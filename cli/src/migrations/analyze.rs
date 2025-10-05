@@ -1,7 +1,7 @@
 //! Migration impact analyzer
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use qail_core::migrate::{diff_schemas, parse_qail};
 
 use crate::sql_gen::cmd_to_sql;

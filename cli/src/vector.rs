@@ -5,7 +5,7 @@
 //! - `qail vector drop` - Delete collection
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 
 /// Create a vector collection in Qdrant.
 pub async fn vector_create(
@@ -33,12 +33,10 @@ pub async fn vector_create(
     println!("  URL: {}", url);
 
     // Parse URL to extract host and port
-    let parsed = url::Url::parse(url)
-        .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
-    let host = parsed.host_str().unwrap_or("localhost");
-    let port = parsed.port().unwrap_or(6334);
+    let (_scheme, host, port, _path) = crate::util::parse_url_parts(url)?;
+    let port = if port == 5432 { 6334 } else { port };
 
-    let mut driver = QdrantDriver::connect(host, port).await?;
+    let mut driver = QdrantDriver::connect(&host, port).await?;
     driver.create_collection(collection, size, dist, false).await?;
 
     println!("{} Collection '{}' created successfully!", "✓".green(), collection);
@@ -53,12 +51,10 @@ pub async fn vector_drop(collection: &str, url: &str) -> Result<()> {
     println!("  URL: {}", url);
 
     // Parse URL to extract host and port
-    let parsed = url::Url::parse(url)
-        .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
-    let host = parsed.host_str().unwrap_or("localhost");
-    let port = parsed.port().unwrap_or(6334);
+    let (_scheme, host, port, _path) = crate::util::parse_url_parts(url)?;
+    let port = if port == 5432 { 6334 } else { port };
 
-    let mut driver = QdrantDriver::connect(host, port).await?;
+    let mut driver = QdrantDriver::connect(&host, port).await?;
     driver.delete_collection(collection).await?;
 
     println!("{} Collection '{}' dropped successfully!", "✓".green(), collection);

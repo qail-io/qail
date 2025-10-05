@@ -3,7 +3,7 @@
 //! Provides pre-migration impact analysis and snapshot creation.
 
 use anyhow::{Result, anyhow};
-use colored::*;
+use crate::colors::*;
 use qail_core::ast::{Action, Expr, Qail};
 use qail_pg::driver::PgDriver;
 use std::path::PathBuf;
@@ -120,7 +120,7 @@ pub fn display_impact(impacts: &[MigrationImpact]) {
         let op_colored = match impact.operation.as_str() {
             "DROP TABLE" => impact.operation.red().bold(),
             "DROP COLUMN" => impact.operation.yellow().bold(),
-            _ => impact.operation.normal(),
+            _ => Painted { text: impact.operation.clone(), prefix: String::new() },
         };
 
         if !impact.dropped_columns.is_empty() {
@@ -204,7 +204,7 @@ fn ensure_snapshot_dir() -> Result<PathBuf> {
 /// Backup a table to CSV file using COPY protocol (AST-native)
 pub async fn backup_table(driver: &mut PgDriver, table: &str) -> Result<PathBuf> {
     let snapshot_dir = ensure_snapshot_dir()?;
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let timestamp = crate::time::timestamp_filename();
     let filename = format!("{}_{}.csv", timestamp, table);
     let path = snapshot_dir.join(&filename);
 
@@ -240,7 +240,7 @@ pub async fn backup_columns(
     columns: &[String],
 ) -> Result<PathBuf> {
     let snapshot_dir = ensure_snapshot_dir()?;
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let timestamp = crate::time::timestamp_filename();
     let col_names = columns.join("_");
     let filename = format!("{}_{}_{}.csv", timestamp, table, col_names);
     let path = snapshot_dir.join(&filename);

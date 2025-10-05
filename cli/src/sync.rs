@@ -4,7 +4,7 @@
 //! that populate the _qail_queue table on INSERT/UPDATE/DELETE.
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;

@@ -4,11 +4,10 @@
 //! Uses pure AST-native queries via Qail (no raw SQL).
 
 use anyhow::{Result, anyhow};
-use colored::*;
+use crate::colors::*;
 use qail_core::ast::{Operator, Qail};
 use qail_core::migrate::{Column, Schema, Table, to_qail_string};
 use qail_pg::driver::PgDriver;
-use url::Url;
 
 use crate::util::parse_pg_url;
 
@@ -22,8 +21,7 @@ pub enum SchemaOutputFormat {
 pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<()> {
     println!("{} {}", "→ Connecting to:".dimmed(), url_str.yellow());
 
-    let url = Url::parse(url_str)?;
-    let scheme = url.scheme();
+    let scheme = url_str.split("://").next().unwrap_or("");
 
     let schema = match scheme {
         "postgres" | "postgresql" => inspect_postgres(url_str).await?,

@@ -44,7 +44,7 @@
 //! ```
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use qail_core::prelude::*;
 use qail_core::transpiler::ToSql;
 use qail_pg::PgDriver;
@@ -230,26 +230,20 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
         println!("{} Opening SSH tunnel to {}...", "🔐".cyan(), ssh_host.green());
         
         // Parse the URL to extract host and port
-        let parsed = url::Url::parse(&db_url)
-            .map_err(|e| anyhow::anyhow!("Invalid database URL: {}", e))?;
-        
-        let remote_host = parsed.host_str().unwrap_or("localhost");
-        let remote_port = parsed.port().unwrap_or(5432);
+        let (_scheme, remote_host, remote_port, _path) = crate::util::parse_url_parts(&db_url)?;
         
         // Create tunnel
-        let tunnel = SshTunnel::new(ssh_host, remote_host, remote_port).await?;
+        let tunnel = SshTunnel::new(ssh_host, &remote_host, remote_port).await?;
         let local_port = tunnel.local_port();
         
         // Rewrite URL to use tunnel
-        let mut tunneled_url = parsed.clone();
-        tunneled_url.set_host(Some("127.0.0.1")).ok();
-        tunneled_url.set_port(Some(local_port)).ok();
+        let tunneled_url = crate::util::rewrite_url_host(&db_url, "127.0.0.1", local_port)?;
         
         println!("{} Tunnel established: localhost:{} -> {}:{}", 
             "✓".green(), local_port, remote_host, remote_port);
         
         _tunnel = Some(tunnel);
-        tunneled_url.to_string()
+        tunneled_url
     } else {
         _tunnel = None;
         db_url
