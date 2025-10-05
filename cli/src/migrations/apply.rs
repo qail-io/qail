@@ -153,35 +153,37 @@ pub enum MigrateDirection {
 
 /// Parse a .qail schema file and generate SQL DDL
 fn parse_qail_to_sql(content: &str) -> Result<String> {
-    let mut sql_parts = Vec::new();
-    
-    // Try to parse tables from schema
-    if let Ok(schema) = Schema::parse(content) {
-        for table in &schema.tables {
-            sql_parts.push(table.to_ddl());
+    // First, try to parse as a schema file
+    match Schema::parse(content) {
+        Ok(schema) => {
+            let mut sql_parts = Vec::new();
+            
+            // Generate DDL for each table
+            for table in &schema.tables {
+                sql_parts.push(table.to_ddl());
+            }
+            
+            if sql_parts.is_empty() {
+                // No tables found, might be raw SQL/functions/triggers
+                // For now, extract function/trigger blocks and translate
+                sql_parts.push(parse_functions_and_triggers(content)?);
+            }
+            
+            Ok(sql_parts.join("\n\n"))
+        }
+        Err(_) => {
+            // Not a schema file, try parsing as functions/triggers
+            parse_functions_and_triggers(content)
         }
     }
-    
-    // Always check for function, trigger, raw blocks
-    // (a delta can mix tables with raw SQL)
-    if let Ok(extra) = parse_functions_and_triggers(content) {
-        sql_parts.push(extra);
-    }
-    
-    if sql_parts.is_empty() {
-        anyhow::bail!("Could not parse any valid QAIL statements");
-    }
-    
-    Ok(sql_parts.join("\n\n"))
 }
 
-/// Parse function, trigger, and raw SQL definitions from .qail format
+/// Parse function and trigger definitions from .qail format
 fn parse_functions_and_triggers(content: &str) -> Result<String> {
     let mut sql_parts = Vec::new();
     let mut current_block = String::new();
     let mut in_function = false;
     let mut in_trigger = false;
-    let mut in_raw = false;
     let mut brace_depth = 0;
     
     for line in content.lines() {
@@ -189,67 +191,6 @@ fn parse_functions_and_triggers(content: &str) -> Result<String> {
         
         // Skip comments
         if trimmed.starts_with('#') || trimmed.is_empty() {
-            if in_raw {
-                // Preserve blank lines / comments inside raw blocks
-                current_block.push('\n');
-                current_block.push_str(line);
-            }
-            continue;
-        }
-        
-        // Detect raw block start: `raw {` or `raw{`
-        if !in_function && !in_trigger && !in_raw
-            && (trimmed == "raw {" || trimmed == "raw{" || trimmed.starts_with("raw {"))
-        {
-            in_raw = true;
-            brace_depth = trimmed.matches('{').count() - trimmed.matches('}').count();
-            // If the opening brace is on the same line, don't include the "raw {" prefix
-            current_block.clear();
-            // Handle single-line raw: `raw { SELECT 1; }`
-            if brace_depth == 0 {
-                let inner = trimmed
-                    .strip_prefix("raw")
-                    .unwrap_or(trimmed)
-                    .trim()
-                    .strip_prefix('{')
-                    .unwrap_or("")
-                    .strip_suffix('}')
-                    .unwrap_or("")
-                    .trim();
-                if !inner.is_empty() {
-                    sql_parts.push(inner.to_string());
-                }
-                in_raw = false;
-            }
-            continue;
-        }
-        
-        // Handle raw block body — passthrough SQL
-        if in_raw {
-            brace_depth += line.matches('{').count();
-            brace_depth -= line.matches('}').count();
-            
-            if brace_depth <= 0 {
-                // Final line — strip trailing }
-                let final_line = trimmed.strip_suffix('}').unwrap_or(trimmed).trim();
-                if !final_line.is_empty() {
-                    if !current_block.is_empty() {
-                        current_block.push('\n');
-                    }
-                    current_block.push_str(final_line);
-                }
-                let raw_sql = current_block.trim().to_string();
-                if !raw_sql.is_empty() {
-                    sql_parts.push(raw_sql);
-                }
-                in_raw = false;
-                current_block.clear();
-            } else {
-                if !current_block.is_empty() {
-                    current_block.push('\n');
-                }
-                current_block.push_str(trimmed);
-            }
             continue;
         }
         
