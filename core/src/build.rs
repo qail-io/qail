@@ -610,34 +610,16 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
                 // Extract table name from Qail::get("table")
                 let after = &line[pos + pattern.len()..];
                 if let Some(table) = extract_string_arg(after) {
-                    // Join continuation lines, tracking parenthesis depth
-                    // so multi-line method arguments don't break the chain
+                    // Join continuation lines (lines that start with .)
                     let mut full_chain = line.to_string();
                     let mut j = i + 1;
-                    
-                    // Count open parens in the initial line
-                    let mut paren_depth: i32 = line.chars().map(|c| match c {
-                        '(' => 1i32,
-                        ')' => -1i32,
-                        _ => 0i32,
-                    }).sum();
-                    
                     while j < lines.len() {
                         let next = lines[j].trim();
-                        if next.starts_with('.') || paren_depth > 0 {
-                            // Either a chained method call or inside parenthesized args
+                        if next.starts_with('.') {
                             full_chain.push_str(next);
-                            // Update paren depth
-                            for c in next.chars() {
-                                match c {
-                                    '(' => paren_depth += 1,
-                                    ')' => paren_depth -= 1,
-                                    _ => {}
-                                }
-                            }
                             j += 1;
-                        } else if next.is_empty() || next.starts_with("//") {
-                            j += 1; // Skip empty lines and comments
+                        } else if next.is_empty() {
+                            j += 1; // Skip empty lines
                         } else {
                             break;
                         }
