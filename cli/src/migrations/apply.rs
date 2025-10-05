@@ -3,7 +3,7 @@
 //! Reads `.qail` migration files in order and executes them against the database.
 
 use anyhow::{Context, Result};
-use colored::*;
+use crate::colors::*;
 use qail_core::parser::schema::Schema;
 use std::fs;
 use std::path::Path;

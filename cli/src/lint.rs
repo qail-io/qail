@@ -1,7 +1,7 @@
 //! Schema linting for best practices
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use qail_core::migrate::{ColumnType, parse_qail};
 
 #[derive(Debug, Clone, PartialEq)]

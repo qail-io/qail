@@ -1,7 +1,7 @@
 //! Migration UP operations
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use qail_core::migrate::{diff_schemas, parse_qail};
 use qail_core::prelude::Qail;
 use qail_pg::driver::PgDriver;
@@ -169,7 +169,7 @@ pub async fn migrate_up(
 
         let choice = prompt_migration_choice();
 
-        _migration_version = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
+        _migration_version = crate::time::timestamp_version();
 
         match choice {
             MigrationChoice::Cancel => {
@@ -230,8 +230,8 @@ pub async fn migrate_up(
         applied += 1;
     }
 
-    let version = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
-    let checksum = format!("{:x}", md5::compute(&sql_up_all));
+    let version = crate::time::timestamp_version();
+    let checksum = crate::time::md5_hex(&sql_up_all);
 
     // Record migration in history (AST-native)
     let record_cmd = Qail::add("_qail_migrations")

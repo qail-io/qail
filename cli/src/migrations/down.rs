@@ -1,7 +1,7 @@
 //! Migration DOWN (rollback) operations
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 use qail_core::migrate::{diff_schemas, parse_qail};
 use qail_core::prelude::{Action, Expr};
 use qail_pg::driver::PgDriver;
