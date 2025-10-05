@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../../../qail.io"
+		},
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../../engine-example-com"
+		},
+		{
+			"path": "../../../qail-web"
+		}
+	],
+	"settings": {}
+}
