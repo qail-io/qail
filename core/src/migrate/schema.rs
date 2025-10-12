@@ -47,6 +47,10 @@ pub struct Table {
     pub columns: Vec<Column>,
     /// Table-level multi-column foreign keys
     pub multi_column_fks: Vec<MultiColumnForeignKey>,
+    /// ENABLE ROW LEVEL SECURITY
+    pub enable_rls: bool,
+    /// FORCE ROW LEVEL SECURITY
+    pub force_rls: bool,
 }
 
 /// A column definition with compile-time type safety.
@@ -677,6 +681,8 @@ impl Table {
             name: name.into(),
             columns: Vec::new(),
             multi_column_fks: Vec::new(),
+            enable_rls: false,
+            force_rls: false,
         }
     }
 

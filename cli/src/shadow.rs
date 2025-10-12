@@ -250,6 +250,8 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             name: table_name.clone(),
             columns,
             multi_column_fks: vec![],
+            enable_rls: false,
+            force_rls: false,
         });
     }
     

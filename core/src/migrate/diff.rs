@@ -250,7 +250,89 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                             ..Default::default()
                         });
                     }
+
+                    // Detect NOT NULL changes
+                    if old_col.nullable && !new_col.nullable && !new_col.primary_key {
+                        // Was nullable, now NOT NULL → SET NOT NULL
+                        cmds.push(Qail {
+                            action: Action::AlterSetNotNull,
+                            table: name.clone(),
+                            columns: vec![Expr::Named(new_col.name.clone())],
+                            ..Default::default()
+                        });
+                    } else if !old_col.nullable && new_col.nullable && !old_col.primary_key {
+                        // Was NOT NULL, now nullable → DROP NOT NULL
+                        cmds.push(Qail {
+                            action: Action::AlterDropNotNull,
+                            table: name.clone(),
+                            columns: vec![Expr::Named(new_col.name.clone())],
+                            ..Default::default()
+                        });
+                    }
+
+                    // Detect DEFAULT changes
+                    match (&old_col.default, &new_col.default) {
+                        (None, Some(new_default)) => {
+                            // No default before, now has one → SET DEFAULT
+                            cmds.push(Qail {
+                                action: Action::AlterSetDefault,
+                                table: name.clone(),
+                                columns: vec![Expr::Named(new_col.name.clone())],
+                                payload: Some(new_default.clone()),
+                                ..Default::default()
+                            });
+                        }
+                        (Some(_), None) => {
+                            // Had default, now removed → DROP DEFAULT
+                            cmds.push(Qail {
+                                action: Action::AlterDropDefault,
+                                table: name.clone(),
+                                columns: vec![Expr::Named(new_col.name.clone())],
+                                ..Default::default()
+                            });
+                        }
+                        (Some(old_default), Some(new_default)) if old_default != new_default => {
+                            // Default value changed → SET DEFAULT (new)
+                            cmds.push(Qail {
+                                action: Action::AlterSetDefault,
+                                table: name.clone(),
+                                columns: vec![Expr::Named(new_col.name.clone())],
+                                payload: Some(new_default.clone()),
+                                ..Default::default()
+                            });
+                        }
+                        _ => {} // Same or both None
+                    }
                 }
+            }
+
+            // Detect RLS changes
+            if !old_table.enable_rls && new_table.enable_rls {
+                cmds.push(Qail {
+                    action: Action::AlterEnableRls,
+                    table: name.clone(),
+                    ..Default::default()
+                });
+            } else if old_table.enable_rls && !new_table.enable_rls {
+                cmds.push(Qail {
+                    action: Action::AlterDisableRls,
+                    table: name.clone(),
+                    ..Default::default()
+                });
+            }
+
+            if !old_table.force_rls && new_table.force_rls {
+                cmds.push(Qail {
+                    action: Action::AlterForceRls,
+                    table: name.clone(),
+                    ..Default::default()
+                });
+            } else if old_table.force_rls && !new_table.force_rls {
+                cmds.push(Qail {
+                    action: Action::AlterNoForceRls,
+                    table: name.clone(),
+                    ..Default::default()
+                });
             }
         }
     }

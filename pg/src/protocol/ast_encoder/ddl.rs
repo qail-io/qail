@@ -260,3 +260,77 @@ pub fn encode_drop_view(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP VIEW IF EXISTS ");
     buf.extend_from_slice(cmd.table.as_bytes());
 }
+
+/// Encode ALTER TABLE ALTER COLUMN SET NOT NULL.
+pub fn encode_alter_set_not_null(cmd: &Qail, buf: &mut BytesMut) {
+    if let Some(Expr::Named(col)) = cmd.columns.first() {
+        buf.extend_from_slice(b"ALTER TABLE ");
+        buf.extend_from_slice(cmd.table.as_bytes());
+        buf.extend_from_slice(b" ALTER COLUMN ");
+        buf.extend_from_slice(col.as_bytes());
+        buf.extend_from_slice(b" SET NOT NULL");
+    }
+}
+
+/// Encode ALTER TABLE ALTER COLUMN DROP NOT NULL.
+pub fn encode_alter_drop_not_null(cmd: &Qail, buf: &mut BytesMut) {
+    if let Some(Expr::Named(col)) = cmd.columns.first() {
+        buf.extend_from_slice(b"ALTER TABLE ");
+        buf.extend_from_slice(cmd.table.as_bytes());
+        buf.extend_from_slice(b" ALTER COLUMN ");
+        buf.extend_from_slice(col.as_bytes());
+        buf.extend_from_slice(b" DROP NOT NULL");
+    }
+}
+
+/// Encode ALTER TABLE ALTER COLUMN SET DEFAULT.
+pub fn encode_alter_set_default(cmd: &Qail, buf: &mut BytesMut) {
+    if let Some(Expr::Named(col)) = cmd.columns.first() {
+        buf.extend_from_slice(b"ALTER TABLE ");
+        buf.extend_from_slice(cmd.table.as_bytes());
+        buf.extend_from_slice(b" ALTER COLUMN ");
+        buf.extend_from_slice(col.as_bytes());
+        buf.extend_from_slice(b" SET DEFAULT ");
+        let default_expr = cmd.payload.as_deref().unwrap_or("NULL");
+        buf.extend_from_slice(default_expr.as_bytes());
+    }
+}
+
+/// Encode ALTER TABLE ALTER COLUMN DROP DEFAULT.
+pub fn encode_alter_drop_default(cmd: &Qail, buf: &mut BytesMut) {
+    if let Some(Expr::Named(col)) = cmd.columns.first() {
+        buf.extend_from_slice(b"ALTER TABLE ");
+        buf.extend_from_slice(cmd.table.as_bytes());
+        buf.extend_from_slice(b" ALTER COLUMN ");
+        buf.extend_from_slice(col.as_bytes());
+        buf.extend_from_slice(b" DROP DEFAULT");
+    }
+}
+
+/// Encode ALTER TABLE ENABLE ROW LEVEL SECURITY.
+pub fn encode_alter_enable_rls(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"ALTER TABLE ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" ENABLE ROW LEVEL SECURITY");
+}
+
+/// Encode ALTER TABLE DISABLE ROW LEVEL SECURITY.
+pub fn encode_alter_disable_rls(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"ALTER TABLE ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" DISABLE ROW LEVEL SECURITY");
+}
+
+/// Encode ALTER TABLE FORCE ROW LEVEL SECURITY.
+pub fn encode_alter_force_rls(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"ALTER TABLE ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" FORCE ROW LEVEL SECURITY");
+}
+
+/// Encode ALTER TABLE NO FORCE ROW LEVEL SECURITY.
+pub fn encode_alter_no_force_rls(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"ALTER TABLE ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" NO FORCE ROW LEVEL SECURITY");
+}
