@@ -61,9 +61,6 @@ bench/benchmarks/fifty_million_consume
 go/go/bench/
 pg/examples/*.go
 
-# Security: Battle tests (internal hardening, not for distribution)
-pg/examples/battle*.rs
+# Security: Internal config (not for distribution)
 qail.toml
-multi_ops_agent_plan.md
-pg/examples/battle_qail_row.rs
 multi_ops_agent_plan.md
