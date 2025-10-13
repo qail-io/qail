@@ -18,10 +18,11 @@
 //! ```
 
 use super::schema::{
-    Column, Comment, EnumType, Extension, Grant, Index, MigrationHint,
-    MultiColumnForeignKey, Privilege, Schema, SchemaFunctionDef, SchemaTriggerDef, Sequence, Table,
-    ViewDef,
+    CheckConstraint, CheckExpr, Column, Comment, EnumType, Extension, FkAction, Grant, Index,
+    MigrationHint, MultiColumnForeignKey, Privilege, Schema, SchemaFunctionDef, SchemaTriggerDef,
+    Sequence, Table, ViewDef,
 };
+use super::types::ColumnType;
 
 /// Parse a .qail file into a Schema.
 pub fn parse_qail(input: &str) -> Result<Schema, String> {
@@ -37,7 +38,7 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
         }
 
         if line.starts_with("table ") {
-            let (table, consumed) = parse_table(line, &mut lines)?;
+            let (table, consumed) = parse_table(line, &mut lines, &schema.enums)?;
             schema.add_table(table);
             // consumed lines already processed
             let _ = consumed;
@@ -99,6 +100,7 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
 fn parse_table<'a, I>(
     first_line: &str,
     lines: &mut std::iter::Peekable<I>,
+    enum_types: &[EnumType],
 ) -> Result<(Table, usize), String>
 where
     I: Iterator<Item = &'a str>,
@@ -132,7 +134,17 @@ where
             continue;
         }
 
-        let col = parse_column(line)?;
+        // Table-level RLS directives
+        if line == "enable_rls" {
+            table.enable_rls = true;
+            continue;
+        }
+        if line == "force_rls" {
+            table.force_rls = true;
+            continue;
+        }
+
+        let col = parse_column(line, enum_types)?;
         table.columns.push(col);
     }
 
@@ -140,7 +152,7 @@ where
 }
 
 /// Parse a column definition.
-fn parse_column(line: &str) -> Result<Column, String> {
+fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     let parts: Vec<&str> = line.split_whitespace().collect();
 
     if parts.len() < 2 {
@@ -150,9 +162,18 @@ fn parse_column(line: &str) -> Result<Column, String> {
     let name = parts[0].to_string();
     let type_str = parts[1];
 
-    let data_type: super::types::ColumnType = type_str
-        .parse()
-        .map_err(|_| format!("Unknown column type: {}", type_str))?;
+    // Try standard type first, then check enum types
+    let data_type: ColumnType = type_str.parse().unwrap_or_else(|_| {
+        // Check if it's a known enum type
+        if let Some(et) = enum_types.iter().find(|e| e.name == type_str) {
+            ColumnType::Enum {
+                name: et.name.clone(),
+                values: et.values.clone(),
+            }
+        } else {
+            ColumnType::Text // fallback
+        }
+    });
 
     let mut col = Column::new(&name, data_type);
 
@@ -196,6 +217,52 @@ fn parse_column(line: &str) -> Result<Column, String> {
                     let table = &fk_str[..paren_start];
                     let column = &fk_str[paren_start + 1..paren_end];
                     col = col.references(table, column);
+                }
+
+                // Check for on_delete / on_update after references
+                while i + 1 < parts.len() {
+                    match parts[i + 1] {
+                        "on_delete" if i + 2 < parts.len() => {
+                            let action = parse_fk_action_str(parts[i + 2]);
+                            col = col.on_delete(action);
+                            i += 2;
+                        }
+                        "on_update" if i + 2 < parts.len() => {
+                            let action = parse_fk_action_str(parts[i + 2]);
+                            col = col.on_update(action);
+                            i += 2;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            s if s.starts_with("check(") => {
+                // Parse check(expr) — may span multiple parts if expression has spaces
+                // Reconstruct the full check(...) from remaining parts
+                let check_str = if s.ends_with(')') {
+                    s.to_string()
+                } else {
+                    // Consume parts until we find the closing )
+                    let mut full = s.to_string();
+                    while i + 1 < parts.len() {
+                        i += 1;
+                        full.push(' ');
+                        full.push_str(parts[i]);
+                        if parts[i].ends_with(')') {
+                            break;
+                        }
+                    }
+                    full
+                };
+                // Strip "check(" and trailing ")"
+                let inner = check_str
+                    .strip_prefix("check(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or("");
+                if !inner.is_empty() {
+                    if let Some(expr) = parse_check_expr_from_qail(inner) {
+                        col.check = Some(CheckConstraint { expr, name: None });
+                    }
                 }
             }
             _ => {
@@ -748,6 +815,91 @@ fn parse_grant(line: &str) -> Result<Grant, String> {
     }
 }
 
+/// Parse QAIL FK action string to FkAction enum.
+/// Accepts: cascade, set_null, set_default, restrict, no_action
+fn parse_fk_action_str(s: &str) -> FkAction {
+    match s {
+        "cascade" => FkAction::Cascade,
+        "set_null" => FkAction::SetNull,
+        "set_default" => FkAction::SetDefault,
+        "restrict" => FkAction::Restrict,
+        _ => FkAction::NoAction,
+    }
+}
+
+/// Parse a QAIL check expression string into a CheckExpr.
+/// Supports:
+///   "col >= 0"           → GreaterOrEqual
+///   "col > 0"            → GreaterThan
+///   "col <= 100"         → LessOrEqual
+///   "col < 100"          → LessThan
+///   "col between 0 200"  → Between
+///   "col >= 0 and col <= 200" → And(GreaterOrEqual, LessOrEqual)
+fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
+    let s = s.trim();
+
+    // Try "col between low high"
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() == 4 && parts[1] == "between" {
+        let col = parts[0].to_string();
+        let low = parts[2].parse::<i64>().ok()?;
+        let high = parts[3].parse::<i64>().ok()?;
+        return Some(CheckExpr::Between { column: col, low, high });
+    }
+
+    // Try "left and right"
+    if let Some(and_pos) = s.find(" and ") {
+        let left = parse_check_expr_from_qail(&s[..and_pos])?;
+        let right = parse_check_expr_from_qail(&s[and_pos + 5..])?;
+        return Some(CheckExpr::And(Box::new(left), Box::new(right)));
+    }
+
+    // Try "left or right"
+    if let Some(or_pos) = s.find(" or ") {
+        let left = parse_check_expr_from_qail(&s[..or_pos])?;
+        let right = parse_check_expr_from_qail(&s[or_pos + 4..])?;
+        return Some(CheckExpr::Or(Box::new(left), Box::new(right)));
+    }
+
+    // Try simple comparisons: "col >= val", "col > val", etc.
+    let ops: &[(&str, fn(String, i64) -> CheckExpr)] = &[
+        (">=", |col, val| CheckExpr::GreaterOrEqual { column: col, value: val }),
+        ("<=", |col, val| CheckExpr::LessOrEqual { column: col, value: val }),
+        (">", |col, val| CheckExpr::GreaterThan { column: col, value: val }),
+        ("<", |col, val| CheckExpr::LessThan { column: col, value: val }),
+    ];
+
+    for (op, constructor) in ops {
+        if let Some(pos) = s.find(op) {
+            let col = s[..pos].trim().to_string();
+            let val = s[pos + op.len()..].trim().parse::<i64>().ok()?;
+            return Some(constructor(col, val));
+        }
+    }
+
+    // Try "length(col) >= min" / "length(col) <= max"
+    if s.starts_with("length(") {
+        let inner_end = s.find(')')?;
+        let col = s[7..inner_end].to_string();
+        let rest = s[inner_end + 1..].trim();
+        if let Some(val_str) = rest.strip_prefix(">=") {
+            let min = val_str.trim().parse::<usize>().ok()?;
+            return Some(CheckExpr::MinLength { column: col, min });
+        }
+        if let Some(val_str) = rest.strip_prefix("<=") {
+            let max = val_str.trim().parse::<usize>().ok()?;
+            return Some(CheckExpr::MaxLength { column: col, max });
+        }
+    }
+
+    // Try "col not_null"
+    if parts.len() == 2 && parts[1] == "not_null" {
+        return Some(CheckExpr::NotNull { column: parts[0].to_string() });
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,5 +1225,154 @@ grant select on users to readonly_role
         assert_eq!(schema.functions.len(), 1);
         assert_eq!(schema.triggers.len(), 1);
         assert_eq!(schema.grants.len(), 1);
+    }
+
+    // ======================== Phase 4 Tests — New Parser Features ========================
+
+    #[test]
+    fn test_parse_fk_actions() {
+        let input = r#"
+table orders {
+  id uuid primary_key
+  user_id uuid references users(id) on_delete cascade on_update restrict
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let col = &schema.tables["orders"].columns[1];
+        assert_eq!(col.name, "user_id");
+        let fk = col.foreign_key.as_ref().unwrap();
+        assert_eq!(fk.table, "users");
+        assert_eq!(fk.column, "id");
+        assert!(matches!(fk.on_delete, FkAction::Cascade));
+        assert!(matches!(fk.on_update, FkAction::Restrict));
+    }
+
+    #[test]
+    fn test_parse_fk_on_delete_only() {
+        let input = r#"
+table orders {
+  id uuid primary_key
+  operator_id uuid references operators(id) on_delete set_null
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let col = &schema.tables["orders"].columns[1];
+        let fk = col.foreign_key.as_ref().unwrap();
+        assert!(matches!(fk.on_delete, FkAction::SetNull));
+        assert!(matches!(fk.on_update, FkAction::NoAction));
+    }
+
+    #[test]
+    fn test_parse_check_between() {
+        let input = r#"
+table products {
+  id uuid primary_key
+  age int check(age between 0 200)
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let col = &schema.tables["products"].columns[1];
+        assert!(col.check.is_some());
+        let expr = &col.check.as_ref().unwrap().expr;
+        match expr {
+            CheckExpr::Between { column, low, high } => {
+                assert_eq!(column, "age");
+                assert_eq!(*low, 0);
+                assert_eq!(*high, 200);
+            }
+            _ => panic!("Expected Between, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_check_comparison() {
+        let input = r#"
+table products {
+  id uuid primary_key
+  score int check(score >= 0)
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let col = &schema.tables["products"].columns[1];
+        let expr = &col.check.as_ref().unwrap().expr;
+        match expr {
+            CheckExpr::GreaterOrEqual { column, value } => {
+                assert_eq!(column, "score");
+                assert_eq!(*value, 0);
+            }
+            _ => panic!("Expected GreaterOrEqual, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_enum_column_type() {
+        let input = r#"
+enum ticket_status { draft, active, cancelled }
+
+table tickets {
+  id uuid primary_key
+  status ticket_status default 'draft'
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        assert_eq!(schema.enums.len(), 1);
+        let col = &schema.tables["tickets"].columns[1];
+        assert_eq!(col.name, "status");
+        match &col.data_type {
+            ColumnType::Enum { name, values } => {
+                assert_eq!(name, "ticket_status");
+                assert_eq!(values, &["draft", "active", "cancelled"]);
+            }
+            _ => panic!("Expected Enum type, got {:?}", col.data_type),
+        }
+        assert_eq!(col.default.as_deref(), Some("'draft'"));
+    }
+
+    #[test]
+    fn test_parse_roundtrip_all_features() {
+        let input = r#"
+extension pgcrypto
+
+enum payment_method { card, va, qris, cash }
+
+sequence invoice_counter { start 1000 increment 1 }
+
+table orders {
+  id uuid primary_key default gen_random_uuid()
+  method payment_method not_null default 'card'
+  user_id uuid references users(id) on_delete cascade
+  score int check(score >= 0)
+  age int check(age between 0 200)
+  enable_rls
+  force_rls
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        assert_eq!(schema.extensions.len(), 1);
+        assert_eq!(schema.enums.len(), 1);
+        assert_eq!(schema.sequences.len(), 1);
+        assert_eq!(schema.tables.len(), 1);
+
+        let table = &schema.tables["orders"];
+        assert!(table.enable_rls);
+        assert!(table.force_rls);
+
+        // Enum column
+        let method = &table.columns[1];
+        assert!(matches!(&method.data_type, ColumnType::Enum { name, .. } if name == "payment_method"));
+        assert_eq!(method.default.as_deref(), Some("'card'"));
+
+        // FK with cascade
+        let user_id = &table.columns[2];
+        let fk = user_id.foreign_key.as_ref().unwrap();
+        assert!(matches!(fk.on_delete, FkAction::Cascade));
+
+        // CHECK >= 0
+        let score = &table.columns[3];
+        assert!(matches!(&score.check.as_ref().unwrap().expr, CheckExpr::GreaterOrEqual { .. }));
+
+        // CHECK between
+        let age = &table.columns[4];
+        assert!(matches!(&age.check.as_ref().unwrap().expr, CheckExpr::Between { .. }));
     }
 }

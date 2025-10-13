@@ -22,6 +22,7 @@ pub mod diff;
 pub mod named_migration;
 pub mod parser;
 pub mod policy;
+pub mod policy_parser;
 pub mod schema;
 pub mod types;
 
@@ -29,6 +30,7 @@ pub use alter::{AlterOp, AlterTable, TableConstraint};
 pub use diff::diff_schemas;
 pub use named_migration::{MigrationMeta, parse_migration_meta, validate_dependencies};
 pub use policy::{RlsPolicy, PolicyTarget, PolicyPermissiveness, tenant_check, session_bool_check};
+pub use policy_parser::parse_policy_expr;
 pub use parser::parse_qail;
 pub use schema::{
     CheckConstraint, CheckExpr, Column, Comment, CommentTarget, Deferrable, EnumType, Extension,

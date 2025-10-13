@@ -62,6 +62,14 @@ impl AstEncoder {
             Action::Mod => ddl::encode_rename_column(cmd, &mut sql_buf),
             Action::CreateView => ddl::encode_create_view(cmd, &mut sql_buf, &mut params),
             Action::DropView => ddl::encode_drop_view(cmd, &mut sql_buf),
+            Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, &mut sql_buf),
+            Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, &mut sql_buf),
+            Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, &mut sql_buf),
+            Action::AlterDropDefault => ddl::encode_alter_drop_default(cmd, &mut sql_buf),
+            Action::AlterEnableRls => ddl::encode_alter_enable_rls(cmd, &mut sql_buf),
+            Action::AlterDisableRls => ddl::encode_alter_disable_rls(cmd, &mut sql_buf),
+            Action::AlterForceRls => ddl::encode_alter_force_rls(cmd, &mut sql_buf),
+            Action::AlterNoForceRls => ddl::encode_alter_no_force_rls(cmd, &mut sql_buf),
             _ => panic!(
                 "Unsupported action {:?} in AST-native encoder. Use legacy encoder for DDL.",
                 cmd.action
@@ -117,6 +125,14 @@ impl AstEncoder {
             Action::Mod => ddl::encode_rename_column(cmd, sql_buf),
             Action::CreateView => ddl::encode_create_view(cmd, sql_buf, params),
             Action::DropView => ddl::encode_drop_view(cmd, sql_buf),
+            Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, sql_buf),
+            Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, sql_buf),
+            Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, sql_buf),
+            Action::AlterDropDefault => ddl::encode_alter_drop_default(cmd, sql_buf),
+            Action::AlterEnableRls => ddl::encode_alter_enable_rls(cmd, sql_buf),
+            Action::AlterDisableRls => ddl::encode_alter_disable_rls(cmd, sql_buf),
+            Action::AlterForceRls => ddl::encode_alter_force_rls(cmd, sql_buf),
+            Action::AlterNoForceRls => ddl::encode_alter_no_force_rls(cmd, sql_buf),
             _ => panic!(
                 "Unsupported action {:?} in AST-native encoder.",
                 cmd.action

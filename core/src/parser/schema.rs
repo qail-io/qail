@@ -40,6 +40,33 @@ pub struct Schema {
     /// RLS policies declared in the schema
     #[serde(default)]
     pub policies: Vec<RlsPolicy>,
+    /// Indexes declared in the schema
+    #[serde(default)]
+    pub indexes: Vec<IndexDef>,
+}
+
+/// Index definition parsed from `index <name> on <table> (<columns>) [unique]`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexDef {
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+impl IndexDef {
+    /// Generate `CREATE INDEX IF NOT EXISTS` SQL.
+    pub fn to_sql(&self) -> String {
+        let unique = if self.unique { " UNIQUE" } else { "" };
+        format!(
+            "CREATE{} INDEX IF NOT EXISTS {} ON {} ({})",
+            unique,
+            self.name,
+            self.table,
+            self.columns.join(", ")
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,7 +142,7 @@ impl Schema {
             .find(|t| t.name.eq_ignore_ascii_case(name))
     }
 
-    /// Generate complete SQL for this schema: tables + RLS + policies.
+    /// Generate complete SQL for this schema: tables + RLS + policies + indexes.
     pub fn to_sql(&self) -> String {
         let mut parts = Vec::new();
 
@@ -128,6 +155,10 @@ impl Schema {
                     parts.push(stmt);
                 }
             }
+        }
+
+        for idx in &self.indexes {
+            parts.push(idx.to_sql());
         }
 
         for policy in &self.policies {
@@ -224,11 +255,12 @@ fn identifier(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)
 }
 
-/// Skip whitespace and comments
+/// Skip whitespace and comments (both `--` and `#` styles)
 fn ws_and_comments(input: &str) -> IResult<&str, ()> {
     let (input, _) = many0(alt((
         map(multispace1, |_| ()),
         map((tag("--"), not_line_ending), |_| ()),
+        map((tag("#"), not_line_ending), |_| ()),
     )))
     .parse(input)?;
     Ok((input, ()))
@@ -452,10 +484,11 @@ fn parse_table(input: &str) -> IResult<&str, TableDef> {
 // Policy Parsing
 // =============================================================================
 
-/// A schema item is either a table or a policy.
+/// A schema item is either a table, policy, or index.
 enum SchemaItem {
     Table(TableDef),
     Policy(RlsPolicy),
+    Index(IndexDef),
 }
 
 /// Parse a policy definition.
@@ -779,7 +812,7 @@ fn parse_policy_func_or_ident(input: &str) -> IResult<&str, Expr> {
     Ok(expr)
 }
 
-/// Parse a single schema item: either a table or a policy
+/// Parse a single schema item: table, policy, or index
 fn parse_schema_item(input: &str) -> IResult<&str, SchemaItem> {
     let (input, _) = ws_and_comments(input)?;
 
@@ -788,9 +821,46 @@ fn parse_schema_item(input: &str) -> IResult<&str, SchemaItem> {
         return Ok((rest, SchemaItem::Policy(policy)));
     }
 
+    // Try index
+    if let Ok((rest, idx)) = parse_index(input) {
+        return Ok((rest, SchemaItem::Index(idx)));
+    }
+
     // Otherwise parse table
     let (rest, table) = parse_table(input)?;
     Ok((rest, SchemaItem::Table(table)))
+}
+
+/// Parse an index line: `index <name> on <table> (<col1>, <col2>) [unique]`
+fn parse_index(input: &str) -> IResult<&str, IndexDef> {
+    let (input, _) = tag_no_case("index")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, _) = tag_no_case("on")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, table) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
+    let (input, _) = nom_ws0(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, cols_str) = take_while1(|c: char| c != ')')(input)?;
+    let (input, _) = char(')')(input)?;
+    let (input, _) = nom_ws0(input)?;
+    let (input, unique_tag) = opt(tag_no_case("unique")).parse(input)?;
+
+    let columns: Vec<String> = cols_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let is_unique = unique_tag.is_some();
+
+    Ok((input, IndexDef {
+        name: name.to_string(),
+        table: table.to_string(),
+        columns,
+        unique: is_unique,
+    }))
 }
 
 /// Parse complete schema file
@@ -803,14 +873,16 @@ fn parse_schema(input: &str) -> IResult<&str, Schema> {
 
     let mut tables = Vec::new();
     let mut policies = Vec::new();
+    let mut indexes = Vec::new();
     for item in items {
         match item {
             SchemaItem::Table(t) => tables.push(t),
             SchemaItem::Policy(p) => policies.push(p),
+            SchemaItem::Index(i) => indexes.push(i),
         }
     }
 
-    Ok((input, Schema { version, tables, policies }))
+    Ok((input, Schema { version, tables, policies, indexes }))
 }
 
 /// Extract version from `-- qail: version=N` directive

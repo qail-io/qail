@@ -70,6 +70,14 @@ pub enum Action {
     CreateEnum,
     DropEnum,
     AlterEnumAddValue,
+    AlterSetNotNull,
+    AlterDropNotNull,
+    AlterSetDefault,
+    AlterDropDefault,
+    AlterEnableRls,
+    AlterDisableRls,
+    AlterForceRls,
+    AlterNoForceRls,
 }
 
 impl std::fmt::Display for Action {
@@ -142,6 +150,14 @@ impl std::fmt::Display for Action {
             Action::CreateEnum => write!(f, "CREATE_ENUM"),
             Action::DropEnum => write!(f, "DROP_ENUM"),
             Action::AlterEnumAddValue => write!(f, "ALTER_ENUM_ADD_VALUE"),
+            Action::AlterSetNotNull => write!(f, "ALTER_SET_NOT_NULL"),
+            Action::AlterDropNotNull => write!(f, "ALTER_DROP_NOT_NULL"),
+            Action::AlterSetDefault => write!(f, "ALTER_SET_DEFAULT"),
+            Action::AlterDropDefault => write!(f, "ALTER_DROP_DEFAULT"),
+            Action::AlterEnableRls => write!(f, "ALTER_ENABLE_RLS"),
+            Action::AlterDisableRls => write!(f, "ALTER_DISABLE_RLS"),
+            Action::AlterForceRls => write!(f, "ALTER_FORCE_RLS"),
+            Action::AlterNoForceRls => write!(f, "ALTER_NO_FORCE_RLS"),
         }
     }
 }

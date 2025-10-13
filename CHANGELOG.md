@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.5] - 2026-02-10
+
+### Added
+
+- **Core:** `policy_parser` module (`qail_core::migrate::policy_parser`) — reusable SQL→AST parser for RLS policy expressions
+  - `parse_policy_expr()` — converts raw `pg_policies.qual`/`with_check` SQL into typed `Expr` AST
+  - `strip_outer_parens()`, `find_top_level_op()` — paren-aware SQL utilities for downstream use
+  - Handles `current_setting()::type` tenant checks, `OR`/`AND` combinators, session bool checks
+  - Falls back to `Expr::Raw(String)` for non-standard patterns
+  - 4 unit tests covering tenant check, OR combinator, raw fallback, paren stripping
+- **CLI:** Fully AST-native introspection — **zero `fetch_raw` calls** in `introspection.rs`
+  - Functions: `Qail::get("information_schema.routines")` + `Qail::get("information_schema.parameters")` + `Qail::get("pg_catalog.pg_proc")`
+  - RLS Policies: `Qail::get("pg_policies")` with `qual`/`with_check` column extraction
+  - Triggers: `Qail::get("information_schema.triggers")` (unchanged)
+
+### Fixed
+
+- **PG:** `battle_qail_row` example now requires `chrono` and `uuid` features — no longer breaks `cargo test` without feature flags
+- **CLI:** Removed ~166 lines of duplicate policy parsing code from `introspection.rs` (moved to core)
+
 ## [0.15.9] - 2026-02-08
 
 ### Added
