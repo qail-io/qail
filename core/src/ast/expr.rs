@@ -177,6 +177,10 @@ pub enum Expr {
         negated: bool, // NOT EXISTS
         alias: Option<String>,
     },
+    /// Raw SQL expression — escape hatch for expressions that cannot be
+    /// reverse-parsed into typed AST nodes (e.g. from pg_policies introspection).
+    /// Prefer typed variants wherever possible.
+    Raw(String),
 }
 
 impl std::fmt::Display for Expr {
@@ -422,6 +426,7 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
+            Expr::Raw(sql) => write!(f, "{}", sql),
         }
     }
 }

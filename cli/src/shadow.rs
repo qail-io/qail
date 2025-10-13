@@ -240,7 +240,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 primary_key: is_pk,
                 unique: is_unique,
                 default,
-                foreign_key: None, // TODO: query foreign keys
+                foreign_key: None, // Will be filled below after FK query
                 check: None,
                 generated: None,
             });
@@ -250,6 +250,8 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             name: table_name.clone(),
             columns,
             multi_column_fks: vec![],
+            enable_rls: false,
+            force_rls: false,
         });
     }
     
@@ -291,6 +293,99 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             concurrently: false,
             expressions: vec![],
         });
+    }
+    
+    // 4. Query FK constraints (batch approach, not N+1)
+    let fk_ref_cmd = Qail::get("information_schema.referential_constraints")
+        .columns(["constraint_name", "unique_constraint_name", "delete_rule", "update_rule"])
+        .filter("constraint_schema", Operator::Eq, "public");
+    
+    let fk_ref_rows = driver.fetch_all(&fk_ref_cmd).await
+        .map_err(|e| anyhow!("Failed to query FK refs: {}", e))?;
+
+    // Build FK constraint → (referenced constraint, on_delete, on_update)
+    let mut fk_map: std::collections::HashMap<String, (String, qail_core::migrate::schema::FkAction, qail_core::migrate::schema::FkAction)> =
+        std::collections::HashMap::new();
+    for row in fk_ref_rows {
+        let fk_name = row.text(0);
+        let ref_name = row.text(1);
+        let on_delete = match row.text(2).as_str() {
+            "CASCADE" => qail_core::migrate::schema::FkAction::Cascade,
+            "SET NULL" => qail_core::migrate::schema::FkAction::SetNull,
+            "SET DEFAULT" => qail_core::migrate::schema::FkAction::SetDefault,
+            "RESTRICT" => qail_core::migrate::schema::FkAction::Restrict,
+            _ => qail_core::migrate::schema::FkAction::NoAction,
+        };
+        let on_update = match row.text(3).as_str() {
+            "CASCADE" => qail_core::migrate::schema::FkAction::Cascade,
+            "SET NULL" => qail_core::migrate::schema::FkAction::SetNull,
+            "SET DEFAULT" => qail_core::migrate::schema::FkAction::SetDefault,
+            "RESTRICT" => qail_core::migrate::schema::FkAction::Restrict,
+            _ => qail_core::migrate::schema::FkAction::NoAction,
+        };
+        fk_map.insert(fk_name, (ref_name, on_delete, on_update));
+    }
+
+    // Batch query key_column_usage for FK resolution
+    let kcu_cmd = Qail::get("information_schema.key_column_usage")
+        .columns(["table_name", "column_name", "constraint_name"])
+        .filter("table_schema", Operator::Eq, "public");
+    
+    let kcu_rows = driver.fetch_all(&kcu_cmd).await
+        .map_err(|e| anyhow!("Failed to query key columns: {}", e))?;
+
+    let mut constraint_cols: std::collections::HashMap<String, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    for row in &kcu_rows {
+        let table = row.text(0);
+        let column = row.text(1);
+        let constraint = row.text(2);
+        constraint_cols.entry(constraint).or_default().push((table, column));
+    }
+
+    // Resolve FKs
+    for (fk_name, (ref_name, on_delete, on_update)) in &fk_map {
+        let fk_cols = constraint_cols.get(fk_name.as_str());
+        let ref_cols = constraint_cols.get(ref_name.as_str());
+        if let (Some(fk_list), Some(ref_list)) = (fk_cols, ref_cols) {
+            if fk_list.len() == 1 && ref_list.len() == 1 {
+                let (fk_table, fk_col) = &fk_list[0];
+                let (ref_table, ref_col) = &ref_list[0];
+                if let Some(table) = schema.tables.get_mut(fk_table.as_str()) {
+                    for col in table.columns.iter_mut() {
+                        if col.name == *fk_col {
+                            col.foreign_key = Some(qail_core::migrate::ForeignKey {
+                                table: ref_table.clone(),
+                                column: ref_col.clone(),
+                                on_delete: on_delete.clone(),
+                                on_update: on_update.clone(),
+                                deferrable: qail_core::migrate::schema::Deferrable::NotDeferrable,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Query RLS status from pg_class
+    let rls_cmd = Qail::get("pg_catalog.pg_class")
+        .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
+        .filter("relkind", Operator::Eq, "r");
+    
+    let rls_rows = driver.fetch_all(&rls_cmd).await
+        .map_err(|e| anyhow!("Failed to query RLS: {}", e))?;
+    
+    for row in rls_rows {
+        let tbl_name = row.text(0);
+        let enable = row.text(1) == "t";
+        let force = row.text(2) == "t";
+        if enable || force {
+            if let Some(table) = schema.tables.get_mut(&tbl_name) {
+                table.enable_rls = enable;
+                table.force_rls = force;
+            }
+        }
     }
     
     Ok(schema)

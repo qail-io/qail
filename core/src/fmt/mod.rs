@@ -349,6 +349,7 @@ impl Formatter {
                 write!(self.buffer, ")")?;
                 if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
             }
+            Expr::Raw(sql) => write!(self.buffer, "{}", sql)?,
         }
         Ok(())
     }
