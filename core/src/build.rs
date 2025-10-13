@@ -646,6 +646,14 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
                     
                     // Skip to end of chain
                     i = j.saturating_sub(1);
+                } else {
+                    // Dynamic table name — cannot validate at build time.
+                    // Extract the variable name for a helpful warning.
+                    let var_hint = after.split(')').next().unwrap_or("?").trim();
+                    println!(
+                        "cargo:warning=Qail: dynamic table name `{}` in {}:{} — cannot validate columns at build time. Consider using string literals.",
+                        var_hint, file, start_line
+                    );
                 }
                 break; // Only match one pattern per line
             }
@@ -669,11 +677,40 @@ fn extract_columns(line: &str) -> Vec<String> {
     let mut columns = Vec::new();
     let mut remaining = line;
     
-    // .column("col")
+    // .column("col") — singular column
     while let Some(pos) = remaining.find(".column(") {
         let after = &remaining[pos + 8..];
         if let Some(col) = extract_string_arg(after) {
             columns.push(col);
+        }
+        remaining = after;
+    }
+    
+    // Reset for .columns([...]) — array syntax (most common pattern)
+    remaining = line;
+    while let Some(pos) = remaining.find(".columns(") {
+        let after = &remaining[pos + 9..];
+        // Find the opening bracket [
+        if let Some(bracket_start) = after.find('[') {
+            let inside = &after[bracket_start + 1..];
+            // Find the closing bracket ]
+            if let Some(bracket_end) = inside.find(']') {
+                let array_content = &inside[..bracket_end];
+                // Extract all string literals from the array
+                let mut scan = array_content;
+                while let Some(quote_start) = scan.find('"') {
+                    let after_quote = &scan[quote_start + 1..];
+                    if let Some(quote_end) = after_quote.find('"') {
+                        let col = &after_quote[..quote_end];
+                        if !col.is_empty() {
+                            columns.push(col.to_string());
+                        }
+                        scan = &after_quote[quote_end + 1..];
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
         remaining = after;
     }
@@ -704,10 +741,45 @@ fn extract_columns(line: &str) -> Vec<String> {
         }
     }
     
+    // .where_eq("col", val) — WHERE clause column
+    remaining = line;
+    while let Some(pos) = remaining.find(".where_eq(") {
+        let after = &remaining[pos + 10..];
+        if let Some(col) = extract_string_arg(after)
+            && !col.contains('.') {
+            columns.push(col);
+        }
+        remaining = after;
+    }
+    
     // .order_by("col", ...)
-    let mut remaining = line;
+    remaining = line;
     while let Some(pos) = remaining.find(".order_by(") {
         let after = &remaining[pos + 10..];
+        if let Some(col) = extract_string_arg(after)
+            && !col.contains('.') {
+            columns.push(col);
+        }
+        remaining = after;
+    }
+    
+    // .order_desc("col"), .order_asc("col")
+    for method in [".order_desc(", ".order_asc("] {
+        let mut temp = line;
+        while let Some(pos) = temp.find(method) {
+            let after = &temp[pos + method.len()..];
+            if let Some(col) = extract_string_arg(after)
+                && !col.contains('.') {
+                columns.push(col);
+            }
+            temp = after;
+        }
+    }
+    
+    // .in_vals("col", vals)
+    remaining = line;
+    while let Some(pos) = remaining.find(".in_vals(") {
+        let after = &remaining[pos + 9..];
         if let Some(col) = extract_string_arg(after)
             && !col.contains('.') {
             columns.push(col);
@@ -750,6 +822,11 @@ pub fn validate_against_schema(schema: &Schema, usages: &[QailUsage]) -> Vec<Str
                 for col in &usage.columns {
                     // Skip qualified columns (CTE refs like cte.column)
                     if col.contains('.') {
+                        continue;
+                    }
+                    // Skip SQL function expressions (e.g., count(*), SUM(amount))
+                    // and wildcard (*) — these are valid SQL, not schema columns
+                    if col.contains('(') || col == "*" {
                         continue;
                     }
                     

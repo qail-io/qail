@@ -129,6 +129,47 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
             }
             format!("ALTER TABLE {} ALTER COLUMN ... TYPE ...", cmd.table)
         }
+        Action::AlterSetNotNull => {
+            if let Some(Expr::Named(col)) = cmd.columns.first() {
+                format!("ALTER TABLE {} ALTER COLUMN {} SET NOT NULL", cmd.table, col)
+            } else {
+                format!("ALTER TABLE {} ALTER COLUMN ... SET NOT NULL", cmd.table)
+            }
+        }
+        Action::AlterDropNotNull => {
+            if let Some(Expr::Named(col)) = cmd.columns.first() {
+                format!("ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL", cmd.table, col)
+            } else {
+                format!("ALTER TABLE {} ALTER COLUMN ... DROP NOT NULL", cmd.table)
+            }
+        }
+        Action::AlterSetDefault => {
+            if let Some(Expr::Named(col)) = cmd.columns.first() {
+                let default_expr = cmd.payload.as_deref().unwrap_or("NULL");
+                format!("ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}", cmd.table, col, default_expr)
+            } else {
+                format!("ALTER TABLE {} ALTER COLUMN ... SET DEFAULT ...", cmd.table)
+            }
+        }
+        Action::AlterDropDefault => {
+            if let Some(Expr::Named(col)) = cmd.columns.first() {
+                format!("ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT", cmd.table, col)
+            } else {
+                format!("ALTER TABLE {} ALTER COLUMN ... DROP DEFAULT", cmd.table)
+            }
+        }
+        Action::AlterEnableRls => {
+            format!("ALTER TABLE {} ENABLE ROW LEVEL SECURITY", cmd.table)
+        }
+        Action::AlterDisableRls => {
+            format!("ALTER TABLE {} DISABLE ROW LEVEL SECURITY", cmd.table)
+        }
+        Action::AlterForceRls => {
+            format!("ALTER TABLE {} FORCE ROW LEVEL SECURITY", cmd.table)
+        }
+        Action::AlterNoForceRls => {
+            format!("ALTER TABLE {} NO FORCE ROW LEVEL SECURITY", cmd.table)
+        }
         _ => format!("-- Unsupported action: {:?}", cmd.action),
     }
 }

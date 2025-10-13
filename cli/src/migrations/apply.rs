@@ -1,12 +1,21 @@
 //! Apply migrations from migrations/ folder
 //!
 //! Reads `.qail` migration files in order and executes them against the database.
+//! Tracks applied migrations in `_qail_migrations` table.
 
 use anyhow::{Context, Result};
 use crate::colors::*;
 use qail_core::parser::schema::Schema;
+use qail_core::migrate::parse_qail;
+use qail_core::migrate::schema::{
+    GrantAction, FkAction,
+};
+use qail_core::prelude::Qail;
 use std::fs;
 use std::path::Path;
+
+use crate::migrations::migration_table_ddl;
+use crate::util::parse_pg_url;
 
 /// A discovered migration, from either flat or subdirectory layout.
 struct MigrationFile {
@@ -88,7 +97,10 @@ fn discover_migrations(
     Ok(migrations)
 }
 
-/// Apply all pending migrations from the migrations/ folder
+/// Apply all pending migrations from the migrations/ folder.
+///
+/// Tracks applied migrations in `_qail_migrations` table so re-running
+/// is safe (idempotent). Skips migrations that have already been applied.
 pub async fn migrate_apply(url: &str, direction: MigrateDirection) -> Result<()> {
     let migrations_dir = super::resolve_deltas_dir(false)?;
 
@@ -104,13 +116,13 @@ pub async fn migrate_apply(url: &str, direction: MigrateDirection) -> Result<()>
     }
 
     println!(
-        "{} Found {} migrations to apply\n",
+        "{} Found {} migration file(s)\n",
         "→".cyan(),
         migrations.len()
     );
 
     // Connect to database
-    let (host, port, user, database, password) = parse_postgres_url(url)?;
+    let (host, port, user, password, database) = parse_pg_url(url)?;
     let mut pg = if let Some(password) = password {
         qail_pg::PgDriver::connect_with_password(&host, port, &user, &database, &password).await?
     } else {
@@ -119,28 +131,86 @@ pub async fn migrate_apply(url: &str, direction: MigrateDirection) -> Result<()>
 
     println!("{} Connected to {}", "✓".green(), database.cyan());
 
-    // Apply each migration
+    // Bootstrap migration tracking table
+    pg.execute_raw(&migration_table_ddl())
+        .await
+        .context("Failed to create _qail_migrations table")?;
+
+    // Query already-applied migration versions
+    let status_cmd = Qail::get("_qail_migrations")
+        .columns(vec!["version"]);
+
+    let applied_versions: Vec<String> = match pg.query_ast(&status_cmd).await {
+        Ok(result) => result
+            .rows
+            .iter()
+            .filter_map(|row| row.first().and_then(|v| v.clone()))
+            .collect(),
+        Err(_) => Vec::new(), // Table may not exist yet
+    };
+
+    // Apply each pending migration
+    let mut applied = 0;
+    let mut skipped = 0;
+
     for mig in &migrations {
+        // Use display_name as the migration version key
+        if applied_versions.iter().any(|v| v == &mig.display_name) {
+            println!("  {} {} {}", "‒".dimmed(), mig.display_name.dimmed(), "(already applied)".dimmed());
+            skipped += 1;
+            continue;
+        }
+
         print!("  {} {}... ", "→".cyan(), mig.display_name);
 
         let content = fs::read_to_string(&mig.path)
             .context(format!("Failed to read {}", mig.path.display()))?;
 
-        // Try to parse as schema and generate DDL
+        // Parse .qail content and generate SQL
         let sql = parse_qail_to_sql(&content)?;
 
-        // Execute the SQL
+        // Execute the migration SQL
         pg.execute_raw(&sql)
             .await
             .context(format!("Failed to execute migration {}", mig.display_name))?;
 
+        // Record in _qail_migrations
+        let checksum = crate::time::md5_hex(&sql);
+        let escaped_sql = sql.replace("'", "''");
+        let record_sql = format!(
+            "INSERT INTO _qail_migrations (version, name, checksum, sql_up) VALUES ('{}', '{}', '{}', '{}')",
+            mig.display_name, mig.display_name, checksum, escaped_sql
+        );
+        pg.execute_raw(&record_sql)
+            .await
+            .context(format!("Failed to record migration {}", mig.display_name))?;
+
         println!("{}", "✓".green());
+        applied += 1;
     }
 
-    println!(
-        "\n{} All migrations applied successfully!",
-        "✓".green().bold()
-    );
+    // Summary
+    if applied > 0 {
+        println!(
+            "\n{}",
+            format!("✓ {} migration(s) applied successfully!", applied)
+                .green()
+                .bold()
+        );
+    }
+    if skipped > 0 {
+        println!(
+            "  {} {} migration(s) already applied (skipped)",
+            "‒".dimmed(),
+            skipped
+        );
+    }
+    if applied == 0 && skipped > 0 {
+        println!(
+            "\n{}",
+            "✓ Database is up to date.".green().bold()
+        );
+    }
     Ok(())
 }
 
@@ -151,32 +221,177 @@ pub enum MigrateDirection {
     Down,
 }
 
-/// Parse a .qail schema file and generate SQL DDL
+/// Parse a .qail schema file and generate SQL DDL.
+///
+/// Uses the full migrate parser (`parse_qail`) which handles the brace-based
+/// .qail format with tables, indexes, functions, triggers, grants, etc.
+/// Falls back to `Schema::parse()` + `parse_functions_and_triggers()` for
+/// backward compatibility with the paren-based format.
 fn parse_qail_to_sql(content: &str) -> Result<String> {
-    // First, try to parse as a schema file
+    // 1. Try the full migrate parser first (handles braces, $$, triggers, grants, etc.)
+    if let Ok(schema) = parse_qail(content) {
+        let sql = migrate_schema_to_sql(&schema);
+        if !sql.is_empty() {
+            return Ok(sql);
+        }
+    }
+
+    // 2. Try the simpler parser/schema.rs parser (paren-based format)
     match Schema::parse(content) {
         Ok(schema) => {
-            let mut sql_parts = Vec::new();
-            
-            // Generate DDL for each table
-            for table in &schema.tables {
-                sql_parts.push(table.to_ddl());
+            if schema.tables.is_empty() && schema.policies.is_empty() && schema.indexes.is_empty() {
+                return parse_functions_and_triggers(content);
             }
-            
-            if sql_parts.is_empty() {
-                // No tables found, might be raw SQL/functions/triggers
-                // For now, extract function/trigger blocks and translate
-                sql_parts.push(parse_functions_and_triggers(content)?);
-            }
-            
-            Ok(sql_parts.join("\n\n"))
+            Ok(schema.to_sql())
         }
         Err(_) => {
-            // Not a schema file, try parsing as functions/triggers
             parse_functions_and_triggers(content)
         }
     }
 }
+
+/// Generate SQL DDL from a fully-parsed migrate Schema.
+fn migrate_schema_to_sql(schema: &qail_core::migrate::schema::Schema) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Extensions first
+    for ext in &schema.extensions {
+        parts.push(format!("CREATE EXTENSION IF NOT EXISTS \"{}\";", ext.name));
+    }
+
+    // Enum types
+    for en in &schema.enums {
+        let values: Vec<String> = en.values.iter().map(|v| format!("'{}'", v)).collect();
+        parts.push(format!(
+            "DO $$ BEGIN CREATE TYPE {} AS ENUM ({}); EXCEPTION WHEN duplicate_object THEN null; END $$;",
+            en.name, values.join(", ")
+        ));
+    }
+
+    // Sequences
+    for seq in &schema.sequences {
+        parts.push(format!("CREATE SEQUENCE IF NOT EXISTS {};", seq.name));
+    }
+
+    // Tables: CREATE without FK references (avoids dependency ordering issues)
+    // FK constraints are added separately via ALTER TABLE afterward.
+    let mut fk_alters: Vec<String> = Vec::new();
+    let mut table_names: Vec<&String> = schema.tables.keys().collect();
+    table_names.sort();
+    for name in &table_names {
+        let table = &schema.tables[*name];
+        let mut col_defs = Vec::new();
+        for col in &table.columns {
+            let mut line = format!("    {} {}", col.name, col.data_type);
+            if col.primary_key {
+                line.push_str(" PRIMARY KEY");
+            }
+            if !col.nullable && !col.primary_key {
+                line.push_str(" NOT NULL");
+            }
+            if col.unique && !col.primary_key {
+                line.push_str(" UNIQUE");
+            }
+            if let Some(ref default) = col.default {
+                line.push_str(&format!(" DEFAULT {}", default));
+            }
+            // Collect FK constraints for deferred ALTER TABLE
+            if let Some(ref fk) = col.foreign_key {
+                let mut alter = format!(
+                    "ALTER TABLE {} ADD CONSTRAINT fk_{}_{} FOREIGN KEY ({}) REFERENCES {}({})",
+                    name, name, col.name, col.name, fk.table, fk.column
+                );
+                if fk.on_delete != FkAction::NoAction {
+                    alter.push_str(&format!(" ON DELETE {}", fk_action_sql(&fk.on_delete)));
+                }
+                alter.push(';');
+                fk_alters.push(alter);
+            }
+            col_defs.push(line);
+        }
+        parts.push(format!(
+            "CREATE TABLE IF NOT EXISTS {} (\n{}\n);",
+            name, col_defs.join(",\n")
+        ));
+    }
+
+    // Deferred FK constraints (after all tables exist)
+    parts.extend(fk_alters);
+
+    // Indexes
+    for idx in &schema.indexes {
+        let unique = if idx.unique { " UNIQUE" } else { "" };
+        parts.push(format!(
+            "CREATE{} INDEX IF NOT EXISTS {} ON {} ({});",
+            unique, idx.name, idx.table, idx.columns.join(", ")
+        ));
+    }
+
+    // Functions
+    for func in &schema.functions {
+        let args = func.args.join(", ");
+        parts.push(format!(
+            "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} AS $$\n{}\n$$ LANGUAGE {};",
+            func.name, args, func.returns, func.body, func.language
+        ));
+    }
+
+    // Triggers
+    for trigger in &schema.triggers {
+        let events = trigger.events.join(" OR ");
+        let for_each = if trigger.for_each_row { "FOR EACH ROW " } else { "" };
+        // Drop + recreate for idempotency
+        parts.push(format!(
+            "DROP TRIGGER IF EXISTS {} ON {};\nCREATE TRIGGER {} {} {} ON {} {}EXECUTE FUNCTION {};",
+            trigger.name, trigger.table,
+            trigger.name, trigger.timing, events, trigger.table, for_each, trigger.execute_function
+        ));
+    }
+
+    // Grants
+    for grant in &schema.grants {
+        let privs: Vec<String> = grant.privileges.iter().map(|p| p.to_string()).collect();
+        let action = match grant.action {
+            GrantAction::Grant => "GRANT",
+            GrantAction::Revoke => "REVOKE",
+        };
+        let prep = match grant.action {
+            GrantAction::Grant => "TO",
+            GrantAction::Revoke => "FROM",
+        };
+        parts.push(format!(
+            "{} {} ON {} {} {};",
+            action, privs.join(", "), grant.on_object, prep, grant.to_role
+        ));
+    }
+
+    // Comments
+    for comment in &schema.comments {
+        use qail_core::migrate::schema::CommentTarget;
+        let target_sql = match &comment.target {
+            CommentTarget::Table(name) => format!("TABLE {}", name),
+            CommentTarget::Column { table, column } => format!("COLUMN {}.{}", table, column),
+        };
+        parts.push(format!(
+            "COMMENT ON {} IS '{}';",
+            target_sql, comment.text.replace('\'', "''")
+        ));
+    }
+
+    parts.join("\n\n")
+}
+
+/// Convert FkAction to SQL string
+fn fk_action_sql(action: &FkAction) -> &'static str {
+    match action {
+        FkAction::NoAction => "NO ACTION",
+        FkAction::Cascade => "CASCADE",
+        FkAction::SetNull => "SET NULL",
+        FkAction::SetDefault => "SET DEFAULT",
+        FkAction::Restrict => "RESTRICT",
+    }
+}
+
 
 /// Parse function and trigger definitions from .qail format
 fn parse_functions_and_triggers(content: &str) -> Result<String> {
@@ -440,45 +655,3 @@ fn translate_trigger(block: &str) -> Result<String> {
     Ok(sql)
 }
 
-/// Parse PostgreSQL URL: postgres://user:password@host:port/database
-fn parse_postgres_url(url: &str) -> Result<(String, u16, String, String, Option<String>)> {
-    let url = url.trim_start_matches("postgres://").trim_start_matches("postgresql://");
-    
-    // Split by @ to separate credentials from host
-    let (credentials, host_part): (Option<&str>, &str) = if url.contains('@') {
-        let parts: Vec<&str> = url.splitn(2, '@').collect();
-        (Some(parts[0]), parts.get(1).copied().unwrap_or("localhost/postgres"))
-    } else {
-        (None, url)
-    };
-    
-    // Parse host:port/database
-    let (host_port, database) = if host_part.contains('/') {
-        let parts: Vec<&str> = host_part.splitn(2, '/').collect();
-        (parts[0], parts.get(1).unwrap_or(&"postgres").to_string())
-    } else {
-        (host_part, "postgres".to_string())
-    };
-    
-    // Parse host:port
-    let (host, port) = if host_port.contains(':') {
-        let parts: Vec<&str> = host_port.split(':').collect();
-        (parts[0].to_string(), parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(5432))
-    } else {
-        (host_port.to_string(), 5432u16)
-    };
-    
-    // Parse user:password
-    let (user, password) = if let Some(creds) = credentials {
-        if creds.contains(':') {
-            let parts: Vec<&str> = creds.splitn(2, ':').collect();
-            (parts[0].to_string(), Some(parts.get(1).unwrap_or(&"").to_string()))
-        } else {
-            (creds.to_string(), None)
-        }
-    } else {
-        ("postgres".to_string(), None)
-    };
-    
-    Ok((host, port, user, database, password))
-}
