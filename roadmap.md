@@ -169,31 +169,31 @@
 
 ---
 
-## 8. Schema-as-Proof System ⏳
+## 8. Schema-as-Proof System ✅
 
 > *The schema becomes a type parameter. The compiler becomes the theorem prover.*
 
-### Phase 1: Column Existence Proof
-- [ ] `schema.qail` → codegen → `Schema` trait with associated types per table
-- [ ] `Qail<S: Schema>` carries schema as phantom type parameter
-- [ ] Column selection proven at compile time — `"foo"` on `users` = compile error if column doesn't exist
-- [ ] No proc macros, no external provers, no database connection at compile time
+### Phase 1: Column Existence Proof ✅
+- [x] `schema.qail` → codegen → `Table` trait with typed columns
+- [x] `TypedQail<T>` carries table type as phantom parameter
+- [x] Column references via `TypedColumn<T>` — type-safe at compile time
+- [x] No proc macros, no database connection at compile time
 
-### Phase 2: Type-Safe Filters
-- [ ] Filter comparisons proven against column types — `age > "hello"` = compile error
-- [ ] `TypedFilter<S>` ensures operand type matches column type
-- [ ] Aggregation functions checked against source types
+### Phase 2: Type-Safe Filters ✅
+- [x] `ColumnValue<C>` trait — `typed_eq(age, "hello")` = compile error when `age: TypedColumn<i64>`
+- [x] `typed_filter()` ensures operand type matches column type
 
-### Phase 3: Join Validity Graph
-- [ ] FK relationship graph encoded at type level
-- [ ] N-way joins proven valid via `RelatedTo<T>` chain
-- [ ] Ambiguous join paths = compile error
+### Phase 3: Join Validity Graph ✅
+- [x] FK relationship graph encoded via `RelatedTo<T>` trait
+- [x] N-way joins proven valid via `join_related()` requiring `T: RelatedTo<U>`
+- [x] Invalid joins = compile error
 
-### Phase 4: RLS Proof Witness
-- [ ] RLS-protected tables get marker trait
-- [ ] Queries without `.with_rls()` on protected tables = compile error
-- [ ] `RlsProof<T>` witness type provided by middleware
-- [ ] **Data leakage becomes a type error, not a security incident**
+### Phase 4: RLS Proof Witness ✅
+- [x] `RequiresRls` marker trait on tables with `operator_id`
+- [x] `DirectBuild` marker trait on tables without — `.build()` available directly
+- [x] Queries without `.with_rls()` on `RequiresRls` tables = compile error (no `.build()` method)
+- [x] `RlsQuery<T>` wrapper — sealed proof witness, only produced by `TypedQail<T>::with_rls(ctx)`
+- [x] **Data leakage is a type error, not a security incident**
 
 ---
 
