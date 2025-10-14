@@ -1,6 +1,10 @@
-# QAIL Roadmap 2026: The "Dream" Backend
+# QAIL Roadmap 2026: The Provably Correct Backend
 
-## 1. First-Class Relations
+> *"If it compiles, the query is correct."*
+
+---
+
+## 1. First-Class Relations ✅
 
 ### Phase 1: Runtime Registry ✅ (v0.15.0)
 - [x] `ref:` syntax in `schema.qail`
@@ -8,185 +12,223 @@
 - [x] `Qail::join_on("table")` — string-based API
 
 ### Phase 2: Fully Typed Codegen ✅ (v0.16.0)
-**Goal:** Zero strings. Compile-time type-safe tables and columns.
-
-```rust
-// Generated from schema.qail by build.rs
-mod schema {
-    pub struct Users;
-    pub struct Posts;
-    pub struct UserId;
-    pub struct PostUserId;
-}
-
-// The Ultimate Dream:
-Qail::get(schema::Users)
-    .join_on(schema::Posts)
-    .column(schema::UserId)
-```
-
-#### Implementation
 - [x] `build.rs` generates `schema_gen.rs` with typed structs
 - [x] Table structs implement `Table` trait
-- [x] `TypedColumn<T>` with Rust type mapping
-- [x] `Qail::get()` accepts typed table markers — `AsRef<str>` generated on table structs
-- [x] `typed_column()` accepts `TypedColumn<T>` — `builders/typed.rs`
+- [x] `TypedColumn<T>` with Rust type mapping (SQL→Rust: uuid→Uuid, text→String, etc.)
+- [x] `Qail::get()` accepts typed table markers via `AsRef<str>`
+- [x] `typed_column()` accepts `TypedColumn<T>` in `builders/typed.rs`
 
 ### Phase 3: Logic-Safe Relations ✅ (v0.16.0)
-**Goal:** Compile-time error if joining unrelated tables.
-
-```rust
-// Generated from ref: annotations
-impl RelatedTo<posts::Posts> for users::Users {
-    fn join_columns() -> (&'static str, &'static str) { ("id", "user_id") }
-}
-
-// Compiles ✓
-Qail::typed(users::table).join_related(posts::table)
-
-// Compile ERROR: "Users: RelatedTo<Products> is not satisfied"
-Qail::typed(users::table).join_related(products::table)
-```
-
-#### Implementation
 - [x] `RelatedTo<T>` trait in `typed.rs`
-- [x] Codegen generates bidirectional `RelatedTo` impls
+- [x] Codegen generates bidirectional `RelatedTo` impls from `ref:` annotations
 - [x] `TypedQail<T>` wrapper + `join_related()` with trait bound
+- [x] Compile error if joining unrelated tables
 
-### Phase 4: Compile-Time Data Governance 🔒 ✅ (v0.16.0)
-**Goal:** Prevent data leaks at the compiler level. Sensitive columns require a "Capability Witness" to select.
-
-```qail
-table users {
-    username TEXT
-    password_hash TEXT protected  // <--- New keyword
-}
-```
-
-```rust
-// ❌ Compile Error: "ProtectedColumn cannot be selected without capability"
-Qail::get(users::table).with_cap(&NoCap).column_protected(users::password_hash)
-
-// ✅ Compiles - AdminCap proves authorization
-Qail::get(users::table)
-    .with_cap(&CapabilityProvider::mint_admin())
-    .column_protected(users::password_hash)
-```
-
-#### Implementation
+### Phase 4: Compile-Time Data Governance ✅ (v0.16.0)
 - [x] `protected` keyword in `schema.qail`
 - [x] `TypedColumn<T, P>` with `Policy` generic
 - [x] `Public` and `Protected` marker traits
 - [x] `CapQuery::column_protected()` with `PolicyAllowedBy<C>` check
-- [x] Compile-time failure verified via type system (`test_cap_query_builder`)
+- [x] Compile-time failure verified via type system
 
 ---
 
-## 2. SaaS Multi-Tenant Isolation (RLS)
-
-**Goal:** Driver-level data isolation for multi-operator SaaS. Application code has ZERO RLS awareness — the driver owns all isolation complexity.
-
-> **Architecture:**
-> ```
-> Request → Middleware → set_rls_context() on PgDriver
->                             ↓
->                        PgDriver (qail-pg)
->                        • &mut self = one connection
->                        • set_config already called
->                        • All queries scoped
->                             ↓
->                        PostgreSQL
->                        • RLS policies = backup check
->                        • Defense-in-depth
-> ```
+## 2. SaaS Multi-Tenant Isolation (RLS) ✅
 
 ### Phase 1: Driver-Level Context ✅ (v0.14.21)
-
-**Goal:** `PgDriver` can set PostgreSQL session variables for RLS enforcement.
-
-#### Implementation
 - [x] `RlsContext` struct in `core/src/rls.rs` — operator_id, agent_id, is_super_admin
-- [x] `PgDriver.set_rls_context(ctx)` — calls `execute_raw("SELECT set_config(...)")`
+- [x] `PgDriver.set_rls_context(ctx)` — calls `set_config()`
 - [x] `PgDriver.clear_rls_context()` — resets to safe defaults
-- [x] `PgDriver.rls_context()` — getter, returns `Option<&RlsContext>`
-- [x] Unit tests pass
 
 ### Phase 2: Pool-Level RLS Acquisition ✅ (v0.15.6)
-
-**Goal:** Pooled connections auto-clear RLS context on return. No stale tenant leaks.
-
-#### Implementation
 - [x] `PgPool.acquire_with_rls(ctx)` — acquire + set context in one call
-- [x] `PooledConnection` auto-clears RLS context on `Drop` via `rls_dirty` flag
-- [x] Unit tests pass (53/53 qail-pg)
+- [x] `PooledConnection` auto-clears RLS on Drop — no stale tenant leaks
 
 ### Phase 3: Policy Definition API ✅ (v0.15.6)
-
-**Goal:** Define RLS policies programmatically using the QAIL AST, not raw SQL.
-
-```rust
-let policy = RlsPolicy::new("orders_isolation", "orders")
-    .for_all()
-    .using(tenant_check("operator_id", "app.current_operator_id", "uuid"));
-let sql = rls_setup_sql(&policy); // ENABLE + FORCE + CREATE POLICY
-```
-
-#### Implementation
 - [x] `RlsPolicy` builder in `core/src/migrate/policy.rs`
-- [x] `AlterOp::ForceRowLevelSecurity` + `force_rls()` / `no_force_rls()` builders
+- [x] `AlterOp::ForceRowLevelSecurity` + builders
 - [x] SQL transpiler in `core/src/transpiler/policy.rs`
-- [x] `rls_setup_sql()` convenience — ENABLE + FORCE + CREATE POLICY in one call
-- [x] Supports `FOR SELECT`, `FOR INSERT`, `FOR UPDATE`, `FOR DELETE`, `FOR ALL`
+- [x] `rls_setup_sql()` — ENABLE + FORCE + CREATE POLICY in one call
 
 ### Phase 4: AST-Level Query Injection ✅ (v0.15.6)
-
-**Goal:** Query builder auto-injects `WHERE operator_id = $current` into every query. Data isolation at the AST level — PostgreSQL RLS policies become a backup safety net.
-
-```rust
-// Developer writes:
-let ctx = RlsContext::operator("op-uuid");
-Qail::get("orders").filter("status", Operator::Eq, "active").with_rls(&ctx)
-// → SELECT * FROM orders WHERE status = 'active' AND operator_id = 'op-uuid'
-
-Qail::add("orders").set_value("total", 100).with_rls(&ctx)
-// → INSERT INTO orders (total, operator_id) VALUES (100, 'op-uuid')
-```
-
-#### Implementation
 - [x] `TenantRegistry` + `TENANT_TABLES` global in `core/src/rls/tenant.rs`
-- [x] `register_tenant_table()`, `lookup_tenant_column()`, `load_tenant_tables()`
 - [x] Auto-detect via `from_build_schema()` — tables with `operator_id` auto-register
-- [x] `Qail::with_rls(ctx)` — GET/SET/DEL → filter, ADD/Upsert → payload
+- [x] `Qail::with_rls(ctx)` — GET/SET/DEL → filter, ADD → payload
 - [x] Super admins + unregistered tables bypass injection
-- [x] 13 unit tests pass
 
 ---
 
-## 3. Native Versioning (Data Virtualization)
-**Goal:** "GitHub for Database" — Branching at the Application Layer.
+## 3. Schema DDL — Full PostgreSQL Coverage ✅
 
-- [ ] Gateway Middleware with `X-Branch-ID` header
-- [ ] Row-Level branching (`WHERE _branch_id = ?`)
+### Phase 1: Core Objects ✅ (v0.15.9)
+- [x] CREATE/DROP EXTENSION — `extension "uuid-ossp" schema public version "1.1"`
+- [x] CREATE TYPE AS ENUM / ALTER TYPE ADD VALUE / DROP TYPE
+- [x] CREATE/ALTER/DROP SEQUENCE — `sequence order_seq { start 1000 increment 1 cache 10 cycle }`
+- [x] CREATE/DROP TABLE with all column properties (PK, FK, NOT NULL, defaults, CHECK)
+- [x] Multi-column foreign keys — `foreign_key (a, b) references t(x, y)`
+- [x] Expression indexes — `index idx on users ((lower(email)))`
+
+### Phase 2: Programmable Objects ✅ (v0.15.9)
+- [x] CREATE/DROP VIEW + MATERIALIZED VIEW — `view name $$ SELECT ... $$`
+- [x] CREATE/DROP FUNCTION (PL/pgSQL with `$$` body)
+- [x] CREATE/DROP TRIGGER — `trigger trg on users before update execute func`
+- [x] GRANT/REVOKE — `grant select, insert on users to app_role`
+- [x] COMMENT ON TABLE/COLUMN — `comment on users.email "Primary contact"`
+- [x] `enable_rls` / `force_rls` table directives
+
+### Phase 3: RLS Policy Definition ✅ (v0.18.5)
+- [x] Policy syntax in `.qail` — `policy name on table for cmd using $$ ... $$ with_check $$ ... $$`
+- [x] Permissive + Restrictive policies
+- [x] Per-command scope: ALL, SELECT, INSERT, UPDATE, DELETE
+- [x] Role targeting: `to app_user`
+
+---
+
+## 4. Database Introspection — Fully AST-Native ✅
+
+### Phase 1: Core Table Introspection ✅ (v0.14.8)
+- [x] `qail pull --url postgres://...` — introspects live database → `schema.qail`
+- [x] Tables, columns, types, defaults, constraints, indexes
+- [x] Identity columns (GENERATED ALWAYS AS IDENTITY)
+- [x] Foreign keys with actions (CASCADE, SET NULL, RESTRICT, etc.)
+- [x] CHECK constraints (comparison, between, compound)
+
+### Phase 2: Programmable Objects ✅ (v0.15.9)
+- [x] Views + materialized views
+- [x] Functions — `Qail::get("information_schema.routines")` + `Qail::get("information_schema.parameters")`
+- [x] Triggers — `Qail::get("information_schema.triggers")`
+- [x] Grants/permissions
+- [x] Sequences, enums, extensions, comments
+
+### Phase 3: Zero `fetch_raw` ✅ (v0.18.5)
+- [x] Functions introspection via `information_schema.routines` + `information_schema.parameters` + `pg_catalog.pg_proc`
+- [x] RLS Policies via `Qail::get("pg_policies")` with `qual`/`with_check` extraction
+- [x] `policy_parser` module in `qail-core` — reusable SQL→Expr parser
+- [x] **Result: zero raw SQL in `introspection.rs`** — every query is AST-native
+
+---
+
+## 5. Migration Engine ✅
+
+### Phase 1: Schema Diffing ✅ (v0.13.0)
+- [x] `diff_schemas()` — old vs new schema comparison
+- [x] `AlterOp` enum: AddColumn, DropColumn, AlterType, RenameColumn, etc.
+- [x] FK-ordered table creation (parent before child, reverse for drops)
+- [x] Intent-aware hints: `rename`, `transform`, `drop confirm`
+
+### Phase 2: CLI Commands ✅ (v0.14.12+)
+- [x] `qail migrate apply` — apply pending `.qail` migrations
+- [x] `qail migrate create <name>` — timestamped up/down file pairs
+- [x] `qail migrate status` — rich tabular output with version, applied_at, checksum
+- [x] `qail migrate reset <schema> <url>` — drop-all + re-apply
+- [x] `qail migrate up` / `qail migrate down` — forward/rollback
+- [x] `qail diff --live --url <db>` — schema drift detection
+
+### Phase 3: Enterprise Features ✅ (v0.14.7+)
+- [x] Shadow migrations — COPY streaming, safe promote
+- [x] Subdirectory migration discovery — `deltas/YYYYMMDDHHMMSS_name/up.qail`
+- [x] `.sql` file rejection with warning — enforces `.qail` barrier
+- [x] `MigrationClass` enum: Reversible, DataLosing, Irreversible
+- [x] Impact analyzer — `qail migrate analyze` scans codebase for affected queries
+
+---
+
+## 6. Multi-Driver Unified AST ✅
+
+### PostgreSQL (qail-pg) ✅
+- [x] Zero-copy wire protocol encoder — AST directly to PostgreSQL binary protocol
+- [x] Prepared statement caching (LRU, 1000 max) — ~5,000 q/s
+- [x] 10-connection pool: 1.3M queries/second
+- [x] SCRAM-SHA-256 authentication
+- [x] TLS/SSL support (rustls)
+- [x] COPY streaming for bulk import/export
+- [x] `QailRow` trait for struct mapping — `fetch_typed::<T>()`
+
+### Qdrant (qail-qdrant) ✅
+- [x] Zero-copy gRPC driver — 13% faster than official client
+- [x] HTTP/2 batch pipelining — 4x speedup
+- [x] Connection pooling with semaphore concurrency
+
+### Redis (qail-redis) ✅
+- [x] Unified `Qail::redis_get()` / `Qail::redis_set()` API
+- [x] Native RESP3 protocol encoder
+- [x] Connection pooling
+
+---
+
+## 7. CLI Toolchain ✅
+
+- [x] `qail init` — project scaffold (supports `--url`, `--deployment` for CI)
+- [x] `qail pull` — live DB → `schema.qail` (fully AST-native)
+- [x] `qail exec` — type-safe QAIL execution (`--json` for piping, `--tx` for transactions)
+- [x] `qail diff` — schema comparison + live drift detection
+- [x] `qail types` — `schema.qail` → Rust typed schema module
+- [x] `qail check` — validate `.qail` syntax
+- [x] `qail worker` — hybrid outbox daemon (PG → Qdrant sync)
+- [x] LSP server (`qail-lsp`) for editor integration
+
+---
+
+## 8. Schema-as-Proof System ✅
+
+> *The schema becomes a type parameter. The compiler becomes the theorem prover.*
+
+### Phase 1: Column Existence Proof ✅
+- [x] `schema.qail` → codegen → `Table` trait with typed columns
+- [x] `TypedQail<T>` carries table type as phantom parameter
+- [x] Column references via `TypedColumn<T>` — type-safe at compile time
+- [x] No proc macros, no database connection at compile time
+
+### Phase 2: Type-Safe Filters ✅
+- [x] `ColumnValue<C>` trait — `typed_eq(age, "hello")` = compile error when `age: TypedColumn<i64>`
+- [x] `typed_filter()` ensures operand type matches column type
+
+### Phase 3: Join Validity Graph ✅
+- [x] FK relationship graph encoded via `RelatedTo<T>` trait
+- [x] N-way joins proven valid via `join_related()` requiring `T: RelatedTo<U>`
+- [x] Invalid joins = compile error
+
+### Phase 4: RLS Proof Witness ✅
+- [x] `RequiresRls` marker trait on tables with `operator_id`
+- [x] `DirectBuild` marker trait on tables without — `.build()` available directly
+- [x] Queries without `.with_rls()` on `RequiresRls` tables = compile error (no `.build()` method)
+- [x] `RlsQuery<T>` wrapper — sealed proof witness, only produced by `TypedQail<T>::with_rls(ctx)`
+- [x] **Data leakage is a type error, not a security incident**
+
+---
+
+## 9. Native Versioning (Data Virtualization) ⏳
+
+> *"GitHub for Databases" — branching at the application layer.*
+
+- [ ] Gateway middleware with `X-Branch-ID` header
+- [ ] Row-level branching (`WHERE _branch_id = ?`)
 - [ ] Copy-on-Write strategy for writes
 - [ ] CLI: `qail branch create <name>`, `qail checkout <name>`
 
 ---
 
-## 4. Infrastructure-Aware Compiler
-**Goal:** Verify external resources at compile time.
+## 10. Infrastructure-Aware Compiler ⏳
+
+> *Verify external resources at compile time.*
 
 - [ ] `schema.qail` extensions: `bucket`, `queue`, `topic`
-- [ ] `build.rs` validates resources exist in Terraform/AWS
+- [ ] `build.rs` validates resources exist in Terraform/AWS/GCP
+- [ ] Compile error if referencing non-existent infra
 
 ---
 
-## Current Status (Feb 7, 2026)
+## Current Status (Feb 10, 2026) — v0.18.5
 
-### SaaS Isolation (RLS) — Full Stack Complete ✅ v0.15.6
-- [x] **Phase 1:** `PgDriver::set_rls_context()` — driver-level session variables
-- [x] **Phase 2:** `PooledConnection` auto-clears RLS on Drop — no stale tenant leaks
-- [x] **Phase 3:** `RlsPolicy` builder + SQL transpiler — AST-native policy creation
-- [x] **Phase 4:** `Qail::with_rls(ctx)` — AST-level tenant injection (primary mechanism)
-- [x] **Repository Migration:** `QailOrderRepository` and `User/Customer` handlers migrated
-- [x] **Staging Verified:** `users`, `customers`, `orders` endpoints confirmed
-- [ ] **Migration Pending:** Move 'ExampleApp' from Operator role to Agent role (DB migration)
+| Section | Status | Version |
+|---|---|---|
+| 1. First-Class Relations | ✅ Complete (4/4 phases) | v0.16.0 |
+| 2. SaaS RLS Isolation | ✅ Complete (4/4 phases) | v0.15.6 |
+| 3. Schema DDL Coverage | ✅ Complete (3/3 phases) | v0.18.5 |
+| 4. Database Introspection | ✅ Complete (3/3 phases, zero raw SQL) | v0.18.5 |
+| 5. Migration Engine | ✅ Complete (3/3 phases) | v0.15.9 |
+| 6. Multi-Driver AST | ✅ Complete (PG + Qdrant + Redis) | v0.14.13 |
+| 7. CLI Toolchain | ✅ Complete | v0.15.7 |
+| 8. Schema-as-Proof | ⏳ Planned | — |
+| 9. Data Virtualization | ⏳ Planned | — |
+| 10. Infra-Aware Compiler | ⏳ Planned | — |
