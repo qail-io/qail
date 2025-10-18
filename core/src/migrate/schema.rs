@@ -42,6 +42,46 @@ pub struct Schema {
     pub grants: Vec<Grant>,
     /// RLS policies
     pub policies: Vec<RlsPolicy>,
+    /// Infrastructure resources (buckets, queues, topics)
+    pub resources: Vec<ResourceDef>,
+}
+
+// ============================================================================
+// Infrastructure Resources
+// ============================================================================
+
+/// Kind of infrastructure resource declared in schema.qail.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResourceKind {
+    Bucket,
+    Queue,
+    Topic,
+}
+
+impl std::fmt::Display for ResourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bucket => write!(f, "bucket"),
+            Self::Queue => write!(f, "queue"),
+            Self::Topic => write!(f, "topic"),
+        }
+    }
+}
+
+/// An infrastructure resource declaration.
+///
+/// ```qail
+/// bucket avatars {
+///     provider s3
+///     region "ap-southeast-1"
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ResourceDef {
+    pub name: String,
+    pub kind: ResourceKind,
+    pub provider: Option<String>,
+    pub properties: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -643,6 +683,11 @@ impl Schema {
 
     pub fn add_grant(&mut self, grant: Grant) {
         self.grants.push(grant);
+    }
+
+    /// Add an infrastructure resource declaration.
+    pub fn add_resource(&mut self, resource: ResourceDef) {
+        self.resources.push(resource);
     }
 
     /// Validate all foreign key references in the schema.

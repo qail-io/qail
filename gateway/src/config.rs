@@ -33,6 +33,9 @@ pub struct GatewayConfig {
     /// Cache TTL in seconds
     #[serde(default = "default_cache_ttl")]
     pub cache_ttl_seconds: u64,
+    
+    /// Path to event triggers config file (optional)
+    pub events_path: Option<String>,
 }
 
 fn default_true() -> bool { true }
@@ -50,6 +53,7 @@ impl Default for GatewayConfig {
             cache_enabled: true,
             cache_max_entries: 1000,
             cache_ttl_seconds: 60,
+            events_path: None,
         }
     }
 }
@@ -89,6 +93,7 @@ impl GatewayConfig {
             cache_enabled,
             cache_max_entries,
             cache_ttl_seconds,
+            events_path: None,
         }
     }
 }

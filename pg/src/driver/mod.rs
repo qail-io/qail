@@ -26,6 +26,7 @@ mod pool;
 mod prepared;
 mod query;
 pub mod rls;
+pub mod branch_sql;
 mod row;
 mod stream;
 mod transaction;
@@ -376,7 +377,7 @@ impl PgDriver {
 
         self.connection.send_bytes(&wire_bytes).await?;
 
-        let mut rows: Vec<PgRow> = Vec::new();
+        let mut rows: Vec<PgRow> = Vec::with_capacity(32);
         let mut column_info: Option<Arc<ColumnInfo>> = None;
 
         let mut error: Option<PgError> = None;
@@ -429,7 +430,7 @@ impl PgDriver {
         self.connection.send_bytes(&wire_bytes).await?;
 
         // Collect results using FAST receiver
-        let mut rows: Vec<PgRow> = Vec::new();
+        let mut rows: Vec<PgRow> = Vec::with_capacity(32);
         let mut error: Option<PgError> = None;
 
         loop {
