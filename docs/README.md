@@ -52,4 +52,4 @@ cd /Users/orion/qail-web && npm run deploy
 We welcome issue reports on GitHub! Please provide detailed descriptions to help us reproduce and fix the problem. We aim to address critical issues within 1-5 business days.
 
 > [!CAUTION]
-> **Alpha Software**: QAIL is currently in **alpha**. While we strive for stability, the API is evolving to ensure it remains ergonomic and truly AST-native. **Do not use in production environments yet.**
+> **Beta Software**: QAIL is currently in **beta**. The API is stabilizing and is battle-tested in production. Breaking changes may still occur between minor versions.

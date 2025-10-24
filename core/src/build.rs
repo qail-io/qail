@@ -18,6 +18,7 @@
 //! - `QAIL=live` - Validate against live database
 //! - `QAIL=false` - Skip validation
 
+use crate::migrate::types::ColumnType;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -37,8 +38,8 @@ pub struct ForeignKey {
 #[derive(Debug, Clone)]
 pub struct TableSchema {
     pub name: String,
-    /// Column name -> Column type (e.g., "id" -> "UUID", "name" -> "TEXT")
-    pub columns: HashMap<String, String>,
+    /// Column name -> Column type (strongly-typed AST enum)
+    pub columns: HashMap<String, ColumnType>,
     /// Column name -> Access Policy (Default: "Public", can be "Protected")
     pub policies: HashMap<String, String>,
     /// Foreign key relationships to other tables
@@ -77,7 +78,7 @@ impl Schema {
     pub fn parse(content: &str) -> Result<Self, String> {
         let mut schema = Schema::default();
         let mut current_table: Option<String> = None;
-        let mut current_columns: HashMap<String, String> = HashMap::new();
+        let mut current_columns: HashMap<String, ColumnType> = HashMap::new();
         let mut current_policies: HashMap<String, String> = HashMap::new();
         let mut current_fks: Vec<ForeignKey> = Vec::new();
         let mut current_rls_flag = false;
@@ -181,7 +182,8 @@ impl Schema {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if let Some(col_name) = parts.first() {
                     // Second word is the type (default to TEXT if missing)
-                    let col_type = parts.get(1).copied().unwrap_or("TEXT").to_uppercase();
+                    let col_type_str = parts.get(1).copied().unwrap_or("text");
+                    let col_type = col_type_str.parse::<ColumnType>().unwrap_or(ColumnType::Text);
                     current_columns.insert(col_name.to_string(), col_type);
                     
                     // Check for policies and foreign keys
@@ -323,7 +325,7 @@ impl Schema {
                 if let Some(col) = extract_column_from_create(line)
                     && let Some(ref table) = current_table
                     && let Some(t) = self.tables.get_mut(table)
-                    && t.columns.insert(col.clone(), "TEXT".to_string()).is_none()
+                    && t.columns.insert(col.clone(), ColumnType::Text).is_none()
                 {
                     changes += 1;
                 }
@@ -339,13 +341,13 @@ impl Schema {
                 && let Some((table, col)) = extract_alter_add_column(line)
             {
                 if let Some(t) = self.tables.get_mut(&table) {
-                    if t.columns.insert(col.clone(), "TEXT".to_string()).is_none() {
+                    if t.columns.insert(col.clone(), ColumnType::Text).is_none() {
                         changes += 1;
                     }
                 } else {
                     // Table might be new from this migration
                     let mut cols = HashMap::new();
-                    cols.insert(col, "TEXT".to_string());
+                    cols.insert(col, ColumnType::Text);
                     self.tables.insert(table.clone(), TableSchema {
                         name: table,
                         columns: cols,
@@ -361,7 +363,7 @@ impl Schema {
             if line_upper.contains("ALTER TABLE") && line_upper.contains(" ADD ") && !line_upper.contains("ADD COLUMN")
                 && let Some((table, col)) = extract_alter_add(line)
                 && let Some(t) = self.tables.get_mut(&table)
-                && t.columns.insert(col.clone(), "TEXT".to_string()).is_none()
+                && t.columns.insert(col.clone(), ColumnType::Text).is_none()
             {
                 changes += 1;
             }
@@ -588,8 +590,8 @@ impl TableSchema {
     }
     
     /// Get column type
-    pub fn column_type(&self, name: &str) -> Option<&str> {
-        self.columns.get(name).map(|s| s.as_str())
+    pub fn column_type(&self, name: &str) -> Option<&ColumnType> {
+        self.columns.get(name)
     }
 }
 
@@ -854,8 +856,12 @@ pub fn validate_against_schema(schema: &Schema, usages: &[QailUsage]) -> Vec<Str
     // Build Validator from Schema with column types
     let mut validator = Validator::new();
     for (table_name, table_schema) in &schema.tables {
-        // Convert HashMap<String, String> to Vec<(&str, &str)>
-        let cols_with_types: Vec<(&str, &str)> = table_schema.columns
+        // Convert HashMap<String, ColumnType> to Vec<(&str, &str)> for validator
+        let type_strings: Vec<(String, String)> = table_schema.columns
+            .iter()
+            .map(|(name, typ)| (name.clone(), typ.to_pg_type()))
+            .collect();
+        let cols_with_types: Vec<(&str, &str)> = type_strings
             .iter()
             .map(|(name, typ)| (name.as_str(), typ.as_str()))
             .collect();
@@ -1115,24 +1121,27 @@ let query = Qail::get("posts")
 // Typed Schema Codegen
 // =============================================================================
 
-/// Map QAIL types to Rust types for TypedColumn<T>
-fn qail_type_to_rust(qail_type: &str) -> &'static str {
-    match qail_type.to_uppercase().as_str() {
-        "UUID" => "uuid::Uuid",
-        "TEXT" | "VARCHAR" | "CHAR" | "STRING" => "String",
-        "INT" | "INTEGER" | "INT4" | "SERIAL" => "i32",
-        "BIGINT" | "INT8" | "BIGSERIAL" => "i64",
-        "SMALLINT" | "INT2" => "i16",
-        "FLOAT" | "FLOAT4" | "REAL" => "f32",
-        "DOUBLE" | "FLOAT8" | "DOUBLE PRECISION" => "f64",
-        "DECIMAL" | "NUMERIC" => "rust_decimal::Decimal",
-        "BOOL" | "BOOLEAN" => "bool",
-        "TIMESTAMP" | "TIMESTAMPTZ" => "chrono::DateTime<chrono::Utc>",
-        "DATE" => "chrono::NaiveDate",
-        "TIME" | "TIMETZ" => "chrono::NaiveTime",
-        "JSON" | "JSONB" => "serde_json::Value",
-        "BYTEA" | "BLOB" => "Vec<u8>",
-        _ => "String", // Default to String for unknown types
+/// Map ColumnType AST to Rust types for TypedColumn<T>
+fn qail_type_to_rust(col_type: &ColumnType) -> &'static str {
+    match col_type {
+        ColumnType::Uuid => "uuid::Uuid",
+        ColumnType::Text | ColumnType::Varchar(_) => "String",
+        ColumnType::Int | ColumnType::Serial => "i32",
+        ColumnType::BigInt | ColumnType::BigSerial => "i64",
+        ColumnType::Bool => "bool",
+        ColumnType::Float => "f32",
+        ColumnType::Decimal(_) => "rust_decimal::Decimal",
+        ColumnType::Jsonb => "serde_json::Value",
+        ColumnType::Timestamp | ColumnType::Timestamptz => "chrono::DateTime<chrono::Utc>",
+        ColumnType::Date => "chrono::NaiveDate",
+        ColumnType::Time => "chrono::NaiveTime",
+        ColumnType::Bytea => "Vec<u8>",
+        ColumnType::Array(_) => "Vec<serde_json::Value>",
+        ColumnType::Enum { .. } => "String",
+        ColumnType::Range(_) => "String",
+        ColumnType::Interval => "String",
+        ColumnType::Cidr | ColumnType::Inet => "String",
+        ColumnType::MacAddr => "String",
     }
 }
 
@@ -1238,7 +1247,7 @@ pub fn generate_schema_code(schema: &Schema) -> String {
             let policy = table.policies.get(col_name).map(|s| s.as_str()).unwrap_or("Public");
             let rust_policy = if policy == "Protected" { "Protected" } else { "Public" };
             
-            code.push_str(&format!("    /// Column `{}.{}` ({}) - {}\n", table.name, col_name, col_type, policy));
+            code.push_str(&format!("    /// Column `{}.{}` ({}) - {}\n", table.name, col_name, col_type.to_pg_type(), policy));
             code.push_str(&format!(
                 "    pub const {}: TypedColumn<{}, {}> = TypedColumn::new(\"{}\", \"{}\");\n",
                 col_ident, rust_type, rust_policy, table.name, col_name
