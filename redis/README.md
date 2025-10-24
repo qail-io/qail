@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/qail-redis.svg)](https://crates.io/crates/qail-redis)
 [![Documentation](https://docs.rs/qail-redis/badge.svg)](https://docs.rs/qail-redis)
 
-> ⚠️ **ALPHA** - Early development. API may change.
+> ⚠️ **BETA** - Early development. API may change.
 
 **"Redis stores time — QAIL decides."**
 

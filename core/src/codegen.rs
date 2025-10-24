@@ -21,6 +21,7 @@
 //! ```
 
 use crate::build::Schema;
+use crate::migrate::types::ColumnType;
 use std::fs;
 
 /// Generate typed Rust code from a schema.qail file and write to output
@@ -189,11 +190,11 @@ fn generate_table_module(table_name: &str, table: &crate::build::TableSchema) ->
     
     for col_name in &col_names {
         if let Some(col_type) = table.columns.get(*col_name) {
-            let rust_type = sql_type_to_rust(col_type);
+            let rust_type = column_type_to_rust(col_type);
             let fn_name = escape_keyword(col_name);
             code.push_str(&format!(
                 "    /// Column `{}` ({})\n",
-                col_name, col_type
+                col_name, col_type.to_pg_type()
             ));
             code.push_str(&format!(
                 "    pub fn {}() -> TypedColumn<{}> {{ TypedColumn::new(\"{}\", \"{}\") }}\n\n",
@@ -207,57 +208,25 @@ fn generate_table_module(table_name: &str, table: &crate::build::TableSchema) ->
     code
 }
 
-/// Map SQL types to Rust types
-pub fn sql_type_to_rust(sql_type: &str) -> &'static str {
-    let upper = sql_type.to_uppercase();
-    
-    // Integer family
-    if upper.contains("BIGINT") || upper.contains("INT8") || upper.contains("BIGSERIAL") {
-        return "i64";
+/// Map ColumnType AST enum to Rust types (for codegen).
+/// This is the ONLY place where we map SQL types to Rust types.
+fn column_type_to_rust(col_type: &ColumnType) -> &'static str {
+    match col_type {
+        ColumnType::Uuid => "uuid::Uuid",
+        ColumnType::Text | ColumnType::Varchar(_) => "String",
+        ColumnType::Int | ColumnType::BigInt | ColumnType::Serial | ColumnType::BigSerial => "i64",
+        ColumnType::Bool => "bool",
+        ColumnType::Float | ColumnType::Decimal(_) => "f64",
+        ColumnType::Jsonb => "serde_json::Value",
+        ColumnType::Timestamp | ColumnType::Timestamptz | ColumnType::Date | ColumnType::Time => "chrono::DateTime<chrono::Utc>",
+        ColumnType::Bytea => "Vec<u8>",
+        ColumnType::Array(_) => "Vec<serde_json::Value>",
+        ColumnType::Enum { .. } => "String",
+        ColumnType::Range(_) => "String",
+        ColumnType::Interval => "String",
+        ColumnType::Cidr | ColumnType::Inet => "String",
+        ColumnType::MacAddr => "String",
     }
-    if upper.contains("INT") || upper.contains("SERIAL") {
-        return "i64";  // Use i64 for all ints for simplicity
-    }
-    
-    // Float family
-    if upper.contains("FLOAT") || upper.contains("DOUBLE") || 
-       upper.contains("DECIMAL") || upper.contains("NUMERIC") || upper.contains("REAL") {
-        return "f64";
-    }
-    
-    // Boolean
-    if upper.contains("BOOL") {
-        return "bool";
-    }
-    
-    // UUID
-    if upper.contains("UUID") {
-        return "uuid::Uuid";
-    }
-    
-    // Text family
-    if upper.contains("TEXT") || upper.contains("VARCHAR") || 
-       upper.contains("CHAR") || upper.contains("NAME") {
-        return "String";
-    }
-    
-    // JSON
-    if upper.contains("JSON") {
-        return "serde_json::Value";
-    }
-    
-    // Timestamp
-    if upper.contains("TIMESTAMP") || upper.contains("DATE") || upper.contains("TIME") {
-        return "chrono::DateTime<chrono::Utc>";
-    }
-    
-    // Bytea
-    if upper.contains("BYTEA") || upper.contains("BLOB") {
-        return "Vec<u8>";
-    }
-    
-    // Default to String for unknown types
-    "String"
 }
 
 /// Convert snake_case to PascalCase
@@ -302,11 +271,15 @@ mod tests {
     }
     
     #[test]
-    fn test_sql_type_mapping() {
-        assert_eq!(sql_type_to_rust("INT"), "i64");
-        assert_eq!(sql_type_to_rust("TEXT"), "String");
-        assert_eq!(sql_type_to_rust("UUID"), "uuid::Uuid");
-        assert_eq!(sql_type_to_rust("BOOLEAN"), "bool");
-        assert_eq!(sql_type_to_rust("JSONB"), "serde_json::Value");
+    fn test_column_type_mapping() {
+        assert_eq!(column_type_to_rust(&ColumnType::Int), "i64");
+        assert_eq!(column_type_to_rust(&ColumnType::Text), "String");
+        assert_eq!(column_type_to_rust(&ColumnType::Uuid), "uuid::Uuid");
+        assert_eq!(column_type_to_rust(&ColumnType::Bool), "bool");
+        assert_eq!(column_type_to_rust(&ColumnType::Jsonb), "serde_json::Value");
+        assert_eq!(column_type_to_rust(&ColumnType::BigInt), "i64");
+        assert_eq!(column_type_to_rust(&ColumnType::Float), "f64");
+        assert_eq!(column_type_to_rust(&ColumnType::Timestamp), "chrono::DateTime<chrono::Utc>");
+        assert_eq!(column_type_to_rust(&ColumnType::Bytea), "Vec<u8>");
     }
 }

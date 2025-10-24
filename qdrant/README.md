@@ -2,7 +2,7 @@
 
 QAIL driver for Qdrant vector database.
 
-> ⚠️ **ALPHA** - This crate is under active development. API may change.
+> ⚠️ **BETA** - This crate is under active development. API may change.
 
 ## Overview
 
