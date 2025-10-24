@@ -485,6 +485,35 @@ impl PgPool {
         Ok(conn)
     }
 
+    /// Acquire a connection with branch context pre-configured.
+    ///
+    /// Sets PostgreSQL session variable `app.branch_id` for data virtualization.
+    /// When the connection is dropped, it automatically clears the branch context.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use qail_core::branch::BranchContext;
+    ///
+    /// let ctx = BranchContext::branch("feature-auth");
+    /// let mut conn = pool.acquire_with_branch(&ctx).await?;
+    /// // All queries through `conn` are now branch-aware
+    /// ```
+    pub async fn acquire_with_branch(
+        &self,
+        ctx: &qail_core::branch::BranchContext,
+    ) -> PgResult<PooledConnection> {
+        let mut conn = self.acquire().await?;
+
+        if let Some(branch_name) = ctx.branch_name() {
+            let sql = super::branch_sql::branch_context_sql(branch_name);
+            let pg_conn = conn.get_mut();
+            pg_conn.execute_simple(&sql).await?;
+            conn.rls_dirty = true; // Reuse dirty flag for auto-reset
+        }
+
+        Ok(conn)
+    }
+
     /// Get the current number of idle connections.
     pub async fn idle_count(&self) -> usize {
         self.inner.connections.lock().await.len()

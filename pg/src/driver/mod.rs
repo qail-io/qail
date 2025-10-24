@@ -26,6 +26,7 @@ mod pool;
 mod prepared;
 mod query;
 pub mod rls;
+pub mod branch_sql;
 mod row;
 mod stream;
 mod transaction;
@@ -365,18 +366,21 @@ impl PgDriver {
     /// Execute a QAIL command and fetch all rows (UNCACHED).
     /// Sends Parse + Bind + Execute on every call.
     /// Use for one-off queries or when caching is not desired.
+    ///
+    /// Optimized: encodes wire bytes into reusable write_buf (zero-alloc).
     pub async fn fetch_all_uncached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
 
-        let wire_bytes = AstEncoder::encode_cmd_reuse(
+        AstEncoder::encode_cmd_reuse_into(
             cmd,
             &mut self.connection.sql_buf,
             &mut self.connection.params_buf,
+            &mut self.connection.write_buf,
         );
 
-        self.connection.send_bytes(&wire_bytes).await?;
+        self.connection.flush_write_buf().await?;
 
-        let mut rows: Vec<PgRow> = Vec::new();
+        let mut rows: Vec<PgRow> = Vec::with_capacity(32);
         let mut column_info: Option<Arc<ColumnInfo>> = None;
 
         let mut error: Option<PgError> = None;
@@ -420,16 +424,17 @@ impl PgDriver {
     pub async fn fetch_all_fast(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
 
-        let wire_bytes = AstEncoder::encode_cmd_reuse(
+        AstEncoder::encode_cmd_reuse_into(
             cmd,
             &mut self.connection.sql_buf,
             &mut self.connection.params_buf,
+            &mut self.connection.write_buf,
         );
 
-        self.connection.send_bytes(&wire_bytes).await?;
+        self.connection.flush_write_buf().await?;
 
         // Collect results using FAST receiver
-        let mut rows: Vec<PgRow> = Vec::new();
+        let mut rows: Vec<PgRow> = Vec::with_capacity(32);
         let mut error: Option<PgError> = None;
 
         loop {
@@ -489,6 +494,8 @@ impl PgDriver {
     /// On subsequent calls: sends only Bind + Execute + Sync (SKIPS Parse!)
     /// Column metadata (RowDescription) is cached alongside the statement
     /// so that by-name column access works on every call.
+    ///
+    /// Optimized: all wire messages are batched into a single write_all syscall.
     pub async fn fetch_all_cached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
         use std::collections::hash_map::DefaultHasher;
@@ -525,21 +532,22 @@ impl PgDriver {
 
         let is_cache_miss = !self.connection.stmt_cache.contains(&sql_hash);
 
+        // Build ALL wire messages into write_buf (single syscall)
+        self.connection.write_buf.clear();
+
         let stmt_name = if let Some(name) = self.connection.stmt_cache.get(&sql_hash) {
             name.clone()
         } else {
             let name = format!("qail_{:x}", sql_hash);
             
-            use crate::protocol::PgEncoder;
-            use tokio::io::AsyncWriteExt;
-            
             let sql_str = std::str::from_utf8(&self.connection.sql_buf).unwrap_or("");
             
-            // Send Parse + Describe(Statement) to get RowDescription on first call
+            // Buffer Parse + Describe(Statement) for first call
+            use crate::protocol::PgEncoder;
             let parse_msg = PgEncoder::encode_parse(&name, sql_str, &[]);
             let describe_msg = PgEncoder::encode_describe(false, &name);
-            self.connection.stream.write_all(&parse_msg).await?;
-            self.connection.stream.write_all(&describe_msg).await?;
+            self.connection.write_buf.extend_from_slice(&parse_msg);
+            self.connection.write_buf.extend_from_slice(&describe_msg);
             
             self.connection.stmt_cache.put(sql_hash, name.clone());
             self.connection.prepared_statements.insert(name.clone(), sql_str.to_string());
@@ -547,21 +555,20 @@ impl PgDriver {
             name
         };
 
-        // Send Bind + Execute + Sync (always)
+        // Append Bind + Execute + Sync to same buffer
         use crate::protocol::PgEncoder;
-        use tokio::io::AsyncWriteExt;
-        
-        let mut buf = bytes::BytesMut::with_capacity(128);
-        PgEncoder::encode_bind_to(&mut buf, &stmt_name, &self.connection.params_buf)
+        PgEncoder::encode_bind_to(&mut self.connection.write_buf, &stmt_name, &self.connection.params_buf)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        PgEncoder::encode_execute_to(&mut buf);
-        PgEncoder::encode_sync_to(&mut buf);
-        self.connection.stream.write_all(&buf).await?;
+        PgEncoder::encode_execute_to(&mut self.connection.write_buf);
+        PgEncoder::encode_sync_to(&mut self.connection.write_buf);
+
+        // Single write_all syscall for all messages
+        self.connection.flush_write_buf().await?;
 
         // On cache hit, use the previously cached ColumnInfo
         let cached_column_info = self.connection.column_info_cache.get(&sql_hash).cloned();
 
-        let mut rows: Vec<PgRow> = Vec::new();
+        let mut rows: Vec<PgRow> = Vec::with_capacity(32);
         let mut column_info: Option<Arc<ColumnInfo>> = cached_column_info;
         let mut error: Option<PgError> = None;
 

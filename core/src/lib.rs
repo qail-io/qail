@@ -18,6 +18,7 @@ pub mod fmt;
 pub mod migrate;
 pub mod parser;
 pub mod rls;
+pub mod branch;
 pub mod schema;
 #[cfg(feature = "analyzer")]
 pub mod transformer;

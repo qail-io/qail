@@ -7,6 +7,14 @@
 - [Installation](./getting-started/installation.md)
 - [Quick Start](./getting-started/quickstart.md)
 
+# Gateway
+
+- [Qail Gateway](./gateway.md)
+
+# Benchmarks
+
+- [Qail vs GraphQL vs REST](./benchmarks.md)
+
 # Core Concepts
 
 - [AST Builder API](./core/builder-api.md)

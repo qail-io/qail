@@ -615,6 +615,31 @@ impl<T: Table + DirectBuild> TypedQail<T> {
 /// ```
 pub trait RequiresRls: Table {}
 
+// =============================================================================
+// Infrastructure Resource Traits (Section 10)
+// =============================================================================
+
+/// Trait for type-safe S3/object storage bucket references.
+///
+/// Generated bucket structs implement this trait.
+pub trait Bucket {
+    fn bucket_name() -> &'static str;
+}
+
+/// Trait for type-safe message queue references (SQS, etc).
+///
+/// Generated queue structs implement this trait.
+pub trait Queue {
+    fn queue_name() -> &'static str;
+}
+
+/// Trait for type-safe event topic references (SNS, Kafka, etc).
+///
+/// Generated topic structs implement this trait.
+pub trait Topic {
+    fn topic_name() -> &'static str;
+}
+
 /// Proof that RLS context has been applied to a query.
 /// 
 /// Sealed constructor — only created internally by `TypedQail::with_rls()`.
