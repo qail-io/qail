@@ -34,6 +34,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Check Cargo Version
+        run: |
+          cargo --version
+          rustc --version
+
       - name: Verify versions match tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -43,73 +48,80 @@ jobs:
           CLI_VERSION=$(grep '^version' cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           QDRANT_VERSION=$(grep '^version' qdrant/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           REDIS_VERSION=$(grep '^version' redis/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          GATEWAY_VERSION=$(grep '^version' gateway/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           
           echo "Tag version: $TAG_VERSION"
-          echo "Core: $CORE_VERSION | PG: $PG_VERSION | CLI: $CLI_VERSION"
-          echo "Qdrant: $QDRANT_VERSION | Redis: $REDIS_VERSION | Gateway: $GATEWAY_VERSION"
+          echo "Core version: $CORE_VERSION"
+          echo "PG version: $PG_VERSION"
+          echo "CLI version: $CLI_VERSION"
+          echo "Qdrant version: $QDRANT_VERSION"
+          echo "Redis version: $REDIS_VERSION"
           
-          MISMATCH=0
-          for V in "$CORE_VERSION" "$PG_VERSION" "$CLI_VERSION" "$QDRANT_VERSION" "$REDIS_VERSION" "$GATEWAY_VERSION"; do
-            if [ "$V" != "$TAG_VERSION" ]; then MISMATCH=1; fi
-          done
-          
-          if [ "$MISMATCH" -eq 1 ]; then
-            echo "❌ Version mismatch!"
+          if [ "$CORE_VERSION" != "$TAG_VERSION" ] || [ "$PG_VERSION" != "$TAG_VERSION" ] || [ "$CLI_VERSION" != "$TAG_VERSION" ] || [ "$QDRANT_VERSION" != "$TAG_VERSION" ] || [ "$REDIS_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch! Tag: $TAG_VERSION, Core: $CORE_VERSION, PG: $PG_VERSION, CLI: $CLI_VERSION, Qdrant: $QDRANT_VERSION, Redis: $REDIS_VERSION"
             exit 1
           fi
           echo "✅ All versions match tag"
 
       - name: Run tests
-        run: cargo test --workspace --lib
+        run: cargo test --workspace
 
+      - name: Authenticate with Crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+        
       - name: Publish qail-core
         if: ${{ !inputs.dry_run }}
         run: cargo publish -p qail-core || echo "qail-core already published, skipping"
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-      - name: Wait for qail-core
+      - name: Wait for qail-core to be available
         if: ${{ !inputs.dry_run }}
-        run: sleep 30
+        run: |
+          sleep 30
+          cargo update  # Force refresh crates.io index
 
       - name: Publish qail-pg
         if: ${{ !inputs.dry_run }}
         run: cargo publish -p qail-pg || echo "qail-pg already published, skipping"
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-      - name: Wait for qail-pg
+      - name: Wait for qail-pg to be available
         if: ${{ !inputs.dry_run }}
-        run: sleep 30
+        run: |
+          sleep 30
+          cargo update  # Force refresh crates.io index
 
       - name: Publish qail-qdrant
         if: ${{ !inputs.dry_run }}
         run: cargo publish -p qail-qdrant || echo "qail-qdrant already published, skipping"
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: Wait for qail-qdrant to be available
+        if: ${{ !inputs.dry_run }}
+        run: |
+          sleep 30
+          cargo update  # Force refresh crates.io index
 
       - name: Publish qail-redis
         if: ${{ !inputs.dry_run }}
         run: cargo publish -p qail-redis || echo "qail-redis already published, skipping"
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-      - name: Wait for dependencies
+      - name: Wait for qail-redis to be available
         if: ${{ !inputs.dry_run }}
-        run: sleep 30
-
-      - name: Publish qail-gateway
-        if: ${{ !inputs.dry_run }}
-        run: cargo publish -p qail-gateway || echo "qail-gateway already published, skipping"
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          sleep 30
+          cargo update  # Force refresh crates.io index
 
       - name: Publish qail (CLI)
         if: ${{ !inputs.dry_run }}
         run: cargo publish -p qail || echo "qail already published, skipping"
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
@@ -117,3 +129,7 @@ jobs:
           echo "🔍 Dry run completed - no packages were published"
           cargo publish -p qail-core --dry-run
           cargo publish -p qail-pg --dry-run
+          cargo publish -p qail-qdrant --dry-run
+          cargo publish -p qail-redis --dry-run
+          cargo publish -p qail --dry-run
+
