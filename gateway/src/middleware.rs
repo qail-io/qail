@@ -84,7 +84,7 @@ impl RateLimiter {
 
 /// Rate limiting middleware
 pub async fn rate_limit_middleware(
-    State(limiter): State<Arc<RateLimiter>>,
+    State(state): State<Arc<crate::GatewayState>>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -96,7 +96,7 @@ pub async fn rate_limit_middleware(
         .map(|s| s.split(',').next().unwrap_or("unknown").trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     
-    match limiter.check(&key).await {
+    match state.rate_limiter.check(&key).await {
         Ok(remaining) => {
             let mut response = next.run(request).await;
             response.headers_mut().insert(
@@ -246,4 +246,218 @@ mod tests {
         // Different key should have its own bucket
         assert!(limiter.check("other").await.is_ok(), "Other key should pass");
     }
+    
+    #[test]
+    fn test_allow_list() {
+        let mut allow_list = QueryAllowList::new();
+        allow_list.allow("SELECT users");
+        assert!(allow_list.is_allowed("SELECT users"));
+        assert!(!allow_list.is_allowed("DROP TABLE users"));
+    }
+    
+    #[test]
+    fn test_complexity_guard() {
+        let guard = QueryComplexityGuard::new(3, 10, 5);
+        
+        // Within limits
+        assert!(guard.check(2, 5, 3).is_ok());
+        
+        // Exceeds depth
+        assert!(guard.check(4, 5, 3).is_err());
+        
+        // Exceeds filters
+        assert!(guard.check(1, 11, 3).is_err());
+        
+        // Exceeds joins
+        assert!(guard.check(1, 5, 6).is_err());
+    }
+}
+
+// ============================================================================
+// Query Allow-List
+// ============================================================================
+
+/// Query allow-list: only pre-approved query patterns are executed.
+///
+/// When enabled, any query not in the allow-list is rejected.
+/// This prevents arbitrary query injection and limits the attack surface.
+#[derive(Debug, Default)]
+pub struct QueryAllowList {
+    enabled: bool,
+    allowed: std::collections::HashSet<String>,
+}
+
+impl QueryAllowList {
+    pub fn new() -> Self {
+        Self {
+            enabled: false,
+            allowed: std::collections::HashSet::new(),
+        }
+    }
+    
+    /// Enable the allow-list (queries not in the list will be rejected)
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+    
+    /// Add a query pattern to the allow-list
+    pub fn allow(&mut self, pattern: &str) {
+        self.enabled = true;
+        self.allowed.insert(pattern.to_string());
+    }
+    
+    /// Load allow-list from a file (one pattern per line)
+    pub fn load_from_file(&mut self, path: &str) -> Result<(), std::io::Error> {
+        let content = std::fs::read_to_string(path)?;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                self.allow(trimmed);
+            }
+        }
+        Ok(())
+    }
+    
+    /// Check if a query pattern is allowed
+    pub fn is_allowed(&self, pattern: &str) -> bool {
+        if !self.enabled {
+            return true; // Allow-list disabled: all queries pass
+        }
+        self.allowed.contains(pattern)
+    }
+}
+
+// ============================================================================
+// Query Complexity Guard
+// ============================================================================
+
+/// Guards against excessively complex queries.
+///
+/// Limits:
+/// - `max_depth`: Maximum nesting depth (joins, subqueries)
+/// - `max_filters`: Maximum number of filter conditions
+/// - `max_joins`: Maximum number of JOIN operations
+#[derive(Debug, Clone)]
+pub struct QueryComplexityGuard {
+    pub max_depth: usize,
+    pub max_filters: usize,
+    pub max_joins: usize,
+}
+
+impl QueryComplexityGuard {
+    pub fn new(max_depth: usize, max_filters: usize, max_joins: usize) -> Self {
+        Self {
+            max_depth,
+            max_filters,
+            max_joins,
+        }
+    }
+    
+    /// Default production limits
+    pub fn production() -> Self {
+        Self {
+            max_depth: 5,
+            max_filters: 20,
+            max_joins: 10,
+        }
+    }
+    
+    /// Check query complexity against limits
+    pub fn check(
+        &self,
+        depth: usize,
+        filter_count: usize,
+        join_count: usize,
+    ) -> Result<(), ApiError> {
+        if depth > self.max_depth {
+            return Err(ApiError {
+                code: "QUERY_TOO_COMPLEX".to_string(),
+                message: format!("Query depth {} exceeds maximum {}", depth, self.max_depth),
+                details: None,
+                request_id: None,
+            });
+        }
+        if filter_count > self.max_filters {
+            return Err(ApiError {
+                code: "QUERY_TOO_COMPLEX".to_string(),
+                message: format!(
+                    "Filter count {} exceeds maximum {}",
+                    filter_count, self.max_filters
+                ),
+                details: None,
+                request_id: None,
+            });
+        }
+        if join_count > self.max_joins {
+            return Err(ApiError {
+                code: "QUERY_TOO_COMPLEX".to_string(),
+                message: format!(
+                    "Join count {} exceeds maximum {}",
+                    join_count, self.max_joins
+                ),
+                details: None,
+                request_id: None,
+            });
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Request tracing middleware
+// ============================================================================
+
+/// Request tracing middleware — wraps each request with a structured tracing span.
+///
+/// Logs: request_id (UUID), method, path, status, duration_ms.
+/// Injects `x-request-id` and `x-response-time` headers.
+pub async fn request_tracer(
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let start = Instant::now();
+
+    // Extract table from path: /api/{table}/... → table
+    let table = path
+        .trim_start_matches('/')
+        .split('/')
+        .nth(1)
+        .unwrap_or("unknown")
+        .to_string();
+
+    tracing::info!(
+        request_id = %request_id,
+        method = %method,
+        path = %path,
+        table = %table,
+        "→ request started"
+    );
+
+    let mut response = next.run(request).await;
+
+    let duration = start.elapsed();
+    let status = response.status().as_u16();
+    let duration_ms = duration.as_secs_f64() * 1000.0;
+
+    tracing::info!(
+        request_id = %request_id,
+        method = %method,
+        path = %path,
+        status = status,
+        duration_ms = %format!("{:.2}", duration_ms),
+        "← request completed"
+    );
+
+    // Inject tracing headers
+    if let Ok(v) = request_id.parse() {
+        response.headers_mut().insert("x-request-id", v);
+    }
+    if let Ok(v) = format!("{:.2}ms", duration_ms).parse() {
+        response.headers_mut().insert("x-response-time", v);
+    }
+
+    response
 }

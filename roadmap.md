@@ -197,14 +197,30 @@
 
 ---
 
-## 9. Native Versioning (Data Virtualization) ⏳
+## 9. Native Versioning (Data Virtualization) ✅
 
 > *"GitHub for Databases" — branching at the application layer.*
 
-- [ ] Gateway middleware with `X-Branch-ID` header
-- [ ] Row-level branching (`WHERE _branch_id = ?`)
-- [ ] Copy-on-Write strategy for writes
-- [ ] CLI: `qail branch create <name>`, `qail checkout <name>`
+### Phase 1: Branch Infrastructure ✅ (v0.18.6)
+- [x] `BranchContext` in `core/src/branch.rs` — branch identity struct
+- [x] `branch_sql.rs` — DDL for `_qail_branches` + `_qail_branch_rows`, session vars, CRUD SQL
+- [x] `PgPool::acquire_with_branch(ctx)` — session variable injection
+
+### Phase 2: Gateway Integration ✅ (v0.18.6)
+- [x] `X-Branch-ID` header extraction → `BranchContext`
+- [x] Branch CRUD API: `POST/GET/DELETE /api/_branch`, `POST /api/_branch/:name/merge`
+- [x] Auth guards on all branch endpoints
+
+### Phase 3: Copy-on-Write ✅ (v0.18.6)
+- [x] CoW Read: `apply_branch_overlay` merges overlay with main table (list + get-by-id)
+- [x] CoW Write: `redirect_to_overlay` intercepts INSERT/UPDATE/DELETE on active branch
+- [x] Transactional merge: overlay → main tables with BEGIN/COMMIT/ROLLBACK
+
+### Phase 4: CLI ✅ (v0.18.6)
+- [x] `qail branch create <name>` — insert into `_qail_branches`
+- [x] `qail branch list` — list all branches with status
+- [x] `qail branch delete <name>` — soft-delete
+- [x] `qail branch merge <name>` — apply overlay + mark merged
 
 ---
 
@@ -218,7 +234,7 @@
 
 ---
 
-## Current Status (Feb 10, 2026) — v0.18.5
+## Current Status (Feb 10, 2026) — v0.18.6
 
 | Section | Status | Version |
 |---|---|---|
@@ -229,6 +245,6 @@
 | 5. Migration Engine | ✅ Complete (3/3 phases) | v0.15.9 |
 | 6. Multi-Driver AST | ✅ Complete (PG + Qdrant + Redis) | v0.14.13 |
 | 7. CLI Toolchain | ✅ Complete | v0.15.7 |
-| 8. Schema-as-Proof | ⏳ Planned | — |
-| 9. Data Virtualization | ⏳ Planned | — |
+| 8. Schema-as-Proof | ✅ Complete (4/4 phases) | v0.16.0 |
+| 9. Data Virtualization | ✅ Complete (4/4 phases) | v0.18.6 |
 | 10. Infra-Aware Compiler | ⏳ Planned | — |

@@ -211,6 +211,7 @@ pub enum Operator {
     SimilarTo,
     ContainedBy,
     Overlaps,
+    TextSearch,
 }
 
 impl Operator {
@@ -247,6 +248,7 @@ impl Operator {
             Operator::SimilarTo => "SIMILAR TO",
             Operator::ContainedBy => "<@",
             Operator::Overlaps => "&&",
+            Operator::TextSearch => "@@",
         }
     }
 

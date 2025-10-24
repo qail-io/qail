@@ -347,8 +347,8 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     for (fk_name, (ref_name, on_delete, on_update)) in &fk_map {
         let fk_cols = constraint_cols.get(fk_name.as_str());
         let ref_cols = constraint_cols.get(ref_name.as_str());
-        if let (Some(fk_list), Some(ref_list)) = (fk_cols, ref_cols) {
-            if fk_list.len() == 1 && ref_list.len() == 1 {
+        if let (Some(fk_list), Some(ref_list)) = (fk_cols, ref_cols)
+            && fk_list.len() == 1 && ref_list.len() == 1 {
                 let (fk_table, fk_col) = &fk_list[0];
                 let (ref_table, ref_col) = &ref_list[0];
                 if let Some(table) = schema.tables.get_mut(fk_table.as_str()) {
@@ -364,7 +364,6 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                         }
                     }
                 }
-            }
         }
     }
 
@@ -380,11 +379,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         let tbl_name = row.text(0);
         let enable = row.text(1) == "t";
         let force = row.text(2) == "t";
-        if enable || force {
-            if let Some(table) = schema.tables.get_mut(&tbl_name) {
+        if (enable || force)
+            && let Some(table) = schema.tables.get_mut(&tbl_name) {
                 table.enable_rls = enable;
                 table.force_rls = force;
-            }
         }
     }
     

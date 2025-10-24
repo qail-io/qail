@@ -438,6 +438,26 @@ EXAMPLES:
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Database branching for data virtualization
+    #[command(after_help = r#"DATA VIRTUALIZATION:
+    Create database branches for isolated experimentation.
+    Changes on a branch are stored as overlay rows — no schema changes needed.
+
+SUBCOMMANDS:
+    create  - Create a new branch
+    list    - List all branches
+    delete  - Soft-delete a branch
+    merge   - Mark a branch as merged
+
+EXAMPLES:
+    qail branch create feature-auth --url postgres://localhost/mydb
+    qail branch list --url postgres://localhost/mydb
+    qail branch merge feature-auth --url postgres://localhost/mydb
+    qail branch delete feature-auth --url postgres://localhost/mydb"#)]
+    Branch {
+        #[command(subcommand)]
+        action: BranchAction,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -446,6 +466,43 @@ enum SyncAction {
     Generate,
     /// List configured sync rules
     List,
+}
+
+#[derive(Subcommand, Clone)]
+enum BranchAction {
+    /// Create a new database branch
+    Create {
+        /// Branch name
+        name: String,
+        /// Parent branch (default: main)
+        #[arg(long)]
+        parent: Option<String>,
+        /// Database URL
+        #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// List all branches
+    List {
+        /// Database URL
+        #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// Soft-delete a branch
+    Delete {
+        /// Branch name
+        name: String,
+        /// Database URL
+        #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// Merge a branch (mark overlay as merged)
+    Merge {
+        /// Branch name
+        name: String,
+        /// Database URL
+        #[arg(short, long)]
+        url: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -860,6 +917,46 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Types { schema, output }) => {
             qail::types::generate_types(schema, output.as_deref())?;
+        },
+        Some(Commands::Branch { action }) => {
+            // Resolve DB URL from --url flag or qail.toml
+            let get_url = |url: &Option<String>| -> Result<String> {
+                if let Some(u) = url {
+                    Ok(u.clone())
+                } else {
+                    // Try reading from qail.toml
+                    let config = std::fs::read_to_string("qail.toml")
+                        .unwrap_or_default();
+                    for line in config.lines() {
+                        let line = line.trim();
+                        if line.starts_with("url") && line.contains('=') {
+                            let val = line.split_once('=').map(|x| x.1).unwrap_or("").trim().trim_matches('"');
+                            if val.starts_with("postgres") {
+                                return Ok(val.to_string());
+                            }
+                        }
+                    }
+                    anyhow::bail!("No database URL. Use --url or set postgres.url in qail.toml")
+                }
+            };
+            match action {
+                BranchAction::Create { name, parent, url } => {
+                    let db_url = get_url(url)?;
+                    qail::branch::branch_create(name, parent.as_deref(), &db_url).await?;
+                }
+                BranchAction::List { url } => {
+                    let db_url = get_url(url)?;
+                    qail::branch::branch_list(&db_url).await?;
+                }
+                BranchAction::Delete { name, url } => {
+                    let db_url = get_url(url)?;
+                    qail::branch::branch_delete(name, &db_url).await?;
+                }
+                BranchAction::Merge { name, url } => {
+                    let db_url = get_url(url)?;
+                    qail::branch::branch_merge(name, &db_url).await?;
+                }
+            }
         },
         None => {
             if let Some(query) = &cli.query {

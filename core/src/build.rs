@@ -52,6 +52,17 @@ pub struct TableSchema {
 #[derive(Debug, Default)]
 pub struct Schema {
     pub tables: HashMap<String, TableSchema>,
+    /// Infrastructure resources (bucket, queue, topic)
+    pub resources: HashMap<String, ResourceSchema>,
+}
+
+/// Infrastructure resource schema (bucket, queue, topic)
+#[derive(Debug, Clone)]
+pub struct ResourceSchema {
+    pub name: String,
+    pub kind: String,
+    pub provider: Option<String>,
+    pub properties: HashMap<String, String>,
 }
 
 impl Schema {
@@ -76,6 +87,51 @@ impl Schema {
             
             // Skip comments and empty lines
             if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Resource declarations: bucket, queue, topic
+            if line.starts_with("bucket ") || line.starts_with("queue ") || line.starts_with("topic ") {
+                let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                let kind = parts[0].to_string();
+                let rest = parts.get(1).copied().unwrap_or("").trim();
+
+                // Extract name (before {
+                let name = rest.split('{').next().unwrap_or(rest).trim().to_string();
+                let mut provider = None;
+                let mut properties = HashMap::new();
+
+                if line.contains('{') {
+                    // Collect block content
+                    let block = rest.split('{').nth(1).unwrap_or("").to_string();
+                    if !block.contains('}') {
+                        for inner in content.lines().skip_while(|l| !l.contains(line)) {
+                            // Simple approach: read until }
+                            if inner.contains('}') { break; }
+                        }
+                    }
+                    let block = block.replace('}', "");
+                    let mut tokens = block.split_whitespace();
+                    while let Some(key) = tokens.next() {
+                        if let Some(val) = tokens.next() {
+                            let val = val.trim_matches('"').to_string();
+                            if key == "provider" {
+                                provider = Some(val);
+                            } else {
+                                properties.insert(key.to_string(), val);
+                            }
+                        }
+                    }
+                }
+
+                if !name.is_empty() {
+                    schema.resources.insert(name.clone(), ResourceSchema {
+                        name,
+                        kind,
+                        provider,
+                        properties,
+                    });
+                }
                 continue;
             }
 

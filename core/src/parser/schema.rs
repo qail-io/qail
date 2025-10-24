@@ -487,7 +487,7 @@ fn parse_table(input: &str) -> IResult<&str, TableDef> {
 /// A schema item is either a table, policy, or index.
 enum SchemaItem {
     Table(TableDef),
-    Policy(RlsPolicy),
+    Policy(Box<RlsPolicy>),
     Index(IndexDef),
 }
 
@@ -621,8 +621,7 @@ fn parse_policy_expr(input: &str) -> IResult<&str, Expr> {
 
         if let Ok((rest, _)) =
             tag_no_case::<_, _, nom::error::Error<&str>>("or").parse(input)
-        {
-            if let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
+            && let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
                 let (rest, right) = parse_policy_comparison(rest)?;
                 result = Expr::Binary {
                     left: Box::new(result),
@@ -632,13 +631,11 @@ fn parse_policy_expr(input: &str) -> IResult<&str, Expr> {
                 };
                 remaining = rest;
                 continue;
-            }
         }
 
         if let Ok((rest, _)) =
             tag_no_case::<_, _, nom::error::Error<&str>>("and").parse(input)
-        {
-            if let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
+            && let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
                 let (rest, right) = parse_policy_comparison(rest)?;
                 result = Expr::Binary {
                     left: Box::new(result),
@@ -648,7 +645,6 @@ fn parse_policy_expr(input: &str) -> IResult<&str, Expr> {
                 };
                 remaining = rest;
                 continue;
-            }
         }
 
         remaining = input;
@@ -818,7 +814,7 @@ fn parse_schema_item(input: &str) -> IResult<&str, SchemaItem> {
 
     // Try policy first (since "policy" is a distinct keyword)
     if let Ok((rest, policy)) = parse_policy(input) {
-        return Ok((rest, SchemaItem::Policy(policy)));
+        return Ok((rest, SchemaItem::Policy(Box::new(policy))));
     }
 
     // Try index
@@ -877,7 +873,7 @@ fn parse_schema(input: &str) -> IResult<&str, Schema> {
     for item in items {
         match item {
             SchemaItem::Table(t) => tables.push(t),
-            SchemaItem::Policy(p) => policies.push(p),
+            SchemaItem::Policy(p) => policies.push(*p),
             SchemaItem::Index(i) => indexes.push(i),
         }
     }

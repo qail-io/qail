@@ -92,6 +92,37 @@ impl AstEncoder {
         sql_buf: &mut BytesMut,
         params: &mut Vec<Option<Vec<u8>>>,
     ) -> BytesMut {
+        Self::encode_cmd_sql_to(cmd, sql_buf, params);
+
+        // Build wire protocol (allocates a new BytesMut)
+        batch::build_extended_query(sql_buf, params)
+            .expect("Parameter limit exceeded in AST encoder")
+    }
+
+    /// Encode a Qail using CALLER'S BUFFERS — writes wire bytes into `wire_buf` (ZERO-ALLOC).
+    /// This is the fastest path: clears all 3 buffers but keeps capacity.
+    /// Use with `connection.write_buf` for single-syscall send.
+    #[inline]
+    pub fn encode_cmd_reuse_into(
+        cmd: &Qail,
+        sql_buf: &mut BytesMut,
+        params: &mut Vec<Option<Vec<u8>>>,
+        wire_buf: &mut BytesMut,
+    ) {
+        Self::encode_cmd_sql_to(cmd, sql_buf, params);
+
+        // Build wire protocol into caller's buffer (zero-alloc)
+        batch::build_extended_query_into(wire_buf, sql_buf, params)
+            .expect("Parameter limit exceeded in AST encoder");
+    }
+
+    /// Internal helper: encode AST to SQL bytes + params (shared by both reuse variants).
+    #[inline]
+    fn encode_cmd_sql_to(
+        cmd: &Qail,
+        sql_buf: &mut BytesMut,
+        params: &mut Vec<Option<Vec<u8>>>,
+    ) {
         // Clear buffers (but keep capacity!)
         sql_buf.clear();
         params.clear();
@@ -138,10 +169,6 @@ impl AstEncoder {
                 cmd.action
             ),
         }
-
-        // Build wire protocol (reuses internal allocation in batch module)
-        batch::build_extended_query(sql_buf, params)
-            .expect("Parameter limit exceeded in AST encoder")
     }
 
     /// Encode a Qail to SQL string + params (for prepared statement caching).
