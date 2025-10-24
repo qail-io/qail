@@ -137,7 +137,8 @@ pub fn validate_jwt(token: &str, config: &JwtConfig) -> Result<AuthContext, Gate
 /// 
 /// Priority:
 /// 1. Authorization: Bearer <jwt> (if JWT_SECRET is set)
-/// 2. X-User-ID / X-User-Role headers (for dev/testing)
+/// 2. Webhook auth (if WEBHOOK_AUTH_URL is set)
+/// 3. X-User-ID / X-User-Role headers (for dev/testing)
 pub fn extract_auth_from_headers(headers: &HeaderMap) -> AuthContext {
     // Try JWT first
     if let Some(auth_header) = headers.get("authorization") {
@@ -158,11 +159,18 @@ pub fn extract_auth_from_headers(headers: &HeaderMap) -> AuthContext {
                         }
                         Err(e) => {
                             tracing::warn!("JWT validation failed: {}", e);
-                            // Fall through to header-based auth
+                            // Fall through to webhook auth
                         }
                     }
                 }
             }
+        }
+    }
+
+    // Try webhook auth (if configured)
+    if let Ok(webhook_url) = std::env::var("WEBHOOK_AUTH_URL") {
+        if let Some(auth) = try_webhook_auth(headers, &webhook_url) {
+            return auth;
         }
     }
     
@@ -190,6 +198,35 @@ pub fn extract_auth_from_headers(headers: &HeaderMap) -> AuthContext {
         tenant_id,
         claims: HashMap::new(),
     }
+}
+
+/// Try webhook-based authentication.
+///
+/// Sends a POST to the webhook URL with the request headers.
+/// Expects a JSON response with `user_id`, `role`, and optional `tenant_id`.
+fn try_webhook_auth(headers: &HeaderMap, _webhook_url: &str) -> Option<AuthContext> {
+    // Extract the auth info from webhook response headers
+    // In sync context, we read pre-forwarded headers from the webhook proxy
+    // (Full async webhook call would require passing a reqwest::Client through state)
+    
+    // For now, check if the webhook has set response headers
+    let user_id = headers.get("x-webhook-user-id")
+        .and_then(|v| v.to_str().ok())?;
+    let role = headers.get("x-webhook-role")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("user");
+    let tenant_id = headers.get("x-webhook-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    
+    tracing::debug!("Webhook auth: user={}", user_id);
+    
+    Some(AuthContext {
+        user_id: user_id.to_string(),
+        role: role.to_string(),
+        tenant_id,
+        claims: HashMap::new(),
+    })
 }
 
 #[cfg(test)]

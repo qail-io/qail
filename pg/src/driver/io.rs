@@ -55,9 +55,11 @@ impl PgConnection {
     }
 
     /// Send raw bytes to the stream.
+    /// Includes flush for TLS safety — TLS buffers internally and
+    /// needs flush to push encrypted data to the underlying TCP socket.
     pub async fn send_bytes(&mut self, bytes: &[u8]) -> PgResult<()> {
         self.stream.write_all(bytes).await?;
-        self.stream.flush().await?; // CRITICAL: Must flush for PostgreSQL to process!
+        self.stream.flush().await?;
         Ok(())
     }
 
@@ -70,12 +72,13 @@ impl PgConnection {
         self.write_buf.extend_from_slice(bytes);
     }
 
-    /// Flush the write buffer to the stream.
-    /// This is the only syscall in the buffered write path.
+    /// Flush the write buffer to the stream (single write_all + flush).
+    /// The flush is critical for TLS connections.
     pub async fn flush_write_buf(&mut self) -> PgResult<()> {
         if !self.write_buf.is_empty() {
             self.stream.write_all(&self.write_buf).await?;
             self.write_buf.clear();
+            self.stream.flush().await?;
         }
         Ok(())
     }

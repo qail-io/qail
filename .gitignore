@@ -64,3 +64,4 @@ pg/examples/*.go
 # Security: Internal config (not for distribution)
 qail.toml
 multi_ops_agent_plan.md
+GAP.md

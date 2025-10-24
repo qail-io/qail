@@ -35,6 +35,7 @@ pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod error;
+pub mod event;
 pub mod handler;
 pub mod metrics;
 pub mod middleware;

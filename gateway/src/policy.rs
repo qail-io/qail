@@ -26,6 +26,14 @@ pub struct PolicyDef {
     pub role: Option<String>,
     #[serde(default)]
     pub operations: Vec<OperationType>,
+    /// Column-level permissions: only these columns are visible (whitelist).
+    /// If empty, all columns are allowed.
+    #[serde(default)]
+    pub allowed_columns: Vec<String>,
+    /// Column-level permissions: these columns are hidden (blacklist).
+    /// Applied after allowed_columns.
+    #[serde(default)]
+    pub denied_columns: Vec<String>,
 }
 
 /// Operations a policy can allow
@@ -120,6 +128,36 @@ impl PolicyEngine {
             self.inject_filter(cmd, &filter)?;
             tracing::debug!("Applied policy '{}' filter: {}", policy_name, filter);
         }
+
+        // Apply column-level permissions
+        for policy in &self.policies {
+            if policy.table != "*" && policy.table != cmd.table {
+                continue;
+            }
+            if let Some(ref required_role) = policy.role {
+                if &auth.role != required_role {
+                    continue;
+                }
+            }
+
+            // Whitelist: restrict to allowed columns only
+            if !policy.allowed_columns.is_empty() {
+                self.apply_column_whitelist(cmd, &policy.allowed_columns);
+                tracing::debug!(
+                    "Policy '{}' restricts columns to: {:?}",
+                    policy.name, policy.allowed_columns
+                );
+            }
+
+            // Blacklist: strip denied columns
+            if !policy.denied_columns.is_empty() {
+                self.apply_column_blacklist(cmd, &policy.denied_columns);
+                tracing::debug!(
+                    "Policy '{}' denies columns: {:?}",
+                    policy.name, policy.denied_columns
+                );
+            }
+        }
         
         Ok(())
     }
@@ -197,6 +235,39 @@ impl PolicyEngine {
         Ok(())
     }
     
+    /// Apply column whitelist: replace SELECT columns with only the allowed set
+    fn apply_column_whitelist(&self, cmd: &mut Qail, allowed: &[String]) {
+        if cmd.columns.is_empty() || cmd.columns == vec![Expr::Star] {
+            // SELECT * → restrict to allowed columns
+            cmd.columns = allowed.iter().map(|c| Expr::Named(c.clone())).collect();
+        } else {
+            // Filter existing columns to only allowed ones
+            cmd.columns.retain(|expr| {
+                match expr {
+                    Expr::Named(name) => allowed.iter().any(|a| a == name),
+                    Expr::Aliased { name, .. } => allowed.iter().any(|a| a == name),
+                    _ => true, // Keep aggregates, casts, etc.
+                }
+            });
+        }
+    }
+    
+    /// Apply column blacklist: remove denied columns from SELECT
+    fn apply_column_blacklist(&self, cmd: &mut Qail, denied: &[String]) {
+        if cmd.columns.is_empty() || cmd.columns == vec![Expr::Star] {
+            // Can't strip from *, leave as-is (blacklist is best-effort with SELECT *)
+            // The caller should use allowed_columns for strict enforcement
+            return;
+        }
+        cmd.columns.retain(|expr| {
+            match expr {
+                Expr::Named(name) => !denied.iter().any(|d| d == name),
+                Expr::Aliased { name, .. } => !denied.iter().any(|d| d == name),
+                _ => true,
+            }
+        });
+    }
+    
     /// Check if any policy denies access (before filter injection)
     pub fn check_access(&self, auth: &AuthContext, table: &str, action: Action) -> Result<(), GatewayError> {
         let op = OperationType::from_action(action);
@@ -271,6 +342,8 @@ mod tests {
             filter: Some("user_id = $user_id".to_string()),
             role: None,
             operations: vec![OperationType::Read],
+            allowed_columns: vec![],
+            denied_columns: vec![],
         });
         
         let auth = AuthContext {
@@ -288,5 +361,61 @@ mod tests {
         let condition = &cmd.cages[0].conditions[0];
         assert_eq!(condition.left, Expr::Named("user_id".to_string()));
         assert_eq!(condition.value, Value::String("user456".to_string()));
+    }
+    
+    #[test]
+    fn test_column_whitelist() {
+        let mut engine = PolicyEngine::new();
+        engine.add_policy(PolicyDef {
+            name: "hide_sensitive".to_string(),
+            table: "users".to_string(),
+            filter: None,
+            role: None,
+            operations: vec![],
+            allowed_columns: vec!["id".into(), "name".into(), "email".into()],
+            denied_columns: vec![],
+        });
+        
+        let auth = AuthContext {
+            user_id: "user1".to_string(),
+            role: "user".to_string(),
+            tenant_id: None,
+            claims: std::collections::HashMap::new(),
+        };
+        
+        // SELECT * should be restricted
+        let mut cmd = Qail::get("users");
+        engine.apply_policies(&auth, &mut cmd).unwrap();
+        assert_eq!(cmd.columns.len(), 3);
+        assert!(cmd.columns.contains(&Expr::Named("id".to_string())));
+        assert!(cmd.columns.contains(&Expr::Named("name".to_string())));
+        assert!(cmd.columns.contains(&Expr::Named("email".to_string())));
+    }
+    
+    #[test]
+    fn test_column_blacklist() {
+        let mut engine = PolicyEngine::new();
+        engine.add_policy(PolicyDef {
+            name: "hide_password".to_string(),
+            table: "users".to_string(),
+            filter: None,
+            role: None,
+            operations: vec![],
+            allowed_columns: vec![],
+            denied_columns: vec!["password_hash".into(), "secret_key".into()],
+        });
+        
+        let auth = AuthContext {
+            user_id: "user1".to_string(),
+            role: "user".to_string(),
+            tenant_id: None,
+            claims: std::collections::HashMap::new(),
+        };
+        
+        let mut cmd = Qail::get("users").columns(["id", "name", "password_hash", "secret_key"]);
+        engine.apply_policies(&auth, &mut cmd).unwrap();
+        assert_eq!(cmd.columns.len(), 2);
+        assert!(cmd.columns.contains(&Expr::Named("id".to_string())));
+        assert!(cmd.columns.contains(&Expr::Named("name".to_string())));
     }
 }

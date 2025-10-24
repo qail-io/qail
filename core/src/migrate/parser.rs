@@ -19,10 +19,11 @@
 
 use super::schema::{
     CheckConstraint, CheckExpr, Column, Comment, EnumType, Extension, FkAction, Grant, Index,
-    MigrationHint, MultiColumnForeignKey, Privilege, Schema, SchemaFunctionDef, SchemaTriggerDef,
-    Sequence, Table, ViewDef,
+    MigrationHint, MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind, Schema,
+    SchemaFunctionDef, SchemaTriggerDef, Sequence, Table, ViewDef,
 };
 use super::types::ColumnType;
+use std::collections::HashMap;
 
 /// Parse a .qail file into a Schema.
 pub fn parse_qail(input: &str) -> Result<Schema, String> {
@@ -88,6 +89,15 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
         } else if line.starts_with("drop ") {
             let hint = parse_drop(line)?;
             schema.add_hint(hint);
+        } else if line.starts_with("bucket ") {
+            let res = parse_resource(line, &mut lines, ResourceKind::Bucket)?;
+            schema.add_resource(res);
+        } else if line.starts_with("queue ") {
+            let res = parse_resource(line, &mut lines, ResourceKind::Queue)?;
+            schema.add_resource(res);
+        } else if line.starts_with("topic ") {
+            let res = parse_resource(line, &mut lines, ResourceKind::Topic)?;
+            schema.add_resource(res);
         } else {
             return Err(format!("Unknown statement: {}", line));
         }
@@ -259,10 +269,9 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     .strip_prefix("check(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("");
-                if !inner.is_empty() {
-                    if let Some(expr) = parse_check_expr_from_qail(inner) {
+                if !inner.is_empty()
+                    && let Some(expr) = parse_check_expr_from_qail(inner) {
                         col.check = Some(CheckConstraint { expr, name: None });
-                    }
                 }
             }
             _ => {
@@ -862,6 +871,7 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     }
 
     // Try simple comparisons: "col >= val", "col > val", etc.
+    #[allow(clippy::type_complexity)]
     let ops: &[(&str, fn(String, i64) -> CheckExpr)] = &[
         (">=", |col, val| CheckExpr::GreaterOrEqual { column: col, value: val }),
         ("<=", |col, val| CheckExpr::LessOrEqual { column: col, value: val }),
@@ -898,6 +908,84 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     }
 
     None
+}
+
+/// Parse an infrastructure resource declaration.
+/// Supports single-line: `bucket avatars`
+/// and multi-line block: `bucket avatars { provider s3 region "ap-southeast-1" }`
+fn parse_resource<'a, I: Iterator<Item = &'a str>>(
+    first_line: &str,
+    lines: &mut std::iter::Peekable<I>,
+    kind: ResourceKind,
+) -> Result<ResourceDef, String> {
+    let keyword = kind.to_string();
+    let after_keyword = first_line
+        .strip_prefix(&keyword)
+        .ok_or_else(|| format!("Expected '{}' keyword", keyword))?
+        .trim();
+
+    // Extract name (first word after the keyword)
+    let (name, rest) = match after_keyword.split_once(|c: char| c.is_whitespace() || c == '{') {
+        Some((n, r)) => (n.trim(), r.trim()),
+        None => (after_keyword.trim_end_matches('{'), ""),
+    };
+
+    if name.is_empty() {
+        return Err(format!("Missing name for {} declaration", keyword));
+    }
+
+    let mut provider = None;
+    let mut properties = HashMap::new();
+
+    // Check if block is on the same line: `bucket avatars { provider s3 }`
+    let has_block = first_line.contains('{');
+
+    if has_block {
+        // Collect content until closing brace
+        let mut block_content = rest.trim_start_matches('{').to_string();
+
+        // If no closing brace on same line, read until we find it
+        if !block_content.contains('}') {
+            for next_line in lines.by_ref() {
+                let next_line = next_line.trim();
+                if next_line == "}" || next_line.ends_with('}') {
+                    let trimmed = next_line.trim_end_matches('}').trim();
+                    if !trimmed.is_empty() {
+                        block_content.push(' ');
+                        block_content.push_str(trimmed);
+                    }
+                    break;
+                }
+                block_content.push(' ');
+                block_content.push_str(next_line);
+            }
+        }
+
+        // Parse key-value pairs from block content
+        let content = block_content.trim_end_matches('}').trim();
+        let mut tokens = content.split_whitespace().peekable();
+
+        while let Some(key) = tokens.next() {
+            if key.is_empty() || key == "}" {
+                continue;
+            }
+            if let Some(value) = tokens.next() {
+                let value = value.trim_matches('"').to_string();
+                if key == "provider" {
+                    provider = Some(value);
+                } else {
+                    properties.insert(key.to_string(), value);
+                }
+            }
+        }
+    }
+
+    Ok(ResourceDef {
+        name: name.to_string(),
+        kind,
+        provider,
+        properties,
+    })
 }
 
 #[cfg(test)]
