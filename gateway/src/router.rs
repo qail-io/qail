@@ -3,16 +3,19 @@
 //! Defines the axum router with all gateway endpoints.
 
 use axum::{
+    middleware as axum_mw,
     routing::{get, post, MethodRouter},
     Router,
 };
 use std::sync::Arc;
 use tower_http::{
+    compression::CompressionLayer,
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
 
 use crate::handler::{execute_batch, execute_query, execute_query_binary, health_check};
+use crate::middleware::rate_limit_middleware;
 use crate::rest::auto_rest_routes;
 use crate::ws::ws_handler;
 use crate::GatewayState;
@@ -55,7 +58,9 @@ pub fn create_router(
     }
 
     router
-        // Middleware layers
+        // Middleware layers (order: bottom = outermost = first to run)
+        .layer(axum_mw::from_fn_with_state(Arc::clone(&state), rate_limit_middleware))
+        .layer(CompressionLayer::new())
         .layer(trace)
         .layer(cors)
         .with_state(state)

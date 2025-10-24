@@ -930,7 +930,7 @@ async fn main() -> Result<()> {
                     for line in config.lines() {
                         let line = line.trim();
                         if line.starts_with("url") && line.contains('=') {
-                            let val = line.splitn(2, '=').nth(1).unwrap_or("").trim().trim_matches('"');
+                            let val = line.split_once('=').map(|x| x.1).unwrap_or("").trim().trim_matches('"');
                             if val.starts_with("postgres") {
                                 return Ok(val.to_string());
                             }

@@ -222,8 +222,8 @@ pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
     // Branch management endpoints
     router = router
         .route("/api/_branch", axum::routing::post(branch_create_handler).get(branch_list_handler))
-        .route("/api/_branch/:name", axum::routing::delete(branch_delete_handler))
-        .route("/api/_branch/:name/merge", axum::routing::post(branch_merge_handler));
+        .route("/api/_branch/{name}", axum::routing::delete(branch_delete_handler))
+        .route("/api/_branch/{name}/merge", axum::routing::post(branch_merge_handler));
 
     tracing::info!("  DEVEX: GET /api/_schema → Schema introspection");
     tracing::info!("  DEVEX: GET /api/_openapi → OpenAPI 3.0 spec");
@@ -530,6 +530,24 @@ async fn list_handler(
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
+    // Build cache key from full URI + user identity
+    let is_streaming = params.stream.unwrap_or(false);
+    let has_branch = headers.get("x-branch-id").is_some();
+    let has_nested = params.expand.as_deref().is_some_and(|e| e.contains("nested:"));
+    let can_cache = !is_streaming && !has_branch && !has_nested;
+    let cache_key = format!("rest:{}:{}:{}", table_name, auth.user_id, request.uri());
+
+    // Check cache for simple read queries
+    if can_cache {
+        if let Some(cached) = state.cache.get(&cache_key) {
+            return Ok(Response::builder()
+                .header("Content-Type", "application/json")
+                .header("X-Cache", "HIT")
+                .body(Body::from(cached))
+                .unwrap());
+        }
+    }
+
     // Execute
     let mut conn = state
         .pool
@@ -575,7 +593,7 @@ async fn list_handler(
     }
 
     // NDJSON streaming: one JSON object per line
-    if params.stream.unwrap_or(false) {
+    if is_streaming {
         let mut body = String::new();
         for row in &data {
             body.push_str(&serde_json::to_string(row).unwrap_or_default());
@@ -587,13 +605,22 @@ async fn list_handler(
             .unwrap());
     }
 
-    Ok(Json(ListResponse {
+    let response_body = ListResponse {
         data,
         count,
         total: None,
         limit,
         offset,
-    }).into_response())
+    };
+
+    // Store in cache for simple queries
+    if can_cache {
+        if let Ok(json) = serde_json::to_string(&response_body) {
+            state.cache.set(&cache_key, &table_name, json);
+        }
+    }
+
+    Ok(Json(response_body).into_response())
 }
 
 /// GET /api/{table}/aggregate — aggregation queries
@@ -1930,7 +1957,7 @@ async fn branch_list_handler(
         Ok(rows) => {
             let branches: Vec<Value> = rows
                 .iter()
-                .map(|row| row_to_json(row))
+                .map(row_to_json)
                 .collect();
             Json(json!({"branches": branches})).into_response()
         }
@@ -2005,7 +2032,7 @@ async fn branch_merge_handler(
     let stats_sql = qail_pg::driver::branch_sql::branch_stats_sql(&name);
     let stats = match conn.get_mut().simple_query(&stats_sql).await {
         Ok(rows) => {
-            rows.iter().map(|row| row_to_json(row)).collect::<Vec<_>>()
+            rows.iter().map(row_to_json).collect::<Vec<_>>()
         }
         Err(_) => vec![],
     };

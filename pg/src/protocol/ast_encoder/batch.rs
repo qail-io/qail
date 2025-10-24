@@ -24,6 +24,27 @@ pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<By
     let total_size = 9 + sql.len() + 13 + params_size + 6 + 10 + 5;
 
     let mut buf = BytesMut::with_capacity(total_size);
+    build_extended_query_into(&mut buf, sql, params)?;
+    Ok(buf)
+}
+
+/// Build Extended Query protocol into a CALLER-PROVIDED buffer (ZERO-ALLOC).
+/// Clears the buffer first but keeps capacity for reuse.
+/// Includes Describe to get RowDescription (column metadata).
+pub fn build_extended_query_into(buf: &mut BytesMut, sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<(), EncodeError> {
+    if params.len() > i16::MAX as usize {
+        return Err(EncodeError::TooManyParameters(params.len()));
+    }
+
+    let params_size: usize = params
+        .iter()
+        .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
+        .sum();
+    // Extra 6 bytes for Describe message ('D' + len + 'P' + null)
+    let total_size = 9 + sql.len() + 13 + params_size + 6 + 10 + 5;
+
+    buf.clear();
+    buf.reserve(total_size);
 
     // ===== PARSE =====
     buf.extend_from_slice(b"P");
@@ -69,7 +90,7 @@ pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<By
     // ===== SYNC =====
     buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
 
-    Ok(buf)
+    Ok(())
 }
 
 /// Encode multiple Qails as a pipeline batch.

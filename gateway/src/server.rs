@@ -11,6 +11,7 @@ use crate::cache::QueryCache;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
 use crate::event::EventTriggerEngine;
+use crate::middleware::RateLimiter;
 use crate::policy::PolicyEngine;
 use crate::router::create_router;
 use crate::schema::SchemaRegistry;
@@ -25,6 +26,7 @@ pub struct GatewayState {
     pub schema: SchemaRegistry,
     pub cache: QueryCache,
     pub config: GatewayConfig,
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 /// The QAIL Gateway server
@@ -92,8 +94,19 @@ impl Gateway {
         if let Some(ref events_path) = self.config.events_path {
             tracing::info!("Loading event triggers from: {}", events_path);
             event_engine.load_from_file(events_path)
-                .map_err(|e| GatewayError::Config(e))?;
+                .map_err(GatewayError::Config)?;
         }
+        
+        // Initialize rate limiter
+        let rate_limiter = RateLimiter::new(
+            self.config.rate_limit_rate,
+            self.config.rate_limit_burst,
+        );
+        tracing::info!(
+            "Rate limiter: {:.0} req/s, burst={}",
+            self.config.rate_limit_rate,
+            self.config.rate_limit_burst
+        );
         
         self.state = Some(Arc::new(GatewayState {
             pool,
@@ -102,6 +115,7 @@ impl Gateway {
             schema,
             cache,
             config: self.config.clone(),
+            rate_limiter,
         }));
         
         tracing::info!("Gateway initialized");
