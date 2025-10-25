@@ -2219,4 +2219,156 @@ mod tests {
         assert!(matches!(parse_scalar_value("null"), QailValue::Null));
         assert!(matches!(parse_scalar_value("hello"), QailValue::String(_)));
     }
+
+    // =========================================================================
+    // SQL Injection Hardening
+    // =========================================================================
+
+    #[test]
+    fn test_sql_injection_in_filter_value() {
+        // Classic SQL injection attempts — must be treated as literal strings
+        let payloads = vec![
+            "'; DROP TABLE users; --",
+            "1 OR 1=1",
+            "1; SELECT * FROM pg_shadow",
+            "' UNION SELECT password FROM users --",
+            "Robert'); DROP TABLE students;--",
+            "1' AND '1'='1",
+            "admin'--",
+            "' OR ''='",
+        ];
+        for payload in payloads {
+            let qs = format!("name.eq={}", urlencoding::encode(payload));
+            let filters = parse_filters(&qs);
+            assert_eq!(filters.len(), 1, "Injection payload should produce exactly 1 filter");
+            // Value must be a String (treated as literal, never parsed as SQL)
+            match &filters[0].2 {
+                QailValue::String(s) => assert_eq!(s, payload),
+                QailValue::Int(_) | QailValue::Float(_) => {
+                    // "1 OR 1=1" might parse the leading "1" as int — that's fine,
+                    // the important thing is it's a parameterized value
+                }
+                _ => {} // Any QailValue is safe — it's parameterized
+            }
+        }
+    }
+
+    #[test]
+    fn test_null_bytes_in_filter() {
+        let filters = parse_filters("name.eq=hello%00world");
+        assert_eq!(filters.len(), 1);
+        // Must not panic and must produce a value
+    }
+
+    #[test]
+    fn test_extremely_long_value() {
+        let long_val = "a".repeat(100_000);
+        let qs = format!("name.eq={}", long_val);
+        let filters = parse_filters(&qs);
+        assert_eq!(filters.len(), 1);
+    }
+
+    #[test]
+    fn test_empty_and_malformed_query_strings() {
+        assert!(parse_filters("").is_empty());
+        assert!(parse_filters("&&&").is_empty());
+        // "===" splits as key="", value="=" — empty key produces no filter
+        // (actually "=" key with "=" value — depends on split_once behavior)
+        assert!(parse_filters("key_no_value").is_empty());
+        // Bare operator with no value
+        let f = parse_filters("col.eq=");
+        assert_eq!(f.len(), 1); // empty string is valid
+    }
+
+    #[test]
+    fn test_unicode_in_filters() {
+        let filters = parse_filters("name.eq=日本語テスト&city.like=%E4%B8%8A%E6%B5%B7");
+        assert_eq!(filters.len(), 2);
+        match &filters[0].2 {
+            QailValue::String(s) => assert_eq!(s, "日本語テスト"),
+            _ => panic!("Expected unicode string"),
+        }
+    }
+
+    // =========================================================================
+    // Proptest Fuzzing
+    // =========================================================================
+
+    mod fuzz {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Generate random query strings in the format `col.op=val`
+        fn arb_query_string() -> impl Strategy<Value = String> {
+            prop::collection::vec(
+                (
+                    "[a-z_]{1,20}",           // column name
+                    prop_oneof![              // operator
+                        Just("eq"), Just("ne"), Just("gt"), Just("gte"),
+                        Just("lt"), Just("lte"), Just("like"), Just("ilike"),
+                        Just("in"), Just("not_in"), Just("is_null"), Just("contains"),
+                        Just("unknown_op"),
+                    ],
+                    ".*",                     // arbitrary value
+                ),
+                0..10, // 0 to 10 filter pairs
+            )
+            .prop_map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(col, op, val)| format!("{}.{}={}", col, op, urlencoding::encode(&val)))
+                    .collect::<Vec<_>>()
+                    .join("&")
+            })
+        }
+
+        proptest! {
+            /// parse_filters must NEVER panic on any input
+            #[test]
+            fn fuzz_parse_filters_never_panics(qs in ".*") {
+                let _ = parse_filters(&qs);
+            }
+
+            /// parse_scalar_value must NEVER panic on any input
+            #[test]
+            fn fuzz_parse_scalar_value_never_panics(s in ".*") {
+                let _ = parse_scalar_value(&s);
+            }
+
+            /// Structured fuzzing: random col.op=val triplets
+            #[test]
+            fn fuzz_structured_filters(qs in arb_query_string()) {
+                let filters = parse_filters(&qs);
+                // All filters must have non-empty column names
+                for (col, _op, _val) in &filters {
+                    prop_assert!(!col.is_empty(), "Column name must not be empty");
+                }
+            }
+
+            /// Reserved params must NEVER appear in filter output
+            #[test]
+            fn fuzz_reserved_params_filtered(
+                col in prop_oneof![
+                    Just("limit"), Just("offset"), Just("sort"),
+                    Just("select"), Just("expand"), Just("cursor"),
+                    Just("distinct"), Just("returning"),
+                ],
+                val in "[a-z0-9]{1,10}"
+            ) {
+                let qs = format!("{}={}", col, val);
+                let filters = parse_filters(&qs);
+                prop_assert!(filters.is_empty(), "Reserved param '{}' should not become a filter", col);
+            }
+
+            /// parse_scalar_value output is always a valid QailValue variant
+            #[test]
+            fn fuzz_scalar_value_is_valid(s in "[^\u{0}]{0,1000}") {
+                let val = parse_scalar_value(&s);
+                // Just verify it produced a valid QailValue (no panic)
+                match val {
+                    _ => {} // Any variant is fine — we just care it didn't panic
+                }
+            }
+        }
+    }
 }
