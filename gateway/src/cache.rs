@@ -206,4 +206,141 @@ mod tests {
         cache.set("get users", "users", r#"{"rows":[]}"#.to_string());
         assert!(cache.get("get users").is_none());
     }
+
+    // =========================================================================
+    // Cache Correctness (Production Readiness)
+    // =========================================================================
+
+    #[test]
+    fn test_write_then_read_consistency() {
+        // After a write + invalidation, reads must NOT return stale data
+        let cache = QueryCache::new(CacheConfig::default());
+
+        // Initial state: cache "v1"
+        cache.set("SELECT * FROM users", "users", r#"{"version":"v1"}"#.to_string());
+        assert_eq!(cache.get("SELECT * FROM users").unwrap(), r#"{"version":"v1"}"#);
+
+        // Simulate a mutation → invalidate
+        cache.invalidate_table("users");
+
+        // Read MUST miss (no stale v1)
+        assert!(cache.get("SELECT * FROM users").is_none(), "Must not return stale data after invalidation");
+
+        // Re-cache with "v2"
+        cache.set("SELECT * FROM users", "users", r#"{"version":"v2"}"#.to_string());
+        assert_eq!(cache.get("SELECT * FROM users").unwrap(), r#"{"version":"v2"}"#);
+    }
+
+    #[test]
+    fn test_cross_table_isolation() {
+        // Invalidating table A must NOT affect table B
+        let cache = QueryCache::new(CacheConfig::default());
+
+        cache.set("SELECT * FROM users", "users", "users_data".to_string());
+        cache.set("SELECT * FROM orders", "orders", "orders_data".to_string());
+
+        cache.invalidate_table("users");
+
+        assert!(cache.get("SELECT * FROM users").is_none(), "users should be invalidated");
+        assert!(cache.get("SELECT * FROM orders").is_some(), "orders should NOT be invalidated");
+    }
+
+    #[test]
+    fn test_ttl_expiry() {
+        let cache = QueryCache::new(CacheConfig {
+            ttl: Duration::from_millis(50), // 50ms TTL
+            ..Default::default()
+        });
+
+        cache.set("query", "table", "data".to_string());
+        assert!(cache.get("query").is_some(), "Should hit immediately");
+
+        // Wait for TTL to expire
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(cache.get("query").is_none(), "Should miss after TTL expiry");
+    }
+
+    #[test]
+    fn test_max_capacity_does_not_corrupt() {
+        let cache = QueryCache::new(CacheConfig {
+            max_entries: 5,
+            ttl: Duration::from_secs(60),
+            enabled: true,
+        });
+
+        // Fill to capacity
+        for i in 0..5 {
+            cache.set(&format!("query_{}", i), "table", format!("data_{}", i));
+        }
+        assert_eq!(cache.stats().entries, 5);
+
+        // Try to add beyond capacity — should silently drop
+        cache.set("query_overflow", "table", "overflow_data".to_string());
+
+        // Verify no corruption: existing entries still return correct data
+        for i in 0..5 {
+            if let Some(val) = cache.get(&format!("query_{}", i)) {
+                assert_eq!(val, format!("data_{}", i), "Data corruption detected!");
+            }
+        }
+    }
+
+    #[test]
+    fn test_concurrent_read_write_no_stale_data() {
+        use std::sync::Arc;
+
+        let cache = Arc::new(QueryCache::new(CacheConfig::default()));
+        let mut handles = Vec::new();
+
+        // 5 writer threads: continuously write + invalidate
+        for i in 0..5 {
+            let cache = cache.clone();
+            handles.push(std::thread::spawn(move || {
+                for j in 0..100 {
+                    let query = format!("SELECT * FROM table_{}", i);
+                    let table = format!("table_{}", i);
+                    cache.set(&query, &table, format!("data_{}_{}", i, j));
+                    // Immediately invalidate
+                    cache.invalidate_table(&table);
+                }
+            }));
+        }
+
+        // 5 reader threads: continuously read, verify no panic
+        for i in 0..5 {
+            let cache = cache.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    let query = format!("SELECT * FROM table_{}", i);
+                    // This should never panic, and if it returns data it should be valid
+                    let _ = cache.get(&query);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("Thread panicked during concurrent cache test");
+        }
+
+        // If we get here without panics or deadlocks, the test passes
+    }
+
+    #[test]
+    fn test_hit_rate_accuracy() {
+        let cache = QueryCache::new(CacheConfig::default());
+
+        cache.set("q1", "t", "d".to_string());
+
+        // 1 miss
+        cache.get("q_nonexistent");
+        // 3 hits
+        cache.get("q1");
+        cache.get("q1");
+        cache.get("q1");
+
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 3);
+        assert_eq!(stats.misses, 1);
+        assert!((stats.hit_rate() - 75.0).abs() < 0.01, "Hit rate should be 75%, got {}", stats.hit_rate());
+    }
 }

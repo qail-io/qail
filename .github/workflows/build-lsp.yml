@@ -1,0 +1,105 @@
+name: Build LSP Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: qail-lsp
+            asset_name: qail-lsp-linux-x64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: qail-lsp
+            asset_name: qail-lsp-linux-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: qail-lsp
+            asset_name: qail-lsp-darwin-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: qail-lsp
+            asset_name: qail-lsp-darwin-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: qail-lsp.exe
+            asset_name: qail-lsp-win-x64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: cargo build --release --package qail-lsp --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename and Collect Artifacts
+        run: |
+          mkdir release_assets
+          # Move and rename each artifact to match its directory name (which is the asset_name)
+          for dir in artifacts/*; do
+            if [ -d "$dir" ]; then
+              asset_name=$(basename "$dir")
+              # Find the binary inside (either qail-lsp or qail-lsp.exe)
+              if [ -f "$dir/qail-lsp.exe" ]; then
+                mv "$dir/qail-lsp.exe" "release_assets/$asset_name"
+              elif [ -f "$dir/qail-lsp" ]; then
+                mv "$dir/qail-lsp" "release_assets/$asset_name"
+              else
+                echo "Warning: No binary found in $dir"
+              fi
+            fi
+          done
+          ls -R release_assets
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release_assets/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
