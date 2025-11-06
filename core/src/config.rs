@@ -46,9 +46,6 @@ pub struct QailConfig {
     pub postgres: PostgresConfig,
 
     #[serde(default)]
-    pub redis: Option<RedisConfig>,
-
-    #[serde(default)]
     pub qdrant: Option<QdrantConfig>,
 
     #[serde(default)]
@@ -121,7 +118,7 @@ pub struct PostgresConfig {
     #[serde(default)]
     pub rls: Option<RlsConfig>,
 
-    /// SSH tunnel host for remote connections (e.g., "example" or "user@host").
+    /// SSH tunnel host for remote connections (e.g., "myserver" or "user@host").
     #[serde(default)]
     pub ssh: Option<String>,
 }
@@ -159,25 +156,6 @@ pub struct RlsConfig {
     pub super_admin_role: Option<String>,
 }
 
-/// `[redis]` — Redis connection settings.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RedisConfig {
-    #[serde(default = "default_redis_host")]
-    pub host: String,
-
-    #[serde(default = "default_redis_port")]
-    pub port: u16,
-
-    #[serde(default = "default_max_connections")]
-    pub max_connections: usize,
-
-    /// Optional password (supports `${VAR:-}` expansion).
-    pub password: Option<String>,
-}
-
-fn default_redis_host() -> String { "127.0.0.1".to_string() }
-fn default_redis_port() -> u16 { 6379 }
-
 /// `[qdrant]` — Qdrant connection settings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QdrantConfig {
@@ -189,6 +167,13 @@ pub struct QdrantConfig {
 
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+
+    /// Use TLS for gRPC connections.
+    /// - `None` (default) → auto-detect from URL scheme (`https://` = TLS)
+    /// - `Some(true)` → force TLS
+    /// - `Some(false)` → force plain TCP
+    #[serde(default)]
+    pub tls: Option<bool>,
 }
 
 fn default_qdrant_url() -> String { "http://localhost:6333".to_string() }
@@ -202,15 +187,25 @@ pub struct GatewayConfig {
     #[serde(default = "default_true")]
     pub cors: bool,
 
+    /// Allowed CORS origins. Empty = allow all.
+    #[serde(default)]
+    pub cors_allowed_origins: Option<Vec<String>>,
+
     /// Path to policy file.
     pub policy: Option<String>,
 
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+
+    /// Maximum number of relations in `?expand=` (default: 4).
+    /// Prevents query explosion from unbounded LEFT JOINs.
+    #[serde(default = "default_max_expand_depth")]
+    pub max_expand_depth: usize,
 }
 
 fn default_bind() -> String { "0.0.0.0:8080".to_string() }
 fn default_true() -> bool { true }
+fn default_max_expand_depth() -> usize { 4 }
 
 /// `[gateway.cache]` — query cache settings.
 #[derive(Debug, Clone, Deserialize)]
@@ -283,27 +278,6 @@ impl QailConfig {
         // DATABASE_URL overrides postgres.url
         if let Ok(url) = std::env::var("DATABASE_URL") {
             self.postgres.url = url;
-        }
-
-        // REDIS_URL overrides redis host+port (format: host:port)
-        if let Ok(url) = std::env::var("REDIS_URL") {
-            let redis = self.redis.get_or_insert(RedisConfig {
-                host: default_redis_host(),
-                port: default_redis_port(),
-                max_connections: default_max_connections(),
-                password: None,
-            });
-            // Parse host:port or just host
-            if let Some((host, port_str)) = url.rsplit_once(':') {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    redis.host = host.to_string();
-                    redis.port = port;
-                } else {
-                    redis.host = url;
-                }
-            } else {
-                redis.host = url;
-            }
         }
 
         // QDRANT_URL overrides qdrant.url
@@ -482,7 +456,7 @@ url = "postgres://localhost/test"
         assert_eq!(config.project.name, "test");
         assert_eq!(config.postgres.url, "postgres://localhost/test");
         assert_eq!(config.postgres.max_connections, 10); // default
-        assert!(config.redis.is_none());
+        assert!(config.qdrant.is_none());
         assert!(config.gateway.is_none());
     }
 
@@ -504,11 +478,6 @@ idle_timeout_secs = 300
 [postgres.rls]
 default_role = "app_user"
 super_admin_role = "super_admin"
-
-[redis]
-host = "10.0.0.1"
-port = 6380
-max_connections = 20
 
 [qdrant]
 url = "http://qdrant:6333"
@@ -538,10 +507,6 @@ embedding_model = "candle:bert-base"
 
         let rls = config.postgres.rls.unwrap();
         assert_eq!(rls.default_role.unwrap(), "app_user");
-
-        let redis = config.redis.unwrap();
-        assert_eq!(redis.host, "10.0.0.1");
-        assert_eq!(redis.port, 6380);
 
         let qdrant = config.qdrant.unwrap();
         assert_eq!(qdrant.max_connections, 15);
@@ -574,7 +539,6 @@ url = "postgres://localhost/legacy"
         // All new fields should have defaults
         assert_eq!(config.postgres.max_connections, 10);
         assert!(config.postgres.rls.is_none());
-        assert!(config.redis.is_none());
         assert!(config.qdrant.is_none());
         assert!(config.gateway.is_none());
     }

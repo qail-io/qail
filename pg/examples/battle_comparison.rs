@@ -12,7 +12,7 @@
 //! Approach 6: REST + expand (server-side JOIN — 1 query + JSON overhead)
 //!
 //! Run:
-//!   DATABASE_URL=postgresql://postgres@localhost:5432/example-db \
+//!   DATABASE_URL=postgresql://qail_user@localhost:5432/qail_test \
 //!     cargo run --example battle_comparison --features chrono,uuid --release
 //!
 //! Security note: Qail enforces RLS at the protocol level. GraphQL/REST

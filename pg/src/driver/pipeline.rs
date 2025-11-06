@@ -228,6 +228,7 @@ impl PgConnection {
             let stmt_name = Self::sql_to_stmt_name(&sql);
 
             if !self.prepared_statements.contains_key(&stmt_name) {
+                self.evict_prepared_if_full();
                 buf.extend(PgEncoder::encode_parse(&stmt_name, &sql, &[]));
                 self.prepared_statements.insert(stmt_name.clone(), sql);
             }
@@ -329,6 +330,7 @@ impl PgConnection {
         let stmt_name = sql_bytes_to_stmt_name(sql.as_bytes());
 
         if !self.prepared_statements.contains_key(&stmt_name) {
+            self.evict_prepared_if_full();
             let mut buf = BytesMut::with_capacity(sql.len() + 32);
             buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
             buf.extend(PgEncoder::encode_sync());

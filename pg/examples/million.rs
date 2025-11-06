@@ -3,7 +3,7 @@
 //! Tests 1 MILLION queries using pipelining.
 //! Serial would take ~10 hours so we skip it.
 //!
-//! Setup: ssh -L 5444:localhost:5432 staging -N -f
+//! Setup: ssh -L 5444:localhost:5432 myserver -N -f
 //! Run: STAGING_DB_PASSWORD="password" cargo run -p qail-pg --example million --release
 
 use std::time::Instant;
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = qail_pg::PgConnection::connect_with_password(
         "127.0.0.1",
         5444,
-        "example",
+        "qail_app",
         "example-staging",
         Some(&password),
     )

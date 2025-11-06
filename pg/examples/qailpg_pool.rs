@@ -12,6 +12,7 @@ const BATCH_SIZE: usize = 10_000;
 const TARGET_DURATION: Duration = Duration::from_secs(60);
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🏁 QAIL-pg POOL + PIPELINE 60-Second Benchmark");
     println!("================================================\n");
@@ -48,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let params_batch = Arc::clone(&params_batch);
         
         tasks.spawn(async move {
-            let mut conn = pool.acquire().await.unwrap();
+            let mut conn = pool.acquire_system().await.unwrap();
             let stmt = conn.prepare("SELECT id, name FROM harbors LIMIT $1").await.unwrap();
             
             while start.elapsed() < TARGET_DURATION {

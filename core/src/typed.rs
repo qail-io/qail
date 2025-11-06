@@ -1008,7 +1008,8 @@ mod tests {
         use crate::rls::RlsContext;
         
         // Super admin — RLS injection is a no-op but proof still required
-        let ctx = RlsContext::super_admin();
+        let token = crate::rls::SuperAdminToken::issue();
+        let ctx = RlsContext::super_admin(token);
         let query = Qail::typed(Orders)
             .column("id")
             .with_rls(&ctx)

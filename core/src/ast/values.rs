@@ -64,7 +64,7 @@ impl std::fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(n) => write!(f, "{}", n),
             Value::Float(n) => write!(f, "{}", n),
-            Value::String(s) => write!(f, "'{}'", s),
+            Value::String(s) => write!(f, "'{}'", s.replace('\'', "''")),
             Value::Param(n) => write!(f, "${}", n),
             Value::NamedParam(name) => write!(f, ":{}", name),
             Value::Function(s) => write!(f, "{}", s),

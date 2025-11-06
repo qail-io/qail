@@ -1,6 +1,7 @@
 //! Gateway configuration
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Main gateway configuration
@@ -21,6 +22,11 @@ pub struct GatewayConfig {
     /// Enable CORS
     #[serde(default = "default_true")]
     pub cors_enabled: bool,
+
+    /// Allowed CORS origins. Empty = allow all (backward compatible).
+    /// Example: ["https://app.qail.io", "https://staging.qail.io"]
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
     
     /// Enable query caching
     #[serde(default = "default_true")]
@@ -44,6 +50,92 @@ pub struct GatewayConfig {
     /// Rate limiter: maximum burst capacity
     #[serde(default = "default_rate_limit_burst")]
     pub rate_limit_burst: u32,
+
+    /// Maximum number of `?expand=` relations per request (default: 4).
+    /// Prevents query explosion from unbounded LEFT JOINs.
+    #[serde(default = "default_max_expand_depth")]
+    pub max_expand_depth: usize,
+
+    /// Statement timeout in milliseconds (default: 30000 = 30s).
+    /// Applied to every RLS-scoped connection. Prevents runaway queries.
+    #[serde(default = "default_statement_timeout_ms")]
+    pub statement_timeout_ms: u32,
+
+    /// Maximum rows returned per query (default: 10000).
+    /// A guardrail against accidental full table scans.
+    #[serde(default = "default_max_result_rows")]
+    pub max_result_rows: usize,
+
+    /// EXPLAIN pre-check mode: "off", "precheck" (default), or "enforce".
+    #[serde(default = "default_explain_mode")]
+    pub explain_mode: String,
+
+    /// EXPLAIN: reject if estimated cost exceeds this (default: 100,000).
+    #[serde(default = "default_explain_max_cost")]
+    pub explain_max_cost: f64,
+
+    /// EXPLAIN: reject if estimated rows exceed this (default: 1,000,000).
+    #[serde(default = "default_explain_max_rows")]
+    pub explain_max_rows: u64,
+
+    /// EXPLAIN: only pre-check queries with expand depth ≥ this (default: 3).
+    #[serde(default = "default_explain_depth_threshold")]
+    pub explain_depth_threshold: usize,
+
+    /// EXPLAIN cache TTL in seconds (default: 300 = 5 min).
+    #[serde(default = "default_explain_cache_ttl")]
+    pub explain_cache_ttl_secs: u64,
+
+    /// Maximum concurrent queries per tenant (default: 10).
+    /// Prevents a single tenant from monopolising the connection pool.
+    #[serde(default = "default_max_concurrent_queries")]
+    pub max_concurrent_queries: usize,
+
+    /// Maximum tracked tenants in the concurrency limiter (default: 10,000).
+    /// Prevents memory exhaustion from forged tenant IDs.
+    #[serde(default = "default_max_tenants")]
+    pub max_tenants: usize,
+
+    /// Idle timeout for tenant semaphore entries in seconds (default: 300).
+    /// Entries unused for this long are evicted by the background sweeper.
+    #[serde(default = "default_tenant_idle_timeout")]
+    pub tenant_idle_timeout_secs: u64,
+
+    /// Optional Qdrant configuration for vector operations.
+    #[serde(default)]
+    pub qdrant: Option<qail_core::config::QdrantConfig>,
+
+    /// Per-role guard overrides. Roles not listed use global defaults.
+    ///
+    /// Example TOML:
+    /// ```toml
+    /// [gateway.overrides.reporting]
+    /// max_result_rows = 100000
+    /// statement_timeout_ms = 120000
+    /// ```
+    #[serde(default)]
+    pub role_overrides: HashMap<String, GuardOverrides>,
+}
+
+/// Per-role limit overrides. All fields optional — omitted fields
+/// fall back to the global default.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GuardOverrides {
+    pub max_result_rows: Option<usize>,
+    pub statement_timeout_ms: Option<u32>,
+    pub explain_max_cost: Option<f64>,
+    pub explain_max_rows: Option<u64>,
+    pub max_expand_depth: Option<usize>,
+}
+
+/// Resolved limits for a specific request, after applying role overrides.
+#[derive(Debug, Clone)]
+pub struct EffectiveLimits {
+    pub max_result_rows: usize,
+    pub statement_timeout_ms: u32,
+    pub explain_max_cost: f64,
+    pub explain_max_rows: u64,
+    pub max_expand_depth: usize,
 }
 
 fn default_true() -> bool { true }
@@ -51,6 +143,17 @@ fn default_cache_max() -> usize { 1000 }
 fn default_cache_ttl() -> u64 { 60 }
 fn default_rate_limit_rate() -> f64 { 100.0 }
 fn default_rate_limit_burst() -> u32 { 200 }
+fn default_max_expand_depth() -> usize { 4 }
+fn default_statement_timeout_ms() -> u32 { 30_000 }
+fn default_max_result_rows() -> usize { 10_000 }
+fn default_explain_mode() -> String { "precheck".to_string() }
+fn default_explain_max_cost() -> f64 { 100_000.0 }
+fn default_explain_max_rows() -> u64 { 1_000_000 }
+fn default_explain_depth_threshold() -> usize { 3 }
+fn default_explain_cache_ttl() -> u64 { 300 }
+fn default_max_concurrent_queries() -> usize { 10 }
+fn default_max_tenants() -> usize { 10_000 }
+fn default_tenant_idle_timeout() -> u64 { 300 }
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -60,12 +163,26 @@ impl Default for GatewayConfig {
             policy_path: None,
             bind_address: "0.0.0.0:8080".to_string(),
             cors_enabled: true,
+            cors_allowed_origins: Vec::new(),
             cache_enabled: true,
             cache_max_entries: 1000,
             cache_ttl_seconds: 60,
             events_path: None,
             rate_limit_rate: 100.0,
             rate_limit_burst: 200,
+            max_expand_depth: 4,
+            statement_timeout_ms: 30_000,
+            max_result_rows: 10_000,
+            explain_mode: "precheck".to_string(),
+            explain_max_cost: 100_000.0,
+            explain_max_rows: 1_000_000,
+            explain_depth_threshold: 3,
+            explain_cache_ttl_secs: 300,
+            max_concurrent_queries: 10,
+            max_tenants: 10_000,
+            tenant_idle_timeout_secs: 300,
+            qdrant: None,
+            role_overrides: HashMap::new(),
         }
     }
 }
@@ -77,6 +194,51 @@ impl GatewayConfig {
             enabled: self.cache_enabled,
             max_entries: self.cache_max_entries,
             ttl: Duration::from_secs(self.cache_ttl_seconds),
+        }
+    }
+
+    /// Build EXPLAIN pre-check config from gateway settings.
+    pub fn explain_config(&self) -> qail_pg::explain::ExplainConfig {
+        use qail_pg::explain::{ExplainConfig, ExplainMode};
+
+        let mode = match self.explain_mode.as_str() {
+            "off" => ExplainMode::Off,
+            "enforce" => ExplainMode::Enforce,
+            _ => ExplainMode::Precheck,
+        };
+
+        ExplainConfig {
+            mode,
+            depth_threshold: self.explain_depth_threshold,
+            max_total_cost: self.explain_max_cost,
+            max_plan_rows: self.explain_max_rows,
+            cache_ttl: Duration::from_secs(self.explain_cache_ttl_secs),
+        }
+    }
+
+    /// Resolve effective limits for a given user role.
+    ///
+    /// Checks `role_overrides` for the role; any unset fields fall back
+    /// to the global defaults. Returns a flat `EffectiveLimits` struct
+    /// that handlers can use without further lookups.
+    pub fn effective_limits(&self, role: &str) -> EffectiveLimits {
+        let overrides = self.role_overrides.get(role);
+        EffectiveLimits {
+            max_result_rows: overrides
+                .and_then(|o| o.max_result_rows)
+                .unwrap_or(self.max_result_rows),
+            statement_timeout_ms: overrides
+                .and_then(|o| o.statement_timeout_ms)
+                .unwrap_or(self.statement_timeout_ms),
+            explain_max_cost: overrides
+                .and_then(|o| o.explain_max_cost)
+                .unwrap_or(self.explain_max_cost),
+            explain_max_rows: overrides
+                .and_then(|o| o.explain_max_rows)
+                .unwrap_or(self.explain_max_rows),
+            max_expand_depth: overrides
+                .and_then(|o| o.max_expand_depth)
+                .unwrap_or(self.max_expand_depth),
         }
     }
 
@@ -102,12 +264,30 @@ impl GatewayConfig {
             policy_path,
             bind_address,
             cors_enabled,
+            cors_allowed_origins: qail.gateway.as_ref()
+                .and_then(|gw| gw.cors_allowed_origins.clone())
+                .unwrap_or_default(),
             cache_enabled,
             cache_max_entries,
             cache_ttl_seconds,
             events_path: None,
             rate_limit_rate: 100.0,
             rate_limit_burst: 200,
+            max_expand_depth: qail.gateway.as_ref()
+                .map(|gw| gw.max_expand_depth)
+                .unwrap_or(4),
+            statement_timeout_ms: 30_000,
+            max_result_rows: 10_000,
+            explain_mode: "precheck".to_string(),
+            explain_max_cost: 100_000.0,
+            explain_max_rows: 1_000_000,
+            explain_depth_threshold: 3,
+            explain_cache_ttl_secs: 300,
+            max_concurrent_queries: 10,
+            max_tenants: 10_000,
+            tenant_idle_timeout_secs: 300,
+            qdrant: qail.qdrant.clone(),
+            role_overrides: HashMap::new(),
         }
     }
 }

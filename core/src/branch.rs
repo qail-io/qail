@@ -34,24 +34,67 @@ pub struct BranchContext {
 }
 
 impl BranchContext {
+    /// Maximum branch name length.
+    pub const MAX_NAME_LEN: usize = 64;
+
     /// Create a context targeting the main branch (no overlay).
     pub fn main() -> Self {
         Self { branch_id: None }
     }
 
     /// Create a context targeting a named branch.
+    ///
+    /// # Panics
+    /// Panics if the branch name is invalid. Use `try_branch` for fallible creation.
     pub fn branch(name: &str) -> Self {
+        assert!(
+            Self::is_valid_name(name),
+            "Invalid branch name: '{}'. Must be 1-{} chars, alphanumeric/hyphen/underscore/dot only.",
+            name, Self::MAX_NAME_LEN
+        );
         Self {
             branch_id: Some(name.to_string()),
         }
     }
 
+    /// Try to create a branch context, returning None if the name is invalid.
+    pub fn try_branch(name: &str) -> Option<Self> {
+        if Self::is_valid_name(name) {
+            Some(Self {
+                branch_id: Some(name.to_string()),
+            })
+        } else {
+            None
+        }
+    }
+
     /// Create from an optional branch name (None = main).
+    /// Invalid branch names are silently treated as main.
     pub fn from_header(value: Option<&str>) -> Self {
         match value {
-            Some(name) if !name.is_empty() && name != "main" => Self::branch(name),
+            Some(name) if !name.is_empty() && name != "main" && Self::is_valid_name(name) => {
+                Self {
+                    branch_id: Some(name.to_string()),
+                }
+            }
             _ => Self::main(),
         }
+    }
+
+    /// Validate a branch name.
+    ///
+    /// Rules:
+    /// - 1 to 64 characters
+    /// - Only alphanumeric, hyphens (`-`), underscores (`_`), and dots (`.`)
+    /// - Must not start with `.` or `-`
+    pub fn is_valid_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= Self::MAX_NAME_LEN
+            && !name.starts_with('.')
+            && !name.starts_with('-')
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
     }
 
     /// Returns true if this is the main branch.
@@ -127,5 +170,56 @@ mod tests {
             BranchContext::branch("a")
         );
         assert_ne!(BranchContext::main(), BranchContext::branch("a"));
+    }
+
+    // ================================================================
+    // Branch name validation tests
+    // ================================================================
+
+    #[test]
+    fn test_valid_branch_names() {
+        assert!(BranchContext::is_valid_name("feature-auth"));
+        assert!(BranchContext::is_valid_name("dev"));
+        assert!(BranchContext::is_valid_name("release.1.0"));
+        assert!(BranchContext::is_valid_name("my_branch_2"));
+        assert!(BranchContext::is_valid_name("a")); // single char
+    }
+
+    #[test]
+    fn test_invalid_branch_names() {
+        assert!(!BranchContext::is_valid_name("")); // empty
+        assert!(!BranchContext::is_valid_name(".hidden")); // starts with dot
+        assert!(!BranchContext::is_valid_name("-flag")); // starts with hyphen
+        assert!(!BranchContext::is_valid_name("has space")); // space
+        assert!(!BranchContext::is_valid_name("has;semicolon")); // SQL injection char
+        assert!(!BranchContext::is_valid_name("it's bad")); // single quote
+        assert!(!BranchContext::is_valid_name("a/b")); // slash (path traversal)
+        assert!(!BranchContext::is_valid_name(&"x".repeat(65))); // too long
+    }
+
+    #[test]
+    fn test_try_branch() {
+        assert!(BranchContext::try_branch("valid-name").is_some());
+        assert!(BranchContext::try_branch("has;injection").is_none());
+        assert!(BranchContext::try_branch("").is_none());
+    }
+
+    #[test]
+    fn test_from_header_rejects_invalid() {
+        // Invalid branch names silently fall back to main
+        assert!(BranchContext::from_header(Some("has;semicolon")).is_main());
+        assert!(BranchContext::from_header(Some(".hidden")).is_main());
+        assert!(BranchContext::from_header(Some("' OR 1=1 --")).is_main());
+        // Valid names still work
+        assert_eq!(
+            BranchContext::from_header(Some("feat-1")).branch_name(),
+            Some("feat-1")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid branch name")]
+    fn test_branch_panics_on_invalid() {
+        let _ = BranchContext::branch("'; DROP TABLE users; --");
     }
 }

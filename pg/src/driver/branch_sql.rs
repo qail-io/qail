@@ -6,11 +6,24 @@
 //! - Branch CRUD operations
 //! - Merge logic (apply overlay → main tables)
 
+/// Safely escape a SQL string literal value.
+///
+/// Strips NUL bytes, escapes single quotes and backslashes, then wraps in
+/// single quotes. This is resistant to backslash-escaping attacks even
+/// when `standard_conforming_strings = off`.
+pub fn escape_literal(val: &str) -> String {
+    let clean = val
+        .replace('\0', "")     // Strip NUL bytes (C-level truncation)
+        .replace('\\', "\\\\") // Escape backslashes FIRST
+        .replace('\'', "''");  // Then escape single quotes
+    format!("'{}'", clean)
+}
+
 /// SQL to set the branch context on a connection session.
 pub fn branch_context_sql(branch_name: &str) -> String {
     format!(
-        "SET LOCAL app.branch_id = '{}';",
-        branch_name.replace('\'', "''")
+        "SET LOCAL app.branch_id = {};",
+        escape_literal(branch_name)
     )
 }
 
@@ -51,20 +64,22 @@ CREATE INDEX IF NOT EXISTS idx_branch_rows_branch
 }
 
 /// SQL to create a new branch.
+///
+/// Branch names are validated to prevent SQL injection.
 pub fn create_branch_sql(name: &str, parent: Option<&str>) -> String {
-    let safe_name = name.replace('\'', "''");
+    let safe_name = escape_literal(name);
     match parent {
         Some(parent_name) => {
-            let safe_parent = parent_name.replace('\'', "''");
+            let safe_parent = escape_literal(parent_name);
             format!(
                 "INSERT INTO _qail_branches (name, parent_branch_id) \
-                 VALUES ('{}', (SELECT id FROM _qail_branches WHERE name = '{}')) \
+                 VALUES ({}, (SELECT id FROM _qail_branches WHERE name = {})) \
                  RETURNING id, name, created_at;",
                 safe_name, safe_parent
             )
         }
         None => format!(
-            "INSERT INTO _qail_branches (name) VALUES ('{}') RETURNING id, name, created_at;",
+            "INSERT INTO _qail_branches (name) VALUES ({}) RETURNING id, name, created_at;",
             safe_name
         ),
     }
@@ -78,9 +93,9 @@ pub fn list_branches_sql() -> &'static str {
 
 /// SQL to soft-delete a branch.
 pub fn delete_branch_sql(name: &str) -> String {
-    let safe_name = name.replace('\'', "''");
+    let safe_name = escape_literal(name);
     format!(
-        "UPDATE _qail_branches SET status = 'deleted' WHERE name = '{}' AND status = 'active';",
+        "UPDATE _qail_branches SET status = 'deleted' WHERE name = {} AND status = 'active';",
         safe_name
     )
 }
@@ -90,13 +105,13 @@ pub fn delete_branch_sql(name: &str) -> String {
 /// Returns the latest overlay row per PK (last write wins).
 /// Use this to merge with main table results in CoW reads.
 pub fn read_overlay_sql(branch_name: &str, table_name: &str) -> String {
-    let safe_branch = branch_name.replace('\'', "''");
-    let safe_table = table_name.replace('\'', "''");
+    let safe_branch = escape_literal(branch_name);
+    let safe_table = escape_literal(table_name);
     format!(
         "SELECT DISTINCT ON (row_pk) row_pk, operation, row_data \
          FROM _qail_branch_rows \
-         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = '{}') \
-           AND table_name = '{}' \
+         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {}) \
+           AND table_name = {} \
          ORDER BY row_pk, created_at DESC;",
         safe_branch, safe_table
     )
@@ -104,15 +119,15 @@ pub fn read_overlay_sql(branch_name: &str, table_name: &str) -> String {
 
 /// SQL to insert a CoW write into the overlay.
 pub fn write_overlay_sql(branch_name: &str, table_name: &str, row_pk: &str, operation: &str) -> String {
-    let safe_branch = branch_name.replace('\'', "''");
-    let safe_table = table_name.replace('\'', "''");
-    let safe_pk = row_pk.replace('\'', "''");
-    let safe_op = operation.replace('\'', "''");
+    let safe_branch = escape_literal(branch_name);
+    let safe_table = escape_literal(table_name);
+    let safe_pk = escape_literal(row_pk);
+    let safe_op = escape_literal(operation);
     format!(
         "INSERT INTO _qail_branch_rows (branch_id, table_name, row_pk, operation, row_data) \
          VALUES (\
-           (SELECT id FROM _qail_branches WHERE name = '{}'), \
-           '{}', '{}', '{}', $1\
+           (SELECT id FROM _qail_branches WHERE name = {}), \
+           {}, {}, {}, $1\
          ) RETURNING id;",
         safe_branch, safe_table, safe_pk, safe_op
     )
@@ -129,21 +144,21 @@ pub fn write_overlay_sql(branch_name: &str, table_name: &str, row_pk: &str, oper
 /// Returns SQL to mark the branch as merged (the actual merge logic
 /// is done in Rust by iterating overlay rows).
 pub fn mark_merged_sql(name: &str) -> String {
-    let safe_name = name.replace('\'', "''");
+    let safe_name = escape_literal(name);
     format!(
         "UPDATE _qail_branches SET status = 'merged', merged_at = now() \
-         WHERE name = '{}' AND status = 'active';",
+         WHERE name = {} AND status = 'active';",
         safe_name
     )
 }
 
 /// SQL to get overlay stats for a branch.
 pub fn branch_stats_sql(name: &str) -> String {
-    let safe_name = name.replace('\'', "''");
+    let safe_name = escape_literal(name);
     format!(
         "SELECT table_name, operation, COUNT(*) as count \
          FROM _qail_branch_rows \
-         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = '{}') \
+         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {}) \
          GROUP BY table_name, operation \
          ORDER BY table_name, operation;",
         safe_name
@@ -155,11 +170,11 @@ pub fn branch_stats_sql(name: &str) -> String {
 /// Returns (table_name, row_pk, operation, row_data) tuples.
 /// Order: by table_name then created_at so operations are applied chronologically.
 pub fn merge_overlay_rows_sql(name: &str) -> String {
-    let safe_name = name.replace('\'', "''");
+    let safe_name = escape_literal(name);
     format!(
         "SELECT DISTINCT ON (table_name, row_pk) table_name, row_pk, operation, row_data::text \
          FROM _qail_branch_rows \
-         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = '{}') \
+         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {}) \
          ORDER BY table_name, row_pk, created_at DESC;",
         safe_name
     )

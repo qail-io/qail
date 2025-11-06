@@ -261,23 +261,6 @@ impl ToSql for Qail {
             operators::Action::DropTrigger => {
                 format!("DROP TRIGGER IF EXISTS {} ON {}", self.table, self.table)
             }
-            // Redis operations - use qail-redis driver instead
-            Action::RedisGet
-            | Action::RedisSet
-            | Action::RedisDel
-            | Action::RedisIncr
-            | Action::RedisDecr
-            | Action::RedisTtl
-            | Action::RedisExpire
-            | Action::RedisExists
-            | Action::RedisMGet
-            | Action::RedisMSet
-            | Action::RedisPing => {
-                format!(
-                    "-- Redis operation {:?} not supported in SQL. Use qail-redis driver.",
-                    self.action
-                )
-            }
             // Phase 7: Extensions, Comments, Sequences
             Action::CreateExtension => ddl::build_create_extension(self, dialect),
             Action::DropExtension => ddl::build_drop_extension(self, dialect),

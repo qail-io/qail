@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔═══════════════════════════════════════════════════════════╗");
     println!("║  BATTLE TEST #6: The Thundering Herd 🐃                   ║");
@@ -41,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Each task fights for a connection
             // If the Semaphore is broken, this acquire() will hang eventually.
             // Using expect here might panic if pool closed or timeout, which is a fail.
-            let mut conn = pool.acquire().await.expect("Failed to acquire");
+            let mut conn = pool.acquire_system().await.expect("Failed to acquire");
             
             // Do a fast query: SELECT 1
             // Use function-as-table syntax for robustness

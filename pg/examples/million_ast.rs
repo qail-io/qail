@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = PgConnection::connect_with_password(
         "127.0.0.1",
         5444,
-        "example",
+        "qail_app",
         "example-staging",
         Some(&password),
     )

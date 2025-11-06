@@ -12,14 +12,14 @@ QAIL compiles typed query ASTs directly to database wire protocols. No SQL strin
 
 ### Supported Databases
 
-| Tier | Category | Supported | Why? |
-|------|----------|-----------|------|
-| **1** | **SQL-AST** | **PostgreSQL**, **SQLite** | Open wire protocols allow full AST encoding. |
-| **2** | **Document-AST** | **MongoDB**, **DynamoDB**, **Qdrant** | Native AST query structure (BSON/JSON). |
+| Tier | Category | Supported | Driver |
+|------|----------|-----------|--------|
+| **1** | **SQL-AST** | **PostgreSQL** | `qail-pg` — Native wire protocol, AST-to-bytes |
+| **2** | **Vector-AST** | **Qdrant** | `qail-qdrant` — gRPC + REST, vector search |
+| **3** | **KV-Command** | **Redis** | `qail-redis` — Native RESP3 protocol |
 
 ### ❌ Not Supported
 * **Oracle, SQL Server, MySQL:** Proprietary/Closed protocols.
-* **Redis:** Imperative command model (not a query language).
 
 ## Quick Example
 
@@ -76,6 +76,7 @@ let rows = driver.query(&cmd).await?;
 | Multi-Tenant Isolation | ✅ |
 | TypedQail<T> Relations | ✅ |
 | Protected Columns | ✅ |
+| LISTEN/NOTIFY/UNLISTEN | ✅ |
 
 > **Note:** QAIL's AST-native design eliminates SQL injection by construction — no strings, no injection surface. Query plan caching (`prepare()`, `pipeline_prepared_fast()`) is purely a PostgreSQL performance optimization, not a security measure.
 
@@ -89,7 +90,6 @@ QAIL speaks **AST**, not SQL strings. Many traditional SQL "security features" a
 | **Prepared Statements** (for security) | Separate SQL from data | Not needed — AST has no SQL text to inject into |
 | **Query Escaping** | Sanitize user input | Not needed — values are typed (`Value::Text`, `Value::Int`), never interpolated |
 | **SQL Validators** | Detect malformed queries | Not needed — invalid AST won't compile |
-| **LISTEN/NOTIFY** | Pub/sub channels | Not planned — string-based protocol, outside AST scope |
 
 ### The AST Guarantee
 

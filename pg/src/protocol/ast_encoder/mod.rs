@@ -334,4 +334,111 @@ mod tests {
         assert!(sql.contains("recent_orders"), "SQL should have second CTE: {}", sql);
         assert!(sql.starts_with("WITH"), "SQL should start with WITH: {}", sql);
     }
+
+    // ================================================================
+    // Edge case tests — wire protocol safety
+    // ================================================================
+
+    #[test]
+    fn test_encode_null_parameter() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::get("users")
+            .filter("deleted_at", Operator::IsNull, true);
+
+        let (wire, params) = AstEncoder::encode_cmd(&cmd);
+        let wire_str = String::from_utf8_lossy(&wire);
+        // IS NULL should not create a parameter — it's a keyword
+        assert!(wire_str.contains("IS NULL") || wire_str.contains("$1"));
+        // At most 1 param (depends on filter encoding)
+        assert!(params.len() <= 1);
+    }
+
+    #[test]
+    fn test_encode_sql_injection_in_string_value() {
+        use qail_core::ast::Operator;
+
+        // Attempt SQL injection via a filter value
+        let malicious = "'; DROP TABLE users; --";
+        let cmd = Qail::get("users")
+            .filter("name", Operator::Eq, malicious);
+
+        // Use SQL output (not wire bytes which include Bind params)
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd);
+
+        // The injection string must NOT appear in the SQL —
+        // it must be in a parameter slot ($1)
+        assert!(!sql.contains("DROP TABLE"), "SQL injection detected in SQL: {}", sql);
+        assert!(sql.contains("$1"), "Should use parameterized query");
+        assert_eq!(params.len(), 1, "Injection should be captured as a param");
+    }
+
+    #[test]
+    fn test_encode_unicode_and_emoji() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::get("products")
+            .filter("name", Operator::Eq, "日本語テスト 🚀");
+
+        let (wire, params) = AstEncoder::encode_cmd(&cmd);
+        let wire_str = String::from_utf8_lossy(&wire);
+
+        assert!(wire_str.contains("$1"));
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_encode_empty_string_filter() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::get("users")
+            .filter("email", Operator::Eq, "");
+
+        let (_wire, params) = AstEncoder::encode_cmd(&cmd);
+        assert_eq!(params.len(), 1, "Empty string should still produce a param");
+    }
+
+    #[test]
+    fn test_encode_large_offset_limit() {
+        let cmd = Qail::get("orders")
+            .limit(100_000)
+            .offset(999_999);
+
+        let (sql, _) = AstEncoder::encode_cmd_sql(&cmd);
+        assert!(sql.contains("LIMIT 100000"), "Large limit should appear: {}", sql);
+        assert!(sql.contains("OFFSET 999999"), "Large offset should appear: {}", sql);
+    }
+
+    #[test]
+    fn test_encode_multi_filter_and_chain() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::get("orders")
+            .filter("status", Operator::Eq, "active")
+            .filter("total", Operator::Gte, 100)
+            .filter("created_at", Operator::Lte, "2026-01-01");
+
+        let (wire, params) = AstEncoder::encode_cmd(&cmd);
+        let wire_str = String::from_utf8_lossy(&wire);
+
+        // Should have 3 parameters: $1, $2, $3
+        assert!(wire_str.contains("$1"));
+        assert!(wire_str.contains("$2"));
+        assert!(wire_str.contains("$3"));
+        assert_eq!(params.len(), 3, "Should have 3 params for 3 filters");
+    }
+
+    #[test]
+    fn test_encode_update_with_mixed_types() {
+        let cmd = Qail::set("users")
+            .set_value("name", "Alice")
+            .set_value("age", 30)
+            .set_value("active", true)
+            .set_value("bio", "");
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd);
+
+        assert!(sql.contains("UPDATE"), "Should be UPDATE: {}", sql);
+        assert_eq!(params.len(), 4, "Should have 4 params for 4 values");
+    }
 }

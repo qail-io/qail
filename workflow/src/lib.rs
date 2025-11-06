@@ -10,7 +10,7 @@
 //! ## Architecture
 //!
 //! ```text
-//! example-engine (domain states + executor impl)
+//! your-engine (domain states + executor impl)
 //!       ↓
 //! qail-workflow (state machine engine)
 //!       ↓

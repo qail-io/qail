@@ -53,7 +53,7 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
                         " CHECK ({} IN ({}))",
                         generator.quote_identifier(name),
                         vals.iter()
-                            .map(|v| format!("'{}'", v))
+                            .map(|v| format!("'{}'", v.replace('\'', "''")))
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));
@@ -463,7 +463,7 @@ pub fn build_create_enum(cmd: &Qail, dialect: Dialect) -> String {
         .columns
         .iter()
         .filter_map(|c| match c {
-            Expr::Named(v) => Some(format!("'{}'", v)),
+            Expr::Named(v) => Some(format!("'{}'", v.replace('\'', "''"))),
             _ => None,
         })
         .collect();
@@ -494,7 +494,7 @@ pub fn build_alter_enum_add_value(cmd: &Qail, dialect: Dialect) -> String {
             parts.push(format!(
                 "ALTER TYPE {} ADD VALUE IF NOT EXISTS '{}'",
                 generator.quote_identifier(&cmd.table),
-                val
+                val.replace('\'', "''")
             ));
         }
     }
