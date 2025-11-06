@@ -83,6 +83,10 @@ impl PgConnection {
         let mut buf = BytesMut::with_capacity(estimated_size);
 
         if is_new {
+            // Evict LRU prepared statement if at capacity. This prevents
+            // unbounded memory growth from dynamic batch filters while
+            // preserving hot statements (unlike the old nuclear `.clear()`).
+            self.evict_prepared_if_full();
             buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
             // Cache the SQL for debugging
             self.prepared_statements.insert(stmt_name.clone(), sql.to_string());
@@ -176,8 +180,15 @@ impl PgConnection {
     ///
     /// Unlike `execute_simple`, this collects and returns data rows.
     /// Used for branch management and other administrative queries.
+    ///
+    /// SECURITY: Capped at 10,000 rows to prevent OOM from unbounded results.
     pub async fn simple_query(&mut self, sql: &str) -> PgResult<Vec<super::PgRow>> {
         use std::sync::Arc;
+
+        /// Safety cap to prevent OOM from unbounded result accumulation.
+        /// Simple Query Protocol has no streaming; all rows are buffered in memory.
+        const MAX_SIMPLE_QUERY_ROWS: usize = 10_000;
+
         let bytes = PgEncoder::encode_query_string(sql);
         self.stream.write_all(&bytes).await?;
 
@@ -193,10 +204,20 @@ impl PgConnection {
                 }
                 BackendMessage::DataRow(data) => {
                     if error.is_none() {
-                        rows.push(super::PgRow {
-                            columns: data,
-                            column_info: column_info.clone(),
-                        });
+                        if rows.len() >= MAX_SIMPLE_QUERY_ROWS {
+                            if error.is_none() {
+                                error = Some(PgError::Query(format!(
+                                    "simple_query exceeded {} row safety cap",
+                                    MAX_SIMPLE_QUERY_ROWS,
+                                )));
+                            }
+                            // Continue draining to reach ReadyForQuery
+                        } else {
+                            rows.push(super::PgRow {
+                                columns: data,
+                                column_info: column_info.clone(),
+                            });
+                        }
                     }
                 }
                 BackendMessage::CommandComplete(_) => {}

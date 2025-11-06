@@ -41,6 +41,22 @@ max_connections = 10
 bind = "0.0.0.0:8080"
 cors = true
 policy = "policies.yaml"
+max_result_rows = 10000
+statement_timeout_ms = 30000
+explain_max_cost = 100000.0
+explain_max_rows = 1000000
+max_expand_depth = 3
+tenant_max_concurrent = 10
+
+# Per-role guard overrides — override global defaults for specific roles.
+# Any field not specified here falls back to the global [gateway] default.
+[gateway.role_overrides.reporting]
+max_result_rows = 100000
+statement_timeout_ms = 120000
+explain_max_cost = 500000.0
+
+[gateway.role_overrides.admin]
+max_expand_depth = 5
 
 [gateway.cache]
 enabled = true

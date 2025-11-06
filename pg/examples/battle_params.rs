@@ -10,6 +10,7 @@
 use qail_pg::{PgPool, PoolConfig};
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔═══════════════════════════════════════════════════════════╗");
     println!("║  BATTLE TEST #8: The 32k Parameter Limit 🔢               ║");
@@ -18,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = PoolConfig::new("localhost", 5432, "postgres", "postgres")
         .password("postgres");
     let pool = PgPool::connect(config).await?;
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool.acquire_system().await?;
 
     // 1. Create a query with 40,000 parameters
     // VALUES ($1), ($2), ... ($40000)

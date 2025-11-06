@@ -7,6 +7,12 @@ use bytes::BytesMut;
 use qail_core::ast::{Action, Qail};
 use tokio::io::AsyncWriteExt;
 
+/// Quote a SQL identifier to prevent injection.
+/// Wraps in double-quotes, escapes embedded double-quotes, and strips NUL bytes.
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"" , ident.replace('\0', "").replace('"', "\"\""))
+}
+
 impl PgConnection {
     /// **Fast** bulk insert using COPY protocol with zero-allocation encoding.
     /// Encodes all rows into a single buffer and writes with one syscall.
@@ -19,8 +25,8 @@ impl PgConnection {
     ) -> PgResult<u64> {
         use crate::protocol::encode_copy_batch;
 
-        let cols = columns.join(", ");
-        let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
+        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let sql = format!("COPY {} ({}) FROM STDIN", quote_ident(table), cols.join(", "));
 
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(&sql);
@@ -78,8 +84,8 @@ impl PgConnection {
         columns: &[String],
         data: &[u8],
     ) -> PgResult<u64> {
-        let cols = columns.join(", ");
-        let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
+        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let sql = format!("COPY {} ({}) FROM STDIN", quote_ident(table), cols.join(", "));
 
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(&sql);
@@ -203,7 +209,11 @@ impl PgConnection {
     /// Export data using raw COPY TO STDOUT, returning raw bytes.
     /// Format: tab-separated values, newline-terminated rows.
     /// Suitable for direct re-import via copy_in_raw.
-    pub async fn copy_out_raw(&mut self, sql: &str) -> PgResult<Vec<u8>> {
+    ///
+    /// # Safety
+    /// `pub(crate)` — not exposed externally because callers pass raw SQL.
+    /// External code should use `copy_export()` with the AST encoder instead.
+    pub(crate) async fn copy_out_raw(&mut self, sql: &str) -> PgResult<Vec<u8>> {
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(sql);
         self.stream.write_all(&bytes).await?;

@@ -2,6 +2,13 @@
 
 use super::{PgConnection, PgResult};
 
+/// Quote a SQL identifier (for savepoint names).
+/// Wraps in double-quotes and escapes embedded double-quotes and NUL bytes.
+fn quote_savepoint_name(name: &str) -> String {
+    let clean = name.replace('\0', "").replace('"', "\"\"");
+    format!("\"{}\"", clean)
+}
+
 impl PgConnection {
     /// Begin a new transaction.
     /// After calling this, all queries run within the transaction
@@ -26,20 +33,20 @@ impl PgConnection {
     /// Savepoints allow partial rollback within a transaction.
     /// Use `rollback_to()` to return to this savepoint.
     pub async fn savepoint(&mut self, name: &str) -> PgResult<()> {
-        self.execute_simple(&format!("SAVEPOINT {}", name)).await
+        self.execute_simple(&format!("SAVEPOINT {}", quote_savepoint_name(name))).await
     }
 
     /// Rollback to a previously created savepoint.
     /// Discards all changes since the named savepoint was created,
     /// but keeps the transaction open.
     pub async fn rollback_to(&mut self, name: &str) -> PgResult<()> {
-        self.execute_simple(&format!("ROLLBACK TO SAVEPOINT {}", name))
+        self.execute_simple(&format!("ROLLBACK TO SAVEPOINT {}", quote_savepoint_name(name)))
             .await
     }
 
     /// Release a savepoint (free resources, if no longer needed).
     pub async fn release_savepoint(&mut self, name: &str) -> PgResult<()> {
-        self.execute_simple(&format!("RELEASE SAVEPOINT {}", name))
+        self.execute_simple(&format!("RELEASE SAVEPOINT {}", quote_savepoint_name(name)))
             .await
     }
 }

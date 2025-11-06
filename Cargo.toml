@@ -7,7 +7,6 @@ members = [
     "encoder",
     "pg",
     "qdrant",
-    "redis",
     "gateway",
     "workflow",
 ]

@@ -43,7 +43,7 @@ impl Qail {
     /// - **ADD/Upsert** → auto-sets `operator_id` in payload
     /// - **Super admins** → no-op (bypasses isolation)
     /// - **Unregistered tables** → no-op (not a tenant table)
-    /// - **DDL/Redis/etc** → no-op
+    /// - **DDL/etc** → no-op
     ///
     /// # Example
     /// ```ignore
@@ -72,7 +72,7 @@ impl Qail {
             Action::Add | Action::Upsert | Action::Put => {
                 self.scope_insert_tenant(&tenant_col, ctx)
             }
-            // DDL, transactions, Redis, etc. → no injection
+            // DDL, transactions, etc. → no injection
             _ => self,
         }
     }
@@ -200,7 +200,8 @@ mod tests {
     fn test_with_rls_noop_for_super_admin() {
         register_tenant_table("_rls_admin_orders", "operator_id");
 
-        let ctx = RlsContext::super_admin();
+        let token = crate::rls::SuperAdminToken::issue();
+        let ctx = RlsContext::super_admin(token);
         let query = Qail::get("_rls_admin_orders").with_rls(&ctx);
 
         let filter = query

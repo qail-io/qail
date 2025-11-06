@@ -7,11 +7,11 @@
 use bytes::BytesMut;
 use qail_core::ast::Qail;
 
-use crate::error::{QdrantError, QdrantResult};
-use crate::transport::GrpcClient;
-use crate::point::{Point, ScoredPoint};
 use crate::decoder;
 use crate::encoder;
+use crate::error::{QdrantError, QdrantResult};
+use crate::point::{Payload, Point, PointId, ScoredPoint};
+use crate::transport::GrpcClient;
 
 /// High-performance gRPC driver for Qdrant.
 ///
@@ -65,13 +65,31 @@ impl QdrantDriver {
         Self::connect(parts[0], port).await
     }
 
-    /// Vector similarity search with zero-copy encoding.
+    /// Connect to Qdrant gRPC endpoint with TLS (rustls).
     ///
-    /// # Arguments
-    /// * `collection` - Collection name
-    /// * `vector` - Query vector
-    /// * `limit` - Max results
-    /// * `score_threshold` - Optional minimum score
+    /// Uses Mozilla root certificates — no system openssl required.
+    pub async fn connect_tls(host: &str, port: u16) -> QdrantResult<Self> {
+        let client = GrpcClient::connect_tls(host, port).await?;
+        Ok(Self {
+            client,
+            buffer: BytesMut::with_capacity(8192),
+        })
+    }
+
+    /// Connect with URL auto-detection (https = TLS, http = plain).
+    pub async fn connect_url(url: &str) -> QdrantResult<Self> {
+        let client = GrpcClient::connect_url(url).await?;
+        Ok(Self {
+            client,
+            buffer: BytesMut::with_capacity(8192),
+        })
+    }
+
+    // ========================================================================
+    // Search Operations
+    // ========================================================================
+
+    /// Vector similarity search with zero-copy encoding.
     ///
     /// # Performance
     /// Vector is encoded via memcpy (no per-element serialization).
@@ -82,10 +100,7 @@ impl QdrantDriver {
         limit: u64,
         score_threshold: Option<f32>,
     ) -> QdrantResult<Vec<ScoredPoint>> {
-        // Clear buffer for reuse
         self.buffer.clear();
-        
-        // Encode request using zero-copy encoder
         encoder::encode_search_proto(
             &mut self.buffer,
             collection,
@@ -94,12 +109,60 @@ impl QdrantDriver {
             score_threshold,
             None,
         );
-
-        // Send via gRPC (split to avoid clone - zero allocation!)
         let request_bytes = self.buffer.split().freeze();
         let response = self.client.search(request_bytes).await?;
+        decoder::decode_search_response(&response)
+    }
 
-        // Decode response using zero-copy decoder
+    /// Vector search with named vector field.
+    pub async fn search_named(
+        &mut self,
+        collection: &str,
+        vector_name: &str,
+        vector: &[f32],
+        limit: u64,
+        score_threshold: Option<f32>,
+    ) -> QdrantResult<Vec<ScoredPoint>> {
+        self.buffer.clear();
+        encoder::encode_search_proto(
+            &mut self.buffer,
+            collection,
+            vector,
+            limit,
+            score_threshold,
+            Some(vector_name),
+        );
+        let request_bytes = self.buffer.split().freeze();
+        let response = self.client.search(request_bytes).await?;
+        decoder::decode_search_response(&response)
+    }
+
+    /// Filtered vector search using QAIL AST conditions.
+    ///
+    /// Translates QAIL conditions into Qdrant's protobuf filter (must/should)
+    /// and includes them in the gRPC search request.
+    pub async fn search_filtered(
+        &mut self,
+        collection: &str,
+        vector: &[f32],
+        limit: u64,
+        score_threshold: Option<f32>,
+        conditions: &[qail_core::ast::Condition],
+        is_or: bool,
+    ) -> QdrantResult<Vec<ScoredPoint>> {
+        self.buffer.clear();
+        encoder::encode_search_with_filter_proto(
+            &mut self.buffer,
+            collection,
+            vector,
+            limit,
+            score_threshold,
+            None,
+            conditions,
+            is_or,
+        );
+        let request_bytes = self.buffer.split().freeze();
+        let response = self.client.search(request_bytes).await?;
         decoder::decode_search_response(&response)
     }
 
@@ -121,10 +184,8 @@ impl QdrantDriver {
         score_threshold: Option<f32>,
     ) -> QdrantResult<Vec<Vec<ScoredPoint>>> {
         use futures_util::future::join_all;
-        
-        // Encode all requests first (reuse buffer for each)
+
         let mut encoded_requests = Vec::with_capacity(vectors.len());
-        
         for vector in vectors {
             self.buffer.clear();
             encoder::encode_search_proto(
@@ -138,16 +199,12 @@ impl QdrantDriver {
             encoded_requests.push(self.buffer.split().freeze());
         }
 
-        // Send all requests concurrently using HTTP/2 multiplexing
         let mut futures = Vec::with_capacity(encoded_requests.len());
         for request in encoded_requests {
             futures.push(self.client.search(request));
         }
 
-        // Wait for all responses
         let responses = join_all(futures).await;
-
-        // Decode all responses
         let mut results = Vec::with_capacity(responses.len());
         for response in responses {
             let decoded = decoder::decode_search_response(&response?)?;
@@ -156,9 +213,11 @@ impl QdrantDriver {
 
         Ok(results)
     }
+
     /// Search using QAIL AST.
     ///
     /// Extracts vector, collection, limit from the Qail command.
+    /// If conditions are present in the AST, they are included as filters.
     pub async fn search_ast(&mut self, cmd: &Qail) -> QdrantResult<Vec<ScoredPoint>> {
         let collection = if cmd.table.is_empty() {
             return Err(QdrantError::Encode("Collection name required".to_string()));
@@ -166,11 +225,11 @@ impl QdrantDriver {
             &cmd.table
         };
 
-        let vector = cmd.vector.as_ref().ok_or_else(|| {
-            QdrantError::Encode("Vector required for search".to_string())
-        })?;
+        let vector = cmd
+            .vector
+            .as_ref()
+            .ok_or_else(|| QdrantError::Encode("Vector required for search".to_string()))?;
 
-        // Extract limit from cages (default 10)
         let mut limit = 10u64;
         for cage in &cmd.cages {
             if let qail_core::ast::CageKind::Limit(n) = cage.kind {
@@ -180,8 +239,34 @@ impl QdrantDriver {
 
         let score_threshold = cmd.score_threshold;
 
+        // Extract filter conditions from cages
+        let conditions: Vec<qail_core::ast::Condition> = cmd
+            .cages
+            .iter()
+            .filter(|c| matches!(c.kind, qail_core::ast::CageKind::Filter))
+            .flat_map(|c| c.conditions.iter().cloned())
+            .collect();
+
+        // If AST has conditions, use filtered search
+        if !conditions.is_empty() {
+            return self
+                .search_filtered(
+                    collection,
+                    vector,
+                    limit,
+                    score_threshold,
+                    &conditions,
+                    false,
+                )
+                .await;
+        }
+
         self.search(collection, vector, limit, score_threshold).await
     }
+
+    // ========================================================================
+    // Point Operations
+    // ========================================================================
 
     /// Upsert points with zero-copy encoding.
     pub async fn upsert(
@@ -190,17 +275,98 @@ impl QdrantDriver {
         points: &[Point],
         wait: bool,
     ) -> QdrantResult<()> {
-        // Clear buffer for reuse
         self.buffer.clear();
-        
-        // Encode request using zero-copy encoder
         encoder::encode_upsert_proto(&mut self.buffer, collection, points, wait);
-
-        // Send via gRPC (split to avoid clone)
         let request_bytes = self.buffer.split().freeze();
         let _response = self.client.upsert(request_bytes).await?;
         Ok(())
     }
+
+    /// Get points by ID (with payload and optional vectors).
+    pub async fn get_points(
+        &mut self,
+        collection: &str,
+        ids: &[PointId],
+        with_vectors: bool,
+    ) -> QdrantResult<Vec<ScoredPoint>> {
+        self.buffer.clear();
+        encoder::encode_get_points_proto(&mut self.buffer, collection, ids, with_vectors);
+        let request_bytes = self.buffer.split().freeze();
+        let response = self.client.get(request_bytes).await?;
+        decoder::decode_get_response(&response)
+    }
+
+    /// Scroll through points (paginated iteration).
+    pub async fn scroll(
+        &mut self,
+        collection: &str,
+        limit: u32,
+        offset: Option<&PointId>,
+        with_vectors: bool,
+    ) -> QdrantResult<decoder::ScrollResult> {
+        self.buffer.clear();
+        encoder::encode_scroll_points_proto(
+            &mut self.buffer,
+            collection,
+            limit,
+            offset,
+            with_vectors,
+        );
+        let request_bytes = self.buffer.split().freeze();
+        let response = self.client.scroll(request_bytes).await?;
+        decoder::decode_scroll_response(&response)
+    }
+
+    /// Delete points by numeric IDs.
+    pub async fn delete_points(
+        &mut self,
+        collection_name: &str,
+        point_ids: &[u64],
+    ) -> QdrantResult<()> {
+        self.buffer.clear();
+        encoder::encode_delete_points_proto(&mut self.buffer, collection_name, point_ids);
+        let request = self.buffer.split().freeze();
+        self.client.delete(request).await?;
+        Ok(())
+    }
+
+    /// Delete points by PointId (supports both numeric and UUID).
+    pub async fn delete_points_by_id(
+        &mut self,
+        collection_name: &str,
+        ids: &[PointId],
+    ) -> QdrantResult<()> {
+        self.buffer.clear();
+        encoder::encode_delete_points_mixed_proto(&mut self.buffer, collection_name, ids);
+        let request = self.buffer.split().freeze();
+        self.client.delete(request).await?;
+        Ok(())
+    }
+
+    /// Update payload on existing points.
+    pub async fn update_payload(
+        &mut self,
+        collection: &str,
+        point_ids: &[PointId],
+        payload: &Payload,
+        wait: bool,
+    ) -> QdrantResult<()> {
+        self.buffer.clear();
+        encoder::encode_set_payload_proto(
+            &mut self.buffer,
+            collection,
+            point_ids,
+            payload,
+            wait,
+        );
+        let request = self.buffer.split().freeze();
+        self.client.update_payload(request).await?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Collection Operations
+    // ========================================================================
 
     /// Create a collection with specific vector parameters.
     pub async fn create_collection(
@@ -232,16 +398,28 @@ impl QdrantDriver {
         Ok(())
     }
 
-    /// Delete points by ID from a collection.
-    pub async fn delete_points(
+    // ========================================================================
+    // Index Operations
+    // ========================================================================
+
+    /// Create a payload field index for faster filtering.
+    pub async fn create_field_index(
         &mut self,
-        collection_name: &str,
-        point_ids: &[u64],
+        collection: &str,
+        field_name: &str,
+        field_type: encoder::FieldType,
+        wait: bool,
     ) -> QdrantResult<()> {
         self.buffer.clear();
-        encoder::encode_delete_points_proto(&mut self.buffer, collection_name, point_ids);
+        encoder::encode_create_field_index_proto(
+            &mut self.buffer,
+            collection,
+            field_name,
+            field_type,
+            wait,
+        );
         let request = self.buffer.split().freeze();
-        self.client.delete(request).await?;
+        self.client.create_field_index(request).await?;
         Ok(())
     }
 }

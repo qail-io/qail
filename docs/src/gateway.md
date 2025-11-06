@@ -2,7 +2,7 @@
 
 Qail Gateway is an **auto-REST API server** that turns your PostgreSQL database into a full-featured API — with zero backend code. Point it at a database, get instant CRUD, real-time subscriptions, and enterprise security.
 
-**90% Hasura feature parity** — without GraphQL complexity. Binary AST protocol instead of string-based queries.
+**Full-featured data API** — without GraphQL complexity. Binary AST protocol instead of string-based queries.
 
 ## Quick Start
 
@@ -156,9 +156,9 @@ auth:
     # OR
     jwks_url: "https://..."            # RS256 via JWKS
   claims:
-    operator_id: "x-hasura-operator-id"
-    user_id: "x-hasura-user-id"
-    role: "x-hasura-role"
+    operator_id: "operator_id"
+    user_id: "sub"
+    role: "role"
 ```
 
 ### Header-Based Dev Auth

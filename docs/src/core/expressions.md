@@ -222,6 +222,16 @@ let mode = GroupByMode::GroupingSets(vec![
 | `Action::Index` | `CREATE INDEX` | ✓ |
 | `Action::CreateView` | `CREATE VIEW AS` | ✓ v0.14.2 |
 | `Action::DropView` | `DROP VIEW` | ✓ v0.14.2 |
+| `Action::CreateMaterializedView` | `CREATE MATERIALIZED VIEW` | ✓ |
+| `Action::RefreshMaterializedView` | `REFRESH MATERIALIZED VIEW` | ✓ |
+| `Action::DropMaterializedView` | `DROP MATERIALIZED VIEW` | ✓ |
+| `Action::Truncate` | `TRUNCATE` | ✓ |
+| `Action::Explain` | `EXPLAIN` | ✓ |
+| `Action::ExplainAnalyze` | `EXPLAIN ANALYZE` | ✓ |
+| `Action::Lock` | `LOCK TABLE` | ✓ |
+| `Action::Listen` | `LISTEN channel` | ✓ |
+| `Action::Notify` | `NOTIFY channel, 'payload'` | ✓ |
+| `Action::Unlisten` | `UNLISTEN channel` | ✓ |
 
 ```rust
 use qail_core::ast::{Qail, Action};

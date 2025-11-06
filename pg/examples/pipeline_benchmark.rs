@@ -17,6 +17,7 @@ const BATCH_ITERATIONS: usize = 20;  // 20 x 500 = 10,000 total
 const POOL_SIZE: usize = 10;
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Pipeline vs Single Query Benchmark");
     println!("======================================\n");
@@ -105,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let batch_clone = batch.clone();
         
         handles.push(tokio::spawn(async move {
-            let mut conn = pool_clone.acquire().await.unwrap();
+            let mut conn = pool_clone.acquire_system().await.unwrap();
             for _ in 0..BATCH_ITERATIONS {
                 let _ = conn.pipeline_ast_cached(&batch_clone).await;
             }

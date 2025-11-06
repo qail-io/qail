@@ -31,6 +31,7 @@ use axum::{
     Router,
 };
 use qail_core::ast::{AggregateFunc, Expr, JoinKind, Operator, Value as QailValue};
+use qail_core::transpiler::ToSql;
 use crate::policy::OperationType;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -429,6 +430,22 @@ fn extract_table_name(uri: &axum::http::Uri) -> Option<String> {
     }
 }
 
+/// Check if the request has `X-Qail-Debug: true` header.
+fn is_debug_request(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-qail-debug")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
+/// Generate the SQL string from a Qail AST command (for debug output).
+/// Uses the transpiler's `to_sql()` method which shows the final SQL
+/// after RLS policy injection.
+fn debug_sql(cmd: &qail_core::ast::Qail) -> String {
+    cmd.to_sql()
+}
+
 /// GET /api/{table} — list with pagination, sorting, filtering, column selection
 async fn list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -447,8 +464,9 @@ async fn list_handler(
     let auth = extract_auth_from_headers(&headers);
 
     // Build Qail AST
-    let limit = params.limit.unwrap_or(50).clamp(1, 1000);
-    let offset = params.offset.unwrap_or(0).max(0);
+    let max_rows = state.config.max_result_rows.min(1000) as i64;
+    let limit = params.limit.unwrap_or(50).clamp(1, max_rows);
+    let offset = params.offset.unwrap_or(0).clamp(0, 100_000);
 
     let mut cmd = qail_core::ast::Qail::get(&table_name);
 
@@ -458,9 +476,11 @@ async fn list_handler(
         cmd = cmd.columns(cols);
     }
 
-    // Sorting (multi-column)
+    // Sorting (multi-column) — default to `id ASC` for deterministic pagination
     if let Some(ref sort) = params.sort {
         cmd = apply_sorting(cmd, sort);
+    } else {
+        cmd = cmd.order_asc("id");
     }
 
     // Distinct
@@ -471,7 +491,17 @@ async fn list_handler(
 
     // Expand FK relations via LEFT JOIN
     if let Some(ref expand) = params.expand {
-        for rel in expand.split(',').map(|s| s.trim()) {
+        let relations: Vec<&str> = {
+            let mut seen = std::collections::HashSet::new();
+            expand.split(',').map(|s| s.trim()).filter(|s| !s.is_empty() && seen.insert(*s)).collect()
+        };
+        if relations.len() > state.config.max_expand_depth {
+            return Err(ApiError::parse_error(format!(
+                "Too many expand relations ({}). Maximum is {}",
+                relations.len(), state.config.max_expand_depth
+            )));
+        }
+        for rel in relations {
             // Try: this table references `rel` (forward: orders?expand=users)
             if let Some((fk_col, ref_col)) = state.schema.relation_for(&table_name, rel) {
                 let left = format!("{}.{}", table_name, fk_col);
@@ -548,24 +578,143 @@ async fn list_handler(
         }
     }
 
+    // ── Per-tenant concurrency guard ────────────────────────────────────
+    let tenant_id = auth.to_rls_context().operator_id.clone();
+    let _concurrency_permit = state
+        .tenant_semaphore
+        .try_acquire(&tenant_id)
+        .await
+        .ok_or_else(|| {
+            tracing::warn!(
+                tenant = %tenant_id,
+                table = %table_name,
+                "Tenant concurrency limit reached"
+            );
+            ApiError::rate_limited()
+        })?;
+
     // Execute
     let mut conn = state
         .pool
-        .acquire_with_rls(auth.to_rls_context())
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    // ── EXPLAIN Pre-check ──────────────────────────────────────────────
+    // Run EXPLAIN (FORMAT JSON) for queries with expand depth ≥ threshold
+    // to reject outrageously expensive queries before they consume resources.
+    {
+        use qail_pg::explain::{ExplainMode, check_estimate};
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let expand_depth = params.expand.as_deref()
+            .map(|e| e.split(',').filter(|s| !s.trim().is_empty()).count())
+            .unwrap_or(0);
+
+        let should_explain = match state.explain_config.mode {
+            ExplainMode::Off => false,
+            ExplainMode::Enforce => true,
+            ExplainMode::Precheck => expand_depth >= state.explain_config.depth_threshold,
+        };
+
+        if should_explain {
+            // Hash the SQL shape for cache lookup
+            let sql_shape = cmd.to_sql();
+            let mut hasher = DefaultHasher::new();
+            sql_shape.hash(&mut hasher);
+            let shape_hash = hasher.finish();
+
+            let estimate = if let Some(cached) = state.explain_cache.get(shape_hash, None) {
+                cached
+            } else {
+                // Run EXPLAIN on the live connection
+                match conn.explain_estimate(&cmd).await {
+                    Ok(Some(est)) => {
+                        state.explain_cache.insert(shape_hash, est.clone());
+                        est
+                    }
+                    Ok(None) => {
+                        // Parse failure — log and allow (fail open)
+                        tracing::warn!(
+                            table = %table_name,
+                            sql = %sql_shape,
+                            "EXPLAIN pre-check: failed to parse EXPLAIN output, allowing query"
+                        );
+                        qail_pg::explain::ExplainEstimate { total_cost: 0.0, plan_rows: 0 }
+                    }
+                    Err(e) => {
+                        // EXPLAIN itself failed — log and allow (fail open)
+                        tracing::warn!(
+                            table = %table_name,
+                            error = %e,
+                            "EXPLAIN pre-check: EXPLAIN query failed, allowing query"
+                        );
+                        qail_pg::explain::ExplainEstimate { total_cost: 0.0, plan_rows: 0 }
+                    }
+                }
+            };
+            // P1-E: Log cost estimates for observability
+            tracing::info!(
+                table = %table_name,
+                explain_cost = estimate.total_cost,
+                explain_rows = estimate.plan_rows,
+                expand_depth,
+                "EXPLAIN estimate"
+            );
+
+            let decision = check_estimate(&estimate, &state.explain_config);
+            if decision.is_rejected() {
+                let msg = decision.rejection_message().unwrap_or_default();
+                let detail = decision.rejection_detail()
+                    .expect("rejected decision always has detail");
+                tracing::warn!(
+                    table = %table_name,
+                    cost = estimate.total_cost,
+                    rows = estimate.plan_rows,
+                    expand_depth,
+                    "EXPLAIN pre-check REJECTED query"
+                );
+                return Err(ApiError::too_expensive(msg, detail));
+            }
+        }
+    }
 
     let rows = conn
         .fetch_all_uncached(&cmd)
         .await
-        .map_err(|e| ApiError::query_error(e.to_string()))?;
+        .map_err(|e| ApiError::query_error(e.to_string()));
 
-    let mut data: Vec<Value> = rows.iter().map(row_to_json).collect();
+    // Release connection early — after this point only JSON processing remains.
+    // Branch overlay still needs conn, so we do it before release.
+    let mut data: Vec<Value> = match &rows {
+        Ok(rows) => rows.iter().map(row_to_json).collect(),
+        Err(_) => Vec::new(),
+    };
 
     // Branch overlay merge (CoW Read)
     let branch_ctx = extract_branch_from_headers(&headers);
     if let Some(branch_name) = branch_ctx.branch_name() {
         apply_branch_overlay(&mut conn, branch_name, &table_name, &mut data, "id").await;
+    }
+
+    // Deterministic cleanup — connection is no longer needed
+    conn.release().await;
+
+    // Now propagate the error if query failed
+    let _rows = rows?;
+
+    // ── Tenant Boundary Invariant ────────────────────────────────────
+    if let Some(ref tenant_id) = auth.tenant_id {
+        let _proof = crate::tenant_guard::verify_tenant_boundary(
+            &data,
+            tenant_id,
+            &table_name,
+            "rest_list",
+        ).map_err(|v| {
+            tracing::error!("{}", v);
+            ApiError::internal("Data integrity error")
+        })?;
     }
 
     let count = data.len();
@@ -613,6 +762,9 @@ async fn list_handler(
         offset,
     };
 
+    let debug = is_debug_request(&headers);
+    let debug_sql_str = if debug { Some(debug_sql(&cmd)) } else { None };
+
     // Store in cache for simple queries
     if can_cache {
         if let Ok(json) = serde_json::to_string(&response_body) {
@@ -620,7 +772,20 @@ async fn list_handler(
         }
     }
 
-    Ok(Json(response_body).into_response())
+    let mut response = Json(response_body).into_response();
+
+    // Attach debug headers if X-Qail-Debug was requested
+    if let Some(sql) = debug_sql_str {
+        let hdrs = response.headers_mut();
+        if let Ok(val) = axum::http::HeaderValue::from_str(&sql) {
+            hdrs.insert("x-qail-sql", val);
+        }
+        if let Ok(val) = axum::http::HeaderValue::from_str(&table_name) {
+            hdrs.insert("x-qail-table", val);
+        }
+    }
+
+    Ok(response)
 }
 
 /// GET /api/{table}/aggregate — aggregation queries
@@ -714,14 +879,16 @@ async fn aggregate_handler(
     // Execute
     let mut conn = state
         .pool
-        .acquire_with_rls(auth.to_rls_context())
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let rows = conn
         .fetch_all_uncached(&cmd)
         .await
-        .map_err(|e| ApiError::query_error(e.to_string()))?;
+        .map_err(|e| { ApiError::query_error(e.to_string()) })?;
+
+    conn.release().await;
 
     let data: Vec<Value> = rows.iter().map(row_to_json).collect();
     let count = data.len();
@@ -769,7 +936,7 @@ async fn get_by_id_handler(
     // Execute
     let mut conn = state
         .pool
-        .acquire_with_rls(auth.to_rls_context())
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -810,6 +977,8 @@ async fn get_by_id_handler(
             }
         }
     }
+
+    conn.release().await;
 
     Ok(Json(SingleResponse { data }))
 }
@@ -887,7 +1056,7 @@ async fn create_handler(
     // Acquire connection
     let mut conn = state
         .pool
-        .acquire_with_rls(auth.to_rls_context())
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -969,6 +1138,9 @@ async fn create_handler(
             }
         }
     }
+
+    // Release connection before JSON processing
+    conn.release().await;
 
     // Invalidate cache
     state.cache.invalidate_table(&table_name);
@@ -1068,7 +1240,7 @@ async fn update_handler(
     // Execute
     let mut conn = state
         .pool
-        .acquire_with_rls(auth.to_rls_context())
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -1089,6 +1261,9 @@ async fn update_handler(
         .first()
         .map(row_to_json)
         .unwrap_or_else(|| json!({"updated": true}));
+
+    // Release connection before event processing
+    conn.release().await;
 
     // Invalidate cache
     state.cache.invalidate_table(&table_name);
@@ -1144,7 +1319,7 @@ async fn delete_handler(
     // Execute
     let mut conn = state
         .pool
-        .acquire_with_rls(auth.to_rls_context())
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -1158,6 +1333,9 @@ async fn delete_handler(
     conn.fetch_all_uncached(&cmd)
         .await
         .map_err(|e| ApiError::query_error(e.to_string()))?;
+
+    // Release connection before event processing
+    conn.release().await;
 
     // Invalidate cache
     state.cache.invalidate_table(&table_name);
@@ -1213,8 +1391,9 @@ async fn nested_list_handler(
 
     let auth = extract_auth_from_headers(&headers);
 
-    let limit = params.limit.unwrap_or(50).clamp(1, 1000);
-    let offset = params.offset.unwrap_or(0).max(0);
+    let max_rows = state.config.max_result_rows.min(1000) as i64;
+    let limit = params.limit.unwrap_or(50).clamp(1, max_rows);
+    let offset = params.offset.unwrap_or(0).clamp(0, 100_000);
 
     // Build: get child[fk_col = parent_id]
     let mut cmd = qail_core::ast::Qail::get(&child_table)
@@ -1260,7 +1439,7 @@ async fn nested_list_handler(
     // Execute — single query, no N+1
     let mut conn = state
         .pool
-        .acquire_with_rls(auth.to_rls_context())
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -1289,9 +1468,20 @@ async fn nested_list_handler(
 ///
 /// Returns the full schema registry as JSON, including tables, columns,
 /// primary keys, foreign keys, and column types.
+///
+/// **Security (H4):** Requires authentication in production.
+/// In dev mode (`QAIL_DEV_MODE=true`), unauthenticated access is allowed.
 async fn schema_introspection_handler(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<GatewayState>>,
-) -> Json<Value> {
+) -> Result<Json<Value>, crate::middleware::ApiError> {
+    // Auth gate: reject unauthenticated callers in production
+    let auth = extract_auth_from_headers(&headers);
+    if !auth.is_authenticated() {
+        return Err(crate::middleware::ApiError::auth_error(
+            "Authentication required for schema introspection",
+        ));
+    }
     let tables = state.schema.tables();
     let mut result = serde_json::Map::new();
 
@@ -1318,18 +1508,26 @@ async fn schema_introspection_handler(
         }));
     }
 
-    Json(json!({
+    Ok(Json(json!({
         "tables": result,
         "table_count": tables.len(),
-    }))
+    })))
 }
 
 /// GET /api/_openapi — Auto-generated OpenAPI 3.0.3 spec
 ///
 /// Generates a complete OpenAPI specification from the schema registry.
 async fn openapi_spec_handler(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<GatewayState>>,
-) -> Json<Value> {
+) -> Result<Json<Value>, crate::middleware::ApiError> {
+    // Auth gate: reject unauthenticated callers in production
+    let auth = extract_auth_from_headers(&headers);
+    if !auth.is_authenticated() {
+        return Err(crate::middleware::ApiError::auth_error(
+            "Authentication required for OpenAPI spec",
+        ));
+    }
     let tables = state.schema.tables();
     let mut paths = serde_json::Map::new();
     let mut schemas = serde_json::Map::new();
@@ -1433,7 +1631,7 @@ async fn openapi_spec_handler(
         }
     }
 
-    Json(json!({
+    Ok(Json(json!({
         "openapi": "3.0.3",
         "info": {
             "title": "QAIL Gateway API",
@@ -1452,7 +1650,7 @@ async fn openapi_spec_handler(
             }
         },
         "security": [{"bearerAuth": []}],
-    }))
+    })))
 }
 
 /// Map PostgreSQL types to OpenAPI 3.0 types
@@ -1498,8 +1696,9 @@ async fn explain_handler(
     let auth = extract_auth_from_headers(&headers);
 
     // Build query (same as list_handler)
-    let limit = params.limit.unwrap_or(50).min(1000);
-    let offset = params.offset.unwrap_or(0);
+    let max_rows = state.config.max_result_rows.min(1000) as i64;
+    let limit = params.limit.unwrap_or(50).clamp(1, max_rows);
+    let offset = params.offset.unwrap_or(0).clamp(0, 100_000);
     let mut cmd = qail_core::ast::Qail::get(&table_name);
 
     // Apply select
@@ -1508,7 +1707,7 @@ async fn explain_handler(
         cmd = cmd.columns(cols);
     }
 
-    // Apply sorting
+    // Apply sorting — default to `id ASC` for deterministic pagination
     if let Some(ref sort) = params.sort {
         for part in sort.split(',') {
             let mut iter = part.splitn(2, ':');
@@ -1520,11 +1719,25 @@ async fn explain_handler(
                 cmd.order_asc(col)
             };
         }
+    } else {
+        cmd = cmd.order_asc("id");
     }
 
-    // Apply expand (flat JOIN only)
+    // Apply expand (flat JOIN only) — enforce depth limit
     if let Some(ref expand) = params.expand {
-        for rel in expand.split(',').map(|s| s.trim()).filter(|s| !s.starts_with("nested:")) {
+        let relations: Vec<&str> = {
+            let mut seen = std::collections::HashSet::new();
+            expand.split(',').map(|s| s.trim())
+                .filter(|s| !s.is_empty() && !s.starts_with("nested:") && seen.insert(*s))
+                .collect()
+        };
+        if relations.len() > state.config.max_expand_depth {
+            return Err(ApiError::parse_error(format!(
+                "Too many expand relations ({}). Maximum is {}",
+                relations.len(), state.config.max_expand_depth
+            )));
+        }
+        for rel in relations {
             if let Some((fk_col, ref_col)) = state.schema.relation_for(&table_name, rel) {
                 let left = format!("{}.{}", table_name, fk_col);
                 let right = format!("{}.{}", rel, ref_col);
@@ -1569,7 +1782,7 @@ async fn explain_handler(
 
     let mut conn = state
         .pool
-        .acquire_with_rls(auth.to_rls_context())
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -1608,7 +1821,7 @@ async fn expand_nested(
 ) -> Result<(), ApiError> {
     let mut conn = state
         .pool
-        .acquire_with_rls(auth.to_rls_context())
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -1862,8 +2075,9 @@ async fn redirect_to_overlay(
         branch_name, table_name, row_pk, operation,
     );
     let data_str = serde_json::to_string(row_data).unwrap_or_default();
-    // Use parameterized query for the JSONB data
-    let full_sql = sql.replace("$1", &format!("'{}'::jsonb", data_str.replace('\'', "''")));
+    // Use escape_literal for proper SQL escaping (handles backslashes, NUL, quotes)
+    let safe_data = qail_pg::driver::branch_sql::escape_literal(&data_str);
+    let full_sql = sql.replace("$1", &format!("{}::jsonb", safe_data));
     conn.get_mut()
         .execute_simple(&full_sql)
         .await
@@ -1899,7 +2113,10 @@ async fn branch_create_handler(
 
     let parent = body.get("parent").and_then(|v| v.as_str());
 
-    let mut conn = match state.pool.acquire().await {
+    let mut conn = match state.pool
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1941,7 +2158,10 @@ async fn branch_list_handler(
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Authentication required"}))).into_response();
     }
 
-    let mut conn = match state.pool.acquire().await {
+    let mut conn = match state.pool
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1979,7 +2199,10 @@ async fn branch_delete_handler(
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Authentication required"}))).into_response();
     }
 
-    let mut conn = match state.pool.acquire().await {
+    let mut conn = match state.pool
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -2017,7 +2240,10 @@ async fn branch_merge_handler(
             .into_response();
     }
 
-    let mut conn = match state.pool.acquire().await {
+    let mut conn = match state.pool
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -2058,58 +2284,45 @@ async fn branch_merge_handler(
                 let operation = row.get_string(2).unwrap_or_default();
                 let row_data_str = row.get_string(3).unwrap_or_default();
 
-                let apply_sql = match operation.as_str() {
+                // Build a Qail AST command instead of raw SQL strings.
+                // This routes through AstEncoder → Extended Query Protocol,
+                // where all values are parameterized (never string-interpolated).
+                let cmd = match operation.as_str() {
                     "insert" => {
-                        // Parse JSONB → INSERT INTO table (cols) VALUES (vals)
                         if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
                             if let Some(obj) = val.as_object() {
-                                let cols: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
-                                let vals: Vec<String> = obj.values().map(|v| match v {
-                                    Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                                    Value::Null => "NULL".to_string(),
-                                    Value::Bool(b) => b.to_string(),
-                                    Value::Number(n) => n.to_string(),
-                                    _ => format!("'{}'::jsonb", v.to_string().replace('\'', "''")),
-                                }).collect();
-                                Some(format!(
-                                    "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING;",
-                                    table, cols.join(", "), vals.join(", ")
-                                ))
+                                let mut q = qail_core::ast::Qail::add(&table);
+                                for (k, v) in obj {
+                                    q = q.set_value(k, json_to_qail_value(v));
+                                }
+                                // Use empty conflict columns for DO NOTHING on any constraint
+                                q = q.on_conflict_nothing::<String>(&[]);
+                                Some(q)
                             } else { None }
                         } else { None }
                     }
                     "update" => {
-                        // Parse JSONB → UPDATE table SET col = val WHERE id = pk
                         if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
                             if let Some(obj) = val.as_object() {
-                                let sets: Vec<String> = obj.iter().map(|(k, v)| {
-                                    let val_str = match v {
-                                        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                                        Value::Null => "NULL".to_string(),
-                                        Value::Bool(b) => b.to_string(),
-                                        Value::Number(n) => n.to_string(),
-                                        _ => format!("'{}'::jsonb", v.to_string().replace('\'', "''")),
-                                    };
-                                    format!("{} = {}", k, val_str)
-                                }).collect();
-                                Some(format!(
-                                    "UPDATE {} SET {} WHERE id = '{}';",
-                                    table, sets.join(", "), row_pk.replace('\'', "''")
-                                ))
+                                let mut q = qail_core::ast::Qail::set(&table);
+                                for (k, v) in obj {
+                                    q = q.set_value(k, json_to_qail_value(v));
+                                }
+                                q = q.eq("id", row_pk.clone());
+                                Some(q)
                             } else { None }
                         } else { None }
                     }
                     "delete" => {
-                        Some(format!(
-                            "DELETE FROM {} WHERE id = '{}';",
-                            table, row_pk.replace('\'', "''")
-                        ))
+                        let q = qail_core::ast::Qail::del(&table)
+                            .eq("id", row_pk.clone());
+                        Some(q)
                     }
                     _ => None,
                 };
 
-                if let Some(sql) = apply_sql {
-                    match conn.get_mut().execute_simple(&sql).await {
+                if let Some(qail_cmd) = cmd {
+                    match conn.fetch_all_uncached(&qail_cmd).await {
                         Ok(_) => applied += 1,
                         Err(e) => errors.push(format!("{}.{}: {}", table, row_pk, e)),
                     }

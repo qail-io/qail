@@ -78,13 +78,6 @@ pub struct Qail {
     pub function_def: Option<crate::ast::FunctionDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_def: Option<crate::ast::TriggerDef>,
-    // Redis fields
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_value: Option<Vec<u8>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub redis_ttl: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub redis_set_condition: Option<String>,
 }
 
 /// Helper for skip_serializing_if on bool fields
@@ -166,10 +159,6 @@ impl Default for Qail {
             // Procedural objects
             function_def: None,
             trigger_def: None,
-            // Redis fields
-            raw_value: None,
-            redis_ttl: None,
-            redis_set_condition: None,
         }
     }
 }

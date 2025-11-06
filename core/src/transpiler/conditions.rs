@@ -118,7 +118,7 @@ impl ConditionToSql for Condition {
                     if path.parse::<i64>().is_ok() {
                         result.push_str(&format!("{}{}", op, path));
                     } else {
-                        result.push_str(&format!("{}'{}'", op, path));
+                        result.push_str(&format!("{}'{}'", op, path.replace('\'', "''")));
                     }
                 }
                 result
@@ -136,7 +136,7 @@ impl ConditionToSql for Condition {
                 Operator::Lte => format!("_el <= {}", self.to_value_sql(generator)),
                 Operator::Fuzzy => {
                     let val = match &self.value {
-                        Value::String(s) => format!("'%{}%'", s),
+                        Value::String(s) => format!("'%{}%'", s.replace('\'', "''")),
                         Value::Param(n) => {
                             let p = generator.placeholder(*n);
                             generator.string_concat(&["'%'", &p, "'%'"])
@@ -168,7 +168,7 @@ impl ConditionToSql for Condition {
         match self.op {
             Operator::Fuzzy => {
                 let val = match &self.value {
-                    Value::String(s) => format!("'%{}%'", s),
+                    Value::String(s) => format!("'%{}%'", s.replace('\'', "''")),
                     Value::Param(n) => {
                         let p = generator.placeholder(*n);
                         generator.string_concat(&["'%'", &p, "'%'"])
@@ -306,7 +306,7 @@ impl ConditionToSql for Condition {
                     if path.parse::<i64>().is_ok() {
                         result.push_str(&format!("{}{}", op, path));
                     } else {
-                        result.push_str(&format!("{}'{}'", op, path));
+                        result.push_str(&format!("{}'{}'", op, path.replace('\'', "''")));
                     }
                 }
                 result

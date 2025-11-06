@@ -68,6 +68,8 @@ pub fn escape_identifier(name: &str) -> String {
 
 /// Escape a single identifier part (no dots).
 fn escape_single_identifier(name: &str) -> String {
+    let name = &name.replace('\0', "");
+
     let lower = name.to_lowercase();
     let needs_escaping = RESERVED_WORDS.contains(&lower.as_str())
         || name.chars().any(|c| !c.is_alphanumeric() && c != '_')
