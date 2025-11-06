@@ -27,11 +27,17 @@ impl PgEncoder {
     pub fn encode_query_string(sql: &str) -> BytesMut {
         let mut buf = BytesMut::new();
 
+        // Bounds check: SQL + null terminator + 4 bytes length must fit in i32
+        let content_len = sql.len() + 1; // +1 for null terminator
+        if content_len > (i32::MAX as usize) - 4 {
+            // Return empty buffer — write will fail safely rather than
+            // producing a malformed message with overflowed length.
+            return buf;
+        }
+
         // Message type 'Q' for Query
         buf.extend_from_slice(b"Q");
 
-        // Content: query string + null terminator
-        let content_len = sql.len() + 1; // +1 for null terminator
         let total_len = (content_len + 4) as i32; // +4 for length field itself
 
         // Length (4 bytes, big-endian)
@@ -146,6 +152,9 @@ impl PgEncoder {
                     content.extend_from_slice(&(-1i32).to_be_bytes());
                 }
                 Some(data) => {
+                    if data.len() > i32::MAX as usize {
+                        return Err(EncodeError::MessageTooLarge(data.len()));
+                    }
                     content.extend_from_slice(&(data.len() as i32).to_be_bytes());
                     content.extend_from_slice(data);
                 }
@@ -262,6 +271,9 @@ impl PgEncoder {
             match param {
                 None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
                 Some(data) => {
+                    if data.len() > i32::MAX as usize {
+                        return Err(EncodeError::MessageTooLarge(data.len()));
+                    }
                     buf.extend_from_slice(&(data.len() as i32).to_be_bytes());
                     buf.extend_from_slice(data);
                 }
@@ -448,6 +460,9 @@ impl PgEncoder {
             match param {
                 Param::Null => Self::put_i32_be(buf, -1),
                 Param::Bytes(data) => {
+                    if data.len() > i32::MAX as usize {
+                        return Err(EncodeError::MessageTooLarge(data.len()));
+                    }
                     Self::put_i32_be(buf, data.len() as i32);
                     buf.extend_from_slice(data);
                 }
@@ -517,6 +532,9 @@ impl PgEncoder {
             match param {
                 None => Self::put_i32_be(buf, -1),
                 Some(data) => {
+                    if data.len() > i32::MAX as usize {
+                        return Err(EncodeError::MessageTooLarge(data.len()));
+                    }
                     Self::put_i32_be(buf, data.len() as i32);
                     buf.extend_from_slice(data);
                 }

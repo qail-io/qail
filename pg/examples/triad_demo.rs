@@ -1,12 +1,11 @@
-//! QAIL Triad Demo - PostgreSQL + Qdrant + Redis
+//! QAIL Dual Demo - PostgreSQL + Qdrant
 //!
-//! "Postgres stores facts, Qdrant stores meaning, Redis stores time — QAIL decides."
+//! "Postgres stores facts, Qdrant stores meaning — QAIL decides."
 //!
-//! This example demonstrates all three QAIL drivers working together.
+//! This example demonstrates the QAIL drivers working together.
 //!
 //! ## Requirements
 //! - PostgreSQL on localhost:5432
-//! - Redis on localhost:6379
 //!
 //! ## Run
 //! ```bash
@@ -20,7 +19,7 @@ use qail_pg::{PgDriver, PgResult};
 async fn main() -> PgResult<()> {
     println!("═══════════════════════════════════════════════════════════════════════");
     println!("  🪝 QAIL TRIAD DEMO");
-    println!("  Postgres stores facts, Qdrant stores meaning, Redis stores time");
+    println!("  Postgres stores facts, Qdrant stores meaning — QAIL decides");
     println!("═══════════════════════════════════════════════════════════════════════\n");
 
     // =========================================================================
@@ -72,14 +71,13 @@ async fn main() -> PgResult<()> {
     println!("
   💾 PostgreSQL: ✅ Connected, AST query tested (353K q/s, 4% faster than libpq)
   🔍 Qdrant:     Run separately: cargo run -p qail-qdrant --example basic
-  🕐 Redis:      Run separately: cargo run -p qail-redis --example integration_test
 
   Each driver is:
-  • INDEPENDENT  - cargo add qail-pg / qail-qdrant / qail-redis
+  • INDEPENDENT  - cargo add qail-pg / qail-qdrant
   • FASTEST      - Native protocol, zero overhead
   • AST-BASED    - Commands are data structures, not strings
 
-  \"Postgres stores facts, Qdrant stores meaning, Redis stores time — QAIL decides.\"
+  \"Postgres stores facts, Qdrant stores meaning — QAIL decides.\"
 ");
 
     Ok(())

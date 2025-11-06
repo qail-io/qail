@@ -454,13 +454,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config.base_url,
             &m,
             |client, base, metrics, i| async move {
-                // Use real operator UUIDs to test nested routes with actual joins
+                // Use test operator UUIDs to test nested routes with actual joins
                 let operator_ids = [
-                    "680a70b3-7fb4-431b-9168-e3f6143e80da",
-                    "12cbe5f9-5923-4c27-b001-e67fefffa68d",
-                    "aed2742d-b456-4ba8-8a36-d9bdc868874c",
-                    "f070bf51-7211-4497-bee5-a59920584fca",
-                    "a6fda6c9-2ac6-4263-a3f8-e8b94b5d0153",
+                    "00000000-0000-0000-0000-000000000001",
+                    "00000000-0000-0000-0000-000000000002",
+                    "00000000-0000-0000-0000-000000000003",
+                    "00000000-0000-0000-0000-000000000004",
+                    "00000000-0000-0000-0000-000000000005",
                 ];
                 let op_id = operator_ids[(i as usize) % operator_ids.len()];
                 // Alternate between vessels and odysseys nested under operators

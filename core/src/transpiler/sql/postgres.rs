@@ -60,7 +60,7 @@ impl SqlGenerator for PostgresGenerator {
             // Note: If the column is not text, an explicit cast may be required.
             // Postgres ->> returns text, suitable for comparisons.
             let op = if is_last { "->>" } else { "->" };
-            sql.push_str(&format!("{}'{}'", op, key));
+            sql.push_str(&format!("{}'{}'", op, key.replace('\'', "''")));
         }
         sql
     }

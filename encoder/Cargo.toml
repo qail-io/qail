@@ -1,9 +1,9 @@
 [package]
 name = "qail-encoder"
-version = "0.19.1"
+version = "0.20.0"
 edition = "2024"
 description = "QAIL Encoder - Lightweight wire protocol encoding (no I/O, no TLS)"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
 
 [lib]

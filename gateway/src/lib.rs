@@ -5,7 +5,7 @@
 //! ## Architecture
 //!
 //! ```text
-//! Client → QAIL AST (binary) → Gateway → Postgres/Qdrant/Redis
+//! Client → QAIL AST (binary) → Gateway → Postgres/Qdrant
 //! ```
 //!
 //! ## Quick Start
@@ -33,6 +33,7 @@
 
 pub mod auth;
 pub mod cache;
+pub mod concurrency;
 pub mod config;
 pub mod error;
 pub mod event;
@@ -44,6 +45,7 @@ pub mod rest;
 pub mod router;
 pub mod schema;
 pub mod server;
+pub mod tenant_guard;
 pub mod ws;
 
 pub use config::GatewayConfig;

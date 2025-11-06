@@ -16,4 +16,5 @@ pub use driver::{
     PooledConnection, QailRow, QueryResult,
 };
 pub use protocol::PgEncoder;
+pub use driver::explain;
 pub use types::{Date, FromPg, Json, Numeric, Time, Timestamp, ToPg, TypeError, Uuid};

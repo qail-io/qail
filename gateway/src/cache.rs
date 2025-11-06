@@ -1,13 +1,20 @@
 //! Query Cache Module
 //!
-//! In-memory LRU cache with TTL for query results.
+//! Production-grade in-memory cache backed by moka (Window-TinyLFU).
 //! Only caches GET/SELECT queries; mutations invalidate relevant cache entries.
+//!
+//! # Design
+//! - **TinyLFU eviction**: Frequency-aware eviction keeps hot entries, evicts cold ones.
+//! - **TTL expiry**: Entries expire after configurable TTL (default 60s).
+//! - **Memory-aware**: Weigher tracks byte size of values, not just entry count.
+//! - **Table invalidation**: Mutations invalidate all cache entries for the affected table.
+//! - **Thread-safe**: All operations are safe for concurrent access without external locking.
 
-use dashmap::DashMap;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
-use std::time::{Duration, Instant};
+use moka::sync::Cache;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
+use std::time::Duration;
 
 /// Cache configuration
 #[derive(Debug, Clone)]
@@ -27,120 +34,91 @@ impl Default for CacheConfig {
     }
 }
 
-/// Cached query result
-#[derive(Debug, Clone)]
-struct CacheEntry {
-    /// Serialized JSON result
-    result: String,
-    /// When this entry was created
-    created_at: Instant,
-}
-
-/// Thread-safe query cache with TTL
+/// Thread-safe query cache with TTL and TinyLFU eviction (moka-backed)
 pub struct QueryCache {
-    entries: DashMap<u64, CacheEntry>,
-    table_queries: DashMap<String, Vec<u64>>,
-    config: CacheConfig,
+    /// moka cache: query_key → JSON result
+    entries: Cache<String, String>,
+    /// Table → list of cache keys for invalidation
+    table_keys: RwLock<HashMap<String, Vec<String>>>,
+    enabled: bool,
     hits: AtomicU64,
     misses: AtomicU64,
 }
 
 impl QueryCache {
     pub fn new(config: CacheConfig) -> Self {
+        let entries = Cache::builder()
+            .max_capacity(config.max_entries as u64)
+            .time_to_live(config.ttl)
+            // Weight by byte size: 1 unit per byte of key + value.
+            // This prevents a few large responses from dominating the cache.
+            .weigher(|key: &String, val: &String| -> u32 {
+                (key.len() + val.len()).min(u32::MAX as usize) as u32
+            })
+            .build();
+
         Self {
-            entries: DashMap::with_capacity(config.max_entries),
-            table_queries: DashMap::new(),
-            config,
+            entries,
+            table_keys: RwLock::new(HashMap::new()),
+            enabled: config.enabled,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
     }
-    
+
     pub fn is_enabled(&self) -> bool {
-        self.config.enabled
+        self.enabled
     }
-    
-    fn hash_query(query: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        query.hash(&mut hasher);
-        hasher.finish()
-    }
-    
+
     pub fn get(&self, query: &str) -> Option<String> {
-        if !self.config.enabled {
+        if !self.enabled {
             return None;
         }
-        
-        let hash = Self::hash_query(query);
-        
-        if let Some(entry) = self.entries.get(&hash) {
-                // Check TTL
-            if entry.created_at.elapsed() < self.config.ttl {
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                return Some(entry.result.clone());
-            } else {
-                // Expired - remove it
-                drop(entry);
-                self.entries.remove(&hash);
-            }
+
+        if let Some(result) = self.entries.get(query) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            Some(result)
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            None
         }
-        
-        self.misses.fetch_add(1, Ordering::Relaxed);
-        None
     }
-    
+
     pub fn set(&self, query: &str, table: &str, result: String) {
-        if !self.config.enabled {
+        if !self.enabled {
             return;
         }
-        
-        if self.entries.len() >= self.config.max_entries {
-            self.evict_expired();
-            
-            if self.entries.len() >= self.config.max_entries {
-                return;
-            }
+
+        let key = query.to_string();
+        self.entries.insert(key.clone(), result);
+
+        // Track which keys belong to which table for invalidation
+        if let Ok(mut map) = self.table_keys.write() {
+            map.entry(table.to_string())
+                .or_default()
+                .push(key);
         }
-        
-        let hash = Self::hash_query(query);
-        let entry = CacheEntry {
-            result,
-            created_at: Instant::now(),
-        };
-        
-        self.entries.insert(hash, entry);
-        
-        self.table_queries
-            .entry(table.to_string())
-            .or_default()
-            .push(hash);
     }
-    
+
     /// Invalidate all cache entries for a table
     pub fn invalidate_table(&self, table: &str) {
-        if let Some((_, hashes)) = self.table_queries.remove(table) {
-            let count = hashes.len();
-            for hash in &hashes {
-                self.entries.remove(hash);
+        if let Ok(mut map) = self.table_keys.write() {
+            if let Some(keys) = map.remove(table) {
+                let count = keys.len();
+                for key in &keys {
+                    self.entries.invalidate(key);
+                }
+                tracing::debug!("Invalidated {} cache entries for table '{}'", count, table);
             }
-            tracing::debug!("Invalidated {} cache entries for table '{}'", count, table);
         }
     }
-    
-    fn evict_expired(&self) {
-        let now = Instant::now();
-        let ttl = self.config.ttl;
-        
-        self.entries.retain(|_, entry| {
-            now.duration_since(entry.created_at) < ttl
-        });
-    }
-    
+
     pub fn stats(&self) -> CacheStats {
         CacheStats {
-            entries: self.entries.len(),
+            entries: self.entries.entry_count() as usize,
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
+            weighted_size: self.entries.weighted_size(),
         }
     }
 }
@@ -150,6 +128,8 @@ pub struct CacheStats {
     pub entries: usize,
     pub hits: u64,
     pub misses: u64,
+    /// Total weighted size of all entries (bytes of key + value)
+    pub weighted_size: u64,
 }
 
 impl CacheStats {
@@ -167,42 +147,42 @@ impl CacheStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_cache_hit_miss() {
         let cache = QueryCache::new(CacheConfig::default());
-        
+
         // Miss on first access
         assert!(cache.get("get users").is_none());
-        
+
         // Set and hit
         cache.set("get users", "users", r#"{"rows":[]}"#.to_string());
         assert!(cache.get("get users").is_some());
-        
+
         let stats = cache.stats();
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.misses, 1);
     }
-    
+
     #[test]
     fn test_cache_invalidation() {
         let cache = QueryCache::new(CacheConfig::default());
-        
+
         cache.set("get users", "users", r#"{"rows":[]}"#.to_string());
         assert!(cache.get("get users").is_some());
-        
+
         // Invalidate table
         cache.invalidate_table("users");
         assert!(cache.get("get users").is_none());
     }
-    
+
     #[test]
     fn test_cache_disabled() {
         let cache = QueryCache::new(CacheConfig {
             enabled: false,
             ..Default::default()
         });
-        
+
         cache.set("get users", "users", r#"{"rows":[]}"#.to_string());
         assert!(cache.get("get users").is_none());
     }
@@ -261,24 +241,21 @@ mod tests {
     }
 
     #[test]
-    fn test_max_capacity_does_not_corrupt() {
+    fn test_eviction_under_capacity() {
+        // moka uses TinyLFU — it should evict cold entries, not crash or corrupt
         let cache = QueryCache::new(CacheConfig {
             max_entries: 5,
             ttl: Duration::from_secs(60),
             enabled: true,
         });
 
-        // Fill to capacity
-        for i in 0..5 {
+        // Insert more than capacity — moka will evict based on TinyLFU policy
+        for i in 0..20 {
             cache.set(&format!("query_{}", i), "table", format!("data_{}", i));
         }
-        assert_eq!(cache.stats().entries, 5);
 
-        // Try to add beyond capacity — should silently drop
-        cache.set("query_overflow", "table", "overflow_data".to_string());
-
-        // Verify no corruption: existing entries still return correct data
-        for i in 0..5 {
+        // Verify no corruption: every entry that IS cached has correct data
+        for i in 0..20 {
             if let Some(val) = cache.get(&format!("query_{}", i)) {
                 assert_eq!(val, format!("data_{}", i), "Data corruption detected!");
             }
@@ -342,5 +319,18 @@ mod tests {
         assert_eq!(stats.hits, 3);
         assert_eq!(stats.misses, 1);
         assert!((stats.hit_rate() - 75.0).abs() < 0.01, "Hit rate should be 75%, got {}", stats.hit_rate());
+    }
+
+    #[test]
+    fn test_large_value_stored_correctly() {
+        let cache = QueryCache::new(CacheConfig::default());
+        let large_value = "x".repeat(1000);
+
+        cache.set("key", "t", large_value.clone());
+
+        // The important property: large values are stored and retrieved correctly
+        let retrieved = cache.get("key").expect("Large value should be cached");
+        assert_eq!(retrieved.len(), 1000);
+        assert_eq!(retrieved, large_value);
     }
 }

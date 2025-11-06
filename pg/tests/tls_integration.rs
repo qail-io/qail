@@ -9,7 +9,7 @@ use qail_pg::{PgConnection, PgDriver, PgResult};
 const HOST: &str = "pg.qail.rs";
 const PORT: u16 = 5432;
 const USER: &str = "qail";
-const PASSWORD: &str = "qail_test_2024";
+const PASSWORD: &str = "test_password";
 const DATABASE: &str = "qailtest";
 
 /// Test TLS connection to pg.qail.rs

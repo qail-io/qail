@@ -26,15 +26,17 @@ pub mod pool;
 
 pub use driver::QdrantDriver;
 pub use error::{QdrantError, QdrantResult};
-pub use point::{Point, PointId, Payload, SparseVector, VectorData, MultiVectorPoint};
+pub use point::{Point, PointId, Payload, PayloadValue, SparseVector, VectorData, MultiVectorPoint, ScoredPoint};
 pub use pool::{QdrantPool, PoolConfig, PooledConnection};
+pub use decoder::ScrollResult;
+pub use encoder::FieldType;
 
 /// Re-export qail-core prelude for convenience.
 pub mod prelude {
     pub use qail_core::prelude::*;
-    pub use crate::{QdrantDriver, QdrantError, QdrantResult, Point, PointId, Payload};
+    pub use crate::{QdrantDriver, QdrantError, QdrantResult, Point, PointId, Payload, PayloadValue, ScoredPoint};
     pub use crate::{SparseVector, VectorData, MultiVectorPoint};
-    pub use crate::{QdrantPool, PoolConfig};
+    pub use crate::{QdrantPool, PoolConfig, ScrollResult, FieldType};
 }
 
 /// Distance metrics for vector similarity.
