@@ -1,6 +1,6 @@
 //! Production middleware
 //!
-//! Rate limiting, timeouts, and structured error responses.
+//! Rate limiting, timeouts, structured error responses, and request tracing.
 
 use axum::{
     extract::State,
@@ -17,6 +17,11 @@ use std::{
 };
 use tokio::sync::RwLock;
 
+/// Request ID extension — inserted by `request_tracer` middleware,
+/// extracted by handlers to populate `ApiError.request_id`.
+#[derive(Clone, Debug)]
+pub struct RequestId(pub String);
+
 /// Request timeout duration
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -27,8 +32,10 @@ pub struct RateLimiter {
     rate: f64,
     /// Maximum burst capacity
     burst: u32,
-    /// Per-IP buckets
+    /// Per-key buckets
     buckets: RwLock<HashMap<String, TokenBucket>>,
+    /// Max number of tracked keys to prevent unbounded growth
+    max_buckets: usize,
 }
 
 #[derive(Debug)]
@@ -47,6 +54,7 @@ impl RateLimiter {
             rate,
             burst,
             buckets: RwLock::new(HashMap::new()),
+            max_buckets: 100_000, // Cap to prevent OOM from spoofed IPs
         })
     }
     
@@ -54,7 +62,20 @@ impl RateLimiter {
     pub async fn check(&self, key: &str) -> Result<u32, ()> {
         let now = Instant::now();
         let mut buckets = self.buckets.write().await;
-        
+
+        // Enforce max bucket count to prevent OOM from spoofed keys.
+        // When at capacity, evict oldest bucket before inserting new one.
+        if !buckets.contains_key(key) && buckets.len() >= self.max_buckets {
+            // Evict the oldest bucket
+            if let Some(oldest_key) = buckets
+                .iter()
+                .min_by_key(|(_, b)| b.last_update)
+                .map(|(k, _)| k.clone())
+            {
+                buckets.remove(&oldest_key);
+            }
+        }
+
         let bucket = buckets.entry(key.to_string()).or_insert_with(|| TokenBucket {
             tokens: self.burst as f64,
             last_update: now,
@@ -82,21 +103,34 @@ impl RateLimiter {
     }
 }
 
-/// Rate limiting middleware
+/// Rate limiting middleware — dual-key: per-IP AND per-tenant.
+///
+/// Both checks must pass. This prevents:
+/// - A single IP from flooding the system (per-IP bucket)
+/// - A single tenant (operator) from starving others (per-tenant bucket)
 pub async fn rate_limit_middleware(
     State(state): State<Arc<crate::GatewayState>>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // Extract client IP (use X-Forwarded-For if behind proxy)
-    let key = request
+    // Per-IP bucket key
+    // SECURITY: Use the LAST XFF entry (closest to our reverse proxy),
+    // not the first (client-controlled). Without a reverse proxy, fall back
+    // to "unknown" — ConnectInfo would be better but requires Hyper config.
+    let ip_key = request
         .headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or("unknown").trim().to_string())
+        .map(|s| s.split(',').next_back().unwrap_or("unknown").trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    
-    match state.rate_limiter.check(&key).await {
+
+    // SECURITY: Tenant-level rate limiting is deferred to post-auth middleware.
+    // Reading x-operator-id from raw headers is spoofable — an attacker can send
+    // any tenant ID to exhaust another tenant's bucket or bypass their own.
+    // For now, only IP-based rate limiting runs pre-auth.
+
+    // IP-only rate limiting (tenant-level deferred to post-auth)
+    match state.rate_limiter.check(&ip_key).await {
         Ok(remaining) => {
             let mut response = next.run(request).await;
             response.headers_mut().insert(
@@ -106,7 +140,7 @@ pub async fn rate_limit_middleware(
             response
         }
         Err(()) => {
-            tracing::warn!("Rate limited: {}", key);
+            tracing::warn!(ip = %ip_key, "IP rate limited");
             ApiError::rate_limited().into_response()
         }
     }
@@ -156,10 +190,42 @@ impl ApiError {
     }
     
     pub fn query_error(msg: impl Into<String>) -> Self {
+        // SECURITY: Log the raw error server-side, do NOT send to client.
+        // Raw PG errors contain table names, constraint names, column types.
+        let detail = msg.into();
+        tracing::error!(detail = %detail, "query_error");
         Self {
             code: "QUERY_ERROR".to_string(),
             message: "Query execution failed.".to_string(),
-            details: Some(msg.into()),
+            details: None,
+            request_id: None,
+        }
+    }
+    
+    /// Query rejected by EXPLAIN pre-check — cost or row estimate too high.
+    ///
+    /// The `detail` is embedded as JSON in the `details` field so that
+    /// client SDKs can programmatically parse cost/row/suggestion data.
+    pub fn too_expensive(
+        msg: impl Into<String>,
+        detail: qail_pg::explain::ExplainRejectionDetail,
+    ) -> Self {
+        let suggestions: Vec<String> = detail.suggestions
+            .iter()
+            .map(|s| format!("\"{}\"", s))
+            .collect();
+        let detail_json = format!(
+            r#"{{"estimated_cost":{:.0},"cost_limit":{:.0},"estimated_rows":{},"row_limit":{},"suggestions":[{}]}}"#,
+            detail.estimated_cost,
+            detail.cost_limit,
+            detail.estimated_rows,
+            detail.row_limit,
+            suggestions.join(","),
+        );
+        Self {
+            code: "QUERY_TOO_EXPENSIVE".to_string(),
+            message: msg.into(),
+            details: Some(detail_json),
             request_id: None,
         }
     }
@@ -192,10 +258,14 @@ impl ApiError {
     }
     
     pub fn internal(msg: impl Into<String>) -> Self {
+        // SECURITY: Log the raw error server-side, do NOT leak stack traces
+        // or PG internals to the client.
+        let detail = msg.into();
+        tracing::error!(detail = %detail, "internal_error");
         Self {
             code: "INTERNAL_ERROR".to_string(),
             message: "An internal error occurred.".to_string(),
-            details: Some(msg.into()),
+            details: None,
             request_id: None,
         }
     }
@@ -212,6 +282,7 @@ impl ApiError {
             "TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
             "PARSE_ERROR" => StatusCode::BAD_REQUEST,
             "QUERY_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
+            "QUERY_TOO_EXPENSIVE" => StatusCode::UNPROCESSABLE_ENTITY,
             "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
             "FORBIDDEN" => StatusCode::FORBIDDEN,
             "NOT_FOUND" => StatusCode::NOT_FOUND,
@@ -223,7 +294,25 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status_code();
-        (status, Json(self)).into_response()
+        let is_rate_limited = self.code == "RATE_LIMITED";
+        let request_id = self.request_id.clone();
+        let mut response = (status, Json(self)).into_response();
+
+        // P1-B: Add Retry-After header for rate-limited responses
+        if is_rate_limited {
+            if let Ok(v) = "1".parse() {
+                response.headers_mut().insert("retry-after", v);
+            }
+        }
+
+        // P1-A: Echo request_id in response header for tracing
+        if let Some(ref id) = request_id {
+            if let Ok(v) = id.parse() {
+                response.headers_mut().insert("x-request-id", v);
+            }
+        }
+
+        response
     }
 }
 
@@ -412,13 +501,16 @@ impl QueryComplexityGuard {
 /// Logs: request_id (UUID), method, path, status, duration_ms.
 /// Injects `x-request-id` and `x-response-time` headers.
 pub async fn request_tracer(
-    request: Request<axum::body::Body>,
+    mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let start = Instant::now();
+
+    // P1-A: Store request_id in extensions for downstream handlers
+    request.extensions_mut().insert(RequestId(request_id.clone()));
 
     // Extract table from path: /api/{table}/... → table
     let table = path

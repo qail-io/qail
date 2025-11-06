@@ -1,11 +1,11 @@
 # Connection Pooling
 
-Efficient connection reuse with `PgPool`.
+Efficient connection reuse with built-in multi-tenant safety.
 
 ## Configuration
 
 ```rust
-use qail_pg::driver::{PgPool, PoolConfig};
+use qail_pg::{PgPool, PoolConfig};
 
 let config = PoolConfig::new("localhost", 5432, "user", "database")
     .password("secret")
@@ -13,32 +13,54 @@ let config = PoolConfig::new("localhost", 5432, "user", "database")
     .min_connections(5);
 ```
 
-## Creating a Pool
+Or load from `qail.toml`:
 
 ```rust
-let pool = PgPool::connect(config).await?;
+let pool = PgPool::from_config().await?;
 ```
 
 ## Acquiring Connections
 
+Always use RLS-aware methods for tenant queries:
+
 ```rust
-// This waits if all connections are in use
-let mut conn = pool.acquire().await?;
+use qail_core::rls::RlsContext;
 
-// Use the connection
-conn.simple_query("SELECT 1").await?;
+// Tenant-scoped connection — RLS is set before any query runs
+let ctx = RlsContext::operator(operator_id);
+let mut conn = pool.acquire_with_rls(ctx).await?;
 
-// Connection automatically returned to pool when dropped
+// With custom statement timeout (milliseconds)
+let mut conn = pool.acquire_with_rls_timeout(ctx, 30_000).await?;
+
+// System connection — no tenant context (for schema introspection, migrations)
+let mut conn = pool.acquire_system().await?;
 ```
+
+> **Warning:** Never use `acquire_raw()` for tenant queries. It returns a connection with **no RLS context**, bypassing row-level security. This method is crate-internal only.
+
+## Connection Lifecycle
+
+Every connection follows a strict lifecycle:
+
+```
+acquire_with_rls(ctx)
+  → set_config('app.current_operator_id', '...', false)
+  → set_config('app.is_super_admin', '...', false)
+  → execute queries (RLS policies filter rows automatically)
+  → release()
+      → DISCARD ALL (clears ALL server-side state)
+      → clear client-side caches
+      → return to pool
+```
+
+`DISCARD ALL` destroys prepared statements, temp tables, GUCs, and all session state. This guarantees zero state leakage between tenants sharing the same physical connection.
 
 ## Pool Stats
 
 ```rust
-// Current idle connections
-let idle = pool.idle_count().await;
-
-// Maximum configured connections
-let max = pool.max_connections();
+let stats = pool.stats();
+println!("Active: {}, Idle: {}", stats.active, stats.idle);
 ```
 
 ## Best Practices
@@ -46,7 +68,8 @@ let max = pool.max_connections();
 1. **Create pool once** at application startup
 2. **Share via `Arc`** across threads/tasks
 3. **Don't hold connections** longer than needed
-4. **Set appropriate pool size** (CPU cores × 2 is a good start)
+4. **Always use `acquire_with_rls()`** for tenant queries — never `acquire_raw()`
+5. **Set appropriate pool size** — CPU cores × 2 is a good start
 
 ```rust
 use std::sync::Arc;
@@ -56,7 +79,8 @@ let pool = Arc::new(PgPool::connect(config).await?);
 // Clone Arc for each task
 let pool_clone = pool.clone();
 tokio::spawn(async move {
-    let conn = pool_clone.acquire().await?;
+    let ctx = RlsContext::operator(op_id);
+    let conn = pool_clone.acquire_with_rls(ctx).await?;
     // ...
 });
 ```

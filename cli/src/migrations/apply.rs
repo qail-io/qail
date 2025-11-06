@@ -223,20 +223,32 @@ pub enum MigrateDirection {
 
 /// Parse a .qail schema file and generate SQL DDL.
 ///
-/// Uses the full migrate parser (`parse_qail`) which handles the brace-based
-/// .qail format with tables, indexes, functions, triggers, grants, etc.
-/// Falls back to `Schema::parse()` + `parse_functions_and_triggers()` for
-/// backward compatibility with the paren-based format.
+/// Detects whether the content uses brace-based (`table foo { ... }`) or
+/// paren-based (`table foo ( ... )`) format and routes to the appropriate parser.
+///
+/// - Brace-based: handled by `parse_qail()` + `migrate_schema_to_sql()` —
+///   supports tables, indexes, functions, triggers, grants, `$$` blocks.
+/// - Paren-based: handled by `Schema::parse()` + `schema.to_sql()` —
+///   the established "schema.qail" format with `enable_rls` annotations.
+/// - Fallback: `parse_functions_and_triggers()` for raw function/trigger blocks.
 fn parse_qail_to_sql(content: &str) -> Result<String> {
-    // 1. Try the full migrate parser first (handles braces, $$, triggers, grants, etc.)
-    if let Ok(schema) = parse_qail(content) {
-        let sql = migrate_schema_to_sql(&schema);
-        if !sql.is_empty() {
-            return Ok(sql);
+    // Detect format: look for `table <name> {` vs `table <name> (`
+    let uses_braces = content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("table ") && trimmed.ends_with('{')
+    });
+
+    if uses_braces {
+        // 1. Brace-based format: use the full migrate parser
+        if let Ok(schema) = parse_qail(content) {
+            let sql = migrate_schema_to_sql(&schema);
+            if !sql.is_empty() {
+                return Ok(sql);
+            }
         }
     }
 
-    // 2. Try the simpler parser/schema.rs parser (paren-based format)
+    // 2. Paren-based format (or brace parser failed): use Schema::parse
     match Schema::parse(content) {
         Ok(schema) => {
             if schema.tables.is_empty() && schema.policies.is_empty() && schema.indexes.is_empty() {
@@ -245,6 +257,16 @@ fn parse_qail_to_sql(content: &str) -> Result<String> {
             Ok(schema.to_sql())
         }
         Err(_) => {
+            // 3. Last resort: try brace parser even without brace detection
+            //    (for files with only functions/triggers/grants)
+            if !uses_braces
+                && let Ok(schema) = parse_qail(content)
+            {
+                let sql = migrate_schema_to_sql(&schema);
+                if !sql.is_empty() {
+                    return Ok(sql);
+                }
+            }
             parse_functions_and_triggers(content)
         }
     }
@@ -313,6 +335,14 @@ fn migrate_schema_to_sql(schema: &qail_core::migrate::schema::Schema) -> String 
             "CREATE TABLE IF NOT EXISTS {} (\n{}\n);",
             name, col_defs.join(",\n")
         ));
+
+        // RLS: ENABLE and FORCE row-level security
+        if table.enable_rls {
+            parts.push(format!("ALTER TABLE {} ENABLE ROW LEVEL SECURITY;", name));
+        }
+        if table.force_rls {
+            parts.push(format!("ALTER TABLE {} FORCE ROW LEVEL SECURITY;", name));
+        }
     }
 
     // Deferred FK constraints (after all tables exist)
@@ -655,3 +685,75 @@ fn translate_trigger(block: &str) -> Result<String> {
     Ok(sql)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_booking_to_sql() {
+        let input = r#"
+table booking_orders {
+  id                    uuid primary_key default gen_random_uuid()
+  hold_id               uuid nullable
+  connection_id         uuid nullable
+  voyage_id             uuid nullable
+  operator_id           uuid not_null
+  status                text not_null default 'Draft'
+  total_fare            bigint not_null
+  currency              text not_null default 'IDR'
+  nationality           text not_null default 'indo'
+  pax_breakdown         jsonb not_null default '{}'
+  contact_info          jsonb not_null default '{}'
+  pricing_breakdown     jsonb nullable
+  passenger_details     jsonb nullable default '[]'
+  connection_snapshot   jsonb nullable
+  invoice_number        text nullable unique
+  booking_number        text nullable
+  metadata              jsonb nullable
+  user_id               uuid nullable
+  agent_id              uuid nullable
+  created_at            timestamptz not_null default now()
+  updated_at            timestamptz not_null default now()
+
+  enable_rls
+  force_rls
+}
+
+index idx_booking_orders_operator on booking_orders (operator_id)
+index idx_booking_orders_status on booking_orders (status)
+index idx_booking_orders_user on booking_orders (user_id)
+"#;
+        let sql = parse_qail_to_sql(input).expect("parse_qail_to_sql should succeed");
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS booking_orders"), "SQL should contain CREATE TABLE");
+        assert!(sql.contains("ALTER TABLE booking_orders ENABLE ROW LEVEL SECURITY"), "SQL should enable RLS");
+        assert!(sql.contains("ALTER TABLE booking_orders FORCE ROW LEVEL SECURITY"), "SQL should force RLS");
+        assert!(sql.contains("CREATE INDEX IF NOT EXISTS idx_booking_orders_operator"), "SQL should create indexes");
+        assert!(sql.contains("CREATE INDEX IF NOT EXISTS idx_booking_orders_status"), "SQL should create status index");
+        assert!(sql.contains("CREATE INDEX IF NOT EXISTS idx_booking_orders_user"), "SQL should create user index");
+    }
+
+    #[test]
+    fn test_parse_paren_based_booking() {
+        let input = r#"
+table orders (
+    id                    uuid primary_key default gen_random_uuid(),
+    operator_id           uuid,
+    status                varchar not_null default 'Draft',
+    total_fare            bigint not_null,
+    currency              varchar not_null default 'IDR',
+    pax_breakdown         jsonb not_null default '{}',
+    contact_info          jsonb not_null default '{}',
+    created_at            timestamptz not_null default now(),
+    updated_at            timestamptz not_null default now()
+) enable_rls
+
+index idx_orders_operator on orders (operator_id)
+index idx_orders_status on orders (status)
+"#;
+        let sql = parse_qail_to_sql(input).expect("paren-based parse should succeed");
+        assert!(!sql.contains("( ("), "SQL should not have double parens");
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS orders"), "SQL should contain CREATE TABLE");
+        assert!(sql.contains("ALTER TABLE orders ENABLE ROW LEVEL SECURITY"), "SQL should enable RLS");
+        assert!(sql.contains("CREATE INDEX IF NOT EXISTS idx_orders_operator"), "SQL should create indexes");
+    }
+}

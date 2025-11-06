@@ -415,17 +415,6 @@ grpc = "{}:6334"
         ));
     }
 
-    // Always include commented-out redis section
-    content.push_str(
-        r#"
-# [redis]
-# host = "127.0.0.1"
-# port = 6379
-# max_connections = 10
-# password = "${REDIS_PASSWORD:-}"
-"#,
-    );
-
     // Always include commented-out gateway section
     content.push_str(
         r#"
@@ -463,9 +452,6 @@ grpc = "{}:6334"
 #
 # DATABASE_URL overrides [postgres].url
 # DATABASE_URL=postgres://user:password@localhost:5432/mydb
-#
-# REDIS_URL overrides [redis].host + port
-# REDIS_URL=127.0.0.1:6379
 #
 # QDRANT_URL overrides [qdrant].url
 # QDRANT_URL=http://localhost:6333

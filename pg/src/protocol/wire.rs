@@ -261,7 +261,7 @@ impl BackendMessage {
         }
 
         let msg_type = buf[0];
-        let len = i32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+        let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
 
         if buf.len() < len + 1 {
             return Err("Incomplete message".to_string());
@@ -296,10 +296,16 @@ impl BackendMessage {
     }
 
     fn decode_auth(payload: &[u8]) -> Result<Self, String> {
+        if payload.len() < 4 {
+            return Err("Auth payload too short".to_string());
+        }
         let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         match auth_type {
             0 => Ok(BackendMessage::AuthenticationOk),
             5 => {
+                if payload.len() < 8 {
+                    return Err("MD5 auth payload too short (need salt)".to_string());
+                }
                 let salt: [u8; 4] = payload[4..8].try_into().unwrap();
                 Ok(BackendMessage::AuthenticationMD5Password(salt))
             }
@@ -344,6 +350,9 @@ impl BackendMessage {
     }
 
     fn decode_backend_key(payload: &[u8]) -> Result<Self, String> {
+        if payload.len() < 8 {
+            return Err("BackendKeyData payload too short".to_string());
+        }
         Ok(BackendMessage::BackendKeyData {
             process_id: i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]),
             secret_key: i32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]),
@@ -351,6 +360,9 @@ impl BackendMessage {
     }
 
     fn decode_ready_for_query(payload: &[u8]) -> Result<Self, String> {
+        if payload.is_empty() {
+            return Err("ReadyForQuery payload empty".to_string());
+        }
         let status = match payload[0] {
             b'I' => TransactionStatus::Idle,
             b'T' => TransactionStatus::InBlock,
@@ -365,7 +377,11 @@ impl BackendMessage {
             return Err("RowDescription payload too short".to_string());
         }
 
-        let field_count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+        let raw_count = i16::from_be_bytes([payload[0], payload[1]]);
+        if raw_count < 0 {
+            return Err(format!("RowDescription invalid field count: {}", raw_count));
+        }
+        let field_count = raw_count as usize;
         let mut fields = Vec::with_capacity(field_count);
         let mut pos = 2;
 
@@ -435,7 +451,19 @@ impl BackendMessage {
             return Err("DataRow payload too short".to_string());
         }
 
-        let column_count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+        let raw_count = i16::from_be_bytes([payload[0], payload[1]]);
+        if raw_count < 0 {
+            return Err(format!("DataRow invalid column count: {}", raw_count));
+        }
+        let column_count = raw_count as usize;
+        // Sanity check: each column needs at least 4 bytes (length field)
+        if column_count > (payload.len() - 2) / 4 + 1 {
+            return Err(format!(
+                "DataRow claims {} columns but payload is only {} bytes",
+                column_count,
+                payload.len()
+            ));
+        }
         let mut columns = Vec::with_capacity(column_count);
         let mut pos = 2;
 

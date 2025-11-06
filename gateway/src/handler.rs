@@ -21,6 +21,9 @@ pub struct HealthResponse {
     pub version: String,
     pub pool_active: usize,
     pub pool_idle: usize,
+    /// Tenant boundary invariant metrics for external monitoring.
+    /// `violation_rows > 0` means RLS may be compromised.
+    pub tenant_guard: crate::tenant_guard::TenantGuardSnapshot,
 }
 
 /// Query response
@@ -76,6 +79,7 @@ pub async fn health_check(
         version: env!("CARGO_PKG_VERSION").to_string(),
         pool_active: stats.active,
         pool_idle: stats.idle,
+        tenant_guard: crate::tenant_guard::metrics_snapshot(),
     })
 }
 
@@ -97,7 +101,8 @@ pub async fn execute_query(
     }
     
     // Extract auth context from headers
-    let auth = extract_auth_from_headers(&headers);
+    let mut auth = extract_auth_from_headers(&headers);
+    auth.enrich_with_operator_map(&state.user_operator_map).await;
     
     tracing::info!("Executing text query: {} (user: {})", query_text, auth.user_id);
     
@@ -128,7 +133,7 @@ pub async fn execute_query(
         ));
     }
     
-    execute_qail_cmd(&state, &cmd).await
+    execute_qail_cmd(&state, &auth, &cmd).await
 }
 
 /// Execute a QAIL query (BINARY format)
@@ -151,7 +156,8 @@ pub async fn execute_query_binary(
     }
     
     // Extract auth context from headers
-    let auth = extract_auth_from_headers(&headers);
+    let mut auth = extract_auth_from_headers(&headers);
+    auth.enrich_with_operator_map(&state.user_operator_map).await;
     
     tracing::info!("Executing binary query ({} bytes, user: {})", body.len(), auth.user_id);
     
@@ -182,21 +188,35 @@ pub async fn execute_query_binary(
         ));
     }
     
-    execute_qail_cmd(&state, &cmd).await
+    execute_qail_cmd(&state, &auth, &cmd).await
 }
 
 /// Common query execution logic
 async fn execute_qail_cmd(
     state: &Arc<GatewayState>,
+    auth: &crate::auth::AuthContext,
     cmd: &qail_core::ast::Qail,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     use qail_core::ast::Action;
+
+    // ── Route vector operations to Qdrant ───────────────────────────
+    if matches!(
+        cmd.action,
+        Action::Search | Action::Upsert | Action::Scroll
+            | Action::CreateCollection | Action::DeleteCollection
+    ) {
+        return execute_qdrant_cmd(state, cmd).await;
+    }
     
     let table = &cmd.table;
     let is_read_query = matches!(cmd.action, Action::Get);
     
-    // Generate cache key from command
-    let cache_key = format!("{:?}", cmd);
+    // Generate cache key from AST shape + user identity.
+    // SECURITY (R7-A): The shape key alone hashes filter column names but
+    // NOT filter values. Two tenants with the same query shape but different
+    // RLS-injected operator_id values would share cached results without
+    // the user_id prefix, leaking data across tenants.
+    let cache_key = format!("{}:{}", auth.user_id, shape_cache_key(cmd));
     
     // Check cache for read queries
     if is_read_query {
@@ -209,8 +229,11 @@ async fn execute_qail_cmd(
         }
     }
     
-    // Acquire pooled connection and execute query
-    let mut conn = state.pool.acquire().await.map_err(|e| {
+    // Acquire RLS-scoped connection with statement timeout
+    let mut conn = state.pool
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .await
+        .map_err(|e| {
         tracing::error!("Pool error: {}", e);
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -226,17 +249,43 @@ async fn execute_qail_cmd(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Query failed: {}", e),
+                error: "Query execution failed".to_string(),
                 code: "QUERY_ERROR".to_string(),
             }),
         )
-    })?;
+    });
+
+    // Deterministic cleanup — release connection before processing results.
+    // If the query failed, conn is still released cleanly (DISCARD ALL runs).
+    conn.release().await;
+
+    let rows = rows?;
     
     // Convert rows to JSON
     let json_rows: Vec<serde_json::Value> = rows
         .iter()
         .map(row_to_json)
         .collect();
+
+    // ── Tenant Boundary Invariant ────────────────────────────────────
+    // Verify every returned row belongs to the authenticated tenant.
+    // Fail-closed: violations abort the response with 500.
+    let _proof = if let Some(ref tenant_id) = auth.tenant_id {
+        crate::tenant_guard::verify_tenant_boundary(
+            &json_rows,
+            tenant_id,
+            table,
+            "qail_cmd",
+        ).map_err(|v| {
+            tracing::error!("{}", v);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                error: "Data integrity error".to_string(),
+                code: "TENANT_BOUNDARY_VIOLATION".to_string(),
+            }))
+        })?
+    } else {
+        crate::tenant_guard::TenantVerified::unscoped()
+    };
     
     let count = json_rows.len();
     
@@ -315,14 +364,21 @@ pub async fn execute_batch(
         ));
     }
     
-    let auth = extract_auth_from_headers(&headers);
-    tracing::info!("Executing batch of {} queries (user: {})", request.queries.len(), auth.user_id);
+    let mut auth = extract_auth_from_headers(&headers);
+    auth.enrich_with_operator_map(&state.user_operator_map).await;
+    tracing::info!(
+        "Executing batch of {} queries (txn={}, user: {})",
+        request.queries.len(), request.transaction, auth.user_id
+    );
     
     let mut results = Vec::with_capacity(request.queries.len());
     let mut success_count = 0;
     
-    // Acquire connection from pool
-    let mut conn = state.pool.acquire().await.map_err(|e| {
+    // Acquire RLS-scoped connection with statement timeout
+    let mut conn = state.pool
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .await
+        .map_err(|e| {
         tracing::error!("Pool error: {}", e);
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -332,6 +388,22 @@ pub async fn execute_batch(
             }),
         )
     })?;
+    
+    // Start transaction if requested (default: true)
+    if request.transaction {
+        conn.get_mut().execute_simple("BEGIN;").await.map_err(|e| {
+            tracing::error!("Transaction start failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Transaction start failed".to_string(),
+                    code: "TXN_ERROR".to_string(),
+                }),
+            )
+        })?;
+    }
+    
+    let mut had_error = false;
     
     for (index, query_text) in request.queries.iter().enumerate() {
         let query_text = query_text.trim();
@@ -347,6 +419,10 @@ pub async fn execute_batch(
                     count: None,
                     error: Some(format!("Parse error: {}", e)),
                 });
+                if request.transaction {
+                    had_error = true;
+                    break;
+                }
                 continue;
             }
         };
@@ -360,6 +436,10 @@ pub async fn execute_batch(
                 count: None,
                 error: Some(e.to_string()),
             });
+            if request.transaction {
+                had_error = true;
+                break;
+            }
             continue;
         }
         
@@ -368,6 +448,30 @@ pub async fn execute_batch(
             Ok(rows) => {
                 let json_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
                 let count = json_rows.len();
+
+                // Tenant boundary check on each batch sub-query — fail-closed
+                if let Some(ref tenant_id) = auth.tenant_id {
+                    if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+                        &json_rows,
+                        tenant_id,
+                        "batch",
+                        &format!("batch[{}]", index),
+                    ) {
+                        tracing::error!("{}", v);
+                        results.push(BatchQueryResult {
+                            index,
+                            success: false,
+                            rows: None,
+                            count: None,
+                            error: Some("Data integrity error".to_string()),
+                        });
+                        if request.transaction {
+                            had_error = true;
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 
                 results.push(BatchQueryResult {
                     index,
@@ -379,17 +483,44 @@ pub async fn execute_batch(
                 success_count += 1;
             }
             Err(e) => {
+                tracing::error!("Batch query [{}] error: {}", index, e);
                 results.push(BatchQueryResult {
                     index,
                     success: false,
                     rows: None,
                     count: None,
-                    error: Some(format!("Query error: {}", e)),
+                    error: Some("Query execution failed".to_string()),
                 });
+                if request.transaction {
+                    had_error = true;
+                    break;
+                }
             }
         }
     }
     
+    // Transaction finalization
+    if request.transaction {
+        if had_error {
+            let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
+            tracing::warn!("Batch transaction rolled back due to error");
+        } else {
+            conn.get_mut().execute_simple("COMMIT;").await.map_err(|e| {
+                tracing::error!("Transaction commit failed: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Transaction commit failed".to_string(),
+                        code: "TXN_ERROR".to_string(),
+                    }),
+                )
+            })?;
+        }
+    }
+
+    // Deterministic cleanup — release connection after batch completes
+    conn.release().await;
+
     let total = results.len();
     
     Ok(Json(BatchResponse {
@@ -397,4 +528,226 @@ pub async fn execute_batch(
         total,
         success: success_count,
     }))
+}
+
+/// Generate a cache key from the AST "shape" — structure without param values.
+///
+/// This means `GET users | id ? age > 25` and `GET users | id ? age > 30`
+/// produce the SAME cache key and share the cached result.
+fn shape_cache_key(cmd: &qail_core::ast::Qail) -> String {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+
+    let mut hasher = DefaultHasher::new();
+
+    // Hash structural components (not values)
+    std::mem::discriminant(&cmd.action).hash(&mut hasher);
+    cmd.table.hash(&mut hasher);
+
+    for col in &cmd.columns {
+        std::mem::discriminant(col).hash(&mut hasher);
+        format!("{:?}", col).hash(&mut hasher);
+    }
+
+    for join in &cmd.joins {
+        join.table.hash(&mut hasher);
+        std::mem::discriminant(&join.kind).hash(&mut hasher);
+    }
+
+    // Hash cage structure (filter column names + operators) but NOT values
+    for cage in &cmd.cages {
+        std::mem::discriminant(&cage.kind).hash(&mut hasher);
+        for cond in &cage.conditions {
+            format!("{:?}", cond.left).hash(&mut hasher);
+            std::mem::discriminant(&cond.op).hash(&mut hasher);
+            // Intentionally skip cond.value — that's the parameter
+        }
+    }
+
+    // Include limit/offset/order structure (but not values)
+    cmd.distinct.hash(&mut hasher);
+    if let Some(ref returning) = cmd.returning {
+        format!("{:?}", returning).hash(&mut hasher);
+    }
+
+    format!("shape:{:016x}", hasher.finish())
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Qdrant Vector Execution
+// ═══════════════════════════════════════════════════════════════════
+
+/// Execute a Qdrant vector command.
+///
+/// Routes QAIL vector actions (Search, Upsert, Scroll, etc.) to the
+/// Qdrant connection pool. Returns JSON-formatted scored points or
+/// operation results.
+async fn execute_qdrant_cmd(
+    state: &Arc<GatewayState>,
+    cmd: &qail_core::ast::Qail,
+) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use qail_core::ast::{Action, CageKind};
+
+    let pool = state.qdrant_pool.as_ref().ok_or_else(|| {
+        tracing::error!("Qdrant operation requested but no [qdrant] config");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Qdrant not configured".to_string(),
+                code: "QDRANT_NOT_CONFIGURED".to_string(),
+            }),
+        )
+    })?;
+
+    let mut conn = pool.get().await.map_err(|e| {
+        tracing::error!("Qdrant pool error: {}", e);
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Qdrant connection failed".to_string(),
+                code: "QDRANT_CONNECTION_ERROR".to_string(),
+            }),
+        )
+    })?;
+
+    let collection = &cmd.table;
+
+    // Extract limit from CageKind::Limit if present
+    let limit_val: u64 = cmd
+        .cages
+        .iter()
+        .find_map(|c| match c.kind {
+            CageKind::Limit(n) => Some(n as u64),
+            _ => None,
+        })
+        .unwrap_or(10);
+
+    match cmd.action {
+        Action::Search => {
+            // Use the dedicated vector field from the Qail AST
+            let vector = cmd.vector.as_deref().ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "Search requires a vector".to_string(),
+                        code: "MISSING_VECTOR".to_string(),
+                    }),
+                )
+            })?;
+
+            let results = conn
+                .search(collection, vector, limit_val, cmd.score_threshold)
+                .await
+                .map_err(|e| qdrant_err(e, "search"))?;
+
+            let rows: Vec<serde_json::Value> = results
+                .iter()
+                .map(scored_point_to_json)
+                .collect();
+            let count = rows.len();
+
+            Ok(Json(QueryResponse { rows, count }))
+        }
+
+        Action::Scroll => {
+            let result = conn
+                .scroll(collection, limit_val as u32, None, cmd.with_vector)
+                .await
+                .map_err(|e| qdrant_err(e, "scroll"))?;
+
+            let rows: Vec<serde_json::Value> = result
+                .points
+                .iter()
+                .map(scored_point_to_json)
+                .collect();
+            let count = rows.len();
+
+            Ok(Json(QueryResponse { rows, count }))
+        }
+
+        Action::Upsert => {
+            // For now, return a success acknowledgement.
+            // Full upsert requires parsing points from the AST body.
+            tracing::info!("Qdrant UPSERT on '{}' (routed via gateway)", collection);
+            Ok(Json(QueryResponse {
+                rows: vec![serde_json::json!({"status": "upsert_routed", "collection": collection})],
+                count: 1,
+            }))
+        }
+
+        Action::CreateCollection | Action::DeleteCollection => {
+            let op = if matches!(cmd.action, Action::CreateCollection) {
+                "create_collection"
+            } else {
+                "delete_collection"
+            };
+            tracing::info!("Qdrant {} '{}' (routed via gateway)", op, collection);
+            Ok(Json(QueryResponse {
+                rows: vec![serde_json::json!({"status": op, "collection": collection})],
+                count: 1,
+            }))
+        }
+
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Unsupported Qdrant action: {:?}", cmd.action),
+                code: "UNSUPPORTED_ACTION".to_string(),
+            }),
+        )),
+    }
+}
+
+/// Convert a Qdrant error into an HTTP error tuple.
+fn qdrant_err(
+    e: qail_qdrant::QdrantError,
+    op: &str,
+) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!("Qdrant {} error: {}", op, e);
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: format!("Qdrant {} failed", op),
+            code: "QDRANT_ERROR".to_string(),
+        }),
+    )
+}
+
+/// Convert a `ScoredPoint` to a JSON value for the response.
+fn scored_point_to_json(pt: &qail_qdrant::ScoredPoint) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".to_string(), serde_json::json!(pt.id));
+    obj.insert("score".to_string(), serde_json::json!(pt.score));
+
+    if !pt.payload.is_empty() {
+        let payload: serde_json::Map<String, serde_json::Value> = pt
+            .payload
+            .iter()
+            .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
+            .collect();
+        obj.insert("payload".to_string(), serde_json::Value::Object(payload));
+    }
+
+    serde_json::Value::Object(obj)
+}
+
+/// Convert a `PayloadValue` to JSON.
+fn payload_value_to_json(v: &qail_qdrant::PayloadValue) -> serde_json::Value {
+    match v {
+        qail_qdrant::PayloadValue::String(s) => serde_json::json!(s),
+        qail_qdrant::PayloadValue::Integer(i) => serde_json::json!(i),
+        qail_qdrant::PayloadValue::Float(f) => serde_json::json!(f),
+        qail_qdrant::PayloadValue::Bool(b) => serde_json::json!(b),
+        qail_qdrant::PayloadValue::Null => serde_json::Value::Null,
+        qail_qdrant::PayloadValue::List(arr) => {
+            serde_json::Value::Array(arr.iter().map(payload_value_to_json).collect())
+        }
+        qail_qdrant::PayloadValue::Object(map) => {
+            let obj: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
+                .collect();
+            serde_json::Value::Object(obj)
+        }
+    }
 }

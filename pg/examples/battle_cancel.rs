@@ -13,6 +13,7 @@ use qail_core::ast::Qail;
 use std::time::{Duration, Instant};
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔═══════════════════════════════════════════════════════════╗");
     println!("║  BATTLE TEST #4: Query Cancellation Race 🏁               ║");
@@ -23,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .password("postgres");
         
     let pool = PgPool::connect(config).await?;
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool.acquire_system().await?;
     
     // Get backend PID via pipeline_ast
     // SELECT * FROM pg_backend_pid()

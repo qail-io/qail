@@ -208,6 +208,61 @@ impl PooledConnection {
         }
     }
 
+    /// Deterministic connection cleanup and pool return.
+    ///
+    /// This is the **correct** way to return a connection to the pool.
+    /// Performs RLS reset + DISCARD ALL synchronously within the caller's
+    /// async context — no fire-and-forget spawns, no runtime lifecycle risks.
+    ///
+    /// If cleanup fails, the connection is destroyed (not returned to pool).
+    ///
+    /// # Usage
+    /// ```ignore
+    /// let mut conn = pool.acquire_with_rls(ctx).await?;
+    /// let result = conn.fetch_all_uncached(&cmd).await;
+    /// conn.release().await; // deterministic cleanup
+    /// result
+    /// ```
+    pub async fn release(mut self) {
+        if let Some(mut conn) = self.conn.take() {
+            // Step 1: Reset RLS if dirty
+            if self.rls_dirty
+                && let Err(e) = conn.execute_simple(super::rls::reset_sql()).await
+            {
+                eprintln!(
+                    "[CRITICAL] pool_rls_reset_failed: RLS reset failed — \
+                     dropping connection to prevent cross-tenant leak: {}",
+                    e
+                );
+                return; // Connection destroyed — not returned to pool
+            }
+
+            // Step 2: DISCARD ALL — nuclear reset of all session state.
+            if let Err(e) = conn.execute_simple("DISCARD ALL").await {
+                eprintln!(
+                    "[WARN] pool_discard_failed: DISCARD ALL failed — \
+                     dropping connection: {}",
+                    e
+                );
+                return; // Connection destroyed — not returned to pool
+            }
+
+            // Step 3: Sync client-side caches with server state.
+            // DISCARD ALL destroys all server-side prepared statements,
+            // so we must clear the client-side tracking maps to stay in sync.
+            conn.prepared_statements.clear();
+            conn.stmt_cache.clear();
+            conn.column_info_cache.clear();
+
+            debug_assert!(
+                conn.prepared_statements.is_empty(),
+                "INVARIANT VIOLATED: prepared statements survived DISCARD ALL"
+            );
+
+            self.pool.return_connection(conn).await;
+        }
+    }
+
     /// Execute a QAIL command and fetch all rows (UNCACHED).
     /// Returns rows with column metadata for JSON serialization.
     pub async fn fetch_all_uncached(&mut self, cmd: &qail_core::ast::Qail) -> PgResult<Vec<super::PgRow>> {
@@ -260,25 +315,59 @@ impl PooledConnection {
             }
         }
     }
+
+    /// Run `EXPLAIN (FORMAT JSON)` on a Qail command and return cost estimates.
+    ///
+    /// Uses `simple_query` under the hood — no additional round-trips beyond
+    /// the single EXPLAIN statement. Returns `None` if parsing fails or
+    /// the EXPLAIN output is unexpected.
+    pub async fn explain_estimate(
+        &mut self,
+        cmd: &qail_core::ast::Qail,
+    ) -> PgResult<Option<super::explain::ExplainEstimate>> {
+        use qail_core::transpiler::ToSql;
+
+        let sql = cmd.to_sql();
+        let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
+
+        let rows = self.simple_query(&explain_sql).await?;
+
+        // PostgreSQL returns the JSON plan as a single text column across one or more rows
+        let mut json_output = String::new();
+        for row in &rows {
+            if let Some(Some(val)) = row.columns.first()
+                && let Ok(text) = std::str::from_utf8(val)
+            {
+                json_output.push_str(text);
+            }
+        }
+
+        Ok(super::explain::parse_explain_json(&json_output))
+    }
 }
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            let pool = self.pool.clone();
-            let rls_dirty = self.rls_dirty;
-            tokio::spawn(async move {
-                if rls_dirty {
-                    // Reset RLS session variables before returning to pool.
-                    // This prevents the next acquire() from inheriting
-                    // a stale tenant context from a different request.
-                    let mut conn = conn;
-                    let _ = conn.execute_simple(super::rls::reset_sql()).await;
-                    pool.return_connection(conn).await;
-                } else {
-                    pool.return_connection(conn).await;
-                }
-            });
+        if self.conn.is_some() {
+            // Safety net: connection was NOT released via `release()`.
+            // This happens when:
+            //   - Handler panicked
+            //   - Early return without calling release()
+            //   - Missed release() call (programming error)
+            //
+            // We DESTROY the connection (don't return to pool) to prevent
+            // dirty session state from being reused. This costs a pool slot
+            // but guarantees no cross-tenant leakage.
+            //
+            // The `conn` field is dropped here, closing the TCP socket.
+            eprintln!(
+                "[WARN] pool_connection_leaked: PooledConnection dropped without release() — \
+                 connection destroyed to prevent state leak (rls_dirty={}). \
+                 Use conn.release().await for deterministic cleanup.",
+                self.rls_dirty
+            );
+            // Decrement active count so pool can create a replacement
+            self.pool.active_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -364,7 +453,7 @@ impl PgPoolInner {
 ///     .max_connections(20);
 /// let pool = PgPool::connect(config).await?;
 /// // Get a connection from the pool
-/// let mut conn = pool.acquire().await?;
+/// let mut conn = pool.acquire_raw().await?;
 /// conn.simple_query("SELECT 1").await?;
 /// ```
 #[derive(Clone)]
@@ -415,8 +504,19 @@ impl PgPool {
         Ok(Self { inner })
     }
 
-    /// Acquire a connection from the pool.
-    pub async fn acquire(&self) -> PgResult<PooledConnection> {
+    /// Acquire a raw connection from the pool (crate-internal only).
+    ///
+    /// # Safety (not `unsafe` in the Rust sense, but security-critical)
+    ///
+    /// This returns a connection with **no RLS context**. All tenant data
+    /// queries on this connection will bypass row-level security.
+    ///
+    /// External code must use `acquire_with_rls()`, `acquire_with_rls_timeout()`,
+    /// or `acquire_system()` instead.
+    ///
+    /// Every call site within this crate MUST include a `// SAFETY:` comment
+    /// explaining why raw acquisition is justified.
+    pub(crate) async fn acquire_raw(&self) -> PgResult<PooledConnection> {
         if self.inner.closed.load(Ordering::Relaxed) {
             return Err(PgError::Connection("Pool is closed".to_string()));
         }
@@ -472,7 +572,8 @@ impl PgPool {
         &self,
         ctx: qail_core::rls::RlsContext,
     ) -> PgResult<PooledConnection> {
-        let mut conn = self.acquire().await?;
+        // SAFETY: RLS context is set immediately below via context_to_sql().
+        let mut conn = self.acquire_raw().await?;
 
         // Set RLS context on the raw connection
         let sql = super::rls::context_to_sql(&ctx);
@@ -483,6 +584,43 @@ impl PgPool {
         conn.rls_dirty = true;
 
         Ok(conn)
+    }
+
+    /// Acquire a connection with RLS context AND statement timeout.
+    ///
+    /// Like `acquire_with_rls()`, but also sets `statement_timeout` to prevent
+    /// runaway queries from holding pool connections indefinitely.
+    pub async fn acquire_with_rls_timeout(
+        &self,
+        ctx: qail_core::rls::RlsContext,
+        timeout_ms: u32,
+    ) -> PgResult<PooledConnection> {
+        // SAFETY: RLS context + timeout set immediately below via context_to_sql_with_timeout().
+        let mut conn = self.acquire_raw().await?;
+
+        // Set RLS context + statement_timeout atomically
+        let sql = super::rls::context_to_sql_with_timeout(&ctx, timeout_ms);
+        let pg_conn = conn.get_mut();
+        pg_conn.execute_simple(&sql).await?;
+
+        // Mark dirty so Drop resets context + timeout before pool return
+        conn.rls_dirty = true;
+
+        Ok(conn)
+    }
+
+    /// Acquire a connection for system-level operations (no tenant context).
+    ///
+    /// Sets RLS session variables to maximally restrictive values:
+    /// - `app.current_operator_id = ''`
+    /// - `app.current_agent_id = ''`  
+    /// - `app.is_super_admin = false`
+    ///
+    /// Use this for startup introspection, migrations, and health checks
+    /// that must not operate within any tenant scope.
+    pub async fn acquire_system(&self) -> PgResult<PooledConnection> {
+        let ctx = qail_core::rls::RlsContext::empty();
+        self.acquire_with_rls(ctx).await
     }
 
     /// Acquire a connection with branch context pre-configured.
@@ -502,7 +640,8 @@ impl PgPool {
         &self,
         ctx: &qail_core::branch::BranchContext,
     ) -> PgResult<PooledConnection> {
-        let mut conn = self.acquire().await?;
+        // SAFETY: Branch context is set immediately below via branch_context_sql().
+        let mut conn = self.acquire_raw().await?;
 
         if let Some(branch_name) = ctx.branch_name() {
             let sql = super::branch_sql::branch_context_sql(branch_name);

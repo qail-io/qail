@@ -9,7 +9,12 @@
 
 # Gateway
 
-- [Qail Gateway](./gateway.md)
+- [Overview](./gateway.md)
+- [Architecture & Invariants](./gateway/architecture.md)
+- [REST API](./gateway/rest-api.md)
+- [Authentication & Security](./gateway/auth.md)
+- [Real-Time & Events](./gateway/realtime.md)
+- [Performance & Observability](./gateway/performance.md)
 
 # Benchmarks
 

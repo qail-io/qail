@@ -6,6 +6,7 @@ use qail_pg::{PgPool, PoolConfig};
 use std::time::Duration;
 
 #[tokio::main]
+#[allow(deprecated)] // Example code — demonstrates raw pool acquire
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔬 Pool Overhead Test (Pure Acquire/Release)");
     println!("{}", "━".repeat(40));
@@ -29,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
     
     for _ in 0..iterations {
-        let conn = pool.acquire().await?;
+        let conn = pool.acquire_system().await?;
         drop(conn); // Return to pool
     }
     
@@ -46,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
     
     for _ in 0..1000 {
-        let mut conn = pool.acquire().await?;
+        let mut conn = pool.acquire_system().await?;
         conn.pipeline_ast_fast(&[query.clone()]).await?;
         drop(conn);
     }

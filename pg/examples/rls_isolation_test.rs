@@ -10,7 +10,7 @@
 //! Pass criteria: Zero cross-tenant rows across all queries, zero errors.
 //!
 //! Run:
-//!   DATABASE_URL=postgresql://user@localhost:5432/example-db \
+//!   DATABASE_URL=postgresql://qail_user@localhost:5432/qail_test \
 //!     cargo run -p qail-pg --example rls_isolation_test --features chrono,uuid --release
 
 use qail_core::prelude::*;
@@ -78,6 +78,11 @@ async fn main() {
 
         // Insert test data for each tenant
         for (i, tenant_id) in tenant_ids.iter().enumerate() {
+            // Set the session variable so RLS USING clause passes during INSERT
+            let set_sql = format!("SET app.operator_id = '{}'", tenant_id);
+            driver.execute_raw(&set_sql).await
+                .expect("Failed to set operator_id for insert");
+
             for j in 0..ROWS_PER_TENANT {
                 let sql = format!(
                     "INSERT INTO _rls_chaos_test (operator_id, data) VALUES ('{}', 'tenant_{}_row_{}')",

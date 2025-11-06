@@ -1,15 +1,15 @@
 [package]
 name = "qail-qdrant"
-version = "0.19.1"
+version = "0.20.0"
 edition = "2024"
 description = "QAIL driver for Qdrant vector database"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
 keywords = ["qail", "qdrant", "vector", "database", "ai"]
 categories = ["database"]
 
 [dependencies]
-qail-core = { path = "../core", version = "0.19.1" }
+qail-core = { path = "../core", version = "0.20.0" }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 bytes = "1"
@@ -21,6 +21,10 @@ thiserror = "2"
 h2 = "0.4"
 http = "1"
 futures-util = "0.3"
+# TLS (rustls - no system openssl needed)
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+webpki-roots = "0.26"
 
 [dev-dependencies]
 tokio-test = "0.4"

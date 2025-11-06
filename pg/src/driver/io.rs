@@ -6,7 +6,11 @@ use super::{PgConnection, PgError, PgResult};
 use crate::protocol::{BackendMessage, FrontendMessage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const MAX_MESSAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GB
+const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024; // 64 MB — prevents OOM from malicious server messages
+
+/// Default read timeout for individual socket reads.
+/// Prevents Slowloris DoS where a server sends partial data then goes silent.
+const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl PgConnection {
     /// Send a frontend message.
@@ -43,14 +47,34 @@ impl PgConnection {
                 }
             }
 
-            if self.buffer.capacity() - self.buffer.len() < 65536 {
-                self.buffer.reserve(131072); // 128KB buffer - reserve once, use many
-            }
 
-            let n = self.stream.read_buf(&mut self.buffer).await?;
+            let n = self.read_with_timeout().await?;
             if n == 0 {
                 return Err(PgError::Connection("Connection closed".to_string()));
             }
+        }
+    }
+
+    /// Read from the socket with a timeout guard.
+    /// Returns the number of bytes read, or an error if the timeout fires.
+    /// This prevents Slowloris DoS attacks where a malicious server sends
+    /// partial data then goes silent, causing the driver to hang forever.
+    #[inline]
+    async fn read_with_timeout(&mut self) -> PgResult<usize> {
+        if self.buffer.capacity() - self.buffer.len() < 65536 {
+            self.buffer.reserve(131072);
+        }
+        
+        match tokio::time::timeout(
+            DEFAULT_READ_TIMEOUT,
+            self.stream.read_buf(&mut self.buffer),
+        ).await {
+            Ok(Ok(n)) => Ok(n),
+            Ok(Err(e)) => Err(PgError::Connection(format!("Read error: {}", e))),
+            Err(_) => Err(PgError::Connection(format!(
+                "Read timeout after {:?} — possible Slowloris attack or dead connection",
+                DEFAULT_READ_TIMEOUT
+            ))),
         }
     }
 
@@ -121,11 +145,8 @@ impl PgConnection {
                 }
             }
 
-            if self.buffer.capacity() - self.buffer.len() < 65536 {
-                self.buffer.reserve(131072); // 128KB buffer - reserve once, use many
-            }
 
-            let n = self.stream.read_buf(&mut self.buffer).await?;
+            let n = self.read_with_timeout().await?;
             if n == 0 {
                 return Err(PgError::Connection("Connection closed".to_string()));
             }
@@ -181,7 +202,8 @@ impl PgConnection {
 
                             for _ in 0..column_count {
                                 if pos + 4 > payload.len() {
-                                    break;
+                                    let _ = self.buffer.split_to(msg_len + 1);
+                                    return Err(PgError::Protocol("DataRow truncated: missing column length".into()));
                                 }
 
                                 let len = i32::from_be_bytes([
@@ -196,10 +218,12 @@ impl PgConnection {
                                     columns.push(None);
                                 } else {
                                     let len = len as usize;
-                                    if pos + len <= payload.len() {
-                                        columns.push(Some(payload[pos..pos + len].to_vec()));
-                                        pos += len;
+                                    if pos + len > payload.len() {
+                                        let _ = self.buffer.split_to(msg_len + 1);
+                                        return Err(PgError::Protocol("DataRow truncated: column data exceeds payload".into()));
                                     }
+                                    columns.push(Some(payload[pos..pos + len].to_vec()));
+                                    pos += len;
                                 }
                             }
 
@@ -214,11 +238,8 @@ impl PgConnection {
                 }
             }
 
-            if self.buffer.capacity() - self.buffer.len() < 65536 {
-                self.buffer.reserve(131072);
-            }
 
-            let n = self.stream.read_buf(&mut self.buffer).await?;
+            let n = self.read_with_timeout().await?;
             if n == 0 {
                 return Err(PgError::Connection("Connection closed".to_string()));
             }
@@ -278,7 +299,7 @@ impl PgConnection {
 
                             for _ in 0..column_count {
                                 if msg_bytes.remaining() < 4 {
-                                    break;
+                                    return Err(PgError::Protocol("DataRow truncated: missing column length".into()));
                                 }
 
                                 let len = msg_bytes.get_i32();
@@ -287,10 +308,11 @@ impl PgConnection {
                                     columns.push(None);
                                 } else {
                                     let len = len as usize;
-                                    if msg_bytes.remaining() >= len {
-                                        let col_data = msg_bytes.split_to(len).freeze();
-                                        columns.push(Some(col_data));
+                                    if msg_bytes.remaining() < len {
+                                        return Err(PgError::Protocol("DataRow truncated: column data exceeds payload".into()));
                                     }
+                                    let col_data = msg_bytes.split_to(len).freeze();
+                                    columns.push(Some(col_data));
                                 }
                             }
 
@@ -305,11 +327,8 @@ impl PgConnection {
                 }
             }
 
-            if self.buffer.capacity() - self.buffer.len() < 65536 {
-                self.buffer.reserve(131072);
-            }
 
-            let n = self.stream.read_buf(&mut self.buffer).await?;
+            let n = self.read_with_timeout().await?;
             if n == 0 {
                 return Err(PgError::Connection("Connection closed".to_string()));
             }
@@ -358,19 +377,38 @@ impl PgConnection {
                         let mut msg_bytes = self.buffer.split_to(msg_len + 1);
                         msg_bytes.advance(5); // Skip type + length
 
+                        // Bounds checks to prevent panic on truncated DataRow
+                        if msg_bytes.remaining() < 2 {
+                            return Err(PgError::Protocol("DataRow ultra: too short for column count".into()));
+                        }
+
                         // Read column count (expect 2)
                         let _col_count = msg_bytes.get_u16();
 
+                        if msg_bytes.remaining() < 4 {
+                            return Err(PgError::Protocol("DataRow ultra: truncated before col0 length".into()));
+                        }
                         let len0 = msg_bytes.get_i32();
                         let col0 = if len0 > 0 {
-                            msg_bytes.split_to(len0 as usize).freeze()
+                            let len0 = len0 as usize;
+                            if msg_bytes.remaining() < len0 {
+                                return Err(PgError::Protocol("DataRow ultra: col0 data exceeds payload".into()));
+                            }
+                            msg_bytes.split_to(len0).freeze()
                         } else {
                             bytes::Bytes::new()
                         };
 
+                        if msg_bytes.remaining() < 4 {
+                            return Err(PgError::Protocol("DataRow ultra: truncated before col1 length".into()));
+                        }
                         let len1 = msg_bytes.get_i32();
                         let col1 = if len1 > 0 {
-                            msg_bytes.split_to(len1 as usize).freeze()
+                            let len1 = len1 as usize;
+                            if msg_bytes.remaining() < len1 {
+                                return Err(PgError::Protocol("DataRow ultra: col1 data exceeds payload".into()));
+                            }
+                            msg_bytes.split_to(len1).freeze()
                         } else {
                             bytes::Bytes::new()
                         };
@@ -384,11 +422,8 @@ impl PgConnection {
                 }
             }
 
-            if self.buffer.capacity() - self.buffer.len() < 65536 {
-                self.buffer.reserve(131072);
-            }
 
-            let n = self.stream.read_buf(&mut self.buffer).await?;
+            let n = self.read_with_timeout().await?;
             if n == 0 {
                 return Err(PgError::Connection("Connection closed".to_string()));
             }

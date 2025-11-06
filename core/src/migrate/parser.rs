@@ -1463,4 +1463,47 @@ table orders {
         let age = &table.columns[4];
         assert!(matches!(&age.check.as_ref().unwrap().expr, CheckExpr::Between { .. }));
     }
+
+    #[test]
+    fn test_parse_booking_migration() {
+        let input = r#"
+table booking_orders {
+  id                    uuid primary_key default gen_random_uuid()
+  hold_id               uuid nullable
+  connection_id         uuid nullable
+  voyage_id             uuid nullable
+  operator_id           uuid not_null
+  status                text not_null default 'Draft'
+  total_fare            bigint not_null
+  currency              text not_null default 'IDR'
+  nationality           text not_null default 'indo'
+  pax_breakdown         jsonb not_null default '{}'
+  contact_info          jsonb not_null default '{}'
+  pricing_breakdown     jsonb nullable
+  passenger_details     jsonb nullable default '[]'
+  connection_snapshot   jsonb nullable
+  invoice_number        text nullable unique
+  booking_number        text nullable
+  metadata              jsonb nullable
+  user_id               uuid nullable
+  agent_id              uuid nullable
+  created_at            timestamptz not_null default now()
+  updated_at            timestamptz not_null default now()
+
+  enable_rls
+  force_rls
+}
+
+index idx_booking_orders_operator on booking_orders (operator_id)
+index idx_booking_orders_status on booking_orders (status)
+index idx_booking_orders_user on booking_orders (user_id)
+"#;
+        let schema = parse_qail(input).expect("parse_qail should succeed for booking migration");
+        assert_eq!(schema.tables.len(), 1);
+        let table = &schema.tables["booking_orders"];
+        assert!(table.enable_rls);
+        assert!(table.force_rls);
+        assert_eq!(table.columns.len(), 21);
+        assert_eq!(schema.indexes.len(), 3);
+    }
 }

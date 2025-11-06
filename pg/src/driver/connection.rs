@@ -32,6 +32,10 @@ const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
 /// CancelRequest protocol code: 80877102
 pub(crate) const CANCEL_REQUEST_CODE: i32 = 80877102;
 
+/// Default timeout for TCP connect + PostgreSQL handshake.
+/// Prevents Slowloris DoS where a malicious server accepts TCP but never responds.
+pub(crate) const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// TLS configuration for mutual TLS (client certificate authentication).
 #[derive(Clone)]
 pub struct TlsConfig {
@@ -82,7 +86,27 @@ impl PgConnection {
     }
 
     /// Connect to PostgreSQL server with optional password authentication.
+    /// Includes a default 10-second timeout covering TCP connect + handshake.
     pub async fn connect_with_password(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+    ) -> PgResult<Self> {
+        tokio::time::timeout(
+            DEFAULT_CONNECT_TIMEOUT,
+            Self::connect_with_password_inner(host, port, user, database, password),
+        )
+        .await
+        .map_err(|_| PgError::Connection(format!(
+            "Connection timeout after {:?} (TCP connect + handshake)",
+            DEFAULT_CONNECT_TIMEOUT
+        )))?
+    }
+
+    /// Inner connection logic without timeout wrapper.
+    async fn connect_with_password_inner(
         host: &str,
         port: u16,
         user: &str,
@@ -120,7 +144,27 @@ impl PgConnection {
     }
 
     /// Connect to PostgreSQL server with TLS encryption.
+    /// Includes a default 10-second timeout covering TCP connect + TLS + handshake.
     pub async fn connect_tls(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+    ) -> PgResult<Self> {
+        tokio::time::timeout(
+            DEFAULT_CONNECT_TIMEOUT,
+            Self::connect_tls_inner(host, port, user, database, password),
+        )
+        .await
+        .map_err(|_| PgError::Connection(format!(
+            "TLS connection timeout after {:?}",
+            DEFAULT_CONNECT_TIMEOUT
+        )))?
+    }
+
+    /// Inner TLS connection logic without timeout wrapper.
+    async fn connect_tls_inner(
         host: &str,
         port: u16,
         user: &str,
@@ -426,6 +470,34 @@ impl PgConnection {
         self.stream.flush().await?;
         
         Ok(())
+    }
+
+    /// Maximum prepared statements per connection before LRU eviction kicks in.
+    ///
+    /// This prevents memory spikes from dynamic batch filters generating
+    /// thousands of unique SQL shapes within a single request. Using LRU
+    /// eviction instead of nuclear `.clear()` preserves hot statements.
+    pub(crate) const MAX_PREPARED_PER_CONN: usize = 128;
+
+    /// Evict the least-recently-used prepared statement if at capacity.
+    ///
+    /// Called before every new statement registration to enforce
+    /// `MAX_PREPARED_PER_CONN`. Both `stmt_cache` (LRU ordering) and
+    /// `prepared_statements` (name→SQL map) are kept in sync.
+    pub(crate) fn evict_prepared_if_full(&mut self) {
+        if self.prepared_statements.len() >= Self::MAX_PREPARED_PER_CONN {
+            // Pop the LRU entry from the cache
+            if let Some((_hash, evicted_name)) = self.stmt_cache.pop_lru() {
+                self.prepared_statements.remove(&evicted_name);
+            } else {
+                // stmt_cache is empty but prepared_statements is full —
+                // shouldn't happen in normal flow, but handle defensively
+                // by clearing the oldest entry from the HashMap.
+                if let Some(key) = self.prepared_statements.keys().next().cloned() {
+                    self.prepared_statements.remove(&key);
+                }
+            }
+        }
     }
 }
 

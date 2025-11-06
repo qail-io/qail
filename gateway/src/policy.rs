@@ -162,19 +162,22 @@ impl PolicyEngine {
         Ok(())
     }
     
-    /// Expand filter template with auth context values
+    /// Expand filter template with auth context values.
+    ///
+    /// SECURITY: All string values are SQL-escaped (single quotes doubled)
+    /// before interpolation to prevent injection via crafted JWT claims.
     fn expand_filter(&self, template: &str, auth: &AuthContext) -> String {
         let mut result = template.to_string();
-        result = result.replace("$user_id", &format!("'{}'", auth.user_id));
-        result = result.replace("$role", &format!("'{}'", auth.role));
+        result = result.replace("$user_id", &format!("'{}'", auth.user_id.replace('\'', "''")));
+        result = result.replace("$role", &format!("'{}'", auth.role.replace('\'', "''")));
         
         for (key, value) in &auth.claims {
             let placeholder = format!("${}", key);
             let replacement = match value {
-                serde_json::Value::String(s) => format!("'{}'", s),
+                serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
                 serde_json::Value::Number(n) => n.to_string(),
                 serde_json::Value::Bool(b) => b.to_string(),
-                _ => format!("'{}'", value),
+                _ => format!("'{}'", value.to_string().replace('\'', "''")),
             };
             result = result.replace(&placeholder, &replacement);
         }
@@ -417,5 +420,99 @@ mod tests {
         assert_eq!(cmd.columns.len(), 2);
         assert!(cmd.columns.contains(&Expr::Named("id".to_string())));
         assert!(cmd.columns.contains(&Expr::Named("name".to_string())));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // SECURITY: expand_filter SQL injection hardening (G1)
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn security_expand_filter_escapes_user_id_quotes() {
+        let engine = PolicyEngine::new();
+        let auth = AuthContext {
+            user_id: "x' OR 1=1 --".to_string(),
+            role: "user".to_string(),
+            tenant_id: None,
+            claims: std::collections::HashMap::new(),
+        };
+        let result = engine.expand_filter("user_id = $user_id", &auth);
+        assert_eq!(result, "user_id = 'x'' OR 1=1 --'");
+        assert!(!result.contains("x' OR"), "Unescaped quote in user_id: {}", result);
+    }
+
+    #[test]
+    fn security_expand_filter_escapes_role_quotes() {
+        let engine = PolicyEngine::new();
+        let auth = AuthContext {
+            user_id: "user1".to_string(),
+            role: "admin'; DROP TABLE users; --".to_string(),
+            tenant_id: None,
+            claims: std::collections::HashMap::new(),
+        };
+        let result = engine.expand_filter("role = $role", &auth);
+        assert!(result.contains("admin''; DROP TABLE users; --"),
+            "Unescaped quote in role: {}", result);
+    }
+
+    #[test]
+    fn security_expand_filter_escapes_claim_string_quotes() {
+        let engine = PolicyEngine::new();
+        let mut claims = std::collections::HashMap::new();
+        claims.insert("org_name".to_string(), serde_json::json!("Acme' OR '1'='1"));
+        let auth = AuthContext {
+            user_id: "user1".to_string(),
+            role: "user".to_string(),
+            tenant_id: None,
+            claims,
+        };
+        let result = engine.expand_filter("org = $org_name", &auth);
+        assert!(result.contains("Acme'' OR ''1''=''1"),
+            "Unescaped quote in claim: {}", result);
+    }
+
+    #[test]
+    fn security_expand_filter_numeric_claim_no_quotes() {
+        let engine = PolicyEngine::new();
+        let mut claims = std::collections::HashMap::new();
+        claims.insert("age".to_string(), serde_json::json!(42));
+        let auth = AuthContext {
+            user_id: "user1".to_string(),
+            role: "user".to_string(),
+            tenant_id: None,
+            claims,
+        };
+        let result = engine.expand_filter("age = $age", &auth);
+        assert_eq!(result, "age = 42");
+    }
+
+    #[test]
+    fn security_expand_filter_bool_claim_no_quotes() {
+        let engine = PolicyEngine::new();
+        let mut claims = std::collections::HashMap::new();
+        claims.insert("active".to_string(), serde_json::json!(true));
+        let auth = AuthContext {
+            user_id: "user1".to_string(),
+            role: "user".to_string(),
+            tenant_id: None,
+            claims,
+        };
+        let result = engine.expand_filter("active = $active", &auth);
+        assert_eq!(result, "active = true");
+    }
+
+    #[test]
+    fn security_expand_filter_safe_values_unchanged() {
+        let engine = PolicyEngine::new();
+        let auth = AuthContext {
+            user_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            role: "operator".to_string(),
+            tenant_id: None,
+            claims: std::collections::HashMap::new(),
+        };
+        let result = engine.expand_filter("user_id = $user_id AND role = $role", &auth);
+        assert_eq!(
+            result,
+            "user_id = '550e8400-e29b-41d4-a716-446655440000' AND role = 'operator'"
+        );
     }
 }

@@ -11,6 +11,8 @@ pub enum EncodeError {
     NullByte,
     /// Too many parameters for the protocol (limit is i16::MAX = 32767).
     TooManyParameters(usize),
+    /// A single parameter or message exceeds i32::MAX bytes.
+    MessageTooLarge(usize),
 }
 
 impl fmt::Display for EncodeError {
@@ -21,6 +23,9 @@ impl fmt::Display for EncodeError {
             }
             EncodeError::TooManyParameters(count) => {
                 write!(f, "Too many parameters: {} (Limit is 32767)", count)
+            }
+            EncodeError::MessageTooLarge(size) => {
+                write!(f, "Message too large: {} bytes (Limit is {})", size, i32::MAX)
             }
         }
     }
