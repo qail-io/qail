@@ -377,7 +377,8 @@ impl PgDriver {
             &mut self.connection.sql_buf,
             &mut self.connection.params_buf,
             &mut self.connection.write_buf,
-        );
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
 
         self.connection.flush_write_buf().await?;
 
@@ -430,7 +431,8 @@ impl PgDriver {
             &mut self.connection.sql_buf,
             &mut self.connection.params_buf,
             &mut self.connection.write_buf,
-        );
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
 
         self.connection.flush_write_buf().await?;
 
@@ -521,7 +523,7 @@ impl PgDriver {
             }
             _ => {
                 // Fallback for unsupported actions
-                let (sql, params) = AstEncoder::encode_cmd_sql(cmd);
+                let (sql, params) = AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
                 let raw_rows = self.connection.query_cached(&sql, &params).await?;
                 return Ok(raw_rows.into_iter().map(|data| PgRow { columns: data, column_info: None }).collect());
             }
@@ -633,7 +635,8 @@ impl PgDriver {
             cmd,
             &mut self.connection.sql_buf,
             &mut self.connection.params_buf,
-        );
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
 
         self.connection.send_bytes(&wire_bytes).await?;
 
@@ -678,7 +681,8 @@ impl PgDriver {
             cmd,
             &mut self.connection.sql_buf,
             &mut self.connection.params_buf,
-        );
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
 
         self.connection.send_bytes(&wire_bytes).await?;
 

@@ -312,6 +312,25 @@ impl ToSql for Qail {
             Action::AlterNoForceRls => {
                 format!("ALTER TABLE {} NO FORCE ROW LEVEL SECURITY", self.table)
             }
+            // Session & procedural commands
+            Action::Call => {
+                format!("CALL {}", self.table)
+            }
+            Action::Do => {
+                let body = self.payload.as_deref().unwrap_or("");
+                let lang = if self.table.is_empty() { "plpgsql" } else { &self.table };
+                format!("DO $$ {} $$ LANGUAGE {}", body, lang)
+            }
+            Action::SessionSet => {
+                let value = self.payload.as_deref().unwrap_or("");
+                format!("SET {} = '{}'", self.table, value)
+            }
+            Action::SessionShow => {
+                format!("SHOW {}", self.table)
+            }
+            Action::SessionReset => {
+                format!("RESET {}", self.table)
+            }
         }
     }
 }

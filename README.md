@@ -198,12 +198,11 @@ qail.rs/
 ├── gateway/    Auto-REST API server (Actix-web)
 ├── cli/        qail exec, pull, diff, migrate, types
 ├── lsp/        Language server for .qail files
-├── encoder/    Wire protocol encoder
+├── encoder/    Wire protocol encoder + C FFI for language bindings
 ├── qdrant/     Qdrant vector DB driver
-├── redis/      Redis driver
 ├── workflow/   Workflow engine
 ├── wasm/       Browser/Node.js WASM bindings (planned)
-├── ffi/        C-API for FFI (planned)
+├── redis/      Redis driver (planned)
 ├── go/         Go bindings via daemon IPC (planned)
 ├── py/         Python bindings via PyO3 (planned)
 └── php/        PHP bindings (planned)

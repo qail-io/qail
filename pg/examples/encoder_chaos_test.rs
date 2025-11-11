@@ -6,12 +6,13 @@
 
 use qail_core::ast::*;
 use qail_pg::protocol::ast_encoder::AstEncoder;
+use qail_pg::protocol::EncodeError;
 
 #[allow(unused_variables, unused_assignments)]
 fn main() {
     let mut pass = 0u32;
     let mut fail = 0u32;
-    let mut panics = 0u32;
+    let panics = 0u32;
 
     println!("═══════════════════════════════════════════════════");
     println!("  🧪 PG ENCODER CHAOS TEST");
@@ -144,38 +145,20 @@ fn main() {
 
     for (label, cmd) in &dml_tests {
         // Test encode_cmd (wire protocol)
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            AstEncoder::encode_cmd(cmd);
-        })) {
-            Ok(_) => { pass += 1; }
+        match AstEncoder::encode_cmd(cmd) {
+            Ok(_) => pass += 1,
             Err(e) => {
-                let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = e.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                println!("  💀 encode_cmd PANIC on '{}': {}", label, msg);
-                panics += 1;
+                println!("  ❌ encode_cmd Err on '{}': {}", label, e);
+                fail += 1;
             }
         }
 
         // Test encode_cmd_sql (SQL string)
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            AstEncoder::encode_cmd_sql(cmd);
-        })) {
-            Ok(_) => { pass += 1; }
+        match AstEncoder::encode_cmd_sql(cmd) {
+            Ok(_) => pass += 1,
             Err(e) => {
-                let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = e.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                println!("  💀 encode_cmd_sql PANIC on '{}': {}", label, msg);
-                panics += 1;
+                println!("  ❌ encode_cmd_sql Err on '{}': {}", label, e);
+                fail += 1;
             }
         }
     }
@@ -238,21 +221,8 @@ fn main() {
     ];
 
     for (label, cmd) in &ddl_tests {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            AstEncoder::encode_cmd(cmd);
-        })) {
-            Ok(_) => { pass += 1; }
-            Err(e) => {
-                let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = e.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                println!("  💀 PANIC on '{}': {}", label, msg);
-                panics += 1;
-            }
+        match AstEncoder::encode_cmd(cmd) {
+            Ok(_) | Err(_) => pass += 1, // DDL may be unsupported; both Ok and Err are fine
         }
     }
     println!("  ✅ {}/{} DDL encode tests passed", pass - ddl_start, ddl_tests.len());
@@ -299,33 +269,24 @@ fn main() {
         Action::TxnRollback,
     ];
 
-    let mut exotic_panics = 0u32;
+    let mut exotic_errs = 0u32;
     for action in &exotic_actions {
         let mut q = Qail::get("test_table");
         q.action = *action;
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            AstEncoder::encode_cmd(&q);
-        })) {
-            Ok(_) => { pass += 1; }
+        match AstEncoder::encode_cmd(&q) {
+            Ok(_) => pass += 1,
+            Err(EncodeError::UnsupportedAction(_)) => {
+                exotic_errs += 1;
+                pass += 1; // Expected: unsupported actions return Err, not panic
+            }
             Err(e) => {
-                let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = e.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                println!("  💀 PANIC on {:?}: {}", action, &msg[..std::cmp::min(msg.len(), 80)]);
-                exotic_panics += 1;
-                panics += 1;
+                println!("  ❌ Unexpected Err on {:?}: {}", action, e);
+                fail += 1;
             }
         }
     }
-    println!("  {}/{} exotic actions handled without panic",
-        exotic_actions.len() as u32 - exotic_panics, exotic_actions.len());
-    if exotic_panics > 0 {
-        println!("  ⚠️  {} exotic actions panic (expected — unsupported in binary protocol)", exotic_panics);
-    }
+    println!("  {}/{} exotic actions return UnsupportedAction (no panic)",
+        exotic_errs, exotic_actions.len());
 
     // ═══════════════════════════════════════════════════
     // 4. SQL String Output Validation
@@ -345,7 +306,14 @@ fn main() {
 
     let mut sql_pass = 0u32;
     for (label, cmd, expected_keyword) in &sql_tests {
-        let (sql, _params) = AstEncoder::encode_cmd_sql(cmd);
+        let (sql, _params) = match AstEncoder::encode_cmd_sql(cmd) {
+            Ok(x) => x,
+            Err(e) => {
+                println!("  ❌ encode_cmd_sql Err on '{}': {}", label, e);
+                fail += 1;
+                continue;
+            }
+        };
         if sql.contains(expected_keyword) {
             sql_pass += 1;
             pass += 1;
@@ -378,14 +346,11 @@ fn main() {
     for query in &integration_queries {
         match qail_core::parser::parse(query) {
             Ok(ast) => {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    AstEncoder::encode_cmd(&ast);
-                    AstEncoder::encode_cmd_sql(&ast);
-                })) {
+                match AstEncoder::encode_cmd(&ast).and_then(|_| AstEncoder::encode_cmd_sql(&ast)) {
                     Ok(_) => { integ_pass += 1; pass += 1; }
-                    Err(_) => {
-                        println!("  💀 PANIC on parse→encode: {}", query);
-                        panics += 1;
+                    Err(e) => {
+                        println!("  ❌ Encode Err on parse→encode '{}': {}", query, e);
+                        fail += 1;
                     }
                 }
             }

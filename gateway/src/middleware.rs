@@ -113,6 +113,9 @@ pub async fn rate_limit_middleware(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let method = request.method().to_string();
+    let start = std::time::Instant::now();
+
     // Per-IP bucket key
     // SECURITY: Use the LAST XFF entry (closest to our reverse proxy),
     // not the first (client-controlled). Without a reverse proxy, fall back
@@ -135,13 +138,20 @@ pub async fn rate_limit_middleware(
             let mut response = next.run(request).await;
             response.headers_mut().insert(
                 "x-ratelimit-remaining",
-                remaining.to_string().parse().unwrap(),
+                remaining.to_string().parse().unwrap_or_else(|_| axum::http::HeaderValue::from_static("0")),
             );
+            let status = response.status().as_u16();
+            let duration = start.elapsed().as_secs_f64();
+            crate::metrics::record_http_request(&method, status, duration);
             response
         }
         Err(()) => {
             tracing::warn!(ip = %ip_key, "IP rate limited");
-            ApiError::rate_limited().into_response()
+            crate::metrics::record_rate_limited();
+            let response = ApiError::rate_limited().into_response();
+            let duration = start.elapsed().as_secs_f64();
+            crate::metrics::record_http_request(&method, 429, duration);
+            response
         }
     }
 }
@@ -222,6 +232,7 @@ impl ApiError {
             detail.row_limit,
             suggestions.join(","),
         );
+        crate::metrics::record_explain_rejected(detail.estimated_cost, detail.cost_limit);
         Self {
             code: "QUERY_TOO_EXPENSIVE".to_string(),
             message: msg.into(),
@@ -283,6 +294,7 @@ impl ApiError {
             "PARSE_ERROR" => StatusCode::BAD_REQUEST,
             "QUERY_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
             "QUERY_TOO_EXPENSIVE" => StatusCode::UNPROCESSABLE_ENTITY,
+            "QUERY_TOO_COMPLEX" => StatusCode::UNPROCESSABLE_ENTITY,
             "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
             "FORBIDDEN" => StatusCode::FORBIDDEN,
             "NOT_FOUND" => StatusCode::NOT_FOUND,
@@ -413,6 +425,11 @@ impl QueryAllowList {
             return true; // Allow-list disabled: all queries pass
         }
         self.allowed.contains(pattern)
+    }
+
+    /// Number of patterns in the allow-list.
+    pub fn len(&self) -> usize {
+        self.allowed.len()
     }
 }
 

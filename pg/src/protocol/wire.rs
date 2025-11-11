@@ -30,6 +30,10 @@ pub enum FrontendMessage {
     SASLInitialResponse { mechanism: String, data: Vec<u8> },
     /// SASL response (subsequent messages in SCRAM)
     SASLResponse(Vec<u8>),
+    /// CopyFail — abort a COPY IN with an error message
+    CopyFail(String),
+    /// Close — explicitly release a prepared statement or portal
+    Close { is_portal: bool, name: String },
 }
 
 /// Backend (server → client) message types
@@ -83,6 +87,8 @@ pub enum BackendMessage {
     /// Parameter description (OIDs of parameters in a prepared statement)
     /// Sent by server in response to Describe(Statement)
     ParameterDescription(Vec<u32>),
+    /// Close complete (server confirmation that a prepared statement/portal was released)
+    CloseComplete,
 }
 
 /// Transaction status
@@ -249,6 +255,27 @@ impl FrontendMessage {
             FrontendMessage::Sync => {
                 vec![b'S', 0, 0, 0, 4]
             }
+            FrontendMessage::CopyFail(msg) => {
+                let mut buf = Vec::new();
+                buf.push(b'f');
+                let content = format!("{}\0", msg);
+                let len = (content.len() + 4) as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(content.as_bytes());
+                buf
+            }
+            FrontendMessage::Close { is_portal, name } => {
+                let mut buf = Vec::new();
+                buf.push(b'C');
+                let type_byte = if *is_portal { b'P' } else { b'S' };
+                let mut content = vec![type_byte];
+                content.extend_from_slice(name.as_bytes());
+                content.push(0);
+                let len = (content.len() + 4) as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(&content);
+                buf
+            }
         }
     }
 }
@@ -280,6 +307,7 @@ impl BackendMessage {
             b'E' => Self::decode_error_response(payload)?,
             b'1' => BackendMessage::ParseComplete,
             b'2' => BackendMessage::BindComplete,
+            b'3' => BackendMessage::CloseComplete,
             b'n' => BackendMessage::NoData,
             b't' => Self::decode_parameter_description(payload)?,
             b'G' => Self::decode_copy_in_response(payload)?,
@@ -306,7 +334,7 @@ impl BackendMessage {
                 if payload.len() < 8 {
                     return Err("MD5 auth payload too short (need salt)".to_string());
                 }
-                let salt: [u8; 4] = payload[4..8].try_into().unwrap();
+                let salt: [u8; 4] = payload[4..8].try_into().expect("salt length verified above");
                 Ok(BackendMessage::AuthenticationMD5Password(salt))
             }
             10 => {

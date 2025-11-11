@@ -1,8 +1,8 @@
 //! Tenant Boundary Invariant Enforcer
 //!
 //! Runtime verification that RLS is working correctly. After every query,
-//! scans returned rows for `operator_id` field mismatches against the
-//! authenticated tenant context.
+//! scans returned rows for a configurable tenant column (default `operator_id`)
+//! mismatches against the authenticated tenant context.
 //!
 //! This catches RLS bypass bugs in code we haven't written yet.
 //!
@@ -12,7 +12,7 @@
 //!   never reach the client.
 //! - **Type-safe**: Returns `TenantVerified` token that response builders
 //!   require. If you skip the check, your code won't compile.
-//! - **Zero false positives**: Only triggers when `operator_id` column exists
+//! - **Zero false positives**: Only triggers when the tenant column exists
 //!   AND its value mismatches the authenticated tenant.
 //! - **Performance**: O(n) scan per response, no allocations beyond the counter.
 
@@ -36,10 +36,10 @@ impl TenantVerified {
     }
 }
 
-/// Tenant boundary violation — one or more rows had wrong `operator_id`.
+/// Tenant boundary violation — one or more rows had wrong tenant column value.
 #[derive(Debug)]
 pub struct TenantViolation {
-    /// Number of rows with mismatched operator_id
+    /// Number of rows with mismatched tenant column
     pub violation_count: u64,
     pub table: String,
     pub endpoint: String,
@@ -63,7 +63,7 @@ pub struct TenantGuardMetrics {
     pub rows_checked: AtomicU64,
     /// Total requests where at least one violation was found
     pub violation_requests: AtomicU64,
-    /// Total individual row violations (rows with wrong operator_id)
+    /// Total individual row violations (rows with wrong tenant column value)
     pub violation_rows: AtomicU64,
 }
 
@@ -89,22 +89,24 @@ pub static TENANT_GUARD: TenantGuardMetrics = TenantGuardMetrics::new();
 /// Verify that all rows in a query response belong to the expected tenant.
 ///
 /// Returns `Ok(TenantVerified)` if all rows pass, or `Err(TenantViolation)`
-/// if any row has a mismatched `operator_id`. On violation, the caller
+/// if any row has a mismatched tenant column value. On violation, the caller
 /// MUST abort the response — never send leaked rows to the client.
 ///
 /// # Arguments
 ///
 /// * `rows` - The JSON rows from the query response
-/// * `expected_operator_id` - The authenticated tenant's operator_id
+/// * `expected_tenant_id` - The authenticated tenant's ID
+/// * `tenant_column` - Column name to check (e.g. "operator_id", "tenant_id")
 /// * `table` - Table name for logging context
 /// * `endpoint` - Endpoint name for logging context
 pub fn verify_tenant_boundary(
     rows: &[Value],
-    expected_operator_id: &str,
+    expected_tenant_id: &str,
+    tenant_column: &str,
     table: &str,
     endpoint: &str,
 ) -> Result<TenantVerified, TenantViolation> {
-    if rows.is_empty() || expected_operator_id.is_empty() {
+    if rows.is_empty() || expected_tenant_id.is_empty() {
         return Ok(TenantVerified(()));
     }
 
@@ -113,38 +115,38 @@ pub fn verify_tenant_boundary(
 
     for (i, row) in rows.iter().enumerate() {
         if let Some(obj) = row.as_object() {
-            // Check operator_id field (our RLS partition key)
-            if let Some(op_val) = obj.get("operator_id") {
+            // Check tenant column (our RLS partition key)
+            if let Some(op_val) = obj.get(tenant_column) {
                 checked += 1;
 
-                let row_operator_id = match op_val {
+                let row_tenant_id = match op_val {
                     Value::String(s) => s.as_str(),
                     Value::Number(n) => {
                         let n_str = n.to_string();
-                        if n_str != expected_operator_id {
+                        if n_str != expected_tenant_id {
                             violations += 1;
                             eprintln!(
                                 "[CRITICAL] TENANT_BOUNDARY_VIOLATION: \
-                                 table={} endpoint={} row={} \
-                                 expected_operator_id={} actual_operator_id={} \
+                                 table={} endpoint={} row={} column={} \
+                                 expected={} actual={} \
                                  — RLS MAY BE COMPROMISED",
-                                table, endpoint, i, expected_operator_id, n_str
+                                table, endpoint, i, tenant_column, expected_tenant_id, n_str
                             );
                         }
                         continue;
                     }
-                    Value::Null => continue, // NULL operator_id — skip (system rows)
+                    Value::Null => continue, // NULL tenant column — skip (system rows)
                     _ => continue,
                 };
 
-                if row_operator_id != expected_operator_id {
+                if row_tenant_id != expected_tenant_id {
                     violations += 1;
                     eprintln!(
                         "[CRITICAL] TENANT_BOUNDARY_VIOLATION: \
-                         table={} endpoint={} row={} \
-                         expected_operator_id={} actual_operator_id={} \
+                         table={} endpoint={} row={} column={} \
+                         expected={} actual={} \
                          — RLS MAY BE COMPROMISED",
-                        table, endpoint, i, expected_operator_id, row_operator_id
+                        table, endpoint, i, tenant_column, expected_tenant_id, row_tenant_id
                     );
                 }
             }
@@ -197,7 +199,7 @@ mod tests {
             json!({"id": 1, "operator_id": "op-123", "name": "Order A"}),
             json!({"id": 2, "operator_id": "op-123", "name": "Order B"}),
         ];
-        assert!(verify_tenant_boundary(&rows, "op-123", "orders", "GET").is_ok());
+        assert!(verify_tenant_boundary(&rows, "op-123", "operator_id", "orders", "GET").is_ok());
     }
 
     #[test]
@@ -207,7 +209,7 @@ mod tests {
             json!({"id": 2, "operator_id": "op-EVIL", "name": "Leaked!"}),
             json!({"id": 3, "operator_id": "op-123", "name": "Order C"}),
         ];
-        let err = verify_tenant_boundary(&rows, "op-123", "orders", "GET").unwrap_err();
+        let err = verify_tenant_boundary(&rows, "op-123", "operator_id", "orders", "GET").unwrap_err();
         assert_eq!(err.violation_count, 1);
     }
 
@@ -217,7 +219,7 @@ mod tests {
             json!({"id": 1, "operator_id": "op-EVIL"}),
             json!({"id": 2, "operator_id": "op-EVIL"}),
         ];
-        let err = verify_tenant_boundary(&rows, "op-123", "orders", "GET").unwrap_err();
+        let err = verify_tenant_boundary(&rows, "op-123", "operator_id", "orders", "GET").unwrap_err();
         assert_eq!(err.violation_count, 2);
     }
 
@@ -227,7 +229,7 @@ mod tests {
             json!({"id": 1, "name": "No operator_id here"}),
             json!({"id": 2, "count": 42}),
         ];
-        assert!(verify_tenant_boundary(&rows, "op-123", "aggregate", "GET").is_ok());
+        assert!(verify_tenant_boundary(&rows, "op-123", "operator_id", "aggregate", "GET").is_ok());
     }
 
     #[test]
@@ -235,7 +237,7 @@ mod tests {
         let rows = vec![
             json!({"id": 1, "operator_id": null, "name": "System row"}),
         ];
-        assert!(verify_tenant_boundary(&rows, "op-123", "settings", "GET").is_ok());
+        assert!(verify_tenant_boundary(&rows, "op-123", "operator_id", "settings", "GET").is_ok());
     }
 
     #[test]
@@ -243,13 +245,13 @@ mod tests {
         let rows = vec![
             json!({"id": 1, "operator_id": "op-123"}),
         ];
-        // Empty operator_id means unauthenticated/system — skip check
-        assert!(verify_tenant_boundary(&rows, "", "orders", "GET").is_ok());
+        // Empty tenant ID means unauthenticated/system — skip check
+        assert!(verify_tenant_boundary(&rows, "", "operator_id", "orders", "GET").is_ok());
     }
 
     #[test]
     fn empty_rows_is_clean() {
-        assert!(verify_tenant_boundary(&[], "op-123", "orders", "GET").is_ok());
+        assert!(verify_tenant_boundary(&[], "op-123", "operator_id", "orders", "GET").is_ok());
     }
 
     #[test]
@@ -258,8 +260,19 @@ mod tests {
             json!({"id": 1, "operator_id": 123}),
         ];
         // Integer 123 != string "op-123"
-        assert!(verify_tenant_boundary(&rows, "op-123", "orders", "GET").is_err());
+        assert!(verify_tenant_boundary(&rows, "op-123", "operator_id", "orders", "GET").is_err());
         // But integer 123 == string "123"
-        assert!(verify_tenant_boundary(&rows, "123", "orders", "GET").is_ok());
+        assert!(verify_tenant_boundary(&rows, "123", "operator_id", "orders", "GET").is_ok());
+    }
+
+    #[test]
+    fn custom_tenant_column() {
+        let rows = vec![
+            json!({"id": 1, "tenant_id": "t-abc", "name": "Order A"}),
+            json!({"id": 2, "tenant_id": "t-abc", "name": "Order B"}),
+        ];
+        assert!(verify_tenant_boundary(&rows, "t-abc", "tenant_id", "orders", "GET").is_ok());
+        // Wrong value
+        assert!(verify_tenant_boundary(&rows, "t-xyz", "tenant_id", "orders", "GET").is_err());
     }
 }

@@ -1,6 +1,8 @@
 # Authentication & Security
 
-The gateway provides multiple layers of security: JWT/webhook authentication, PostgreSQL Row-Level Security integration, a YAML policy engine, and query allow-listing.
+The gateway provides multiple layers of security: JWT authentication, PostgreSQL Row-Level Security integration, a YAML policy engine, and query allow-listing.
+
+> **Note:** Webhook-based authentication has been removed. JWT (`JWT_SECRET`) is the only supported authentication mechanism. If your reverse proxy needs to authenticate, forward user identity within the JWT — not via custom headers.
 
 ---
 
@@ -40,23 +42,9 @@ For development, pass claims directly as headers:
 curl -H "x-operator-id: uuid" -H "x-user-id: uuid" /api/orders
 ```
 
-> **Warning:** Header-based auth is only active when `JWT_SECRET` is **not set**. In production with `JWT_SECRET` configured, these headers are ignored — role and identity are cryptographically bound to the JWT token.
+> **Warning:** Header-based auth is only active when `QAIL_DEV_MODE=true` is set **and** `JWT_SECRET` is **not set**. The gateway will **refuse to start** in dev mode when the bind address is not `localhost` — preventing accidental exposure of header-based auth on public interfaces.
 
 ---
-
-## Webhook Auth
-
-Delegate authentication to an external service:
-
-```toml
-# qail.toml
-[gateway.auth.webhook]
-url = "https://auth.example.com/verify"
-headers_forward = ["Authorization", "Cookie"]
-```
-
-The gateway forwards the specified headers to your auth endpoint. The webhook response becomes the auth context.
-
 ---
 
 ## Row-Level Security (RLS)
@@ -159,3 +147,19 @@ When enabled, any query pattern not in the allow-list is rejected with `403 Forb
 | N+1 catastrophe | Default behavior | **Structurally impossible** |
 | Over-fetching | Manual column control | **Policy-enforced** |
 | Query abuse | Rate limiting only | **Allow-list + rate limit** |
+
+---
+
+## Internal Endpoint Protection (M4)
+
+The `/metrics` and `/health/internal` endpoints expose operational details. Protect them in production:
+
+```toml
+# qail.toml
+[gateway]
+admin_token = "your-secret-admin-token"
+```
+
+When set, both endpoints require `Authorization: Bearer <admin_token>`. Without the token, they return `401 Unauthorized`.
+
+Alternatively, restrict access via network policy (firewall rules, reverse proxy).

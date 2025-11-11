@@ -67,6 +67,12 @@ pub enum Action {
     AlterDisableRls,
     AlterForceRls,
     AlterNoForceRls,
+    // Session & procedural commands
+    Call,
+    Do,
+    SessionSet,
+    SessionShow,
+    SessionReset,
 }
 
 impl std::fmt::Display for Action {
@@ -136,6 +142,11 @@ impl std::fmt::Display for Action {
             Action::AlterDisableRls => write!(f, "ALTER_DISABLE_RLS"),
             Action::AlterForceRls => write!(f, "ALTER_FORCE_RLS"),
             Action::AlterNoForceRls => write!(f, "ALTER_NO_FORCE_RLS"),
+            Action::Call => write!(f, "CALL"),
+            Action::Do => write!(f, "DO"),
+            Action::SessionSet => write!(f, "SESSION_SET"),
+            Action::SessionShow => write!(f, "SESSION_SHOW"),
+            Action::SessionReset => write!(f, "SESSION_RESET"),
         }
     }
 }
@@ -190,6 +201,14 @@ pub enum Operator {
     ContainedBy,
     Overlaps,
     TextSearch,
+    /// `?|` — does JSONB contain ANY of the given keys?
+    KeyExistsAny,
+    /// `?&` — does JSONB contain ALL of the given keys?
+    KeyExistsAll,
+    /// `#>` — JSONB path extraction → jsonb
+    JsonPath,
+    /// `#>>` — JSONB path extraction → text
+    JsonPathText,
 }
 
 impl Operator {
@@ -227,6 +246,10 @@ impl Operator {
             Operator::ContainedBy => "<@",
             Operator::Overlaps => "&&",
             Operator::TextSearch => "@@",
+            Operator::KeyExistsAny => "?|",
+            Operator::KeyExistsAll => "?&",
+            Operator::JsonPath => "#>",
+            Operator::JsonPathText => "#>>",
         }
     }
 

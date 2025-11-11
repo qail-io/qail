@@ -173,4 +173,85 @@ impl Qail {
             ..Default::default()
         }
     }
+
+    // PostgreSQL Procedural Commands
+
+    /// Create a CALL command to invoke a stored procedure.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let cmd = Qail::call("refresh_materialized_views()");
+    /// // Generates: CALL refresh_materialized_views()
+    /// ```
+    pub fn call(procedure: impl Into<String>) -> Self {
+        Self {
+            action: Action::Call,
+            table: procedure.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a DO command to execute an anonymous code block.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let cmd = Qail::do_block("BEGIN RAISE NOTICE 'hello'; END;", "plpgsql");
+    /// // Generates: DO $$ BEGIN RAISE NOTICE 'hello'; END; $$ LANGUAGE plpgsql
+    /// ```
+    pub fn do_block(body: impl Into<String>, language: impl Into<String>) -> Self {
+        Self {
+            action: Action::Do,
+            payload: Some(body.into()),
+            table: language.into(),
+            ..Default::default()
+        }
+    }
+
+    // PostgreSQL Session Commands
+
+    /// Create a SET command for session variables.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let cmd = Qail::session_set("statement_timeout", "5000");
+    /// // Generates: SET statement_timeout = '5000'
+    /// ```
+    pub fn session_set(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            action: Action::SessionSet,
+            table: key.into(),
+            payload: Some(value.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Create a SHOW command to inspect a session variable.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let cmd = Qail::session_show("statement_timeout");
+    /// // Generates: SHOW statement_timeout
+    /// ```
+    pub fn session_show(key: impl Into<String>) -> Self {
+        Self {
+            action: Action::SessionShow,
+            table: key.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a RESET command to restore a session variable to default.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let cmd = Qail::session_reset("statement_timeout");
+    /// // Generates: RESET statement_timeout
+    /// ```
+    pub fn session_reset(key: impl Into<String>) -> Self {
+        Self {
+            action: Action::SessionReset,
+            table: key.into(),
+            ..Default::default()
+        }
+    }
 }

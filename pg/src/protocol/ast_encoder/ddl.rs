@@ -334,3 +334,43 @@ pub fn encode_alter_no_force_rls(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(cmd.table.as_bytes());
     buf.extend_from_slice(b" NO FORCE ROW LEVEL SECURITY");
 }
+
+// ── Session & procedural commands ──────────────────────────────────
+
+/// Encode CALL procedure_name.
+pub fn encode_call(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"CALL ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}
+
+/// Encode DO $$ body $$ LANGUAGE lang.
+pub fn encode_do(cmd: &Qail, buf: &mut BytesMut) {
+    let body = cmd.payload.as_deref().unwrap_or("");
+    let lang = if cmd.table.is_empty() { "plpgsql" } else { &cmd.table };
+    buf.extend_from_slice(b"DO $$ ");
+    buf.extend_from_slice(body.as_bytes());
+    buf.extend_from_slice(b" $$ LANGUAGE ");
+    buf.extend_from_slice(lang.as_bytes());
+}
+
+/// Encode SET key = 'value'.
+pub fn encode_session_set(cmd: &Qail, buf: &mut BytesMut) {
+    let value = cmd.payload.as_deref().unwrap_or("");
+    buf.extend_from_slice(b"SET ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" = '");
+    buf.extend_from_slice(value.as_bytes());
+    buf.extend_from_slice(b"'");
+}
+
+/// Encode SHOW key.
+pub fn encode_session_show(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"SHOW ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}
+
+/// Encode RESET key.
+pub fn encode_session_reset(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"RESET ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}
