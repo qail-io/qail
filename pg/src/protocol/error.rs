@@ -4,6 +4,8 @@
 
 use std::fmt;
 
+use qail_core::ast::Action;
+
 /// Errors that can occur during wire protocol encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodeError {
@@ -13,6 +15,10 @@ pub enum EncodeError {
     TooManyParameters(usize),
     /// A single parameter or message exceeds i32::MAX bytes.
     MessageTooLarge(usize),
+    /// Action not supported by the AST-native encoder (e.g. Listen, Search).
+    UnsupportedAction(Action),
+    /// A Value::Function/expression contains SQL injection markers.
+    UnsafeExpression(String),
 }
 
 impl fmt::Display for EncodeError {
@@ -26,6 +32,12 @@ impl fmt::Display for EncodeError {
             }
             EncodeError::MessageTooLarge(size) => {
                 write!(f, "Message too large: {} bytes (Limit is {})", size, i32::MAX)
+            }
+            EncodeError::UnsupportedAction(action) => {
+                write!(f, "Unsupported action {:?} in AST-native encoder", action)
+            }
+            EncodeError::UnsafeExpression(expr) => {
+                write!(f, "Unsafe expression rejected: {}", expr)
             }
         }
     }

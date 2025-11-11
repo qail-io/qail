@@ -287,6 +287,7 @@ async fn handle_client_message(
                                     if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
                                         &json_rows,
                                         tenant_id,
+                                        &state.config.tenant_column,
                                         &cmd.table,
                                         "ws_query",
                                     ) {
@@ -337,6 +338,14 @@ async fn handle_client_message(
                 }
             };
 
+            // SECURITY (E5): Validate table name against schema registry.
+            if state.schema.table(&table).is_none() {
+                let _ = tx.send(WsServerMessage::Error {
+                    message: format!("Unknown table: '{}'. Live queries require a valid table name.", table),
+                }).await;
+                return;
+            }
+
             // SECURITY (R1): Apply row-level security policies — same as HTTP handler.
             // Without this, LiveQuery bypasses all PolicyEngine filters.
             if let Err(e) = state.policy_engine.apply_policies(auth, &mut cmd) {
@@ -361,6 +370,7 @@ async fn handle_client_message(
                             if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
                                 &json_rows,
                                 tenant_id,
+                                &state.config.tenant_column,
                                 &cmd.table,
                                 "ws_live_query",
                             ) {

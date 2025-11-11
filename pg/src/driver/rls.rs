@@ -19,9 +19,10 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
     let op_id = sanitize_guc_value(&ctx.operator_id);
     let ag_id = sanitize_guc_value(&ctx.agent_id);
     format!(
-        "SELECT set_config('app.current_operator_id', '{}', false), \
-                set_config('app.current_agent_id', '{}', false), \
-                set_config('app.is_super_admin', '{}', false)",
+        "BEGIN; \
+         SELECT set_config('app.current_operator_id', '{}', true), \
+                set_config('app.current_agent_id', '{}', true), \
+                set_config('app.is_super_admin', '{}', true)",
         op_id,
         ag_id,
         ctx.bypasses_rls(),
@@ -36,10 +37,11 @@ pub(crate) fn context_to_sql_with_timeout(ctx: &RlsContext, timeout_ms: u32) -> 
     let op_id = sanitize_guc_value(&ctx.operator_id);
     let ag_id = sanitize_guc_value(&ctx.agent_id);
     format!(
-        "SET statement_timeout = {}; \
-         SELECT set_config('app.current_operator_id', '{}', false), \
-                set_config('app.current_agent_id', '{}', false), \
-                set_config('app.is_super_admin', '{}', false)",
+        "BEGIN; \
+         SET LOCAL statement_timeout = {}; \
+         SELECT set_config('app.current_operator_id', '{}', true), \
+                set_config('app.current_agent_id', '{}', true), \
+                set_config('app.is_super_admin', '{}', true)",
         timeout_ms,
         op_id,
         ag_id,
@@ -70,13 +72,11 @@ fn sanitize_guc_value(val: &str) -> String {
         .collect()
 }
 
-/// SQL to reset all RLS session variables to safe defaults.
-/// Used when returning connections to the pool.
+/// SQL to commit the transaction and reset RLS context.
+/// Transaction-local set_config values auto-reset on COMMIT,
+/// so no explicit reset is needed — just end the transaction.
 pub(crate) fn reset_sql() -> &'static str {
-    "RESET statement_timeout; \
-     SELECT set_config('app.current_operator_id', '', false), \
-            set_config('app.current_agent_id', '', false), \
-            set_config('app.is_super_admin', 'false', false)"
+    "COMMIT; RESET statement_timeout"
 }
 
 #[cfg(test)]
@@ -104,9 +104,8 @@ mod tests {
     #[test]
     fn test_reset_sql() {
         let sql = reset_sql();
-        assert!(sql.contains("app.current_operator_id"));
-        assert!(sql.contains("app.current_agent_id"));
-        assert!(sql.contains("'false'")); // resets is_super_admin
+        assert!(sql.contains("COMMIT"), "Should COMMIT the transaction");
+        assert!(sql.contains("RESET statement_timeout"), "Should reset statement_timeout");
     }
 
     // ══════════════════════════════════════════════════════════════════

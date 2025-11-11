@@ -167,11 +167,8 @@ pub fn encode_search_proto(
     let vector_bytes_len = vector.len() * 4; // f32 = 4 bytes
     encode_varint(buf, vector_bytes_len);
     
-    // ZERO-COPY: Write floats directly as bytes
-    // Safe because f32 is 4 bytes on all platforms
-    let float_bytes = unsafe {
-        std::slice::from_raw_parts(vector.as_ptr() as *const u8, vector_bytes_len)
-    };
+    // ZERO-COPY: Write floats directly as bytes via bytemuck (safe, zero-cost)
+    let float_bytes: &[u8] = bytemuck::cast_slice(vector);
     buf.extend_from_slice(float_bytes);
     
     // Field 4: limit (varint)
@@ -221,9 +218,7 @@ pub fn encode_search_with_filter_proto(
     buf.put_u8(SEARCH_VECTOR);
     let vector_bytes_len = vector.len() * 4;
     encode_varint(buf, vector_bytes_len);
-    let float_bytes = unsafe {
-        std::slice::from_raw_parts(vector.as_ptr() as *const u8, vector_bytes_len)
-    };
+    let float_bytes: &[u8] = bytemuck::cast_slice(vector);
     buf.extend_from_slice(float_bytes);
     
     // Field 3: filter (Filter message)
@@ -559,9 +554,7 @@ fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) {
     encode_varint(&mut point_buf, vector_inner_len);
     point_buf.put_u8(0x0A); // Vector.data (field 1, packed floats)
     encode_varint(&mut point_buf, vector_bytes_len);
-    let float_bytes = unsafe {
-        std::slice::from_raw_parts(point.vector.as_ptr() as *const u8, vector_bytes_len)
-    };
+    let float_bytes: &[u8] = bytemuck::cast_slice(&point.vector);
     point_buf.extend_from_slice(float_bytes);
     
     // Write to main buffer with length prefix

@@ -74,16 +74,16 @@ impl CodebaseScanner {
     /// Create a new scanner with default patterns.
     pub fn new() -> Self {
         Self {
-            qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)").unwrap(),
-            qail_column_pattern: Regex::new(r"'(\w+)").unwrap(),
-            qail_v2_get_pattern: Regex::new(r"\bget\s+(\w+)\s+fields\s+(.+?)(?:\s+where|\s+order|\s+limit|$)").unwrap(),
-            qail_v2_set_pattern: Regex::new(r"\bset\s+(\w+)\s+values\s+(.+?)(?:\s+where|$)").unwrap(),
-            qail_v2_del_pattern: Regex::new(r"\bdel\s+(\w+)(?:\s+where|$)").unwrap(),
-            qail_v2_add_pattern: Regex::new(r"\badd\s+(\w+)\s+fields\s+(.+?)\s+values").unwrap(),
-            sql_select_pattern: Regex::new(r"(?i)SELECT\s+(.+?)\s+FROM\s+(\w+)").unwrap(),
-            sql_insert_pattern: Regex::new(r"(?i)INSERT\s+INTO\s+(\w+)").unwrap(),
-            sql_update_pattern: Regex::new(r"(?i)UPDATE\s+(\w+)\s+SET").unwrap(),
-            sql_delete_pattern: Regex::new(r"(?i)DELETE\s+FROM\s+(\w+)").unwrap(),
+            qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)").expect("valid qail action regex"),
+            qail_column_pattern: Regex::new(r"'(\w+)").expect("valid qail column regex"),
+            qail_v2_get_pattern: Regex::new(r"\bget\s+(\w+)\s+fields\s+([^\n]+?)(?:\s+where|\s+order|\s+limit|$)").expect("valid v2 get regex"),
+            qail_v2_set_pattern: Regex::new(r"\bset\s+(\w+)\s+values\s+([^\n]+?)(?:\s+where|$)").expect("valid v2 set regex"),
+            qail_v2_del_pattern: Regex::new(r"\bdel\s+(\w+)(?:\s+where|$)").expect("valid v2 del regex"),
+            qail_v2_add_pattern: Regex::new(r"\badd\s+(\w+)\s+fields\s+([^\n]+?)\s+values").expect("valid v2 add regex"),
+            sql_select_pattern: Regex::new(r"(?i)SELECT\s+([^\n]+?)\s+FROM\s+(\w+)").expect("valid sql select regex"),
+            sql_insert_pattern: Regex::new(r"(?i)INSERT\s+INTO\s+(\w+)").expect("valid sql insert regex"),
+            sql_update_pattern: Regex::new(r"(?i)UPDATE\s+(\w+)\s+SET").expect("valid sql update regex"),
+            sql_delete_pattern: Regex::new(r"(?i)DELETE\s+FROM\s+(\w+)").expect("valid sql delete regex"),
         }
     }
 
@@ -181,6 +181,11 @@ impl CodebaseScanner {
 
         for (line_num, line) in content.lines().enumerate() {
             let line_number = line_num + 1;
+
+            // R7-ReDoS: Skip excessively long lines to bound regex backtracking
+            if line.len() > 4096 {
+                continue;
+            }
 
             for cap in self.qail_action_pattern.captures_iter(line) {
                 let action = cap.get(1).map(|m| m.as_str()).unwrap_or("");

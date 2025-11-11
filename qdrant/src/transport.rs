@@ -199,20 +199,46 @@ impl GrpcClient {
     }
 
     /// Get a ready sender, reconnecting if the previous connection dropped.
+    ///
+    /// The lock is held only to clone the sender (or reconnect), NOT during
+    /// the `ready()` await. This prevents head-of-line blocking under load.
     async fn get_sender(&self) -> QdrantResult<SendRequest<Bytes>> {
-        let mut guard = self.sender.lock().await;
+        // Fast path: clone sender under short lock, then await ready() WITHOUT lock
+        let maybe_sender = {
+            let guard = self.sender.lock().await;
+            guard.as_ref().cloned()
+        };
 
-        // Try the existing connection first
-        if let Some(ref sender) = *guard {
-            match sender.clone().ready().await {
+        if let Some(sender) = maybe_sender {
+            match sender.ready().await {
                 Ok(ready) => return Ok(ready),
                 Err(_) => {
+                    // Connection dead — fall through to reconnect
+                    let mut guard = self.sender.lock().await;
                     *guard = None;
                 }
             }
         }
 
-        // Reconnect using the same transport mode
+        // Slow path: reconnect (re-acquire lock for mutation)
+        let mut guard = self.sender.lock().await;
+
+        // Double-check: another task may have reconnected while we waited
+        if let Some(sender) = guard.as_ref().cloned() {
+            drop(guard);
+            match sender.ready().await {
+                Ok(ready) => return Ok(ready),
+                Err(_) => {
+                    let mut guard = self.sender.lock().await;
+                    *guard = None;
+                    // Fall through to reconnect below, re-acquire lock
+                    drop(guard);
+                }
+            }
+            // Re-acquire for the reconnect
+            guard = self.sender.lock().await;
+        }
+
         let new_sender = if self.tls {
             let config = self.tls_config.as_ref()
                 .ok_or_else(|| QdrantError::Connection("TLS config missing on reconnect".to_string()))?;

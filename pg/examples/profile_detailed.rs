@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // ENCODE
         let t = Instant::now();
-        let buf = qail_pg::protocol::AstEncoder::encode_batch(&cmds);
+        let buf = qail_pg::protocol::AstEncoder::encode_batch(&cmds).unwrap();
         total_encode += t.elapsed();
 
         // SEND (write_all)

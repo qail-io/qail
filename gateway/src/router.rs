@@ -18,7 +18,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::handler::{execute_batch, execute_query, execute_query_binary, health_check};
+use crate::handler::{execute_batch, execute_query, execute_query_binary, health_check, health_check_internal};
 use crate::middleware::rate_limit_middleware;
 use crate::rest::auto_rest_routes;
 use crate::ws::ws_handler;
@@ -46,8 +46,12 @@ pub fn create_router(
     let rest = auto_rest_routes(Arc::clone(&state));
     
     let mut router = Router::new()
-        // Health check
+        // Health check (public — minimal info)
         .route("/health", get(health_check))
+        // Health check (internal — full metrics, restrict in production)
+        .route("/health/internal", get(health_check_internal))
+        // Prometheus metrics (outside rate limiting — Prometheus scraper must always succeed)
+        .route("/metrics", get(crate::metrics::metrics_handler))
         // Query endpoints (Qail AST protocol)
         .route("/qail", post(execute_query))
         .route("/qail/binary", post(execute_query_binary))
@@ -108,6 +112,18 @@ fn build_cors_layer(config: &crate::config::GatewayConfig) -> CorsLayer {
         .allow_headers(Any);
 
     if config.cors_allowed_origins.is_empty() {
+        if config.cors_strict {
+            // SECURITY (M1): In strict mode, refuse to start without explicit origins.
+            panic!(
+                "SECURITY: cors_strict=true but cors_allowed_origins is empty. \
+                 Configure explicit CORS origins or set cors_strict=false."
+            );
+        }
+        // Backward compatible: warn and allow all
+        tracing::warn!(
+            "CORS allows ANY origin (cors_allowed_origins is empty). \
+             Set `cors_allowed_origins` for production deployments."
+        );
         base.allow_origin(Any)
     } else {
         let origins: Vec<HeaderValue> = config
