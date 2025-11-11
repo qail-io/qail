@@ -514,6 +514,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytemuck"
+version = "1.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2731,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2749,7 +2755,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "chrono",
  "nom 8.0.0",
@@ -2769,7 +2775,7 @@ dependencies = [
 
 [[package]]
 name = "qail-encoder"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "qail-core",
  "qail-pg",
@@ -2777,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "qail-gateway"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -2812,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "qail-lsp"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "qail-core",
  "serde",
@@ -2823,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "qail-pg"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2852,9 +2858,10 @@ dependencies = [
 
 [[package]]
 name = "qail-qdrant"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "bytes",
  "futures-util",
  "h2",
@@ -2876,7 +2883,7 @@ dependencies = [
 
 [[package]]
 name = "qail-workflow"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "async-trait",
  "chrono",

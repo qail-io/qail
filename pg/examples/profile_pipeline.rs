@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Phase 1: Encode
         let encode_start = Instant::now();
-        let buf = qail_pg::protocol::AstEncoder::encode_batch(&cmds);
+        let buf = qail_pg::protocol::AstEncoder::encode_batch(&cmds).unwrap();
         total_encode_time += encode_start.elapsed();
 
         // Phase 2: Send (using raw stream access)

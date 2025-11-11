@@ -15,6 +15,21 @@ use qail_core::transpiler::ToSql;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::panic;
+
+/// Helper: wrap an FFI body in catch_unwind and return a default on panic.
+/// Also sets the thread-local error so callers can inspect via qail_last_error().
+macro_rules! ffi_catch {
+    ($default:expr, $body:expr) => {
+        match panic::catch_unwind(panic::AssertUnwindSafe(|| $body)) {
+            Ok(result) => result,
+            Err(_) => {
+                set_error("Internal panic in QAIL encoder".to_string());
+                $default
+            }
+        }
+    };
+}
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -52,59 +67,63 @@ pub extern "C" fn qail_version() -> *const c_char {
 /// Caller must free with qail_free().
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_transpile(qail: *const c_char) -> *mut c_char {
-    clear_error();
+    ffi_catch!(std::ptr::null_mut(), {
+        clear_error();
 
-    if qail.is_null() {
-        set_error("NULL input".to_string());
-        return std::ptr::null_mut();
-    }
-
-    let c_str = unsafe { CStr::from_ptr(qail) };
-    let qail_str = match c_str.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(format!("Invalid UTF-8: {}", e));
+        if qail.is_null() {
+            set_error("NULL input".to_string());
             return std::ptr::null_mut();
         }
-    };
 
-    match qail_core::parse(qail_str) {
-        Ok(cmd) => {
-            let sql = cmd.to_sql();
-            match CString::new(sql) {
-                Ok(c_string) => c_string.into_raw(),
-                Err(e) => {
-                    set_error(format!("NUL byte in output: {}", e));
-                    std::ptr::null_mut()
+        let c_str = unsafe { CStr::from_ptr(qail) };
+        let qail_str = match c_str.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                set_error(format!("Invalid UTF-8: {}", e));
+                return std::ptr::null_mut();
+            }
+        };
+
+        match qail_core::parse(qail_str) {
+            Ok(cmd) => {
+                let sql = cmd.to_sql();
+                match CString::new(sql) {
+                    Ok(c_string) => c_string.into_raw(),
+                    Err(e) => {
+                        set_error(format!("NUL byte in output: {}", e));
+                        std::ptr::null_mut()
+                    }
                 }
             }
+            Err(e) => {
+                set_error(format!("{:?}", e));
+                std::ptr::null_mut()
+            }
         }
-        Err(e) => {
-            set_error(format!("{:?}", e));
-            std::ptr::null_mut()
-        }
-    }
+    })
 }
 
 /// Validate QAIL syntax.
 /// Returns 1 if valid, 0 if invalid.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_validate(qail: *const c_char) -> i32 {
-    if qail.is_null() {
-        return 0;
-    }
-
-    let c_str = unsafe { CStr::from_ptr(qail) };
-    match c_str.to_str() {
-        Ok(s) => {
-            if qail_core::parse(s).is_ok() {
-                1
-            } else {
-                0
-            }
+    ffi_catch!(0, {
+        if qail.is_null() {
+            return 0;
         }
-        Err(_) => 0,
-    }
+
+        let c_str = unsafe { CStr::from_ptr(qail) };
+        match c_str.to_str() {
+            Ok(s) => {
+                if qail_core::parse(s).is_ok() {
+                    1
+                } else {
+                    0
+                }
+            }
+            Err(_) => 0,
+        }
+    })
 }
 
 // ============================================================================
@@ -122,69 +141,71 @@ pub extern "C" fn qail_encode_get(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    clear_error();
+    ffi_catch!(-99, {
+        clear_error();
 
-    if table.is_null() || out_ptr.is_null() || out_len.is_null() {
-        set_error("NULL pointer argument".to_string());
-        return -1;
-    }
-
-    let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(format!("Invalid UTF-8 in table: {}", e));
-            return -2;
+        if table.is_null() || out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
         }
-    };
 
-    // Build Qail
-    let mut cmd = qail_core::ast::Qail::get(table_str);
-
-    // Parse columns
-    if !columns.is_null() {
-        let cols_str = match unsafe { CStr::from_ptr(columns) }.to_str() {
+        let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
             Ok(s) => s,
             Err(e) => {
-                set_error(format!("Invalid UTF-8 in columns: {}", e));
-                return -3;
+                set_error(format!("Invalid UTF-8 in table: {}", e));
+                return -2;
             }
         };
 
-        if cols_str == "*" {
-            cmd = cmd.select_all();
-        } else {
-            for col in cols_str.split(',') {
-                let col = col.trim();
-                if !col.is_empty() {
-                    cmd = cmd.column(col);
+        // Build Qail
+        let mut cmd = qail_core::ast::Qail::get(table_str);
+
+        // Parse columns
+        if !columns.is_null() {
+            let cols_str = match unsafe { CStr::from_ptr(columns) }.to_str() {
+                Ok(s) => s,
+                Err(e) => {
+                    set_error(format!("Invalid UTF-8 in columns: {}", e));
+                    return -3;
+                }
+            };
+
+            if cols_str == "*" {
+                cmd = cmd.select_all();
+            } else {
+                for col in cols_str.split(',') {
+                    let col = col.trim();
+                    if !col.is_empty() {
+                        cmd = cmd.column(col);
+                    }
                 }
             }
+        } else {
+            cmd = cmd.select_all();
         }
-    } else {
-        cmd = cmd.select_all();
-    }
 
-    // Apply limit
-    if limit >= 0 {
-        cmd = cmd.limit(limit);
-    }
+        // Apply limit
+        if limit >= 0 {
+            cmd = cmd.limit(limit);
+        }
 
-    // Encode to Simple Query wire bytes
-    let sql = cmd.to_sql();
-    let wire_bytes = encode_simple_query(&sql);
-    let len = wire_bytes.len();
+        // Encode to Simple Query wire bytes
+        let sql = cmd.to_sql();
+        let wire_bytes = encode_simple_query(&sql);
+        let len = wire_bytes.len();
 
-    // Transfer ownership to caller
-    let mut boxed = wire_bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
+        // Transfer ownership to caller
+        let mut boxed = wire_bytes.into_boxed_slice();
+        let ptr = boxed.as_mut_ptr();
+        std::mem::forget(boxed);
 
-    unsafe {
-        *out_ptr = ptr;
-        *out_len = len;
-    }
+        unsafe {
+            *out_ptr = ptr;
+            *out_len = len;
+        }
 
-    0 // Success
+        0 // Success
+    })
 }
 
 /// Encode a batch of uniform SELECT queries.
@@ -198,66 +219,68 @@ pub extern "C" fn qail_encode_uniform_batch(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    clear_error();
+    ffi_catch!(-99, {
+        clear_error();
 
-    if table.is_null() || out_ptr.is_null() || out_len.is_null() || count == 0 {
-        set_error("NULL pointer or zero count".to_string());
-        return -1;
-    }
-
-    let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(format!("Invalid UTF-8 in table: {}", e));
-            return -2;
+        if table.is_null() || out_ptr.is_null() || out_len.is_null() || count == 0 {
+            set_error("NULL pointer or zero count".to_string());
+            return -1;
         }
-    };
 
-    // Build the base command
-    let mut base_cmd = qail_core::ast::Qail::get(table_str);
+        let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                set_error(format!("Invalid UTF-8 in table: {}", e));
+                return -2;
+            }
+        };
 
-    if !columns.is_null() {
-        if let Ok(cols_str) = unsafe { CStr::from_ptr(columns) }.to_str() {
-            if cols_str == "*" {
-                base_cmd = base_cmd.select_all();
-            } else {
-                for col in cols_str.split(',') {
-                    let col = col.trim();
-                    if !col.is_empty() {
-                        base_cmd = base_cmd.column(col);
+        // Build the base command
+        let mut base_cmd = qail_core::ast::Qail::get(table_str);
+
+        if !columns.is_null() {
+            if let Ok(cols_str) = unsafe { CStr::from_ptr(columns) }.to_str() {
+                if cols_str == "*" {
+                    base_cmd = base_cmd.select_all();
+                } else {
+                    for col in cols_str.split(',') {
+                        let col = col.trim();
+                        if !col.is_empty() {
+                            base_cmd = base_cmd.column(col);
+                        }
                     }
                 }
             }
+        } else {
+            base_cmd = base_cmd.select_all();
         }
-    } else {
-        base_cmd = base_cmd.select_all();
-    }
 
-    if limit >= 0 {
-        base_cmd = base_cmd.limit(limit);
-    }
+        if limit >= 0 {
+            base_cmd = base_cmd.limit(limit);
+        }
 
-    // Encode SQL once, repeat count times
-    let sql = base_cmd.to_sql();
-    let single_query = encode_simple_query(&sql);
+        // Encode SQL once, repeat count times
+        let sql = base_cmd.to_sql();
+        let single_query = encode_simple_query(&sql);
 
-    // Batch: repeat the query `count` times
-    let mut batch_bytes = Vec::with_capacity(single_query.len() * count);
-    for _ in 0..count {
-        batch_bytes.extend_from_slice(&single_query);
-    }
+        // Batch: repeat the query `count` times
+        let mut batch_bytes = Vec::with_capacity(single_query.len() * count);
+        for _ in 0..count {
+            batch_bytes.extend_from_slice(&single_query);
+        }
 
-    let len = batch_bytes.len();
-    let mut boxed = batch_bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
+        let len = batch_bytes.len();
+        let mut boxed = batch_bytes.into_boxed_slice();
+        let ptr = boxed.as_mut_ptr();
+        std::mem::forget(boxed);
 
-    unsafe {
-        *out_ptr = ptr;
-        *out_len = len;
-    }
+        unsafe {
+            *out_ptr = ptr;
+            *out_len = len;
+        }
 
-    0
+        0
+    })
 }
 
 // ============================================================================
@@ -343,40 +366,42 @@ pub extern "C" fn qail_encode_parse(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    clear_error();
+    ffi_catch!(-99, {
+        clear_error();
 
-    if sql.is_null() || out_ptr.is_null() || out_len.is_null() {
-        set_error("NULL pointer argument".to_string());
-        return -1;
-    }
-
-    let name_str = if name.is_null() {
-        ""
-    } else {
-        unsafe { CStr::from_ptr(name) }.to_str().unwrap_or_default()
-    };
-
-    let sql_str = match unsafe { CStr::from_ptr(sql) }.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(format!("Invalid UTF-8 in SQL: {}", e));
-            return -2;
+        if sql.is_null() || out_ptr.is_null() || out_len.is_null() {
+            set_error("NULL pointer argument".to_string());
+            return -1;
         }
-    };
 
-    let wire_bytes = encode_parse_message(name_str, sql_str);
-    let len = wire_bytes.len();
+        let name_str = if name.is_null() {
+            ""
+        } else {
+            unsafe { CStr::from_ptr(name) }.to_str().unwrap_or_default()
+        };
 
-    let mut boxed = wire_bytes.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
+        let sql_str = match unsafe { CStr::from_ptr(sql) }.to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                set_error(format!("Invalid UTF-8 in SQL: {}", e));
+                return -2;
+            }
+        };
 
-    unsafe {
-        *out_ptr = ptr;
-        *out_len = len;
-    }
+        let wire_bytes = encode_parse_message(name_str, sql_str);
+        let len = wire_bytes.len();
 
-    0
+        let mut boxed = wire_bytes.into_boxed_slice();
+        let ptr = boxed.as_mut_ptr();
+        std::mem::forget(boxed);
+
+        unsafe {
+            *out_ptr = ptr;
+            *out_len = len;
+        }
+
+        0
+    })
 }
 
 /// Encode a Sync message.
@@ -407,11 +432,19 @@ pub extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut usize) -
 /// # Arguments
 /// * `statement` - Prepared statement name
 /// * `params` - Array of parameter strings (all queries use same single param)
+/// * `params_count` - Number of elements in the `params` array
 /// * `count` - Number of Bind+Execute pairs to generate
 /// * `out_ptr` - Output pointer for allocated bytes
 /// * `out_len` - Output length
 ///
 /// Each query in batch uses params[i % params_count] as its parameter.
+///
+/// # Safety — `params` Array Bounds
+///
+/// The caller **MUST** ensure that `params` points to a valid array of at least
+/// `params_count` elements. Providing a smaller array is **undefined behavior**
+/// (the function iterates `0..params_count` via `params.add(i)`).
+/// Individual null elements within the array are safely skipped via `filter_map`.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_encode_bind_execute_batch(
     statement: *const c_char,
@@ -421,71 +454,73 @@ pub extern "C" fn qail_encode_bind_execute_batch(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    clear_error();
+    ffi_catch!(-99, {
+        clear_error();
 
-    if statement.is_null() || out_ptr.is_null() || out_len.is_null() || count == 0 {
-        set_error("NULL pointer or zero count".to_string());
-        return -1;
-    }
+        if statement.is_null() || out_ptr.is_null() || out_len.is_null() || count == 0 {
+            set_error("NULL pointer or zero count".to_string());
+            return -1;
+        }
 
-    let stmt_str = unsafe { CStr::from_ptr(statement) }
-        .to_str()
-        .unwrap_or_default();
+        let stmt_str = unsafe { CStr::from_ptr(statement) }
+            .to_str()
+            .unwrap_or_default();
 
-    // Collect params
-    let param_strs: Vec<&str> = if params.is_null() || params_count == 0 {
-        vec![]
-    } else {
-        (0..params_count)
-            .filter_map(|i| {
-                let p = unsafe { *params.add(i) };
-                if p.is_null() {
-                    None
-                } else {
-                    unsafe { CStr::from_ptr(p) }.to_str().ok()
-                }
-            })
-            .collect()
-    };
-
-    // Pre-calculate size: each Bind+Execute is ~30 bytes + param data
-    let avg_param_len = if param_strs.is_empty() {
-        2
-    } else {
-        param_strs.iter().map(|s| s.len()).sum::<usize>() / param_strs.len()
-    };
-    let estimated_size = count * (30 + stmt_str.len() + avg_param_len);
-    let mut buf = Vec::with_capacity(estimated_size);
-
-    for i in 0..count {
-        // Get param for this query
-        let param = if param_strs.is_empty() {
-            None
+        // Collect params
+        let param_strs: Vec<&str> = if params.is_null() || params_count == 0 {
+            vec![]
         } else {
-            Some(param_strs[i % param_strs.len()])
+            (0..params_count)
+                .filter_map(|i| {
+                    let p = unsafe { *params.add(i) };
+                    if p.is_null() {
+                        None
+                    } else {
+                        unsafe { CStr::from_ptr(p) }.to_str().ok()
+                    }
+                })
+                .collect()
         };
 
-        // Encode Bind
-        encode_bind_to_buf(&mut buf, stmt_str, param);
+        // Pre-calculate size: each Bind+Execute is ~30 bytes + param data
+        let avg_param_len = if param_strs.is_empty() {
+            2
+        } else {
+            param_strs.iter().map(|s| s.len()).sum::<usize>() / param_strs.len()
+        };
+        let estimated_size = count * (30 + stmt_str.len() + avg_param_len);
+        let mut buf = Vec::with_capacity(estimated_size);
 
-        // Encode Execute
-        buf.extend_from_slice(&[b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0]);
-    }
+        for i in 0..count {
+            // Get param for this query
+            let param = if param_strs.is_empty() {
+                None
+            } else {
+                Some(param_strs[i % param_strs.len()])
+            };
 
-    // Add Sync at end
-    buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
+            // Encode Bind
+            encode_bind_to_buf(&mut buf, stmt_str, param);
 
-    let len = buf.len();
-    let mut boxed = buf.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
+            // Encode Execute
+            buf.extend_from_slice(&[b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0]);
+        }
 
-    unsafe {
-        *out_ptr = ptr;
-        *out_len = len;
-    }
+        // Add Sync at end
+        buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
 
-    0
+        let len = buf.len();
+        let mut boxed = buf.into_boxed_slice();
+        let ptr = boxed.as_mut_ptr();
+        std::mem::forget(boxed);
+
+        unsafe {
+            *out_ptr = ptr;
+            *out_len = len;
+        }
+
+        0
+    })
 }
 
 // ============================================================================
@@ -565,63 +600,65 @@ pub extern "C" fn qail_decode_response(
     len: usize,
     out_handle: *mut *mut QailResponse,
 ) -> i32 {
-    clear_error();
+    ffi_catch!(-99, {
+        clear_error();
 
-    if data.is_null() || out_handle.is_null() {
-        set_error("Null pointer".to_string());
-        return -1;
-    }
+        if data.is_null() || out_handle.is_null() {
+            set_error("Null pointer".to_string());
+            return -1;
+        }
 
-    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-    let mut response = QailResponse {
-        rows: Vec::new(),
-        affected_rows: 0,
-        error: None,
-    };
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        let mut response = QailResponse {
+            rows: Vec::new(),
+            affected_rows: 0,
+            error: None,
+        };
 
-    let mut offset = 0;
-    while offset < bytes.len() {
-        match BackendMessage::decode(&bytes[offset..]) {
-            Ok((msg, consumed)) => {
-                offset += consumed;
+        let mut offset = 0;
+        while offset < bytes.len() {
+            match BackendMessage::decode(&bytes[offset..]) {
+                Ok((msg, consumed)) => {
+                    offset += consumed;
 
-                match msg {
-                    BackendMessage::DataRow(columns) => {
-                        response.rows.push(columns);
-                    }
-                    BackendMessage::CommandComplete(tag) => {
-                        // Parse affected rows from tag like "INSERT 0 5" or "UPDATE 10"
-                        if let Some(num) = tag.split_whitespace().last() {
-                            response.affected_rows = num.parse().unwrap_or(0);
+                    match msg {
+                        BackendMessage::DataRow(columns) => {
+                            response.rows.push(columns);
                         }
+                        BackendMessage::CommandComplete(tag) => {
+                            // Parse affected rows from tag like "INSERT 0 5" or "UPDATE 10"
+                            if let Some(num) = tag.split_whitespace().last() {
+                                response.affected_rows = num.parse().unwrap_or(0);
+                            }
+                        }
+                        BackendMessage::ErrorResponse(fields) => {
+                            response.error = Some(if fields.message.is_empty() {
+                                "Unknown error".to_string()
+                            } else {
+                                fields.message
+                            });
+                        }
+                        BackendMessage::ReadyForQuery(_) => {
+                            break; // Done
+                        }
+                        _ => {} // Skip other messages
                     }
-                    BackendMessage::ErrorResponse(fields) => {
-                        response.error = Some(if fields.message.is_empty() {
-                            "Unknown error".to_string()
-                        } else {
-                            fields.message
-                        });
-                    }
-                    BackendMessage::ReadyForQuery(_) => {
-                        break; // Done
-                    }
-                    _ => {} // Skip other messages
                 }
-            }
-            Err(e) => {
-                // Not enough data yet, or parse error
-                if e.contains("not enough") || e.contains("Need") {
-                    break;
+                Err(e) => {
+                    // Not enough data yet, or parse error
+                    if e.contains("not enough") || e.contains("Need") {
+                        break;
+                    }
+                    set_error(e);
+                    return -1;
                 }
-                set_error(e);
-                return -1;
             }
         }
-    }
 
-    let boxed = Box::new(response);
-    unsafe { *out_handle = Box::into_raw(boxed) };
-    0
+        let boxed = Box::new(response);
+        unsafe { *out_handle = Box::into_raw(boxed) };
+        0
+    })
 }
 
 #[cfg(feature = "response")]
@@ -678,7 +715,13 @@ pub extern "C" fn qail_response_is_null(
 #[cfg(feature = "response")]
 /// Get column value as string.
 /// Returns pointer to null-terminated string, or NULL if value is NULL.
-/// The returned string is only valid until the response is freed.
+///
+/// # Safety — Pointer Lifetime (L2)
+///
+/// The returned `*out_ptr` borrows memory from the `QailResponse` handle.
+/// It is **only valid** until `qail_response_free(handle)` is called.
+/// Callers **MUST** copy the data (e.g., `memcpy`) before freeing the response
+/// if the value is needed beyond the response's lifetime.
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_response_get_string(
     handle: *const QailResponse,

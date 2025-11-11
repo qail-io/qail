@@ -3,7 +3,7 @@
 //! Functions for encoding Expr, Value, Operator, and conditions to wire format.
 
 use bytes::BytesMut;
-use qail_core::ast::{Action, CageKind, Condition, Expr, FrameBound, Operator, SortOrder, Value, WindowFrame};
+use qail_core::ast::{Action, CageKind, Condition, Constraint, Expr, FrameBound, ModKind, Operator, SortOrder, Value, WindowFrame};
 
 use super::super::helpers::{i64_to_bytes, write_param_placeholder, NUMERIC_VALUES};
 
@@ -358,7 +358,48 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
                 buf.extend_from_slice(a.as_bytes());
             }
         }
-        _ => buf.extend_from_slice(b"*"),
+        Expr::Raw(sql) => buf.extend_from_slice(sql.as_bytes()),
+        Expr::Def { name, data_type, constraints } => {
+            buf.extend_from_slice(name.as_bytes());
+            buf.extend_from_slice(b" ");
+            buf.extend_from_slice(data_type.to_uppercase().as_bytes());
+            for c in constraints {
+                match c {
+                    Constraint::PrimaryKey => buf.extend_from_slice(b" PRIMARY KEY"),
+                    Constraint::Unique => buf.extend_from_slice(b" UNIQUE"),
+                    Constraint::Nullable => buf.extend_from_slice(b" NULL"),
+                    Constraint::Default(val) => {
+                        buf.extend_from_slice(b" DEFAULT ");
+                        buf.extend_from_slice(val.as_bytes());
+                    }
+                    Constraint::Check(vals) => {
+                        buf.extend_from_slice(b" CHECK (");
+                        buf.extend_from_slice(vals.join(", ").as_bytes());
+                        buf.extend_from_slice(b")");
+                    }
+                    Constraint::References(target) => {
+                        buf.extend_from_slice(b" REFERENCES ");
+                        buf.extend_from_slice(target.as_bytes());
+                    }
+                    _ => {
+                        buf.extend_from_slice(b" ");
+                        buf.extend_from_slice(c.to_string().as_bytes());
+                    }
+                }
+            }
+        }
+        Expr::Mod { kind, col } => {
+            match kind {
+                ModKind::Add => {
+                    buf.extend_from_slice(b"ADD COLUMN ");
+                    encode_column_expr(col, buf);
+                }
+                ModKind::Drop => {
+                    buf.extend_from_slice(b"DROP COLUMN ");
+                    encode_column_expr(col, buf);
+                }
+            }
+        }
     }
 }
 
@@ -395,6 +436,10 @@ pub fn encode_operator(op: &Operator, buf: &mut BytesMut) {
         Operator::Exists => b"EXISTS",
         Operator::NotExists => b"NOT EXISTS",
         Operator::TextSearch => b"@@",
+        Operator::KeyExistsAny => b"?|",
+        Operator::KeyExistsAll => b"?&",
+        Operator::JsonPath => b"#>",
+        Operator::JsonPathText => b"#>>",
     };
     buf.extend_from_slice(bytes);
 }
@@ -519,11 +564,44 @@ pub fn encode_conditions(
             Operator::Overlaps => buf.extend_from_slice(b" && "),
             Operator::Fuzzy => buf.extend_from_slice(b" ILIKE "),
             Operator::KeyExists => buf.extend_from_slice(b" ? "),
+            Operator::KeyExistsAny => buf.extend_from_slice(b" ?| "),
+            Operator::KeyExistsAll => buf.extend_from_slice(b" ?& "),
+            Operator::JsonPath => buf.extend_from_slice(b" #> "),
+            Operator::JsonPathText => buf.extend_from_slice(b" #>> "),
             Operator::JsonExists | Operator::JsonQuery | Operator::JsonValue => {
                 buf.extend_from_slice(b" = ");
             }
             Operator::Exists | Operator::NotExists => {
-                buf.extend_from_slice(b" = ");
+                // EXISTS/NOT EXISTS: rewrite as a standalone subquery check.
+                // Truncate the left-side expression that was already written
+                let left_bytes = cond.left.to_string().len();
+                buf.truncate(buf.len() - left_bytes);
+                // Remove the preceding " AND " if this isn't the first condition
+                if i > 0 {
+                    // " AND " was already written before encode_expr
+                    // but we already truncated the left expr, the " AND " is still there
+                }
+                if cond.op == Operator::NotExists {
+                    buf.extend_from_slice(b"NOT EXISTS (");
+                } else {
+                    buf.extend_from_slice(b"EXISTS (");
+                }
+                // Encode the subquery from the value
+                match &cond.value {
+                    Value::Subquery(q) => {
+                        let mut sub_buf = BytesMut::with_capacity(128);
+                        let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
+                        if let Ok(()) = super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params) {
+                            buf.extend_from_slice(&sub_buf);
+                        }
+                    }
+                    _ => {
+                        // Fallback: render value as raw SQL
+                        buf.extend_from_slice(cond.value.to_string().as_bytes());
+                    }
+                }
+                buf.extend_from_slice(b")");
+                continue;
             }
             Operator::TextSearch => {
                 // Full-text search: to_tsvector('english', coalesce(col1,'') || ' ' || coalesce(col2,'')) @@ websearch_to_tsquery('english', $N)
@@ -633,6 +711,20 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
             write_param_placeholder(buf, params.len());
         }
         Value::Function(f) => {
+            // R9: Reject injection markers in function expressions.
+            // The parser generates safe values like "NOW() - INTERVAL '24 hours'",
+            // but guard against programmatic misuse.
+            if f.len() > 1024
+                || f.contains(';')
+                || f.contains("--")
+                || f.contains("/*")
+                || f.contains("*/")
+            {
+                return Err(super::super::EncodeError::UnsafeExpression(
+                    format!("Value::Function rejected: suspicious content in '{}'",
+                            &f[..f.len().min(80)])
+                ));
+            }
             buf.extend_from_slice(f.as_bytes());
         }
         Value::Column(col) => {
@@ -643,7 +735,7 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
             let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
             match q.action {
                 Action::Get => super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params)?,
-                _ => panic!("Unsupported subquery action {:?}", q.action),
+                _ => return Err(super::super::EncodeError::UnsupportedAction(q.action.clone())),
             }
             buf.extend_from_slice(b"(");
             buf.extend_from_slice(&sub_buf);

@@ -7,6 +7,8 @@ mod expressions;
 
 // Re-export main encoding functions used externally
 pub use expressions::encode_columns;
+#[cfg(test)]
+pub use expressions::encode_column_expr;
 pub use expressions::encode_conditions;
 pub use expressions::encode_expr;
 pub use expressions::encode_join_value;

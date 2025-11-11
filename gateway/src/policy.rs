@@ -171,6 +171,12 @@ impl PolicyEngine {
         result = result.replace("$user_id", &format!("'{}'", auth.user_id.replace('\'', "''")));
         result = result.replace("$role", &format!("'{}'", auth.role.replace('\'', "''")));
         
+        // SECURITY (H1): Expand $tenant_id for tenant isolation policies.
+        // Without this, policies like `filter: "tenant_id = $tenant_id"` stay literal.
+        if let Some(ref tid) = auth.tenant_id {
+            result = result.replace("$tenant_id", &format!("'{}'", tid.replace('\'', "''")));
+        }
+        
         for (key, value) in &auth.claims {
             let placeholder = format!("${}", key);
             let replacement = match value {
@@ -514,5 +520,50 @@ mod tests {
             result,
             "user_id = '550e8400-e29b-41d4-a716-446655440000' AND role = 'operator'"
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // SECURITY: $tenant_id expansion (H1)
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_expand_filter_tenant_id() {
+        let engine = PolicyEngine::new();
+        let auth = AuthContext {
+            user_id: "user1".to_string(),
+            role: "user".to_string(),
+            tenant_id: Some("tenant_abc".to_string()),
+            claims: std::collections::HashMap::new(),
+        };
+        let result = engine.expand_filter("operator_id = $tenant_id", &auth);
+        assert_eq!(result, "operator_id = 'tenant_abc'");
+    }
+
+    #[test]
+    fn test_expand_filter_tenant_id_sql_injection() {
+        let engine = PolicyEngine::new();
+        let auth = AuthContext {
+            user_id: "user1".to_string(),
+            role: "user".to_string(),
+            tenant_id: Some("O'Brien".to_string()),
+            claims: std::collections::HashMap::new(),
+        };
+        let result = engine.expand_filter("operator_id = $tenant_id", &auth);
+        assert_eq!(result, "operator_id = 'O''Brien'");
+        assert!(!result.contains("O'B"), "Unescaped quote in tenant_id: {}", result);
+    }
+
+    #[test]
+    fn test_expand_filter_tenant_id_missing() {
+        let engine = PolicyEngine::new();
+        let auth = AuthContext {
+            user_id: "user1".to_string(),
+            role: "user".to_string(),
+            tenant_id: None,
+            claims: std::collections::HashMap::new(),
+        };
+        // When tenant_id is None, $tenant_id should NOT be expanded (stays literal)
+        let result = engine.expand_filter("operator_id = $tenant_id", &auth);
+        assert_eq!(result, "operator_id = $tenant_id");
     }
 }

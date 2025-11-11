@@ -19,6 +19,7 @@ jobs:
   publish-wasm:
     name: Build and Publish WASM
     runs-on: ubuntu-latest
+    if: hashFiles('wasm/Cargo.toml') != ''
     environment: release
     permissions:
       contents: read

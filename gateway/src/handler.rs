@@ -10,18 +10,26 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use bincode::Options;
 
 use crate::auth::extract_auth_from_headers;
 use crate::GatewayState;
 
-/// Health check response
+/// Public health check response (minimal, safe for public exposure)
+#[derive(Debug, Serialize)]
+pub struct HealthCheckPublic {
+    pub status: String,
+    pub version: String,
+}
+
+/// Internal health check response (includes operational metrics)
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub pool_active: usize,
     pub pool_idle: usize,
-    /// Tenant boundary invariant metrics for external monitoring.
+    /// Tenant boundary invariant metrics for internal monitoring.
     /// `violation_rows > 0` means RLS may be compromised.
     pub tenant_guard: crate::tenant_guard::TenantGuardSnapshot,
 }
@@ -70,9 +78,40 @@ pub struct ErrorResponse {
     pub code: String,
 }
 
-pub async fn health_check(
+pub async fn health_check() -> Json<HealthCheckPublic> {
+    Json(HealthCheckPublic {
+        status: "ok".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
+/// Internal health check — includes pool stats and tenant guard metrics.
+///
+/// SECURITY (M4): When `admin_token` is configured, requires
+/// `Authorization: Bearer <token>` to prevent leaking operational details.
+pub async fn health_check_internal(
     State(state): State<Arc<GatewayState>>,
-) -> Json<HealthResponse> {
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    if let Some(ref expected) = state.config.admin_token {
+        let provided = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match provided {
+            Some(token) if token == expected => {}
+            _ => {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "Unauthorized: admin_token required",
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let stats = state.pool.stats().await;
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -81,6 +120,7 @@ pub async fn health_check(
         pool_idle: stats.idle,
         tenant_guard: crate::tenant_guard::metrics_snapshot(),
     })
+    .into_response()
 }
 
 pub async fn execute_query(
@@ -99,12 +139,24 @@ pub async fn execute_query(
             }),
         ));
     }
+
+    // SECURITY: Query allow-list check — reject non-whitelisted patterns.
+    if !state.allow_list.is_allowed(query_text) {
+        tracing::warn!("Query rejected by allow-list: {}", query_text);
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Query not in allow-list".to_string(),
+                code: "QUERY_NOT_ALLOWED".to_string(),
+            }),
+        ));
+    }
     
     // Extract auth context from headers
     let mut auth = extract_auth_from_headers(&headers);
     auth.enrich_with_operator_map(&state.user_operator_map).await;
     
-    tracing::info!("Executing text query: {} (user: {})", query_text, auth.user_id);
+    tracing::debug!("Executing text query: {} (user: {})", query_text, auth.user_id);
     
     // Parse the QAIL text into AST
     let mut cmd = match qail_core::parser::parse(query_text) {
@@ -159,10 +211,16 @@ pub async fn execute_query_binary(
     let mut auth = extract_auth_from_headers(&headers);
     auth.enrich_with_operator_map(&state.user_operator_map).await;
     
-    tracing::info!("Executing binary query ({} bytes, user: {})", body.len(), auth.user_id);
+    tracing::debug!("Executing binary query ({} bytes, user: {})", body.len(), auth.user_id);
     
     // Deserialize the binary QAIL AST
-    let mut cmd: qail_core::ast::Qail = match bincode::deserialize(&body) {
+    // SECURITY (E3): Limit deserialization to 64 KiB to prevent allocation bombs.
+    let mut cmd: qail_core::ast::Qail = match bincode::options()
+        .with_limit(64 * 1024)
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .deserialize(&body)
+    {
         Ok(cmd) => cmd,
         Err(e) => {
             tracing::warn!("Bincode decode error: {}", e);
@@ -191,6 +249,29 @@ pub async fn execute_query_binary(
     execute_qail_cmd(&state, &auth, &cmd).await
 }
 
+/// Extract query complexity metrics from a QAIL AST.
+///
+/// Returns (depth, filter_count, join_count) where:
+/// - depth = CTEs + set ops + source subquery nesting
+/// - filter_count = total conditions across all Filter cages
+/// - join_count = number of JOIN clauses
+fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usize) {
+    use qail_core::ast::CageKind;
+
+    let depth = cmd.ctes.len()
+        + cmd.set_ops.len()
+        + usize::from(cmd.source_query.is_some());
+
+    let filter_count: usize = cmd.cages.iter()
+        .filter(|c| matches!(c.kind, CageKind::Filter))
+        .map(|c| c.conditions.len())
+        .sum();
+
+    let join_count = cmd.joins.len();
+
+    (depth, filter_count, join_count)
+}
+
 /// Common query execution logic
 async fn execute_qail_cmd(
     state: &Arc<GatewayState>,
@@ -198,6 +279,25 @@ async fn execute_qail_cmd(
     cmd: &qail_core::ast::Qail,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     use qail_core::ast::Action;
+
+    // ── Query Complexity Guard ───────────────────────────────────────
+    // Reject excessively complex queries before touching the database.
+    let (depth, filters, joins) = query_complexity(cmd);
+    if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
+        tracing::warn!(
+            table = %cmd.table,
+            depth, filters, joins,
+            "Query rejected by complexity guard"
+        );
+        crate::metrics::record_complexity_rejected();
+        return Err((
+            api_err.status_code(),
+            Json(ErrorResponse {
+                error: api_err.message,
+                code: api_err.code,
+            }),
+        ));
+    }
 
     // ── Route vector operations to Qdrant ───────────────────────────
     if matches!(
@@ -216,7 +316,9 @@ async fn execute_qail_cmd(
     // NOT filter values. Two tenants with the same query shape but different
     // RLS-injected operator_id values would share cached results without
     // the user_id prefix, leaking data across tenants.
-    let cache_key = format!("{}:{}", auth.user_id, shape_cache_key(cmd));
+    // SECURITY (E1): Include tenant_id in cache key to prevent cross-tenant cache poisoning.
+    let tenant = auth.tenant_id.as_deref().unwrap_or("_anon");
+    let cache_key = format!("{}:{}:{}", tenant, auth.user_id, shape_cache_key(cmd));
     
     // Check cache for read queries
     if is_read_query {
@@ -243,8 +345,11 @@ async fn execute_qail_cmd(
             }),
         )
     })?;
+
     
-    let rows = conn.fetch_all_uncached(cmd).await.map_err(|e| {
+    // Measure query execution time
+    let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
+    let rows = conn.fetch_all_cached(cmd).await.map_err(|e| {
         tracing::error!("Query error: {}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -254,6 +359,7 @@ async fn execute_qail_cmd(
             }),
         )
     });
+    timer.finish(rows.is_ok());
 
     // Deterministic cleanup — release connection before processing results.
     // If the query failed, conn is still released cleanly (DISCARD ALL runs).
@@ -274,6 +380,7 @@ async fn execute_qail_cmd(
         crate::tenant_guard::verify_tenant_boundary(
             &json_rows,
             tenant_id,
+            &state.config.tenant_column,
             table,
             "qail_cmd",
         ).map_err(|v| {
@@ -360,6 +467,21 @@ pub async fn execute_batch(
             Json(ErrorResponse {
                 error: "Empty query batch".to_string(),
                 code: "EMPTY_BATCH".to_string(),
+            }),
+        ));
+    }
+
+    // SECURITY (E2): Cap batch size to prevent resource exhaustion.
+    if request.queries.len() > state.config.max_batch_queries {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse {
+                error: format!(
+                    "Batch size {} exceeds maximum of {}",
+                    request.queries.len(),
+                    state.config.max_batch_queries,
+                ),
+                code: "BATCH_TOO_LARGE".to_string(),
             }),
         ));
     }
@@ -454,6 +576,7 @@ pub async fn execute_batch(
                     if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
                         &json_rows,
                         tenant_id,
+                        &state.config.tenant_column,
                         "batch",
                         &format!("batch[{}]", index),
                     ) {
