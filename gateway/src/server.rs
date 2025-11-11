@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use metrics_exporter_prometheus::PrometheusHandle;
 use axum::routing::MethodRouter;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -37,6 +38,12 @@ pub struct GatewayState {
     pub user_operator_map: Arc<RwLock<HashMap<String, String>>>,
     /// Optional Qdrant connection pool for vector operations.
     pub qdrant_pool: Option<qail_qdrant::QdrantPool>,
+    /// Prometheus metrics handle for rendering /metrics endpoint
+    pub prometheus_handle: Arc<PrometheusHandle>,
+    /// Query complexity guard — limits depth, filters, and joins per query.
+    pub complexity_guard: crate::middleware::QueryComplexityGuard,
+    /// Query allow-list — when enabled, only pre-approved patterns are executed.
+    pub allow_list: crate::middleware::QueryAllowList,
 }
 
 /// The QAIL Gateway server
@@ -64,10 +71,16 @@ impl Gateway {
     /// Initialize the gateway (load schema, policies, connect to DB)
     pub async fn init(&mut self) -> Result<(), GatewayError> {
         tracing::info!("Initializing QAIL Gateway...");
+
+        // SECURITY (M2): Block startup if dev-mode is enabled with unsafe config.
+        self.check_dev_mode_safety()?;
         
         // Load policies
         let mut policy_engine = PolicyEngine::new();
         if let Some(ref policy_path) = self.config.policy_path {
+            // SECURITY (E7): Validate path before reading
+            crate::config::validate_config_path(policy_path, self.config.config_root.as_deref())
+                .map_err(GatewayError::Config)?;
             tracing::info!("Loading policies from: {}", policy_path);
             policy_engine.load_from_file(policy_path)?;
         }
@@ -75,6 +88,9 @@ impl Gateway {
         // Load schema
         let mut schema = SchemaRegistry::new();
         if let Some(ref schema_path) = self.config.schema_path {
+            // SECURITY (E7): Validate path before reading
+            crate::config::validate_config_path(schema_path, self.config.config_root.as_deref())
+                .map_err(GatewayError::Config)?;
             tracing::info!("Loading schema from: {}", schema_path);
             schema.load_from_file(schema_path)?;
         }
@@ -149,6 +165,9 @@ impl Gateway {
         // Load event triggers
         let mut event_engine = EventTriggerEngine::new();
         if let Some(ref events_path) = self.config.events_path {
+            // SECURITY (E7): Validate path before reading
+            crate::config::validate_config_path(events_path, self.config.config_root.as_deref())
+                .map_err(GatewayError::Config)?;
             tracing::info!("Loading event triggers from: {}", events_path);
             event_engine.load_from_file(events_path)
                 .map_err(GatewayError::Config)?;
@@ -229,6 +248,33 @@ impl Gateway {
             None
         };
 
+        // Initialize Prometheus metrics recorder
+        let prometheus_handle = Arc::new(crate::metrics::init_metrics());
+
+        // Initialize query complexity guard
+        let complexity_guard = crate::middleware::QueryComplexityGuard::new(
+            self.config.max_query_depth,
+            self.config.max_query_filters,
+            self.config.max_query_joins,
+        );
+        tracing::info!(
+            "Complexity guard: max_depth={}, max_filters={}, max_joins={}",
+            self.config.max_query_depth,
+            self.config.max_query_filters,
+            self.config.max_query_joins
+        );
+
+        // Initialize query allow-list (optional)
+        let mut allow_list = crate::middleware::QueryAllowList::new();
+        if let Some(ref path) = self.config.allow_list_path {
+            allow_list.load_from_file(path).map_err(|e| {
+                GatewayError::Config(format!("Failed to load allow-list from '{}': {}", path, e))
+            })?;
+            tracing::info!("Query allow-list: {} patterns loaded from '{}'", allow_list.len(), path);
+        }
+
+        tracing::info!("Tenant column: '{}'", self.config.tenant_column);
+
         self.state = Some(Arc::new(GatewayState {
             pool,
             policy_engine,
@@ -242,12 +288,56 @@ impl Gateway {
             tenant_semaphore,
             user_operator_map,
             qdrant_pool,
+            prometheus_handle,
+            complexity_guard,
+            allow_list,
         }));
         
         tracing::info!("Gateway initialized");
         Ok(())
     }
     
+    /// SECURITY (M2): Refuse to start if dev-mode is enabled with unsafe config.
+    ///
+    /// Prevents operators from accidentally running header-based auth on a
+    /// public interface. Two conditions trigger the guard:
+    /// 1. `QAIL_DEV_MODE=true` + bind address is NOT `127.0.0.1` or `localhost`
+    /// 2. `QAIL_DEV_MODE=true` + `JWT_SECRET` is not set
+    fn check_dev_mode_safety(&self) -> Result<(), GatewayError> {
+        let dev_mode = std::env::var("QAIL_DEV_MODE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        if !dev_mode {
+            return Ok(());
+        }
+
+        let bind = &self.config.bind_address;
+        let is_local = bind.starts_with("127.0.0.1")
+            || bind.starts_with("localhost")
+            || bind.starts_with("[::1]");
+
+        if !is_local {
+            return Err(GatewayError::Config(format!(
+                "SECURITY: QAIL_DEV_MODE=true but bind_address='{}' is not localhost. \
+                 Dev mode allows unauthenticated header-based auth. \
+                 Either set bind_address to 127.0.0.1 or unset QAIL_DEV_MODE.",
+                bind
+            )));
+        }
+
+        let jwt_set = std::env::var("JWT_SECRET").is_ok();
+        if !jwt_set {
+            tracing::warn!(
+                "QAIL_DEV_MODE=true and JWT_SECRET is not set. \
+                 Header-based auth is active on {}. Do NOT expose this port publicly.",
+                bind
+            );
+        }
+
+        Ok(())
+    }
+
     /// Start serving requests
     /// 
     /// # Errors
@@ -270,6 +360,40 @@ impl Gateway {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| GatewayError::Config(format!("Failed to bind to {}: {}", addr, e)))?;
+
+        // Context for background metrics task
+        let state_metrics = Arc::clone(state);
+        tokio::spawn(async move {
+            loop {
+                // Use PgPool native methods
+                let active = state_metrics.pool.active_count();
+                let max = state_metrics.pool.max_connections();
+                let idle = state_metrics.pool.idle_count().await;
+                
+                crate::metrics::record_pool_stats(active, idle, max);
+                
+                // Collect process memory (RSS) from /proc/self/stat
+                // Field 24 (index 23) is RSS in pages. Assumes 4KB pages.
+                if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+                    if let Some(rss_pages) = stat.split_whitespace().nth(23).and_then(|s| s.parse::<u64>().ok()) {
+                         metrics::gauge!("process_resident_memory_bytes").set((rss_pages * 4096) as f64);
+                    }
+                }
+                
+                if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+                    if let Some(rss_pages) = stat.split_whitespace().nth(23).and_then(|s| s.parse::<u64>().ok()) {
+                         metrics::gauge!("process_resident_memory_bytes").set((rss_pages * 4096) as f64);
+                    }
+                }
+
+                // Poll cache stats
+                let cache_stats = state_metrics.cache.stats();
+                metrics::gauge!("qail_cache_entries").set(cache_stats.entries as f64);
+                metrics::gauge!("qail_cache_weighted_bytes").set(cache_stats.weighted_size as f64);
+                
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
         
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_signal())
@@ -399,6 +523,13 @@ impl GatewayBuilder {
     /// Set the bind address
     pub fn bind(mut self, addr: impl Into<String>) -> Self {
         self.config.bind_address = addr.into();
+        self
+    }
+    
+    /// Override rate limiter settings (requests per second, burst capacity)
+    pub fn rate_limit(mut self, rate: f64, burst: u32) -> Self {
+        self.config.rate_limit_rate = rate;
+        self.config.rate_limit_burst = burst;
         self
     }
     

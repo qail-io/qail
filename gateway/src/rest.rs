@@ -565,7 +565,9 @@ async fn list_handler(
     let has_branch = headers.get("x-branch-id").is_some();
     let has_nested = params.expand.as_deref().is_some_and(|e| e.contains("nested:"));
     let can_cache = !is_streaming && !has_branch && !has_nested;
-    let cache_key = format!("rest:{}:{}:{}", table_name, auth.user_id, request.uri());
+    // SECURITY (E1): Include tenant_id to prevent cross-tenant cache poisoning.
+    let tenant = auth.tenant_id.as_deref().unwrap_or("_anon");
+    let cache_key = format!("rest:{}:{}:{}:{}", tenant, table_name, auth.user_id, request.uri());
 
     // Check cache for simple read queries
     if can_cache {
@@ -635,7 +637,15 @@ async fn list_handler(
                         est
                     }
                     Ok(None) => {
-                        // Parse failure — log and allow (fail open)
+                        // SECURITY (E8): In Enforce mode, fail closed.
+                        if matches!(state.explain_config.mode, ExplainMode::Enforce) {
+                            tracing::warn!(
+                                table = %table_name,
+                                sql = %sql_shape,
+                                "EXPLAIN pre-check: parse failure in Enforce mode — rejecting query"
+                            );
+                            return Err(ApiError::internal("EXPLAIN pre-check failed (enforce mode)"));
+                        }
                         tracing::warn!(
                             table = %table_name,
                             sql = %sql_shape,
@@ -644,7 +654,15 @@ async fn list_handler(
                         qail_pg::explain::ExplainEstimate { total_cost: 0.0, plan_rows: 0 }
                     }
                     Err(e) => {
-                        // EXPLAIN itself failed — log and allow (fail open)
+                        // SECURITY (E8): In Enforce mode, fail closed.
+                        if matches!(state.explain_config.mode, ExplainMode::Enforce) {
+                            tracing::warn!(
+                                table = %table_name,
+                                error = %e,
+                                "EXPLAIN pre-check: EXPLAIN failed in Enforce mode — rejecting query"
+                            );
+                            return Err(ApiError::internal("EXPLAIN pre-check failed (enforce mode)"));
+                        }
                         tracing::warn!(
                             table = %table_name,
                             error = %e,
@@ -680,10 +698,12 @@ async fn list_handler(
         }
     }
 
+    let timer = crate::metrics::QueryTimer::new(&table_name, "select");
     let rows = conn
         .fetch_all_uncached(&cmd)
         .await
         .map_err(|e| ApiError::query_error(e.to_string()));
+    timer.finish(rows.is_ok());
 
     // Release connection early — after this point only JSON processing remains.
     // Branch overlay still needs conn, so we do it before release.
@@ -709,6 +729,7 @@ async fn list_handler(
         let _proof = crate::tenant_guard::verify_tenant_boundary(
             &data,
             tenant_id,
+            &state.config.tenant_column,
             &table_name,
             "rest_list",
         ).map_err(|v| {
@@ -2100,6 +2121,11 @@ async fn branch_create_handler(
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Authentication required"}))).into_response();
     }
 
+    // SECURITY (E6): Branch operations require admin role.
+    if auth.role != "admin" && auth.role != "super_admin" {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "Admin role required for branch operations"}))).into_response();
+    }
+
     let name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => {
@@ -2197,6 +2223,11 @@ async fn branch_delete_handler(
     let auth = extract_auth_from_headers(&headers);
     if !auth.is_authenticated() {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Authentication required"}))).into_response();
+    }
+
+    // SECURITY (E6): Branch operations require admin role.
+    if auth.role != "admin" && auth.role != "super_admin" {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "Admin role required for branch operations"}))).into_response();
     }
 
     let mut conn = match state.pool

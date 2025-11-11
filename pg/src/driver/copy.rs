@@ -164,7 +164,7 @@ impl PgConnection {
         }
 
         // Encode command to SQL using AST encoder
-        let (sql, _params) = AstEncoder::encode_cmd_sql(cmd);
+        let (sql, _params) = AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
 
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(&sql);

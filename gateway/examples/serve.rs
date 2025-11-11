@@ -46,6 +46,18 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref path) = policy_path {
         builder = builder.policy(path);
     }
+
+    // Allow overriding rate limits via env for stress testing
+    if let Ok(rate) = std::env::var("RATE_LIMIT_RATE") {
+        if let Ok(r) = rate.parse::<f64>() {
+            builder = builder.rate_limit(r, 
+                std::env::var("RATE_LIMIT_BURST")
+                    .ok()
+                    .and_then(|b| b.parse().ok())
+                    .unwrap_or((r * 2.0) as u32)
+            );
+        }
+    }
     
     let gateway = builder.build_and_init().await?;
     

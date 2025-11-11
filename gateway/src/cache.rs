@@ -75,13 +75,23 @@ impl QueryCache {
             return None;
         }
 
-        if let Some(result) = self.entries.get(query) {
+        let result = if let Some(result) = self.entries.get(query) {
             self.hits.fetch_add(1, Ordering::Relaxed);
             Some(result)
         } else {
             self.misses.fetch_add(1, Ordering::Relaxed);
             None
-        }
+        };
+
+        // Export to Prometheus
+        crate::metrics::record_cache_stats(
+            self.hits.load(Ordering::Relaxed),
+            self.misses.load(Ordering::Relaxed),
+            self.entries.entry_count() as usize,
+            self.entries.weighted_size(),
+        );
+
+        result
     }
 
     pub fn set(&self, query: &str, table: &str, result: String) {

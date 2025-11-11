@@ -52,7 +52,7 @@ fn main() {
         use qail_pg::protocol::AstEncoder;
 
         // Single step: AST → wire bytes (NO SQL STRING!)
-        let (bytes, _params) = AstEncoder::encode_cmd(&sample_cmd);
+        let (bytes, _params) = AstEncoder::encode_cmd(&sample_cmd).unwrap();
         new_bytes_total += bytes.len();
     }
 

@@ -94,3 +94,70 @@ pub fn rewrite_url_host(url: &str, new_host: &str, new_port: u16) -> Result<Stri
     Ok(result)
 }
 
+/// Redact the password from a PostgreSQL URL.
+///
+/// `postgres://user:secret@host:5432/db` → `postgres://user:***@host:5432/db`
+/// Returns the original string unchanged if there is no password.
+pub fn redact_url(url: &str) -> String {
+    // Find the scheme separator
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    // Check for userinfo@host
+    let Some((userinfo, hostpart)) = rest.split_once('@') else {
+        return url.to_string(); // no @ → no credentials
+    };
+    // Check for user:password
+    if let Some((user, _password)) = userinfo.split_once(':') {
+        format!("{}://{}:***@{}", scheme, user, hostpart)
+    } else {
+        url.to_string() // no password in userinfo
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_redact_url_with_password() {
+        assert_eq!(
+            redact_url("postgres://admin:s3cret@db.example.com:5432/mydb"),
+            "postgres://admin:***@db.example.com:5432/mydb"
+        );
+    }
+
+    #[test]
+    fn test_redact_url_no_password() {
+        assert_eq!(
+            redact_url("postgres://admin@localhost/mydb"),
+            "postgres://admin@localhost/mydb"
+        );
+    }
+
+    #[test]
+    fn test_redact_url_no_userinfo() {
+        assert_eq!(
+            redact_url("postgres://localhost/mydb"),
+            "postgres://localhost/mydb"
+        );
+    }
+
+    #[test]
+    fn test_redact_url_preserves_query_params() {
+        assert_eq!(
+            redact_url("postgres://user:pass@host:5432/db?max_connections=10"),
+            "postgres://user:***@host:5432/db?max_connections=10"
+        );
+    }
+
+    #[test]
+    fn test_parse_pg_url_basic() {
+        let (host, port, user, password, database) = parse_pg_url("postgres://admin:pass@localhost:5432/testdb").unwrap();
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 5432);
+        assert_eq!(user, "admin");
+        assert_eq!(password, Some("pass".to_string()));
+        assert_eq!(database, "testdb");
+    }
+}
