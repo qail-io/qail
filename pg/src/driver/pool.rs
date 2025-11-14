@@ -411,6 +411,13 @@ impl PooledConnection {
             conn.stmt_cache.put(sql_hash, name.clone());
             conn.prepared_statements.insert(name.clone(), sql_str.to_string());
 
+            // Register in global hot-statement registry for cross-connection sharing
+            if let Ok(mut hot) = self.pool.hot_statements.write() {
+                if hot.len() < MAX_HOT_STATEMENTS {
+                    hot.insert(sql_hash, (name.clone(), sql_str.to_string()));
+                }
+            }
+
             name
         };
 
@@ -464,6 +471,199 @@ impl PooledConnection {
                 _ => {}
             }
         }
+    }
+
+    /// Execute a QAIL command with RLS context in a SINGLE roundtrip.
+    ///
+    /// Pipelines the RLS setup (BEGIN + set_config) and the query
+    /// (Parse/Bind/Execute/Sync) into one `write_all` syscall.
+    /// PG processes messages in order, so the BEGIN + set_config
+    /// completes before the query executes — security is preserved.
+    ///
+    /// Wire layout:
+    /// ```text
+    /// [SimpleQuery: "BEGIN; SET LOCAL...; SELECT set_config(...)"]
+    /// [Parse (if cache miss)]
+    /// [Describe (if cache miss)]
+    /// [Bind]
+    /// [Execute]
+    /// [Sync]
+    /// ```
+    ///
+    /// Response processing: consume 2× ReadyForQuery (SimpleQuery + Sync).
+    pub async fn fetch_all_with_rls(
+        &mut self,
+        cmd: &qail_core::ast::Qail,
+        rls_sql: &str,
+    ) -> PgResult<Vec<super::PgRow>> {
+        use super::ColumnInfo;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let conn = self.conn.as_mut().expect("Connection should always be present");
+
+        conn.sql_buf.clear();
+        conn.params_buf.clear();
+
+        // Encode SQL + params to reusable buffers
+        match cmd.action {
+            qail_core::ast::Action::Get | qail_core::ast::Action::With => {
+                crate::protocol::ast_encoder::dml::encode_select(cmd, &mut conn.sql_buf, &mut conn.params_buf).ok();
+            }
+            qail_core::ast::Action::Add => {
+                crate::protocol::ast_encoder::dml::encode_insert(cmd, &mut conn.sql_buf, &mut conn.params_buf).ok();
+            }
+            qail_core::ast::Action::Set => {
+                crate::protocol::ast_encoder::dml::encode_update(cmd, &mut conn.sql_buf, &mut conn.params_buf).ok();
+            }
+            qail_core::ast::Action::Del => {
+                crate::protocol::ast_encoder::dml::encode_delete(cmd, &mut conn.sql_buf, &mut conn.params_buf).ok();
+            }
+            _ => {
+                // Fallback: RLS setup must happen synchronously for unsupported actions
+                conn.execute_simple(rls_sql).await?;
+                self.rls_dirty = true;
+                return self.fetch_all_uncached(cmd).await;
+            }
+        }
+
+        let mut hasher = DefaultHasher::new();
+        conn.sql_buf.hash(&mut hasher);
+        let sql_hash = hasher.finish();
+
+        let is_cache_miss = !conn.stmt_cache.contains(&sql_hash);
+
+        conn.write_buf.clear();
+
+        // ── Prepend RLS Simple Query message ─────────────────────────
+        // This is the key optimization: RLS setup bytes go first in the
+        // same buffer as the query messages.
+        let rls_msg = crate::protocol::PgEncoder::encode_query_string(rls_sql);
+        conn.write_buf.extend_from_slice(&rls_msg);
+
+        // ── Then append the query messages (same as fetch_all_cached) ──
+        let stmt_name = if let Some(name) = conn.stmt_cache.get(&sql_hash) {
+            name.clone()
+        } else {
+            let name = format!("qail_{:x}", sql_hash);
+
+            conn.evict_prepared_if_full();
+
+            let sql_str = std::str::from_utf8(&conn.sql_buf).unwrap_or("");
+
+            use crate::protocol::PgEncoder;
+            let parse_msg = PgEncoder::encode_parse(&name, sql_str, &[]);
+            let describe_msg = PgEncoder::encode_describe(false, &name);
+            conn.write_buf.extend_from_slice(&parse_msg);
+            conn.write_buf.extend_from_slice(&describe_msg);
+
+            conn.stmt_cache.put(sql_hash, name.clone());
+            conn.prepared_statements.insert(name.clone(), sql_str.to_string());
+
+            // Register in global hot-statement registry
+            if let Ok(mut hot) = self.pool.hot_statements.write() {
+                if hot.len() < MAX_HOT_STATEMENTS {
+                    hot.insert(sql_hash, (name.clone(), sql_str.to_string()));
+                }
+            }
+
+            name
+        };
+
+        use crate::protocol::PgEncoder;
+        PgEncoder::encode_bind_to(&mut conn.write_buf, &stmt_name, &conn.params_buf)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_execute_to(&mut conn.write_buf);
+        PgEncoder::encode_sync_to(&mut conn.write_buf);
+
+        // ── Single write_all for RLS + Query ────────────────────────
+        conn.flush_write_buf().await?;
+
+        // Mark connection as RLS-dirty (needs COMMIT on release)
+        self.rls_dirty = true;
+
+        // ── Phase 1: Consume Simple Query responses (RLS setup) ─────
+        // Simple Query produces: CommandComplete × N, then ReadyForQuery.
+        // set_config results and BEGIN/SET LOCAL responses are all here.
+        let mut rls_error: Option<PgError> = None;
+        loop {
+            let msg = conn.recv().await?;
+            match msg {
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    // RLS setup done — break to Extended Query phase
+                    if let Some(err) = rls_error {
+                        return Err(err);
+                    }
+                    break;
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    if rls_error.is_none() {
+                        rls_error = Some(PgError::Query(err.message));
+                    }
+                }
+                // CommandComplete, DataRow (from set_config), RowDescription — ignore
+                _ => {}
+            }
+        }
+
+        // ── Phase 2: Consume Extended Query responses (actual data) ──
+        let cached_column_info = conn.column_info_cache.get(&sql_hash).cloned();
+
+        let mut rows: Vec<super::PgRow> = Vec::with_capacity(32);
+        let mut column_info: Option<std::sync::Arc<ColumnInfo>> = cached_column_info;
+        let mut error: Option<PgError> = None;
+
+        loop {
+            let msg = conn.recv().await?;
+            match msg {
+                crate::protocol::BackendMessage::ParseComplete
+                | crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::ParameterDescription(_) => {}
+                crate::protocol::BackendMessage::RowDescription(fields) => {
+                    let info = std::sync::Arc::new(ColumnInfo::from_fields(&fields));
+                    if is_cache_miss {
+                        conn.column_info_cache.insert(sql_hash, info.clone());
+                    }
+                    column_info = Some(info);
+                }
+                crate::protocol::BackendMessage::DataRow(data) => {
+                    if error.is_none() {
+                        rows.push(super::PgRow {
+                            columns: data,
+                            column_info: column_info.clone(),
+                        });
+                    }
+                }
+                crate::protocol::BackendMessage::CommandComplete(_) => {}
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    return Ok(rows);
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Execute multiple QAIL commands in a single PG pipeline round-trip.
+    ///
+    /// Sends all queries as Parse+Bind+Execute in one write, receives all
+    /// responses in one read. Returns raw column data per query per row.
+    ///
+    /// This is the fastest path for batch operations — amortizes TCP
+    /// overhead across N queries into a single syscall pair.
+    pub async fn pipeline_ast(
+        &mut self,
+        cmds: &[qail_core::ast::Qail],
+    ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
+        let conn = self.conn.as_mut().expect("Connection should always be present");
+        conn.pipeline_ast(cmds).await
     }
 
     /// Run `EXPLAIN (FORMAT JSON)` on a Qail command and return cost estimates.
@@ -540,6 +740,9 @@ impl std::ops::DerefMut for PooledConnection {
     }
 }
 
+/// Maximum number of hot statements to track globally.
+const MAX_HOT_STATEMENTS: usize = 32;
+
 /// Inner pool state (shared across clones).
 struct PgPoolInner {
     config: PoolConfig,
@@ -548,6 +751,10 @@ struct PgPoolInner {
     closed: AtomicBool,
     active_count: AtomicUsize,
     total_created: AtomicUsize,
+    /// Global registry of frequently-used prepared statements.
+    /// Maps sql_hash → (stmt_name, sql_text).
+    /// New connections pre-prepare these on checkout for instant cache hits.
+    hot_statements: std::sync::RwLock<std::collections::HashMap<u64, (String, String)>>,
 }
 
 impl PgPoolInner {
@@ -649,6 +856,7 @@ impl PgPool {
             closed: AtomicBool::new(false),
             active_count: AtomicUsize::new(0),
             total_created: AtomicUsize::new(initial_count),
+            hot_statements: std::sync::RwLock::new(std::collections::HashMap::new()),
         });
 
         Ok(Self { inner })
@@ -661,12 +869,14 @@ impl PgPool {
     /// This returns a connection with **no RLS context**. All tenant data
     /// queries on this connection will bypass row-level security.
     ///
-    /// External code must use `acquire_with_rls()`, `acquire_with_rls_timeout()`,
-    /// or `acquire_system()` instead.
+    /// **Safe usage**: Pair with `fetch_all_with_rls()` for pipelined
+    /// RLS+query execution (single roundtrip). Or use `acquire_with_rls()`
+    /// / `acquire_with_rls_timeout()` for the 2-roundtrip path.
     ///
-    /// Every call site within this crate MUST include a `// SAFETY:` comment
-    /// explaining why raw acquisition is justified.
-    pub(crate) async fn acquire_raw(&self) -> PgResult<PooledConnection> {
+    /// **Unsafe usage**: Running queries directly on a raw connection
+    /// without RLS context. Every call site MUST include a `// SAFETY:`
+    /// comment explaining why raw acquisition is justified.
+    pub async fn acquire_raw(&self) -> PgResult<PooledConnection> {
         if self.inner.closed.load(Ordering::Relaxed) {
             return Err(PgError::Connection("Pool is closed".to_string()));
         }
@@ -685,7 +895,7 @@ impl PgPool {
         permit.forget();
 
         // Try to get existing healthy connection
-        let conn = if let Some(conn) = self.inner.get_healthy_connection().await {
+        let mut conn = if let Some(conn) = self.inner.get_healthy_connection().await {
             conn
         } else {
             let conn = Self::create_connection(&self.inner.config).await?;
@@ -693,6 +903,43 @@ impl PgPool {
             conn
         };
 
+        // Pre-prepare hot statements that this connection doesn't have yet.
+        // Collect data synchronously (guard dropped before async work).
+        let missing: Vec<(u64, String, String)> = {
+            if let Ok(hot) = self.inner.hot_statements.read() {
+                hot.iter()
+                    .filter(|(hash, _)| !conn.stmt_cache.contains(hash))
+                    .map(|(hash, (name, sql))| (*hash, name.clone(), sql.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }; // RwLockReadGuard dropped here — safe across .await
+
+        if !missing.is_empty() {
+            use crate::protocol::PgEncoder;
+            let mut buf = bytes::BytesMut::new();
+            for (_, name, sql) in &missing {
+                let parse_msg = PgEncoder::encode_parse(name, sql, &[]);
+                buf.extend_from_slice(&parse_msg);
+            }
+            PgEncoder::encode_sync_to(&mut buf);
+            if conn.send_bytes(&buf).await.is_ok() {
+                // Drain responses (ParseComplete + ReadyForQuery)
+                loop {
+                    match conn.recv().await {
+                        Ok(crate::protocol::BackendMessage::ReadyForQuery(_)) => break,
+                        Ok(_) => continue,
+                        Err(_) => break,
+                    }
+                }
+                // Register in local cache
+                for (hash, name, sql) in &missing {
+                    conn.stmt_cache.put(*hash, name.clone());
+                    conn.prepared_statements.insert(name.clone(), sql.clone());
+                }
+            }
+        }
 
         self.inner.active_count.fetch_add(1, Ordering::Relaxed);
 
