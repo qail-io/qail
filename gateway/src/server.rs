@@ -44,6 +44,9 @@ pub struct GatewayState {
     pub complexity_guard: crate::middleware::QueryComplexityGuard,
     /// Query allow-list — when enabled, only pre-approved patterns are executed.
     pub allow_list: crate::middleware::QueryAllowList,
+    /// DSL parse cache — hash(query_text) → parsed Qail AST.
+    /// Skips re-parsing for repeated identical queries.
+    pub parse_cache: moka::sync::Cache<u64, qail_core::ast::Qail>,
 }
 
 /// The QAIL Gateway server
@@ -107,7 +110,20 @@ impl Gateway {
         
         // Create connection pool
         tracing::info!("Creating connection pool...");
-        let pool_config = parse_database_url(&self.config.database_url)?;
+        let mut pool_config = parse_database_url(&self.config.database_url)?;
+
+        // Allow env var overrides for pool sizing (takes precedence over URL query params)
+        if let Ok(min) = std::env::var("POOL_MIN_CONNECTIONS") {
+            if let Ok(n) = min.parse() {
+                pool_config = pool_config.min_connections(n);
+            }
+        }
+        if let Ok(max) = std::env::var("POOL_MAX_CONNECTIONS") {
+            if let Ok(n) = max.parse() {
+                pool_config = pool_config.max_connections(n);
+            }
+        }
+
         let pool = PgPool::connect(pool_config)
             .await
             .map_err(|e| GatewayError::Database(e.to_string()))?;
@@ -291,6 +307,10 @@ impl Gateway {
             prometheus_handle,
             complexity_guard,
             allow_list,
+            parse_cache: moka::sync::Cache::builder()
+                .max_capacity(1024)
+                .time_to_live(std::time::Duration::from_secs(300))
+                .build(),
         }));
         
         tracing::info!("Gateway initialized");

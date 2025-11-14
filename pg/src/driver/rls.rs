@@ -75,8 +75,10 @@ fn sanitize_guc_value(val: &str) -> String {
 /// SQL to commit the transaction and reset RLS context.
 /// Transaction-local set_config values auto-reset on COMMIT,
 /// so no explicit reset is needed — just end the transaction.
+/// `SET LOCAL statement_timeout` is also transaction-scoped and
+/// auto-resets on COMMIT — no separate RESET needed.
 pub(crate) fn reset_sql() -> &'static str {
-    "COMMIT; RESET statement_timeout"
+    "COMMIT"
 }
 
 #[cfg(test)]
@@ -104,8 +106,7 @@ mod tests {
     #[test]
     fn test_reset_sql() {
         let sql = reset_sql();
-        assert!(sql.contains("COMMIT"), "Should COMMIT the transaction");
-        assert!(sql.contains("RESET statement_timeout"), "Should reset statement_timeout");
+        assert_eq!(sql, "COMMIT", "Should just COMMIT (SET LOCAL auto-resets)");
     }
 
     // ══════════════════════════════════════════════════════════════════
