@@ -18,7 +18,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::handler::{execute_batch, execute_query, execute_query_binary, health_check, health_check_internal};
+use crate::handler::{execute_batch, execute_query, execute_query_binary, execute_query_fast, health_check, health_check_internal};
 use crate::middleware::rate_limit_middleware;
 use crate::rest::auto_rest_routes;
 use crate::ws::ws_handler;
@@ -55,6 +55,7 @@ pub fn create_router(
         // Query endpoints (Qail AST protocol)
         .route("/qail", post(execute_query))
         .route("/qail/binary", post(execute_query_binary))
+        .route("/qail/fast", post(execute_query_fast))
         .route("/qail/batch", post(execute_batch))
         // REST-friendly batch alias
         .route("/api/_batch", post(execute_batch))
@@ -72,7 +73,9 @@ pub fn create_router(
     router
         // Middleware layers (order: bottom = outermost = first to run)
         .layer(axum_mw::from_fn_with_state(Arc::clone(&state), rate_limit_middleware))
-        .layer(CompressionLayer::new())
+        .layer(CompressionLayer::new()
+            .compress_when(tower_http::compression::predicate::SizeAbove::new(1024))
+        )
         // ── Security Response Headers ────────────────────────────────
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::X_CONTENT_TYPE_OPTIONS,
