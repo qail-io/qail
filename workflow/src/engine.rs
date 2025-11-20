@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::channel::ChannelKind;
 use crate::context::WorkflowContext;
+use crate::payment::{ChargeRequest, ChargeResponse, Currency, PaymentKind};
 use crate::registry::WorkflowDefinition;
 use crate::step::WorkflowStep;
 
@@ -28,6 +29,8 @@ pub enum WorkflowError {
     PersistenceFailed(String),
     /// Timeout reached while waiting
     Timeout { event: String },
+    /// Payment charge creation failed
+    ChargeFailed(String),
     /// Generic error
     Other(String),
 }
@@ -44,6 +47,7 @@ impl std::fmt::Display for WorkflowError {
             WorkflowError::AlreadyTerminal(s) => write!(f, "Workflow already terminal: {}", s),
             WorkflowError::PersistenceFailed(e) => write!(f, "Persistence failed: {}", e),
             WorkflowError::Timeout { event } => write!(f, "Timeout waiting for: {}", event),
+            WorkflowError::ChargeFailed(e) => write!(f, "Charge failed: {}", e),
             WorkflowError::Other(e) => write!(f, "{}", e),
         }
     }
@@ -108,6 +112,18 @@ pub trait WorkflowExecutor: Send + Sync {
         &self,
         workflow_id: &str,
     ) -> Result<Option<WorkflowContext>, WorkflowError>;
+
+    /// Create a payment charge via the appropriate provider.
+    ///
+    /// The engine resolves the charge parameters from context and
+    /// delegates to the provider matching `provider_kind`.
+    /// Implementations should look up the registered `PaymentProvider`
+    /// and call `create_charge()` on it.
+    async fn create_charge(
+        &self,
+        provider: &PaymentKind,
+        request: ChargeRequest,
+    ) -> Result<ChargeResponse, WorkflowError>;
 }
 
 /// Execute a single workflow step.
@@ -216,6 +232,59 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 // Engine logging — consumers can override via tracing subscriber
                 eprintln!("[workflow:{}] {}", ctx.workflow_id, resolved);
             }
+
+            WorkflowStep::Charge {
+                provider,
+                amount_key,
+                reference_key,
+                description_key,
+                payment_method_key,
+                store_as,
+            } => {
+                // Resolve amount from context (supports i64 or f64)
+                let amount = ctx
+                    .get(amount_key)
+                    .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+                    .ok_or_else(|| {
+                        WorkflowError::MissingContextKey(format!(
+                            "{} (expected numeric amount)",
+                            amount_key
+                        ))
+                    })?;
+
+                let reference_id = ctx
+                    .get_str(reference_key)
+                    .ok_or_else(|| WorkflowError::MissingContextKey(reference_key.clone()))?
+                    .to_string();
+
+                let description = description_key
+                    .as_ref()
+                    .and_then(|k| ctx.get_str(k))
+                    .map(String::from);
+
+                let payment_method = payment_method_key
+                    .as_ref()
+                    .and_then(|k| ctx.get_str(k))
+                    .map(String::from);
+
+                let request = ChargeRequest {
+                    amount,
+                    currency: Currency::default(),
+                    reference_id,
+                    description,
+                    payment_method,
+                    return_url: None,
+                    metadata: None,
+                };
+
+                let response = executor.create_charge(provider, request).await?;
+
+                if let Some(key) = store_as {
+                    let response_json = serde_json::to_value(&response)
+                        .map_err(|e| WorkflowError::Other(e.to_string()))?;
+                    ctx.set(key, response_json);
+                }
+            }
         }
 
         Ok(())
@@ -317,6 +386,7 @@ pub async fn resume_workflow<E: WorkflowExecutor>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::payment::{ChargeResponse, ChargeStatus, PaymentKind};
 
     struct MockExecutor {
         queries: std::sync::Mutex<Vec<String>>,
@@ -366,6 +436,22 @@ mod tests {
             _workflow_id: &str,
         ) -> Result<Option<WorkflowContext>, WorkflowError> {
             Ok(None)
+        }
+
+        async fn create_charge(
+            &self,
+            _provider: &PaymentKind,
+            request: ChargeRequest,
+        ) -> Result<ChargeResponse, WorkflowError> {
+            Ok(ChargeResponse {
+                charge_id: format!("mock-charge-{}", request.reference_id),
+                status: ChargeStatus::Pending,
+                redirect_url: None,
+                qr_code: Some("00020101021226610014ID.CO.MOCK".into()),
+                payment_code: None,
+                expires_at: Some("2026-02-13T16:00:00Z".into()),
+                raw: None,
+            })
         }
     }
 
@@ -481,5 +567,66 @@ mod tests {
 
         // Should pause at "active" (Wait encountered before Transition)
         assert_eq!(result, "active");
+    }
+
+    #[tokio::test]
+    async fn test_workflow_with_charge() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("booking_payment")
+            .initial_state("created")
+            .transition(
+                "created",
+                "awaiting_payment",
+                vec![
+                    WorkflowStep::charge(
+                        PaymentKind::Xendit,
+                        "order.total",
+                        "order.id",
+                        Some("charge"),
+                    ),
+                    WorkflowStep::wait("payment.success", std::time::Duration::from_secs(3600)),
+                ],
+            )
+            .transition(
+                "awaiting_payment",
+                "confirmed",
+                vec![
+                    WorkflowStep::notify(ChannelKind::Email, "booking_confirmed", "customer.email"),
+                    WorkflowStep::transition("confirmed"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-payment-001", "created");
+        ctx.set(
+            "order",
+            serde_json::json!({
+                "id": "booking-789",
+                "total": 150000
+            }),
+        );
+        ctx.set(
+            "customer",
+            serde_json::json!({
+                "email": "guest@example.com"
+            }),
+        );
+
+        let result = run_workflow(&executor, &wf, &mut ctx).await.unwrap();
+
+        // Should pause at Wait step (awaiting_payment webhook)
+        assert_eq!(result, "created");
+
+        // Verify charge was stored in context
+        let charge = ctx.get("charge").expect("charge should be in context");
+        assert_eq!(
+            charge.get("charge_id").and_then(|v| v.as_str()),
+            Some("mock-charge-booking-789")
+        );
+        assert_eq!(
+            charge.get("status").and_then(|v| v.as_str()),
+            Some("Pending")
+        );
+        assert!(charge.get("qr_code").is_some());
     }
 }

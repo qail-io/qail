@@ -429,6 +429,51 @@ EXAMPLES:
         #[arg(long)]
         json: bool,
     },
+    /// Seed a database with fixture data (alias for `exec -f seed.qail`)
+    #[command(after_help = r#"SEED DATA:
+    Run a .qail seed file against a database. This is a convenience
+    alias for `qail exec -f <file>` with a default of `seed.qail`.
+
+    SEED FILE FORMAT:
+    Same as exec — one QAIL statement per line, comments with # or --.
+
+    # seed.qail
+    add users fields name, email values 'Alice', 'alice@test.com'
+    add users fields name, email values 'Bob', 'bob@test.com'
+    add products fields name, price values 'Widget', 9.99
+
+EXAMPLES:
+    # Seed using default seed.qail in current directory
+    qail seed --url postgres://localhost/mydb
+
+    # Seed with custom file
+    qail seed -f fixtures/dev.qail --url postgres://localhost/mydb
+
+    # Seed with SSH tunnel
+    qail seed --ssh staging --url postgres://localhost/mydb
+
+    # Seed in a transaction (rollback on error)
+    qail seed --tx --url postgres://localhost/mydb
+
+    # Preview SQL without executing
+    qail seed --dry-run"#)]
+    Seed {
+        /// Path to seed file (default: seed.qail)
+        #[arg(short, long, default_value = "seed.qail")]
+        file: String,
+        /// Database URL
+        #[arg(short, long)]
+        url: Option<String>,
+        /// SSH host for tunneling
+        #[arg(long)]
+        ssh: Option<String>,
+        /// Wrap all statements in a transaction
+        #[arg(long)]
+        tx: bool,
+        /// Dry-run: print generated SQL without executing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Generate typed Rust schema from schema.qail
     Types {
         /// Path to schema.qail file
@@ -913,6 +958,18 @@ async fn main() -> Result<()> {
                 tx: *tx,
                 dry_run: *dry_run,
                 json: *json,
+            }).await?;
+        },
+        Some(Commands::Seed { file, url, ssh, tx, dry_run }) => {
+            println!("{}", format!("Seeding from: {}", file).cyan());
+            qail::exec::run_exec(qail::exec::ExecConfig {
+                query: None,
+                file: Some(file.clone()),
+                url: url.clone(),
+                ssh: ssh.clone(),
+                tx: *tx,
+                dry_run: *dry_run,
+                json: false,
             }).await?;
         },
         Some(Commands::Types { schema, output }) => {

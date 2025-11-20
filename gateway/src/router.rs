@@ -18,7 +18,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::handler::{execute_batch, execute_query, execute_query_binary, execute_query_fast, health_check, health_check_internal};
+use crate::handler::{execute_batch, execute_query, execute_query_binary, execute_query_fast, health_check, health_check_internal, swagger_ui};
 use crate::middleware::rate_limit_middleware;
 use crate::rest::auto_rest_routes;
 use crate::ws::ws_handler;
@@ -52,6 +52,8 @@ pub fn create_router(
         .route("/health/internal", get(health_check_internal))
         // Prometheus metrics (outside rate limiting — Prometheus scraper must always succeed)
         .route("/metrics", get(crate::metrics::metrics_handler))
+        // Swagger UI (interactive API docs)
+        .route("/docs", get(swagger_ui))
         // Query endpoints (Qail AST protocol)
         .route("/qail", post(execute_query))
         .route("/qail/binary", post(execute_query_binary))
