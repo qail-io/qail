@@ -12,7 +12,7 @@ pub mod protocol;
 pub mod types;
 
 pub use driver::{
-    PgConnection, PgDriver, PgDriverBuilder, PgError, PgPool, PgResult, PgRow, PoolConfig, PoolStats,
+    Notification, PgConnection, PgDriver, PgDriverBuilder, PgError, PgPool, PgResult, PgRow, PoolConfig, PoolStats,
     PooledConnection, QailRow, QueryResult,
 };
 pub use protocol::PgEncoder;

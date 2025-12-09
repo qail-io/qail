@@ -21,6 +21,7 @@ impl PgConnection {
     }
 
     /// Loops until a complete message is available.
+    /// Automatically buffers NotificationResponse messages for LISTEN/NOTIFY.
     pub async fn recv(&mut self) -> PgResult<BackendMessage> {
         loop {
             // Try to decode from buffer first
@@ -43,6 +44,15 @@ impl PgConnection {
                     // We have a complete message - zero-copy split
                     let msg_bytes = self.buffer.split_to(msg_len + 1);
                     let (msg, _) = BackendMessage::decode(&msg_bytes).map_err(PgError::Protocol)?;
+
+                    // Intercept async notifications — buffer them instead of returning
+                    if let BackendMessage::NotificationResponse { process_id, channel, payload } = msg {
+                        self.notifications.push_back(
+                            super::notification::Notification { process_id, channel, payload }
+                        );
+                        continue; // Keep reading for the actual response
+                    }
+
                     return Ok(msg);
                 }
             }
@@ -60,7 +70,7 @@ impl PgConnection {
     /// This prevents Slowloris DoS attacks where a malicious server sends
     /// partial data then goes silent, causing the driver to hang forever.
     #[inline]
-    async fn read_with_timeout(&mut self) -> PgResult<usize> {
+    pub(crate) async fn read_with_timeout(&mut self) -> PgResult<usize> {
         if self.buffer.capacity() - self.buffer.len() < 65536 {
             self.buffer.reserve(131072);
         }
