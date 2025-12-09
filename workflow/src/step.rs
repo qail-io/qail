@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::channel::ChannelKind;
+use crate::payment::PaymentKind;
 
 /// A single step in a workflow execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +73,25 @@ pub enum WorkflowStep {
     Log {
         /// Message template (can reference context keys with {key})
         message: String,
+    },
+
+    /// Create a payment charge via a payment provider.
+    ///
+    /// Resolves amount and reference from context, calls the provider,
+    /// and stores the `ChargeResponse` in context for downstream steps.
+    Charge {
+        /// Which payment provider to use
+        provider: PaymentKind,
+        /// Context key that resolves to the charge amount (i64)
+        amount_key: String,
+        /// Context key that resolves to the reference ID (string)
+        reference_key: String,
+        /// Optional context key for description
+        description_key: Option<String>,
+        /// Optional context key for payment method override
+        payment_method_key: Option<String>,
+        /// Optional key to store `ChargeResponse` in context
+        store_as: Option<String>,
     },
 }
 
@@ -146,6 +166,42 @@ impl WorkflowStep {
     pub fn log(message: &str) -> Self {
         WorkflowStep::Log {
             message: message.into(),
+        }
+    }
+
+    /// Create a Charge step.
+    pub fn charge(
+        provider: PaymentKind,
+        amount_key: &str,
+        reference_key: &str,
+        store_as: Option<&str>,
+    ) -> Self {
+        WorkflowStep::Charge {
+            provider,
+            amount_key: amount_key.into(),
+            reference_key: reference_key.into(),
+            description_key: None,
+            payment_method_key: None,
+            store_as: store_as.map(String::from),
+        }
+    }
+
+    /// Create a Charge step with full options.
+    pub fn charge_with(
+        provider: PaymentKind,
+        amount_key: &str,
+        reference_key: &str,
+        description_key: Option<&str>,
+        payment_method_key: Option<&str>,
+        store_as: Option<&str>,
+    ) -> Self {
+        WorkflowStep::Charge {
+            provider,
+            amount_key: amount_key.into(),
+            reference_key: reference_key.into(),
+            description_key: description_key.map(String::from),
+            payment_method_key: payment_method_key.map(String::from),
+            store_as: store_as.map(String::from),
         }
     }
 

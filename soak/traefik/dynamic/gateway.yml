@@ -6,7 +6,7 @@ tls:
 http:
   routers:
     gateway:
-      rule: "Host(`gateway.qail.io`)"
+      rule: "Host(`gateway.example.com`)"
       entryPoints:
         - websecure
       service: gateway

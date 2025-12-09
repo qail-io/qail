@@ -1,6 +1,6 @@
 [package]
 name = "qail-qdrant"
-version = "0.20.1"
+version = "0.20.2"
 edition = "2024"
 description = "QAIL driver for Qdrant vector database"
 license = "Apache-2.0"
@@ -9,9 +9,9 @@ keywords = ["qail", "qdrant", "vector", "database", "ai"]
 categories = ["database"]
 
 [dependencies]
-qail-core = { path = "../core", version = "0.20.1" }
+qail-core = { path = "../core", version = "0.20.2" }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 bytes = "1"
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
