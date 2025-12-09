@@ -169,6 +169,15 @@ pub struct ApiError {
     /// Request ID for tracing
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// Hint for resolving the error (safe for client display)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// Table that caused the error (when relevant)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    /// Column that caused the error (when relevant)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
 }
 
 impl ApiError {
@@ -178,6 +187,7 @@ impl ApiError {
             message: "Too many requests. Please slow down.".to_string(),
             details: None,
             request_id: None,
+            hint: None, table: None, column: None,
         }
     }
     
@@ -187,6 +197,7 @@ impl ApiError {
             message: "Request timed out.".to_string(),
             details: None,
             request_id: None,
+            hint: None, table: None, column: None,
         }
     }
     
@@ -196,6 +207,7 @@ impl ApiError {
             message: "Failed to parse query.".to_string(),
             details: Some(msg.into()),
             request_id: None,
+            hint: None, table: None, column: None,
         }
     }
     
@@ -209,6 +221,7 @@ impl ApiError {
             message: "Query execution failed.".to_string(),
             details: None,
             request_id: None,
+            hint: None, table: None, column: None,
         }
     }
     
@@ -238,6 +251,8 @@ impl ApiError {
             message: msg.into(),
             details: Some(detail_json),
             request_id: None,
+            hint: Some("Add filters, reduce columns, or add indexes".to_string()),
+            table: None, column: None,
         }
     }
     
@@ -247,6 +262,8 @@ impl ApiError {
             message: msg.into(),
             details: None,
             request_id: None,
+            hint: Some("Provide a valid JWT in the Authorization header".to_string()),
+            table: None, column: None,
         }
     }
     
@@ -256,6 +273,7 @@ impl ApiError {
             message: msg.into(),
             details: None,
             request_id: None,
+            hint: None, table: None, column: None,
         }
     }
     
@@ -265,6 +283,7 @@ impl ApiError {
             message: format!("{} not found", resource.into()),
             details: None,
             request_id: None,
+            hint: None, table: None, column: None,
         }
     }
     
@@ -278,11 +297,109 @@ impl ApiError {
             message: "An internal error occurred.".to_string(),
             details: None,
             request_id: None,
+            hint: None, table: None, column: None,
         }
     }
     
+    /// Validation error with table/column context
+    pub fn validation_error(table: impl Into<String>, column: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            code: "VALIDATION_ERROR".to_string(),
+            message: msg.into(),
+            details: None,
+            request_id: None,
+            hint: None,
+            table: Some(table.into()),
+            column: Some(column.into()),
+        }
+    }
+    
+    /// Parse a Postgres error string and extract structured hints.
+    ///
+    /// SECURITY: Only safe, generic hints are exposed to clients.
+    /// Raw constraint names and PG internals are never leaked.
+    pub fn from_pg_error(pg_err: &str, table_name: Option<&str>) -> Self {
+        let lower = pg_err.to_lowercase();
+        
+        // Unique constraint violation → 23505
+        if lower.contains("unique") || lower.contains("duplicate key") || lower.contains("23505") {
+            tracing::warn!(raw = %pg_err, "unique_violation");
+            return Self {
+                code: "CONFLICT".to_string(),
+                message: "A record with this value already exists.".to_string(),
+                details: None,
+                request_id: None,
+                hint: Some("Use a different value or update the existing record".to_string()),
+                table: table_name.map(|s| s.to_string()),
+                column: extract_column_from_constraint(pg_err),
+            };
+        }
+        
+        // Foreign key violation → 23503
+        if lower.contains("foreign key") || lower.contains("23503") {
+            tracing::warn!(raw = %pg_err, "fk_violation");
+            return Self {
+                code: "VALIDATION_ERROR".to_string(),
+                message: "Referenced record does not exist.".to_string(),
+                details: None,
+                request_id: None,
+                hint: Some("Ensure the referenced ID exists before inserting".to_string()),
+                table: table_name.map(|s| s.to_string()),
+                column: extract_column_from_constraint(pg_err),
+            };
+        }
+        
+        // NOT NULL violation → 23502
+        if lower.contains("not-null") || lower.contains("null value") || lower.contains("23502") {
+            tracing::warn!(raw = %pg_err, "not_null_violation");
+            return Self {
+                code: "VALIDATION_ERROR".to_string(),
+                message: "A required field is missing.".to_string(),
+                details: None,
+                request_id: None,
+                hint: Some("Provide all required fields".to_string()),
+                table: table_name.map(|s| s.to_string()),
+                column: extract_column_from_pg_null_error(pg_err),
+            };
+        }
+        
+        // RLS violation
+        if lower.contains("row-level security") || lower.contains("new row violates") {
+            tracing::warn!(raw = %pg_err, "rls_violation");
+            return Self {
+                code: "FORBIDDEN".to_string(),
+                message: "Access denied by row-level security policy.".to_string(),
+                details: None,
+                request_id: None,
+                hint: Some("Your session does not have permission for this operation".to_string()),
+                table: table_name.map(|s| s.to_string()),
+                column: None,
+            };
+        }
+        
+        // Fallback: generic query error (no PG internals leaked)
+        Self::query_error(pg_err)
+    }
+    
+    // -- Builder methods --
+    
     pub fn with_request_id(mut self, id: impl Into<String>) -> Self {
         self.request_id = Some(id.into());
+        self
+    }
+    
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+    
+    pub fn with_table(mut self, table: impl Into<String>) -> Self {
+        self.table = Some(table.into());
+        self
+    }
+    
+    pub fn with_column(mut self, column: impl Into<String>) -> Self {
+        self.column = Some(column.into());
         self
     }
     
@@ -292,6 +409,8 @@ impl ApiError {
             "RATE_LIMITED" => StatusCode::TOO_MANY_REQUESTS,
             "TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
             "PARSE_ERROR" => StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR" => StatusCode::BAD_REQUEST,
+            "CONFLICT" => StatusCode::CONFLICT,
             "QUERY_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
             "QUERY_TOO_EXPENSIVE" => StatusCode::UNPROCESSABLE_ENTITY,
             "QUERY_TOO_COMPLEX" => StatusCode::UNPROCESSABLE_ENTITY,
@@ -301,6 +420,39 @@ impl ApiError {
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
+}
+
+/// Extract column name from a PG constraint error message.
+///
+/// Example: `duplicate key value violates unique constraint "users_email_key"` → `email`
+fn extract_column_from_constraint(err: &str) -> Option<String> {
+    if let Some(start) = err.find('"') {
+        if let Some(end) = err[start + 1..].find('"') {
+            let constraint = &err[start + 1..start + 1 + end];
+            let parts: Vec<&str> = constraint.rsplitn(2, '_').collect();
+            if parts.len() == 2 {
+                let prefix = parts[1];
+                if let Some(col_start) = prefix.find('_') {
+                    return Some(prefix[col_start + 1..].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract column name from a PG NOT NULL violation.
+///
+/// Example: `null value in column "email" of relation "users" violates not-null constraint`
+fn extract_column_from_pg_null_error(err: &str) -> Option<String> {
+    let marker = "column \"";
+    if let Some(start) = err.find(marker) {
+        let rest = &err[start + marker.len()..];
+        if let Some(end) = rest.find('"') {
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
 }
 
 impl IntoResponse for ApiError {
@@ -481,6 +633,7 @@ impl QueryComplexityGuard {
                 message: format!("Query depth {} exceeds maximum {}", depth, self.max_depth),
                 details: None,
                 request_id: None,
+                hint: None, table: None, column: None,
             });
         }
         if filter_count > self.max_filters {
@@ -492,6 +645,7 @@ impl QueryComplexityGuard {
                 ),
                 details: None,
                 request_id: None,
+                hint: None, table: None, column: None,
             });
         }
         if join_count > self.max_joins {
@@ -503,6 +657,7 @@ impl QueryComplexityGuard {
                 ),
                 details: None,
                 request_id: None,
+                hint: None, table: None, column: None,
             });
         }
         Ok(())

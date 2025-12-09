@@ -8,7 +8,7 @@ const rateLimited = new Counter('rate_limited');
 const tenantLatency = new Trend('tenant_latency', true);
 
 // ── Configuration ───────────────────────────────────────────────
-const BASE_URL = __ENV.BASE_URL || 'https://gateway.qail.io';
+const BASE_URL = __ENV.BASE_URL || 'https://gateway.example.com';
 
 // Simulated tenants with different roles
 const TENANTS = [

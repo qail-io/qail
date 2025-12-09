@@ -152,7 +152,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     // ── 2. Primary Keys (AST-native) ────────────────────────────────────
     let pk_cmd = Qail::get("information_schema.table_constraints")
-        .columns(["table_name", "constraint_type"])
+        .columns(["table_name", "constraint_name", "constraint_type"])
         .filter("table_schema", Operator::Eq, "public")
         .filter("constraint_type", Operator::Eq, "PRIMARY KEY");
 
@@ -161,9 +161,9 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query primary keys: {}", e))?;
 
-    let pk_tables: std::collections::HashSet<String> = pk_rows
+    let pk_constraint_names: std::collections::HashSet<String> = pk_rows
         .iter()
-        .map(|r| r.text(0))
+        .map(|r| r.text(1))  // constraint_name
         .collect();
 
     // ── 3. Key Column Usage (for PK + Unique + FK) (AST-native) ─────────
@@ -186,7 +186,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let column = row.text(1);
         let constraint = row.text(2);
 
-        if constraint.ends_with("_pkey") || pk_tables.contains(&table) {
+        if pk_constraint_names.contains(&constraint) {
             pk_columns.insert((table.clone(), column.clone()));
         }
         constraint_columns

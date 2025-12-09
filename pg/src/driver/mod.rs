@@ -13,6 +13,7 @@
 //! - `copy.rs` - COPY protocol for bulk operations
 //! - `pipeline.rs` - High-performance pipelining (275k q/s)
 //! - `cancel.rs` - Query cancellation
+//! - `notification.rs` - LISTEN/NOTIFY support
 //! - `io_backend.rs` - Runtime I/O backend detection
 
 mod cancel;
@@ -31,6 +32,7 @@ pub mod branch_sql;
 mod row;
 mod stream;
 mod transaction;
+pub mod notification;
 
 pub use connection::PgConnection;
 pub use connection::TlsConfig;
@@ -41,6 +43,7 @@ pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection};
 pub use prepared::PreparedStatement;
 pub use rls::RlsContext;
 pub use row::QailRow;
+pub use notification::Notification;
 
 use qail_core::ast::Qail;
 use std::collections::HashMap;

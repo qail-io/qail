@@ -93,6 +93,53 @@ pub async fn health_check() -> Json<HealthCheckPublic> {
     })
 }
 
+/// Swagger UI — serves interactive API documentation.
+///
+/// Loads swagger-ui from CDN and points it at the gateway's own `/api/_openapi` endpoint.
+/// No authentication required (the OpenAPI spec itself is auth-gated, but reading the
+/// UI chrome is harmless).
+pub async fn swagger_ui() -> axum::response::Html<String> {
+    let _version = env!("CARGO_PKG_VERSION");
+    axum::response::Html(format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Qail Gateway — API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    body {{ margin: 0; background: #1a1a2e; }}
+    .swagger-ui .topbar {{ display: none; }}
+    .swagger-ui .info .title {{ color: #e2e8f0; }}
+    .swagger-ui .info .title small {{ background: #4f46e5; padding: 2px 8px; border-radius: 4px; }}
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({{
+      url: '/api/_openapi',
+      dom_id: '#swagger-ui',
+      deepLinking: true,
+      layout: 'BaseLayout',
+      defaultModelsExpandDepth: 1,
+      docExpansion: 'list',
+      filter: true,
+      requestInterceptor: (req) => {{
+        // Auto-inject JWT if set in localStorage
+        const token = localStorage.getItem('qail_token');
+        if (token) req.headers['Authorization'] = 'Bearer ' + token;
+        return req;
+      }},
+    }});
+  </script>
+</body>
+</html>"#
+    ))
+}
+
 /// Internal health check — includes pool stats and tenant guard metrics.
 ///
 /// SECURITY (M4): When `admin_token` is configured, requires

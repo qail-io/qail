@@ -8,7 +8,7 @@ scrape_configs:
     static_configs:
       - targets: ['host.containers.internal:8080']
         labels:
-          instance: 'gateway.qail.io'
+          instance: 'gateway.example.com'
 
   - job_name: 'prometheus'
     static_configs:

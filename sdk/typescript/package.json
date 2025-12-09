@@ -1,0 +1,43 @@
+{
+    "name": "@qail/client",
+    "version": "0.1.0",
+    "description": "TypeScript client SDK for Qail Gateway",
+    "main": "dist/index.js",
+    "module": "dist/index.mjs",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "import": "./dist/index.mjs",
+            "require": "./dist/index.js",
+            "types": "./dist/index.d.ts"
+        }
+    },
+    "scripts": {
+        "build": "tsup src/index.ts --format cjs,esm --dts",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "lint": "tsc --noEmit",
+        "prepublishOnly": "npm run build"
+    },
+    "keywords": [
+        "qail",
+        "database",
+        "query-builder",
+        "postgres",
+        "sdk"
+    ],
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/qail-io/qail",
+        "directory": "sdk/typescript"
+    },
+    "devDependencies": {
+        "tsup": "^8.0.0",
+        "typescript": "^5.4.0",
+        "vitest": "^3.0.0"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}
