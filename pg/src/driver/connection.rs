@@ -14,10 +14,11 @@
 
 use super::stream::PgStream;
 use super::{PgError, PgResult};
+use super::notification::Notification;
 use crate::protocol::{BackendMessage, FrontendMessage, ScramClient, TransactionStatus};
 use bytes::BytesMut;
 use lru::LruCache;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -77,6 +78,9 @@ pub struct PgConnection {
     pub(crate) column_info_cache: HashMap<u64, Arc<super::ColumnInfo>>,
     pub(crate) process_id: i32,
     pub(crate) secret_key: i32,
+    /// Buffer for asynchronous LISTEN/NOTIFY notifications.
+    /// Populated by `recv()` when it encounters NotificationResponse messages.
+    pub(crate) notifications: VecDeque<Notification>,
 }
 
 impl PgConnection {
@@ -130,6 +134,7 @@ impl PgConnection {
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
+            notifications: VecDeque::new(),
         };
 
         conn.send(FrontendMessage::Startup {
@@ -223,6 +228,7 @@ impl PgConnection {
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
+            notifications: VecDeque::new(),
         };
 
         conn.send(FrontendMessage::Startup {
@@ -333,6 +339,7 @@ impl PgConnection {
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
+            notifications: VecDeque::new(),
         };
 
         conn.send(FrontendMessage::Startup {
@@ -370,6 +377,7 @@ impl PgConnection {
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
+            notifications: VecDeque::new(),
         };
 
         conn.send(FrontendMessage::Startup {

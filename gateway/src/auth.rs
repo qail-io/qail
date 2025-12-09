@@ -367,14 +367,14 @@ mod tests {
     #[test]
     fn test_operator_role_does_not_bypass_rls() {
         let auth = AuthContext {
-            user_id: "example-user".to_string(),
+            user_id: "test-user-001".to_string(),
             role: "operator".to_string(),
-            tenant_id: Some("op-example".to_string()),
+            tenant_id: Some("op-test-001".to_string()),
             claims: HashMap::new(),
         };
         let rls = auth.to_rls_context();
         assert!(!rls.bypasses_rls(), "operator role should NOT bypass RLS");
-        assert_eq!(rls.operator_id, "op-example");
+        assert_eq!(rls.operator_id, "op-test-001");
     }
 
     // ══════════════════════════════════════════════════════════════════
