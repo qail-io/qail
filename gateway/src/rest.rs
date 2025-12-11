@@ -205,8 +205,13 @@ pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
 
             // Nested routes: GET /api/{parent}/:id/{child}
             let children = state.schema.children_of(table_name);
+            let mut seen_nested = std::collections::HashSet::new();
             for (child_table, _fk_col, _pk_col) in &children {
                 let nested_path = format!("/api/{}/{{id}}/{}", table_name, child_table);
+                if !seen_nested.insert(nested_path.clone()) {
+                    tracing::debug!("  AUTO-REST nested: {} → skipped (duplicate FK)", nested_path);
+                    continue;
+                }
                 tracing::info!("  AUTO-REST nested: {} → GET", nested_path);
                 router = router.route(&nested_path, get(nested_list_handler));
             }
@@ -336,7 +341,7 @@ fn parse_filters(query_string: &str) -> Vec<(String, Operator, QailValue)> {
     filters
 }
 
-/// Parse a scalar value, attempting numeric conversion
+/// Parse a scalar value, attempting type detection (bool → int → float → uuid → string)
 fn parse_scalar_value(s: &str) -> QailValue {
     if s == "true" {
         return QailValue::Bool(true);
@@ -352,6 +357,10 @@ fn parse_scalar_value(s: &str) -> QailValue {
     }
     if let Ok(f) = s.parse::<f64>() {
         return QailValue::Float(f);
+    }
+    // Detect UUID strings so PG parameterized queries get the right type OID
+    if let Ok(uuid) = Uuid::parse_str(s) {
+        return QailValue::Uuid(uuid);
     }
     QailValue::String(s.to_string())
 }
@@ -931,7 +940,7 @@ async fn get_by_id_handler(
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
 
     // Validate UUID format before hitting the database
-    Uuid::parse_str(&id)
+    let parsed_uuid = Uuid::parse_str(&id)
         .map_err(|_| ApiError::parse_error(format!("Invalid UUID: {}", id)))?;
 
     let table = state
@@ -946,9 +955,9 @@ async fn get_by_id_handler(
 
     let auth = extract_auth_from_headers(&headers);
 
-    // Build: get table[pk = $id]
+    // Build: get table[pk = $id] — use Uuid value for correct PG type matching
     let mut cmd = qail_core::ast::Qail::get(&table_name)
-        .filter(pk, Operator::Eq, QailValue::String(id.clone()))
+        .filter(pk, Operator::Eq, QailValue::Uuid(parsed_uuid))
         .limit(1);
 
     // Apply RLS

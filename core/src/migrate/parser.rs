@@ -22,7 +22,9 @@ use super::schema::{
     MigrationHint, MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind, Schema,
     SchemaFunctionDef, SchemaTriggerDef, Sequence, Table, ViewDef,
 };
+use super::policy::{RlsPolicy, PolicyTarget};
 use super::types::ColumnType;
+use crate::ast::Expr;
 use std::collections::HashMap;
 
 /// Parse a .qail file into a Schema.
@@ -98,6 +100,9 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
         } else if line.starts_with("topic ") {
             let res = parse_resource(line, &mut lines, ResourceKind::Topic)?;
             schema.add_resource(res);
+        } else if line.starts_with("policy ") {
+            let policy = parse_policy(line, &mut lines)?;
+            schema.add_policy(policy);
         } else {
             return Err(format!("Unknown statement: {}", line));
         }
@@ -988,6 +993,124 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
     })
 }
 
+/// Parse an RLS policy definition.
+///
+/// Syntax:
+/// ```text
+/// policy NAME on TABLE for TARGET
+///   using $$ EXPR $$
+///   with_check $$ EXPR $$
+/// ```
+///
+/// Both `using` and `with_check` are optional. The `$$` delimiters may span
+/// multiple lines (same pattern as views / functions).
+fn parse_policy<'a, I: Iterator<Item = &'a str>>(
+    first_line: &str,
+    lines: &mut std::iter::Peekable<I>,
+) -> Result<RlsPolicy, String> {
+    // Parse header: "policy NAME on TABLE for TARGET"
+    let rest = first_line.strip_prefix("policy ").unwrap().trim();
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+
+    // Minimum: NAME on TABLE for TARGET  (4 tokens)
+    if parts.len() < 4 {
+        return Err(format!("Invalid policy: {}", first_line));
+    }
+
+    let name = parts[0];
+
+    let on_idx = parts.iter().position(|&p| p == "on")
+        .ok_or_else(|| format!("policy missing 'on' keyword: {}", first_line))?;
+    let table = parts.get(on_idx + 1)
+        .ok_or_else(|| format!("policy missing table name: {}", first_line))?;
+
+    let for_idx = parts.iter().position(|&p| p == "for")
+        .ok_or_else(|| format!("policy missing 'for' keyword: {}", first_line))?;
+    let target_str = parts.get(for_idx + 1)
+        .ok_or_else(|| format!("policy missing target: {}", first_line))?;
+
+    let target = match target_str.to_lowercase().as_str() {
+        "all" => PolicyTarget::All,
+        "select" => PolicyTarget::Select,
+        "insert" => PolicyTarget::Insert,
+        "update" => PolicyTarget::Update,
+        "delete" => PolicyTarget::Delete,
+        _ => return Err(format!("Unknown policy target: {}", target_str)),
+    };
+
+    let mut policy = RlsPolicy::create(name, *table);
+    policy.target = target;
+
+    // Consume indented continuation lines (using / with_check)
+    while let Some(&next_line) = lines.peek() {
+        let trimmed = next_line.trim();
+        if trimmed.is_empty() {
+            lines.next();
+            continue;
+        }
+        // Only continue if the line is indented (part of this policy block)
+        if !next_line.starts_with("  ") && !next_line.starts_with('\t') {
+            break;
+        }
+
+        // Consume the peeked line before processing it
+        lines.next();
+
+        if trimmed.starts_with("using ") || trimmed.starts_with("with_check ") {
+            let is_using = trimmed.starts_with("using ");
+            let keyword = if is_using { "using " } else { "with_check " };
+            let after_keyword = trimmed.strip_prefix(keyword).unwrap_or("").trim();
+
+            let body = extract_dollar_body(after_keyword, lines)?;
+            // Store as raw SQL — the gateway only needs table/column metadata
+            // for auto-REST routing; typed expression parsing is done by the
+            // migration diff engine via parse_policy_expr() when needed.
+            let expr = Expr::Raw(body);
+
+            if is_using {
+                policy.using = Some(expr);
+            } else {
+                policy.with_check = Some(expr);
+            }
+        }
+        // Unknown indented lines are already consumed above
+    }
+
+    Ok(policy)
+}
+
+/// Extract text between `$$` markers, consuming continuation lines if needed.
+fn extract_dollar_body<'a, I: Iterator<Item = &'a str>>(
+    first_part: &str,
+    lines: &mut std::iter::Peekable<I>,
+) -> Result<String, String> {
+    // Strip leading $$
+    let after_open = first_part
+        .strip_prefix("$$")
+        .ok_or("expected $$ to start expression")?
+        .trim_start();
+
+    if let Some(pos) = after_open.find("$$") {
+        // Single-line: $$ body $$
+        Ok(after_open[..pos].trim().to_string())
+    } else {
+        // Multi-line: collect until closing $$
+        let mut body = after_open.to_string();
+        for line in lines.by_ref() {
+            if let Some(pos) = line.find("$$") {
+                let before = &line[..pos];
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(before);
+                break;
+            }
+            body.push('\n');
+            body.push_str(line);
+        }
+        Ok(body.trim().to_string())
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
