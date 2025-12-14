@@ -12,7 +12,7 @@ categories = ["database", "web-programming"]
 # Core QAIL
 qail-core = { path = "../core", version = "0.20.3" }
 qail-pg = { path = "../pg", version = "0.20.3" }
-qail-qdrant = { path = "../qdrant", version = "0.20.3" }
+qail-qdrant = { path = "../qdrant", version = "0.20.3", optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -70,7 +70,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 chrono = "0.4"
 
 [features]
-default = []
+default = ["qdrant"]
+qdrant = ["dep:qail-qdrant"]
 
 [dev-dependencies]
 tokio-test = "0.4"

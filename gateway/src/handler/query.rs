@@ -16,6 +16,7 @@ use super::{
     FastQueryResponse, QueryResponse,
 };
 use super::convert::{row_to_array, row_to_json};
+#[cfg(feature = "qdrant")]
 use super::qdrant::execute_qdrant_cmd;
 use crate::auth::extract_auth_from_headers;
 use crate::middleware::ApiError;
@@ -267,7 +268,13 @@ async fn execute_qail_cmd(
         Action::Search | Action::Upsert | Action::Scroll
             | Action::CreateCollection | Action::DeleteCollection
     ) {
-        return execute_qdrant_cmd(state, cmd).await;
+        #[cfg(feature = "qdrant")]
+        { return execute_qdrant_cmd(state, cmd).await; }
+        #[cfg(not(feature = "qdrant"))]
+        { return Err(ApiError::bad_request(
+            "QDRANT_DISABLED",
+            "Vector operations require the 'qdrant' feature",
+        )); }
     }
     
     let table = &cmd.table;

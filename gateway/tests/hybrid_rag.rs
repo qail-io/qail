@@ -1,3 +1,4 @@
+#![cfg(feature = "qdrant")]
 //! Hybrid PG + Qdrant integration test: simulates a RAG / semantic search workflow.
 //!
 //! **Scenario: Maritime Knowledge Base**
@@ -45,6 +46,7 @@ fn fake_embed(text: &str) -> Vec<f32> {
 // Main hybrid test
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live DATABASE_URL + Qdrant server"]
 async fn hybrid_rag_search_flow() {
     println!("\n╔══════════════════════════════════════════════════════════╗");
     println!("║  HYBRID PG + QDRANT INTEGRATION TEST                   ║");
