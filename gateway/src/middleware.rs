@@ -381,6 +381,43 @@ impl ApiError {
         Self::query_error(pg_err)
     }
     
+    /// Bad request with a custom error code — for handler-specific validation errors
+    /// (e.g., EMPTY_QUERY, DECODE_ERROR, BATCH_TOO_LARGE, UNSUPPORTED_ACTION).
+    pub fn bad_request(code: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: msg.into(),
+            details: None,
+            request_id: None,
+            hint: None, table: None, column: None,
+        }
+    }
+
+    /// Database connection / pool error — maps to 503 SERVICE_UNAVAILABLE.
+    pub fn connection_error(msg: impl Into<String>) -> Self {
+        let detail = msg.into();
+        tracing::error!(detail = %detail, "connection_error");
+        Self {
+            code: "CONNECTION_ERROR".to_string(),
+            message: "Database connection failed.".to_string(),
+            details: None,
+            request_id: None,
+            hint: None, table: None, column: None,
+        }
+    }
+
+    /// Generic constructor with an explicit error code — use for ad-hoc codes
+    /// that don't warrant their own factory (e.g., QDRANT_ERROR, TXN_ERROR).
+    pub fn with_code(code: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: msg.into(),
+            details: None,
+            request_id: None,
+            hint: None, table: None, column: None,
+        }
+    }
+
     // -- Builder methods --
     
     pub fn with_request_id(mut self, id: impl Into<String>) -> Self {
@@ -408,16 +445,34 @@ impl ApiError {
         match self.code.as_str() {
             "RATE_LIMITED" => StatusCode::TOO_MANY_REQUESTS,
             "TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
-            "PARSE_ERROR" => StatusCode::BAD_REQUEST,
-            "VALIDATION_ERROR" => StatusCode::BAD_REQUEST,
+            "PARSE_ERROR" | "VALIDATION_ERROR" | "EMPTY_QUERY" | "EMPTY_BATCH"
+            | "DECODE_ERROR" | "UNSUPPORTED_ACTION" | "MISSING_VECTOR" => StatusCode::BAD_REQUEST,
             "CONFLICT" => StatusCode::CONFLICT,
-            "QUERY_ERROR" => StatusCode::INTERNAL_SERVER_ERROR,
-            "QUERY_TOO_EXPENSIVE" => StatusCode::UNPROCESSABLE_ENTITY,
-            "QUERY_TOO_COMPLEX" => StatusCode::UNPROCESSABLE_ENTITY,
+            "QUERY_ERROR" | "QDRANT_ERROR" | "TXN_ERROR"
+            | "TENANT_BOUNDARY_VIOLATION" => StatusCode::INTERNAL_SERVER_ERROR,
+            "QUERY_TOO_EXPENSIVE" | "QUERY_TOO_COMPLEX" => StatusCode::UNPROCESSABLE_ENTITY,
             "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
-            "FORBIDDEN" => StatusCode::FORBIDDEN,
+            "FORBIDDEN" | "QUERY_NOT_ALLOWED" | "POLICY_DENIED" => StatusCode::FORBIDDEN,
             "NOT_FOUND" => StatusCode::NOT_FOUND,
+            "CONNECTION_ERROR" | "QDRANT_NOT_CONFIGURED"
+            | "QDRANT_CONNECTION_ERROR" => StatusCode::SERVICE_UNAVAILABLE,
+            "BATCH_TOO_LARGE" => StatusCode::PAYLOAD_TOO_LARGE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<crate::error::GatewayError> for ApiError {
+    fn from(err: crate::error::GatewayError) -> Self {
+        match &err {
+            crate::error::GatewayError::Config(_) => Self::internal(err.to_string()),
+            crate::error::GatewayError::Schema(_) => Self::internal(err.to_string()),
+            crate::error::GatewayError::Policy(_) => Self::internal(err.to_string()),
+            crate::error::GatewayError::Database(_) => Self::connection_error(err.to_string()),
+            crate::error::GatewayError::Auth(_) => Self::auth_error(err.to_string()),
+            crate::error::GatewayError::AccessDenied(_) => Self::forbidden(err.to_string()),
+            crate::error::GatewayError::InvalidQuery(_) => Self::parse_error(err.to_string()),
+            crate::error::GatewayError::Internal(_) => Self::internal(err.to_string()),
         }
     }
 }
@@ -583,6 +638,11 @@ impl QueryAllowList {
     pub fn len(&self) -> usize {
         self.allowed.len()
     }
+
+    /// Returns `true` if the allow-list has no patterns.
+    pub fn is_empty(&self) -> bool {
+        self.allowed.is_empty()
+    }
 }
 
 // ============================================================================
@@ -621,6 +681,7 @@ impl QueryComplexityGuard {
     }
     
     /// Check query complexity against limits
+    #[allow(clippy::result_large_err)]
     pub fn check(
         &self,
         depth: usize,

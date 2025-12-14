@@ -110,10 +110,13 @@ impl RlsContext {
     ///
     /// Requires a `SuperAdminToken` — which can only be created via
     /// `SuperAdminToken::issue()` with mandatory audit logging.
+    ///
+    /// Uses nil UUID for operator/agent IDs to avoid `''::uuid` cast errors
+    /// in PostgreSQL RLS policies (PostgreSQL doesn't short-circuit OR).
     pub fn super_admin(_token: SuperAdminToken) -> Self {
         Self {
-            operator_id: String::new(),
-            agent_id: String::new(),
+            operator_id: "00000000-0000-0000-0000-000000000000".to_string(),
+            agent_id: "00000000-0000-0000-0000-000000000000".to_string(),
             is_super_admin: true,
         }
     }

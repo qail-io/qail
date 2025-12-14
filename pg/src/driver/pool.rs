@@ -324,13 +324,11 @@ impl PooledConnection {
                 Ok((msg_type, data)) => {
                     match msg_type {
                         b'D' => {
-                            if error.is_none() {
-                                if let Some(columns) = data {
-                                    rows.push(super::PgRow {
-                                        columns,
-                                        column_info: None,
-                                    });
-                                }
+                            if error.is_none() && let Some(columns) = data {
+                                rows.push(super::PgRow {
+                                    columns,
+                                    column_info: None,
+                                });
                             }
                         }
                         b'Z' => {
@@ -412,10 +410,10 @@ impl PooledConnection {
             conn.prepared_statements.insert(name.clone(), sql_str.to_string());
 
             // Register in global hot-statement registry for cross-connection sharing
-            if let Ok(mut hot) = self.pool.hot_statements.write() {
-                if hot.len() < MAX_HOT_STATEMENTS {
-                    hot.insert(sql_hash, (name.clone(), sql_str.to_string()));
-                }
+            if let Ok(mut hot) = self.pool.hot_statements.write()
+                && hot.len() < MAX_HOT_STATEMENTS
+            {
+                hot.insert(sql_hash, (name.clone(), sql_str.to_string()));
             }
 
             name
@@ -560,11 +558,10 @@ impl PooledConnection {
             conn.stmt_cache.put(sql_hash, name.clone());
             conn.prepared_statements.insert(name.clone(), sql_str.to_string());
 
-            // Register in global hot-statement registry
-            if let Ok(mut hot) = self.pool.hot_statements.write() {
-                if hot.len() < MAX_HOT_STATEMENTS {
-                    hot.insert(sql_hash, (name.clone(), sql_str.to_string()));
-                }
+            if let Ok(mut hot) = self.pool.hot_statements.write()
+                && hot.len() < MAX_HOT_STATEMENTS
+            {
+                hot.insert(sql_hash, (name.clone(), sql_str.to_string()));
             }
 
             name
