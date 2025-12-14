@@ -690,6 +690,11 @@ impl Schema {
         self.resources.push(resource);
     }
 
+    /// Add an RLS policy definition.
+    pub fn add_policy(&mut self, policy: RlsPolicy) {
+        self.policies.push(policy);
+    }
+
     /// Validate all foreign key references in the schema.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();

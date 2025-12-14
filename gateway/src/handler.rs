@@ -5,7 +5,7 @@
 use axum::{
     body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     response::Json,
 };
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,7 @@ use std::sync::Arc;
 use bincode::Options;
 
 use crate::auth::extract_auth_from_headers;
+use crate::middleware::ApiError;
 use crate::GatewayState;
 
 /// Public health check response (minimal, safe for public exposure)
@@ -80,12 +81,6 @@ pub struct BatchQueryResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-    pub code: String,
-}
-
 pub async fn health_check() -> Json<HealthCheckPublic> {
     Json(HealthCheckPublic {
         status: "ok".to_string(),
@@ -99,45 +94,41 @@ pub async fn health_check() -> Json<HealthCheckPublic> {
 /// No authentication required (the OpenAPI spec itself is auth-gated, but reading the
 /// UI chrome is harmless).
 pub async fn swagger_ui() -> axum::response::Html<String> {
-    let _version = env!("CARGO_PKG_VERSION");
-    axum::response::Html(format!(
-        r#"<!DOCTYPE html>
+    axum::response::Html(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Qail Gateway — API Docs</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
-  <style>
-    body {{ margin: 0; background: #1a1a2e; }}
-    .swagger-ui .topbar {{ display: none; }}
-    .swagger-ui .info .title {{ color: #e2e8f0; }}
-    .swagger-ui .info .title small {{ background: #4f46e5; padding: 2px 8px; border-radius: 4px; }}
-  </style>
+    <meta charset="UTF-8">
+    <title>QAIL Gateway — API Documentation</title>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
 </head>
 <body>
-  <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-  <script>
-    SwaggerUIBundle({{
-      url: '/api/_openapi',
-      dom_id: '#swagger-ui',
-      deepLinking: true,
-      layout: 'BaseLayout',
-      defaultModelsExpandDepth: 1,
-      docExpansion: 'list',
-      filter: true,
-      requestInterceptor: (req) => {{
-        // Auto-inject JWT if set in localStorage
-        const token = localStorage.getItem('qail_token');
-        if (token) req.headers['Authorization'] = 'Bearer ' + token;
-        return req;
-      }},
-    }});
-  </script>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+    SwaggerUIBundle({
+        url: '/api/_openapi',
+        dom_id: '#swagger-ui',
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+        layout: 'BaseLayout',
+        deepLinking: true,
+        defaultModelsExpandDepth: 1,
+        docExpansion: 'list',
+        requestInterceptor: function(req) {
+            const token = localStorage.getItem('qail_token');
+            if (token) {
+                req.headers['Authorization'] = 'Bearer ' + token;
+            }
+            return req;
+        },
+    });
+    </script>
+    <style>
+        body { margin: 0; padding: 0; }
+        .swagger-ui .topbar { display: none; }
+        .swagger-ui .info .title { font-size: 2em; font-weight: 700; }
+    </style>
 </body>
-</html>"#
-    ))
+</html>"#.to_string())
 }
 
 /// Internal health check — includes pool stats and tenant guard metrics.
@@ -182,29 +173,17 @@ pub async fn execute_query(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     body: String,
-) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<QueryResponse>, ApiError> {
     let query_text = body.trim();
     
     if query_text.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Empty query".to_string(),
-                code: "EMPTY_QUERY".to_string(),
-            }),
-        ));
+        return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
     }
 
     // SECURITY: Query allow-list check — reject non-whitelisted patterns.
     if !state.allow_list.is_allowed(query_text) {
         tracing::warn!("Query rejected by allow-list: {}", query_text);
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Query not in allow-list".to_string(),
-                code: "QUERY_NOT_ALLOWED".to_string(),
-            }),
-        ));
+        return Err(ApiError::with_code("QUERY_NOT_ALLOWED", "Query not in allow-list"));
     }
     
     // Extract auth context from headers
@@ -231,13 +210,7 @@ pub async fn execute_query(
                 }
                 Err(e) => {
                     tracing::warn!("Parse error: {}", e);
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse {
-                            error: format!("Parse error: {}", e),
-                            code: "PARSE_ERROR".to_string(),
-                        }),
-                    ));
+                    return Err(ApiError::parse_error(format!("Parse error: {}", e)));
                 }
             }
         }
@@ -246,13 +219,7 @@ pub async fn execute_query(
     // Apply row-level security policies
     if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
         tracing::warn!("Policy error: {}", e);
-        return Err((
-            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::FORBIDDEN),
-            Json(ErrorResponse {
-                error: e.to_string(),
-                code: "POLICY_DENIED".to_string(),
-            }),
-        ));
+        return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
     
     execute_qail_cmd(&state, &auth, &cmd).await
@@ -266,15 +233,9 @@ pub async fn execute_query_binary(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<QueryResponse>, ApiError> {
     if body.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Empty binary query".to_string(),
-                code: "EMPTY_QUERY".to_string(),
-            }),
-        ));
+        return Err(ApiError::bad_request("EMPTY_QUERY", "Empty binary query"));
     }
     
     // Extract auth context from headers
@@ -294,26 +255,14 @@ pub async fn execute_query_binary(
         Ok(cmd) => cmd,
         Err(e) => {
             tracing::warn!("Bincode decode error: {}", e);
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid binary format: {}", e),
-                    code: "DECODE_ERROR".to_string(),
-                }),
-            ));
+            return Err(ApiError::bad_request("DECODE_ERROR", format!("Invalid binary format: {}", e)));
         }
     };
     
     // Apply row-level security policies
     if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
         tracing::warn!("Policy error: {}", e);
-        return Err((
-            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::FORBIDDEN),
-            Json(ErrorResponse {
-                error: e.to_string(),
-                code: "POLICY_DENIED".to_string(),
-            }),
-        ));
+        return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
     
     execute_qail_cmd(&state, &auth, &cmd).await
@@ -328,27 +277,15 @@ pub async fn execute_query_fast(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     body: String,
-) -> Result<Json<FastQueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<FastQueryResponse>, ApiError> {
     let query_text = body.trim();
     
     if query_text.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Empty query".to_string(),
-                code: "EMPTY_QUERY".to_string(),
-            }),
-        ));
+        return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
     }
 
     if !state.allow_list.is_allowed(query_text) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Query not in allow-list".to_string(),
-                code: "QUERY_NOT_ALLOWED".to_string(),
-            }),
-        ));
+        return Err(ApiError::with_code("QUERY_NOT_ALLOWED", "Query not in allow-list"));
     }
     
     let mut auth = extract_auth_from_headers(&headers);
@@ -370,26 +307,14 @@ pub async fn execute_query_fast(
                     cmd
                 }
                 Err(e) => {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse {
-                            error: format!("Parse error: {}", e),
-                            code: "PARSE_ERROR".to_string(),
-                        }),
-                    ));
+                    return Err(ApiError::parse_error(format!("Parse error: {}", e)));
                 }
             }
         }
     };
     
     if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
-        return Err((
-            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::FORBIDDEN),
-            Json(ErrorResponse {
-                error: e.to_string(),
-                code: "POLICY_DENIED".to_string(),
-            }),
-        ));
+        return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
     
     execute_qail_cmd_fast(&state, &auth, &cmd).await
@@ -401,56 +326,31 @@ async fn execute_qail_cmd_fast(
     state: &Arc<GatewayState>,
     auth: &crate::auth::AuthContext,
     cmd: &qail_core::ast::Qail,
-) -> Result<Json<FastQueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<FastQueryResponse>, ApiError> {
     use qail_core::ast::Action;
 
     let (depth, filters, joins) = query_complexity(cmd);
     if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
         crate::metrics::record_complexity_rejected();
-        return Err((
-            api_err.status_code(),
-            Json(ErrorResponse {
-                error: api_err.message,
-                code: api_err.code,
-            }),
-        ));
+        return Err(api_err);
     }
 
     if matches!(cmd.action, Action::Search | Action::Upsert | Action::Scroll
         | Action::CreateCollection | Action::DeleteCollection) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Vector operations not supported on /qail/fast".to_string(),
-                code: "UNSUPPORTED_ACTION".to_string(),
-            }),
+        return Err(ApiError::bad_request(
+            "UNSUPPORTED_ACTION",
+            "Vector operations not supported on /qail/fast",
         ));
     }
 
     let mut conn = state.pool
         .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
-        .map_err(|e| {
-        tracing::error!("Pool error: {}", e);
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "Database connection failed".to_string(),
-                code: "CONNECTION_ERROR".to_string(),
-            }),
-        )
-    })?;
+        .map_err(|e| ApiError::connection_error(e.to_string()))?;
 
     let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
     let rows = conn.fetch_all_fast(cmd).await.map_err(|e| {
-        tracing::error!("Query error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Query execution failed".to_string(),
-                code: "QUERY_ERROR".to_string(),
-            }),
-        )
+        ApiError::query_error(e.to_string())
     });
     timer.finish(rows.is_ok());
     conn.release().await;
@@ -520,7 +420,7 @@ async fn execute_qail_cmd(
     state: &Arc<GatewayState>,
     auth: &crate::auth::AuthContext,
     cmd: &qail_core::ast::Qail,
-) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<QueryResponse>, ApiError> {
     use qail_core::ast::Action;
 
     // ── Query Complexity Guard ───────────────────────────────────────
@@ -533,13 +433,7 @@ async fn execute_qail_cmd(
             "Query rejected by complexity guard"
         );
         crate::metrics::record_complexity_rejected();
-        return Err((
-            api_err.status_code(),
-            Json(ErrorResponse {
-                error: api_err.message,
-                code: api_err.code,
-            }),
-        ));
+        return Err(api_err);
     }
 
     // ── Route vector operations to Qdrant ───────────────────────────
@@ -578,16 +472,7 @@ async fn execute_qail_cmd(
     let mut conn = state.pool
         .acquire_raw()
         .await
-        .map_err(|e| {
-        tracing::error!("Pool error: {}", e);
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "Database connection failed".to_string(),
-                code: "CONNECTION_ERROR".to_string(),
-            }),
-        )
-    })?;
+        .map_err(|e| ApiError::connection_error(e.to_string()))?;
 
     // Generate RLS SQL for pipelining (BEGIN + SET LOCAL + set_config)
     let rls_sql = qail_pg::rls_sql_with_timeout(
@@ -598,14 +483,7 @@ async fn execute_qail_cmd(
     // Measure query execution time
     let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
     let rows = conn.fetch_all_with_rls(cmd, &rls_sql).await.map_err(|e| {
-        tracing::error!("Query error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Query execution failed".to_string(),
-                code: "QUERY_ERROR".to_string(),
-            }),
-        )
+        ApiError::query_error(e.to_string())
     });
     timer.finish(rows.is_ok());
 
@@ -633,10 +511,7 @@ async fn execute_qail_cmd(
             "qail_cmd",
         ).map_err(|v| {
             tracing::error!("{}", v);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                error: "Data integrity error".to_string(),
-                code: "TENANT_BOUNDARY_VIOLATION".to_string(),
-            }))
+            ApiError::with_code("TENANT_BOUNDARY_VIOLATION", "Data integrity error")
         })?
     } else {
         crate::tenant_guard::TenantVerified::unscoped()
@@ -658,12 +533,15 @@ async fn execute_qail_cmd(
     } else {
         // Mutation - invalidate cache for this table
         state.cache.invalidate_table(table);
-        tracing::debug!("Cache INVALIDATE for table '{}'", table);
+        tracing::debug!("Cache INVALIDATED for table '{}' (mutation)", table);
     }
     
     Ok(Json(response))
 }
 
+/// Convert a PgRow to a JSON object with column names as keys.
+///
+/// Used by both the QAIL handler and the REST handler.
 pub fn row_to_json(row: &qail_pg::PgRow) -> serde_json::Value {
     let column_names: Vec<String> = if let Some(ref info) = row.column_info {
         let mut pairs: Vec<_> = info.name_to_index.iter().collect();
@@ -812,29 +690,20 @@ pub async fn execute_batch(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     Json(request): Json<BatchRequest>,
-) -> Result<Json<BatchResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<BatchResponse>, ApiError> {
     if request.queries.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Empty query batch".to_string(),
-                code: "EMPTY_BATCH".to_string(),
-            }),
-        ));
+        return Err(ApiError::bad_request("EMPTY_BATCH", "Empty query batch"));
     }
 
     // SECURITY (E2): Cap batch size to prevent resource exhaustion.
     if request.queries.len() > state.config.max_batch_queries {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(ErrorResponse {
-                error: format!(
-                    "Batch size {} exceeds maximum of {}",
-                    request.queries.len(),
-                    state.config.max_batch_queries,
-                ),
-                code: "BATCH_TOO_LARGE".to_string(),
-            }),
+        return Err(ApiError::bad_request(
+            "BATCH_TOO_LARGE",
+            format!(
+                "Batch size {} exceeds maximum of {}",
+                request.queries.len(),
+                state.config.max_batch_queries,
+            ),
         ));
     }
     
@@ -852,28 +721,13 @@ pub async fn execute_batch(
     let mut conn = state.pool
         .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
         .await
-        .map_err(|e| {
-        tracing::error!("Pool error: {}", e);
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "Database connection failed".to_string(),
-                code: "CONNECTION_ERROR".to_string(),
-            }),
-        )
-    })?;
+        .map_err(|e| ApiError::connection_error(e.to_string()))?;
     
     // Start transaction if requested (default: true)
     if request.transaction {
         conn.get_mut().execute_simple("BEGIN;").await.map_err(|e| {
             tracing::error!("Transaction start failed: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Transaction start failed".to_string(),
-                    code: "TXN_ERROR".to_string(),
-                }),
-            )
+            ApiError::with_code("TXN_ERROR", "Transaction start failed")
         })?;
     }
     
@@ -901,14 +755,31 @@ pub async fn execute_batch(
             }
         };
         
-        // Apply policies
+        // Apply RLS policies
         if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
             results.push(BatchQueryResult {
                 index,
                 success: false,
                 rows: None,
                 count: None,
-                error: Some(e.to_string()),
+                error: Some(format!("Policy error: {}", e)),
+            });
+            if request.transaction {
+                had_error = true;
+                break;
+            }
+            continue;
+        }
+
+        // Query complexity check
+        let (depth, filters, joins) = query_complexity(&cmd);
+        if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
+            results.push(BatchQueryResult {
+                index,
+                success: false,
+                rows: None,
+                count: None,
+                error: Some(api_err.message),
             });
             if request.transaction {
                 had_error = true;
@@ -918,34 +789,19 @@ pub async fn execute_batch(
         }
         
         // Execute query
-        match conn.fetch_all_cached(&cmd).await {
+        let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
+        match conn.fetch_all_uncached(&cmd).await {
             Ok(rows) => {
-                let json_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
+                timer.finish(true);
+                let json_rows: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(row_to_json)
+                    .collect();
                 let count = json_rows.len();
-
-                // Tenant boundary check on each batch sub-query — fail-closed
-                if let Some(ref tenant_id) = auth.tenant_id {
-                    if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
-                        &json_rows,
-                        tenant_id,
-                        &state.config.tenant_column,
-                        "batch",
-                        &format!("batch[{}]", index),
-                    ) {
-                        tracing::error!("{}", v);
-                        results.push(BatchQueryResult {
-                            index,
-                            success: false,
-                            rows: None,
-                            count: None,
-                            error: Some("Data integrity error".to_string()),
-                        });
-                        if request.transaction {
-                            had_error = true;
-                            break;
-                        }
-                        continue;
-                    }
+                
+                // Invalidate cache for mutations
+                if !matches!(cmd.action, qail_core::ast::Action::Get) {
+                    state.cache.invalidate_table(&cmd.table);
                 }
                 
                 results.push(BatchQueryResult {
@@ -982,13 +838,7 @@ pub async fn execute_batch(
         } else {
             conn.get_mut().execute_simple("COMMIT;").await.map_err(|e| {
                 tracing::error!("Transaction commit failed: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Transaction commit failed".to_string(),
-                        code: "TXN_ERROR".to_string(),
-                    }),
-                )
+                ApiError::with_code("TXN_ERROR", "Transaction commit failed")
             })?;
         }
     }
@@ -1060,29 +910,17 @@ fn shape_cache_key(cmd: &qail_core::ast::Qail) -> String {
 async fn execute_qdrant_cmd(
     state: &Arc<GatewayState>,
     cmd: &qail_core::ast::Qail,
-) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<QueryResponse>, ApiError> {
     use qail_core::ast::{Action, CageKind};
 
     let pool = state.qdrant_pool.as_ref().ok_or_else(|| {
         tracing::error!("Qdrant operation requested but no [qdrant] config");
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "Qdrant not configured".to_string(),
-                code: "QDRANT_NOT_CONFIGURED".to_string(),
-            }),
-        )
+        ApiError::with_code("QDRANT_NOT_CONFIGURED", "Qdrant not configured")
     })?;
 
     let mut conn = pool.get().await.map_err(|e| {
         tracing::error!("Qdrant pool error: {}", e);
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "Qdrant connection failed".to_string(),
-                code: "QDRANT_CONNECTION_ERROR".to_string(),
-            }),
-        )
+        ApiError::with_code("QDRANT_CONNECTION_ERROR", "Qdrant connection failed")
     })?;
 
     let collection = &cmd.table;
@@ -1101,13 +939,7 @@ async fn execute_qdrant_cmd(
         Action::Search => {
             // Use the dedicated vector field from the Qail AST
             let vector = cmd.vector.as_deref().ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: "Search requires a vector".to_string(),
-                        code: "MISSING_VECTOR".to_string(),
-                    }),
-                )
+                ApiError::bad_request("MISSING_VECTOR", "Search requires a vector")
             })?;
 
             let results = conn
@@ -1163,29 +995,17 @@ async fn execute_qdrant_cmd(
             }))
         }
 
-        _ => Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Unsupported Qdrant action: {:?}", cmd.action),
-                code: "UNSUPPORTED_ACTION".to_string(),
-            }),
+        _ => Err(ApiError::bad_request(
+            "UNSUPPORTED_ACTION",
+            format!("Unsupported Qdrant action: {:?}", cmd.action),
         )),
     }
 }
 
-/// Convert a Qdrant error into an HTTP error tuple.
-fn qdrant_err(
-    e: qail_qdrant::QdrantError,
-    op: &str,
-) -> (StatusCode, Json<ErrorResponse>) {
+/// Convert a Qdrant error into an ApiError.
+fn qdrant_err(e: qail_qdrant::QdrantError, op: &str) -> ApiError {
     tracing::error!("Qdrant {} error: {}", op, e);
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: format!("Qdrant {} failed", op),
-            code: "QDRANT_ERROR".to_string(),
-        }),
-    )
+    ApiError::with_code("QDRANT_ERROR", format!("Qdrant {} failed", op))
 }
 
 /// Convert a `ScoredPoint` to a JSON value for the response.

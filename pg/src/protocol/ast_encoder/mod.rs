@@ -24,13 +24,19 @@ mod values;
 use bytes::BytesMut;
 use qail_core::ast::{Action, Qail};
 
+/// Shorthand for the common return type of encode methods.
+type EncodeResult = Result<(BytesMut, Vec<Option<Vec<u8>>>), EncodeError>;
+
+/// Shorthand for encode methods that return SQL as a `String`.
+type EncodeSqlResult = Result<(String, Vec<Option<Vec<u8>>>), EncodeError>;
+
 /// AST-native encoder that skips SQL string generation.
 pub struct AstEncoder;
 
 impl AstEncoder {
     /// Encode a Qail directly to Extended Query protocol bytes.
     /// Returns (wire_bytes, extracted_params_as_bytes)
-    pub fn encode_cmd(cmd: &Qail) -> Result<(BytesMut, Vec<Option<Vec<u8>>>), EncodeError> {
+    pub fn encode_cmd(cmd: &Qail) -> EncodeResult {
         let mut sql_buf = BytesMut::with_capacity(256);
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
 
@@ -54,7 +60,7 @@ impl AstEncoder {
         Self::encode_cmd_sql_to(cmd, sql_buf, params)?;
 
         // Build wire protocol (allocates a new BytesMut)
-        batch::build_extended_query(sql_buf, params).map_err(Into::into)
+        batch::build_extended_query(sql_buf, params)
     }
 
     /// Encode a Qail using CALLER'S BUFFERS — writes wire bytes into `wire_buf` (ZERO-ALLOC).
@@ -127,13 +133,13 @@ impl AstEncoder {
         Action::SessionSet => ddl::encode_session_set(cmd, sql_buf),
         Action::SessionShow => ddl::encode_session_show(cmd, sql_buf),
         Action::SessionReset => ddl::encode_session_reset(cmd, sql_buf),
-            _ => return Err(EncodeError::UnsupportedAction(cmd.action.clone())),
+            _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
         Ok(())
     }
 
     /// Encode a Qail to SQL string + params (for prepared statement caching).
-    pub fn encode_cmd_sql(cmd: &Qail) -> Result<(String, Vec<Option<Vec<u8>>>), EncodeError> {
+    pub fn encode_cmd_sql(cmd: &Qail) -> EncodeSqlResult {
         let mut sql_buf = BytesMut::with_capacity(256);
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
 
@@ -178,7 +184,7 @@ impl AstEncoder {
             Action::SessionSet => ddl::encode_session_set(cmd, &mut sql_buf),
             Action::SessionShow => ddl::encode_session_show(cmd, &mut sql_buf),
             Action::SessionReset => ddl::encode_session_reset(cmd, &mut sql_buf),
-            _ => return Err(EncodeError::UnsupportedAction(cmd.action.clone())),
+            _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
 
 

@@ -27,19 +27,14 @@ impl std::fmt::Display for PaymentKind {
 // ─── Charge Request / Response ──────────────────────────────────────
 
 /// Currency for payment amounts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Currency {
+    #[default]
     IDR,
     USD,
     PHP,
     THB,
     MYR,
-}
-
-impl Default for Currency {
-    fn default() -> Self {
-        Self::IDR
-    }
 }
 
 /// Request to create a payment charge.
