@@ -5,7 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.3] - 2026-02-16
+
+### Added
+
+- **Gateway:** Split monolithic `handler.rs` (1,049 lines) into modular `handler/` directory:
+  - `handler/mod.rs` — shared types (`QueryResponse`, `BatchRequest`) and re-exports
+  - `handler/query.rs` — query execution (text, binary, fast, batch)
+  - `handler/admin.rs` — health checks and Swagger UI
+  - `handler/convert.rs` — PgRow→JSON conversion with OID-directed type mapping
+  - `handler/qdrant.rs` — Qdrant vector operations
+- **Gateway:** 22 new unit tests for `handler/convert.rs` covering all OID branches, fallback guessing, and `pg_array_to_json` edge cases (gateway tests: 81 → 103)
+- **Project:** Added `CONTRIBUTING.md` — build instructions, project structure, code style, PR process
+
+### Fixed
+
+- **Gateway:** Replaced 4 `eprintln!()` calls with `tracing` macros in `concurrency.rs` and `tenant_guard.rs`
+- **Gateway:** Implemented `From<GatewayError> for ApiError` to bridge gateway and API error types
+- **Gateway:** Fixed 6 rustdoc errors (private intra-doc links, unclosed HTML tag, bare URLs)
+- **Docs:** Corrected license badge and footer in README.md from MIT to Apache-2.0
+
+## [0.20.2] - 2026-02-12
+
+### Added
+
+- **CLI:** Fix primary key introspection for composite keys
+- **SDK:** Generated build artifacts for Swift, TypeScript, and Kotlin SDKs
+- **Gateway:** Fast query execution endpoint (`/qail/fast`) with shape-based caching
+
+## [0.20.1] - 2026-02-11
+
+### Added
+
+- **PG:** Transaction-local RLS — tenant context now scoped to transaction lifetime
+- **PG:** Prepared statement caching for repeated query patterns
+
+## [0.20.0] - 2026-02-10
+
+### Added
+
+- **PG:** PostgreSQL `EXPLAIN` pre-check support — rejects expensive queries before execution
+- **Core:** `SuperAdminToken` — cryptographic proof for RLS bypass authorization
+- **PG:** Wire protocol security tests — SQL injection and binary smuggling hardening
+- **Gateway:** Comprehensive cache correctness and TTL expiry tests
+
+### Changed
+
+- **Gateway:** License updated to BSL-1.1
+
+### Removed
+
+- **Core:** Redis module removed (replaced by PostgreSQL-native caching)
+
+## [0.19.1] - 2026-02-10
+
+### Changed
+
+- **Core:** Replaced stringly-typed column schema with `ColumnType` AST — type-safe schema representation
+- **Docs:** README update with improved examples
+
+## [0.19.0] - 2026-02-09
+
+### Added
+
+- **Gateway:** Data virtualization branching with CLI commands
+- **Gateway:** Column-level access control policies
+
+### Fixed
+
+- **Gateway:** P0 fixes — rate limiter correctness, REST response caching, compression middleware
+- **Gateway:** Clippy cleanup across workspace
+
+## [0.18.6] - 2026-02-10
+
+### Added
+
+- **Core:** Codegen emits `RequiresRls` / `DirectBuild` markers for compile-time tenant safety
+- **Core:** `rls_proof_demo` and `spark_safety_demo` — comprehensive compile-time safety showcases
+- **Core:** RLS Proof Witness — compile-time tenant enforcement patterns
+
 ## [0.18.5] - 2026-02-10
+
 
 ### Added
 
