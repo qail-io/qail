@@ -188,7 +188,7 @@ pub fn validate_jwt(token: &str, config: &JwtConfig) -> Result<AuthContext, Gate
 /// Extract auth context from request headers
 /// 
 /// Priority:
-/// 1. Authorization: Bearer <jwt> (if JWT_SECRET is set)
+/// 1. `Authorization: Bearer <jwt>` (if JWT_SECRET is set)
 /// 2. X-User-ID / X-User-Role headers (dev mode only)
 pub fn extract_auth_from_headers(headers: &HeaderMap) -> AuthContext {
     // Try JWT first
