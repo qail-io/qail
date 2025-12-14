@@ -125,12 +125,14 @@ pub fn verify_tenant_boundary(
                         let n_str = n.to_string();
                         if n_str != expected_tenant_id {
                             violations += 1;
-                            eprintln!(
-                                "[CRITICAL] TENANT_BOUNDARY_VIOLATION: \
-                                 table={} endpoint={} row={} column={} \
-                                 expected={} actual={} \
-                                 — RLS MAY BE COMPROMISED",
-                                table, endpoint, i, tenant_column, expected_tenant_id, n_str
+                            tracing::error!(
+                                table = table,
+                                endpoint = endpoint,
+                                row = i,
+                                column = tenant_column,
+                                expected = expected_tenant_id,
+                                actual = %n_str,
+                                "TENANT_BOUNDARY_VIOLATION — RLS MAY BE COMPROMISED"
                             );
                         }
                         continue;
@@ -141,12 +143,14 @@ pub fn verify_tenant_boundary(
 
                 if row_tenant_id != expected_tenant_id {
                     violations += 1;
-                    eprintln!(
-                        "[CRITICAL] TENANT_BOUNDARY_VIOLATION: \
-                         table={} endpoint={} row={} column={} \
-                         expected={} actual={} \
-                         — RLS MAY BE COMPROMISED",
-                        table, endpoint, i, tenant_column, expected_tenant_id, row_tenant_id
+                    tracing::error!(
+                        table = table,
+                        endpoint = endpoint,
+                        row = i,
+                        column = tenant_column,
+                        expected = expected_tenant_id,
+                        actual = row_tenant_id,
+                        "TENANT_BOUNDARY_VIOLATION — RLS MAY BE COMPROMISED"
                     );
                 }
             }
