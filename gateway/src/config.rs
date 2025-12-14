@@ -24,7 +24,7 @@ pub struct GatewayConfig {
     pub cors_enabled: bool,
 
     /// Allowed CORS origins. Empty = allow all (backward compatible).
-    /// Example: ["https://app.qail.io", "https://staging.qail.io"]
+    /// Example: `["https://app.qail.io", "https://staging.qail.io"]`
     #[serde(default)]
     pub cors_allowed_origins: Vec<String>,
 
