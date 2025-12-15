@@ -29,6 +29,7 @@ async fn ensure_collection(d: &mut QdrantDriver, name: &str, dim: u64) {
 // 1. Search on an empty collection — should return zero, not error
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_search_empty_collection() {
     println!("▸ Search on empty collection...");
     let mut d = driver().await;
@@ -46,6 +47,7 @@ async fn weird_search_empty_collection() {
 // 2. Upsert same ID twice — second write should overwrite
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_duplicate_id_overwrite() {
     println!("▸ Duplicate ID overwrite...");
     let mut d = driver().await;
@@ -80,6 +82,7 @@ async fn weird_duplicate_id_overwrite() {
 // 3. Unicode nightmare payload — emoji, CJK, RTL, zalgo text
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_unicode_payload() {
     println!("▸ Unicode nightmare payload...");
     let mut d = driver().await;
@@ -120,6 +123,7 @@ async fn weird_unicode_payload() {
 // 4. Very high-dimensional vectors (1536-dim like OpenAI embeddings)
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_high_dim_vectors() {
     println!("▸ High-dimensional vectors (1536-dim)...");
     let mut d = driver().await;
@@ -157,6 +161,7 @@ async fn weird_high_dim_vectors() {
 // 5. Score threshold filter — only return results above threshold
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_score_threshold() {
     println!("▸ Score threshold filter...");
     let mut d = driver().await;
@@ -193,6 +198,7 @@ async fn weird_score_threshold() {
 // 6. Concurrent pool access — 10 searches in parallel
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_concurrent_pool() {
     println!("▸ Concurrent pool access (10 parallel searches)...");
     let mut d = driver().await;
@@ -242,6 +248,7 @@ async fn weird_concurrent_pool() {
 // 7. UUID point IDs — use string UUIDs instead of numeric
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_uuid_point_ids() {
     println!("▸ UUID point IDs...");
     let mut d = driver().await;
@@ -270,6 +277,7 @@ async fn weird_uuid_point_ids() {
 // 8. Nested payload — objects and arrays in payload values
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_nested_payload() {
     println!("▸ Nested payload (objects + arrays)...");
     let mut d = driver().await;
@@ -337,6 +345,7 @@ async fn weird_nested_payload() {
 // 9. Scroll with pagination — verify next_offset advances
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_scroll_pagination() {
     println!("▸ Scroll pagination...");
     let mut d = driver().await;
@@ -392,6 +401,7 @@ async fn weird_scroll_pagination() {
 // 10. Reconnection resilience — drop connection, then query again
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_reconnection() {
     println!("▸ Reconnection resilience...");
     let mut d = driver().await;
@@ -423,6 +433,7 @@ async fn weird_reconnection() {
 // 11. Batch upsert — 1000 points in a single call
 // ═══════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires live Qdrant server"]
 async fn weird_batch_upsert_1000() {
     println!("▸ Batch upsert 1000 points...");
     let mut d = driver().await;

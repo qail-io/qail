@@ -12,6 +12,7 @@ const COLLECTION: &str = "e2e_test_collection";
 const VECTOR_DIM: usize = 4;
 
 #[tokio::test]
+#[ignore = "Requires live Qdrant server on localhost:6334"]
 async fn e2e_qdrant_lifecycle() {
     // ── 1. Connect (plain TCP) ──────────────────────────────────────
     println!("▸ Connecting to Qdrant gRPC on localhost:6334...");
