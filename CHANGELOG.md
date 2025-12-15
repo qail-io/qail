@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.4] - 2026-02-16
+
+### Added
+
+- **Gateway:** `qdrant` feature flag — `qail-qdrant` is now an optional dependency (default = on)
+  - Build without Qdrant: `cargo build -p qail-gateway --no-default-features`
+  - Vector operations return descriptive error when feature is disabled
+- **Project:** `SECURITY.md` — vulnerability disclosure policy with GitHub Security Advisories
+
+### Fixed
+
+- **Gateway:** 14 integration tests (`bench_pg_vs_qdrant`, `hybrid_rag`, `e2e_qdrant`, `e2e_weird`) marked `#[ignore]` — no longer block `cargo test --workspace` without live infra
+- **Git:** Scrubbed ~150 MB of build artifacts from history (`.so`, `.dylib`, `.a`, `.o`, `zig-cache/`, `docs/book/`, PHP build cache)
+- **Git:** Removed `schema.qail` (production DB schema) from all historical commits
+
 ## [0.20.3] - 2026-02-16
 
 ### Added

@@ -2737,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.20.3"
+version = "0.20.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2755,7 +2755,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.20.3"
+version = "0.20.4"
 dependencies = [
  "chrono",
  "nom 8.0.0",
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "qail-gateway"
-version = "0.20.3"
+version = "0.20.4"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -2830,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "qail-pg"
-version = "0.20.3"
+version = "0.20.4"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "qail-qdrant"
-version = "0.20.3"
+version = "0.20.4"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2884,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "qail-workflow"
-version = "0.20.3"
+version = "0.20.4"
 dependencies = [
  "async-trait",
  "chrono",
