@@ -49,7 +49,7 @@ futures = "0.3"
 
 # Prometheus metrics
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 
 # Cache
 moka = { version = "0.12", features = ["sync"] }
