@@ -222,12 +222,6 @@ qail.rs/
 
 ---
 
-## Production
-
-Qail powers [ExampleApp](https://example.com) — a multi-operator maritime booking platform with full RLS tenant isolation across 27+ tables, serving real customers in production.
-
----
-
 ## Documentation
 
 - 📖 [Full Documentation](https://qail.rs/docs)
