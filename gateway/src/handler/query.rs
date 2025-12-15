@@ -9,7 +9,7 @@ use axum::{
     response::Json,
 };
 use std::sync::Arc;
-use bincode::Options;
+
 
 use super::{
     BatchQueryResult, BatchRequest, BatchResponse,
@@ -80,7 +80,7 @@ pub async fn execute_query(
 
 /// Execute a QAIL query (BINARY format)
 /// 
-/// Accepts bincode-encoded QAIL AST and returns JSON results.
+/// Accepts postcard-encoded QAIL AST and returns JSON results.
 /// This is faster than text format since it skips parsing.
 pub async fn execute_query_binary(
     State(state): State<Arc<GatewayState>>,
@@ -97,17 +97,16 @@ pub async fn execute_query_binary(
     
     tracing::debug!("Executing binary query ({} bytes, user: {})", body.len(), auth.user_id);
     
-    // Deserialize the binary QAIL AST
     // SECURITY (E3): Limit deserialization to 64 KiB to prevent allocation bombs.
-    let mut cmd: qail_core::ast::Qail = match bincode::options()
-        .with_limit(64 * 1024)
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .deserialize(&body)
-    {
+    if body.len() > 64 * 1024 {
+        return Err(ApiError::bad_request("PAYLOAD_TOO_LARGE", "Binary query exceeds 64 KiB limit"));
+    }
+    
+    // Deserialize the binary QAIL AST (postcard format)
+    let mut cmd: qail_core::ast::Qail = match postcard::from_bytes(&body) {
         Ok(cmd) => cmd,
         Err(e) => {
-            tracing::warn!("Bincode decode error: {}", e);
+            tracing::warn!("Postcard decode error: {}", e);
             return Err(ApiError::bad_request("DECODE_ERROR", format!("Invalid binary format: {}", e)));
         }
     };
