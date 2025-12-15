@@ -77,4 +77,4 @@ qdrant = ["dep:qail-qdrant"]
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hdrhistogram = "7"
-proptest = "1.9.0"
+proptest = "1.10.0"
