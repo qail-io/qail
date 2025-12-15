@@ -8,8 +8,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a QAIL query
     let cmd = Qail::get("harbors").columns(["id", "name"]).limit(3);
     
-    // Serialize to bincode
-    let bytes = bincode::serialize(&cmd)?;
+    // Serialize to postcard
+    let bytes = postcard::to_allocvec(&cmd)?;
     println!("Binary query size: {} bytes", bytes.len());
     
     // Send to gateway

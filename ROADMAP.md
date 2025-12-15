@@ -149,10 +149,8 @@
 - [x] HTTP/2 batch pipelining — 4x speedup
 - [x] Connection pooling with semaphore concurrency
 
-### Redis (qail-redis) ✅
-- [x] Unified `Qail::redis_get()` / `Qail::redis_set()` API
-- [x] Native RESP3 protocol encoder
-- [x] Connection pooling
+### Redis (qail-redis) — Removed
+- Removed in v0.20.0 — replaced by in-process Moka + LRU caching
 
 ---
 
@@ -165,7 +163,7 @@
 - [x] `qail types` — `schema.qail` → Rust typed schema module
 - [x] `qail check` — validate `.qail` syntax
 - [x] `qail worker` — hybrid outbox daemon (PG → Qdrant sync)
-- [x] LSP server (`qail-lsp`) for editor integration
+- [/] LSP server (`qail-lsp`) — basic scaffolding built, completion/hover/actions handlers in progress
 
 ---
 
@@ -199,7 +197,7 @@
 
 ## 9. Native Versioning (Data Virtualization) ✅
 
-> *"GitHub for Databases" — branching at the application layer.*
+> *Row-level Copy-on-Write branching — overlay-based reads and writes without cloning tables.*
 
 ### Phase 1: Branch Infrastructure ✅ (v0.18.6)
 - [x] `BranchContext` in `core/src/branch.rs` — branch identity struct
@@ -224,13 +222,15 @@
 
 ---
 
-## 10. Infrastructure-Aware Compiler ⏳
+## 10. Infrastructure-Aware Compiler — Deferred
 
 > *Verify external resources at compile time.*
 
 - [ ] `schema.qail` extensions: `bucket`, `queue`, `topic`
 - [ ] `build.rs` validates resources exist in Terraform/AWS/GCP
 - [ ] Compile error if referencing non-existent infra
+
+> **Note:** Low priority — focusing on gateway features and crates.io publish first.
 
 ---
 
@@ -281,7 +281,16 @@
 - [x] Schema introspection endpoint (`GET /api/_schema`)
 - [x] "First query in 5 minutes" quickstart — `docs/quickstart.md`
 - [x] Swagger UI integration (`GET /docs` — CDN-hosted, dark theme, auto-JWT)
-- [ ] "Qail vs PostgREST" comparison page with benchmark data
+
+### Phase 7: Auto-REST API Generation ✅ (v0.20.3)
+
+- [x] Schema-driven CRUD routes — `GET/POST/PUT/PATCH/DELETE /api/{table}`
+- [x] Aggregation endpoints — `GET /api/{table}/aggregate`
+- [x] Nested routes from FK graph — `GET /api/{parent}/{id}/{child}`
+- [x] EXPLAIN pre-check endpoints — `GET /api/{table}/explain`
+- [x] DevEx routes — `/api/_tables`, `/api/_openapi`, `/api/_health`
+- [x] RLS policy parsing from schema files
+- [x] UUID handling refinement in REST API context
 
 ### Phase 6: Realtime Documentation ✅
 
@@ -328,7 +337,7 @@
 
 ---
 
-## Current Status (Feb 13, 2026) — v0.20.1
+## Current Status (Feb 16, 2026) — v0.20.4
 
 | Section | Status | Version |
 |---|---|---|
@@ -337,10 +346,10 @@
 | 3. Schema DDL Coverage | ✅ Complete (3/3 phases) | v0.18.5 |
 | 4. Database Introspection | ✅ Complete (3/3 phases, zero raw SQL) | v0.18.5 |
 | 5. Migration Engine | ✅ Complete (3/3 phases) | v0.15.9 |
-| 6. Multi-Driver AST | ✅ Complete (PG + Qdrant + Redis) | v0.14.13 |
-| 7. CLI Toolchain | ✅ Complete | v0.15.7 |
+| 6. Multi-Driver AST | ✅ Complete (PG + Qdrant) | v0.20.4 |
+| 7. CLI Toolchain | ✅ Complete (LSP planned) | v0.15.7 |
 | 8. Schema-as-Proof | ✅ Complete (4/4 phases) | v0.16.0 |
 | 9. Data Virtualization | ✅ Complete (4/4 phases) | v0.18.6 |
-| 10. Infra-Aware Compiler | ⏳ Planned | — |
-| 11. Market Readiness | ✅ Complete (6/6 phases) | v0.20.1 |
-| 12. Gateway Performance | ✅ Complete (pipelined RLS) | v0.20.1 |
+| 10. Infra-Aware Compiler | 💤 Deferred | — |
+| 11. Market Readiness | ✅ Complete (7/7 phases) | v0.20.3 |
+| 12. Gateway Performance | ✅ Complete (pipelined RLS) | v0.20.4 |

@@ -1,11 +1,11 @@
-# Qail — The Database Driver That Makes Bad Queries Impossible
+# Qail — Application-to-Database Pipeline with Compile-Time Safety
 
-> **Rust gives you memory safety. Qail gives you query safety.**
+> **From your app to PostgreSQL wire bytes — one typed AST, zero strings, built-in tenant isolation.**
 
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-qail.rs-blue)](https://qail.rs/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.18.6-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.20.5-green)](CHANGELOG.md)
 
 ---
 
@@ -173,14 +173,14 @@ GET    /api/{table}/_explain    # EXPLAIN ANALYZE
 GET    /api/{table}/_aggregate  # count, sum, avg, min, max
 ```
 
-**90% Hasura feature parity** — without GraphQL complexity:
+**A complete REST API layer for PostgreSQL:**
 
 - ✅ Auto-REST CRUD for all tables
 - ✅ FK-based JOIN expansion (`?expand=`) + nested expansion
 - ✅ Full-text search (`?search=`)
 - ✅ WebSocket subscriptions + live queries
 - ✅ Event triggers (mutation → webhook with retry)
-- ✅ JWT auth (HS256/RS256) + webhook auth
+- ✅ JWT auth (HS256/RS256) + API key auth
 - ✅ YAML policy engine + column permissions
 - ✅ Query allow-listing + complexity limits
 - ✅ Prometheus metrics + request tracing
@@ -195,22 +195,17 @@ GET    /api/{table}/_aggregate  # count, sum, avg, min, max
 qail.rs/
 ├── core/       AST engine, parser, validator, typed system, RLS, migrations
 ├── pg/         PostgreSQL driver (binary wire protocol, connection pool)
-├── gateway/    Auto-REST API server (Actix-web)
+├── gateway/    Auto-REST API server (Axum)
 ├── cli/        qail exec, pull, diff, migrate, types
-├── lsp/        Language server for .qail files
 ├── encoder/    Wire protocol encoder + C FFI for language bindings
-├── qdrant/     Qdrant vector DB driver
+├── qdrant/     Qdrant vector DB driver (optional)
 ├── workflow/   Workflow engine
-├── wasm/       Browser/Node.js WASM bindings (planned)
-├── redis/      Redis driver (planned)
-├── go/         Go bindings via daemon IPC (planned)
-├── py/         Python bindings via PyO3 (planned)
-└── php/        PHP bindings (planned)
+└── sdk/        Language bindings (TypeScript, Swift, Kotlin)
 ```
 
 ---
 
-## Feature Status (v0.18.6)
+## Feature Status (v0.20.4)
 
 | Category | Features |
 |----------|----------|
@@ -222,14 +217,8 @@ qail.rs/
 | **Migrations** | AST-native diffing, drift detection, impact analysis |
 | **Schema** | Views, Materialized Views, Functions, Triggers, Extensions, Sequences, Grants |
 | **Performance** | Connection Pool, Query Cache (LRU+TTL), Prepared Statements, Binary Protocol |
-| **Connection** | SSL/TLS, SCRAM-SHA-256, Unix Socket, mTLS, SSH Tunnel |
+| **Connection** | SSL/TLS, SCRAM-SHA-256, Unix Socket |
 | **Operations** | EXPLAIN ANALYZE, Statement Timeout, LOCK TABLE, Batch Transactions |
-
----
-
-## Production
-
-Qail powers [ExampleApp](https://example.com) — a multi-operator maritime booking platform with full RLS tenant isolation across 27+ tables, serving real customers in production.
 
 ---
 
