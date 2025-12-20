@@ -90,6 +90,8 @@ fn parse_action(input: &str) -> IResult<&str, Action> {
         value(Action::Gen, tag("gen")),
         value(Action::Make, tag("make")),
         value(Action::Mod, tag("mod")),
+        value(Action::Over, tag("over")),
+        value(Action::With, tag("with")),
     ))(input)
 }
 
@@ -159,24 +161,70 @@ fn parse_column_full_def_or_named(input: &str) -> IResult<&str, Column> {
         }));
     }
     
-    // 3. Opt: Type Definition (:type)
-    let (input, data_type) = opt(preceded(char(':'), parse_identifier))(input)?;
+    // 3. Opt: check for colon
+    if let Ok((input, _)) = char::<_, nom::error::Error<&str>>(':')(input) {
+        // We have a type OR a window function.
+        let (input, type_or_func) = parse_identifier(input)?;
+        
+        let (input, _) = ws_or_comment(input)?;
+        
+        // Peek/Check for open paren `(`
+        if let Ok((input, _)) = char::<_, nom::error::Error<&str>>('(')(input) {
+            // It IS a function call -> Window Column
+            // We sat on `(`, so continue parsing args
+            let (input, _) = ws_or_comment(input)?;
+            let (input, args) = opt(tuple((
+                parse_value,
+                many0(preceded(
+                    tuple((ws_or_comment, char(','), ws_or_comment)),
+                    parse_value
+                ))
+            )))(input)?;
+            let (input, _) = ws_or_comment(input)?;
+            let (input, _) = char(')')(input)?;
+            
+            let params = match args {
+                Some((first, mut rest)) => {
+                    let mut v = vec![first];
+                    v.append(&mut rest);
+                    v
+                },
+                None => vec![],
+            };
+
+            // Parse Order Cages (e.g. ^!amount) which are technically sort cages
+            let (input, sorts) = many0(parse_sort_cage)(input)?;
+            
+            // Parse Partition: {Part=...}
+            let (input, partitions) = opt(parse_partition_block)(input)?;
+            let partition = partitions.unwrap_or_default();
+
+            return Ok((input, Column::Window {
+                name: name.to_string(),
+                func: type_or_func.to_string(),
+                params,
+                partition,
+                order: sorts,
+            }));
+        } else {
+            // It is just a Type Definition
+            // Parse Constraints
+            let (input, constraints) = parse_constraints(input)?;
+            
+            return Ok((input, Column::Def { 
+                name: name.to_string(), 
+                data_type: type_or_func.to_string(), 
+                constraints 
+            }));
+        }
+    }
     
-    // 4. Opt: Constraints (^pk, ^uniq, ?)
+    // No colon, check for constraints (inferred type Def)
     let (input, constraints) = parse_constraints(input)?;
-    
-    if let Some(dt) = data_type {
-        // It's a Definition
-        Ok((input, Column::Def { 
-            name: name.to_string(), 
-            data_type: dt.to_string(), 
-            constraints 
-        }))
-    } else if !constraints.is_empty() {
-         // Has constraints but no type? Assume inferred or default, treat as Def
+    if !constraints.is_empty() {
          Ok((input, Column::Def { 
             name: name.to_string(), 
-            data_type: "str".to_string(), // Default or error? For now default strict, maybe str
+            data_type: "str".to_string(), 
             constraints 
         }))
     } else {
@@ -381,20 +429,58 @@ fn parse_value(input: &str) -> IResult<&str, Value> {
         // Boolean: true/false
         value(Value::Bool(true), tag("true")),
         value(Value::Bool(false), tag("false")),
-        // Function: name()
-        map(
-            recognize(pair(parse_identifier, tag("()"))),
-            |s: &str| Value::Function(s.trim_end_matches("()").to_string()),
-        ),
-        // Function without parens: now, etc.
+        // Function call: name(args)
+        parse_function_call,
+        // Function without parens: now, etc. (keyword-like)
         map(tag("now"), |_| Value::Function("now".to_string())),
         // Number (float or int)
         parse_number,
-        // Quoted string
+        // String
         parse_quoted_string,
         // Bare identifier (treated as string)
         map(parse_identifier, |s| Value::String(s.to_string())),
     ))(input)
+}
+
+/// Parse function call: name(arg1, arg2)
+fn parse_function_call(input: &str) -> IResult<&str, Value> {
+    let (input, name) = parse_identifier(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    let (input, args) = opt(tuple((
+        parse_value,
+        many0(preceded(
+            tuple((ws_or_comment, char(','), ws_or_comment)),
+            parse_value
+        ))
+    )))(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    let (input, _) = char(')')(input)?;
+
+    let params = match args {
+        Some((first, mut rest)) => {
+            let mut v = vec![first];
+            v.append(&mut rest);
+            v
+        },
+        None => vec![],
+    };
+
+    // If it's a known function that returns a value type we strictly handle, we might map it.
+    // For now, Value::Function stores name and args? 
+    // Wait, Value::Function(String) only stores name! 
+    // We need to update Value::Function to store params or serialize as string?
+    // Current Ast: Value::Function(String). usage `now()`.
+    // If I change AST Value::Function, I break deserialization potentially or need large refactor.
+    // For `rank()`, it's a valid Value?? 
+    // Actually, `Value` is for conditions `WHERE col = val`.
+    // Window Func is in `Column`. `Column::Window` has `params: Vec<Value>`.
+    
+    // So parse_function_call should return (String, Vec<Value>) not Value.
+    // But parse_value needs to return Value.
+    // Let's keep parse_value returns Value::Function(name) for simple 0-arg funcs.
+    // For parsing Window Columns, we use a dedicated parser.
+    Ok((input, Value::Function(format!("{}({})", name, params.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")))))
 }
 
 /// Parse a number (integer or float).
@@ -419,6 +505,73 @@ fn parse_quoted_string(input: &str) -> IResult<&str, Value> {
     let (input, _) = char('\'')(input)?;
     
     Ok((input, Value::String(content.to_string())))
+}
+
+/// Parse Window Column Definition: @name:func(args)^sort{Part=...}
+fn parse_window_column(input: &str) -> IResult<&str, Column> {
+    // 1. Parse Name
+    let (input, name) = parse_identifier(input)?;
+    let (input, _) = char(':')(input)?;
+    
+    // 2. Parse Function Call (name + params)
+    let (input, func_name) = parse_identifier(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    let (input, args) = opt(tuple((
+        parse_value,
+        many0(preceded(
+            tuple((ws_or_comment, char(','), ws_or_comment)),
+            parse_value
+        ))
+    )))(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    let (input, _) = char(')')(input)?;
+    
+    let params = match args {
+        Some((first, mut rest)) => {
+            let mut v = vec![first];
+            v.append(&mut rest);
+            v
+        },
+        None => vec![],
+    };
+
+    // 3. Parse Order Cages (e.g. ^!amount)
+    let (input, sorts) = many0(parse_sort_cage)(input)?;
+    
+    // 4. Parse Partition: {Part=col1,col2}
+    let (input, partitions) = opt(parse_partition_block)(input)?;
+    let partition = partitions.unwrap_or_default();
+
+    Ok((input, Column::Window {
+        name: name.to_string(),
+        func: func_name.to_string(),
+        params,
+        partition,
+        order: sorts,
+    }))
+}
+
+fn parse_partition_block(input: &str) -> IResult<&str, Vec<String>> {
+    let (input, _) = char('{')(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    let (input, _) = tag("Part")(input)?; // Case sensitive?
+    let (input, _) = ws_or_comment(input)?;
+    let (input, _) = char('=')(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    
+    let (input, first) = parse_identifier(input)?;
+    let (input, mut rest) = many0(preceded(
+        tuple((ws_or_comment, char(','), ws_or_comment)),
+        parse_identifier
+    ))(input)?;
+    
+    let (input, _) = ws_or_comment(input)?;
+    let (input, _) = char('}')(input)?;
+    
+    let mut cols = vec![first.to_string()];
+    cols.append(&mut rest.iter().map(|s| s.to_string()).collect());
+    Ok((input, cols))
 }
 
 #[cfg(test)]

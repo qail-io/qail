@@ -20,6 +20,8 @@ impl ToSql for QailCmd {
             Action::Gen => format!("-- gen::{}  (generates Rust struct, not SQL)", self.table),
             Action::Make => self.to_create_table_sql(),
             Action::Mod => self.to_alter_table_sql(),
+            Action::Over => self.to_window_sql(),
+            Action::With => self.to_cte_sql(),
         }
     }
 }
@@ -325,6 +327,118 @@ impl QailCmd {
             }
         }
         stmts.join(";\n")
+    }
+
+    /// Generate Window Function SQL (Pillar 8).
+    fn to_window_sql(&self) -> String {
+        // Build SELECT with window function columns
+        let mut sql = String::from("SELECT ");
+
+        let cols: Vec<String> = self.columns.iter().map(|c| {
+            match c {
+                Column::Window { name, func, params, partition, order } => {
+                    let params_str = if params.is_empty() {
+                        String::new()
+                    } else {
+                        params.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+                    };
+                    
+                    let mut over_clause = String::from("OVER (");
+                    if !partition.is_empty() {
+                        over_clause.push_str("PARTITION BY ");
+                        over_clause.push_str(&partition.join(", "));
+                        if !order.is_empty() {
+                            over_clause.push(' ');
+                        }
+                    }
+                    if !order.is_empty() {
+                        over_clause.push_str("ORDER BY ");
+                        let order_parts: Vec<String> = order.iter().map(|cage| {
+                            match &cage.kind {
+                                CageKind::Sort(SortOrder::Asc) => {
+                                    if let Some(cond) = cage.conditions.first() {
+                                        format!("{} ASC", cond.column)
+                                    } else {
+                                        String::new()
+                                    }
+                                }
+                                CageKind::Sort(SortOrder::Desc) => {
+                                    if let Some(cond) = cage.conditions.first() {
+                                        format!("{} DESC", cond.column)
+                                    } else {
+                                        String::new()
+                                    }
+                                }
+                                _ => String::new(),
+                            }
+                        }).filter(|s| !s.is_empty()).collect();
+                        over_clause.push_str(&order_parts.join(", "));
+                    }
+                    over_clause.push(')');
+                    
+                    format!("{}({}) {} AS {}", func, params_str, over_clause, name)
+                }
+                _ => c.to_string(),
+            }
+        }).collect();
+
+        sql.push_str(&cols.join(", "));
+        sql.push_str(" FROM ");
+        sql.push_str(&self.table);
+
+        // Handle cages (WHERE, LIMIT, etc.)
+        let where_clauses: Vec<String> = self.cages.iter()
+            .filter(|c| matches!(c.kind, CageKind::Filter))
+            .flat_map(|c| c.conditions.iter().map(|cond| cond.to_sql()))
+            .collect();
+
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+
+        sql
+    }
+
+    /// Generate CTE SQL (Pillar 8).
+    fn to_cte_sql(&self) -> String {
+        // For WITH, the table is the CTE name. We generate: WITH cte_name AS (...) SELECT * FROM cte_name
+        // The inner query comes from cages (filter/limit). This is a stub—full impl needs chained queries.
+        let mut sql = String::from("WITH ");
+        sql.push_str(&self.table);
+        sql.push_str(" AS (");
+
+        // Generate inner SELECT from columns and cages
+        sql.push_str("SELECT ");
+        if self.columns.is_empty() {
+            sql.push('*');
+        } else {
+            let cols: Vec<String> = self.columns.iter().map(|c| c.to_string()).collect();
+            sql.push_str(&cols.join(", "));
+        }
+        sql.push_str(" FROM ");
+        sql.push_str(&self.table);
+
+        // Cages for inner query
+        let where_clauses: Vec<String> = self.cages.iter()
+            .filter(|c| matches!(c.kind, CageKind::Filter))
+            .flat_map(|c| c.conditions.iter().map(|cond| cond.to_sql()))
+            .collect();
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+        
+        for cage in &self.cages {
+            if let CageKind::Limit(n) = cage.kind {
+                sql.push_str(&format!(" LIMIT {}", n));
+            }
+        }
+
+        sql.push_str(") SELECT * FROM ");
+        sql.push_str(&self.table);
+
+        sql
     }
 }
 

@@ -163,6 +163,14 @@ pub enum Column {
         kind: ModKind,
         col: Box<Column>,
     },
+    /// Window Function Definition
+    Window {
+        name: String,
+        func: String,
+        params: Vec<Value>,
+        partition: Vec<String>,
+        order: Vec<Cage>,
+    },
 }
 
 impl std::fmt::Display for Column {
@@ -187,6 +195,35 @@ impl std::fmt::Display for Column {
                 ModKind::Add => write!(f, "+{}", col),
                 ModKind::Drop => write!(f, "-{}", col),
             },
+            Column::Window { name, func, params, partition, order } => {
+                write!(f, "{}:{}(", name, func)?;
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", p)?;
+                }
+                write!(f, ")")?;
+                
+                // Print partitions if any (custom syntax for display?)
+                if !partition.is_empty() {
+                    write!(f, "{{Part=")?;
+                    for (i, p) in partition.iter().enumerate() {
+                        if i > 0 { write!(f, ",")?; }
+                        write!(f, "{}", p)?;
+                    }
+                    write!(f, "}}")?;
+                }
+
+                // Print order cages
+                for cage in order {
+                   // We need a helper to print cages without brackets?? 
+                   // Actually cages print format is not defined here yet.
+                   // Spec implies order is just sort cages suffixed like ^uniq
+                   // But order cages are `[^!col]`.
+                   // Let's just output them as cages for now or skip until transpiler.
+                   // For display purposes, we might need to serialize cages or skip.
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -257,6 +294,10 @@ pub enum Action {
     Make,
     /// Modify Table (Mod)
     Mod,
+    /// Window Function (Over)
+    Over,
+    /// CTE (With)
+    With,
 }
 
 impl std::fmt::Display for Action {
@@ -269,6 +310,8 @@ impl std::fmt::Display for Action {
             Action::Gen => write!(f, "GEN"),
             Action::Make => write!(f, "MAKE"),
             Action::Mod => write!(f, "MOD"),
+            Action::Over => write!(f, "OVER"),
+            Action::With => write!(f, "WITH"),
         }
     }
 }
