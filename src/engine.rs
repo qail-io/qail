@@ -7,14 +7,14 @@ use crate::error::QailError;
 use crate::parser;
 use crate::transpiler::ToSql;
 
-use sqlx::any::{AnyPoolOptions, AnyRow};
-use sqlx::{AnyPool, Column, Row, TypeInfo};
+use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::{Column, Row, TypeInfo};
 use std::collections::HashMap;
 
 /// A database connection for executing QAIL queries.
 #[derive(Clone)]
 pub struct QailDB {
-    pool: AnyPool,
+    pool: PgPool,
 }
 
 impl QailDB {
@@ -22,8 +22,6 @@ impl QailDB {
     ///
     /// Supported URL formats:
     /// - `postgres://user:pass@host/db`
-    /// - `mysql://user:pass@host/db`
-    /// - `sqlite://path/to/db.sqlite` or `sqlite::memory:`
     ///
     /// # Example
     ///
@@ -31,10 +29,7 @@ impl QailDB {
     /// let db = QailDB::connect("postgres://localhost/mydb").await?;
     /// ```
     pub async fn connect(url: &str) -> Result<Self, QailError> {
-        // Install default drivers
-        sqlx::any::install_default_drivers();
-        
-        let pool = AnyPoolOptions::new()
+        let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(url)
             .await
@@ -64,14 +59,14 @@ impl QailDB {
     }
 
     /// Get a reference to the underlying connection pool.
-    pub fn pool(&self) -> &AnyPool {
+    pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 }
 
 /// A QAIL query builder with parameter bindings.
 pub struct QailQuery {
-    pool: AnyPool,
+    pool: PgPool,
     qail: String,
     sql: Option<String>,
     bindings: Vec<QailValue>,
@@ -89,7 +84,7 @@ pub enum QailValue {
 }
 
 impl QailQuery {
-    fn new(pool: AnyPool, qail: String) -> Self {
+    fn new(pool: PgPool, qail: String) -> Self {
         Self {
             pool,
             qail,
@@ -99,7 +94,7 @@ impl QailQuery {
         }
     }
 
-    fn raw(pool: AnyPool, sql: String) -> Self {
+    fn raw(pool: PgPool, sql: String) -> Self {
         Self {
             pool,
             qail: String::new(),
@@ -164,7 +159,7 @@ impl QailQuery {
             };
         }
 
-        let rows: Vec<AnyRow> = query
+        let rows: Vec<PgRow> = query
             .fetch_all(&self.pool)
             .await
             .map_err(|e| QailError::Execution(e.to_string()))?;
@@ -193,7 +188,7 @@ impl QailQuery {
             };
         }
 
-        let row: AnyRow = query
+        let row: PgRow = query
             .fetch_one(&self.pool)
             .await
             .map_err(|e| QailError::Execution(e.to_string()))?;
@@ -226,33 +221,77 @@ impl QailQuery {
     }
 }
 
-/// Convert an AnyRow to a HashMap.
-fn row_to_map(row: &AnyRow) -> HashMap<String, serde_json::Value> {
+/// Convert a PgRow to a HashMap, handling Postgres-specific types.
+fn row_to_map(row: &PgRow) -> HashMap<String, serde_json::Value> {
+    use sqlx::ValueRef;
+    
     let mut map = HashMap::new();
 
     for (i, column) in row.columns().iter().enumerate() {
         let name = column.name().to_string();
         let type_name = column.type_info().name();
 
+        // Try to get the raw value first to check for NULL
+        let value_ref = row.try_get_raw(i);
+        if value_ref.is_err() || value_ref.as_ref().map(|v| v.is_null()).unwrap_or(true) {
+            map.insert(name, serde_json::Value::Null);
+            continue;
+        }
+
         let value: serde_json::Value = match type_name {
-            "BOOL" | "BOOLEAN" => row
+            "BOOL" => row
                 .try_get::<bool, _>(i)
                 .map(serde_json::Value::Bool)
                 .unwrap_or(serde_json::Value::Null),
-            "INT2" | "INT4" | "INT8" | "INTEGER" | "BIGINT" | "SMALLINT" => row
+            "INT2" | "INT4" => row
+                .try_get::<i32, _>(i)
+                .map(|v| serde_json::Value::Number(v.into()))
+                .unwrap_or(serde_json::Value::Null),
+            "INT8" => row
                 .try_get::<i64, _>(i)
                 .map(|v| serde_json::Value::Number(v.into()))
                 .unwrap_or(serde_json::Value::Null),
-            "FLOAT4" | "FLOAT8" | "REAL" | "DOUBLE" => row
+            "FLOAT4" => row
+                .try_get::<f32, _>(i)
+                .ok()
+                .and_then(|v| serde_json::Number::from_f64(v as f64))
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            "FLOAT8" => row
                 .try_get::<f64, _>(i)
                 .ok()
                 .and_then(|v| serde_json::Number::from_f64(v))
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
-            _ => row
+            "UUID" => row
+                .try_get::<sqlx::types::Uuid, _>(i)
+                .map(|v| serde_json::Value::String(v.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            "TIMESTAMPTZ" | "TIMESTAMP" => row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>(i)
+                .map(|v| serde_json::Value::String(v.to_rfc3339()))
+                .or_else(|_| {
+                    row.try_get::<chrono::NaiveDateTime, _>(i)
+                        .map(|v| serde_json::Value::String(v.to_string()))
+                })
+                .unwrap_or(serde_json::Value::Null),
+            "DATE" => row
+                .try_get::<chrono::NaiveDate, _>(i)
+                .map(|v| serde_json::Value::String(v.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+            "TEXT" | "VARCHAR" | "CHAR" | "NAME" => row
                 .try_get::<String, _>(i)
                 .map(serde_json::Value::String)
                 .unwrap_or(serde_json::Value::Null),
+            "JSONB" | "JSON" => row
+                .try_get::<serde_json::Value, _>(i)
+                .unwrap_or(serde_json::Value::Null),
+            _ => {
+                // Fallback: try to get as string
+                row.try_get::<String, _>(i)
+                    .map(serde_json::Value::String)
+                    .unwrap_or_else(|_| serde_json::Value::String(format!("<{}>", type_name)))
+            }
         };
 
         map.insert(name, value);
