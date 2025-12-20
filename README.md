@@ -67,23 +67,23 @@ qail = "0.1"
 
 ## 💡 Usage
 
-### CLI — The `kq` Command
+### CLI — The `qail` Command
 
 ```bash
 # Fetch all users
-kq "get::users•@*"
+qail 'get::users•@*'
 
 # Get specific columns with filter
-kq "get::orders•@id@total@status[user_id=$1][lim=10]" --bind 42
+qail 'get::orders•@id@total@status[user_id=$1][lim=10]' --bind 42
 
 # Update a record
-kq "set::users•[verified=true][id=$1]" --bind 7
+qail 'set::users•[verified=true][id=$1]' --bind 7
 
 # Delete with condition
-kq "del::sessions•[expired_at<now]"
+qail 'del::sessions•[expired_at<now]'
 
 # Transpile only (don't execute)
-kq "get::users•@*[active=true]" --dry-run
+qail 'get::users•@*[active=true]' --dry-run
 ```
 
 ### As a Library
@@ -329,7 +329,7 @@ cargo run -- "get::users•@*[lim=5]" --dry-run
 
 ## 📄 License
 
-MIT © 2024 QAIL Contributors
+MIT © 2025 QAIL Contributors
 
 ---
 
