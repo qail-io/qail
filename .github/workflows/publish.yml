@@ -60,6 +60,11 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Authenticate with Crates.io
+        uses: rust-lang/simpleinfra/github-actions/crates-io-auth@master
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish qail-core
         if: ${{ !inputs.dry_run }}
         run: cargo publish -p qail-core || echo "qail-core already published, skipping"
