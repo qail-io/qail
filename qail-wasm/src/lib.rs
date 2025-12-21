@@ -22,9 +22,9 @@ use nom::{
     IResult,
     branch::alt,
     bytes::complete::{tag, take_while1},
-    character::complete::{char, multispace0},
-    combinator::{map, opt, value},
-    multi::{many0, separated_list0},
+    character::complete::char,
+    combinator::{map, opt},
+    multi::many0,
     sequence::{delimited, preceded, tuple},
 };
 

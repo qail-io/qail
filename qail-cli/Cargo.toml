@@ -1,8 +1,8 @@
 [package]
 name = "qail"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
-description = "The Horizontal Query Language — Stop writing strings. Hook your data."
+description = "The Universal Query Transpiler - SQL is Assembly, Compile to Safety"
 license = "MIT"
 repository = "https://github.com/qail-rs/qail"
 readme = "../README.md"
@@ -10,18 +10,16 @@ categories = ["database", "command-line-utilities", "parser-implementations"]
 keywords = ["db", "sql", "cli", "query", "database"]
 
 [dependencies]
-qail-core = { path = "../qail-core", version = "0.5.0" }
-qail-macro = { path = "../qail-macro", version = "0.5.0" }
+qail-core = { path = "../qail-core", version = "0.6.0" }
+qail-macro = { path = "../qail-macro", version = "0.6.0" }
 clap = { version = "4.5", features = ["derive", "env"] }
-tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 colored = "2.0"
-comfy-table = "7.1"
 anyhow = "1.0"
 chrono = "0.4"
-sqlx = { version = "0.7", features = ["runtime-tokio", "tls-native-tls", "postgres", "mysql", "sqlite", "chrono", "uuid", "json"] }
 rustyline = "14.0"
 dirs = "5.0"
 
-
+[lints]
+workspace = true

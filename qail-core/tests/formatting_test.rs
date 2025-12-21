@@ -5,7 +5,7 @@ use qail_core::ast::*;
 fn test_comments_and_whitespace() {
     let query = r#"
         get::users -- The users table
-        • @*       -- Get everything
+        :'_       -- Get everything (all columns)
         // Just active ones
         [active=true]
         
@@ -23,7 +23,7 @@ fn test_comments_and_whitespace() {
 #[test]
 fn test_inline_comments_in_cages() {
     let query = r#"
-        get::users•@*
+        get::users:'_
         [
             active=true -- status check
             &
@@ -41,7 +41,7 @@ fn test_inline_comments_in_cages() {
 
 #[test]
 fn test_tabbed_formatting() {
-    let query = "get::users\t\t-- tabbed action\n\t•\n\t@id\n\t@email\n\t[id=$1]";
+    let query = "get::users\t\t-- tabbed action\n\t:\n\t'id\n\t'email\n\t[id=$1]";
     let cmd = parse(query).expect("Failed to parse tabbed query");
     assert_eq!(cmd.columns.len(), 2);
 }

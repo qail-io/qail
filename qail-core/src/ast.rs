@@ -220,14 +220,9 @@ impl std::fmt::Display for Column {
                     write!(f, "}}")?;
                 }
 
-                // Print order cages
-                for cage in order {
-                   // We need a helper to print cages without brackets?? 
-                   // Actually cages print format is not defined here yet.
-                   // Spec implies order is just sort cages suffixed like ^uniq
-                   // But order cages are `[^!col]`.
-                   // Let's just output them as cages for now or skip until transpiler.
-                   // For display purposes, we might need to serialize cages or skip.
+                // Print order cages (TODO: implement proper order display)
+                for _cage in order {
+                    // Order cages are sort cages - display format TBD
                 }
                 Ok(())
             }

@@ -9,4 +9,9 @@ members = [
     "qail-wasm",
 ]
 
-
+[workspace.lints.rust]
+warnings = "deny"
+unused = "deny"
+dead_code = "deny"
+unused_imports = "deny"
+unused_variables = "deny"

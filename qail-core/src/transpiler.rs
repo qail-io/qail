@@ -188,21 +188,6 @@ impl QailCmd {
         for cage in &self.cages {
             if let CageKind::Filter = cage.kind {
                 if is_first_filter {
-                    fn map_type(t: &str) -> &str {
-                        match t {
-                            "str" | "text" | "string" => "VARCHAR(255)",
-                            "int" | "i32" => "INT",
-                            "bigint" | "i64" => "BIGINT",
-                            "uuid" => "UUID",
-                            "bool" | "boolean" => "BOOLEAN",
-                            "dec" | "decimal" => "DECIMAL",
-                            "float" | "f64" => "DOUBLE PRECISION",
-                            "serial" => "SERIAL",
-                            "timestamp" | "time" => "TIMESTAMP",
-                            "json" | "jsonb" => "JSONB",
-                            _ => t, // usage of raw types if unknown
-                        }
-                    }
                     // First filter cage is the SET payload
                     for cond in &cage.conditions {
                         set_clauses.push(format!("{} = {}", cond.column, cond.value));
@@ -558,37 +543,37 @@ mod tests {
 
     #[test]
     fn test_simple_select() {
-        let cmd = parse("get::users•@*").unwrap();
+        let cmd = parse("get::users:'_").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT * FROM users");
     }
 
     #[test]
     fn test_select_columns() {
-        let cmd = parse("get::users•@id@email@role").unwrap();
+        let cmd = parse("get::users:'id'email'role").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT id, email, role FROM users");
     }
 
     #[test]
     fn test_select_with_where() {
-        let cmd = parse("get::users•@*[active=true]").unwrap();
+        let cmd = parse("get::users:'_[active=true]").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT * FROM users WHERE active = true");
     }
 
     #[test]
     fn test_select_with_limit() {
-        let cmd = parse("get::users•@*[lim=10]").unwrap();
+        let cmd = parse("get::users:'_[lim=10]").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT * FROM users LIMIT 10");
     }
 
     #[test]
     fn test_select_with_order() {
-        let cmd = parse("get::users•@*[^!created_at]").unwrap();
+        let cmd = parse("get::users:'_[^!created_at]").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT * FROM users ORDER BY created_at DESC");
     }
 
     #[test]
     fn test_select_complex() {
-        let cmd = parse("get::users•@id@email[active=true][^!created_at][lim=10]").unwrap();
+        let cmd = parse("get::users:'id'email[active=true][^!created_at][lim=10]").unwrap();
         assert_eq!(
             cmd.to_sql(),
             "SELECT id, email FROM users WHERE active = true ORDER BY created_at DESC LIMIT 10"
@@ -597,44 +582,44 @@ mod tests {
 
     #[test]
     fn test_update() {
-        let cmd = parse("set::users•[verified=true][id=$1]").unwrap();
+        let cmd = parse("set::users:[verified=true][id=$1]").unwrap();
         assert_eq!(cmd.to_sql(), "UPDATE users SET verified = true WHERE id = $1");
     }
 
     #[test]
     fn test_delete() {
-        let cmd = parse("del::sessions•[expired_at<now]").unwrap();
+        let cmd = parse("del::sessions:[expired_at<now]").unwrap();
         // Note: 'now' is parsed as a function
         assert_eq!(cmd.to_sql(), "DELETE FROM sessions WHERE expired_at < now()");
     }
 
     #[test]
     fn test_fuzzy_match() {
-        let cmd = parse("get::users•@*[name~$1]").unwrap();
+        let cmd = parse("get::users:'_[name~$1]").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT * FROM users WHERE name ILIKE '%' || $1 || '%'");
     }
 
     #[test]
     fn test_or_conditions() {
-        let cmd = parse("get::users•@*[role=admin|role=mod]").unwrap();
+        let cmd = parse("get::users:'_[role=admin|role=mod]").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT * FROM users WHERE (role = 'admin' OR role = 'mod')");
     }
 
     #[test]
     fn test_mixed_and_or() {
-        let cmd = parse("get::users•@*[active=true][role=admin|role=mod]").unwrap();
+        let cmd = parse("get::users:'_[active=true][role=admin|role=mod]").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT * FROM users WHERE active = true AND (role = 'admin' OR role = 'mod')");
     }
 
     #[test]
     fn test_array_unnest() {
-        let cmd = parse("get::posts•@*[tags[*]~$1]").unwrap();
+        let cmd = parse("get::posts:'_[tags[*]~$1]").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT * FROM posts WHERE EXISTS (SELECT 1 FROM unnest(tags) _el WHERE _el ILIKE '%' || $1 || '%')");
     }
 
     #[test]
     fn test_complex_array_search() {
-        let cmd = parse("get::kb•@*[active=true][keywords[*]~$1|question~$1]").unwrap();
+        let cmd = parse("get::kb:'_[active=true][keywords[*]~$1|question~$1]").unwrap();
         assert_eq!(
             cmd.to_sql(),
             "SELECT * FROM kb WHERE active = true AND (EXISTS (SELECT 1 FROM unnest(keywords) _el WHERE _el ILIKE '%' || $1 || '%') OR question ILIKE '%' || $1 || '%')"
@@ -643,13 +628,13 @@ mod tests {
 
     #[test]
     fn test_offset_pagination() {
-        let cmd = parse("get::users•@*[lim=10][off=20]").unwrap();
+        let cmd = parse("get::users:'_[lim=10][off=20]").unwrap();
         assert_eq!(cmd.to_sql(), "SELECT * FROM users LIMIT 10 OFFSET 20");
     }
 
     #[test]
     fn test_insert_returning() {
-        let cmd = parse("add::users•@id@email[name=John]").unwrap();
+        let cmd = parse("add::users:'id'email[name=John]").unwrap();
         let sql = cmd.to_sql();
         assert!(sql.contains("RETURNING"));
     }
@@ -664,21 +649,21 @@ mod tests {
 
     #[test]
     fn test_left_join() {
-        let cmd = parse("get::users<-profiles•@id@name").unwrap();
+        let cmd = parse("get::users<-profiles:'id'name").unwrap();
         let sql = cmd.to_sql();
         assert!(sql.contains("LEFT JOIN"));
     }
 
     #[test]
     fn test_right_join() {
-        let cmd = parse("get::users->>profiles•@id@name").unwrap();
+        let cmd = parse("get::users->>profiles:'id'name").unwrap();
         let sql = cmd.to_sql();
         assert!(sql.contains("RIGHT JOIN"));
     }
 
     #[test]
     fn test_distinct() {
-        let cmd = parse("get!::users•@role").unwrap();
+        let cmd = parse("get!::users:'role").unwrap();
         assert!(cmd.distinct);
         assert_eq!(cmd.to_sql(), "SELECT DISTINCT role FROM users");
     }

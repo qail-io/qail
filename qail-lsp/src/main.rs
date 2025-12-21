@@ -5,8 +5,7 @@
 //! - Hover information (SQL preview)
 //! - Completion suggestions
 
-use qail_core::{parse, transpiler::ToSql};
-use serde_json::Value;
+use qail_core::parse;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -69,14 +68,6 @@ impl QailLanguageServer {
 
         diagnostics
     }
-
-    /// Get SQL preview for hover
-    fn get_sql_preview(&self, query: &str) -> Option<String> {
-        match parse(query) {
-            Ok(cmd) => Some(cmd.to_sql()),
-            Err(_) => None,
-        }
-    }
 }
 
 #[tower_lsp::async_trait]
@@ -129,7 +120,7 @@ impl LanguageServer for QailLanguageServer {
         }
     }
 
-    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+    async fn hover(&self, _params: HoverParams) -> Result<Option<Hover>> {
         // For now, return basic hover info
         // In a full implementation, we'd extract the QAIL query at the position
         Ok(Some(Hover {
@@ -142,7 +133,7 @@ impl LanguageServer for QailLanguageServer {
         }))
     }
 
-    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+    async fn completion(&self, _params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let completions = vec![
             // Actions
             CompletionItem {

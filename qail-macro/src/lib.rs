@@ -1,49 +1,40 @@
+//! QAIL Procedural Macros
+//!
+//! This crate provides the `qail!` macro for compile-time validated QAIL queries.
+//!
+//! # Usage
+//!
+//! The macro parses QAIL at compile time and returns the SQL string.
+//! Use with any database driver of your choice.
+//!
+//! ```ignore
+//! // Returns a &'static str with the SQL
+//! let sql = qail!("get::users:'_[active=true]");
+//! // => "SELECT * FROM users WHERE active = true"
+//!
+//! // Use with your preferred driver
+//! pool.query(sql).fetch_all().await?;
+//! ```
+
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse::Parse, parse::ParseStream, parse_macro_input, Expr, Ident, LitStr, Token};
+use syn::{parse_macro_input, LitStr};
 use qail_core::transpiler::ToSql;
 
-struct QailInput {
-    pool: Ident,
-    _comma1: Token![,],
-    query: LitStr,
-    args: Vec<Expr>,
-}
-
-impl Parse for QailInput {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let pool: Ident = input.parse()?;
-        let _comma1: Token![,] = input.parse()?;
-        let query: LitStr = input.parse()?;
-        
-        let mut args = Vec::new();
-        while input.peek(Token![,]) {
-            let _comma: Token![,] = input.parse()?;
-            if input.is_empty() {
-                break;
-            }
-            let arg: Expr = input.parse()?;
-            args.push(arg);
-        }
-
-        Ok(QailInput {
-            pool,
-            _comma1,
-            query,
-            args,
-        })
-    }
-}
-
+/// Compile-time QAIL to SQL transpilation.
+///
+/// Parses the QAIL query at compile time and emits the SQL string.
+/// If the query has a syntax error, compilation fails with a helpful message.
+///
+/// # Example
+///
+/// ```ignore
+/// let sql = qail!("get::users:'id'email[active=true]");
+/// // sql = "SELECT id, email FROM users WHERE active = true"
+/// ```
 #[proc_macro]
 pub fn qail(input: TokenStream) -> TokenStream {
-    let QailInput {
-        pool,
-        query,
-        args,
-        ..
-    } = parse_macro_input!(input as QailInput);
-
+    let query = parse_macro_input!(input as LitStr);
     let query_str = query.value();
 
     // Parse QAIL at compile time
@@ -59,11 +50,9 @@ pub fn qail(input: TokenStream) -> TokenStream {
     // Transpile to SQL
     let sql = cmd.to_sql();
 
-    // Generate the sqlx::query! call
-    // usage: sqlx::query!(sql, args...).fetch_all(&pool)
+    // Return the SQL string as a &'static str
     let expand = quote! {
-        sqlx::query!(#sql, #(#args),*)
-            .fetch_all(&#pool)
+        #sql
     };
 
     TokenStream::from(expand)
