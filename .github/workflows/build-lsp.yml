@@ -77,10 +77,29 @@ jobs:
         with:
           path: artifacts
 
+      - name: Rename and Collect Artifacts
+        run: |
+          mkdir release_assets
+          # Move and rename each artifact to match its directory name (which is the asset_name)
+          for dir in artifacts/*; do
+            if [ -d "$dir" ]; then
+              asset_name=$(basename "$dir")
+              # Find the binary inside (either qail-lsp or qail-lsp.exe)
+              if [ -f "$dir/qail-lsp.exe" ]; then
+                mv "$dir/qail-lsp.exe" "release_assets/$asset_name"
+              elif [ -f "$dir/qail-lsp" ]; then
+                mv "$dir/qail-lsp" "release_assets/$asset_name"
+              else
+                echo "Warning: No binary found in $dir"
+              fi
+            fi
+          done
+          ls -R release_assets
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/**/*
+          files: release_assets/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
