@@ -35,11 +35,11 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while, take_while1},
-    character::complete::{char, digit1, multispace1, not_line_ending},
+    bytes::complete::{tag, take_until, take_while, take_while1},
+    character::complete::{char, digit1, multispace0, multispace1, not_line_ending},
     combinator::{map, opt, recognize, value},
-    multi::many0,
-    sequence::{pair, preceded, tuple},
+    multi::{many0, separated_list1},
+    sequence::{delimited, pair, preceded, tuple},
     IResult,
 };
 
@@ -285,7 +285,55 @@ fn parse_constraints(input: &str) -> IResult<&str, Vec<Constraint>> {
         value(Constraint::PrimaryKey, tag("^pk")),
         value(Constraint::Unique, tag("^uniq")),
         value(Constraint::Nullable, char('?')),
+        parse_default_constraint,
+        parse_check_constraint,
     )))(input)
+}
+
+/// Parse DEFAULT value constraint: `= value` or `= func()`
+fn parse_default_constraint(input: &str) -> IResult<&str, Constraint> {
+    let (input, _) = preceded(multispace0, char('='))(input)?;
+    let (input, _) = multispace0(input)?;
+    
+    // Parse function call like uuid(), now(), or literal values
+    let (input, value) = alt((
+        // Function call: name()
+        map(
+            pair(
+                take_while1(|c: char| c.is_alphanumeric() || c == '_'),
+                tag("()")
+            ),
+            |(name, parens): (&str, &str)| format!("{}{}", name, parens)
+        ),
+        // Numeric literal
+        map(
+            take_while1(|c: char| c.is_numeric() || c == '.' || c == '-'),
+            |s: &str| s.to_string()
+        ),
+        // Quoted string
+        map(
+            delimited(char('"'), take_until("\""), char('"')),
+            |s: &str| format!("'{}'", s)
+        ),
+    ))(input)?;
+    
+    Ok((input, Constraint::Default(value)))
+}
+
+/// Parse CHECK constraint: `^check("a","b","c")`
+fn parse_check_constraint(input: &str) -> IResult<&str, Constraint> {
+    let (input, _) = tag("^check(")(input)?;
+    let (input, values) = separated_list1(
+        char(','),
+        delimited(
+            multispace0,
+            delimited(char('"'), take_until("\""), char('"')),
+            multispace0
+        )
+    )(input)?;
+    let (input, _) = char(')')(input)?;
+    
+    Ok((input, Constraint::Check(values.into_iter().map(|s| s.to_string()).collect())))
 }
 
 fn parse_agg_func(input: &str) -> IResult<&str, AggregateFunc> {
@@ -965,5 +1013,52 @@ mod tests {
         assert_eq!(cmd.action, Action::Set);
         assert_eq!(cmd.cages.len(), 2);
         assert_eq!(cmd.cages[1].conditions[0].value, Value::Param(1));
+    }
+
+    // ========================================================================
+    // Schema v0.7.0 Tests (DEFAULT, CHECK)
+    // ========================================================================
+
+    #[test]
+    fn test_make_with_default_uuid() {
+        let cmd = parse("make::users:'id:uuid^pk = uuid()").unwrap();
+        assert_eq!(cmd.action, Action::Make);
+        assert_eq!(cmd.table, "users");
+        assert_eq!(cmd.columns.len(), 1);
+        if let Column::Def { name, data_type, constraints } = &cmd.columns[0] {
+            assert_eq!(name, "id");
+            assert_eq!(data_type, "uuid");
+            assert!(constraints.contains(&Constraint::PrimaryKey));
+            assert!(constraints.iter().any(|c| matches!(c, Constraint::Default(v) if v == "uuid()")));
+        } else {
+            panic!("Expected Column::Def");
+        }
+    }
+
+    #[test]
+    fn test_make_with_default_numeric() {
+        let cmd = parse("make::stats:'count:bigint = 0").unwrap();
+        assert_eq!(cmd.action, Action::Make);
+        if let Column::Def { constraints, .. } = &cmd.columns[0] {
+            assert!(constraints.iter().any(|c| matches!(c, Constraint::Default(v) if v == "0")));
+        } else {
+            panic!("Expected Column::Def");
+        }
+    }
+
+    #[test]
+    fn test_make_with_check_constraint() {
+        let cmd = parse(r#"make::orders:'status:varchar^check("pending","paid","cancelled")"#).unwrap();
+        assert_eq!(cmd.action, Action::Make);
+        if let Column::Def { name, constraints, .. } = &cmd.columns[0] {
+            assert_eq!(name, "status");
+            let check = constraints.iter().find(|c| matches!(c, Constraint::Check(_)));
+            assert!(check.is_some());
+            if let Some(Constraint::Check(vals)) = check {
+                assert_eq!(vals, &vec!["pending".to_string(), "paid".to_string(), "cancelled".to_string()]);
+            }
+        } else {
+            panic!("Expected Column::Def");
+        }
     }
 }

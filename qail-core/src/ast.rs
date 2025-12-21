@@ -243,6 +243,10 @@ pub enum Constraint {
     PrimaryKey,
     Unique,
     Nullable,
+    /// DEFAULT value (e.g., `= uuid()`, `= 0`, `= now()`)
+    Default(String),
+    /// CHECK constraint with allowed values (e.g., `^check("a","b")`)
+    Check(Vec<String>),
 }
 
 impl std::fmt::Display for Constraint {
@@ -251,6 +255,8 @@ impl std::fmt::Display for Constraint {
             Constraint::PrimaryKey => write!(f, "pk"),
             Constraint::Unique => write!(f, "uniq"),
             Constraint::Nullable => write!(f, "?"),
+            Constraint::Default(val) => write!(f, "={}", val),
+            Constraint::Check(vals) => write!(f, "check({})", vals.join(",")),
         }
     }
 }

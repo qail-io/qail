@@ -303,12 +303,38 @@ impl QailCmd {
                     line.push_str(" NOT NULL");
                 }
 
+                // Handle DEFAULT value
+                for constraint in constraints {
+                    if let Constraint::Default(val) = constraint {
+                        line.push_str(" DEFAULT ");
+                        // Map common functions to SQL equivalents
+                        let sql_default = match val.as_str() {
+                            "uuid()" => "gen_random_uuid()",
+                            "now()" => "NOW()",
+                            other => other,
+                        };
+                        line.push_str(sql_default);
+                    }
+                }
+
                 if constraints.contains(&Constraint::PrimaryKey) {
                     line.push_str(" PRIMARY KEY");
                 }
                 if constraints.contains(&Constraint::Unique) {
                     line.push_str(" UNIQUE");
                 }
+
+                // Handle CHECK constraint
+                for constraint in constraints {
+                    if let Constraint::Check(vals) = constraint {
+                        line.push_str(&format!(
+                            " CHECK ({} IN ({}))",
+                            name,
+                            vals.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                }
+
                 defs.push(line);
             }
         }
