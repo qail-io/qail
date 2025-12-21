@@ -19,7 +19,6 @@ jobs:
   publish:
     name: Publish
     runs-on: ubuntu-latest
-    environment: release
     permissions:
       id-token: write
       contents: read
@@ -33,6 +32,11 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Check Cargo Version
+        run: |
+          cargo --version
+          rustc --version
 
       - name: Verify versions match tag
         if: startsWith(github.ref, 'refs/tags/v')
