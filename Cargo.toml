@@ -6,5 +6,7 @@ members = [
     "qail-cli",
     "qail-bench",
     "qail-lsp",
+    "qail-wasm",
 ]
+
 
