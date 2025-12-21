@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod engine;
 pub mod error;
+pub mod validator;
 pub mod parser;
 pub mod schema;
 pub mod transpiler;
