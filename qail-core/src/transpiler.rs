@@ -4,6 +4,31 @@
 
 use crate::ast::*;
 
+/// SQL reserved words that must be quoted when used as identifiers.
+const RESERVED_WORDS: &[&str] = &[
+    "order", "group", "user", "table", "select", "from", "where", "join",
+    "left", "right", "inner", "outer", "on", "and", "or", "not", "null",
+    "true", "false", "limit", "offset", "as", "in", "is", "like", "between",
+    "having", "union", "all", "distinct", "case", "when", "then", "else", "end",
+    "create", "alter", "drop", "insert", "update", "delete", "index", "key",
+    "primary", "foreign", "references", "default", "constraint", "check",
+];
+
+/// Escape an identifier if it's a reserved word or contains special chars.
+/// Returns the identifier quoted with double quotes if needed.
+pub fn escape_identifier(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let needs_escaping = RESERVED_WORDS.contains(&lower.as_str())
+        || name.chars().any(|c| !c.is_alphanumeric() && c != '_')
+        || name.chars().next().map(|c| c.is_numeric()).unwrap_or(false);
+    
+    if needs_escaping {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    } else {
+        name.to_string()
+    }
+}
+
 /// Trait for converting AST nodes to SQL.
 pub trait ToSql {
     /// Convert this node to a SQL string.
@@ -250,6 +275,16 @@ impl QailCmd {
                 sql.push_str(&values.join(", "));
                 sql.push(')');
             }
+        }
+
+        // RETURNING clause - if columns are specified, return them
+        if !self.columns.is_empty() {
+            let cols: Vec<String> = self.columns.iter().map(|c| c.to_string()).collect();
+            sql.push_str(" RETURNING ");
+            sql.push_str(&cols.join(", "));
+        } else {
+            // Default to returning * for convenience
+            sql.push_str(" RETURNING *");
         }
 
         sql
@@ -601,4 +636,40 @@ mod tests {
             "SELECT * FROM kb WHERE active = true AND (EXISTS (SELECT 1 FROM unnest(keywords) _el WHERE _el ILIKE '%' || $1 || '%') OR question ILIKE '%' || $1 || '%')"
         );
     }
+
+    #[test]
+    fn test_offset_pagination() {
+        let cmd = parse("get::users•@*[lim=10][off=20]").unwrap();
+        assert_eq!(cmd.to_sql(), "SELECT * FROM users LIMIT 10 OFFSET 20");
+    }
+
+    #[test]
+    fn test_insert_returning() {
+        let cmd = parse("add::users•@id@email[name=John]").unwrap();
+        let sql = cmd.to_sql();
+        assert!(sql.contains("RETURNING"));
+    }
+
+    #[test]
+    fn test_escape_reserved_words() {
+        assert_eq!(escape_identifier("users"), "users");
+        assert_eq!(escape_identifier("order"), "\"order\"");
+        assert_eq!(escape_identifier("group"), "\"group\"");
+        assert_eq!(escape_identifier("user"), "\"user\"");
+    }
+
+    #[test]
+    fn test_left_join() {
+        let cmd = parse("get::users<-profiles•@id@name").unwrap();
+        let sql = cmd.to_sql();
+        assert!(sql.contains("LEFT JOIN"));
+    }
+
+    #[test]
+    fn test_right_join() {
+        let cmd = parse("get::users->>profiles•@id@name").unwrap();
+        let sql = cmd.to_sql();
+        assert!(sql.contains("RIGHT JOIN"));
+    }
 }
+

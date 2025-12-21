@@ -101,10 +101,38 @@ fn parse_identifier(input: &str) -> IResult<&str, &str> {
 }
 
 fn parse_joins(input: &str) -> IResult<&str, Vec<Join>> {
-    many0(map(preceded(preceded(ws_or_comment, tag("->")), parse_identifier), |t| Join {
-        table: t.to_string(),
+    many0(parse_single_join)(input)
+}
+
+/// Parse a single join: `->` (INNER), `<-` (LEFT), `->>` (RIGHT)
+fn parse_single_join(input: &str) -> IResult<&str, Join> {
+    let (input, _) = ws_or_comment(input)?;
+    
+    // Try RIGHT JOIN first (->>)
+    if let Ok((remaining, _)) = tag::<_, _, nom::error::Error<&str>>("->>") (input) {
+        let (remaining, table) = parse_identifier(remaining)?;
+        return Ok((remaining, Join {
+            table: table.to_string(),
+            kind: JoinKind::Right,
+        }));
+    }
+    
+    // Try LEFT JOIN (<-)
+    if let Ok((remaining, _)) = tag::<_, _, nom::error::Error<&str>>("<-") (input) {
+        let (remaining, table) = parse_identifier(remaining)?;
+        return Ok((remaining, Join {
+            table: table.to_string(),
+            kind: JoinKind::Left,
+        }));
+    }
+    
+    // Default: INNER JOIN (->)
+    let (input, _) = tag("->")(input)?;
+    let (input, table) = parse_identifier(input)?;
+    Ok((input, Join {
+        table: table.to_string(),
         kind: JoinKind::Inner,
-    }))(input)
+    }))
 }
 
 /// Parse columns (hooks).
@@ -268,6 +296,12 @@ fn parse_cage(input: &str) -> IResult<&str, Cage> {
         return Ok((remaining, cage));
     }
     
+    if let Ok((remaining, cage)) = parse_offset_cage(input) {
+        let (remaining, _) = ws_or_comment(remaining)?;
+        let (remaining, _) = char(']')(remaining)?;
+        return Ok((remaining, cage));
+    }
+    
     if let Ok((remaining, cage)) = parse_sort_cage(input) {
         let (remaining, _) = ws_or_comment(remaining)?;
         let (remaining, _) = char(']')(remaining)?;
@@ -301,6 +335,24 @@ fn parse_limit_cage(input: &str) -> IResult<&str, Cage> {
         input,
         Cage {
             kind: CageKind::Limit(n.parse().unwrap_or(10)),
+            conditions: vec![],
+            logical_op: LogicalOp::And,
+        },
+    ))
+}
+
+/// Parse offset cage [off=N].
+fn parse_offset_cage(input: &str) -> IResult<&str, Cage> {
+    let (input, _) = tag("off")(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    let (input, _) = char('=')(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    let (input, n) = digit1(input)?;
+    
+    Ok((
+        input,
+        Cage {
+            kind: CageKind::Offset(n.parse().unwrap_or(0)),
             conditions: vec![],
             logical_op: LogicalOp::And,
         },

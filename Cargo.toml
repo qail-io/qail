@@ -4,4 +4,5 @@ members = [
     "qail-core",
     "qail-macro",
     "qail-cli",
+    "qail-bench",
 ]
