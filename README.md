@@ -212,29 +212,41 @@ QAIL provides multiple integration paths:
 
 ### The C-API Advantage
 
-Instead of building separate bindings for each language, we expose a **Universal C-API** (`libqail`). Any language with FFI support can call QAIL directly:
+Instead of building separate bindings for each language, we expose a **Universal C-API** (`libqail`). Any language with FFI support can call QAIL directly.
 
+**Installation (Linux/macOS):**
+1. Download `libqail-v0.7.0.tar.gz` from Releases.
+2. Install header and library:
+   ```bash
+   sudo cp include/qail.h /usr/local/include/
+   sudo cp lib/libqail_ffi.so /usr/local/lib/  # .dylib on macOS
+   sudo ldconfig # Linux only
+   ```
+
+**Usage (C/C++):**
+Compile with `-lqail_ffi`:
 ```c
-// C / C++
 #include <qail.h>
-const char* sql = qail_transpile("get::users:'_ [ 0..10 ]");
+// ...
+// char* sql = qail_transpile("get::users:'_");
 ```
 
+**Usage (Python):**
 ```python
-# Python (via ctypes or cffi)
 from ctypes import cdll
-libqail = cdll.LoadLibrary("libqail.so")
-sql = libqail.qail_transpile(b"get::users:'_")
+lib = cdll.LoadLibrary("libqail_ffi.so") # or .dylib
+# ...
 ```
 
+**Usage (Go):**
 ```go
-// Go (via cgo)
-// #include <qail.h>
+/*
+#cgo LDFLAGS: -lqail_ffi
+#include <qail.h>
+*/
 import "C"
-sql := C.GoString(C.qail_transpile(C.CString("get::users:'_")))
+// ...
 ```
-
-**Same syntax. Same validation. Any driver.**
 
 ---
 
