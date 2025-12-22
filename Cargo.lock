@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "qail-bench"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "qail-core",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "colored",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "qail-ffi"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "qail-core",
  "serde_json",
@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "qail-lsp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "qail-core",
  "serde",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "qail-macro"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "proc-macro2",
  "qail-core",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "qail-wasm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "js-sys",
  "qail-core",

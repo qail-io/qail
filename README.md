@@ -48,7 +48,7 @@ cargo install qail
 
 ```toml
 [dependencies]
-qail-core = "0.6.1"
+qail-core = "0.8"
 ```
 
 ### Node.js / Browser (WASM)
@@ -208,14 +208,14 @@ QAIL provides multiple integration paths:
 | **Rust** | `qail-core` | Native crate, zero overhead |
 | **Node.js / Browser** | `qail-wasm` | WebAssembly module (~50KB) |
 | **C / C++** | `libqail` | Universal C-API for FFI |
-| **Python, Go, PHP, Java** | via C-API | Use `libqail` through your language's FFI |
+| **Python, Go, PHP, Java** | via C-API/FFI | Native bindings available |
 
 ### The C-API Advantage
 
 Instead of building separate bindings for each language, we expose a **Universal C-API** (`libqail`). Any language with FFI support can call QAIL directly.
 
 **Installation (Linux/macOS):**
-1. Download `libqail-v0.7.0.tar.gz` from Releases.
+1. Download `libqail-v0.8.0.tar.gz` from Releases.
 2. Install header and library:
    ```bash
    sudo cp include/qail.h /usr/local/include/

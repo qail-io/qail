@@ -15,7 +15,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::*;
 use qail_core::prelude::*;
-use qail_core::transpiler::ToSql;
+use qail_core::transpiler::{ToSql, Dialect};
 use anyhow::Result;
 
 #[derive(Parser)]
@@ -35,6 +35,10 @@ struct Cli {
     #[arg(short, long, value_enum, default_value = "sql")]
     format: OutputFormat,
 
+    /// Target SQL dialect
+    #[arg(short, long, value_enum, default_value = "postgres")]
+    dialect: CliDialect,
+
     /// Verbose output (show AST)
     #[arg(short, long)]
     verbose: bool,
@@ -48,6 +52,25 @@ enum OutputFormat {
     Sql,
     Json,
     Pretty,
+}
+
+#[derive(Clone, ValueEnum)]
+enum CliDialect {
+    Postgres,
+    Mysql,
+    Sqlite,
+    Sqlserver,
+}
+
+impl From<CliDialect> for Dialect {
+    fn from(val: CliDialect) -> Self {
+        match val {
+            CliDialect::Postgres => Dialect::Postgres,
+            CliDialect::Mysql => Dialect::MySQL,
+            CliDialect::Sqlite => Dialect::SQLite,
+            CliDialect::Sqlserver => Dialect::SqlServer,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -105,17 +128,18 @@ fn transpile_query(query: &str, cli: &Cli) -> Result<()> {
 
     // Parse the query
     let cmd = qail_core::parse(query).map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
+    let dialect: Dialect = cli.dialect.clone().into();
     
     match cli.format {
         OutputFormat::Sql => {
-            println!("{}", cmd.to_sql());
+            println!("{}", cmd.to_sql_with_dialect(dialect));
         }
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&cmd)?);
         }
         OutputFormat::Pretty => {
             println!("{}", "Generated SQL:".green().bold());
-            println!("{}", cmd.to_sql().white());
+            println!("{}", cmd.to_sql_with_dialect(dialect).white());
         }
     }
 
