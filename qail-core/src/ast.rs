@@ -270,6 +270,8 @@ impl QailCmd {
 pub struct Join {
     pub table: String,
     pub kind: JoinKind,
+    #[serde(default)]
+    pub on: Option<Vec<Condition>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -779,6 +781,8 @@ pub enum Value {
     Array(Vec<Value>),
     /// Subquery for IN/EXISTS expressions (e.g., WHERE id IN (SELECT ...))
     Subquery(Box<QailCmd>),
+    /// Column reference (e.g. JOIN ... ON a.id = b.id)
+    Column(String),
 }
 
 impl From<bool> for Value {
@@ -838,6 +842,7 @@ impl std::fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Subquery(cmd) => write!(f, "({})", cmd.table), // Placeholder display
+            Value::Column(col) => write!(f, "\"{}\"", col), // Placeholder, generator should quote properly
         }
     }
 }

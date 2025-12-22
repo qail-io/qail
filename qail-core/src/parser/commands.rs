@@ -15,10 +15,6 @@ use super::cages::*;
 pub fn parse_qail_cmd(input: &str) -> IResult<&str, QailCmd> {
     let (input, action) = parse_action(input)?;
     
-    // Check for DISTINCT variants:
-    // 1. !on(col,col) -> DISTINCT ON
-    // 2. ! -> DISTINCT
-    
     let (input, distinct_on) = if let Ok((input, _)) = tag::<_, _, nom::error::Error<&str>>("!on(")(input) {
         let (input, (cols, _)) = parse_constraint_columns(input)?;
         let (input, _) = char(')')(input)?;
@@ -92,7 +88,7 @@ pub fn parse_qail_cmd(input: &str) -> IResult<&str, QailCmd> {
             having: vec![],
             group_by_mode: GroupByMode::default(),
             ctes: vec![],
-            distinct_on: vec![],
+            distinct_on,
         },
     ))
 }

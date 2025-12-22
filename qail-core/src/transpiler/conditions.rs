@@ -161,6 +161,23 @@ impl ConditionToSql for Condition {
                 use crate::transpiler::ToSql;
                 format!("({})", cmd.to_sql())
             }
+            Value::Column(col) => {
+                 // Determine if it's "table"."col" or just "col"
+                 // Use resolve_col_syntax logic? Or simply quote?
+                 // Usually Join ON RHS is just an identifier, but transpiler logic in resolve_col_syntax
+                 // requires a QailCmd context which we don't have here efficiently (we have context: Option<&QailCmd> in other methods but strictly to_value_sql signature is fixed?).
+                 // Wait, to_value_sql signature is: fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String
+                 // We don't have context here.
+                 // However, we can use a basic split check or just quote full string.
+                 // If col is "users.id", generator.quote_identifier("users.id") might quote the whole thing which is wrong for Postgres ("users.id" vs "users"."id").
+                 // We should manually split if dot is present.
+                 if col.contains('.') {
+                     let parts: Vec<&str> = col.split('.').collect();
+                     parts.iter().map(|p| generator.quote_identifier(p)).collect::<Vec<String>>().join(".")
+                 } else {
+                     generator.quote_identifier(col)
+                 }
+            }
             v => v.to_string(), 
         }
     }
