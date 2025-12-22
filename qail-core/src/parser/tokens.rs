@@ -48,8 +48,18 @@ pub fn parse_action(input: &str) -> IResult<&str, Action> {
 }
 
 /// Parse an identifier (table name, column name).
+/// Parse an identifier (table name, column name).
 pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.')(input)
+    alt((
+        // Standard identifier
+        take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.'),
+        // LSP Snippet (e.g. ${1:table})
+        recognize(tuple((
+            tag("${"),
+            take_while(|c: char| c != '}'),
+            char('}'),
+        ))),
+    ))(input)
 }
 
 pub fn parse_joins(input: &str) -> IResult<&str, Vec<Join>> {

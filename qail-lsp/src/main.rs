@@ -68,6 +68,36 @@ impl QailLanguageServer {
         None
     }
 
+    /// Try to determine the active table context at cursors position
+    fn get_context_table(&self, uri: &str, line: usize, col: usize) -> Option<String> {
+        let docs = self.documents.read().ok()?;
+        let content = docs.get(uri)?;
+        let target_line = content.lines().nth(line)?;
+
+        if col > target_line.len() {
+            return None;
+        }
+
+        let prefix = &target_line[..col];
+        
+        // Regex to find 'action::table' pattern
+        // Simple heuristic: find last occurrence of '::'
+        if let Some(idx) = prefix.rfind("::") {
+            let potential_match = &prefix[idx+2..];
+            // Table name is usually the next word
+            // It might be followed by ' or [ or whitespace
+            let table_end = potential_match.find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(potential_match.len());
+            
+            let table = &potential_match[..table_end];
+            if !table.is_empty() {
+                return Some(table.to_string());
+            }
+        }
+        
+        None
+    }
+
     /// Parse QAIL and return diagnostics
     fn get_diagnostics(&self, text: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
@@ -166,6 +196,9 @@ impl LanguageServer for QailLanguageServer {
                     ]),
                     ..Default::default()
                 }),
+                definition_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -200,6 +233,34 @@ impl LanguageServer for QailLanguageServer {
             .await;
     }
 
+    /// Extract word at cursor position
+    fn get_word_at_position(&self, uri: &str, line: usize, col: usize) -> Option<String> {
+        let docs = self.documents.read().ok()?;
+        let content = docs.get(uri)?;
+        let target_line = content.lines().nth(line)?;
+        
+        let chars: Vec<char> = target_line.chars().collect();
+        if col >= chars.len() { return None; }
+        
+        // Find start
+        let mut start = col;
+        while start > 0 && chars[start-1].is_alphanumeric() || chars[start-1] == '_' {
+            start -= 1;
+        }
+        
+        // Find end
+        let mut end = col;
+        while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+            end += 1;
+        }
+        
+        if start < end {
+            Some(target_line[start..end].to_string())
+        } else {
+            None
+        }
+    }
+
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         if let Some(change) = params.content_changes.first() {
             // Update cached document
@@ -215,6 +276,151 @@ impl LanguageServer for QailLanguageServer {
                 .publish_diagnostics(params.text_document.uri, diagnostics, None)
                 .await;
         }
+    }
+
+    async fn goto_definition(&self, params: GotoDefinitionParams) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let line = params.text_document_position_params.position.line as usize;
+        let col = params.text_document_position_params.position.character as usize;
+        
+        if let Some(word) = self.get_word_at_position(&uri, line, col) {
+            // Check if it's a known table
+            let is_table = if let Ok(schema) = self.schema.read() {
+                if let Some(validator) = schema.as_ref() {
+                    validator.table_names().contains(&word)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if is_table {
+                // Return location in qail.schema.json
+                // We assume it's in the root
+                let root_uri = Option::<Url>::from(params.text_document_position_params.text_document.uri)
+                    .and_then(|u| u.join("./qail.schema.json").ok());
+                
+                if let Some(schema_uri) = root_uri {
+                    // Try to find line number
+                    let mut line_num = 0;
+                    if let Ok(path) = schema_uri.to_file_path() {
+                        if let Ok(content) = std::fs::read_to_string(path) {
+                            for (i, l) in content.lines().enumerate() {
+                                if l.contains(&format!("\"name\": \"{}\"", word)) {
+                                    line_num = i;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: schema_uri,
+                        range: Range {
+                            start: Position { line: line_num as u32, character: 0 },
+                            end: Position { line: line_num as u32, character: 100 },
+                        }
+                    })));
+                }
+            }
+        }
+        
+        Ok(None)
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri.to_string();
+        let line = params.text_document_position.position.line as usize;
+        let col = params.text_document_position.position.character as usize;
+        let new_name = params.new_name;
+
+        // Get word at cursor
+        if let Some(word) = self.get_word_at_position(&uri, line, col) {
+            // Read document content
+            if let Ok(docs) = self.documents.read() {
+                if let Some(content) = docs.get(&uri) {
+                    let mut edits = Vec::new();
+                    
+                    // Simple textual find/replace in current doc (MVP)
+                    for (i, line_str) in content.lines().enumerate() {
+                        let mut start_idx = 0;
+                        while let Some(idx) = line_str[start_idx..].find(&word) {
+                            let abs_idx = start_idx + idx;
+                            
+                            // Check boundaries to ensure whole word match
+                            let prev_char = if abs_idx > 0 { line_str.chars().nth(abs_idx - 1) } else { None };
+                            let next_char = line_str.chars().nth(abs_idx + word.len());
+                            
+                            let is_start_boundary = prev_char.map_or(true, |c| !c.is_alphanumeric() && c != '_');
+                            let is_end_boundary = next_char.map_or(true, |c| !c.is_alphanumeric() && c != '_');
+
+                            if is_start_boundary && is_end_boundary {
+                                edits.push(TextEdit {
+                                    range: Range {
+                                        start: Position { line: i as u32, character: abs_idx as u32 },
+                                        end: Position { line: i as u32, character: (abs_idx + word.len()) as u32 },
+                                    },
+                                    new_text: new_name.clone(),
+                                });
+                            }
+                            start_idx = abs_idx + word.len();
+                        }
+                    }
+
+                    if !edits.is_empty() {
+                         let mut changes = HashMap::new();
+                         changes.insert(params.text_document_position.text_document.uri, edits);
+                         return Ok(Some(WorkspaceEdit {
+                             changes: Some(changes),
+                             ..Default::default()
+                         }));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<Vec<CodeAction>>> {
+        let mut actions = Vec::new();
+
+        for diagnostic in params.context.diagnostics {
+            if let Some(code) = &diagnostic.code {
+                if let NumberOrString::String(s) = code {
+                    if s == "qail-schema" {
+                        // Check for "Did you mean '...'" in message
+                        if let Some(start_idx) = diagnostic.message.find("Did you mean '") {
+                            let rest = &diagnostic.message[start_idx + 14..];
+                            if let Some(end_idx) = rest.find('\'') {
+                                let suggestion = &rest[..end_idx];
+                                
+                                // Create fix
+                                let mut changes = HashMap::new();
+                                changes.insert(params.text_document.uri.clone(), vec![TextEdit {
+                                    range: diagnostic.range,
+                                    new_text: suggestion.to_string(),
+                                }]);
+
+                                actions.push(CodeAction {
+                                    title: format!("Change to '{}'", suggestion),
+                                    kind: Some(CodeActionKind::QUICKFIX),
+                                    diagnostics: Some(vec![diagnostic.clone()]),
+                                    edit: Some(WorkspaceEdit {
+                                        changes: Some(changes),
+                                        ..Default::default()
+                                    }),
+                                    is_preferred: Some(true),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Some(actions))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -257,7 +463,7 @@ impl LanguageServer for QailLanguageServer {
                 label: "get::".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("SELECT query".to_string()),
-                insert_text: Some("get::${1:table}•@${2:*}".to_string()),
+                insert_text: Some("get::${1:table} : ${2:'_}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
@@ -265,7 +471,7 @@ impl LanguageServer for QailLanguageServer {
                 label: "set::".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("UPDATE query".to_string()),
-                insert_text: Some("set::${1:table}•[${2:column}=${3:value}][${4:where}]".to_string()),
+                insert_text: Some("set::${1:table} [ ${2:column}=${3:value} ][ ${4:where} ]".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
@@ -273,7 +479,7 @@ impl LanguageServer for QailLanguageServer {
                 label: "del::".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("DELETE query".to_string()),
-                insert_text: Some("del::${1:table}•[${2:where}]".to_string()),
+                insert_text: Some("del::${1:table} [ ${2:where} ]".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
@@ -281,7 +487,7 @@ impl LanguageServer for QailLanguageServer {
                 label: "add::".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("INSERT query".to_string()),
-                insert_text: Some("add::${1:table}•@${2:columns}[${3:values}]".to_string()),
+                insert_text: Some("add::${1:table} : ${2:columns} [ ${3:values} ]".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
@@ -290,7 +496,7 @@ impl LanguageServer for QailLanguageServer {
                 label: "get!::".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("SELECT DISTINCT".to_string()),
-                insert_text: Some("get!::${1:table}•@${2:column}".to_string()),
+                insert_text: Some("get!::${1:table} : ${2:column}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
@@ -376,6 +582,24 @@ impl LanguageServer for QailLanguageServer {
                         detail: Some(format!("DELETE FROM {}", table)),
                         ..Default::default()
                     });
+                }
+
+                // Context-aware column completions
+                let uri = _params.text_document_position_params.text_document.uri.to_string();
+                let line = _params.text_document_position_params.position.line as usize;
+                let col = _params.text_document_position_params.position.character as usize;
+
+                if let Some(table) = self.get_context_table(&uri, line, col) {
+                   if let Some(columns) = validator.column_names(&table) {
+                       for col_name in columns {
+                           completions.push(CompletionItem {
+                               label: col_name.clone(),
+                               kind: Some(CompletionItemKind::FIELD),
+                               detail: Some(format!("Column of {}", table)),
+                               ..Default::default()
+                           });
+                       }
+                   }
                 }
             }
         }
