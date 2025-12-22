@@ -1,6 +1,6 @@
 [package]
 name = "qail-core"
-version = "0.8.4"
+version = "0.8.5"
 edition = "2024"
 description = "The Universal Query Transpiler - Core parser and transpiler"
 license = "MIT"

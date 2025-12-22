@@ -1,6 +1,6 @@
 [package]
 name = "qail-ffi"
-version = "0.8.4"
+version = "0.8.5"
 edition = "2021"
 description = "QAIL C-API for FFI bindings (Go, PHP, Python, Java)"
 license = "MIT"

@@ -12,10 +12,7 @@ impl SqlGenerator for InfluxGenerator {
     }
 
     fn placeholder(&self, _index: usize) -> String {
-         // InfluxQL HTTP API usually takes params or literals.
-         // Let's assume literals (no strict prepare supported in basic HTTP calls usually)
-         // But for structure, let's look like Postgres ($n) or just literals?
-         // Let's fallback to strings.
+         // InfluxQL HTTP API usually handles literals.
          "?".to_string() 
     }
 

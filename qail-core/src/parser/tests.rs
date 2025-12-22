@@ -51,7 +51,6 @@ fn test_v2_get_with_range_offset() {
     assert_eq!(cmd.cages.len(), 1);
     // Range 20..30 = LIMIT 10 with offset 20
     assert_eq!(cmd.cages[0].kind, CageKind::Limit(10));
-    // Offset stored in conditions as workaround
     assert_eq!(cmd.cages[0].conditions[0].column, "__offset__");
     assert_eq!(cmd.cages[0].conditions[0].value, Value::Int(20));
 }

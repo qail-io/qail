@@ -48,8 +48,8 @@ impl SqlGenerator for PostgresGenerator {
         for (i, key) in path.iter().enumerate() {
             let is_last = i == path.len() - 1;
             // Use -> (json) for intermediates, ->> (text) for last
-            // Note: If last is not strings, this might be issue, but general query assumes text or cast.
-            // Postgres ->> returns text. suitable for comparisons.
+            // Note: If the column is not text, an explicit cast may be required.
+            // Postgres ->> returns text, suitable for comparisons.
             let op = if is_last { "->>" } else { "->" };
             sql.push_str(&format!("{}'{}'", op, key));
         }

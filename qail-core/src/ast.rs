@@ -40,6 +40,9 @@ pub struct QailCmd {
     /// CTE definitions (for WITH/WITH RECURSIVE queries)
     #[serde(default)]
     pub ctes: Vec<CTEDef>,
+    /// DISTINCT ON columns (Postgres-specific)
+    #[serde(default)]
+    pub distinct_on: Vec<String>,
 }
 
 impl QailCmd {
@@ -58,6 +61,7 @@ impl QailCmd {
             having: vec![],
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
+            distinct_on: vec![],
         }
     }
 
@@ -76,6 +80,7 @@ impl QailCmd {
             having: vec![],
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
+            distinct_on: vec![],
         }
     }
 
@@ -94,6 +99,7 @@ impl QailCmd {
             having: vec![],
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
+            distinct_on: vec![],
         }
     }
 
@@ -112,6 +118,7 @@ impl QailCmd {
             having: vec![],
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
+            distinct_on: vec![],
         }
     }
     /// Add columns to hook (select).
@@ -210,6 +217,7 @@ impl QailCmd {
             set_ops: vec![],
             having: vec![],
             group_by_mode: GroupByMode::Simple,
+            distinct_on: vec![],
             ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,
@@ -269,8 +277,12 @@ pub enum JoinKind {
     Inner,
     Left,
     Right,
-    /// LATERAL join (Postgres, MySQL 8+) - allows subquery to reference outer query
+    /// LATERAL join (Postgres, MySQL 8+)
     Lateral,
+    /// FULL OUTER JOIN
+    Full,
+    /// CROSS JOIN
+    Cross,
 }
 
 /// Set operation type for combining queries
@@ -344,6 +356,7 @@ pub enum Column {
         params: Vec<Value>,
         partition: Vec<String>,
         order: Vec<Cage>,
+        frame: Option<WindowFrame>,
     },
     /// CASE WHEN expression
     Case {
@@ -351,6 +364,26 @@ pub enum Column {
         when_clauses: Vec<(Condition, Value)>,
         /// ELSE value (optional)
         else_value: Option<Box<Value>>,
+        /// Optional alias
+        alias: Option<String>,
+    },
+    /// JSON accessor (data->>'key' or data->'key')
+    JsonAccess {
+        /// Base column name
+        column: String,
+        /// JSON path/key
+        path: String,
+        /// true for ->> (as text), false for -> (as JSON)
+        as_text: bool,
+        /// Optional alias
+        alias: Option<String>,
+    },
+    /// Function call expression (COALESCE, NULLIF, etc.)
+    FunctionCall {
+        /// Function name (coalesce, nullif, etc.)
+        name: String,
+        /// Arguments to the function
+        args: Vec<String>,
         /// Optional alias
         alias: Option<String>,
     },
@@ -378,7 +411,7 @@ impl std::fmt::Display for Column {
                 ModKind::Add => write!(f, "+{}", col),
                 ModKind::Drop => write!(f, "-{}", col),
             },
-            Column::Window { name, func, params, partition, order } => {
+            Column::Window { name, func, params, partition, order, frame } => {
                 write!(f, "{}:{}(", name, func)?;
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 { write!(f, ", ")?; }
@@ -386,17 +419,22 @@ impl std::fmt::Display for Column {
                 }
                 write!(f, ")")?;
                 
-                // Print partitions if any (custom syntax for display?)
+                // Print partitions if any
                 if !partition.is_empty() {
                     write!(f, "{{Part=")?;
                     for (i, p) in partition.iter().enumerate() {
                         if i > 0 { write!(f, ",")?; }
                         write!(f, "{}", p)?;
                     }
+                    if let Some(fr) = frame {
+                        write!(f, ", Frame={:?}", fr)?; // Debug format for now
+                    }
                     write!(f, "}}")?;
+                } else if frame.is_some() {
+                     write!(f, "{{Frame={:?}}}", frame.as_ref().unwrap())?;
                 }
 
-                // Print order cages (TODO: implement proper order display)
+                // Print order cages
                 for _cage in order {
                     // Order cages are sort cages - display format TBD
                 }
@@ -411,6 +449,21 @@ impl std::fmt::Display for Column {
                     write!(f, " ELSE {}", e)?;
                 }
                 write!(f, " END")?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Column::JsonAccess { column, path, as_text, alias } => {
+                let op = if *as_text { "->>" } else { "->" };
+                write!(f, "{}{}{}", column, op, path)?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Column::FunctionCall { name, args, alias } => {
+                write!(f, "{}({})", name.to_uppercase(), args.join(", "))?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }
@@ -636,6 +689,14 @@ pub enum CageKind {
 pub enum SortOrder {
     Asc,
     Desc,
+    /// ASC NULLS FIRST (nulls at top)
+    AscNullsFirst,
+    /// ASC NULLS LAST (nulls at bottom)
+    AscNullsLast,
+    /// DESC NULLS FIRST (nulls at top)
+    DescNullsFirst,
+    /// DESC NULLS LAST (nulls at bottom)
+    DescNullsLast,
 }
 
 /// Logical operator between conditions.

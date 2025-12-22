@@ -61,7 +61,10 @@ fn build_aggregate(cmd: &QailCmd) -> String {
     for cage in &cmd.cages {
         match &cage.kind {
              CageKind::Sort(order) => {
-                 let val = match order { SortOrder::Asc => 1, SortOrder::Desc => -1 };
+                 let val = match order {
+                     SortOrder::Asc | SortOrder::AscNullsFirst | SortOrder::AscNullsLast => 1,
+                     SortOrder::Desc | SortOrder::DescNullsFirst | SortOrder::DescNullsLast => -1,
+                 };
                  if let Some(cond) = cage.conditions.first() {
                      stages.push(format!("{{ \"$sort\": {{ \"{}\": {} }} }}", cond.column, val));
                  }
@@ -89,13 +92,10 @@ fn build_find(cmd: &QailCmd) -> String {
             CageKind::Offset(n) => mongo.push_str(&format!(".skip({})", n)),
             CageKind::Sort(order) => {
                  let val = match order {
-                     SortOrder::Asc => 1,
-                     SortOrder::Desc => -1,
+                     SortOrder::Asc | SortOrder::AscNullsFirst | SortOrder::AscNullsLast => 1,
+                     SortOrder::Desc | SortOrder::DescNullsFirst | SortOrder::DescNullsLast => -1,
                  };
-                 // Simplified: assuming single sort for now or chaining. 
-                 // Real mongo .sort() takes object. 
-                 // Let's grab the column from conditions if present or just assume from cage if structure allows
-                 // But wait, Sort cages usually have conditions? No, parser stores sort col in condition.
+                 // Extract sort field from condition.
                  if let Some(cond) = cage.conditions.first() {
                      mongo.push_str(&format!(".sort({{ \"{}\": {} }})", cond.column, val));
                  }
@@ -240,7 +240,7 @@ fn value_to_json(v: &Value) -> String {
         Value::Float(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
-        Value::Param(i) => format!("\"$param{}\"", i), // Placeholder for mongo?
+        Value::Param(i) => format!("\"$param{}\"", i),
         _ => "\"unknown\"".to_string(),
     }
 }

@@ -170,7 +170,7 @@ fn build_cql_create_table(cmd: &QailCmd) -> String {
     }
     
     // Check cages for PK (fallback) if parser puts it there? No, usually in Def/TableConstraint.
-    // If no PK, Cassandra fails. Assume 'id' if exists?
+    // If no PK is defined, default to 'id' if it exists.
     if pks.is_empty() {
         // Find 'id' col
         if defs.iter().any(|d| d.starts_with("id ")) {

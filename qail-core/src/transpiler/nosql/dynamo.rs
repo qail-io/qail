@@ -22,7 +22,7 @@ fn build_get_item(cmd: &QailCmd) -> String {
     // DynamoDB uses KeyConditionExpression for keys, FilterExpression for others.
     // For simplicity, we'll map everything to FilterExpression unless we know schema (which we don't).
     // Or we outputs Scan/Query structure.
-    // Let's assume Scan/Query with FilterExpression.
+    // Default to Scan/Query with FilterExpression.
     
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": \"{}\"", cmd.table));
@@ -170,7 +170,7 @@ fn build_item_json(cmd: &QailCmd) -> String {
 }
 
 fn build_key_from_filter(cmd: &QailCmd) -> String {
-    // Naive: take the first filter condition as the PK
+    // Use the first filter condition as the primary key.
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
              if let Some(cond) = cage.conditions.first() {
@@ -230,7 +230,7 @@ fn build_create_table(cmd: &QailCmd) -> String {
         }
     }
     
-    // Fallback: If no PK marked, assume 'id'
+    // Fallback: If no PK is explicitly marked, use 'id' as the default HASH key.
     if key_schema.is_empty() {
         attr_defs.push("{ \"AttributeName\": \"id\", \"AttributeType\": \"S\" }".to_string());
         key_schema.push("{ \"AttributeName\": \"id\", \"KeyType\": \"HASH\" }".to_string());

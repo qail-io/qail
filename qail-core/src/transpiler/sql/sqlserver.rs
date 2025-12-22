@@ -24,7 +24,7 @@ impl SqlGenerator for SqlServerGenerator {
     }
 
     fn limit_offset(&self, limit: Option<usize>, offset: Option<usize>) -> String {
-        // T-SQL requires ORDER BY for OFFSET/FETCH (handled by DML builder logic ideally, but we assume it's there)
+        // T-SQL requires ORDER BY for OFFSET/FETCH.
         // Syntax: OFFSET n ROWS FETCH NEXT m ROWS ONLY
         // Note: If no offset, we use TOP (in SELECT clause) or default offset 0 if strict?
         // Actually, T-SQL supports `OFFSET 0 ROWS` if you have ORDER BY.

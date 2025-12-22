@@ -232,11 +232,6 @@ fn items_to_cage(items: Vec<BlockItem>, input: &str) -> IResult<&str, Cage> {
                             logical_op: LogicalOp::And,
                         }));
                     } else {
-                        // Store limit in conditions as a workaround? No, just return offset.
-                        // Actually, let's return a compound cage. But the AST doesn't support that.
-                        // For proper support, we'd need to extend the AST or return Vec<Cage>.
-                        // For now: return LIMIT with offset stored somehow.
-                        // Workaround: return the cage kind that combines both.
                         return Ok((input, Cage {
                             kind: CageKind::Limit(limit),
                             conditions: vec![Condition {

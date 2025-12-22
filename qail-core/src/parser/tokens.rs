@@ -3,7 +3,7 @@ use nom::{
     bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, digit1, multispace1, not_line_ending},
     combinator::{map, opt, recognize, value},
-    multi::{many0},
+    multi::{many0, separated_list1},
     sequence::{pair, preceded, tuple},
     IResult,
 };
@@ -38,7 +38,7 @@ pub fn parse_action(input: &str) -> IResult<&str, Action> {
         value(Action::With, tag("with")),
         value(Action::Index, tag("index")),
         // Transactions
-        value(Action::TxnStart, tag("txn")), // Will define specific variant in commands.rs
+        value(Action::TxnStart, tag("txn")), //specific variant in commands.rs
         value(Action::Put, tag("put")),
         value(Action::DropCol, tag("drop")),
         value(Action::RenameCol, tag("rename")),
@@ -80,6 +80,36 @@ fn parse_single_join(input: &str) -> IResult<&str, Join> {
         }));
     }
     
+    // FULL OUTER JOIN (<->)
+    if let Ok((remaining, _)) = tag::<_, _, nom::error::Error<&str>>("<->") (input) {
+        let (remaining, _) = ws_or_comment(remaining)?;
+        let (remaining, table) = parse_identifier(remaining)?;
+        return Ok((remaining, Join {
+            table: table.to_string(),
+            kind: JoinKind::Full,
+        }));
+    }
+
+    // CROSS JOIN (><)
+    if let Ok((remaining, _)) = tag::<_, _, nom::error::Error<&str>>("><") (input) {
+        let (remaining, _) = ws_or_comment(remaining)?;
+        let (remaining, table) = parse_identifier(remaining)?;
+        return Ok((remaining, Join {
+            table: table.to_string(),
+            kind: JoinKind::Cross,
+        }));
+    }
+
+    // LATERAL JOIN (->^)
+    if let Ok((remaining, _)) = tag::<_, _, nom::error::Error<&str>>("->^") (input) {
+        let (remaining, _) = ws_or_comment(remaining)?;
+        let (remaining, table) = parse_identifier(remaining)?;
+        return Ok((remaining, Join {
+            table: table.to_string(),
+            kind: JoinKind::Lateral,
+        }));
+    }
+
     // Try LEFT JOIN (<-)
     if let Ok((remaining, _)) = tag::<_, _, nom::error::Error<&str>>("<-") (input) {
         let (remaining, _) = ws_or_comment(remaining)?;
@@ -148,9 +178,25 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
         parse_double_quoted_string,
         // Single-quoted string
         parse_quoted_string,
+        // Array literal: ['a', 'b']
+        parse_array_literal,
         // Bare identifier (treated as string)
         map(parse_identifier, |s| Value::String(s.to_string())),
     ))(input)
+}
+
+/// Parse array literal: [val1, val2]
+fn parse_array_literal(input: &str) -> IResult<&str, Value> {
+    let (input, _) = char('[')(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    let (input, values) = separated_list1(
+        tuple((ws_or_comment, char(','), ws_or_comment)),
+        parse_value
+    )(input)?;
+    let (input, _) = ws_or_comment(input)?;
+    let (input, _) = char(']')(input)?;
+    
+    Ok((input, Value::Array(values)))
 }
 
 /// Parse function call: name(arg1, arg2)

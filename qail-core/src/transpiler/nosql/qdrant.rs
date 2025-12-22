@@ -20,7 +20,7 @@ fn build_qdrant_upsert(cmd: &QailCmd) -> String {
     // Body: { "points": [ { "id": 1, "vector": [...], "payload": {...} } ] }
     // let mut points = Vec::new(); // Unused
     
-    // We assume single point upsert for now from cages
+    // Single point upsert from payload/filter cages.
     let mut point_id = "0".to_string(); // Default ID?
     let mut vector = "[0.0]".to_string();
     let mut payload_parts = Vec::new();
@@ -84,7 +84,7 @@ fn build_qdrant_search(cmd: &QailCmd) -> String {
 
     // 1. Vector handling
     // We look for a condition with the key "vector" or similar, usage: [vector~[0.1, 0.2]]
-    // Or we assume any array value with Fuzzy match (~) is the query vector.
+    // Any array value with a Fuzzy match (~) is treated as the query vector.
     let mut vector_found = false;
     
     for cage in &cmd.cages {
@@ -115,8 +115,7 @@ fn build_qdrant_search(cmd: &QailCmd) -> String {
     if !vector_found {
         // Fallback: If no vector specified, Qdrant can effectively do a Scroll (listing), but "search" needs vector?
         // Actually, Qdrant supports Scroll API separate from Search. 
-        // But let's assume if no vector, we might imply using a "zero" vector or just outputting filter-only search (which Qdrant supports via scroll mostly, but search API might reject without vector in older versions, newer ones allow).
-        // Let's assume this is a pure Search transpiler.
+        // Default to zero vector for search if none specified.
         parts.push("\"vector\": [0.0]".to_string()); // Dummy vector or error? Let's use dummy to show intent.
     }
 
