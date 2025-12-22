@@ -23,7 +23,7 @@ pub fn build_json_table(cmd: &QailCmd, dialect: Dialect) -> String {
     let (source_table, source_col) = if parts.len() >= 2 {
         (parts[0], parts[1..].join("."))
     } else {
-        // If no table specified, assume it's a column reference from context
+        // If no table is specified, treat as a column reference.
         ("_", cmd.table.clone())
     };
     

@@ -24,11 +24,11 @@ fn build_hset(cmd: &QailCmd) -> String {
     
     // Key Logic: usually `table:id`. We need to extract ID from cages?
     // Or just use table as key prefix?
-    // Let's assume we look for a unique key in filter/payload cages?
+    // Extract unique key from filter or payload cages.
     // For simplicity: We construct HSET key field val field val
     // But HSET needs a specific KEY.
     // If user says `put::users:id` -> key `users:id`?
-    // Let's assume the first cage filter on 'id' or 'key' is the Redis Key suffix.
+    // Use the first cage filter on 'id' or 'key' as the Redis Key suffix.
     let mut redis_key = format!("entity{}", key); // Default
     let mut fields = Vec::new();
     

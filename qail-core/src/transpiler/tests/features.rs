@@ -403,14 +403,14 @@ fn test_recursive_cte() {
     
     // Outer query with CTE
     let mut cmd = QailCmd::get("emp_tree");
-    cmd.cte = Some(CTEDef {
+    cmd.ctes = vec![CTEDef {
         name: "emp_tree".to_string(),
         recursive: true,
         columns: vec!["id".to_string(), "name".to_string(), "manager_id".to_string()],
         base_query: Box::new(base),
         recursive_query: Some(Box::new(recursive)),
         source_table: Some("employees".to_string()),
-    });
+    }];
     cmd.action = Action::With;
     
     use crate::transpiler::dml::cte::build_cte;

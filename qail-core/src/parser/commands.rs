@@ -14,9 +14,26 @@ use super::cages::*;
 /// Parse the complete QAIL command.
 pub fn parse_qail_cmd(input: &str) -> IResult<&str, QailCmd> {
     let (input, action) = parse_action(input)?;
-    // Check for ! after action for DISTINCT (e.g., get!::users)
-    let (input, distinct_marker) = opt(char('!'))(input)?;
-    let distinct = distinct_marker.is_some();
+    
+    // Check for DISTINCT variants:
+    // 1. !on(col,col) -> DISTINCT ON
+    // 2. ! -> DISTINCT
+    
+    let (input, distinct_on) = if let Ok((input, _)) = tag::<_, _, nom::error::Error<&str>>("!on(")(input) {
+        let (input, (cols, _)) = parse_constraint_columns(input)?;
+        let (input, _) = char(')')(input)?;
+        (input, cols)
+    } else {
+        (input, vec![])
+    };
+
+    let (input, distinct) = if distinct_on.is_empty() {
+        let (input, distinct_marker) = opt(char('!'))(input)?;
+        (input, distinct_marker.is_some())
+    } else {
+        (input, false) // distinct_on implies distinct, but we store it separately
+    };
+
     let (input, _) = tag("::")(input)?;
     
     // Special handling for INDEX action
@@ -75,66 +92,92 @@ pub fn parse_qail_cmd(input: &str) -> IResult<&str, QailCmd> {
             having: vec![],
             group_by_mode: GroupByMode::default(),
             ctes: vec![],
+            distinct_on: vec![],
         },
     ))
 }
 
 /// Parse WITH (CTE) command.
 /// 
-/// Syntax: `with::cte_name { base_query } ~> { recursive_query } -> final_query`
+/// Syntax: `with::cte1 { ... } ~> { ... }; cte2 { ... } -> final_query`
 /// 
-/// Examples:
-/// - Simple CTE: `with::recent { get::orders:'_[created_at > now() - 7d] } -> get::recent:'_`
-/// - Recursive: `with::emp_tree { get::employees:'_[manager_id IS NULL] } ~> { get::employees:'_->emp_tree } -> get::emp_tree:'_`
+/// Supports multiple CTEs separated by semicolons.
+/// Recursive CTEs use `~> { ... }` syntax for the recursive part.
+/// All CTEs are followed by `->` pointing to the final query.
 fn parse_with_command(input: &str) -> IResult<&str, QailCmd> {
     let (input, _) = ws_or_comment(input)?;
     
-    // Parse CTE name
-    let (input, cte_name) = parse_identifier(input)?;
-    let (input, _) = ws_or_comment(input)?;
+    let mut ctes = Vec::new();
+    let mut remaining = input;
     
-    // Parse base query in braces: { get::... }
-    let (input, base_str) = delimited(
-        char('{'),
-        take_until("}"),
-        char('}')
-    )(input)?;
-    
-    // Recursively parse the base query
-    let (_, base_query) = parse_qail_cmd(base_str.trim())?;
-    
-    let (input, _) = ws_or_comment(input)?;
-    
-    // Check for recursive part: ~> { ... }
-    let (input, recursive_query) = if input.starts_with("~>") {
-        let (input, _) = tag("~>")(input)?;
+    loop {
+        // Parse CTE name
+        let (input, cte_name) = parse_identifier(remaining)?;
         let (input, _) = ws_or_comment(input)?;
-        let (input, rec_str) = delimited(
+        
+        // Parse base query: { ... }
+        let (input, base_str) = delimited(
             char('{'),
             take_until("}"),
             char('}')
         )(input)?;
-        let (_, rec_query) = parse_qail_cmd(rec_str.trim())?;
-        (input, Some(rec_query))
-    } else {
-        (input, None)
-    };
-    
-    let (input, _) = ws_or_comment(input)?;
-    
-    // Parse final query: -> get::cte_name:'_
-    let (input, _) = tag("->")(input)?;
-    let (input, _) = ws_or_comment(input)?;
-    let (_input, final_query) = parse_qail_cmd(input)?;
-    
-    // Extract column names from base query
-    let columns: Vec<String> = base_query.columns.iter().filter_map(|c| {
-        match c {
-            Column::Named(n) => Some(n.clone()),
-            Column::Aliased { alias, .. } => Some(alias.clone()),
-            _ => None,
+        
+        let (_, base_query) = parse_qail_cmd(base_str.trim())?;
+        
+        let (input, _) = ws_or_comment(input)?;
+        
+        // Parse recursive part: ~> { ... }
+        let (input, recursive_query) = if input.starts_with("~>") {
+            let (input, _) = tag("~>")(input)?;
+            let (input, _) = ws_or_comment(input)?;
+            let (input, rec_str) = delimited(
+                char('{'),
+                take_until("}"),
+                char('}')
+            )(input)?;
+            let (_, rec_query) = parse_qail_cmd(rec_str.trim())?;
+            (input, Some(rec_query))
+        } else {
+            (input, None)
+        };
+        
+        // Extract columns from base query for the CTE definition
+        let columns: Vec<String> = base_query.columns.iter().filter_map(|c| {
+            match c {
+                Column::Named(n) => Some(n.clone()),
+                Column::Aliased { alias, .. } => Some(alias.clone()),
+                _ => None,
+            }
+        }).collect();
+        
+        ctes.push(CTEDef {
+            name: cte_name.to_string(),
+            recursive: recursive_query.is_some(),
+            columns,
+            base_query: Box::new(base_query),
+            recursive_query: recursive_query.map(Box::new),
+            source_table: Some(cte_name.to_string()),
+        });
+        
+        let (input, _) = ws_or_comment(input)?;
+        
+        // Check separator or end
+        if input.starts_with("->") {
+            remaining = input;
+            break;
+        } else if input.starts_with(';') {
+            let (input, _) = char(';')(input)?;
+            let (input, _) = ws_or_comment(input)?;
+            remaining = input;
+        } else {
+            remaining = input;
         }
-    }).collect();
+    }
+    
+    // Parse final query: -> get::...
+    let (remaining, _) = tag("->")(remaining)?;
+    let (remaining, _) = ws_or_comment(remaining)?;
+    let (_input, final_query) = parse_qail_cmd(remaining)?;
     
     Ok((
         "",  // Consume all input
@@ -150,14 +193,8 @@ fn parse_with_command(input: &str) -> IResult<&str, QailCmd> {
             set_ops: vec![],
             having: vec![],
             group_by_mode: GroupByMode::default(),
-            ctes: vec![CTEDef {
-                name: cte_name.to_string(),
-                recursive: recursive_query.is_some(),
-                columns,
-                base_query: Box::new(base_query),
-                recursive_query: recursive_query.map(Box::new),
-                source_table: Some(cte_name.to_string()),
-            }],
+            distinct_on: vec![],
+            ctes,
         },
     ))
 }
@@ -196,5 +233,6 @@ fn parse_index_command(input: &str) -> IResult<&str, QailCmd> {
         having: vec![],
         group_by_mode: GroupByMode::default(),
         ctes: vec![],
+            distinct_on: vec![],
     }))
 }

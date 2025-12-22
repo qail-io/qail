@@ -244,8 +244,14 @@ fn explain_query(query: &str) {
                     let kind = match &cage.kind {
                         CageKind::Filter => "Filter".to_string(),
                         CageKind::Payload => "Payload".to_string(),
-                        CageKind::Sort(SortOrder::Asc) => "Sort ↑".to_string(),
-                        CageKind::Sort(SortOrder::Desc) => "Sort ↓".to_string(),
+                        CageKind::Sort(order) => match order {
+                            qail_core::ast::SortOrder::Asc => "Sort ↑".to_string(),
+                            qail_core::ast::SortOrder::Desc => "Sort ↓".to_string(),
+                            qail_core::ast::SortOrder::AscNullsFirst => "Sort ↑ (Nulls 1st)".to_string(),
+                            qail_core::ast::SortOrder::AscNullsLast => "Sort ↑ (Nulls Last)".to_string(),
+                            qail_core::ast::SortOrder::DescNullsFirst => "Sort ↓ (Nulls 1st)".to_string(),
+                            qail_core::ast::SortOrder::DescNullsLast => "Sort ↓ (Nulls Last)".to_string(),
+                        },
                         CageKind::Limit(n) => format!("Limit({})", n),
                         CageKind::Offset(n) => format!("Offset({})", n),
                         CageKind::Sample(n) => format!("Sample({}%)", n),

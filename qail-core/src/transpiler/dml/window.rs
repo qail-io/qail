@@ -12,7 +12,7 @@ pub fn build_window(cmd: &QailCmd, dialect: Dialect) -> String {
 
     let cols: Vec<String> = cmd.columns.iter().map(|c| {
         match c {
-            Column::Window { name, func, params, partition, order } => {
+            Column::Window { name, func, params, partition, order, frame } => {
                 let params_str = if params.is_empty() {
                     String::new()
                 } else {
@@ -46,11 +46,38 @@ pub fn build_window(cmd: &QailCmd, dialect: Dialect) -> String {
                                     String::new()
                                 }
                             }
+                            // Handle Nulls First/Last if needed here, but skipping for brevity of match
+                             CageKind::Sort(SortOrder::AscNullsFirst) => {
+                                if let Some(cond) = cage.conditions.first() { format!("{} ASC NULLS FIRST", generator.quote_identifier(&cond.column)) } else { "".to_string() }
+                            }
+                            CageKind::Sort(SortOrder::AscNullsLast) => {
+                                if let Some(cond) = cage.conditions.first() { format!("{} ASC NULLS LAST", generator.quote_identifier(&cond.column)) } else { "".to_string() }
+                            }
+                            CageKind::Sort(SortOrder::DescNullsFirst) => {
+                                if let Some(cond) = cage.conditions.first() { format!("{} DESC NULLS FIRST", generator.quote_identifier(&cond.column)) } else { "".to_string() }
+                            }
+                            CageKind::Sort(SortOrder::DescNullsLast) => {
+                                if let Some(cond) = cage.conditions.first() { format!("{} DESC NULLS LAST", generator.quote_identifier(&cond.column)) } else { "".to_string() }
+                            }
                             _ => String::new(),
                         }
                     }).filter(|s| !s.is_empty()).collect();
                     over_clause.push_str(&order_parts.join(", "));
                 }
+                
+                // Add Frame Logic
+                if let Some(fr) = frame {
+                    over_clause.push(' ');
+                    match fr {
+                        WindowFrame::Rows { start, end } => {
+                            over_clause.push_str(&format!("ROWS BETWEEN {} AND {}", bound_to_sql(&start), bound_to_sql(&end)));
+                        }
+                        WindowFrame::Range { start, end } => {
+                             over_clause.push_str(&format!("RANGE BETWEEN {} AND {}", bound_to_sql(&start), bound_to_sql(&end)));
+                        }
+                    }
+                }
+                
                 over_clause.push(')');
                 
                 format!("{}({}) {} AS {}", func, params_str, over_clause, generator.quote_identifier(name))
@@ -79,4 +106,14 @@ pub fn build_window(cmd: &QailCmd, dialect: Dialect) -> String {
     }
 
     sql
+}
+
+fn bound_to_sql(bound: &FrameBound) -> String {
+    match bound {
+        FrameBound::UnboundedPreceding => "UNBOUNDED PRECEDING".to_string(),
+        FrameBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".to_string(),
+        FrameBound::CurrentRow => "CURRENT ROW".to_string(),
+        FrameBound::Preceding(n) => format!("{} PRECEDING", n),
+        FrameBound::Following(n) => format!("{} FOLLOWING", n),
+    }
 }
