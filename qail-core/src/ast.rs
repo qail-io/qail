@@ -37,9 +37,9 @@ pub struct QailCmd {
     /// GROUP BY mode (Simple, Rollup, Cube)
     #[serde(default)]
     pub group_by_mode: GroupByMode,
-    /// CTE definition (for WITH/WITH RECURSIVE queries)
+    /// CTE definitions (for WITH/WITH RECURSIVE queries)
     #[serde(default)]
-    pub cte: Option<CTEDef>,
+    pub ctes: Vec<CTEDef>,
 }
 
 impl QailCmd {
@@ -57,7 +57,7 @@ impl QailCmd {
             set_ops: vec![],
             having: vec![],
             group_by_mode: GroupByMode::Simple,
-            cte: None,
+            ctes: vec![],
         }
     }
 
@@ -75,7 +75,7 @@ impl QailCmd {
             set_ops: vec![],
             having: vec![],
             group_by_mode: GroupByMode::Simple,
-            cte: None,
+            ctes: vec![],
         }
     }
 
@@ -93,7 +93,7 @@ impl QailCmd {
             set_ops: vec![],
             having: vec![],
             group_by_mode: GroupByMode::Simple,
-            cte: None,
+            ctes: vec![],
         }
     }
 
@@ -111,7 +111,7 @@ impl QailCmd {
             set_ops: vec![],
             having: vec![],
             group_by_mode: GroupByMode::Simple,
-            cte: None,
+            ctes: vec![],
         }
     }
     /// Add columns to hook (select).
@@ -210,14 +210,14 @@ impl QailCmd {
             set_ops: vec![],
             having: vec![],
             group_by_mode: GroupByMode::Simple,
-            cte: Some(CTEDef {
+            ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,
                 columns,
                 base_query: Box::new(self),
                 recursive_query: None,
                 source_table: None,
-            }),
+            }],
         }
     }
 
@@ -230,7 +230,7 @@ impl QailCmd {
     ///     .recursive(recursive_query);
     /// ```
     pub fn recursive(mut self, recursive_part: QailCmd) -> Self {
-        if let Some(ref mut cte) = self.cte {
+        if let Some(cte) = self.ctes.last_mut() {
             cte.recursive = true;
             cte.recursive_query = Some(Box::new(recursive_part));
         }
@@ -239,7 +239,7 @@ impl QailCmd {
 
     /// Set the source table for recursive join (self-reference).
     pub fn from_cte(mut self, cte_name: impl Into<String>) -> Self {
-        if let Some(ref mut cte) = self.cte {
+        if let Some(cte) = self.ctes.last_mut() {
             cte.source_table = Some(cte_name.into());
         }
         self
