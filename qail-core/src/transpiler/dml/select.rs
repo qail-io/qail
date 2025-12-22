@@ -52,14 +52,69 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                     }
                 }
                 Column::FunctionCall { name, args, alias } => {
-                    let args_sql: Vec<String> = args.iter()
-                        .map(|a| generator.quote_identifier(a))
-                        .collect();
-                    let expr = format!("{}({})", name.to_uppercase(), args_sql.join(", "));
-                    if let Some(a) = alias {
-                        format!("{} AS {}", expr, generator.quote_identifier(a))
+                    if name.eq_ignore_ascii_case("case") {
+                        // case(when_cond, then_val, else_val) -> CASE WHEN ... THEN ... ELSE ... END
+                        if args.len() >= 3 {
+                            // Arg 0: WHEN condition (Raw preferred)
+                            let cond_arg = &args[0];
+                            let cond_sql = if cond_arg.starts_with('{') && cond_arg.ends_with('}') {
+                                &cond_arg[1..cond_arg.len()-1]
+                            } else {
+                                cond_arg // Fallback
+                            };
+                            
+                            // Arg 1: THEN value (Quoted unless raw)
+                            let then_arg = &args[1];
+                            let then_sql = if then_arg.starts_with('{') && then_arg.ends_with('}') {
+                                then_arg[1..then_arg.len()-1].to_string()
+                            } else {
+                                generator.quote_identifier(then_arg)
+                            };
+
+                            // Arg 2: ELSE value (Quoted unless raw)
+                            let else_arg = &args[2];
+                            let else_sql = if else_arg.starts_with('{') && else_arg.ends_with('}') {
+                                else_arg[1..else_arg.len()-1].to_string()
+                            } else {
+                                generator.quote_identifier(else_arg)
+                            };
+                            
+                            let expr = format!("CASE WHEN {} THEN {} ELSE {} END", cond_sql, then_sql, else_sql);
+                            if let Some(a) = alias {
+                                format!("{} AS {}", expr, generator.quote_identifier(a))
+                            } else {
+                                expr
+                            }
+                        } else {
+                            // Invalid case call, fallback to standard function
+                             let args_sql: Vec<String> = args.iter()
+                                .map(|a| generator.quote_identifier(a))
+                                .collect();
+                            let expr = format!("CASE({})", args_sql.join(", "));
+                             if let Some(a) = alias {
+                                format!("{} AS {}", expr, generator.quote_identifier(a))
+                            } else {
+                                expr
+                            }
+                        }
                     } else {
-                        expr
+                        // Standard Function
+                        let args_sql: Vec<String> = args.iter()
+                            .map(|a| {
+                                if a.starts_with('{') && a.ends_with('}') {
+                                    // Raw SQL block: {content} -> content
+                                    a[1..a.len()-1].to_string()
+                                } else {
+                                    generator.quote_identifier(a)
+                                }
+                            })
+                            .collect();
+                        let expr = format!("{}({})", name.to_uppercase(), args_sql.join(", "));
+                        if let Some(a) = alias {
+                            format!("{} AS {}", expr, generator.quote_identifier(a))
+                        } else {
+                            expr
+                        }
                     }
                 }
                 _ => c.to_string(), // Fallback for complex cols if any remaining
@@ -142,7 +197,7 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
 
     // Process cages
     let mut where_groups: Vec<String> = Vec::new();
-    let mut order_by: Option<String> = None;
+    let mut order_by_clauses: Vec<String> = Vec::new();
     let mut limit: Option<usize> = None;
     let mut offset: Option<usize> = None;
 
@@ -174,7 +229,7 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         SortOrder::DescNullsFirst => "DESC NULLS FIRST",
                         SortOrder::DescNullsLast => "DESC NULLS LAST",
                     };
-                    order_by = Some(format!("{} {}", generator.quote_identifier(&cond.column), dir));
+                    order_by_clauses.push(format!("{} {}", generator.quote_identifier(&cond.column), dir));
                 }
             }
             CageKind::Limit(n) => {
@@ -224,9 +279,9 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
     }
 
     // ORDER BY
-    if let Some(order) = order_by {
+    if !order_by_clauses.is_empty() {
         sql.push_str(" ORDER BY ");
-        sql.push_str(&order);
+        sql.push_str(&order_by_clauses.join(", "));
     }
 
     // QUALIFY (Snowflake, BigQuery, Databricks) - filter on window function results

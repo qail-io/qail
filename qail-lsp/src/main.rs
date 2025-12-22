@@ -53,9 +53,12 @@ impl QailLanguageServer {
         let content = docs.get(uri)?;
         let target_line = content.lines().nth(line)?;
         
-        // Find QAIL pattern in line
-        let patterns = ["get::", "set::", "del::", "add::", "make::", "mod::", "gen::"];
-        for pattern in patterns {
+        // Find QAIL pattern in line (v1 or v2 syntax)
+        let v1_patterns = ["get::", "set::", "del::", "add::", "make::", "mod::", "gen::"];
+        let v2_patterns = ["get ", "set ", "del ", "add ", "with "];
+        
+        // Try v1 patterns first
+        for pattern in v1_patterns {
             if let Some(start) = target_line.find(pattern) {
                 let rest = &target_line[start..];
                 // Find end of query
@@ -63,6 +66,15 @@ impl QailLanguageServer {
                     .or_else(|| rest.find('\''))
                     .unwrap_or(rest.len());
                 return Some(rest[..end].to_string());
+            }
+        }
+        
+        // Try v2 patterns
+        for pattern in v2_patterns {
+            if let Some(start) = target_line.find(pattern) {
+                // For v2 syntax, query extends to end of line or newline
+                let rest = &target_line[start..];
+                return Some(rest.to_string());
             }
         }
         None
@@ -102,8 +114,45 @@ impl QailLanguageServer {
     fn get_diagnostics(&self, text: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 
+        // Track whether we're inside a multi-line CTE block (with::)
+        // CTE blocks contain nested get::/set::/etc that shouldn't be parsed individually
+        let mut in_cte_block = false;
+        let mut cte_brace_depth = 0;
+
         // Find QAIL patterns in the text
         for (line_num, line) in text.lines().enumerate() {
+            // Update CTE tracking state
+            // Look for with:: pattern that starts a CTE block
+            if line.contains("with::") {
+                in_cte_block = true;
+                // Count opening braces to track nesting
+                cte_brace_depth += line.matches('{').count();
+                cte_brace_depth = cte_brace_depth.saturating_sub(line.matches('}').count());
+                // The with:: line itself should be parsed, but we skip for now since
+                // the whole CTE needs to be assembled. For CTEs, we only validate the
+                // final assembled query. Skip this line.
+                continue;
+            }
+            
+            // If we're inside a CTE block, track brace depth
+            if in_cte_block {
+                cte_brace_depth += line.matches('{').count();
+                cte_brace_depth = cte_brace_depth.saturating_sub(line.matches('}').count());
+                
+                // Check if we've exited all CTE braces
+                if cte_brace_depth == 0 {
+                    // Check if this line has the closing of CTE (e.g. ends with } or has -> which exits CTE context)
+                    // or if the line after with:: block ends with terminal patterns
+                    if !line.contains("with::") {
+                        in_cte_block = false;
+                    }
+                }
+                
+                // Skip parsing patterns inside CTE blocks - they're fragments, not standalone queries
+                // This prevents false positives like "get::table !on(col)" being parsed without CTE context
+                continue;
+            }
+
             // Look for QAIL patterns (get::, set::, del::, add::, make::, mod::)
             let patterns = ["get::", "set::", "del::", "add::", "make::", "mod::", "gen::"];
             
@@ -550,6 +599,55 @@ impl LanguageServer for QailLanguageServer {
                 kind: Some(CompletionItemKind::SNIPPET),
                 detail: Some("ORDER BY DESC".to_string()),
                 insert_text: Some("[^!${1:column}]".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            // === V2 Canonical Syntax Completions ===
+            CompletionItem {
+                label: "get (v2)".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("SELECT query (v2 canonical)".to_string()),
+                insert_text: Some("get ${1:table}\nfields\n  ${2:*}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "with (v2)".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("CTE definition (v2 canonical)".to_string()),
+                insert_text: Some("with ${1:cte_name} =\n  get ${2:table}\n  fields\n    ${3:*}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "join (v2)".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("JOIN clause (v2 canonical)".to_string()),
+                insert_text: Some("join ${1:table}\n  on ${2:condition}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "where (v2)".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("WHERE clause (v2 canonical)".to_string()),
+                insert_text: Some("where ${1:column} = ${2:value}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "order by (v2)".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("ORDER BY clause (v2 canonical)".to_string()),
+                insert_text: Some("order by\n  ${1:column} ${2|asc,desc|}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "fields (v2)".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Column projection (v2 canonical)".to_string()),
+                insert_text: Some("fields\n  ${1:column1},\n  ${2:column2}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             },
