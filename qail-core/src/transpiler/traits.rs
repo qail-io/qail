@@ -12,7 +12,21 @@ pub const RESERVED_WORDS: &[&str] = &[
 
 /// Escape an identifier if it's a reserved word or contains special chars.
 /// Returns the identifier quoted with double quotes if needed.
+/// Handles dotted identifiers (e.g., `table.column`) by quoting each part.
 pub fn escape_identifier(name: &str) -> String {
+    // Handle dotted identifiers (e.g., lm.phone_number -> "lm"."phone_number")
+    if name.contains('.') {
+        return name
+            .split('.')
+            .map(|part| escape_single_identifier(part))
+            .collect::<Vec<_>>()
+            .join(".");
+    }
+    escape_single_identifier(name)
+}
+
+/// Escape a single identifier part (no dots).
+fn escape_single_identifier(name: &str) -> String {
     let lower = name.to_lowercase();
     let needs_escaping = RESERVED_WORDS.contains(&lower.as_str())
         || name.chars().any(|c| !c.is_alphanumeric() && c != '_')

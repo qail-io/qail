@@ -4,6 +4,7 @@ pub mod validator;
 pub mod parser;
 pub mod transpiler;
 pub mod schema;
+pub mod fmt;
 
 pub use parser::parse;
 

@@ -83,7 +83,7 @@ struct QueryInput {
 
 #[cfg(feature = "sqlx")]
 impl Parse for QueryInput {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let query: LitStr = input.parse()?;
         let args = if input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
@@ -105,7 +105,7 @@ struct QueryAsInput {
 
 #[cfg(feature = "sqlx")]
 impl Parse for QueryAsInput {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let output_type: Type = input.parse()?;
         input.parse::<Token![,]>()?;
         let query: LitStr = input.parse()?;

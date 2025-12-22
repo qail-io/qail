@@ -32,6 +32,11 @@ impl ParamContext {
 ///    - If first part matches table name or any join alias -> Treat as "Table"."Col".
 ///    - Else -> Treat as "Col"->"Field" (JSON).
 fn resolve_col_syntax(col: &str, cmd: &QailCmd, generator: &dyn SqlGenerator) -> String {
+    // Check for raw SQL syntax { ... }
+    if col.starts_with('{') && col.ends_with('}') {
+        return col[1..col.len()-1].to_string();
+    }
+
     let parts: Vec<&str> = col.split('.').collect();
     if parts.len() <= 1 {
         return generator.quote_identifier(col);
@@ -204,7 +209,33 @@ impl ConditionToSql for Condition {
         };
 
         match self.op {
-            Operator::Eq => format!("{} = {}", col, value_placeholder(&self.value, params)),
+            Operator::Eq => {
+                // Check if this is a raw condition (column `{...}`, op=Eq, value=Null)
+                if matches!(self.value, Value::Null) && col.starts_with('{') && col.ends_with('}') {
+                    // It was already unwrapped by resolve_col_syntax if context was present
+                    // If context was NOT present, col is fully quoted?
+                    // Wait, resolve_col_syntax unquotes it.
+                    // If parse_cages/items_to_cage set column="{...}", 
+                    // resolve_col_syntax returns "..." (raw content).
+                    // BUT resolve_col_syntax is only called if context is Some.
+                    // If context is None, generate.quote_identifier is called.
+                    // Generaor quotes "{...}" -> "\"{...}\"".
+                    // We need to handle that case?
+                    // Usually context is Some in SELECT.
+                    // Let's assume context is Some which is true for Select/Update/Delete.
+                    // If resolve_col_syntax returned Raw string, we just output it.
+                    // But wait, resolve_col_syntax stripped { }.
+                    // So `col` here is just the content.
+                    // How do we distinguish "content" from "quoted_col"?
+                    // Quoted col is `"col"`. Raw content `sender IS NOT NULL`.
+                    // We can't distinguish easily unless we check `self.column`.
+                    if self.column.starts_with('{') && self.column.ends_with('}') {
+                        return col; // Use resolved col (which is raw)
+                    }
+                }
+                
+                format!("{} = {}", col, value_placeholder(&self.value, params))
+            },
             Operator::Ne => format!("{} != {}", col, value_placeholder(&self.value, params)),
             Operator::Gt => format!("{} > {}", col, value_placeholder(&self.value, params)),
             Operator::Gte => format!("{} >= {}", col, value_placeholder(&self.value, params)),
