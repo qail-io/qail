@@ -22,7 +22,7 @@ fn test_mongo_output() {
 
 #[test]
 fn test_mongo_insert() {
-    let cmd = parse("add::users:[name=John][age=30]").unwrap();
+    let cmd = parse("add::users:[name=\"John\"][age=30]").unwrap();
     let mongo = cmd.to_mongo();
     assert!(mongo.contains("db.users.insertOne("));
     assert!(mongo.contains("\"name\": \"John\""));
@@ -95,7 +95,7 @@ fn test_redis_search() {
 
 #[test]
 fn test_redis_complex_operators() {
-    let cmd = parse("get::users:'_[role!=admin][name~john][age<=30]").unwrap();
+    let cmd = parse("get::users:'_[role!=\"admin\"][name~\"john\"][age<=30]").unwrap();
     let redis = cmd.to_redis_search();
     
     assert!(redis.contains("-(@role:admin)"));
@@ -105,7 +105,7 @@ fn test_redis_complex_operators() {
 
 #[test]
 fn test_elastic_dsl() {
-    let cmd = parse("get::logs:'message'level[level=error][count>10][lim=50]").unwrap();
+    let cmd = parse("get::logs:'message'level[level=\"error\"][count>10][lim=50]").unwrap();
     let elastic = cmd.to_elastic();
     
     assert!(elastic.contains("\"query\": { \"bool\": { \"must\": ["));
@@ -127,7 +127,7 @@ fn test_neo4j_cypher() {
 
 #[test]
 fn test_qdrant_search() {
-    let cmd = parse("get::points:'id'score[vector~\"cute cat\"][city=London][lim=10]").unwrap();
+    let cmd = parse("get::points:'id'score[vector~\"cute cat\"][city=\"London\"][lim=10]").unwrap();
     let qdrant = cmd.to_qdrant_search();
     
     assert!(qdrant.contains("{{EMBED:cute cat}}"));

@@ -144,7 +144,7 @@ fn test_parameterized_sql() {
     use crate::transpiler::ToSqlParameterized;
     use crate::ast::Value;
     
-    let cmd = parse("get::users:'_[name=John][age=30]").unwrap();
+    let cmd = parse("get::users:'_[name=\"John\"][age=30]").unwrap();
     let result = cmd.to_sql_parameterized();
     
     // SQL should have placeholders, not inline values
