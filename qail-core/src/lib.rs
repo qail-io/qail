@@ -3,6 +3,7 @@ pub mod error;
 pub mod validator;
 pub mod parser;
 pub mod transpiler;
+pub mod schema;
 
 pub use parser::parse;
 

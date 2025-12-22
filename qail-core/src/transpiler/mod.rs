@@ -28,6 +28,43 @@ pub use traits::escape_identifier;
 pub use dialect::Dialect;
 pub use conditions::ConditionToSql;
 
+/// Result of transpilation with extracted parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranspileResult {
+    /// The SQL template with placeholders (e.g., $1, $2 or ?, ?)
+    pub sql: String,
+    /// The extracted parameter values in order
+    pub params: Vec<Value>,
+}
+
+impl TranspileResult {
+    /// Create a new TranspileResult.
+    pub fn new(sql: impl Into<String>, params: Vec<Value>) -> Self {
+        Self {
+            sql: sql.into(),
+            params,
+        }
+    }
+
+    /// Create a result with no parameters.
+    pub fn sql_only(sql: impl Into<String>) -> Self {
+        Self {
+            sql: sql.into(),
+            params: Vec::new(),
+        }
+    }
+}
+
+/// Trait for converting AST nodes to parameterized SQL.
+pub trait ToSqlParameterized {
+    /// Convert to SQL with extracted parameters (default dialect).
+    fn to_sql_parameterized(&self) -> TranspileResult {
+        self.to_sql_parameterized_with_dialect(Dialect::default())
+    }
+    /// Convert to SQL with extracted parameters for specific dialect.
+    fn to_sql_parameterized_with_dialect(&self, dialect: Dialect) -> TranspileResult;
+}
+
 /// Trait for converting AST nodes to SQL.
 pub trait ToSql {
     /// Convert this node to a SQL string using default dialect.
@@ -61,5 +98,29 @@ impl ToSql for QailCmd {
             // JSON features
             Action::JsonTable => dml::json_table::build_json_table(self, dialect),
         }
+    }
+}
+
+impl ToSqlParameterized for QailCmd {
+    fn to_sql_parameterized_with_dialect(&self, dialect: Dialect) -> TranspileResult {
+        // Collect all parameter values from cages
+        let mut params = Vec::new();
+        
+        for cage in &self.cages {
+            for cond in &cage.conditions {
+                // Only extract non-parameter values (literals that become params)
+                // Skip Param values as they're already placeholders
+                match &cond.value {
+                    Value::Param(_) => {}, // Already a placeholder
+                    v => params.push(v.clone()),
+                }
+            }
+        }
+
+        // For now, use the standard SQL transpilation
+        // Future: replace literal values with placeholders in the SQL
+        let sql = self.to_sql_with_dialect(dialect);
+
+        TranspileResult::new(sql, params)
     }
 }

@@ -8,6 +8,7 @@ members = [
     "qail-lsp",
     "qail-wasm",
     "qail-ffi",
+    "qail-sqlx",
 ]
 
 [workspace.lints.rust]
