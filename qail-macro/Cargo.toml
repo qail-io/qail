@@ -1,6 +1,6 @@
 [package]
 name = "qail-macro"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "Procedural macros for QAIL"
 license = "MIT"
@@ -13,7 +13,7 @@ keywords = ["qail", "macro", "sql"]
 proc-macro = true
 
 [dependencies]
-qail-core = { path = "../qail-core", version = "0.8.0" }
+qail-core = { path = "../qail-core", version = "0.8.1" }
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
