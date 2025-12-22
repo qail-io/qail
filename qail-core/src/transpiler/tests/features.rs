@@ -422,3 +422,42 @@ fn test_recursive_cte() {
     assert!(sql.contains("UNION ALL"));
 }
 
+
+// ============= v0.8.6: Custom JOINs & DISTINCT ON =============
+
+#[test]
+fn test_custom_join_on() {
+    let q = "get::users -> orders (users.id = orders.user_id)";
+    let cmd = parse(q).unwrap();
+    let sql = cmd.to_sql();
+    // Identifiers are unquoted if safe in Postgres dialect implementation used
+    assert!(sql.contains("INNER JOIN orders ON users.id = orders.user_id"), "SQL was: {}", sql);
+}
+
+#[test]
+fn test_custom_join_multiple_conditions() {
+    let q = "get::A -> B (A.x = B.x, A.y = B.y)";
+    let cmd = parse(q).unwrap();
+    let sql = cmd.to_sql();
+    assert!(sql.contains("INNER JOIN B ON A.x = B.x AND A.y = B.y"), "SQL was: {}", sql);
+    // Verify AST structure
+    assert!(cmd.joins[0].on.is_some());
+    assert_eq!(cmd.joins[0].on.as_ref().unwrap().len(), 2);
+}
+
+#[test]
+fn test_distinct_on() {
+    // Syntax check: !on(col1, col2)
+    let q = "get!on(department, role)::employees";
+    let cmd = parse(q).unwrap();
+    assert_eq!(cmd.distinct_on, vec!["department".to_string(), "role".to_string()]);
+    
+    // Transpiler check (Postgres default)
+    let sql = cmd.to_sql();
+    // Quoting behavior: "department" is safe -> department? No.
+    // wait, resolve identifiers?
+    // Distinct ON usage: generator.quote_identifier(c)
+    // department -> department.
+    // SELECT DISTINCT ON (department, role) ...
+    assert!(sql.starts_with("SELECT DISTINCT ON (department, role)"), "SQL was: {}", sql);
+}
