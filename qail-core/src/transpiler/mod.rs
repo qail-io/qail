@@ -103,24 +103,65 @@ impl ToSql for QailCmd {
 
 impl ToSqlParameterized for QailCmd {
     fn to_sql_parameterized_with_dialect(&self, dialect: Dialect) -> TranspileResult {
-        // Collect all parameter values from cages
-        let mut params = Vec::new();
+        use conditions::ParamContext;
+        use conditions::ConditionToSql;
         
+        let generator = dialect.generator();
+        let mut param_ctx = ParamContext::new();
+        
+        // Build WHERE clause with parameterized conditions
+        let mut where_parts = Vec::new();
         for cage in &self.cages {
-            for cond in &cage.conditions {
-                // Only extract non-parameter values (literals that become params)
-                // Skip Param values as they're already placeholders
-                match &cond.value {
-                    Value::Param(_) => {}, // Already a placeholder
-                    v => params.push(v.clone()),
+            if let CageKind::Filter = cage.kind {
+                for cond in &cage.conditions {
+                    where_parts.push(cond.to_sql_parameterized(&generator, Some(self), &mut param_ctx));
                 }
             }
         }
 
-        // For now, use the standard SQL transpilation
-        // Future: replace literal values with placeholders in the SQL
-        let sql = self.to_sql_with_dialect(dialect);
+        // For now, build a simplified parameterized SELECT
+        // Full implementation would parameterize all DML operations
+        let table = generator.quote_identifier(&self.table);
+        
+        let cols = if self.columns.is_empty() {
+            "*".to_string()
+        } else {
+            self.columns
+                .iter()
+                .map(|c| match c {
+                    Column::Star => "*".to_string(),
+                    Column::Named(n) => generator.quote_identifier(n),
+                    Column::Aliased { name, alias } => {
+                        format!("{} AS {}", generator.quote_identifier(name), generator.quote_identifier(alias))
+                    }
+                    Column::Aggregate { col, func } => {
+                        format!("{}({})", func, generator.quote_identifier(col))
+                    }
+                    _ => "*".to_string(), // Fallback for other variants
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        
+        let mut sql = format!("SELECT {} FROM {}", cols, table);
+        
+        if !where_parts.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_parts.join(" AND "));
+        }
+        
+        // Handle LIMIT/OFFSET
+        for cage in &self.cages {
+            match cage.kind {
+                CageKind::Limit(n) => sql.push_str(&format!(" LIMIT {}", n)),
+                CageKind::Offset(n) => sql.push_str(&format!(" OFFSET {}", n)),
+                _ => {}
+            }
+        }
 
-        TranspileResult::new(sql, params)
+        TranspileResult {
+            sql,
+            params: param_ctx.params,
+        }
     }
 }

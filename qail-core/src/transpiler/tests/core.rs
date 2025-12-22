@@ -138,3 +138,23 @@ fn test_transactions() {
     cmd.action = Action::TxnRollback;
     assert!(cmd.to_sql().contains("ROLLBACK"));
 }
+
+#[test]
+fn test_parameterized_sql() {
+    use crate::transpiler::ToSqlParameterized;
+    use crate::ast::Value;
+    
+    let cmd = parse("get::users:'_[name=John][age=30]").unwrap();
+    let result = cmd.to_sql_parameterized();
+    
+    // SQL should have placeholders, not inline values
+    assert!(result.sql.contains("$1"), "SQL should have $1 placeholder: {}", result.sql);
+    assert!(result.sql.contains("$2"), "SQL should have $2 placeholder: {}", result.sql);
+    assert!(!result.sql.contains("John"), "SQL should NOT contain literal 'John': {}", result.sql);
+    assert!(!result.sql.contains("30"), "SQL should NOT contain literal '30': {}", result.sql);
+    
+    // Params should contain the values
+    assert_eq!(result.params.len(), 2);
+    assert_eq!(result.params[0], Value::String("John".to_string()));
+    assert_eq!(result.params[1], Value::Int(30));
+}

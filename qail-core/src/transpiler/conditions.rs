@@ -1,6 +1,28 @@
 use crate::ast::*;
 use super::traits::SqlGenerator;
 
+/// Context for parameterized query building.
+#[derive(Debug, Default)]
+pub struct ParamContext {
+    /// Current parameter index (1-based for Postgres $1, $2, etc.)
+    pub index: usize,
+    /// Collected parameter values in order
+    pub params: Vec<Value>,
+}
+
+impl ParamContext {
+    pub fn new() -> Self {
+        Self { index: 0, params: Vec::new() }
+    }
+
+    /// Add a value and return the placeholder for it.
+    pub fn add_param(&mut self, value: Value, generator: &dyn SqlGenerator) -> String {
+        self.index += 1;
+        self.params.push(value);
+        generator.placeholder(self.index)
+    }
+}
+
 /// Helper to resolve a column identifier that might be a JSON path or a JOIN reference.
 /// 
 /// Heuristic:
@@ -40,6 +62,15 @@ fn resolve_col_syntax(col: &str, cmd: &QailCmd, generator: &dyn SqlGenerator) ->
 pub trait ConditionToSql {
     fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&QailCmd>) -> String;
     fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String;
+    
+    /// Convert condition to SQL with parameterized values.
+    /// Returns the SQL fragment and updates the ParamContext with extracted values.
+    fn to_sql_parameterized(
+        &self, 
+        generator: &Box<dyn SqlGenerator>, 
+        context: Option<&QailCmd>,
+        params: &mut ParamContext
+    ) -> String;
 }
 
 impl ConditionToSql for Condition {
@@ -131,6 +162,60 @@ impl ConditionToSql for Condition {
                 format!("({})", cmd.to_sql())
             }
             v => v.to_string(), 
+        }
+    }
+
+    fn to_sql_parameterized(
+        &self, 
+        generator: &Box<dyn SqlGenerator>, 
+        context: Option<&QailCmd>,
+        params: &mut ParamContext
+    ) -> String {
+        let col = if let Some(cmd) = context {
+            resolve_col_syntax(&self.column, cmd, generator.as_ref())
+        } else {
+            generator.quote_identifier(&self.column)
+        };
+
+        // Helper to convert value to placeholder
+        let value_placeholder = |v: &Value, p: &mut ParamContext| -> String {
+            match v {
+                Value::Param(n) => generator.placeholder(*n), // Already a placeholder
+                Value::Null => "NULL".to_string(),
+                other => p.add_param(other.clone(), generator.as_ref()),
+            }
+        };
+
+        match self.op {
+            Operator::Eq => format!("{} = {}", col, value_placeholder(&self.value, params)),
+            Operator::Ne => format!("{} != {}", col, value_placeholder(&self.value, params)),
+            Operator::Gt => format!("{} > {}", col, value_placeholder(&self.value, params)),
+            Operator::Gte => format!("{} >= {}", col, value_placeholder(&self.value, params)),
+            Operator::Lt => format!("{} < {}", col, value_placeholder(&self.value, params)),
+            Operator::Lte => format!("{} <= {}", col, value_placeholder(&self.value, params)),
+            Operator::Fuzzy => {
+                // For LIKE, we need to wrap in wildcards
+                let placeholder = value_placeholder(&self.value, params);
+                format!("{} {} {}", col, generator.fuzzy_operator(), placeholder)
+            }
+            Operator::IsNull => format!("{} IS NULL", col),
+            Operator::IsNotNull => format!("{} IS NOT NULL", col),
+            Operator::In => format!("{} = ANY({})", col, value_placeholder(&self.value, params)),
+            Operator::NotIn => format!("{} != ALL({})", col, value_placeholder(&self.value, params)),
+            Operator::Contains => generator.json_contains(&col, &value_placeholder(&self.value, params)),
+            Operator::KeyExists => generator.json_key_exists(&col, &value_placeholder(&self.value, params)),
+            Operator::JsonExists => {
+                let path = value_placeholder(&self.value, params);
+                generator.json_exists(&col, &path)
+            }
+            Operator::JsonQuery => {
+                let path = value_placeholder(&self.value, params);
+                generator.json_query(&col, &path)
+            }
+            Operator::JsonValue => {
+                let path = value_placeholder(&self.value, params);
+                format!("{} = {}", generator.json_value(&col, &path), value_placeholder(&self.value, params))
+            }
         }
     }
 }
