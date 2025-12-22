@@ -28,6 +28,16 @@ impl Validator {
         );
     }
 
+    /// Get list of all table names (for autocomplete).
+    pub fn table_names(&self) -> &[String] {
+        &self.tables
+    }
+
+    /// Get column names for a table (for autocomplete).
+    pub fn column_names(&self, table: &str) -> Option<&Vec<String>> {
+        self.columns.get(table)
+    }
+
     /// Check if a table exists. If not, returns suggested names.
     pub fn validate_table(&self, table: &str) -> Result<(), String> {
         if self.tables.contains(&table.to_string()) {
