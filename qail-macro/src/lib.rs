@@ -228,3 +228,53 @@ pub fn qail_query_as(input: TokenStream) -> TokenStream {
 
     TokenStream::from(expand)
 }
+
+// ============================================================================
+// CTE Macro (for WITH queries)
+// ============================================================================
+
+/// Compile-time CTE (Common Table Expression) to SQL.
+/// 
+/// Supports both simple and recursive CTEs using the WITH syntax.
+/// 
+/// # Example
+/// 
+/// ```ignore
+/// // Simple CTE
+/// let sql = qail_cte!("with::recent { get::orders:'_[age < 7] } -> get::recent:'_");
+/// 
+/// // Recursive CTE  
+/// let sql = qail_cte!(
+///     "with::emp_tree { get::employees:'_[manager_id IS NULL] } ~> { get::employees:'_ } -> get::emp_tree:'_"
+/// );
+/// ```
+#[proc_macro]
+pub fn qail_cte(input: TokenStream) -> TokenStream {
+    let query = parse_macro_input!(input as LitStr);
+    let query_str = query.value();
+
+    // Parse CTE at compile time (CTE syntax starts with "with::")
+    let full_query = if !query_str.starts_with("with::") {
+        format!("with::{}", query_str)
+    } else {
+        query_str.clone()
+    };
+
+    let cmd = match qail_core::parse(&full_query) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            return syn::Error::new(query.span(), format!("QAIL CTE Parse Error: {}", e))
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // Transpile to SQL (this uses the CTE transpiler)
+    let sql = cmd.to_sql();
+
+    let expand = quote! {
+        #sql
+    };
+
+    TokenStream::from(expand)
+}
