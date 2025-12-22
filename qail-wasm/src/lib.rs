@@ -24,6 +24,7 @@
 
 use wasm_bindgen::prelude::*;
 use qail_core::transpiler::{ToSql, Dialect};
+use qail_core::transpiler::{ToMongo, ToDynamo, ToCassandra, ToRedis, ToElastic, ToNeo4j, ToQdrant};
 
 /// Parse QAIL and return SQL string.
 #[wasm_bindgen]
@@ -70,6 +71,64 @@ pub fn validate(qail: &str) -> bool {
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+// ============= NoSQL Transpilation Functions =============
+
+/// Parse QAIL and return MongoDB query/command.
+#[wasm_bindgen]
+pub fn to_mongo(qail: &str) -> Result<String, JsError> {
+    let cmd = qail_core::parse(qail)
+        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    Ok(cmd.to_mongo())
+}
+
+/// Parse QAIL and return DynamoDB JSON.
+#[wasm_bindgen]
+pub fn to_dynamo(qail: &str) -> Result<String, JsError> {
+    let cmd = qail_core::parse(qail)
+        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    Ok(cmd.to_dynamo())
+}
+
+/// Parse QAIL and return Cassandra CQL.
+#[wasm_bindgen]
+pub fn to_cassandra(qail: &str) -> Result<String, JsError> {
+    let cmd = qail_core::parse(qail)
+        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    Ok(cmd.to_cassandra())
+}
+
+/// Parse QAIL and return Redis/RediSearch command.
+#[wasm_bindgen]
+pub fn to_redis(qail: &str) -> Result<String, JsError> {
+    let cmd = qail_core::parse(qail)
+        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    Ok(cmd.to_redis_search())
+}
+
+/// Parse QAIL and return Elasticsearch DSL JSON.
+#[wasm_bindgen]
+pub fn to_elastic(qail: &str) -> Result<String, JsError> {
+    let cmd = qail_core::parse(qail)
+        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    Ok(cmd.to_elastic())
+}
+
+/// Parse QAIL and return Neo4j Cypher query.
+#[wasm_bindgen]
+pub fn to_neo4j(qail: &str) -> Result<String, JsError> {
+    let cmd = qail_core::parse(qail)
+        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    Ok(cmd.to_cypher())
+}
+
+/// Parse QAIL and return Qdrant vector search JSON.
+#[wasm_bindgen]
+pub fn to_qdrant(qail: &str) -> Result<String, JsError> {
+    let cmd = qail_core::parse(qail)
+        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    Ok(cmd.to_qdrant_search())
 }
 
 #[cfg(test)]
