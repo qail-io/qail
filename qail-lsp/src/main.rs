@@ -176,6 +176,34 @@ impl QailLanguageServer {
 
         diagnostics
     }
+
+    /// Extract word at cursor position
+    fn get_word_at_position(&self, uri: &str, line: usize, col: usize) -> Option<String> {
+        let docs = self.documents.read().ok()?;
+        let content = docs.get(uri)?;
+        let target_line = content.lines().nth(line)?;
+        
+        let chars: Vec<char> = target_line.chars().collect();
+        if col >= chars.len() { return None; }
+        
+        // Find start
+        let mut start = col;
+        while start > 0 && (chars[start-1].is_alphanumeric() || chars[start-1] == '_') {
+            start -= 1;
+        }
+        
+        // Find end
+        let mut end = col;
+        while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+            end += 1;
+        }
+        
+        if start < end {
+            Some(target_line[start..end].to_string())
+        } else {
+            None
+        }
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -233,33 +261,6 @@ impl LanguageServer for QailLanguageServer {
             .await;
     }
 
-    /// Extract word at cursor position
-    fn get_word_at_position(&self, uri: &str, line: usize, col: usize) -> Option<String> {
-        let docs = self.documents.read().ok()?;
-        let content = docs.get(uri)?;
-        let target_line = content.lines().nth(line)?;
-        
-        let chars: Vec<char> = target_line.chars().collect();
-        if col >= chars.len() { return None; }
-        
-        // Find start
-        let mut start = col;
-        while start > 0 && chars[start-1].is_alphanumeric() || chars[start-1] == '_' {
-            start -= 1;
-        }
-        
-        // Find end
-        let mut end = col;
-        while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
-            end += 1;
-        }
-        
-        if start < end {
-            Some(target_line[start..end].to_string())
-        } else {
-            None
-        }
-    }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         if let Some(change) = params.content_changes.first() {
@@ -382,7 +383,7 @@ impl LanguageServer for QailLanguageServer {
         Ok(None)
     }
 
-    async fn code_action(&self, params: CodeActionParams) -> Result<Option<Vec<CodeAction>>> {
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<Vec<CodeActionOrCommand>>> {
         let mut actions = Vec::new();
 
         for diagnostic in params.context.diagnostics {
@@ -402,7 +403,7 @@ impl LanguageServer for QailLanguageServer {
                                     new_text: suggestion.to_string(),
                                 }]);
 
-                                actions.push(CodeAction {
+                                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                                     title: format!("Change to '{}'", suggestion),
                                     kind: Some(CodeActionKind::QUICKFIX),
                                     diagnostics: Some(vec![diagnostic.clone()]),
@@ -412,7 +413,7 @@ impl LanguageServer for QailLanguageServer {
                                     }),
                                     is_preferred: Some(true),
                                     ..Default::default()
-                                });
+                                }));
                             }
                         }
                     }
@@ -585,9 +586,9 @@ impl LanguageServer for QailLanguageServer {
                 }
 
                 // Context-aware column completions
-                let uri = _params.text_document_position_params.text_document.uri.to_string();
-                let line = _params.text_document_position_params.position.line as usize;
-                let col = _params.text_document_position_params.position.character as usize;
+                let uri = _params.text_document_position.text_document.uri.to_string();
+                let line = _params.text_document_position.position.line as usize;
+                let col = _params.text_document_position.position.character as usize;
 
                 if let Some(table) = self.get_context_table(&uri, line, col) {
                    if let Some(columns) = validator.column_names(&table) {

@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "qail-bench"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "criterion",
  "qail-core",
@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "qail-ffi"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "qail-core",
  "serde_json",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "qail-macro"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "proc-macro2",
  "qail-core",
@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "qail-sqlx"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "qail-core",
  "sqlx",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "qail-wasm"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "js-sys",
  "qail-core",
