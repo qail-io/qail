@@ -1,6 +1,6 @@
 [package]
 name = "qail-lsp"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "Language Server Protocol implementation for QAIL"
 license = "MIT"
