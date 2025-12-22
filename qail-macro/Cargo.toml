@@ -1,20 +1,24 @@
 [package]
 name = "qail-macro"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
-description = "Procedural macros for QAIL"
+description = "Procedural macros for QAIL - compile-time validated database queries"
 license = "MIT"
 repository = "https://github.com/qail-rs/qail"
 readme = "../README.md"
 categories = ["database", "rust-patterns"]
-keywords = ["qail", "macro", "sql"]
+keywords = ["qail", "macro", "sql", "sqlx"]
 
 [lib]
 proc-macro = true
 
+[features]
+default = []
+sqlx = []  # Enables qail_query! and qail_query_as! macros
+
 [dependencies]
-qail-core = { path = "../qail-core", version = "0.8.1" }
-syn = { version = "2.0", features = ["full"] }
+qail-core = { path = "../qail-core", version = "0.8" }
+syn = { version = "2.0", features = ["full", "extra-traits"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 
