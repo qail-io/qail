@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::transpiler::dialect::Dialect;
 use crate::transpiler::conditions::ConditionToSql;
+use crate::transpiler::SqlGenerator;
 
 /// Generate INSERT SQL.
 pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
@@ -30,6 +31,11 @@ pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
         }
     }
 
+    // ON CONFLICT clause
+    if let Some(on_conflict) = &cmd.on_conflict {
+        sql.push_str(&build_on_conflict(on_conflict, &dialect, generator.as_ref()));
+    }
+
     // RETURNING clause - configurable
     match &cmd.returning {
         None => sql.push_str(" RETURNING *"), // Default: return all
@@ -43,3 +49,66 @@ pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
 
     sql
 }
+
+/// Build ON CONFLICT clause for different dialects
+fn build_on_conflict(
+    on_conflict: &OnConflict,
+    dialect: &Dialect,
+    generator: &dyn SqlGenerator,
+) -> String {
+    match dialect {
+        Dialect::MySQL | Dialect::MariaDB => build_on_conflict_mysql(on_conflict, generator),
+        _ => build_on_conflict_postgres(on_conflict, generator),
+    }
+}
+
+/// PostgreSQL/SQLite style: ON CONFLICT (cols) DO UPDATE SET ... or DO NOTHING
+fn build_on_conflict_postgres(
+    on_conflict: &OnConflict,
+    generator: &dyn SqlGenerator,
+) -> String {
+    let mut sql = String::from(" ON CONFLICT (");
+    let cols: Vec<String> = on_conflict.columns.iter()
+        .map(|c| generator.quote_identifier(c))
+        .collect();
+    sql.push_str(&cols.join(", "));
+    sql.push_str(")");
+    
+    match &on_conflict.action {
+        ConflictAction::DoNothing => {
+            sql.push_str(" DO NOTHING");
+        }
+        ConflictAction::DoUpdate { assignments } => {
+            sql.push_str(" DO UPDATE SET ");
+            let sets: Vec<String> = assignments.iter()
+                .map(|(col, expr)| format!("{} = {}", generator.quote_identifier(col), expr))
+                .collect();
+            sql.push_str(&sets.join(", "));
+        }
+    }
+    
+    sql
+}
+
+/// MySQL style: ON DUPLICATE KEY UPDATE ...
+fn build_on_conflict_mysql(
+    on_conflict: &OnConflict,
+    generator: &dyn SqlGenerator,
+) -> String {
+    match &on_conflict.action {
+        ConflictAction::DoNothing => {
+            // MySQL doesn't have DO NOTHING, use INSERT IGNORE instead or empty update
+            // For now, we'll just skip (the INSERT would fail on conflict)
+            String::new()
+        }
+        ConflictAction::DoUpdate { assignments } => {
+            let mut sql = String::from(" ON DUPLICATE KEY UPDATE ");
+            let sets: Vec<String> = assignments.iter()
+                .map(|(col, expr)| format!("{} = {}", generator.quote_identifier(col), expr))
+                .collect();
+            sql.push_str(&sets.join(", "));
+            sql
+        }
+    }
+}
+

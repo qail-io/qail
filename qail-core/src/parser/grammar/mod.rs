@@ -96,7 +96,7 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     let (input, joins) = many0(parse_join_clause)(input)?;
     let (input, _) = multispace0(input)?;
     
-    // For SET/UPDATE: parse "values col = val, col2 = val2"
+    // For SET/UPDATE: parse "values col = val, col2 = val2" before fields
     let (input, set_cages) = if matches!(action, Action::Set) {
         opt(parse_values_clause)(input)?
     } else {
@@ -107,8 +107,26 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     // Parse optional clauses
     let (input, columns) = opt(parse_fields_clause)(input)?;
     let (input, _) = multispace0(input)?;
+    
+    // For ADD/INSERT: parse "values val1, val2" AFTER fields clause
+    let (input, add_cages) = if matches!(action, Action::Add) {
+        opt(dml::parse_insert_values)(input)?
+    } else {
+        (input, None)
+    };
+    let (input, _) = multispace0(input)?;
+    
     let (input, where_cages) = opt(parse_where_clause)(input)?;
     let (input, _) = multispace0(input)?;
+    
+    // Parse ON CONFLICT clause (for ADD/INSERT only)
+    let (input, on_conflict) = if matches!(action, Action::Add) {
+        opt(dml::parse_on_conflict)(input)?
+    } else {
+        (input, None)
+    };
+    let (input, _) = multispace0(input)?;
+    
     let (input, order_cages) = opt(parse_order_by_clause)(input)?;
     let (input, _) = multispace0(input)?;
     let (input, limit_cage) = opt(parse_limit_clause)(input)?;
@@ -121,6 +139,11 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     // For SET, values come first (as Payload cage)
     if let Some(sc) = set_cages {
         cages.push(sc);
+    }
+    
+    // For ADD, values come as Payload cage too
+    if let Some(ac) = add_cages {
+        cages.push(ac);
     }
     
     if let Some(wc) = where_cages {
@@ -151,6 +174,7 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
         group_by_mode: GroupByMode::default(),
         returning: None,
         ctes,
+        on_conflict,
     }))
 }
 

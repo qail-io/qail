@@ -16,4 +16,4 @@ pub use self::joins::Join;
 pub use self::expr::{
     BinaryOp, Expr, ColumnGeneration, Constraint, FrameBound, IndexDef, TableConstraint, WindowFrame,
 };
-pub use self::cmd::{CTEDef, QailCmd};
+pub use self::cmd::{CTEDef, ConflictAction, OnConflict, QailCmd};
