@@ -110,7 +110,19 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                                 } else {
                                    // For expressions (especially binary), don't quote
                                    match a {
-                                       Expr::Named(n) => generator.quote_identifier(n),
+                                       Expr::Named(n) => {
+                                           // Don't quote if already quoted, is a param, or is numeric
+                                           if n.starts_with('\'') || n.starts_with('"') 
+                                               || n.starts_with(':') || n.starts_with('$')
+                                               || n.parse::<f64>().is_ok()
+                                               || n.eq_ignore_ascii_case("NULL")
+                                               || n.eq_ignore_ascii_case("TRUE")
+                                               || n.eq_ignore_ascii_case("FALSE") {
+                                               n.clone()
+                                           } else {
+                                               generator.quote_identifier(n)
+                                           }
+                                       },
                                        Expr::Star => "*".to_string(),
                                        _ => arg_str, // Binary, FunctionCall etc - use as-is
                                    }

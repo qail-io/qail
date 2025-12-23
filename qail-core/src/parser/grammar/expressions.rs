@@ -156,19 +156,37 @@ fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
     Ok((input, expr))
 }
 
-/// Parse atomic expressions (functions, case, identifiers, wildcards)
+/// Parse atomic expressions (functions, case, literals, identifiers, wildcards)
 fn parse_atom(input: &str) -> IResult<&str, Expr> {
     alt((
         parse_case,
         parse_special_function, // Try special functions first (SUBSTRING, EXTRACT, TRIM)
         parse_function_or_aggregate,
         parse_star,
+        parse_literal, // String literals, numbers, named params
         parse_simple_ident,
     ))(input)
 }
 
 fn parse_star(input: &str) -> IResult<&str, Expr> {
     map(tag("*"), |_| Expr::Star)(input)
+}
+
+/// Parse literal values (strings, numbers, named params) as expressions
+fn parse_literal(input: &str) -> IResult<&str, Expr> {
+    use super::base::parse_value;
+    use crate::ast::Value;
+    
+    map(parse_value, |v| match v {
+        Value::NamedParam(name) => Expr::Named(format!(":{}", name)),
+        Value::Param(n) => Expr::Named(format!("${}", n)),
+        Value::String(s) => Expr::Named(format!("'{}'", s)),
+        Value::Int(n) => Expr::Named(n.to_string()),
+        Value::Float(f) => Expr::Named(f.to_string()),
+        Value::Bool(b) => Expr::Named(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
+        Value::Null => Expr::Named("NULL".to_string()),
+        _ => Expr::Named("VALUE".to_string()),
+    })(input)
 }
 
 fn parse_simple_ident(input: &str) -> IResult<&str, Expr> {

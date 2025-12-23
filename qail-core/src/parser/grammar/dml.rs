@@ -58,13 +58,25 @@ pub fn parse_set_assignments(input: &str) -> IResult<&str, Vec<Condition>> {
     )(input)
 }
 
-/// Parse single assignment: column = value
+/// Parse single assignment: column = value or column = expression (supports functions)
 pub fn parse_assignment(input: &str) -> IResult<&str, Condition> {
+    use nom::branch::alt;
+    use super::expressions::parse_expression;
+    
     let (input, column) = parse_identifier(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char('=')(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, value) = parse_value(input)?;
+    
+    // Try expression first (for function calls like coalesce), fall back to simple value
+    let (input, value) = alt((
+        // Try expression and convert to Value::Function
+        nom::combinator::map(parse_expression, |expr| {
+            Value::Function(expr.to_string())
+        }),
+        // Fall back to simple value parsing
+        parse_value,
+    ))(input)?;
     
     Ok((input, Condition {
         left: Expr::Named(column.to_string()),
