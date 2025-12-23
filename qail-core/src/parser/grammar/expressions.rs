@@ -19,6 +19,36 @@ pub fn parse_expression(input: &str) -> IResult<&str, Expr> {
     parse_concat_expr(input)
 }
 
+/// Parse an expression with optional AS alias
+/// e.g., `column`, `CASE...END AS name`, `func(...) AS alias`
+pub fn parse_expression_with_alias(input: &str) -> IResult<&str, Expr> {
+    let (input, mut expr) = parse_expression(input)?;
+    let (input, _) = multispace0(input)?;
+    
+    // Check for optional AS alias
+    if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("as")(input) {
+        let (remaining, _) = multispace1(remaining)?;
+        let (remaining, alias) = parse_identifier(remaining)?;
+        expr = set_expr_alias(expr, alias.to_string());
+        return Ok((remaining, expr));
+    }
+    
+    Ok((input, expr))
+}
+
+/// Set alias on any Expr variant that supports it
+fn set_expr_alias(expr: Expr, alias: String) -> Expr {
+    match expr {
+        Expr::Named(name) => Expr::Aliased { name, alias },
+        Expr::Case { when_clauses, else_value, .. } => Expr::Case { when_clauses, else_value, alias: Some(alias) },
+        Expr::FunctionCall { name, args, .. } => Expr::FunctionCall { name, args, alias: Some(alias) },
+        Expr::SpecialFunction { name, args, .. } => Expr::SpecialFunction { name, args, alias: Some(alias) },
+        Expr::Binary { left, op, right, .. } => Expr::Binary { left, op, right, alias: Some(alias) },
+        Expr::JsonAccess { column, path, as_text, .. } => Expr::JsonAccess { column, path, as_text, alias: Some(alias) },
+        other => other, // Star, Aliased already have alias
+    }
+}
+
 /// Parse concatenation (lowest precedence): expr || expr
 fn parse_concat_expr(input: &str) -> IResult<&str, Expr> {
     let (input, left) = parse_additive_expr(input)?;
@@ -214,10 +244,10 @@ fn parse_case(input: &str) -> IResult<&str, Expr> {
     
     let (input, _) = multispace0(input)?;
     
-    // Else
+    // Else - parse as expression (not just value)
     let (input, else_value) = opt(preceded(
         tuple((tag_no_case("else"), multispace1)),
-        parse_value
+        parse_expression
     ))(input)?;
     
     let (input, _) = multispace0(input)?;
@@ -230,7 +260,7 @@ fn parse_case(input: &str) -> IResult<&str, Expr> {
     }))
 }
 
-fn parse_when(input: &str) -> IResult<&str, (Condition, Value)> {
+fn parse_when(input: &str) -> IResult<&str, (Condition, Box<Expr>)> {
     let (input, _) = tag_no_case("when")(input)?;
     let (input, _) = multispace1(input)?;
     
@@ -247,7 +277,9 @@ fn parse_when(input: &str) -> IResult<&str, (Condition, Value)> {
     let (input, _) = multispace1(input)?;
     let (input, _) = tag_no_case("then")(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, then_val) = parse_value(input)?;
+    
+    // Parse THEN as expression (not just value) - allows SUBSTRING, functions, etc.
+    let (input, then_expr) = parse_expression(input)?;
     
     Ok((input, (
         Condition {
@@ -256,7 +288,7 @@ fn parse_when(input: &str) -> IResult<&str, (Condition, Value)> {
             value: val,
             is_array_unnest: false,
         },
-        then_val
+        Box::new(then_expr)
     )))
 }
 

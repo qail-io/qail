@@ -348,15 +348,15 @@ fn test_case_expression() {
                 op: Operator::Eq,
                 value: Value::String("active".to_string()),
                 is_array_unnest: false,
-            }, Value::Int(1)),
+            }, Box::new(Expr::Named("1".to_string()))),
             (Condition {
                 left: Expr::Named("status".to_string()),
                 op: Operator::Eq,
                 value: Value::String("pending".to_string()),
                 is_array_unnest: false,
-            }, Value::Int(2)),
+            }, Box::new(Expr::Named("2".to_string()))),
         ],
-        else_value: Some(Box::new(Value::Int(0))),
+        else_value: Some(Box::new(Expr::Named("0".to_string()))),
         alias: Some("priority".to_string()),
     });
     
