@@ -8,17 +8,26 @@ pub struct ParamContext {
     pub index: usize,
     /// Collected parameter values in order
     pub params: Vec<Value>,
+    /// Names of named parameters in order (for :name → $n mapping)
+    pub named_params: Vec<String>,
 }
 
 impl ParamContext {
     pub fn new() -> Self {
-        Self { index: 0, params: Vec::new() }
+        Self { index: 0, params: Vec::new(), named_params: Vec::new() }
     }
 
     /// Add a value and return the placeholder for it.
     pub fn add_param(&mut self, value: Value, generator: &dyn SqlGenerator) -> String {
         self.index += 1;
         self.params.push(value);
+        generator.placeholder(self.index)
+    }
+
+    /// Add a named parameter and return the placeholder for it.
+    pub fn add_named_param(&mut self, name: String, generator: &dyn SqlGenerator) -> String {
+        self.index += 1;
+        self.named_params.push(name);
         generator.placeholder(self.index)
     }
 }
@@ -217,6 +226,7 @@ impl ConditionToSql for Condition {
         let value_placeholder = |v: &Value, p: &mut ParamContext| -> String {
             match v {
                 Value::Param(n) => generator.placeholder(*n), // Already a placeholder
+                Value::NamedParam(name) => p.add_named_param(name.clone(), generator.as_ref()),
                 Value::Null => "NULL".to_string(),
                 other => p.add_param(other.clone(), generator.as_ref()),
             }

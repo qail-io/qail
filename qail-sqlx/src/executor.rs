@@ -50,8 +50,18 @@ pub trait QailExecutor {
     where
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin;
 
+    /// Fetch all rows with named parameters.
+    fn qail_fetch_all_with<'a, T>(&'a self, qail: &'a str, params: &'a crate::params::QailParams) -> Pin<Box<dyn Future<Output = QailResult<Vec<T>>> + Send + 'a>>
+    where
+        T: for<'r> FromRow<'r, PgRow> + Send + Unpin;
+
     /// Fetch one row using a QAIL query string.
     fn qail_fetch_one<'a, T>(&'a self, qail: &'a str) -> Pin<Box<dyn Future<Output = QailResult<T>> + Send + 'a>>
+    where
+        T: for<'r> FromRow<'r, PgRow> + Send + Unpin;
+
+    /// Fetch one row with named parameters.
+    fn qail_fetch_one_with<'a, T>(&'a self, qail: &'a str, params: &'a crate::params::QailParams) -> Pin<Box<dyn Future<Output = QailResult<T>> + Send + 'a>>
     where
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin;
 
@@ -60,8 +70,16 @@ pub trait QailExecutor {
     where
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin;
 
+    /// Fetch optional row with named parameters.
+    fn qail_fetch_optional_with<'a, T>(&'a self, qail: &'a str, params: &'a crate::params::QailParams) -> Pin<Box<dyn Future<Output = QailResult<Option<T>>> + Send + 'a>>
+    where
+        T: for<'r> FromRow<'r, PgRow> + Send + Unpin;
+
     /// Execute a QAIL query (for INSERT/UPDATE/DELETE).
     fn qail_execute<'a>(&'a self, qail: &'a str) -> Pin<Box<dyn Future<Output = QailResult<u64>> + Send + 'a>>;
+
+    /// Execute a QAIL query with named parameters.
+    fn qail_execute_with<'a>(&'a self, qail: &'a str, params: &'a crate::params::QailParams) -> Pin<Box<dyn Future<Output = QailResult<u64>> + Send + 'a>>;
 
     /// Execute a QailCmd directly (for dynamic query building).
     fn qail_execute_cmd<'a, T>(&'a self, cmd: &'a QailCmd) -> Pin<Box<dyn Future<Output = QailResult<Vec<T>>> + Send + 'a>>
@@ -123,6 +141,49 @@ impl QailExecutor for PgPool {
             Ok(rows)
         })
     }
+
+    fn qail_fetch_all_with<'a, T>(&'a self, qail: &'a str, params: &'a crate::params::QailParams) -> Pin<Box<dyn Future<Output = QailResult<Vec<T>>> + Send + 'a>>
+    where
+        T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
+    {
+        Box::pin(async move {
+            let result = parse_and_parameterize(qail)?;
+            let rows = execute_query_as_with::<T>(self, &result, params).await?;
+            Ok(rows)
+        })
+    }
+
+    fn qail_fetch_one_with<'a, T>(&'a self, qail: &'a str, params: &'a crate::params::QailParams) -> Pin<Box<dyn Future<Output = QailResult<T>> + Send + 'a>>
+    where
+        T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
+    {
+        Box::pin(async move {
+            let result = parse_and_parameterize(qail)?;
+            let rows = execute_query_as_with::<T>(self, &result, params).await?;
+            rows.into_iter().next().ok_or_else(|| {
+                QailSqlxError::Sqlx(sqlx::Error::RowNotFound)
+            })
+        })
+    }
+
+    fn qail_fetch_optional_with<'a, T>(&'a self, qail: &'a str, params: &'a crate::params::QailParams) -> Pin<Box<dyn Future<Output = QailResult<Option<T>>> + Send + 'a>>
+    where
+        T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
+    {
+        Box::pin(async move {
+            let result = parse_and_parameterize(qail)?;
+            let rows = execute_query_as_with::<T>(self, &result, params).await?;
+            Ok(rows.into_iter().next())
+        })
+    }
+
+    fn qail_execute_with<'a>(&'a self, qail: &'a str, params: &'a crate::params::QailParams) -> Pin<Box<dyn Future<Output = QailResult<u64>> + Send + 'a>> {
+        Box::pin(async move {
+            let result = parse_and_parameterize(qail)?;
+            let affected = execute_query_with(self, &result, params).await?;
+            Ok(affected)
+        })
+    }
 }
 
 /// Parse QAIL and generate parameterized SQL.
@@ -154,6 +215,37 @@ async fn execute_query(pool: &PgPool, result: &TranspileResult) -> QailResult<u6
     // Bind each parameter
     for param in &result.params {
         query = bind_value_raw(query, param);
+    }
+    
+    let result = query.execute(pool).await?;
+    Ok(result.rows_affected())
+}
+
+/// Execute a parameterized query with named params and return typed results.
+async fn execute_query_as_with<T>(pool: &PgPool, result: &TranspileResult, params: &crate::params::QailParams) -> QailResult<Vec<T>>
+where
+    T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
+{
+    let mut query = sqlx::query_as::<_, T>(&result.sql);
+    
+    // Bind values from QailParams in the order they appear in the query
+    let values = params.bind_values(&result.named_params);
+    for value in &values {
+        query = bind_value(query, value);
+    }
+    
+    let rows = query.fetch_all(pool).await?;
+    Ok(rows)
+}
+
+/// Execute a parameterized query with named params and return affected rows.
+async fn execute_query_with(pool: &PgPool, result: &TranspileResult, params: &crate::params::QailParams) -> QailResult<u64> {
+    let mut query = sqlx::query(&result.sql);
+    
+    // Bind values from QailParams in the order they appear in the query
+    let values = params.bind_values(&result.named_params);
+    for value in &values {
+        query = bind_value_raw(query, value);
     }
     
     let result = query.execute(pool).await?;
