@@ -13,13 +13,18 @@ pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.')(input)
 }
 
-/// Parse value: string, number, bool, null, $param
+/// Parse value: string, number, bool, null, $param, :named_param
 pub fn parse_value(input: &str) -> IResult<&str, Value> {
     alt((
         // Parameter: $1, $2
         map(
             preceded(char('$'), digit1),
             |d: &str| Value::Param(d.parse().unwrap_or(0))
+        ),
+        // Named parameter: :name, :id, :user_id
+        map(
+            preceded(char(':'), take_while1(|c: char| c.is_alphanumeric() || c == '_')),
+            |name: &str| Value::NamedParam(name.to_string())
         ),
         // Boolean
         value(Value::Bool(true), tag_no_case("true")),

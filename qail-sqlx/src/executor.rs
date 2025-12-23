@@ -180,7 +180,7 @@ where
             query.bind(strings)
         }
         // These shouldn't appear in parameterized output, but handle gracefully
-        Value::Param(_) | Value::Function(_) | Value::Subquery(_) | Value::Column(_) => {
+        Value::Param(_) | Value::NamedParam(_) | Value::Function(_) | Value::Subquery(_) | Value::Column(_) => {
             // Bind as string representation
             query.bind(value.to_string())
         }
@@ -203,7 +203,7 @@ fn bind_value_raw<'q>(
             query.bind(strings)
         }
         // These shouldn't appear in parameterized output, but handle gracefully
-        Value::Param(_) | Value::Function(_) | Value::Subquery(_) | Value::Column(_) => {
+        Value::Param(_) | Value::NamedParam(_) | Value::Function(_) | Value::Subquery(_) | Value::Column(_) => {
             query.bind(value.to_string())
         }
     }

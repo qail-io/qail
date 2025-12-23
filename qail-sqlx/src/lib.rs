@@ -27,8 +27,10 @@
 use qail_core::transpiler::{ToSql, Dialect, TranspileResult, ToSqlParameterized};
 
 pub mod executor;
+pub mod params;
 
 pub use executor::{QailExecutor, QailSqlxError, QailResult};
+pub use params::QailParams;
 
 /// Parse QAIL and return PostgreSQL.
 pub fn qail_to_sql(qail: &str) -> Result<String, qail_core::error::QailError> {
@@ -66,6 +68,7 @@ pub mod prelude {
         qail_to_sql_parameterized_with_dialect
     };
     pub use super::executor::{QailExecutor, QailSqlxError, QailResult};
+    pub use super::params::QailParams;
     pub use qail_core::transpiler::{ToSql, Dialect, TranspileResult};
     pub use qail_core::ast::{QailCmd, Value};
 }
