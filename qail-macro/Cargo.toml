@@ -1,6 +1,6 @@
 [package]
 name = "qail-macro"
-version = "0.8.7"
+version = "0.8.8"
 edition = "2024"
 description = "Procedural macros for QAIL - compile-time validated database queries"
 license = "MIT"

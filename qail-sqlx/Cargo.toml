@@ -1,6 +1,6 @@
 [package]
 name = "qail-sqlx"
-version = "0.8.6"
+version = "0.8.8"
 edition = "2021"
 description = "SQLx integration for QAIL - execute QAIL queries with typed results"
 license = "MIT"
