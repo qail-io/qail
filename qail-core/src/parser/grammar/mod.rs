@@ -1,0 +1,145 @@
+pub mod base;
+pub mod clauses;
+pub mod cte;
+pub mod ddl;
+pub mod dml;
+pub mod joins;
+pub mod expressions;
+
+use nom::{
+    bytes::complete::tag_no_case,
+    combinator::{opt},
+    multi::many0,
+    character::complete::{multispace0, multispace1},
+    IResult,
+};
+use crate::ast::*;
+// Import parsers from submodules
+use self::base::*;
+use self::clauses::*;
+use self::ddl::*;
+use self::dml::*;
+use self::joins::*;
+// use self::expressions::*; // Used in clauses module
+
+/// Parse a QAIL query (root entry point).
+pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
+    let input = input.trim();
+    
+    // Try transaction commands first (single keywords)
+    if let Ok((remaining, cmd)) = parse_txn_command(input) {
+        return Ok((remaining, cmd));
+    }
+    
+    // Try CREATE INDEX first (special case: "index name on table ...")
+    if let Ok((remaining, cmd)) = parse_create_index(input) {
+        return Ok((remaining, cmd));
+    }
+    
+    // Try WITH clause (CTE) parsing
+    let (input, ctes) = if input.to_lowercase().starts_with("with ") {
+        let (remaining, (cte_defs, _is_recursive)) = cte::parse_with_clause(input)?;
+        let (remaining, _) = multispace0(remaining)?;
+        (remaining, cte_defs)
+    } else {
+        (input, vec![])
+    };
+    
+    // Parse action first
+    let (input, (action, distinct)) = parse_action(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    // Check for DISTINCT ON (col1, col2) after action (Postgres-specific)
+    let (input, distinct_on) = if distinct {
+        // If already parsed "get distinct", check for "on (...)"
+        if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("on")(input) {
+            let (remaining, _) = multispace0(remaining)?;
+            // Parse (col1, col2)
+            let (remaining, cols) = nom::sequence::delimited(
+                nom::character::complete::char('('),
+                nom::multi::separated_list1(
+                    nom::sequence::tuple((multispace0, nom::character::complete::char(','), multispace0)),
+                    |i| parse_identifier(i).map(|(r, s)| (r, s.to_string()))
+                ),
+                nom::character::complete::char(')')
+            )(remaining)?;
+            let (remaining, _) = multispace1(remaining)?;
+            (remaining, cols)
+        } else {
+            (input, vec![])
+        }
+    } else {
+        (input, vec![])
+    };
+    
+    //  Parse table name
+    let (input, table) = parse_identifier(input)?;
+    let (input, _) = multispace0(input)?;
+    
+    // For MAKE (CREATE TABLE): parse column definitions
+    if matches!(action, Action::Make) {
+        return parse_create_table(input, table);
+    }
+    
+    // Parse optional joins: [inner|left|right] join table [on condition]
+    let (input, joins) = many0(parse_join_clause)(input)?;
+    let (input, _) = multispace0(input)?;
+    
+    // For SET/UPDATE: parse "values col = val, col2 = val2"
+    let (input, set_cages) = if matches!(action, Action::Set) {
+        opt(parse_values_clause)(input)?
+    } else {
+        (input, None)
+    };
+    let (input, _) = multispace0(input)?;
+    
+    // Parse optional clauses
+    let (input, columns) = opt(parse_fields_clause)(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, where_cages) = opt(parse_where_clause)(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, order_cages) = opt(parse_order_by_clause)(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, limit_cage) = opt(parse_limit_clause)(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, offset_cage) = opt(parse_offset_clause)(input)?;
+    
+    // Build cages
+    let mut cages = Vec::new();
+    
+    // For SET, values come first (as Payload cage)
+    if let Some(sc) = set_cages {
+        cages.push(sc);
+    }
+    
+    if let Some(wc) = where_cages {
+        cages.extend(wc);
+    }
+    if let Some(oc) = order_cages {
+        cages.extend(oc);
+    }
+    if let Some(lc) = limit_cage {
+        cages.push(lc);
+    }
+    if let Some(oc) = offset_cage {
+        cages.push(oc);
+    }
+    
+    Ok((input, QailCmd {
+        action,
+        table: table.to_string(),
+        columns: columns.unwrap_or_else(|| vec![Expr::Star]),
+        joins,
+        cages,
+        distinct,
+        distinct_on,
+        index_def: None,
+        table_constraints: vec![],
+        set_ops: vec![],
+        having: vec![],
+        group_by_mode: GroupByMode::default(),
+        ctes,
+    }))
+}
+
+

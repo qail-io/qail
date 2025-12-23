@@ -66,7 +66,11 @@ fn build_aggregate(cmd: &QailCmd) -> String {
                      SortOrder::Desc | SortOrder::DescNullsFirst | SortOrder::DescNullsLast => -1,
                  };
                  if let Some(cond) = cage.conditions.first() {
-                     stages.push(format!("{{ \"$sort\": {{ \"{}\": {} }} }}", cond.column, val));
+                     let col_str = match &cond.left {
+                         Expr::Named(name) => name.clone(),
+                         expr => expr.to_string(),
+                     };
+                     stages.push(format!("{{ \"$sort\": {{ \"{}\": {} }} }}", col_str, val));
                  }
              },
              CageKind::Offset(n) => stages.push(format!("{{ \"$skip\": {} }}", n)),
@@ -97,7 +101,11 @@ fn build_find(cmd: &QailCmd) -> String {
                  };
                  // Extract sort field from condition.
                  if let Some(cond) = cage.conditions.first() {
-                     mongo.push_str(&format!(".sort({{ \"{}\": {} }})", cond.column, val));
+                     let col_str = match &cond.left {
+                         Expr::Named(name) => name.clone(),
+                         expr => expr.to_string(),
+                     };
+                     mongo.push_str(&format!(".sort({{ \"{}\": {} }})", col_str, val));
                  }
             },
             _ => {}
@@ -119,7 +127,11 @@ fn build_update(cmd: &QailCmd) -> String {
              CageKind::Payload | CageKind::Filter => {
                 for cond in &cage.conditions {
                      if !first { update_doc.push_str(", "); }
-                     update_doc.push_str(&format!("\"{}\": {}", cond.column, value_to_json(&cond.value)));
+                     let col_str = match &cond.left {
+                         Expr::Named(name) => name.clone(),
+                         expr => expr.to_string(),
+                     };
+                     update_doc.push_str(&format!("\"{}\": {}", col_str, value_to_json(&cond.value)));
                      first = false;
                 }
             },
@@ -142,7 +154,11 @@ fn build_insert(cmd: &QailCmd) -> String {
             CageKind::Payload | CageKind::Filter => {
                 for cond in &cage.conditions {
                      if !first { doc.push_str(", "); }
-                     doc.push_str(&format!("\"{}\": {}", cond.column, value_to_json(&cond.value)));
+                     let col_str = match &cond.left {
+                         Expr::Named(name) => name.clone(),
+                         expr => expr.to_string(),
+                     };
+                     doc.push_str(&format!("\"{}\": {}", col_str, value_to_json(&cond.value)));
                      first = false;
                 }
             },
@@ -167,7 +183,11 @@ fn build_upsert(cmd: &QailCmd) -> String {
              CageKind::Payload | CageKind::Filter => {
                 for cond in &cage.conditions {
                      if !first { update_doc.push_str(", "); }
-                     update_doc.push_str(&format!("\"{}\": {}", cond.column, value_to_json(&cond.value)));
+                     let col_str = match &cond.left {
+                         Expr::Named(name) => name.clone(),
+                         expr => expr.to_string(),
+                     };
+                     update_doc.push_str(&format!("\"{}\": {}", col_str, value_to_json(&cond.value)));
                      first = false;
                 }
             },
@@ -200,12 +220,17 @@ fn build_query_filter(cmd: &QailCmd) -> String {
                      _ => "$eq" // Fallback
                  };
                  
-                 // If simple equality, clean syntax { key: val }
-                 if let Operator::Eq = cond.op {
-                      query_parts.push(format!("\"{}\": {}", cond.column, value_to_json(&cond.value)));
-                 } else {
-                      query_parts.push(format!("\"{}\": {{ \"{}\": {} }}", cond.column, op, value_to_json(&cond.value)));
-                 }
+                  let col_str = match &cond.left {
+                      Expr::Named(name) => name.clone(),
+                      expr => expr.to_string(),
+                  };
+                  
+                  // If simple equality, clean syntax { key: val }
+                  if let Operator::Eq = cond.op {
+                       query_parts.push(format!("\"{}\": {}", col_str, value_to_json(&cond.value)));
+                  } else {
+                       query_parts.push(format!("\"{}\": {{ \"{}\": {} }}", col_str, op, value_to_json(&cond.value)));
+                  }
              }
         }
     }
@@ -225,7 +250,7 @@ fn build_projection(cmd: &QailCmd) -> String {
     let mut proj = String::from("{ ");
     for (i, col) in cmd.columns.iter().enumerate() {
         if i > 0 { proj.push_str(", "); }
-        if let Column::Named(name) = col {
+        if let Expr::Named(name) = col {
             proj.push_str(&format!("\"{}\": 1", name));
         }
     }

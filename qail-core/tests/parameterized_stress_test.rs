@@ -10,7 +10,7 @@ use qail_core::parser::parse;
 /// Test basic value extraction
 #[test]
 fn test_basic_parameterization() {
-    let cmd = parse("get::users:'_[name=Alice][age=25]").unwrap();
+    let cmd = parse("get users fields * where name = \"Alice\" and age = 25").unwrap();
     let result = cmd.to_sql_parameterized();
     
     println!("SQL: {}", result.sql);
@@ -26,7 +26,7 @@ fn test_basic_parameterization() {
 #[test]
 fn test_explicit_param_passthrough() {
     // When user explicitly uses $1, it should pass through
-    let cmd = parse("get::users:'_[id=$1]").unwrap();
+    let cmd = parse("get users fields * where id = $1").unwrap();
     let result = cmd.to_sql_parameterized();
     
     println!("SQL: {}", result.sql);
@@ -41,7 +41,7 @@ fn test_explicit_param_passthrough() {
 /// Test boolean parameterization
 #[test]
 fn test_boolean_params() {
-    let cmd = parse("get::users:'_[active=true][verified=false]").unwrap();
+    let cmd = parse("get users fields * where active = true and verified = false").unwrap();
     let result = cmd.to_sql_parameterized();
     
     println!("SQL: {}", result.sql);
@@ -55,7 +55,7 @@ fn test_boolean_params() {
 /// Test numeric types
 #[test]
 fn test_numeric_params() {
-    let cmd = parse("get::products:'_[price=99.99][quantity=100]").unwrap();
+    let cmd = parse("get products fields * where price = 99.99 and quantity = 100").unwrap();
     let result = cmd.to_sql_parameterized();
     
     println!("SQL: {}", result.sql);
@@ -76,7 +76,7 @@ fn test_numeric_params() {
 /// Test complex query with multiple conditions
 #[test]
 fn test_complex_multi_condition() {
-    let cmd = parse("get::orders:'id'total'status[status=pending][amount>100]").unwrap();
+    let cmd = parse("get orders fields id, total, status where status = \"pending\" and amount > 100").unwrap();
     let result = cmd.to_sql_parameterized();
     
     println!("SQL: {}", result.sql);
@@ -99,11 +99,11 @@ fn test_complex_multi_condition() {
 fn test_null_handling() {
     // NULL conditions should not create params
     let mut cmd = QailCmd::get("users");
-    cmd.columns.push(Column::Star);
+    cmd.columns.push(Expr::Star);
     cmd.cages.push(Cage {
         kind: CageKind::Filter,
         conditions: vec![Condition {
-            column: "deleted_at".to_string(),
+            left: Expr::Named("deleted_at".to_string()),
             op: Operator::IsNull,
             value: Value::Null,
             is_array_unnest: false,
@@ -121,7 +121,7 @@ fn test_null_handling() {
 /// Test LIMIT/OFFSET
 #[test]
 fn test_limit_offset() {
-    let cmd = parse("get::users:'_[lim=20][off=40]").unwrap();
+    let cmd = parse("get users fields * limit 20 offset 40").unwrap();
     let result = cmd.to_sql_parameterized();
     
     println!("SQL: {}", result.sql);
@@ -135,7 +135,7 @@ fn test_limit_offset() {
 /// Placeholder numbering should be sequential
 #[test]
 fn test_sequential_placeholder_numbering() {
-    let cmd = parse("get::users:'_[a=1][b=2][c=3][d=4][e=5]").unwrap();
+    let cmd = parse("get users fields * where a=1 and b=2 and c=3 and d=4 and e=5").unwrap();
     let result = cmd.to_sql_parameterized();
     
     println!("SQL: {}", result.sql);
@@ -152,7 +152,7 @@ fn test_sequential_placeholder_numbering() {
 /// Test edge case: empty conditions
 #[test]
 fn test_no_conditions() {
-    let cmd = parse("get::users:'_").unwrap();
+    let cmd = parse("get users fields *").unwrap();
     let result = cmd.to_sql_parameterized();
     
     println!("SQL: {}", result.sql);
@@ -166,11 +166,11 @@ fn test_no_conditions() {
 fn test_string_with_quotes() {
     // Parser doesn't handle embedded quotes, so test via AST
     let mut cmd = QailCmd::get("users");
-    cmd.columns.push(Column::Star);
+    cmd.columns.push(Expr::Star);
     cmd.cages.push(Cage {
         kind: CageKind::Filter,
         conditions: vec![Condition {
-            column: "name".to_string(),
+            left: Expr::Named("name".to_string()),
             op: Operator::Eq,
             value: Value::String("O'Brien".to_string()),
             is_array_unnest: false,

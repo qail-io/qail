@@ -26,8 +26,8 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
     } else {
         let cols: Vec<String> = cmd.columns.iter().map(|c| {
              match c {
-                Column::Named(name) => generator.quote_identifier(name),
-                Column::Case { when_clauses, else_value, alias } => {
+                Expr::Named(name) => generator.quote_identifier(name),
+                Expr::Case { when_clauses, else_value, alias } => {
                     let mut case_sql = String::from("CASE");
                     for (cond, val) in when_clauses {
                         case_sql.push_str(&format!(" WHEN {} THEN {}", cond.to_sql(&generator, Some(cmd)), val));
@@ -42,7 +42,7 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         case_sql
                     }
                 }
-                Column::JsonAccess { column, path, as_text, alias } => {
+                Expr::JsonAccess { column, path, as_text, alias } => {
                     let op = if *as_text { "->>" } else { "->" };
                     let expr = format!("{}{}'{}'" , generator.quote_identifier(column), op, path);
                     if let Some(a) = alias {
@@ -51,32 +51,34 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         expr
                     }
                 }
-                Column::FunctionCall { name, args, alias } => {
+                Expr::FunctionCall { name, args, alias } => {
                     if name.eq_ignore_ascii_case("case") {
                         // case(when_cond, then_val, else_val) -> CASE WHEN ... THEN ... ELSE ... END
                         if args.len() >= 3 {
+                            // Convert args to strings for processing
+                            let cond_str = args[0].to_string();
+                            let then_str = args[1].to_string();
+                            let else_str = args[2].to_string();
+                            
                             // Arg 0: WHEN condition (Raw preferred)
-                            let cond_arg = &args[0];
-                            let cond_sql = if cond_arg.starts_with('{') && cond_arg.ends_with('}') {
-                                &cond_arg[1..cond_arg.len()-1]
+                            let cond_sql = if cond_str.starts_with('{') && cond_str.ends_with('}') {
+                                cond_str[1..cond_str.len()-1].to_string()
                             } else {
-                                cond_arg // Fallback
+                                cond_str
                             };
                             
                             // Arg 1: THEN value (Quoted unless raw)
-                            let then_arg = &args[1];
-                            let then_sql = if then_arg.starts_with('{') && then_arg.ends_with('}') {
-                                then_arg[1..then_arg.len()-1].to_string()
+                            let then_sql = if then_str.starts_with('{') && then_str.ends_with('}') {
+                                then_str[1..then_str.len()-1].to_string()
                             } else {
-                                generator.quote_identifier(then_arg)
+                                generator.quote_identifier(&then_str)
                             };
 
                             // Arg 2: ELSE value (Quoted unless raw)
-                            let else_arg = &args[2];
-                            let else_sql = if else_arg.starts_with('{') && else_arg.ends_with('}') {
-                                else_arg[1..else_arg.len()-1].to_string()
+                            let else_sql = if else_str.starts_with('{') && else_str.ends_with('}') {
+                                else_str[1..else_str.len()-1].to_string()
                             } else {
-                                generator.quote_identifier(else_arg)
+                                generator.quote_identifier(&else_str)
                             };
                             
                             let expr = format!("CASE WHEN {} THEN {} ELSE {} END", cond_sql, then_sql, else_sql);
@@ -87,8 +89,8 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                             }
                         } else {
                             // Invalid case call, fallback to standard function
-                             let args_sql: Vec<String> = args.iter()
-                                .map(|a| generator.quote_identifier(a))
+                            let args_sql: Vec<String> = args.iter()
+                                .map(|a| a.to_string())
                                 .collect();
                             let expr = format!("CASE({})", args_sql.join(", "));
                              if let Some(a) = alias {
@@ -98,14 +100,20 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                             }
                         }
                     } else {
-                        // Standard Function
+                        // Standard Function - transpile each arg expression
                         let args_sql: Vec<String> = args.iter()
                             .map(|a| {
-                                if a.starts_with('{') && a.ends_with('}') {
+                                let arg_str = a.to_string();
+                                if arg_str.starts_with('{') && arg_str.ends_with('}') {
                                     // Raw SQL block: {content} -> content
-                                    a[1..a.len()-1].to_string()
+                                    arg_str[1..arg_str.len()-1].to_string()
                                 } else {
-                                    generator.quote_identifier(a)
+                                   // For expressions (especially binary), don't quote
+                                   match a {
+                                       Expr::Named(n) => generator.quote_identifier(n),
+                                       Expr::Star => "*".to_string(),
+                                       _ => arg_str, // Binary, FunctionCall etc - use as-is
+                                   }
                                 }
                             })
                             .collect();
@@ -185,11 +193,11 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
     }
     
     // Prepare for GROUP BY check
-    let has_aggregates = cmd.columns.iter().any(|c| matches!(c, Column::Aggregate { .. }));
+    let has_aggregates = cmd.columns.iter().any(|c| matches!(c, Expr::Aggregate { .. }));
     let mut non_aggregated_cols = Vec::new();
     if has_aggregates {
          for col in &cmd.columns {
-             if let Column::Named(name) = col {
+             if let Expr::Named(name) = col {
                  non_aggregated_cols.push(generator.quote_identifier(name));
              }
          }
@@ -229,7 +237,11 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         SortOrder::DescNullsFirst => "DESC NULLS FIRST",
                         SortOrder::DescNullsLast => "DESC NULLS LAST",
                     };
-                    order_by_clauses.push(format!("{} {}", generator.quote_identifier(&cond.column), dir));
+                    let col_sql = match &cond.left {
+                        Expr::Named(name) => generator.quote_identifier(name),
+                        expr => expr.to_string(),
+                    };
+                    order_by_clauses.push(format!("{} {}", col_sql, dir));
                 }
             }
             CageKind::Limit(n) => {

@@ -61,11 +61,19 @@ impl QailLanguageServer {
         for pattern in v1_patterns {
             if let Some(start) = target_line.find(pattern) {
                 let rest = &target_line[start..];
-                // Find end of query
-                let end = rest.find('"')
-                    .or_else(|| rest.find('\''))
-                    .unwrap_or(rest.len());
-                return Some(rest[..end].to_string());
+                // Check if in a Rust string literal
+                if start > 1 {
+                    let before = &target_line[..start];
+                    if before.ends_with("(\"") || before.ends_with("(r\"") || before.ends_with("= \"") {
+                        // Find closing quote
+                        if let Some(end_pos) = rest.find("\")") {
+                            return Some(rest[..end_pos].to_string());
+                        } else if let Some(end_pos) = rest.find("\"") {
+                            return Some(rest[..end_pos].to_string());
+                        }
+                    }
+                }
+                return Some(rest.to_string());
             }
         }
         
@@ -158,16 +166,32 @@ impl QailLanguageServer {
             
             for pattern in patterns {
                 if let Some(start) = line.find(pattern) {
-                    // Extract the QAIL query (until end of line or closing quote)
+                    // Extract the QAIL query
+                    // Handle both raw QAIL (in .qail files) and QAIL embedded in Rust strings
                     let query_start = start;
                     let rest = &line[query_start..];
                     
-                    // Find end of query (quote or end of line)
-                    let query_end = rest.find('"')
-                        .or_else(|| rest.find('\''))
-                        .unwrap_or(rest.len());
-                    
-                    let query = &rest[..query_end];
+                    // Check if the query is inside a Rust string literal (preceded by `("` or `(r"`)
+                    // If so, extract up to closing `")`, otherwise extract to end of line
+                    let (query, query_end) = if start > 1 {
+                        let before = &line[..start];
+                        // Check for parse("... or similar patterns indicating Rust string literal
+                        if before.ends_with("(\"") || before.ends_with("(r\"") || before.ends_with("= \"") {
+                            // Find the closing ")
+                            if let Some(end_pos) = rest.find("\")") {
+                                (&rest[..end_pos], end_pos)
+                            } else if let Some(end_pos) = rest.find("\"") {
+                                (&rest[..end_pos], end_pos)
+                            } else {
+                                (rest, rest.len())
+                            }
+                        } else {
+                            // Not in a string literal, use full line (for .qail files)
+                            (rest, rest.len())
+                        }
+                    } else {
+                        (rest, rest.len())
+                    };
                     
                     // Try to parse
                     match parse(query) {

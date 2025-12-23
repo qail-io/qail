@@ -1,5 +1,5 @@
 use std::fmt::{Result, Write};
-use crate::ast::{QailCmd, Column, Join, Cage, CageKind, Condition, Operator, Value, LogicalOp, SortOrder, Action};
+use crate::ast::{QailCmd, Expr, Join, Cage, CageKind, Condition, Operator, Value, LogicalOp, SortOrder, Action};
 
 #[cfg(test)]
 mod tests;
@@ -82,7 +82,7 @@ impl Formatter {
              // But proposal says "Canonical". 
              // "get table" implies "get table fields *" usually?
              // If manual explicit columns:
-            if !(cmd.columns.len() == 1 && matches!(cmd.columns[0], Column::Star)) {
+            if !(cmd.columns.len() == 1 && matches!(cmd.columns[0], Expr::Star)) {
                 self.indent()?;
                 writeln!(self.buffer, "fields")?;
                 self.indent_level += 1;
@@ -132,7 +132,7 @@ impl Formatter {
                 if let CageKind::Sort(order) = cage.kind {
                      for (j, cond) in cage.conditions.iter().enumerate() {
                         self.indent()?;
-                        write!(self.buffer, "{}", cond.column)?;
+                        write!(self.buffer, "{}", cond.left)?;
                         self.format_sort_order(order)?;
                         if i < sorts.len() - 1 || j < cage.conditions.len() - 1 {
                              writeln!(self.buffer, ",")?;
@@ -165,12 +165,12 @@ impl Formatter {
         Ok(())
     }
 
-    fn format_column(&mut self, col: &Column) -> Result {
+    fn format_column(&mut self, col: &Expr) -> Result {
         match col {
-            Column::Star => write!(self.buffer, "*")?,
-            Column::Named(name) => write!(self.buffer, "{}", name)?,
-            Column::Aliased { name, alias } => write!(self.buffer, "{} as {}", name, alias)?,
-            Column::Aggregate { col, func } => {
+            Expr::Star => write!(self.buffer, "*")?,
+            Expr::Named(name) => write!(self.buffer, "{}", name)?,
+            Expr::Aliased { name, alias } => write!(self.buffer, "{} as {}", name, alias)?,
+            Expr::Aggregate { col, func } => {
                  let func_name = match func {
                      crate::ast::AggregateFunc::Count => "count",
                      crate::ast::AggregateFunc::Sum => "sum",
@@ -180,8 +180,9 @@ impl Formatter {
                  };
                  write!(self.buffer, "{}({})", func_name, col)?
             },
-            Column::FunctionCall { name, args, alias } => {
-                write!(self.buffer, "{}({})", name, args.join(", "))?;
+            Expr::FunctionCall { name, args, alias } => {
+                let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(self.buffer, "{}({})", name, args_str.join(", "))?;
                 if let Some(a) = alias {
                     write!(self.buffer, " as {}", a)?;
                 }
@@ -224,7 +225,7 @@ impl Formatter {
                  }
              }
              
-             write!(self.buffer, "{}", cond.column)?;
+             write!(self.buffer, "{}", cond.left)?;
              
              match cond.op {
                  Operator::Eq => write!(self.buffer, " = ")?,

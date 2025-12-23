@@ -37,25 +37,27 @@ fn build_get_item(cmd: &QailCmd) -> String {
     for cage in &cmd.cages {
          if let CageKind::Filter = cage.kind {
              for cond in &cage.conditions {
-                 match cond.column.as_str() {
-                     "gsi" | "index" => {
-                         let index_name = match &cond.value {
-                             Value::String(s) => s.clone(),
-                             _ => cond.value.to_string().replace("'", ""),
-                         };
-                         parts.push(format!("\"IndexName\": \"{}\"", index_name));
-                     },
-                     "consistency" | "consistent" => {
-                         // Map values to ConsistentRead boolean?
-                         // STRONG -> true. EVENTUAL -> false.
-                         let val = cond.value.to_string().to_uppercase();
-                         if val.contains("STRONG") || val.contains("TRUE") {
-                             parts.push("\"ConsistentRead\": true".to_string());
-                         } else {
-                             parts.push("\"ConsistentRead\": false".to_string());
-                         }
-                     },
-                     _ => {}
+                 if let Expr::Named(name) = &cond.left {
+                     match name.as_str() {
+                         "gsi" | "index" => {
+                             let index_name = match &cond.value {
+                                 Value::String(s) => s.clone(),
+                                 _ => cond.value.to_string().replace("'", ""),
+                             };
+                             parts.push(format!("\"IndexName\": \"{}\"", index_name));
+                         },
+                         "consistency" | "consistent" => {
+                             // Map values to ConsistentRead boolean?
+                             // STRONG -> true. EVENTUAL -> false.
+                             let val = cond.value.to_string().to_uppercase();
+                             if val.contains("STRONG") || val.contains("TRUE") {
+                                 parts.push("\"ConsistentRead\": true".to_string());
+                             } else {
+                                 parts.push("\"ConsistentRead\": false".to_string());
+                             }
+                         },
+                         _ => {}
+                     }
                  }
              }
          }
@@ -64,7 +66,7 @@ fn build_get_item(cmd: &QailCmd) -> String {
     // Projections
     if !cmd.columns.is_empty() {
          let cols: Vec<String> = cmd.columns.iter().map(|c| match c {
-             Column::Named(n) => n.clone(),
+             Expr::Named(n) => n.clone(),
              _ => "".to_string()
          }).collect();
          parts.push(format!("\"ProjectionExpression\": \"{}\"", cols.join(", ")));
@@ -125,7 +127,12 @@ fn build_expression(cmd: &QailCmd) -> (String, String) {
         if let CageKind::Filter = cage.kind {
              for cond in &cage.conditions {
                  // Skip meta params
-                 if matches!(cond.column.as_str(), "gsi" | "index" | "consistency" | "consistent") {
+                 let col_name = match &cond.left {
+                     Expr::Named(name) => name.clone(),
+                     expr => expr.to_string(),
+                 };
+
+                 if matches!(col_name.as_str(), "gsi" | "index" | "consistency" | "consistent") {
                      continue;
                  }
                  
@@ -141,7 +148,7 @@ fn build_expression(cmd: &QailCmd) -> (String, String) {
                      _ => "="
                  };
                  
-                 expr_parts.push(format!("{} {} {}", cond.column, op, placeholder));
+                 expr_parts.push(format!("{} {} {}", col_name, op, placeholder));
                  
                  // Value JSON
                  let val_json = value_to_dynamo(&cond.value);
@@ -160,7 +167,11 @@ fn build_item_json(cmd: &QailCmd) -> String {
              CageKind::Payload | CageKind::Filter => {
                 for cond in &cage.conditions {
                      let val = value_to_dynamo(&cond.value);
-                     parts.push(format!("\"{}\": {}", cond.column, val));
+                     let col_str = match &cond.left {
+                         Expr::Named(name) => name.clone(),
+                         expr => expr.to_string(),
+                     };
+                     parts.push(format!("\"{}\": {}", col_str, val));
                 }
             },
             _ => {}
@@ -175,7 +186,11 @@ fn build_key_from_filter(cmd: &QailCmd) -> String {
         if let CageKind::Filter = cage.kind {
              if let Some(cond) = cage.conditions.first() {
                   let val = value_to_dynamo(&cond.value);
-                  return format!("\"{}\": {}", cond.column, val);
+                  let col_str = match &cond.left {
+                      Expr::Named(name) => name.clone(),
+                      expr => expr.to_string(),
+                  };
+                  return format!("\"{}\": {}", col_str, val);
              }
         }
     }
@@ -192,7 +207,11 @@ fn build_update_expression(cmd: &QailCmd) -> (String, String) {
               for cond in &cage.conditions {
                   counter += 1;
                    let placeholder = format!(":u{}", counter);
-                   sets.push(format!("{} = {}", cond.column, placeholder));
+                   let col_str = match &cond.left {
+                       Expr::Named(name) => name.clone(),
+                       expr => expr.to_string(),
+                   };
+                   sets.push(format!("{} = {}", col_str, placeholder));
                    
                    let val = value_to_dynamo(&cond.value);
                    vals.push(format!("\"{}\": {}", placeholder, val));
@@ -218,7 +237,7 @@ fn build_create_table(cmd: &QailCmd) -> String {
     let mut key_schema = Vec::new();
     
     for col in &cmd.columns {
-        if let Column::Def { name, data_type, constraints } = col {
+        if let Expr::Def { name, data_type, constraints } = col {
             if constraints.contains(&Constraint::PrimaryKey) {
                 let dtype = match data_type.as_str() {
                     "int" | "i32" | "float" => "N",

@@ -1,5 +1,5 @@
 use super::Formatter;
-use crate::ast::{QailCmd, Column, Join, JoinKind, Cage, CageKind, Condition, Operator, Value, LogicalOp, SortOrder, CTEDef};
+use crate::ast::{QailCmd, Expr, Join, JoinKind, Cage, CageKind, Condition, Operator, Value, LogicalOp, SortOrder, CTEDef};
 
 #[test]
 fn test_fmt_simple_get() {
@@ -13,8 +13,8 @@ fn test_fmt_simple_get() {
 fn test_fmt_get_fields() {
     let mut cmd = QailCmd::get("users");
     cmd.columns = vec![
-        Column::Named("id".to_string()),
-        Column::Aliased { name: "name".to_string(), alias: "full_name".to_string() },
+        Expr::Named("id".to_string()),
+        Expr::Aliased { name: "name".to_string(), alias: "full_name".to_string() },
     ];
     
     let formatter = Formatter::new();
@@ -42,8 +42,8 @@ fn test_fmt_complex_query() {
     let mut cmd = QailCmd::get("whatsapp_contacts");
     
     cmd.columns = vec![
-        Column::Named("id".to_string()),
-        Column::Named("phone_number".to_string()),
+        Expr::Named("id".to_string()),
+        Expr::Named("phone_number".to_string()),
     ];
     
     cmd.joins = vec![
@@ -58,7 +58,7 @@ fn test_fmt_complex_query() {
     // Let's use that.
     cmd.joins[0].on = Some(vec![
         Condition {
-            column: "phone_number".to_string(),
+            left: Expr::Named("phone_number".to_string()),
             op: Operator::Eq,
             value: Value::Null, 
             is_array_unnest: false,
@@ -73,7 +73,7 @@ fn test_fmt_complex_query() {
         logical_op: LogicalOp::And,
         conditions: vec![
             Condition {
-                column: "rn".to_string(),
+                left: Expr::Named("rn".to_string()),
                 op: Operator::Eq,
                 value: Value::Int(1),
                 is_array_unnest: false,
@@ -86,7 +86,7 @@ fn test_fmt_complex_query() {
         logical_op: LogicalOp::And,
         conditions: vec![
             Condition {
-                column: "created_at".to_string(),
+                left: Expr::Named("created_at".to_string()),
                 op: Operator::Eq, // ignored for sort
                 value: Value::Null, 
                 is_array_unnest: false,

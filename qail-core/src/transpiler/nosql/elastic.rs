@@ -36,7 +36,7 @@ fn build_elastic_search(cmd: &QailCmd) -> String {
     // Projections (Source filtering)
     if !cmd.columns.is_empty() {
          let cols: Vec<String> = cmd.columns.iter().map(|c| match c {
-             Column::Named(n) => format!("\"{}\"", n),
+             Expr::Named(n) => format!("\"{}\"", n),
              _ => "".to_string()
          }).collect();
          parts.push(format!("\"_source\": [{}]", cols.join(", ")));
@@ -52,15 +52,19 @@ fn build_filter(cmd: &QailCmd) -> String {
         if let CageKind::Filter = cage.kind {
             for cond in &cage.conditions {
                  let val = value_to_json(&cond.value);
+                 let col_str = match &cond.left {
+                     Expr::Named(name) => name.clone(),
+                     expr => expr.to_string(),
+                 };
                  let term = match cond.op {
-                     Operator::Eq => format!("{{ \"term\": {{ \"{}\": {} }} }}", cond.column, val),
-                     Operator::Ne => format!("{{ \"bool\": {{ \"must_not\": {{ \"term\": {{ \"{}\": {} }} }} }} }}", cond.column, val),
-                     Operator::Gt => format!("{{ \"range\": {{ \"{}\": {{ \"gt\": {} }} }} }}", cond.column, val),
-                     Operator::Gte => format!("{{ \"range\": {{ \"{}\": {{ \"gte\": {} }} }} }}", cond.column, val),
-                     Operator::Lt => format!("{{ \"range\": {{ \"{}\": {{ \"lt\": {} }} }} }}", cond.column, val),
-                     Operator::Lte => format!("{{ \"range\": {{ \"{}\": {{ \"lte\": {} }} }} }}", cond.column, val),
-                     Operator::Fuzzy => format!("{{ \"match\": {{ \"{}\": {{ \"query\": {}, \"fuzziness\": \"AUTO\" }} }} }}", cond.column, val),
-                     _ => format!("{{ \"match\": {{ \"{}\": {} }} }}", cond.column, val),
+                     Operator::Eq => format!("{{ \"term\": {{ \"{}\": {} }} }}", col_str, val),
+                     Operator::Ne => format!("{{ \"bool\": {{ \"must_not\": {{ \"term\": {{ \"{}\": {} }} }} }} }}", col_str, val),
+                     Operator::Gt => format!("{{ \"range\": {{ \"{}\": {{ \"gt\": {} }} }} }}", col_str, val),
+                     Operator::Gte => format!("{{ \"range\": {{ \"{}\": {{ \"gte\": {} }} }} }}", col_str, val),
+                     Operator::Lt => format!("{{ \"range\": {{ \"{}\": {{ \"lt\": {} }} }} }}", col_str, val),
+                     Operator::Lte => format!("{{ \"range\": {{ \"{}\": {{ \"lte\": {} }} }} }}", col_str, val),
+                     Operator::Fuzzy => format!("{{ \"match\": {{ \"{}\": {{ \"query\": {}, \"fuzziness\": \"AUTO\" }} }} }}", col_str, val),
+                     _ => format!("{{ \"match\": {{ \"{}\": {} }} }}", col_str, val),
                  };
                  musts.push(term);
             }

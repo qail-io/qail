@@ -33,7 +33,7 @@ fn build_cypher_match(cmd: &QailCmd) -> String {
         format!("RETURN {}", alias)
     } else {
         let cols: Vec<String> = cmd.columns.iter().map(|c| match c {
-            Column::Named(n) => format!("{}.{}", alias, n),
+            Expr::Named(n) => format!("{}.{}", alias, n),
             _ => "".to_string()
         }).collect();
         format!("RETURN {}", cols.join(", "))
@@ -62,7 +62,11 @@ fn build_where(cmd: &QailCmd, alias: &str) -> String {
                      _ => "="
                  };
                  let val = value_to_cypher(&cond.value);
-                 conds.push(format!("{}.{} {} {}", alias, cond.column, op, val));
+                 let col_str = match &cond.left {
+                     Expr::Named(name) => name.clone(),
+                     expr => expr.to_string(),
+                 };
+                 conds.push(format!("{}.{} {} {}", alias, col_str, op, val));
             }
         }
     }

@@ -12,7 +12,7 @@ pub fn build_create_table(cmd: &QailCmd, dialect: Dialect) -> String {
 
     let mut defs = Vec::new();
     for col in &cmd.columns {
-        if let Column::Def {
+        if let Expr::Def {
             name,
             data_type,
             constraints,
@@ -89,7 +89,7 @@ pub fn build_create_table(cmd: &QailCmd, dialect: Dialect) -> String {
     // Generate COMMENT ON statements
     let mut comments = Vec::new();
     for col in &cmd.columns {
-        if let Column::Def { name, constraints, .. } = col {
+        if let Expr::Def { name, constraints, .. } = col {
             for c in constraints {
                 if let Constraint::Comment(text) = c {
                     comments.push(format!(
@@ -118,10 +118,10 @@ pub fn build_alter_table(cmd: &QailCmd, dialect: Dialect) -> String {
 
     for col in &cmd.columns {
         match col {
-            Column::Mod { kind, col } => {
+            Expr::Mod { kind, col } => {
                 match kind {
                     ModKind::Add => {
-                        if let Column::Def { name, data_type, constraints } = col.as_ref() {
+                        if let Expr::Def { name, data_type, constraints } = col.as_ref() {
                             let sql_type = map_type(data_type);
                             let mut line = format!("ALTER TABLE {} ADD COLUMN {} {}", table_name, generator.quote_identifier(name), sql_type);
                             
@@ -137,7 +137,7 @@ pub fn build_alter_table(cmd: &QailCmd, dialect: Dialect) -> String {
                         }
                     }
                     ModKind::Drop => {
-                        if let Column::Named(name) = col.as_ref() {
+                        if let Expr::Named(name) = col.as_ref() {
                             stmts.push(format!("ALTER TABLE {} DROP COLUMN {}", table_name, generator.quote_identifier(name)));
                         }
                     }
@@ -194,7 +194,7 @@ pub fn build_alter_column(cmd: &QailCmd, dialect: Dialect) -> String {
     
     // Identified columns (target column)
     let cols: Vec<String> = cmd.columns.iter().filter_map(|c| match c {
-        Column::Named(n) => Some(n.clone()),
+        Expr::Named(n) => Some(n.clone()),
         _ => None,
     }).collect();
     
@@ -211,7 +211,10 @@ pub fn build_alter_column(cmd: &QailCmd, dialect: Dialect) -> String {
             // Syntax: rename::users:old[to=new]
             let new_name_opt = cmd.cages.iter()
                 .flat_map(|c| &c.conditions)
-                .find(|c| c.column == "to" || c.column == "new" || c.column == "rename")
+                .find(|c| {
+                    let col = match &c.left { Expr::Named(n) => n.as_str(), _ => "" };
+                    matches!(col, "to" | "new" | "rename")
+                })
                 .map(|c| match &c.value {
                     Value::String(s) => s.clone(),
                     Value::Param(_) => "PARAM".to_string(), // unsupported

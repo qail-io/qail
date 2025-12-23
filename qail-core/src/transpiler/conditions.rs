@@ -81,10 +81,15 @@ pub trait ConditionToSql {
 impl ConditionToSql for Condition {
     /// Convert condition to SQL string.
     fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&QailCmd>) -> String {
-        let col = if let Some(cmd) = context {
-            resolve_col_syntax(&self.column, cmd, generator.as_ref())
-        } else {
-            generator.quote_identifier(&self.column)
+        let col = match &self.left {
+            Expr::Named(name) => {
+                if let Some(cmd) = context {
+                    resolve_col_syntax(name, cmd, generator.as_ref())
+                } else {
+                    generator.quote_identifier(name)
+                }
+            },
+            expr => expr.to_string(),
         };
 
         // Handle array unnest conditions
@@ -153,6 +158,10 @@ impl ConditionToSql for Condition {
                 let path = self.to_value_sql(generator);
                 format!("{} = {}", generator.json_value(&col, &path.trim_matches('\'')), self.to_value_sql(generator))
             }
+            Operator::Like => format!("{} LIKE {}", col, self.to_value_sql(generator)),
+            Operator::NotLike => format!("{} NOT LIKE {}", col, self.to_value_sql(generator)),
+            Operator::ILike => format!("{} ILIKE {}", col, self.to_value_sql(generator)),
+            Operator::NotILike => format!("{} NOT ILIKE {}", col, self.to_value_sql(generator)),
         }
     }
 
@@ -193,10 +202,15 @@ impl ConditionToSql for Condition {
         context: Option<&QailCmd>,
         params: &mut ParamContext
     ) -> String {
-        let col = if let Some(cmd) = context {
-            resolve_col_syntax(&self.column, cmd, generator.as_ref())
-        } else {
-            generator.quote_identifier(&self.column)
+        let col = match &self.left {
+            Expr::Named(name) => {
+                if let Some(cmd) = context {
+                    resolve_col_syntax(name, cmd, generator.as_ref())
+                } else {
+                    generator.quote_identifier(name)
+                }
+            },
+            expr => expr.to_string(),
         };
 
         // Helper to convert value to placeholder
@@ -229,8 +243,10 @@ impl ConditionToSql for Condition {
                     // How do we distinguish "content" from "quoted_col"?
                     // Quoted col is `"col"`. Raw content `sender IS NOT NULL`.
                     // We can't distinguish easily unless we check `self.column`.
-                    if self.column.starts_with('{') && self.column.ends_with('}') {
-                        return col; // Use resolved col (which is raw)
+                    if let Expr::Named(name) = &self.left {
+                        if name.starts_with('{') && name.ends_with('}') {
+                            return col; // Use resolved col (which is raw)
+                        }
                     }
                 }
                 
@@ -264,6 +280,10 @@ impl ConditionToSql for Condition {
                 let path = value_placeholder(&self.value, params);
                 format!("{} = {}", generator.json_value(&col, &path), value_placeholder(&self.value, params))
             }
+            Operator::Like => format!("{} LIKE {}", col, value_placeholder(&self.value, params)),
+            Operator::NotLike => format!("{} NOT LIKE {}", col, value_placeholder(&self.value, params)),
+            Operator::ILike => format!("{} ILIKE {}", col, value_placeholder(&self.value, params)),
+            Operator::NotILike => format!("{} NOT ILIKE {}", col, value_placeholder(&self.value, params)),
         }
     }
 }

@@ -1,9 +1,12 @@
+#![allow(unused_imports)]
 use crate::parser::parse;
 use crate::ast::*;
 
 #[test]
 fn test_index_basic() {
-    let cmd = parse("index::idx_users_email^on(users:'email)").unwrap();
+    let q = "index idx_users_email on users email";
+    let cmd = parse(q).unwrap();
+    
     assert_eq!(cmd.action, Action::Index);
     let idx = cmd.index_def.expect("index_def should be Some");
     assert_eq!(idx.name, "idx_users_email");
@@ -14,7 +17,9 @@ fn test_index_basic() {
 
 #[test]
 fn test_index_composite() {
-    let cmd = parse("index::idx_lookup^on(orders:'user_id-created_at)").unwrap();
+    let q = "index idx_lookup on orders user_id, created_at";
+    let cmd = parse(q).unwrap();
+    
     assert_eq!(cmd.action, Action::Index);
     let idx = cmd.index_def.expect("index_def should be Some");
     assert_eq!(idx.name, "idx_lookup");
@@ -24,7 +29,9 @@ fn test_index_composite() {
 
 #[test]
 fn test_index_unique() {
-    let cmd = parse("index::idx_phone^on(users:'phone)^unique").unwrap();
+    let q = "index idx_phone on users phone unique";
+    let cmd = parse(q).unwrap();
+    
     assert_eq!(cmd.action, Action::Index);
     let idx = cmd.index_def.expect("index_def should be Some");
     assert_eq!(idx.name, "idx_phone");
