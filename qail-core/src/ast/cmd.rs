@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::ast::{Action, Cage, CageKind, Column, Condition, GroupByMode, IndexDef, Join, LogicalOp, Operator, SetOp, SortOrder, TableConstraint, Value};
+use crate::ast::{Action, Cage, CageKind, Expr, Condition, GroupByMode, IndexDef, Join, LogicalOp, Operator, SetOp, SortOrder, TableConstraint, Value};
 
 /// The primary command structure representing a parsed QAIL query.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8,8 +8,8 @@ pub struct QailCmd {
     pub action: Action,
     /// Target table name
     pub table: String,
-    /// Columns to select/return
-    pub columns: Vec<Column>,
+    /// Columns to select/return (now Expressions)
+    pub columns: Vec<Expr>,
     /// Joins to other tables
     #[serde(default)]
     pub joins: Vec<Join>,
@@ -64,6 +64,25 @@ impl QailCmd {
         Self {
             action: Action::Get,
             table: table.into(),
+            joins: vec![],
+            columns: vec![],
+            cages: vec![],
+            distinct: false,
+            index_def: None,
+            table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            ctes: vec![],
+            distinct_on: vec![],
+        }
+    }
+
+    /// Create a placeholder command for raw SQL (used in CTE subqueries).
+    pub fn raw_sql(sql: impl Into<String>) -> Self {
+        Self {
+            action: Action::Get,
+            table: sql.into(),
             joins: vec![],
             columns: vec![],
             cages: vec![],
@@ -134,9 +153,48 @@ impl QailCmd {
             distinct_on: vec![],
         }
     }
+
+    /// Create a new PUT (upsert) command for the given table.
+    pub fn put(table: impl Into<String>) -> Self {
+        Self {
+            action: Action::Put,
+            table: table.into(),
+            joins: vec![],
+            columns: vec![],
+            cages: vec![],
+            distinct: false,
+            index_def: None,
+            table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            ctes: vec![],
+            distinct_on: vec![],
+        }
+    }
+
+    /// Create a new MAKE (create table) command for the given table.
+    pub fn make(table: impl Into<String>) -> Self {
+        Self {
+            action: Action::Make,
+            table: table.into(),
+            joins: vec![],
+            columns: vec![],
+            cages: vec![],
+            distinct: false,
+            index_def: None,
+            table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            ctes: vec![],
+            distinct_on: vec![],
+        }
+    }
+
     /// Add columns to hook (select).
     pub fn hook(mut self, cols: &[&str]) -> Self {
-        self.columns = cols.iter().map(|c| Column::Named(c.to_string())).collect();
+        self.columns = cols.iter().map(|c| Expr::Named(c.to_string())).collect();
         self
     }
 
@@ -145,7 +203,7 @@ impl QailCmd {
         self.cages.push(Cage {
             kind: CageKind::Filter,
             conditions: vec![Condition {
-                column: column.to_string(),
+                left: Expr::Named(column.to_string()),
                 op: Operator::Eq,
                 value: value.into(),
                 is_array_unnest: false,
@@ -170,7 +228,7 @@ impl QailCmd {
         self.cages.push(Cage {
             kind: CageKind::Sort(SortOrder::Asc),
             conditions: vec![Condition {
-                column: column.to_string(),
+                left: Expr::Named(column.to_string()),
                 op: Operator::Eq,
                 value: Value::Null,
                 is_array_unnest: false,
@@ -185,7 +243,7 @@ impl QailCmd {
         self.cages.push(Cage {
             kind: CageKind::Sort(SortOrder::Desc),
             conditions: vec![Condition {
-                column: column.to_string(),
+                left: Expr::Named(column.to_string()),
                 op: Operator::Eq,
                 value: Value::Null,
                 is_array_unnest: false,
@@ -212,8 +270,8 @@ impl QailCmd {
         let cte_name = name.into();
         let columns: Vec<String> = self.columns.iter().filter_map(|c| {
             match c {
-                Column::Named(n) => Some(n.clone()),
-                Column::Aliased { alias, .. } => Some(alias.clone()),
+                Expr::Named(n) => Some(n.clone()),
+                Expr::Aliased { alias, .. } => Some(alias.clone()),
                 _ => None,
             }
         }).collect();
@@ -273,7 +331,7 @@ impl QailCmd {
     /// let final_query = cte.select_from_cte(&["id", "name", "level"]);
     /// ```
     pub fn select_from_cte(mut self, columns: &[&str]) -> Self {
-        self.columns = columns.iter().map(|c| Column::Named(c.to_string())).collect();
+        self.columns = columns.iter().map(|c| Expr::Named(c.to_string())).collect();
         self
     }
 }

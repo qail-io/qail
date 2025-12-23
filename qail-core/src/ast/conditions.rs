@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
-use crate::ast::{Operator, Value};
+use crate::ast::{Operator, Value, Expr};
 
 /// A single condition within a cage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Condition {
-    /// Column name
-    pub column: String,
+    /// Left hand side expression (usually a column)
+    pub left: Expr,
     /// Comparison operator
     pub op: Operator,
     /// Value to compare against

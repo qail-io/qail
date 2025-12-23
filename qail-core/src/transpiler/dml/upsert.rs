@@ -12,7 +12,7 @@ pub fn build_upsert(cmd: &QailCmd, dialect: Dialect) -> String {
     
     // 1. Identify PK (Conflict Target) from command columns (put::table:pk)
     let pk_cols: Vec<String> = cmd.columns.iter().filter_map(|c| match c {
-        Column::Named(n) => Some(n.clone()),
+        Expr::Named(n) => Some(n.clone()),
         _ => None,
     }).collect();
     
@@ -23,7 +23,10 @@ pub fn build_upsert(cmd: &QailCmd, dialect: Dialect) -> String {
     // 2. Extract Data from Cage
     let (data_cols, data_vals): (Vec<String>, Vec<String>) = if let Some(cage) = cmd.cages.first() {
         cage.conditions.iter().map(|c| (
-            c.column.clone(),
+            match &c.left {
+                Expr::Named(name) => name.clone(),
+                expr => expr.to_string(),
+            },
             c.to_value_sql(&generator)
         )).unzip()
     } else {

@@ -1,14 +1,44 @@
 use serde::{Deserialize, Serialize};
 use crate::ast::{AggregateFunc, Cage, Condition, ModKind, Value};
 
-/// A column reference.
+/// Binary operators for expressions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BinaryOp {
+    /// String concatenation (||)
+    Concat,
+    /// Addition (+)
+    Add,
+    /// Subtraction (-)
+    Sub,
+    /// Multiplication (*)
+    Mul,
+    /// Division (/)
+    Div,
+    /// Modulo (%)
+    Rem,
+}
+
+impl std::fmt::Display for BinaryOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BinaryOp::Concat => write!(f, "||"),
+            BinaryOp::Add => write!(f, "+"),
+            BinaryOp::Sub => write!(f, "-"),
+            BinaryOp::Mul => write!(f, "*"),
+            BinaryOp::Div => write!(f, "/"),
+            BinaryOp::Rem => write!(f, "%"),
+        }
+    }
+}
+/// A general expression node (column, value, function, etc.).
+/// Formerly `Column`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Column {
+pub enum Expr {
     /// All columns (*)
     Star,
     /// A named column
     Named(String),
-    /// An aliased column (col AS alias)
+    /// An aliased expression (expr AS alias)
     Aliased { name: String, alias: String },
     /// An aggregate function (COUNT(col))
     Aggregate { col: String, func: AggregateFunc },
@@ -21,7 +51,7 @@ pub enum Column {
     /// Column Modification (for Mod keys)
     Mod {
         kind: ModKind,
-        col: Box<Column>,
+        col: Box<Expr>,
     },
     /// Window Function Definition
     Window {
@@ -56,21 +86,39 @@ pub enum Column {
     FunctionCall {
         /// Function name (coalesce, nullif, etc.)
         name: String,
-        /// Arguments to the function
-        args: Vec<String>,
+        /// Arguments to the function (now supports nested expressions)
+        args: Vec<Expr>,
         /// Optional alias
+        alias: Option<String>,
+    },
+    /// Special SQL function with keyword arguments (SUBSTRING, EXTRACT, TRIM, etc.)
+    /// e.g., SUBSTRING(expr FROM pos [FOR len]), EXTRACT(YEAR FROM date)
+    SpecialFunction {
+        /// Function name (SUBSTRING, EXTRACT, TRIM, etc.)
+        name: String,
+        /// Arguments as (optional_keyword, expr) pairs
+        /// e.g., [(None, col), (Some("FROM"), 2), (Some("FOR"), 5)]
+        args: Vec<(Option<String>, Box<Expr>)>,
+        /// Optional alias
+        alias: Option<String>,
+    },
+    /// Binary expression (left op right)
+    Binary {
+        left: Box<Expr>,
+        op: BinaryOp,
+        right: Box<Expr>,
         alias: Option<String>,
     },
 }
 
-impl std::fmt::Display for Column {
+impl std::fmt::Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Column::Star => write!(f, "*"),
-            Column::Named(name) => write!(f, "{}", name),
-            Column::Aliased { name, alias } => write!(f, "{} AS {}", name, alias),
-            Column::Aggregate { col, func } => write!(f, "{}({})", func, col),
-            Column::Def {
+            Expr::Star => write!(f, "*"),
+            Expr::Named(name) => write!(f, "{}", name),
+            Expr::Aliased { name, alias } => write!(f, "{} AS {}", name, alias),
+            Expr::Aggregate { col, func } => write!(f, "{}({})", func, col),
+            Expr::Def {
                 name,
                 data_type,
                 constraints,
@@ -81,11 +129,11 @@ impl std::fmt::Display for Column {
                 }
                 Ok(())
             }
-            Column::Mod { kind, col } => match kind {
+            Expr::Mod { kind, col } => match kind {
                 ModKind::Add => write!(f, "+{}", col),
                 ModKind::Drop => write!(f, "-{}", col),
             },
-            Column::Window { name, func, params, partition, order, frame } => {
+            Expr::Window { name, func, params, partition, order, frame } => {
                 write!(f, "{}:{}(", name, func)?;
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 { write!(f, ", ")?; }
@@ -114,10 +162,10 @@ impl std::fmt::Display for Column {
                 }
                 Ok(())
             }
-            Column::Case { when_clauses, else_value, alias } => {
+            Expr::Case { when_clauses, else_value, alias } => {
                 write!(f, "CASE")?;
                 for (cond, val) in when_clauses {
-                    write!(f, " WHEN {} THEN {}", cond.column, val)?;
+                    write!(f, " WHEN {} THEN {}", cond.left, val)?;
                 }
                 if let Some(e) = else_value {
                     write!(f, " ELSE {}", e)?;
@@ -128,7 +176,7 @@ impl std::fmt::Display for Column {
                 }
                 Ok(())
             }
-            Column::JsonAccess { column, path, as_text, alias } => {
+            Expr::JsonAccess { column, path, as_text, alias } => {
                 let op = if *as_text { "->>" } else { "->" };
                 write!(f, "{}{}{}", column, op, path)?;
                 if let Some(a) = alias {
@@ -136,8 +184,31 @@ impl std::fmt::Display for Column {
                 }
                 Ok(())
             }
-            Column::FunctionCall { name, args, alias } => {
-                write!(f, "{}({})", name.to_uppercase(), args.join(", "))?;
+            Expr::FunctionCall { name, args, alias } => {
+                let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{}({})", name.to_uppercase(), args_str.join(", "))?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::SpecialFunction { name, args, alias } => {
+                write!(f, "{}(", name.to_uppercase())?;
+                for (i, (keyword, expr)) in args.iter().enumerate() {
+                    if i > 0 { write!(f, " ")?; }
+                    if let Some(kw) = keyword {
+                        write!(f, "{} ", kw)?;
+                    }
+                    write!(f, "{}", expr)?;
+                }
+                write!(f, ")")?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
+            Expr::Binary { left, op, right, alias } => {
+                write!(f, "({} {} {})", left, op, right)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }

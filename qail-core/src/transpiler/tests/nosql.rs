@@ -11,7 +11,7 @@ use crate::transpiler::nosql::qdrant::ToQdrant;
 
 #[test]
 fn test_mongo_output() {
-    let cmd = parse("get::users:'name'age[active=true][age>20][lim=5]").unwrap();
+    let cmd = parse("get users fields name, age where active = true and age > 20 limit 5").unwrap();
     
     let mongo = cmd.to_mongo();
     assert!(mongo.contains("db.users.find("));
@@ -22,7 +22,17 @@ fn test_mongo_output() {
 
 #[test]
 fn test_mongo_insert() {
-    let cmd = parse("add::users:[name=\"John\"][age=30]").unwrap();
+    use crate::ast::*;
+    // For INSERT, use manual construction since v2 ADD syntax isn't fully implemented
+    let mut cmd = QailCmd::add("users");
+    cmd.cages.push(Cage {
+        kind: CageKind::Payload,
+        conditions: vec![
+            Condition { left: Expr::Named("name".to_string()), op: Operator::Eq, value: Value::String("John".to_string()), is_array_unnest: false },
+            Condition { left: Expr::Named("age".to_string()), op: Operator::Eq, value: Value::Int(30), is_array_unnest: false },
+        ],
+        logical_op: LogicalOp::And,
+    });
     let mongo = cmd.to_mongo();
     assert!(mongo.contains("db.users.insertOne("));
     assert!(mongo.contains("\"name\": \"John\""));
@@ -33,8 +43,8 @@ fn test_mongo_insert() {
 fn test_mongo_join() {
     use crate::ast::*;
     let mut cmd = QailCmd::get("users");
-    cmd.columns.push(Column::Named("name".to_string()));
-    cmd.columns.push(Column::Named("email".to_string()));
+    cmd.columns.push(Expr::Named("name".to_string()));
+    cmd.columns.push(Expr::Named("email".to_string()));
     cmd.joins.push(Join { table: "orders".to_string(), kind: JoinKind::Left, on: None });
     
     let mongo = cmd.to_mongo();
@@ -45,7 +55,7 @@ fn test_mongo_join() {
 
 #[test]
 fn test_dynamo_output() {
-    let cmd = parse("get::users:'name'age[active=true][age>20]").unwrap();
+    let cmd = parse("get users fields name, age where active = true and age > 20").unwrap();
     let dynamo = cmd.to_dynamo();
     
     assert!(dynamo.contains("\"TableName\": \"users\""));
@@ -55,7 +65,18 @@ fn test_dynamo_output() {
 
 #[test]
 fn test_dynamo_gsi() {
-    let cmd = parse("get::users:'email[index=email_gsi][consistency=strong]").unwrap();
+    use crate::ast::*;
+    // Use manual construction for meta params like index/consistency
+    let mut cmd = QailCmd::get("users");
+    cmd.columns.push(Expr::Named("email".to_string()));
+    cmd.cages.push(Cage {
+        kind: CageKind::Filter,
+        conditions: vec![
+            Condition { left: Expr::Named("index".to_string()), op: Operator::Eq, value: Value::String("email_gsi".to_string()), is_array_unnest: false },
+            Condition { left: Expr::Named("consistency".to_string()), op: Operator::Eq, value: Value::String("strong".to_string()), is_array_unnest: false },
+        ],
+        logical_op: LogicalOp::And,
+    });
     let dynamo = cmd.to_dynamo();
     println!("Dynamo GSI: {}", dynamo);
     assert!(dynamo.contains("email_gsi") || dynamo.contains("IndexName"));
@@ -63,7 +84,7 @@ fn test_dynamo_gsi() {
 
 #[test]
 fn test_cassandra_output() {
-    let cmd = parse("get::users:'name'age[active=true][age>20][lim=5]").unwrap();
+    let cmd = parse("get users fields name, age where active = true and age > 20 limit 5").unwrap();
     let cql = cmd.to_cassandra();
     
     assert!(cql.contains("SELECT name, age FROM users"));
@@ -75,7 +96,16 @@ fn test_cassandra_output() {
 
 #[test]
 fn test_cassandra_consistency() {
-    let cmd = parse("get::users:'_[consistency=quorum]").unwrap();
+    use crate::ast::*;
+    // Use manual construction for consistency level
+    let mut cmd = QailCmd::get("users");
+    cmd.cages.push(Cage {
+        kind: CageKind::Filter,
+        conditions: vec![
+            Condition { left: Expr::Named("consistency".to_string()), op: Operator::Eq, value: Value::String("quorum".to_string()), is_array_unnest: false },
+        ],
+        logical_op: LogicalOp::And,
+    });
     let cql = cmd.to_cassandra();
     println!("Cassandra CQL: {}", cql);
     assert!(cql.contains("CONSISTENCY QUORUM") || cql.contains("quorum"));
@@ -83,7 +113,7 @@ fn test_cassandra_consistency() {
 
 #[test]
 fn test_redis_search() {
-    let cmd = parse("get::users:'name'age[active=true][age>20][lim=5]").unwrap();
+    let cmd = parse("get users fields name, age where active = true and age > 20 limit 5").unwrap();
     let redis = cmd.to_redis_search();
     
     assert!(redis.contains("FT.SEARCH idx:users"));
@@ -95,7 +125,7 @@ fn test_redis_search() {
 
 #[test]
 fn test_redis_complex_operators() {
-    let cmd = parse("get::users:'_[role!=\"admin\"][name~\"john\"][age<=30]").unwrap();
+    let cmd = parse("get users fields * where role != \"admin\" and name ~ \"john\" and age <= 30").unwrap();
     let redis = cmd.to_redis_search();
     
     assert!(redis.contains("-(@role:admin)"));
@@ -105,7 +135,7 @@ fn test_redis_complex_operators() {
 
 #[test]
 fn test_elastic_dsl() {
-    let cmd = parse("get::logs:'message'level[level=\"error\"][count>10][lim=50]").unwrap();
+    let cmd = parse("get logs fields message, level where level = \"error\" and count > 10 limit 50").unwrap();
     let elastic = cmd.to_elastic();
     
     assert!(elastic.contains("\"query\": { \"bool\": { \"must\": ["));
@@ -116,7 +146,7 @@ fn test_elastic_dsl() {
 
 #[test]
 fn test_neo4j_cypher() {
-    let cmd = parse("get::users:'name'age[active=true][age>20][lim=5]").unwrap();
+    let cmd = parse("get users fields name, age where active = true and age > 20 limit 5").unwrap();
     let cypher = cmd.to_cypher();
     
     assert!(cypher.contains("MATCH (n:users)"));
@@ -127,7 +157,24 @@ fn test_neo4j_cypher() {
 
 #[test]
 fn test_qdrant_search() {
-    let cmd = parse("get::points:'id'score[vector~\"cute cat\"][city=\"London\"][lim=10]").unwrap();
+    use crate::ast::*;
+    // Qdrant with vector search uses special syntax, use manual construction
+    let mut cmd = QailCmd::get("points");
+    cmd.columns.push(Expr::Named("id".to_string()));
+    cmd.columns.push(Expr::Named("score".to_string()));
+    cmd.cages.push(Cage {
+        kind: CageKind::Filter,
+        conditions: vec![
+            Condition { left: Expr::Named("vector".to_string()), op: Operator::Fuzzy, value: Value::String("cute cat".to_string()), is_array_unnest: false },
+            Condition { left: Expr::Named("city".to_string()), op: Operator::Eq, value: Value::String("London".to_string()), is_array_unnest: false },
+        ],
+        logical_op: LogicalOp::And,
+    });
+    cmd.cages.push(Cage {
+        kind: CageKind::Limit(10),
+        conditions: vec![],
+        logical_op: LogicalOp::And,
+    });
     let qdrant = cmd.to_qdrant_search();
     
     assert!(qdrant.contains("{{EMBED:cute cat}}"));

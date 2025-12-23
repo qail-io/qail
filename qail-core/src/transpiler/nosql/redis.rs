@@ -36,10 +36,12 @@ fn build_hset(cmd: &QailCmd) -> String {
         match cage.kind {
             CageKind::Filter | CageKind::Payload => {
                 for cond in &cage.conditions {
-                    if cond.column == "id" || cond.column == "key" {
-                        redis_key = format!("{}{}", key, value_to_string(&cond.value));
-                    } else {
-                        fields.push(format!("{} {}", cond.column, escape_redis_val(&value_to_string(&cond.value))));
+                    if let Expr::Named(name) = &cond.left {
+                        if name == "id" || name == "key" {
+                            redis_key = format!("{}{}", key, value_to_string(&cond.value));
+                        } else {
+                            fields.push(format!("{} {}", name, escape_redis_val(&value_to_string(&cond.value))));
+                        }
                     }
                 }
             },
@@ -63,8 +65,10 @@ fn build_del(cmd: &QailCmd) -> String {
     for cage in &cmd.cages {
          if let CageKind::Filter = cage.kind {
              for cond in &cage.conditions {
-                 if cond.column == "id" || cond.column == "key" {
-                     redis_key = format!("{}{}", key, value_to_string(&cond.value));
+                 if let Expr::Named(name) = &cond.left {
+                     if name == "id" || name == "key" {
+                         redis_key = format!("{}{}", key, value_to_string(&cond.value));
+                     }
                  }
              }
          }
@@ -89,7 +93,11 @@ fn build_search(cmd: &QailCmd) -> String {
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
              for cond in &cage.conditions {
-                 let field = format!("@{}", cond.column);
+                 let col_name = match &cond.left {
+                     Expr::Named(name) => name.clone(),
+                     expr => expr.to_string(),
+                 };
+                 let field = format!("@{}", col_name);
                  let val = match &cond.value {
                      Value::Int(n) => n.to_string(),
                      Value::Float(n) => n.to_string(),
@@ -147,7 +155,7 @@ fn build_search(cmd: &QailCmd) -> String {
     if !cmd.columns.is_empty() {
          let mut cols = Vec::new();
          for c in &cmd.columns {
-             if let Column::Named(n) = c {
+             if let Expr::Named(n) = c {
                  cols.push(n.clone());
              }
          }

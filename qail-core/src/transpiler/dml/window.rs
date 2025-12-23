@@ -12,7 +12,7 @@ pub fn build_window(cmd: &QailCmd, dialect: Dialect) -> String {
 
     let cols: Vec<String> = cmd.columns.iter().map(|c| {
         match c {
-            Column::Window { name, func, params, partition, order, frame } => {
+            Expr::Window { name, func, params, partition, order, frame } => {
                 let params_str = if params.is_empty() {
                     String::new()
                 } else {
@@ -31,34 +31,22 @@ pub fn build_window(cmd: &QailCmd, dialect: Dialect) -> String {
                 if !order.is_empty() {
                     over_clause.push_str("ORDER BY ");
                     let order_parts: Vec<String> = order.iter().map(|cage| {
+                        let col_str = if let Some(cond) = cage.conditions.first() {
+                            match &cond.left {
+                                Expr::Named(name) => generator.quote_identifier(name),
+                                expr => expr.to_string(),
+                            }
+                        } else {
+                            return String::new();
+                        };
+
                         match &cage.kind {
-                            CageKind::Sort(SortOrder::Asc) => {
-                                if let Some(cond) = cage.conditions.first() {
-                                    format!("{} ASC", generator.quote_identifier(&cond.column))
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            CageKind::Sort(SortOrder::Desc) => {
-                                if let Some(cond) = cage.conditions.first() {
-                                    format!("{} DESC", generator.quote_identifier(&cond.column))
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            // Handle Nulls First/Last if needed here, but skipping for brevity of match
-                             CageKind::Sort(SortOrder::AscNullsFirst) => {
-                                if let Some(cond) = cage.conditions.first() { format!("{} ASC NULLS FIRST", generator.quote_identifier(&cond.column)) } else { "".to_string() }
-                            }
-                            CageKind::Sort(SortOrder::AscNullsLast) => {
-                                if let Some(cond) = cage.conditions.first() { format!("{} ASC NULLS LAST", generator.quote_identifier(&cond.column)) } else { "".to_string() }
-                            }
-                            CageKind::Sort(SortOrder::DescNullsFirst) => {
-                                if let Some(cond) = cage.conditions.first() { format!("{} DESC NULLS FIRST", generator.quote_identifier(&cond.column)) } else { "".to_string() }
-                            }
-                            CageKind::Sort(SortOrder::DescNullsLast) => {
-                                if let Some(cond) = cage.conditions.first() { format!("{} DESC NULLS LAST", generator.quote_identifier(&cond.column)) } else { "".to_string() }
-                            }
+                            CageKind::Sort(SortOrder::Asc) => format!("{} ASC", col_str),
+                            CageKind::Sort(SortOrder::Desc) => format!("{} DESC", col_str),
+                            CageKind::Sort(SortOrder::AscNullsFirst) => format!("{} ASC NULLS FIRST", col_str),
+                            CageKind::Sort(SortOrder::AscNullsLast) => format!("{} ASC NULLS LAST", col_str),
+                            CageKind::Sort(SortOrder::DescNullsFirst) => format!("{} DESC NULLS FIRST", col_str),
+                            CageKind::Sort(SortOrder::DescNullsLast) => format!("{} DESC NULLS LAST", col_str),
                             _ => String::new(),
                         }
                     }).filter(|s| !s.is_empty()).collect();

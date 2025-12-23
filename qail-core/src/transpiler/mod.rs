@@ -129,12 +129,12 @@ impl ToSqlParameterized for QailCmd {
             self.columns
                 .iter()
                 .map(|c| match c {
-                    Column::Star => "*".to_string(),
-                    Column::Named(n) => generator.quote_identifier(n),
-                    Column::Aliased { name, alias } => {
+                    Expr::Star => "*".to_string(),
+                    Expr::Named(n) => generator.quote_identifier(n),
+                    Expr::Aliased { name, alias } => {
                         format!("{} AS {}", generator.quote_identifier(name), generator.quote_identifier(alias))
                     }
-                    Column::Aggregate { col, func } => {
+                    Expr::Aggregate { col, func } => {
                         format!("{}({})", func, generator.quote_identifier(col))
                     }
                     _ => "*".to_string(), // Fallback for other variants

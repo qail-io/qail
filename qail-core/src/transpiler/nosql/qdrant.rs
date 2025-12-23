@@ -29,12 +29,14 @@ fn build_qdrant_upsert(cmd: &QailCmd) -> String {
         match cage.kind {
             CageKind::Payload | CageKind::Filter => {
                 for cond in &cage.conditions {
-                    if cond.column == "id" {
-                         point_id = value_to_json(&cond.value);
-                    } else if cond.column == "vector" {
-                         vector = value_to_json(&cond.value);
-                    } else {
-                         payload_parts.push(format!("\"{}\": {}", cond.column, value_to_json(&cond.value)));
+                    if let Expr::Named(name) = &cond.left {
+                        if name == "id" {
+                             point_id = value_to_json(&cond.value);
+                        } else if name == "vector" {
+                             vector = value_to_json(&cond.value);
+                        } else {
+                             payload_parts.push(format!("\"{}\": {}", name, value_to_json(&cond.value)));
+                        }
                     }
                 }
             }
@@ -60,8 +62,10 @@ fn build_qdrant_delete(cmd: &QailCmd) -> String {
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
             for cond in &cage.conditions {
-                 if cond.column == "id" {
-                     ids.push(value_to_json(&cond.value));
+                 if let Expr::Named(name) = &cond.left {
+                     if name == "id" {
+                         ids.push(value_to_json(&cond.value));
+                     }
                  }
             }
         }
@@ -136,7 +140,7 @@ fn build_qdrant_search(cmd: &QailCmd) -> String {
     if !cmd.columns.is_empty() {
          let mut incl = Vec::new();
          for c in &cmd.columns {
-             if let Column::Named(n) = c {
+             if let Expr::Named(n) = c {
                  incl.push(format!("\"{}\"", n));
              }
          }
@@ -159,16 +163,20 @@ fn build_filter(cmd: &QailCmd) -> String {
                  if cond.op == Operator::Fuzzy { continue; }
                  
                  let val = value_to_json(&cond.value); 
-                 
+                 let col_str = match &cond.left {
+                     Expr::Named(name) => name.clone(),
+                     expr => expr.to_string(),
+                 };
+
                  let clause = match cond.op {
-                     Operator::Eq => format!("{{ \"key\": \"{}\", \"match\": {{ \"value\": {} }} }}", cond.column, val),
+                     Operator::Eq => format!("{{ \"key\": \"{}\", \"match\": {{ \"value\": {} }} }}", col_str, val),
                      // Qdrant range: { "key": "price", "range": { "gt": 10.0 } }
-                     Operator::Gt => format!("{{ \"key\": \"{}\", \"range\": {{ \"gt\": {} }} }}", cond.column, val),
-                     Operator::Gte => format!("{{ \"key\": \"{}\", \"range\": {{ \"gte\": {} }} }}", cond.column, val),
-                     Operator::Lt => format!("{{ \"key\": \"{}\", \"range\": {{ \"lt\": {} }} }}", cond.column, val),
-                     Operator::Lte => format!("{{ \"key\": \"{}\", \"range\": {{ \"lte\": {} }} }}", cond.column, val),
-                     Operator::Ne => format!("{{ \"must_not\": [{{ \"key\": \"{}\", \"match\": {{ \"value\": {} }} }}] }}", cond.column, val), // This needs wrapping?
-                     _ => format!("{{ \"key\": \"{}\", \"match\": {{ \"value\": {} }} }}", cond.column, val),
+                     Operator::Gt => format!("{{ \"key\": \"{}\", \"range\": {{ \"gt\": {} }} }}", col_str, val),
+                     Operator::Gte => format!("{{ \"key\": \"{}\", \"range\": {{ \"gte\": {} }} }}", col_str, val),
+                     Operator::Lt => format!("{{ \"key\": \"{}\", \"range\": {{ \"lt\": {} }} }}", col_str, val),
+                     Operator::Lte => format!("{{ \"key\": \"{}\", \"range\": {{ \"lte\": {} }} }}", col_str, val),
+                     Operator::Ne => format!("{{ \"must_not\": [{{ \"key\": \"{}\", \"match\": {{ \"value\": {} }} }}] }}", col_str, val), // This needs wrapping?
+                     _ => format!("{{ \"key\": \"{}\", \"match\": {{ \"value\": {} }} }}", col_str, val),
                  };
                  musts.push(clause);
             }

@@ -10,25 +10,28 @@ pub fn build_update(cmd: &QailCmd, dialect: Dialect) -> String {
     let mut sql = String::from("UPDATE ");
     sql.push_str(&generator.quote_identifier(&cmd.table));
 
-    // For SET queries, first cage is payload, rest are filters
     let mut set_clauses: Vec<String> = Vec::new();
     let mut where_clauses: Vec<String> = Vec::new();
-    let mut is_first_filter = true;
 
     for cage in &cmd.cages {
-        if let CageKind::Filter = cage.kind {
-            if is_first_filter {
-                // First filter cage is the SET payload
+        match cage.kind {
+            // V2 syntax: Payload cage contains SET values
+            CageKind::Payload => {
                 for cond in &cage.conditions {
-                    set_clauses.push(format!("{} = {}", generator.quote_identifier(&cond.column), cond.to_value_sql(&generator)));
+                    let col_sql = match &cond.left {
+                        Expr::Named(name) => generator.quote_identifier(name),
+                        expr => expr.to_string(),
+                    };
+                    set_clauses.push(format!("{} = {}", col_sql, cond.to_value_sql(&generator)));
                 }
-                is_first_filter = false;
-            } else {
-                // Subsequent filter cages are WHERE conditions
+            }
+            // Filter cage contains WHERE conditions
+            CageKind::Filter => {
                 for cond in &cage.conditions {
                     where_clauses.push(cond.to_sql(&generator, Some(cmd)));
                 }
             }
+            _ => {}
         }
     }
 
@@ -46,3 +49,4 @@ pub fn build_update(cmd: &QailCmd, dialect: Dialect) -> String {
 
     sql
 }
+

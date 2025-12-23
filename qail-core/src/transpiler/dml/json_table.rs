@@ -32,10 +32,15 @@ pub fn build_json_table(cmd: &QailCmd, dialect: Dialect) -> String {
         if let CageKind::Filter = cage.kind {
             if let Some(cond) = cage.conditions.first() {
                 // The "column" is actually the path without leading $
-                if cond.column.starts_with('$') {
-                    cond.column.clone()
-                } else {
-                    format!("${}", cond.column)
+                match &cond.left {
+                    Expr::Named(col) => {
+                        if col.starts_with('$') {
+                            col.clone()
+                        } else {
+                            format!("${}", col)
+                        }
+                    },
+                    _ => "$[*]".to_string()
                 }
             } else {
                 "$[*]".to_string()
@@ -51,7 +56,7 @@ pub fn build_json_table(cmd: &QailCmd, dialect: Dialect) -> String {
     // Column::Named("product_name=$.name") -> product_name TEXT PATH '$.name'
     let column_defs: Vec<String> = cmd.columns.iter().filter_map(|c| {
         match c {
-            Column::Named(def) => {
+            Expr::Named(def) => {
                 // Parse "name=$.path" or just "name"
                 if let Some((name, json_path)) = def.split_once('=') {
                     // Default type TEXT
@@ -61,7 +66,7 @@ pub fn build_json_table(cmd: &QailCmd, dialect: Dialect) -> String {
                     Some(format!("{} TEXT PATH '$.{}'", generator.quote_identifier(def), def))
                 }
             },
-            Column::Def { name, data_type, .. } => {
+            Expr::Def { name, data_type, .. } => {
                 // If using Column::Def, data_type might contain the path
                 Some(format!("{} {} PATH '$.{}'", generator.quote_identifier(name), data_type, name))
             },

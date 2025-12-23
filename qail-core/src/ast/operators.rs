@@ -120,6 +120,14 @@ pub enum Operator {
     JsonQuery,
     /// JSON_VALUE - extract scalar value at path (Postgres 17+)
     JsonValue,
+    /// LIKE pattern match
+    Like,
+    /// NOT LIKE pattern match
+    NotLike,
+    /// ILIKE case-insensitive pattern match (Postgres)
+    ILike,
+    /// NOT ILIKE case-insensitive pattern match (Postgres)
+    NotILike,
 }
 
 /// Aggregate functions.

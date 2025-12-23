@@ -5,37 +5,37 @@ use crate::transpiler::ToSql;
 
 #[test]
 fn test_simple_select() {
-    let cmd = parse("get::users:'_").unwrap();
+    let cmd = parse("get users").unwrap();
     assert_eq!(cmd.to_sql(), "SELECT * FROM users");
 }
 
 #[test]
 fn test_select_columns() {
-    let cmd = parse("get::users:'id'email'role").unwrap();
+    let cmd = parse("get users fields id, email, role").unwrap();
     assert_eq!(cmd.to_sql(), "SELECT id, email, role FROM users");
 }
 
 #[test]
 fn test_select_with_where() {
-    let cmd = parse("get::users:'_[active=true]").unwrap();
+    let cmd = parse("get users fields * where active = true").unwrap();
     assert_eq!(cmd.to_sql(), "SELECT * FROM users WHERE active = true");
 }
 
 #[test]
 fn test_select_with_limit() {
-    let cmd = parse("get::users:'_[lim=10]").unwrap();
+    let cmd = parse("get users fields * limit 10").unwrap();
     assert_eq!(cmd.to_sql(), "SELECT * FROM users LIMIT 10");
 }
 
 #[test]
 fn test_select_with_order() {
-    let cmd = parse("get::users:'_[^!created_at]").unwrap();
+    let cmd = parse("get users fields * order by created_at desc").unwrap();
     assert_eq!(cmd.to_sql(), "SELECT * FROM users ORDER BY created_at DESC");
 }
 
 #[test]
 fn test_select_complex() {
-    let cmd = parse("get::users:'id'email[active=true][^!created_at][lim=10]").unwrap();
+    let cmd = parse("get users fields id, email where active = true order by created_at desc limit 10").unwrap();
     assert_eq!(
         cmd.to_sql(),
         "SELECT id, email FROM users WHERE active = true ORDER BY created_at DESC LIMIT 10"
@@ -44,19 +44,19 @@ fn test_select_complex() {
 
 #[test]
 fn test_update() {
-    let cmd = parse("set::users:[verified=true][id=$1]").unwrap();
+    let cmd = parse("set users values verified = true where id = $1").unwrap();
     assert_eq!(cmd.to_sql(), "UPDATE users SET verified = true WHERE id = $1");
 }
 
 #[test]
 fn test_delete() {
-    let cmd = parse("del::users:[id=$1]").unwrap();
+    let cmd = parse("del users where id = $1").unwrap();
     assert_eq!(cmd.to_sql(), "DELETE FROM users WHERE id = $1");
 }
 
 #[test]
 fn test_fuzzy_match() {
-    let cmd = parse("get::users:'_[name~$1]").unwrap();
+    let cmd = parse("get users fields * where name ~ $1").unwrap();
     assert_eq!(cmd.to_sql(), "SELECT * FROM users WHERE name ILIKE '%' || $1 || '%'");
 }
 
@@ -68,8 +68,8 @@ fn test_or_conditions() {
     cmd.cages.push(Cage {
         kind: CageKind::Filter,
         conditions: vec![
-            Condition { column: "status".to_string(), op: Operator::Eq, value: Value::String("active".to_string()), is_array_unnest: false },
-            Condition { column: "status".to_string(), op: Operator::Eq, value: Value::String("pending".to_string()), is_array_unnest: false },
+            Condition { left: Expr::Named("status".to_string()), op: Operator::Eq, value: Value::String("active".to_string()), is_array_unnest: false },
+            Condition { left: Expr::Named("status".to_string()), op: Operator::Eq, value: Value::String("pending".to_string()), is_array_unnest: false },
         ],
         logical_op: LogicalOp::Or,
     });
@@ -84,7 +84,7 @@ fn test_array_unnest() {
     cmd.cages.push(Cage {
         kind: CageKind::Filter,
         conditions: vec![Condition {
-            column: "tags".to_string(),
+            left: Expr::Named("tags".to_string()),
             op: Operator::Eq,
             value: Value::Param(1),
             is_array_unnest: true,
@@ -119,7 +119,7 @@ fn test_distinct() {
     use crate::ast::*;
     let mut cmd = QailCmd::get("users");
     cmd.distinct = true;
-    cmd.columns.push(Column::Named("role".to_string()));
+    cmd.columns.push(Expr::Named("role".to_string()));
     let sql = cmd.to_sql();
     assert!(sql.contains("SELECT DISTINCT"));
     assert!(sql.contains("role"));
@@ -144,7 +144,7 @@ fn test_parameterized_sql() {
     use crate::transpiler::ToSqlParameterized;
     use crate::ast::Value;
     
-    let cmd = parse("get::users:'_[name=\"John\"][age=30]").unwrap();
+    let cmd = parse("get users fields * where name = \"John\" and age = 30").unwrap();
     let result = cmd.to_sql_parameterized();
     
     // SQL should have placeholders, not inline values
