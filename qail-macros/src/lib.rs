@@ -291,14 +291,18 @@ fn generate_params_code(params: &[(Ident, Expr)]) -> TokenStream2 {
         return quote! {};
     }
 
-    let param_entries: Vec<TokenStream2> = params.iter().map(|(name, value)| {
+    let param_inserts: Vec<TokenStream2> = params.iter().map(|(name, value)| {
         let name_str = name.to_string();
-        quote! { #name_str: #value.to_string() }
+        quote! {
+            __p.insert(#name_str, (#value).to_string());
+        }
     }).collect();
 
     quote! {
-        let __qail_params = qail_sqlx::qail_params! {
-            #(#param_entries),*
+        let __qail_params = {
+            let mut __p = qail_sqlx::params::QailParams::new();
+            #(#param_inserts)*
+            __p
         };
     }
 }
@@ -324,7 +328,6 @@ pub fn qail(input: TokenStream) -> TokenStream {
     let pool = &input.pool;
     let result_type = &input.result_type;
     let query_lit = &input.query;
-    let params_code = generate_params_code(&input.params);
     
     let output = if input.params.is_empty() {
         quote! {
@@ -334,11 +337,14 @@ pub fn qail(input: TokenStream) -> TokenStream {
             }
         }
     } else {
+        let params_code = generate_params_code(&input.params);
         quote! {
             {
                 use qail_sqlx::prelude::*;
                 #params_code
-                (#pool).qail_fetch_all_with::<#result_type>(#query_lit, &__qail_params)
+                async move {
+                    (#pool).qail_fetch_all_with::<#result_type>(#query_lit, &__qail_params).await
+                }
             }
         }
     };
@@ -363,7 +369,6 @@ pub fn qail_one(input: TokenStream) -> TokenStream {
     let pool = &input.pool;
     let result_type = &input.result_type;
     let query_lit = &input.query;
-    let params_code = generate_params_code(&input.params);
     
     let output = if input.params.is_empty() {
         quote! {
@@ -373,11 +378,14 @@ pub fn qail_one(input: TokenStream) -> TokenStream {
             }
         }
     } else {
+        let params_code = generate_params_code(&input.params);
         quote! {
             {
                 use qail_sqlx::prelude::*;
                 #params_code
-                (#pool).qail_fetch_one_with::<#result_type>(#query_lit, &__qail_params)
+                async move {
+                    (#pool).qail_fetch_one_with::<#result_type>(#query_lit, &__qail_params).await
+                }
             }
         }
     };
@@ -402,7 +410,6 @@ pub fn qail_optional(input: TokenStream) -> TokenStream {
     let pool = &input.pool;
     let result_type = &input.result_type;
     let query_lit = &input.query;
-    let params_code = generate_params_code(&input.params);
     
     let output = if input.params.is_empty() {
         quote! {
@@ -412,11 +419,14 @@ pub fn qail_optional(input: TokenStream) -> TokenStream {
             }
         }
     } else {
+        let params_code = generate_params_code(&input.params);
         quote! {
             {
                 use qail_sqlx::prelude::*;
                 #params_code
-                (#pool).qail_fetch_optional_with::<#result_type>(#query_lit, &__qail_params)
+                async move {
+                    (#pool).qail_fetch_optional_with::<#result_type>(#query_lit, &__qail_params).await
+                }
             }
         }
     };
@@ -440,7 +450,6 @@ pub fn qail_execute(input: TokenStream) -> TokenStream {
     
     let pool = &input.pool;
     let query_lit = &input.query;
-    let params_code = generate_params_code(&input.params);
     
     let output = if input.params.is_empty() {
         quote! {
@@ -450,11 +459,14 @@ pub fn qail_execute(input: TokenStream) -> TokenStream {
             }
         }
     } else {
+        let params_code = generate_params_code(&input.params);
         quote! {
             {
                 use qail_sqlx::prelude::*;
                 #params_code
-                (#pool).qail_execute_with(#query_lit, &__qail_params)
+                async move {
+                    (#pool).qail_execute_with(#query_lit, &__qail_params).await
+                }
             }
         }
     };
