@@ -1,0 +1,25 @@
+[package]
+name = "qail-macros"
+version = "0.8.10"
+edition = "2021"
+license = "MIT"
+description = "Compile-time validated QAIL query macros"
+repository = "https://github.com/nicosql/qail"
+keywords = ["sql", "query", "macro", "compile-time", "database"]
+categories = ["database", "development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["full", "parsing"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# We'll need a way to reuse qail-core types at compile time
+# For now, we'll parse QAIL ourselves or shell out
+
+[dev-dependencies]
+trybuild = "1.0"
