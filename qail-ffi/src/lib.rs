@@ -242,12 +242,25 @@ pub extern "C" fn qail_version() -> *mut c_char {
 mod tests {
     use super::*;
     use std::ffi::CString;
+    use qail_core::ast::{QailCmd, Expr};
+    use qail_core::transpiler::ToSql;
+
+    // Test via AST construction - immune to syntax changes
+    #[test]
+    fn test_ast_transpile() {
+        let mut cmd = QailCmd::get("users");
+        cmd.columns.push(Expr::Star);
+        let sql = cmd.to_sql();
+        assert!(sql.contains("SELECT"));
+        assert!(sql.contains("FROM users"));
+    }
 
     #[test]
-    fn test_transpile() {
-        let input = CString::new("get::users:'_").unwrap();
+    fn test_ffi_transpile() {
+        // Use simple v2 syntax that's stable
+        let input = CString::new("get users fields *").unwrap();
         let result = qail_transpile(input.as_ptr());
-        assert!(!result.is_null());
+        assert!(!result.is_null(), "transpile returned null, check qail_last_error");
         
         let sql = unsafe { CStr::from_ptr(result) }.to_str().unwrap();
         assert!(sql.contains("SELECT"));
@@ -258,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_validate() {
-        let valid = CString::new("get::users:'_").unwrap();
+        let valid = CString::new("get users fields *").unwrap();
         assert_eq!(qail_validate(valid.as_ptr()), 1);
         
         let invalid = CString::new("invalid syntax!!!").unwrap();
