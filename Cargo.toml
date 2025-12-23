@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "qail-core",
     "qail-macro",
+    "qail-macros",
     "qail-cli",
     "qail-bench",
     "qail-lsp",
