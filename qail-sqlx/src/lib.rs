@@ -66,20 +66,20 @@ mod tests {
 
     #[test]
     fn test_qail_to_sql() {
-        let sql = qail_to_sql("get::users:'_").unwrap();
+        let sql = qail_to_sql("get users fields *").unwrap();
         assert!(sql.contains("SELECT"));
         assert!(sql.contains("users"));
     }
 
     #[test]
     fn test_qail_with_dialect() {
-        let sql = qail_to_sql_with_dialect("get::users:'_", Dialect::MySQL).unwrap();
+        let sql = qail_to_sql_with_dialect("get users fields *", Dialect::MySQL).unwrap();
         assert!(sql.contains("`users`")); // MySQL backticks
     }
 
     #[test]
     fn test_parameterized() {
-        let result = qail_to_sql_parameterized("get::users:'_[active=true]").unwrap();
+        let result = qail_to_sql_parameterized("get users fields * where active = true").unwrap();
         assert!(result.sql.contains("users"));
         // Params should contain the 'true' value
         assert!(!result.params.is_empty());
