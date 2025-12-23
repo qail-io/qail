@@ -39,6 +39,10 @@ pub struct QailCmd {
     /// DISTINCT ON columns (Postgres-specific)
     #[serde(default)]
     pub distinct_on: Vec<String>,
+    /// RETURNING clause columns (for INSERT/UPDATE/DELETE)
+    /// Empty = RETURNING *, Some([]) = no RETURNING, Some([cols]) = RETURNING cols
+    #[serde(default)]
+    pub returning: Option<Vec<Expr>>,
 }
 
 /// CTE (Common Table Expression) definition
@@ -75,6 +79,7 @@ impl QailCmd {
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
             distinct_on: vec![],
+            returning: None,
         }
     }
 
@@ -94,6 +99,7 @@ impl QailCmd {
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
             distinct_on: vec![],
+            returning: None,
         }
     }
 
@@ -113,6 +119,7 @@ impl QailCmd {
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
             distinct_on: vec![],
+            returning: None,
         }
     }
 
@@ -132,6 +139,7 @@ impl QailCmd {
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
             distinct_on: vec![],
+            returning: None,
         }
     }
 
@@ -151,6 +159,7 @@ impl QailCmd {
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
             distinct_on: vec![],
+            returning: None,
         }
     }
 
@@ -170,6 +179,7 @@ impl QailCmd {
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
             distinct_on: vec![],
+            returning: None,
         }
     }
 
@@ -189,6 +199,7 @@ impl QailCmd {
             group_by_mode: GroupByMode::Simple,
             ctes: vec![],
             distinct_on: vec![],
+            returning: None,
         }
     }
 
@@ -289,6 +300,7 @@ impl QailCmd {
             having: vec![],
             group_by_mode: GroupByMode::Simple,
             distinct_on: vec![],
+            returning: None,
             ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,

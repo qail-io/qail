@@ -125,5 +125,6 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, QailCmd> {
         having: vec![],
         group_by_mode: GroupByMode::default(),
         ctes: vec![],
+        returning: None,
     }))
 }

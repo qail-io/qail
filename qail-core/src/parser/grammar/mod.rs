@@ -149,6 +149,7 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
         set_ops: vec![],
         having: vec![],
         group_by_mode: GroupByMode::default(),
+        returning: None,
         ctes,
     }))
 }
