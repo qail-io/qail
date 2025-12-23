@@ -29,12 +29,14 @@ pub use dialect::Dialect;
 pub use conditions::ConditionToSql;
 
 /// Result of transpilation with extracted parameters.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TranspileResult {
     /// The SQL template with placeholders (e.g., $1, $2 or ?, ?)
     pub sql: String,
     /// The extracted parameter values in order
     pub params: Vec<Value>,
+    /// Names of named parameters in order they appear (for :name → $n mapping)
+    pub named_params: Vec<String>,
 }
 
 impl TranspileResult {
@@ -43,6 +45,7 @@ impl TranspileResult {
         Self {
             sql: sql.into(),
             params,
+            named_params: vec![],
         }
     }
 
@@ -51,6 +54,7 @@ impl TranspileResult {
         Self {
             sql: sql.into(),
             params: Vec::new(),
+            named_params: Vec::new(),
         }
     }
 }
@@ -162,6 +166,7 @@ impl ToSqlParameterized for QailCmd {
         TranspileResult {
             sql,
             params: param_ctx.params,
+            named_params: param_ctx.named_params,
         }
     }
 }
