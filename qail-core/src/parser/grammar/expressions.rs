@@ -290,9 +290,15 @@ fn parse_when(input: &str) -> IResult<&str, (Condition, Box<Expr>)> {
     let (input, op) = parse_operator(input)?;
     let (input, _) = multispace0(input)?;
     
-    let (input, val) = parse_value(input)?;
+    // For IS NULL / IS NOT NULL, there's no value to parse
+    let (input, val) = if matches!(op, crate::ast::Operator::IsNull | crate::ast::Operator::IsNotNull) {
+        (input, crate::ast::Value::Null)
+    } else {
+        parse_value(input)?
+    };
     
-    let (input, _) = multispace1(input)?;
+    // Use multispace0 since IS NULL already consumed trailing space
+    let (input, _) = multispace0(input)?;
     let (input, _) = tag_no_case("then")(input)?;
     let (input, _) = multispace1(input)?;
     
@@ -396,4 +402,25 @@ fn parse_extract(input: &str) -> IResult<&str, Expr> {
         ],
         alias: None,
     }))
+}
+
+#[cfg(test)]
+mod case_when_tests {
+    use super::*;
+    
+    #[test]
+    fn test_parse_when_is_null() {
+        let input = "when name is null then email";
+        let result = parse_when(input);
+        println!("Result: {:?}", result);
+        assert!(result.is_ok(), "Failed to parse WHEN with IS NULL: {:?}", result);
+    }
+    
+    #[test]
+    fn test_parse_case_is_null() {
+        let input = "case when name is null then email else name end";
+        let result = parse_case(input);
+        println!("Result: {:?}", result);
+        assert!(result.is_ok(), "Failed to parse CASE with IS NULL: {:?}", result);
+    }
 }
