@@ -432,6 +432,59 @@ impl PgConnection {
         }
     }
 
+    // ==================== Transaction Support ====================
+
+    /// Begin a new transaction.
+    ///
+    /// After calling this, all queries run within the transaction
+    /// until `commit()` or `rollback()` is called.
+    ///
+    /// # Example
+    /// ```ignore
+    /// conn.begin_transaction().await?;
+    /// conn.execute_raw("INSERT INTO users (name) VALUES ($1)", &[Some(b"Alice".to_vec())]).await?;
+    /// conn.execute_raw("INSERT INTO profiles (user_id) VALUES ($1)", &[Some(b"1".to_vec())]).await?;
+    /// conn.commit().await?;  // Both inserts succeed or neither do
+    /// ```
+    pub async fn begin_transaction(&mut self) -> PgResult<()> {
+        self.execute_simple("BEGIN").await
+    }
+
+    /// Commit the current transaction.
+    ///
+    /// Makes all changes since `begin_transaction()` permanent.
+    pub async fn commit(&mut self) -> PgResult<()> {
+        self.execute_simple("COMMIT").await
+    }
+
+    /// Rollback the current transaction.
+    ///
+    /// Discards all changes since `begin_transaction()`.
+    pub async fn rollback(&mut self) -> PgResult<()> {
+        self.execute_simple("ROLLBACK").await
+    }
+
+    /// Execute a simple SQL statement (no parameters).
+    /// Used internally for transaction control.
+    async fn execute_simple(&mut self, sql: &str) -> PgResult<()> {
+        let bytes = PgEncoder::encode_query_string(sql);
+        self.stream.write_all(&bytes).await?;
+
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(());
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Execute multiple queries in a single network round-trip (PIPELINING).
     ///
     /// This sends all queries at once, then reads all responses.
