@@ -2,6 +2,32 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::ast::QailCmd;
 
+/// Time interval unit for duration expressions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IntervalUnit {
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl std::fmt::Display for IntervalUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IntervalUnit::Second => write!(f, "seconds"),
+            IntervalUnit::Minute => write!(f, "minutes"),
+            IntervalUnit::Hour => write!(f, "hours"),
+            IntervalUnit::Day => write!(f, "days"),
+            IntervalUnit::Week => write!(f, "weeks"),
+            IntervalUnit::Month => write!(f, "months"),
+            IntervalUnit::Year => write!(f, "years"),
+        }
+    }
+}
+
 /// A value in a condition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
@@ -31,6 +57,8 @@ pub enum Value {
     Uuid(Uuid),
     /// Null UUID value (for typed NULL in UUID columns)
     NullUuid,
+    /// Time interval (e.g., 24 hours, 7 days)
+    Interval { amount: i64, unit: IntervalUnit },
 }
 
 impl std::fmt::Display for Value {
@@ -56,6 +84,7 @@ impl std::fmt::Display for Value {
             Value::Column(s) => write!(f, "{}", s),
             Value::Uuid(u) => write!(f, "'{}'", u),
             Value::NullUuid => write!(f, "NULL"),
+            Value::Interval { amount, unit } => write!(f, "INTERVAL '{} {}'", amount, unit),
         }
     }
 }

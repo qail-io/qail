@@ -7,13 +7,33 @@ use nom::{
     IResult,
 };
 use crate::ast::*;
+use crate::ast::values::IntervalUnit;
 
 /// Parse checking identifier (table name, column name, or qualified name like table.column)
 pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.')(input)
 }
 
-/// Parse value: string, number, bool, null, $param, :named_param
+/// Parse interval shorthand: 24h, 7d, 1w, 30m, 6mo, 1y
+pub fn parse_interval(input: &str) -> IResult<&str, Value> {
+    let (input, num_str) = digit1(input)?;
+    let amount: i64 = num_str.parse().unwrap_or(0);
+    
+    // Parse unit suffix
+    let (input, unit) = alt((
+        value(IntervalUnit::Second, tag_no_case("s")),
+        value(IntervalUnit::Minute, tag_no_case("m")),
+        value(IntervalUnit::Hour, tag_no_case("h")),
+        value(IntervalUnit::Day, tag_no_case("d")),
+        value(IntervalUnit::Week, tag_no_case("w")),
+        value(IntervalUnit::Month, tag_no_case("mo")),
+        value(IntervalUnit::Year, tag_no_case("y")),
+    ))(input)?;
+    
+    Ok((input, Value::Interval { amount, unit }))
+}
+
+/// Parse value: string, number, bool, null, $param, :named_param, interval
 pub fn parse_value(input: &str) -> IResult<&str, Value> {
     alt((
         // Parameter: $1, $2
@@ -46,7 +66,9 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
             recognize(tuple((opt(char('-')), digit1, char('.'), digit1))),
             |s: &str| Value::Float(s.parse().unwrap_or(0.0))
         ),
-        // Integer
+        // Interval shorthand before plain integers: 24h, 7d, 1w
+        parse_interval,
+        // Integer (last, after interval)
         map(
             recognize(tuple((opt(char('-')), digit1))),
             |s: &str| Value::Int(s.parse().unwrap_or(0))
