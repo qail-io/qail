@@ -79,6 +79,193 @@ impl PgEncoder {
         buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
         buf
     }
+
+    // ==================== Extended Query Protocol ====================
+
+    /// Encode a Parse message (prepare a statement).
+    ///
+    /// Wire format:
+    /// - 'P' (1 byte) - message type
+    /// - length (4 bytes)
+    /// - statement name (null-terminated, "" for unnamed)
+    /// - query string (null-terminated)
+    /// - parameter count (2 bytes)
+    /// - parameter OIDs (4 bytes each, 0 = infer type)
+    pub fn encode_parse(name: &str, sql: &str, param_types: &[u32]) -> BytesMut {
+        let mut buf = BytesMut::new();
+        
+        // Message type 'P'
+        buf.extend_from_slice(&[b'P']);
+        
+        // Build content first to calculate length
+        let mut content = Vec::new();
+        
+        // Statement name (null-terminated)
+        content.extend_from_slice(name.as_bytes());
+        content.push(0);
+        
+        // Query string (null-terminated)
+        content.extend_from_slice(sql.as_bytes());
+        content.push(0);
+        
+        // Parameter count
+        content.extend_from_slice(&(param_types.len() as i16).to_be_bytes());
+        
+        // Parameter OIDs
+        for &oid in param_types {
+            content.extend_from_slice(&oid.to_be_bytes());
+        }
+        
+        // Length (includes length field itself)
+        let len = (content.len() + 4) as i32;
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&content);
+        
+        buf
+    }
+
+    /// Encode a Bind message (bind parameters to a prepared statement).
+    ///
+    /// Wire format:
+    /// - 'B' (1 byte) - message type
+    /// - length (4 bytes)
+    /// - portal name (null-terminated)
+    /// - statement name (null-terminated)
+    /// - format code count (2 bytes) - we use 0 (all text)
+    /// - parameter count (2 bytes)
+    /// - for each parameter: length (4 bytes, -1 for NULL), data
+    /// - result format count (2 bytes) - we use 0 (all text)
+    pub fn encode_bind(portal: &str, statement: &str, params: &[Option<Vec<u8>>]) -> BytesMut {
+        let mut buf = BytesMut::new();
+        
+        // Message type 'B'
+        buf.extend_from_slice(&[b'B']);
+        
+        // Build content
+        let mut content = Vec::new();
+        
+        // Portal name (null-terminated)
+        content.extend_from_slice(portal.as_bytes());
+        content.push(0);
+        
+        // Statement name (null-terminated)
+        content.extend_from_slice(statement.as_bytes());
+        content.push(0);
+        
+        // Format codes count (0 = use default text format)
+        content.extend_from_slice(&0i16.to_be_bytes());
+        
+        // Parameter count
+        content.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        
+        // Parameters
+        for param in params {
+            match param {
+                None => {
+                    // NULL: length = -1
+                    content.extend_from_slice(&(-1i32).to_be_bytes());
+                }
+                Some(data) => {
+                    content.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                    content.extend_from_slice(data);
+                }
+            }
+        }
+        
+        // Result format codes count (0 = use default text format)
+        content.extend_from_slice(&0i16.to_be_bytes());
+        
+        // Length
+        let len = (content.len() + 4) as i32;
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&content);
+        
+        buf
+    }
+
+    /// Encode an Execute message (execute a bound portal).
+    ///
+    /// Wire format:
+    /// - 'E' (1 byte) - message type
+    /// - length (4 bytes)
+    /// - portal name (null-terminated)
+    /// - max rows (4 bytes, 0 = unlimited)
+    pub fn encode_execute(portal: &str, max_rows: i32) -> BytesMut {
+        let mut buf = BytesMut::new();
+        
+        // Message type 'E'
+        buf.extend_from_slice(&[b'E']);
+        
+        // Build content
+        let mut content = Vec::new();
+        
+        // Portal name (null-terminated)
+        content.extend_from_slice(portal.as_bytes());
+        content.push(0);
+        
+        // Max rows
+        content.extend_from_slice(&max_rows.to_be_bytes());
+        
+        // Length
+        let len = (content.len() + 4) as i32;
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&content);
+        
+        buf
+    }
+
+    /// Encode a Describe message (get statement/portal metadata).
+    ///
+    /// Wire format:
+    /// - 'D' (1 byte) - message type
+    /// - length (4 bytes)
+    /// - 'S' for statement or 'P' for portal
+    /// - name (null-terminated)
+    pub fn encode_describe(is_portal: bool, name: &str) -> BytesMut {
+        let mut buf = BytesMut::new();
+        
+        // Message type 'D'
+        buf.extend_from_slice(&[b'D']);
+        
+        // Build content
+        let mut content = Vec::new();
+        
+        // Type: 'S' for statement, 'P' for portal
+        content.push(if is_portal { b'P' } else { b'S' });
+        
+        // Name (null-terminated)
+        content.extend_from_slice(name.as_bytes());
+        content.push(0);
+        
+        // Length
+        let len = (content.len() + 4) as i32;
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&content);
+        
+        buf
+    }
+
+    /// Encode a complete extended query pipeline.
+    ///
+    /// This combines Parse + Bind + Execute + Sync for a single query.
+    /// Use this for parameterized queries.
+    pub fn encode_extended_query(sql: &str, params: &[Option<Vec<u8>>]) -> BytesMut {
+        let mut buf = BytesMut::new();
+        
+        // Parse (unnamed statement, infer all types)
+        buf.extend(Self::encode_parse("", sql, &[]));
+        
+        // Bind (unnamed portal, unnamed statement)
+        buf.extend(Self::encode_bind("", "", params));
+        
+        // Execute (unnamed portal, unlimited rows)
+        buf.extend(Self::encode_execute("", 0));
+        
+        // Sync (end of pipeline)
+        buf.extend(Self::encode_sync());
+        
+        buf
+    }
 }
 
 #[cfg(test)]
@@ -123,5 +310,63 @@ mod tests {
     fn test_encode_terminate() {
         let bytes = PgEncoder::encode_terminate();
         assert_eq!(bytes.as_ref(), &[b'X', 0, 0, 0, 4]);
+    }
+
+    #[test]
+    fn test_encode_sync() {
+        let bytes = PgEncoder::encode_sync();
+        assert_eq!(bytes.as_ref(), &[b'S', 0, 0, 0, 4]);
+    }
+
+    #[test]
+    fn test_encode_parse() {
+        let bytes = PgEncoder::encode_parse("", "SELECT $1", &[]);
+        
+        // Message type 'P'
+        assert_eq!(bytes[0], b'P');
+        
+        // Content should include query
+        let content = String::from_utf8_lossy(&bytes[5..]);
+        assert!(content.contains("SELECT $1"));
+    }
+
+    #[test]
+    fn test_encode_bind() {
+        let params = vec![
+            Some(b"42".to_vec()),
+            None, // NULL
+        ];
+        let bytes = PgEncoder::encode_bind("", "", &params);
+        
+        // Message type 'B'
+        assert_eq!(bytes[0], b'B');
+        
+        // Should have proper length
+        let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        assert!(len > 4); // At least header
+    }
+
+    #[test]
+    fn test_encode_execute() {
+        let bytes = PgEncoder::encode_execute("", 0);
+        
+        // Message type 'E'
+        assert_eq!(bytes[0], b'E');
+        
+        // Length: 4 + 1 (null) + 4 (max_rows) = 9
+        let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        assert_eq!(len, 9);
+    }
+
+    #[test]
+    fn test_encode_extended_query() {
+        let params = vec![Some(b"hello".to_vec())];
+        let bytes = PgEncoder::encode_extended_query("SELECT $1", &params);
+        
+        // Should contain all 4 message types: P, B, E, S
+        assert!(bytes.windows(1).any(|w| w == [b'P']));
+        assert!(bytes.windows(1).any(|w| w == [b'B']));
+        assert!(bytes.windows(1).any(|w| w == [b'E']));
+        assert!(bytes.windows(1).any(|w| w == [b'S']));
     }
 }
