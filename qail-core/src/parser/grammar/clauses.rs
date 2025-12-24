@@ -136,8 +136,39 @@ pub fn parse_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
     Ok((input, conditions))
 }
 
-/// Parse single condition: column op value
+/// Parse single condition: column op value OR exists (subquery) OR not exists (subquery)
 pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
+    // Special case: EXISTS (subquery) and NOT EXISTS (subquery) - unary operators
+    if let Ok((input, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("not exists")(input) {
+        let (input, _) = multispace0(input)?;
+        let (input, _) = char('(')(input)?;
+        let (input, _) = multispace0(input)?;
+        let (input, subquery) = super::parse_root(input)?;
+        let (input, _) = multispace0(input)?;
+        let (input, _) = char(')')(input)?;
+        return Ok((input, Condition {
+            left: Expr::Named("".to_string()),
+            op: Operator::NotExists,
+            value: Value::Subquery(Box::new(subquery)),
+            is_array_unnest: false,
+        }));
+    }
+    if let Ok((input, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("exists")(input) {
+        let (input, _) = multispace0(input)?;
+        let (input, _) = char('(')(input)?;
+        let (input, _) = multispace0(input)?;
+        let (input, subquery) = super::parse_root(input)?;
+        let (input, _) = multispace0(input)?;
+        let (input, _) = char(')')(input)?;
+        return Ok((input, Condition {
+            left: Expr::Named("".to_string()),
+            op: Operator::Exists,
+            value: Value::Subquery(Box::new(subquery)),
+            is_array_unnest: false,
+        }));
+    }
+    
+    // Normal case: column op value
     let (input, left_expr) = parse_expression(input)?;
     let (input, _) = multispace0(input)?;
     

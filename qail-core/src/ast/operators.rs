@@ -132,6 +132,10 @@ pub enum Operator {
     Between,
     /// NOT BETWEEN x AND y
     NotBetween,
+    /// EXISTS (subquery) - check if subquery returns any rows
+    Exists,
+    /// NOT EXISTS (subquery)
+    NotExists,
 }
 
 /// Aggregate functions.
