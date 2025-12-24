@@ -268,6 +268,14 @@ where
         Value::Null => query.bind(None::<String>),
         Value::Uuid(u) => query.bind(*u),
         Value::NullUuid => query.bind(None::<uuid::Uuid>),
+        Value::Timestamp(ts) => {
+            // Parse RFC3339 string back to DateTime for proper binding
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                query.bind(dt.with_timezone(&chrono::Utc))
+            } else {
+                query.bind(ts.clone())
+            }
+        }
         Value::Array(arr) => {
             // Convert array to strings for now
             let strings: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
@@ -294,6 +302,14 @@ fn bind_value_raw<'q>(
         Value::Null => query.bind(None::<String>),
         Value::Uuid(u) => query.bind(*u),
         Value::NullUuid => query.bind(None::<uuid::Uuid>),
+        Value::Timestamp(ts) => {
+            // Parse RFC3339 string back to DateTime for proper binding
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                query.bind(dt.with_timezone(&chrono::Utc))
+            } else {
+                query.bind(ts.clone())
+            }
+        }
         Value::Array(arr) => {
             let strings: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
             query.bind(strings)
