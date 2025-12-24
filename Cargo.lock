@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.8.11"
+version = "0.8.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1690,11 +1690,12 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.8.11"
+version = "0.8.12"
 dependencies = [
  "chrono",
  "colored",
  "nom",
+ "regex",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -1740,7 +1741,7 @@ dependencies = [
 
 [[package]]
 name = "qail-sqlx"
-version = "0.8.11"
+version = "0.8.12"
 dependencies = [
  "qail-core",
  "sqlx",

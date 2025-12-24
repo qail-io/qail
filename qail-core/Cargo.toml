@@ -1,6 +1,6 @@
 [package]
 name = "qail-core"
-version = "0.8.11"
+version = "0.8.12"
 edition = "2024"
 description = "The Universal Query Transpiler - Core parser and transpiler"
 license = "MIT"
@@ -19,6 +19,7 @@ uuid = { version = "1.11.0", features = ["serde", "v4", "js"] }
 rust_decimal = "1.33"
 colored = "2.0"
 strsim = "0.11.1"
+regex = "1.12.2"
 
 [dev-dependencies]
 
