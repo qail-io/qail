@@ -245,24 +245,59 @@ impl PgEncoder {
         buf
     }
 
-    /// Encode a complete extended query pipeline.
+    /// Encode a complete extended query pipeline (OPTIMIZED).
     ///
-    /// This combines Parse + Bind + Execute + Sync for a single query.
-    /// Use this for parameterized queries.
+    /// This combines Parse + Bind + Execute + Sync in a single buffer.
+    /// Zero intermediate allocations - writes directly to pre-sized BytesMut.
     pub fn encode_extended_query(sql: &str, params: &[Option<Vec<u8>>]) -> BytesMut {
-        let mut buf = BytesMut::new();
+        // Calculate total size upfront to avoid reallocations
+        // Parse: 1 + 4 + 1 + sql.len() + 1 + 2 = 9 + sql.len()
+        // Bind: 1 + 4 + 1 + 1 + 2 + 2 + params_data + 2 = 13 + params_data
+        // Execute: 1 + 4 + 1 + 4 = 10
+        // Sync: 5
+        let params_size: usize = params.iter()
+            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
+            .sum();
+        let total_size = 9 + sql.len() + 13 + params_size + 10 + 5;
         
-        // Parse (unnamed statement, infer all types)
-        buf.extend(Self::encode_parse("", sql, &[]));
+        let mut buf = BytesMut::with_capacity(total_size);
         
-        // Bind (unnamed portal, unnamed statement)
-        buf.extend(Self::encode_bind("", "", params));
+        // ===== PARSE =====
+        buf.extend_from_slice(&[b'P']);
+        let parse_len = (1 + sql.len() + 1 + 2 + 4) as i32; // name + sql + param_count
+        buf.extend_from_slice(&parse_len.to_be_bytes());
+        buf.extend_from_slice(&[0]); // Unnamed statement
+        buf.extend_from_slice(sql.as_bytes());
+        buf.extend_from_slice(&[0]); // Null terminator
+        buf.extend_from_slice(&0i16.to_be_bytes()); // No param types (infer)
         
-        // Execute (unnamed portal, unlimited rows)
-        buf.extend(Self::encode_execute("", 0));
+        // ===== BIND =====
+        buf.extend_from_slice(&[b'B']);
+        let bind_len = (1 + 1 + 2 + 2 + params_size + 2 + 4) as i32;
+        buf.extend_from_slice(&bind_len.to_be_bytes());
+        buf.extend_from_slice(&[0]); // Unnamed portal
+        buf.extend_from_slice(&[0]); // Unnamed statement
+        buf.extend_from_slice(&0i16.to_be_bytes()); // Format codes (default text)
+        buf.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        for param in params {
+            match param {
+                None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(data) => {
+                    buf.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                    buf.extend_from_slice(data);
+                }
+            }
+        }
+        buf.extend_from_slice(&0i16.to_be_bytes()); // Result format (default text)
         
-        // Sync (end of pipeline)
-        buf.extend(Self::encode_sync());
+        // ===== EXECUTE =====
+        buf.extend_from_slice(&[b'E']);
+        buf.extend_from_slice(&9i32.to_be_bytes()); // len = 4 + 1 + 4
+        buf.extend_from_slice(&[0]); // Unnamed portal
+        buf.extend_from_slice(&0i32.to_be_bytes()); // Unlimited rows
+        
+        // ===== SYNC =====
+        buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
         
         buf
     }
