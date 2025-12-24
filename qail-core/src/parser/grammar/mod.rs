@@ -4,6 +4,10 @@ pub mod cte;
 pub mod ddl;
 pub mod dml;
 pub mod joins;
+pub mod binary_ops;
+pub mod functions;
+pub mod case_when;
+pub mod special_funcs;
 pub mod expressions;
 
 use nom::{
