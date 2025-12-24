@@ -159,7 +159,9 @@ fn parse_literal(input: &str) -> IResult<&str, Expr> {
         },
         Value::Bool(b) => Expr::Named(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
         Value::Null => Expr::Named("NULL".to_string()),
-        _ => Expr::Named("VALUE".to_string()),
+        Value::Interval { amount, unit } => Expr::Named(format!("INTERVAL '{} {}'", amount, unit)),
+        // Fall back to Display for other variants
+        _ => Expr::Named(v.to_string()),
     })(input)
 }
 
