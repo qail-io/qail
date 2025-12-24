@@ -45,10 +45,12 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                 Expr::Case { when_clauses, else_value, alias } => {
                     let mut case_sql = String::from("CASE");
                     for (cond, val) in when_clauses {
-                        case_sql.push_str(&format!(" WHEN {} THEN {}", cond.to_sql(&generator, Some(cmd)), val));
+                        case_sql.push_str(&format!(" WHEN {} THEN {}", 
+                            cond.to_sql(&generator, Some(cmd)), 
+                            render_expr_for_orderby(val, &generator, cmd)));
                     }
                     if let Some(e) = else_value {
-                        case_sql.push_str(&format!(" ELSE {}", e));
+                        case_sql.push_str(&format!(" ELSE {}", render_expr_for_orderby(e, &generator, cmd)));
                     }
                     case_sql.push_str(" END");
                     if let Some(a) = alias {
@@ -434,6 +436,10 @@ fn render_expr_for_orderby(expr: &Expr, generator: &Box<dyn crate::transpiler::S
                 }
                 _ => format!("{}(...)", name)
             }
+        }
+        Expr::JsonAccess { column, path, as_text, .. } => {
+            let op = if *as_text { "->>" } else { "->" };
+            format!("{}{}'{}'", generator.quote_identifier(column), op, path)
         }
         _ => expr.to_string(), // Fallback for Star, Aliased, etc.
     }
