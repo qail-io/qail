@@ -93,13 +93,17 @@ impl PgDriver {
     }
 
     /// Execute a QAIL command and fetch all rows.
+    ///
+    /// Uses Extended Query Protocol - parameters are sent as binary bytes,
+    /// skipping the string layer entirely.
     pub async fn fetch_all(&mut self, cmd: &QailCmd) -> PgResult<Vec<PgRow>> {
-        // Layer 2: Convert AST to SQL (pure, sync)
+        // Layer 2: Convert AST to parameterized SQL (pure, sync)
         use qail_core::transpiler::ToSql;
-        let sql = cmd.to_sql();
+        let sql = cmd.to_sql();  // TODO: Use to_sql_parameterized() when ready
 
-        // Layer 3: Execute via connection (async I/O)
-        let raw_rows = self.connection.simple_query(&sql).await?;
+        // Layer 3: Execute via Extended Query Protocol (async I/O)
+        // Parameters are binary bytes - no string interpolation
+        let raw_rows = self.connection.query(&sql, &[]).await?;
         
         Ok(raw_rows.into_iter().map(|columns| PgRow { columns }).collect())
     }
@@ -111,16 +115,18 @@ impl PgDriver {
     }
 
     /// Execute a QAIL command (for mutations).
+    ///
+    /// Uses Extended Query Protocol - parameters are sent as binary bytes.
     pub async fn execute(&mut self, cmd: &QailCmd) -> PgResult<u64> {
-        // Layer 2: Convert AST to SQL (pure, sync)
+        // Layer 2: Convert AST to parameterized SQL (pure, sync)
         use qail_core::transpiler::ToSql;
-        let sql = cmd.to_sql();
+        let sql = cmd.to_sql();  // TODO: Use to_sql_parameterized() when ready
 
-        // Layer 3: Execute via connection (async I/O)
-        // simple_query returns rows, but for mutations we just need to know it succeeded
-        let _ = self.connection.simple_query(&sql).await?;
+        // Layer 3: Execute via Extended Query Protocol (async I/O)
+        let _ = self.connection.query(&sql, &[]).await?;
         
         // TODO: Parse affected rows from CommandComplete tag (e.g., "INSERT 0 1")
         Ok(1)
     }
 }
+

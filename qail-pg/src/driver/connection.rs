@@ -160,45 +160,21 @@ impl PgConnection {
         }
     }
 
-    /// Execute a simple query and return results.
-    pub async fn simple_query(&mut self, sql: &str) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        self.send(FrontendMessage::Query(sql.to_string())).await?;
-
-        let mut rows = Vec::new();
-
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::RowDescription(_) => {
-                    // Column metadata - could store for later
-                }
-                BackendMessage::DataRow(data) => {
-                    rows.push(data);
-                }
-                BackendMessage::CommandComplete(_) => {
-                    // Query done
-                }
-                BackendMessage::ReadyForQuery(_) => {
-                    return Ok(rows);
-                }
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Execute an extended query with binary parameters.
+    /// Execute a query with binary parameters.
     ///
-    /// This uses the Parse/Bind/Execute protocol:
-    /// 1. Parse: Send SQL template with $1, $2, etc. placeholders
-    /// 2. Bind: Send parameter values as binary bytes
-    /// 3. Execute: Run the query
-    /// 4. Sync: End the pipeline
+    /// This uses the Extended Query Protocol (Parse/Bind/Execute/Sync):
+    /// - Parameters are sent as binary bytes, skipping the string layer
+    /// - No SQL injection possible - parameters are never interpolated
+    /// - Better performance via prepared statement reuse
     ///
-    /// Parameters skip the string layer - they're sent as raw bytes.
-    pub async fn extended_query(
+    /// # Example
+    /// ```ignore
+    /// let rows = conn.query(
+    ///     "SELECT * FROM users WHERE name = $1",
+    ///     &[Some(b"Alice".to_vec())]
+    /// ).await?;
+    /// ```
+    pub async fn query(
         &mut self, 
         sql: &str, 
         params: &[Option<Vec<u8>>]
