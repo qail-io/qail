@@ -210,6 +210,13 @@ fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')')(input)?;
     
+    // Optional alias: AS alias_name or just alias_name (after space)
+    let (input, alias) = opt(preceded(
+        tuple((multispace1, tag_no_case("as"), multispace1)),
+        parse_identifier
+    ))(input)?;
+    let alias = alias.map(|s| s.to_string());
+    
     let name_lower = name.to_lowercase();
     match name_lower.as_str() {
         "count" | "sum" | "avg" | "min" | "max" => {
@@ -225,13 +232,13 @@ fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
                 "max" => AggregateFunc::Max,
                 _ => AggregateFunc::Count, // unreachable
             };
-            Ok((input, Expr::Aggregate { col, func }))
+            Ok((input, Expr::Aggregate { col, func, alias }))
         },
         _ => {
             Ok((input, Expr::FunctionCall {
                 name: name.to_string(),
                 args,
-                alias: None,
+                alias,
             }))
         }
     }

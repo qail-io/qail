@@ -41,7 +41,7 @@ pub enum Expr {
     /// An aliased expression (expr AS alias)
     Aliased { name: String, alias: String },
     /// An aggregate function (COUNT(col))
-    Aggregate { col: String, func: AggregateFunc },
+    Aggregate { col: String, func: AggregateFunc, alias: Option<String> },
     /// Column Definition (for Make keys)
     Def {
         name: String,
@@ -117,7 +117,13 @@ impl std::fmt::Display for Expr {
             Expr::Star => write!(f, "*"),
             Expr::Named(name) => write!(f, "{}", name),
             Expr::Aliased { name, alias } => write!(f, "{} AS {}", name, alias),
-            Expr::Aggregate { col, func } => write!(f, "{}({})", func, col),
+            Expr::Aggregate { col, func, alias } => {
+                write!(f, "{}({})", func, col)?;
+                if let Some(a) = alias {
+                    write!(f, " AS {}", a)?;
+                }
+                Ok(())
+            }
             Expr::Def {
                 name,
                 data_type,

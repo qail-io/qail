@@ -170,7 +170,7 @@ impl Formatter {
             Expr::Star => write!(self.buffer, "*")?,
             Expr::Named(name) => write!(self.buffer, "{}", name)?,
             Expr::Aliased { name, alias } => write!(self.buffer, "{} as {}", name, alias)?,
-            Expr::Aggregate { col, func } => {
+            Expr::Aggregate { col, func, alias } => {
                  let func_name = match func {
                      crate::ast::AggregateFunc::Count => "count",
                      crate::ast::AggregateFunc::Sum => "sum",
@@ -178,7 +178,10 @@ impl Formatter {
                      crate::ast::AggregateFunc::Min => "min",
                      crate::ast::AggregateFunc::Max => "max",
                  };
-                 write!(self.buffer, "{}({})", func_name, col)?
+                 write!(self.buffer, "{}({})", func_name, col)?;
+                 if let Some(a) = alias {
+                     write!(self.buffer, " as {}", a)?;
+                 }
             },
             Expr::FunctionCall { name, args, alias } => {
                 let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
