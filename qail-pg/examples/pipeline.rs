@@ -9,8 +9,8 @@
 
 use std::time::Instant;
 
-const QUERIES_PER_BATCH: usize = 10;
-const BATCHES: usize = 10;
+const QUERIES_PER_BATCH: usize = 1000;
+const BATCHES: usize = 1000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
