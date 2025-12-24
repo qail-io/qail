@@ -135,6 +135,10 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     let (input, where_cages) = opt(parse_where_clause)(input)?;
     let (input, _) = multispace0(input)?;
     
+    // Parse HAVING clause (for filtering on aggregates - comes after implicit GROUP BY)
+    let (input, having) = opt(parse_having_clause)(input)?;
+    let (input, _) = multispace0(input)?;
+    
     // Parse ON CONFLICT clause (for ADD/INSERT only)
     let (input, on_conflict) = if matches!(action, Action::Add) {
         opt(dml::parse_on_conflict)(input)?
@@ -186,7 +190,7 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
         index_def: None,
         table_constraints: vec![],
         set_ops: vec![],
-        having: vec![],
+        having: having.unwrap_or_default(),
         group_by_mode: GroupByMode::default(),
         returning: None,
         ctes,
