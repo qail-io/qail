@@ -5,13 +5,17 @@
 
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use bytes::BytesMut;
 use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus, ScramClient};
 use super::{PgError, PgResult};
+
+/// Initial buffer capacity (8KB - typical response size)
+const BUFFER_CAPACITY: usize = 8192;
 
 /// A raw PostgreSQL connection.
 pub struct PgConnection {
     stream: TcpStream,
-    buffer: Vec<u8>,
+    buffer: BytesMut,
 }
 
 impl PgConnection {
@@ -33,7 +37,7 @@ impl PgConnection {
 
         let mut conn = Self {
             stream,
-            buffer: Vec::with_capacity(8192),
+            buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
         };
 
         // Send startup message
@@ -66,21 +70,24 @@ impl PgConnection {
                 ]) as usize;
                 
                 if self.buffer.len() >= msg_len + 1 {
-                    // We have a complete message
-                    let (msg, consumed) = BackendMessage::decode(&self.buffer)
+                    // We have a complete message - zero-copy split
+                    let msg_bytes = self.buffer.split_to(msg_len + 1);
+                    let (msg, _) = BackendMessage::decode(&msg_bytes)
                         .map_err(PgError::Protocol)?;
-                    self.buffer.drain(..consumed);
                     return Ok(msg);
                 }
             }
             
-            // Need more data - read from stream
-            let mut temp = [0u8; 4096];
-            let n = self.stream.read(&mut temp).await?;
+            // Need more data - read directly into BytesMut (no temp buffer)
+            // Reserve space if needed
+            if self.buffer.capacity() - self.buffer.len() < 4096 {
+                self.buffer.reserve(4096);
+            }
+            
+            let n = self.stream.read_buf(&mut self.buffer).await?;
             if n == 0 {
                 return Err(PgError::Connection("Connection closed".to_string()));
             }
-            self.buffer.extend_from_slice(&temp[..n]);
         }
     }
 
