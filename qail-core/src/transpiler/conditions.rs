@@ -102,9 +102,13 @@ impl ConditionToSql for Condition {
                     generator.quote_identifier(name)
                 }
             },
-            Expr::JsonAccess { column, path, as_text, .. } => {
-                let op = if *as_text { "->>" } else { "->" };
-                format!("{}{}'{}'", generator.quote_identifier(column), op, path)
+            Expr::JsonAccess { column, path_segments, .. } => {
+                let mut result = generator.quote_identifier(column);
+                for (path, as_text) in path_segments {
+                    let op = if *as_text { "->>" } else { "->" };
+                    result.push_str(&format!("{}'{}'", op, path));
+                }
+                result
             },
             expr => expr.to_string(),
         };
@@ -262,9 +266,13 @@ impl ConditionToSql for Condition {
                     generator.quote_identifier(name)
                 }
             },
-            Expr::JsonAccess { column, path, as_text, .. } => {
-                let op = if *as_text { "->>" } else { "->" };
-                format!("{}{}'{}'", generator.quote_identifier(column), op, path)
+            Expr::JsonAccess { column, path_segments, .. } => {
+                let mut result = generator.quote_identifier(column);
+                for (path, as_text) in path_segments {
+                    let op = if *as_text { "->>" } else { "->" };
+                    result.push_str(&format!("{}'{}'", op, path));
+                }
+                result
             },
             expr => expr.to_string(),
         };

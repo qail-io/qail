@@ -86,7 +86,7 @@ pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
         expr = match expr {
             Expr::Named(n) => Expr::Aliased { name: n, alias: a.to_string() },
             Expr::FunctionCall { name, args, .. } => Expr::FunctionCall { name, args, alias: Some(a.to_string()) },
-            Expr::JsonAccess { column, path, as_text, .. } => Expr::JsonAccess { column, path, as_text, alias: Some(a.to_string()) },
+            Expr::JsonAccess { column, path_segments, .. } => Expr::JsonAccess { column, path_segments, alias: Some(a.to_string()) },
             Expr::Case { when_clauses, else_value, .. } => Expr::Case { when_clauses, else_value, alias: Some(a.to_string()) },
             Expr::Aggregate { col, func, distinct, filter, .. } => Expr::Aggregate { col, func, distinct, filter, alias: Some(a.to_string()) },
             Expr::Cast { expr: inner, target_type, .. } => Expr::Cast { expr: inner, target_type, alias: Some(a.to_string()) },
