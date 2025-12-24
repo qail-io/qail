@@ -13,6 +13,7 @@
 //! ```
 
 pub mod grammar;
+pub mod schema;
 
 #[cfg(test)]
 mod tests;

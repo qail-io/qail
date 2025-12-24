@@ -378,7 +378,8 @@ fn test_having_clause() {
     cmd.columns.push(Expr::Named("customer_id".to_string()));
     cmd.columns.push(Expr::Aggregate { 
         col: "total".to_string(), 
-        func: AggregateFunc::Sum 
+        func: AggregateFunc::Sum,
+        alias: None,
     });
     cmd.having.push(Condition {
         left: Expr::Named("SUM(total)".to_string()),
@@ -402,7 +403,8 @@ fn test_group_by_rollup() {
     cmd.columns.push(Expr::Named("year".to_string()));
     cmd.columns.push(Expr::Aggregate { 
         col: "amount".to_string(), 
-        func: AggregateFunc::Sum 
+        func: AggregateFunc::Sum,
+        alias: None,
     });
     cmd.group_by_mode = GroupByMode::Rollup;
     
@@ -418,7 +420,8 @@ fn test_group_by_cube() {
     cmd.columns.push(Expr::Named("product".to_string()));
     cmd.columns.push(Expr::Aggregate { 
         col: "amount".to_string(), 
-        func: AggregateFunc::Sum 
+        func: AggregateFunc::Sum,
+        alias: None,
     });
     cmd.group_by_mode = GroupByMode::Cube;
     
@@ -527,7 +530,7 @@ fn test_custom_join_multiple_conditions() {
 fn test_distinct_on() {
     // Manual construction for DISTINCT ON
     let mut cmd = QailCmd::get("employees");
-    cmd.distinct_on = vec!["department".to_string(), "role".to_string()];
+    cmd.distinct_on = vec![Expr::Named("department".to_string()), Expr::Named("role".to_string())];
     
     // Transpiler check (Postgres default)
     let sql = cmd.to_sql();
