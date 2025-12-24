@@ -18,12 +18,19 @@ const BUFFER_CAPACITY: usize = 8192;
 /// SSLRequest message bytes (request code: 80877103)
 const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
 
+/// CancelRequest protocol code: 80877102
+const CANCEL_REQUEST_CODE: i32 = 80877102;
+
 /// A raw PostgreSQL connection.
 pub struct PgConnection {
     stream: PgStream,
     buffer: BytesMut,
     /// Cache of prepared statements: stmt_name -> SQL text (for debugging)
     prepared_statements: HashMap<String, String>,
+    /// Backend process ID (for query cancellation)  
+    process_id: i32,
+    /// Backend secret key (for query cancellation)
+    secret_key: i32,
 }
 
 impl PgConnection {
@@ -47,6 +54,8 @@ impl PgConnection {
             stream: PgStream::Tcp(tcp_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
             prepared_statements: HashMap::new(),
+            process_id: 0,
+            secret_key: 0,
         };
 
         // Send startup message
@@ -119,6 +128,8 @@ impl PgConnection {
             stream: PgStream::Tls(tls_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
             prepared_statements: HashMap::new(),
+            process_id: 0,
+            secret_key: 0,
         };
 
         // Send startup message over TLS
@@ -163,6 +174,8 @@ impl PgConnection {
             stream: PgStream::Unix(unix_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
             prepared_statements: HashMap::new(),
+            process_id: 0,
+            secret_key: 0,
         };
 
         // Send startup message
@@ -275,8 +288,10 @@ impl PgConnection {
                 BackendMessage::ParameterStatus { .. } => {
                     // Store server parameters if needed
                 }
-                BackendMessage::BackendKeyData { .. } => {
+                BackendMessage::BackendKeyData { process_id, secret_key } => {
                     // Store for cancel requests
+                    self.process_id = process_id;
+                    self.secret_key = secret_key;
                 }
                 BackendMessage::ReadyForQuery(TransactionStatus::Idle) |
                 BackendMessage::ReadyForQuery(TransactionStatus::InBlock) |
@@ -506,6 +521,51 @@ impl PgConnection {
     /// Discards all changes since `begin_transaction()`.
     pub async fn rollback(&mut self) -> PgResult<()> {
         self.execute_simple("ROLLBACK").await
+    }
+
+    // ==================== Query Cancellation ====================
+
+    /// Get the cancel key for this connection.
+    /// 
+    /// Returns (host, port, process_id, secret_key) needed to cancel queries.
+    /// Use with `cancel_query()` from another task.
+    pub fn get_cancel_key(&self) -> (i32, i32) {
+        (self.process_id, self.secret_key)
+    }
+
+    /// Cancel a running query on a PostgreSQL backend.
+    ///
+    /// This opens a new TCP connection and sends a CancelRequest message.
+    /// The original connection continues running but the query is interrupted.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // From another task, cancel a long-running query
+    /// let (pid, key) = conn.get_cancel_key();
+    /// PgConnection::cancel_query("127.0.0.1", 5432, pid, key).await?;
+    /// ```
+    pub async fn cancel_query(
+        host: &str,
+        port: u16, 
+        process_id: i32,
+        secret_key: i32,
+    ) -> PgResult<()> {
+        // Open new connection just for cancel
+        let addr = format!("{}:{}", host, port);
+        let mut stream = TcpStream::connect(&addr).await?;
+        
+        // Send CancelRequest message:
+        // Length (16) + CancelRequest code (80877102) + process_id + secret_key
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&16i32.to_be_bytes()); // Length
+        buf[4..8].copy_from_slice(&CANCEL_REQUEST_CODE.to_be_bytes());
+        buf[8..12].copy_from_slice(&process_id.to_be_bytes());
+        buf[12..16].copy_from_slice(&secret_key.to_be_bytes());
+        
+        stream.write_all(&buf).await?;
+        
+        // Server will close connection after receiving cancel request
+        Ok(())
     }
 
     /// Execute a simple SQL statement (no parameters).
