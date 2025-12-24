@@ -8,4 +8,7 @@ pub struct Join {
     pub kind: JoinKind,
     #[serde(default)]
     pub on: Option<Vec<Condition>>,
+    /// If true, use ON TRUE (unconditional join). Used for joining CTEs.
+    #[serde(default)]
+    pub on_true: bool,
 }

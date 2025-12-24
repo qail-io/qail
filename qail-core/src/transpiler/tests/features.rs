@@ -218,6 +218,7 @@ fn test_lateral_join() {
         table: "orders".to_string(),
         kind: JoinKind::Lateral,
         on: None,
+        on_true: false,
     });
 
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
@@ -526,6 +527,7 @@ fn test_custom_join_on() {
             value: Value::Column("orders.user_id".to_string()),
             is_array_unnest: false,
         }]),
+        on_true: false,
     });
     let sql = cmd.to_sql();
     // Identifiers are unquoted if safe in Postgres dialect implementation used
@@ -552,6 +554,7 @@ fn test_custom_join_multiple_conditions() {
                 is_array_unnest: false,
             },
         ]),
+        on_true: false,
     });
     let sql = cmd.to_sql();
     assert!(sql.contains("INNER JOIN B ON A.x = B.x AND A.y = B.y"), "SQL was: {}", sql);
