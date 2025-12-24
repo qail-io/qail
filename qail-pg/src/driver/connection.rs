@@ -219,9 +219,63 @@ impl PgConnection {
         }
     }
 
+    /// Execute a mutation and return affected rows count.
+    ///
+    /// Parses the affected rows from CommandComplete tag:
+    /// - "INSERT 0 1" → 1
+    /// - "UPDATE 5" → 5
+    /// - "DELETE 10" → 10
+    pub async fn execute_raw(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>]
+    ) -> PgResult<u64> {
+        use crate::protocol::PgEncoder;
+        
+        // Send Parse + Bind + Execute + Sync as one pipeline
+        let bytes = PgEncoder::encode_extended_query(sql, params);
+        self.stream.write_all(&bytes).await?;
+
+        let mut affected_rows = 0u64;
+
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::ParseComplete => {}
+                BackendMessage::BindComplete => {}
+                BackendMessage::NoData => {}
+                BackendMessage::DataRow(_) => {
+                    // Mutations might return rows (RETURNING clause)
+                }
+                BackendMessage::CommandComplete(tag) => {
+                    // Parse affected rows from tag: "INSERT 0 1", "UPDATE 5", "DELETE 10"
+                    affected_rows = parse_affected_rows(&tag);
+                }
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(affected_rows);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Send raw bytes to the stream.
     pub async fn send_bytes(&mut self, bytes: &[u8]) -> PgResult<()> {
         self.stream.write_all(bytes).await?;
         Ok(())
     }
+}
+
+/// Parse affected rows from CommandComplete tag.
+/// Examples: "INSERT 0 1" → 1, "UPDATE 5" → 5, "DELETE 10" → 10
+fn parse_affected_rows(tag: &str) -> u64 {
+    // Format is: "COMMAND [OID] ROWS" where OID is only for INSERT
+    // Examples: "INSERT 0 5", "UPDATE 5", "DELETE 10", "SELECT 100"
+    tag.split_whitespace()
+        .last()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }

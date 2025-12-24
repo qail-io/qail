@@ -122,6 +122,7 @@ impl PgDriver {
     /// Execute a QAIL command (for mutations).
     ///
     /// Uses Extended Query Protocol - parameters are sent as binary bytes.
+    /// Returns the number of affected rows.
     pub async fn execute(&mut self, cmd: &QailCmd) -> PgResult<u64> {
         // Layer 2: Convert AST to parameterized SQL (pure, sync)
         use qail_core::transpiler::ToSqlParameterized;
@@ -133,10 +134,8 @@ impl PgDriver {
             .collect();
 
         // Layer 3: Execute via Extended Query Protocol (async I/O)
-        let _ = self.connection.query(&result.sql, &params).await?;
-        
-        // TODO: Parse affected rows from CommandComplete tag (e.g., "INSERT 0 1")
-        Ok(1)
+        let affected = self.connection.execute_raw(&result.sql, &params).await?;
+        Ok(affected)
     }
 }
 
