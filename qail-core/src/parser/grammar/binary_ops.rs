@@ -9,6 +9,7 @@ use nom::{
     bytes::complete::tag,
     character::complete::multispace0,
     IResult,
+    Parser,
 };
 use crate::ast::*;
 use super::expressions::parse_json_or_ident;
@@ -54,7 +55,7 @@ where
         // Try each operator
         let mut matched = None;
         for (op_str, op_enum) in operators {
-            if let Ok((after_op, _)) = tag::<_, _, nom::error::Error<&str>>(*op_str)(remaining) {
+            if let Ok((after_op, _)) = tag::<_, _, nom::error::Error<&str>>(*op_str).parse(remaining) {
                 matched = Some((after_op, *op_enum));
                 break;
             }

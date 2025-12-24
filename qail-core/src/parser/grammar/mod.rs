@@ -15,6 +15,7 @@ use nom::{
     combinator::{opt},
     multi::many0,
     character::complete::{multispace0, multispace1},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -71,17 +72,17 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     // Supports expressions like: CASE WHEN ... END, functions, columns
     let (input, distinct_on) = if distinct {
         // If already parsed "get distinct", check for "on (...)"
-        if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("on")(input) {
+        if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("on").parse(input) {
             let (remaining, _) = multispace0(remaining)?;
             // Parse (expr1, expr2) - full expressions, not just identifiers
             let (remaining, exprs) = nom::sequence::delimited(
                 nom::character::complete::char('('),
                 nom::multi::separated_list1(
-                    nom::sequence::tuple((multispace0, nom::character::complete::char(','), multispace0)),
+                    (multispace0, nom::character::complete::char(','), multispace0),
                     expressions::parse_expression
                 ),
                 nom::character::complete::char(')')
-            )(remaining)?;
+            ).parse(remaining)?;
             let (remaining, _) = multispace1(remaining)?;
             (remaining, exprs)
         } else {
@@ -101,24 +102,24 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     }
     
     // Parse optional joins: [inner|left|right] join table [on condition]
-    let (input, joins) = many0(parse_join_clause)(input)?;
+    let (input, joins) = many0(parse_join_clause).parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // For SET/UPDATE: parse "values col = val, col2 = val2" before fields
     let (input, set_cages) = if matches!(action, Action::Set) {
-        opt(parse_values_clause)(input)?
+        opt(parse_values_clause).parse(input)?
     } else {
         (input, None)
     };
     let (input, _) = multispace0(input)?;
     
     // Parse optional clauses
-    let (input, columns) = opt(parse_fields_clause)(input)?;
+    let (input, columns) = opt(parse_fields_clause).parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // For ADD/INSERT: try "from (get ...)" first, then fall back to "values val1, val2"
     let (input, source_query) = if matches!(action, Action::Add) {
-        opt(dml::parse_source_query)(input)?
+        opt(dml::parse_source_query).parse(input)?
     } else {
         (input, None)
     };
@@ -126,32 +127,32 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     
     // Only parse values if no source_query (INSERT...SELECT takes precedence)
     let (input, add_cages) = if source_query.is_none() && matches!(action, Action::Add) {
-        opt(dml::parse_insert_values)(input)?
+        opt(dml::parse_insert_values).parse(input)?
     } else {
         (input, None)
     };
     let (input, _) = multispace0(input)?;
     
-    let (input, where_cages) = opt(parse_where_clause)(input)?;
+    let (input, where_cages) = opt(parse_where_clause).parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Parse HAVING clause (for filtering on aggregates - comes after implicit GROUP BY)
-    let (input, having) = opt(parse_having_clause)(input)?;
+    let (input, having) = opt(parse_having_clause).parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Parse ON CONFLICT clause (for ADD/INSERT only)
     let (input, on_conflict) = if matches!(action, Action::Add) {
-        opt(dml::parse_on_conflict)(input)?
+        opt(dml::parse_on_conflict).parse(input)?
     } else {
         (input, None)
     };
     let (input, _) = multispace0(input)?;
     
-    let (input, order_cages) = opt(parse_order_by_clause)(input)?;
+    let (input, order_cages) = opt(parse_order_by_clause).parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, limit_cage) = opt(parse_limit_clause)(input)?;
+    let (input, limit_cage) = opt(parse_limit_clause).parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, offset_cage) = opt(parse_offset_clause)(input)?;
+    let (input, offset_cage) = opt(parse_offset_clause).parse(input)?;
     
     // Build cages
     let mut cages = Vec::new();

@@ -3,7 +3,8 @@ use nom::{
     bytes::complete::{tag_no_case},
     character::complete::{char, multispace0, multispace1},
     combinator::{opt, map},
-    sequence::{tuple, preceded},
+    sequence::{preceded},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -15,20 +16,20 @@ pub fn parse_join_clause(input: &str) -> IResult<&str, Join> {
     // Parse join kind (optional, defaults to LEFT)
     let (input, kind) = alt((
         map(
-            tuple((tag_no_case("left"), multispace1, tag_no_case("join"))),
+            (tag_no_case("left"), multispace1, tag_no_case("join")),
             |_| JoinKind::Left
         ),
         map(
-            tuple((tag_no_case("right"), multispace1, tag_no_case("join"))),
+            (tag_no_case("right"), multispace1, tag_no_case("join")),
             |_| JoinKind::Right
         ),
         map(
-            tuple((tag_no_case("inner"), multispace1, tag_no_case("join"))),
+            (tag_no_case("inner"), multispace1, tag_no_case("join")),
             |_| JoinKind::Inner
         ),
         // Default: just "join" = LEFT join
         map(tag_no_case("join"), |_| JoinKind::Left),
-    ))(input)?;
+    )).parse(input)?;
     
     let (input, _) = multispace1(input)?;
     let (input, table) = parse_identifier(input)?;
@@ -36,20 +37,20 @@ pub fn parse_join_clause(input: &str) -> IResult<&str, Join> {
     
     // Optional ON clause: either ON TRUE or ON condition
     // First check for ON TRUE (unconditional join)
-    let (input, on_true_result) = opt(tuple((
+    let (input, on_true_result) = opt((
         tag_no_case("on"),
         multispace1,
         tag_no_case("true")
-    )))(input)?;
+    )).parse(input)?;
     
     let (input, on_clause, on_true) = if on_true_result.is_some() {
         (input, None, true)
     } else {
         // Try parsing ON condition
         let (input, cond) = opt(preceded(
-            tuple((tag_no_case("on"), multispace1)),
+            (tag_no_case("on"), multispace1),
             parse_join_condition
-        ))(input)?;
+        )).parse(input)?;
         (input, cond, false)
     };
     
@@ -68,7 +69,7 @@ pub fn parse_join_clause(input: &str) -> IResult<&str, Join> {
 pub fn parse_join_condition(input: &str) -> IResult<&str, Vec<Condition>> {
     let (input, left_expr) = parse_expression(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char('=')(input)?;
+    let (input, _) = char('=').parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, right_col) = parse_identifier(input)?;
     

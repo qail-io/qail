@@ -4,7 +4,8 @@ use nom::{
     character::complete::{char, multispace0, multispace1, digit1},
     combinator::{opt, map, value},
     multi::{separated_list0, separated_list1, many0},
-    sequence::{tuple, preceded, delimited},
+    sequence::{preceded, delimited},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -13,7 +14,7 @@ use super::expressions::parse_expression;
 
 /// Parse: fields id, name, email  OR  fields *
 pub fn parse_fields_clause(input: &str) -> IResult<&str, Vec<Expr>> {
-    let (input, _) = tag_no_case("fields")(input)?;
+    let (input, _) = tag_no_case("fields").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     alt((
@@ -21,7 +22,7 @@ pub fn parse_fields_clause(input: &str) -> IResult<&str, Vec<Expr>> {
         map(char('*'), |_| vec![Expr::Star]),
         // Column list: id, name, email
         parse_column_list,
-    ))(input)
+    )).parse(input)
 }
 
 /// Parse comma-separated column list, respecting parenthesis depth
@@ -66,9 +67,9 @@ pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
     
     // Check for alias
     let (input, alias) = opt(preceded(
-        tuple((tag_no_case("as"), multispace1)),
+        (tag_no_case("as"), multispace1),
         parse_identifier
-    ))(input)?;
+    )).parse(input)?;
     
     if let Some(a) = alias {
         // Wrap whatever expr we found in Aliased?
@@ -99,7 +100,7 @@ pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
 
 /// Parse: where col = value and col2 = value2
 pub fn parse_where_clause(input: &str) -> IResult<&str, Vec<Cage>> {
-    let (input, _) = tag_no_case("where")(input)?;
+    let (input, _) = tag_no_case("where").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     let (input, conditions) = parse_conditions(input)?;
@@ -114,7 +115,7 @@ pub fn parse_where_clause(input: &str) -> IResult<&str, Vec<Cage>> {
 /// Parse: having condition and condition2
 /// HAVING is for filtering on aggregates after GROUP BY
 pub fn parse_having_clause(input: &str) -> IResult<&str, Vec<Condition>> {
-    let (input, _) = tag_no_case("having")(input)?;
+    let (input, _) = tag_no_case("having").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     let (input, conditions) = parse_conditions(input)?;
@@ -127,9 +128,9 @@ pub fn parse_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
     let (input, first) = parse_condition(input)?;
     // Use multispace0 before and/or to handle IS NULL case (trailing space already consumed)
     let (input, rest) = many0(preceded(
-        tuple((multispace0, alt((tag_no_case("and"), tag_no_case("or"))), multispace1)),
+        (multispace0, alt((tag_no_case("and"), tag_no_case("or"))), multispace1),
         parse_condition
-    ))(input)?;
+    )).parse(input)?;
     
     let mut conditions = vec![first];
     conditions.extend(rest);
@@ -141,11 +142,11 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
     // Special case: EXISTS (subquery) and NOT EXISTS (subquery) - unary operators
     if let Ok((input, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("not exists")(input) {
         let (input, _) = multispace0(input)?;
-        let (input, _) = char('(')(input)?;
+        let (input, _) = char('(').parse(input)?;
         let (input, _) = multispace0(input)?;
         let (input, subquery) = super::parse_root(input)?;
         let (input, _) = multispace0(input)?;
-        let (input, _) = char(')')(input)?;
+        let (input, _) = char(')').parse(input)?;
         return Ok((input, Condition {
             left: Expr::Named("".to_string()),
             op: Operator::NotExists,
@@ -155,11 +156,11 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
     }
     if let Ok((input, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("exists")(input) {
         let (input, _) = multispace0(input)?;
-        let (input, _) = char('(')(input)?;
+        let (input, _) = char('(').parse(input)?;
         let (input, _) = multispace0(input)?;
         let (input, subquery) = super::parse_root(input)?;
         let (input, _) = multispace0(input)?;
-        let (input, _) = char(')')(input)?;
+        let (input, _) = char(')').parse(input)?;
         return Ok((input, Condition {
             left: Expr::Named("".to_string()),
             op: Operator::Exists,
@@ -183,21 +184,21 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
         // Parse BETWEEN min AND max
         let (input, min_val) = parse_value(input)?;
         let (input, _) = multispace1(input)?;
-        let (input, _) = tag_no_case("and")(input)?;
+        let (input, _) = tag_no_case("and").parse(input)?;
         let (input, _) = multispace1(input)?;
         let (input, max_val) = parse_value(input)?;
         // Store as array with 2 elements [min, max]
         (input, Value::Array(vec![min_val, max_val]))
     } else if matches!(op, Operator::In | Operator::NotIn) {
         // Parse IN (val1, val2, ...)
-        let (input, _) = char('(')(input)?;
+        let (input, _) = char('(').parse(input)?;
         let (input, _) = multispace0(input)?;
         let (input, values) = separated_list0(
-            tuple((multispace0, char(','), multispace0)),
+            (multispace0, char(','), multispace0),
             parse_value
-        )(input)?;
+        ).parse(input)?;
         let (input, _) = multispace0(input)?;
-        let (input, _) = char(')')(input)?;
+        let (input, _) = char(')').parse(input)?;
         (input, Value::Array(values))
     } else {
         if let Ok((i, val)) = parse_value(input) {
@@ -219,15 +220,15 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
 
 /// Parse: order by col [asc|desc], col2 [asc|desc]
 pub fn parse_order_by_clause(input: &str) -> IResult<&str, Vec<Cage>> {
-    let (input, _) = tag_no_case("order")(input)?;
+    let (input, _) = tag_no_case("order").parse(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, _) = tag_no_case("by")(input)?;
+    let (input, _) = tag_no_case("by").parse(input)?;
     let (input, _) = multispace1(input)?;
     
     let (input, sorts) = separated_list1(
-        tuple((multispace0, char(','), multispace0)),
+        (multispace0, char(','), multispace0),
         parse_sort_column
-    )(input)?;
+    ).parse(input)?;
     
     Ok((input, sorts))
 }
@@ -240,7 +241,7 @@ pub fn parse_sort_column(input: &str) -> IResult<&str, Cage> {
     let (input, order) = opt(alt((
         value(SortOrder::Desc, tag_no_case("desc")),
         value(SortOrder::Asc, tag_no_case("asc")),
-    )))(input)?;
+    ))).parse(input)?;
     
     Ok((input, Cage {
         kind: CageKind::Sort(order.unwrap_or(SortOrder::Asc)),
@@ -256,7 +257,7 @@ pub fn parse_sort_column(input: &str) -> IResult<&str, Cage> {
 
 /// Parse: limit N
 pub fn parse_limit_clause(input: &str) -> IResult<&str, Cage> {
-    let (input, _) = tag_no_case("limit")(input)?;
+    let (input, _) = tag_no_case("limit").parse(input)?;
     let (input, _) = multispace1(input)?;
     let (input, n) = digit1(input)?;
     
@@ -269,7 +270,7 @@ pub fn parse_limit_clause(input: &str) -> IResult<&str, Cage> {
 
 /// Parse: offset N
 pub fn parse_offset_clause(input: &str) -> IResult<&str, Cage> {
-    let (input, _) = tag_no_case("offset")(input)?;
+    let (input, _) = tag_no_case("offset").parse(input)?;
     let (input, _) = multispace1(input)?;
     let (input, n) = digit1(input)?;
     
@@ -283,20 +284,20 @@ pub fn parse_offset_clause(input: &str) -> IResult<&str, Cage> {
 /// Parse: DISTINCT ON (col1, col2, ...)
 /// Returns list of column names for DISTINCT ON
 pub fn parse_distinct_on(input: &str) -> IResult<&str, Vec<String>> {
-    let (input, _) = tag_no_case("distinct")(input)?;
+    let (input, _) = tag_no_case("distinct").parse(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, _) = tag_no_case("on")(input)?;
+    let (input, _) = tag_no_case("on").parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Parse column list in parentheses
     let (input, cols) = delimited(
         char('('),
         separated_list1(
-            tuple((multispace0, char(','), multispace0)),
+            (multispace0, char(','), multispace0),
             map(parse_identifier, |s| s.to_string())
         ),
         char(')')
-    )(input)?;
+    ).parse(input)?;
     
     Ok((input, cols))
 }

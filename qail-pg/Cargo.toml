@@ -1,0 +1,16 @@
+[package]
+name = "qail-pg"
+version = "0.9.0"
+edition = "2021"
+description = "PostgreSQL driver for QAIL - native wire protocol"
+license = "MIT"
+
+[dependencies]
+qail-core = { path = "../qail-core" }
+postgres-protocol = "0.6"
+bytes = "1.5"
+async-trait = "0.1"
+tokio = { version = "1", features = ["net", "io-util"] }
+
+[lints]
+workspace = true

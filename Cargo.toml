@@ -2,13 +2,12 @@
 resolver = "2"
 members = [
     "qail-core",
-    "qail-macros",
     "qail-cli",
     "qail-bench",
     "qail-lsp",
     "qail-wasm",
     "qail-ffi",
-    "qail-sqlx",
+    "qail-pg",
 ]
 
 [workspace.lints.rust]

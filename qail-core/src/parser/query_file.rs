@@ -18,7 +18,7 @@ use nom::{
     character::complete::{multispace0, multispace1, char, not_line_ending},
     combinator::map,
     multi::{many0, separated_list0},
-    sequence::tuple,
+    Parser,
     IResult,
 };
 use serde::{Deserialize, Serialize};
@@ -96,15 +96,15 @@ impl QueryFile {
 
 /// Parse identifier
 fn identifier(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)
+    take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)
 }
 
 /// Skip whitespace and comments
 fn ws_and_comments(input: &str) -> IResult<&str, ()> {
     let (input, _) = many0(alt((
         map(multispace1, |_| ()),
-        map(tuple((tag("--"), not_line_ending)), |_| ()),
-    )))(input)?;
+        map((tag("--"), not_line_ending), |_| ()),
+    ))).parse(input)?;
     Ok((input, ()))
 }
 
@@ -113,7 +113,7 @@ fn parse_param(input: &str) -> IResult<&str, QueryParam> {
     let (input, _) = multispace0(input)?;
     let (input, name) = identifier(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(':')(input)?;
+    let (input, _) = char(':').parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, typ) = identifier(input)?;
     
@@ -125,13 +125,13 @@ fn parse_param(input: &str) -> IResult<&str, QueryParam> {
 
 /// Parse parameter list: (param1: Type, param2: Type)
 fn parse_params(input: &str) -> IResult<&str, Vec<QueryParam>> {
-    let (input, _) = char('(')(input)?;
+    let (input, _) = char('(').parse(input)?;
     let (input, params) = separated_list0(
         char(','),
         parse_param,
-    )(input)?;
+    ).parse(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(')')(input)?;
+    let (input, _) = char(')').parse(input)?;
     
     Ok((input, params))
 }
@@ -139,19 +139,19 @@ fn parse_params(input: &str) -> IResult<&str, Vec<QueryParam>> {
 /// Parse return type: -> Type, -> Vec<Type>, -> Option<Type>
 fn parse_return_type(input: &str) -> IResult<&str, ReturnType> {
     let (input, _) = multispace0(input)?;
-    let (input, _) = tag("->")(input)?;
+    let (input, _) = tag("->").parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Check for Vec<T> or Option<T>
     if let Ok((input, _)) = tag::<_, _, nom::error::Error<&str>>("Vec<")(input) {
-        let (input, inner) = take_while1(|c: char| c != '>')(input)?;
-        let (input, _) = char('>')(input)?;
+        let (input, inner) = take_while1(|c: char| c != '>').parse(input)?;
+        let (input, _) = char('>').parse(input)?;
         return Ok((input, ReturnType::Vec(inner.to_string())));
     }
     
     if let Ok((input, _)) = tag::<_, _, nom::error::Error<&str>>("Option<")(input) {
-        let (input, inner) = take_while1(|c: char| c != '>')(input)?;
-        let (input, _) = char('>')(input)?;
+        let (input, inner) = take_while1(|c: char| c != '>').parse(input)?;
+        let (input, _) = char('>').parse(input)?;
         return Ok((input, ReturnType::Option(inner.to_string())));
     }
     
@@ -163,7 +163,7 @@ fn parse_return_type(input: &str) -> IResult<&str, ReturnType> {
 /// Parse query body (everything after : until next query/execute or EOF)
 fn parse_body(input: &str) -> IResult<&str, &str> {
     let (input, _) = multispace0(input)?;
-    let (input, _) = char(':')(input)?;
+    let (input, _) = char(':').parse(input)?;
     let (input, _) = multispace0(input)?;
     
     // Find end: next "query" or "execute" keyword at line start (after whitespace), or EOF
@@ -195,7 +195,7 @@ fn parse_query_def(input: &str) -> IResult<&str, QueryDef> {
     let (input, is_execute) = alt((
         map(tag_no_case("query"), |_| false),
         map(tag_no_case("execute"), |_| true),
-    ))(input)?;
+    )).parse(input)?;
     
     let (input, _) = multispace1(input)?;
     let (input, name) = identifier(input)?;
@@ -223,7 +223,7 @@ fn parse_query_def(input: &str) -> IResult<&str, QueryDef> {
 /// Parse complete query file
 fn parse_query_file(input: &str) -> IResult<&str, QueryFile> {
     let (input, _) = ws_and_comments(input)?;
-    let (input, queries) = many0(parse_query_def)(input)?;
+    let (input, queries) = many0(parse_query_def).parse(input)?;
     let (input, _) = ws_and_comments(input)?;
     
     Ok((input, QueryFile { queries }))
