@@ -58,23 +58,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Fetch 20: {:?} ({:?}/iter)",
         qail_fetch_time, qail_fetch_time / ITERATIONS as u32);
 
-    // ============ SQLx ============
-    println!("\n📊 SQLx (Raw Driver)");
+    // ============ SQLx (FAIR: Single Connection, not Pool) ============
+    println!("\n📊 SQLx (Single Connection - FAIR)");
+    
+    use sqlx::Connection;
     
     let sqlx_connect_start = Instant::now();
-    let sqlx_pool = sqlx::PgPool::connect(&db_url).await?;
+    let mut sqlx_conn = sqlx::PgConnection::connect(&db_url).await?;
     let sqlx_connect_time = sqlx_connect_start.elapsed();
     println!("   Connect: {:?}", sqlx_connect_time);
     
     for _ in 0..10 {
         let _: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vessels")
-            .fetch_one(&sqlx_pool).await?;
+            .fetch_one(&mut sqlx_conn).await?;
     }
     
     let sqlx_count_start = Instant::now();
     for _ in 0..ITERATIONS {
         let _: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vessels")
-            .fetch_one(&sqlx_pool).await?;
+            .fetch_one(&mut sqlx_conn).await?;
     }
     let sqlx_count_time = sqlx_count_start.elapsed();
     println!("   COUNT(*): {:?} ({:?}/iter)",
@@ -84,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..ITERATIONS {
         let _: Vec<(uuid::Uuid, String, bool)> = sqlx::query_as(
             "SELECT id, name, is_active FROM vessels LIMIT 20"
-        ).fetch_all(&sqlx_pool).await?;
+        ).fetch_all(&mut sqlx_conn).await?;
     }
     let sqlx_fetch_time = sqlx_fetch_start.elapsed();
     println!("   Fetch 20: {:?} ({:?}/iter)",
