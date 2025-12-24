@@ -34,11 +34,24 @@ pub fn parse_join_clause(input: &str) -> IResult<&str, Join> {
     let (input, table) = parse_identifier(input)?;
     let (input, _) = multispace0(input)?;
     
-    // Optional ON clause: parse as a single condition (left.col = right.col)
-    let (input, on_clause) = opt(preceded(
-        tuple((tag_no_case("on"), multispace1)),
-        parse_join_condition
-    ))(input)?;
+    // Optional ON clause: either ON TRUE or ON condition
+    // First check for ON TRUE (unconditional join)
+    let (input, on_true_result) = opt(tuple((
+        tag_no_case("on"),
+        multispace1,
+        tag_no_case("true")
+    )))(input)?;
+    
+    let (input, on_clause, on_true) = if on_true_result.is_some() {
+        (input, None, true)
+    } else {
+        // Try parsing ON condition
+        let (input, cond) = opt(preceded(
+            tuple((tag_no_case("on"), multispace1)),
+            parse_join_condition
+        ))(input)?;
+        (input, cond, false)
+    };
     
     // Consume trailing whitespace so many0 can find the next JOIN
     let (input, _) = multispace0(input)?;
@@ -47,6 +60,7 @@ pub fn parse_join_clause(input: &str) -> IResult<&str, Join> {
         table: table.to_string(),
         kind,
         on: on_clause,
+        on_true,
     }))
 }
 

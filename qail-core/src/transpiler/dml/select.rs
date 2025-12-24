@@ -236,6 +236,13 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                 target_table,
                 on_sql.join(" AND ")
             ));
+        } else if join.on_true {
+            // Explicit ON TRUE (unconditional join, used for CTE joins)
+            sql.push_str(&format!(
+                " {} JOIN {} ON TRUE",
+                kind,
+                target_table
+            ));
         } else if needs_on {
             sql.push_str(&format!(
                 " {} JOIN {} ON {}.{} = {}.id",
