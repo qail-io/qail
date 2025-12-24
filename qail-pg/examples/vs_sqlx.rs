@@ -3,7 +3,7 @@
 //! Compares real database query performance against staging DB.
 //!
 //! Setup:
-//!   ssh -L 15432:localhost:5432 sailtix -N -f
+//!   ssh -L 15432:localhost:5432 postgres -N -f
 //!
 //! Run:
 //!   STAGING_DB_PASSWORD="password" cargo run -p qail-pg --example vs_sqlx --release
@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("🏎️  QAIL-PG vs SQLx Benchmark");
     println!("==============================");
-    println!("Database: swb-staging (via SSH tunnel)");
+    println!("Database: testdb (via SSH tunnel)");
     println!("Iterations: {}\n", ITERATIONS);
 
     // ============ QAIL-PG ============
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let qail_connect_start = Instant::now();
     let mut qail_conn = qail_pg::PgConnection::connect_with_password(
-        "127.0.0.1", 15432, "sailtix", "swb-staging", Some(&password)
+        "127.0.0.1", 15432, "postgres", "testdb", Some(&password)
     ).await?;
     let qail_connect_time = qail_connect_start.elapsed();
     println!("   Connect time: {:?}", qail_connect_time);
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📊 SQLx (For comparison)");
     
     let db_url = format!(
-        "postgres://sailtix:{}@127.0.0.1:15432/swb-staging",
+        "postgres://postgres:{}@127.0.0.1:15432/testdb",
         password
     );
     

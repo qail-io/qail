@@ -3,7 +3,7 @@
 //! Tests 1 MILLION queries using pipelining.
 //! Serial would take ~10 hours so we skip it.
 //!
-//! Setup: ssh -L 15432:localhost:5432 sailtix -N -f
+//! Setup: ssh -L 15432:localhost:5432 postgres -N -f
 //! Run: STAGING_DB_PASSWORD="password" cargo run -p qail-pg --example million --release
 
 use std::time::Instant;
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("⚠️  Skipping serial test (would take ~{:.0} hours)", estimated_serial / 3600.0);
     
     let mut conn = qail_pg::PgConnection::connect_with_password(
-        "127.0.0.1", 15432, "sailtix", "swb-staging", Some(&password)
+        "127.0.0.1", 15432, "postgres", "testdb", Some(&password)
     ).await?;
     
     // Warmup

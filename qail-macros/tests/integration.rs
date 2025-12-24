@@ -24,16 +24,14 @@ struct MessageCount {
     count: i64,
 }
 
-/// Get database URL from environment or use default staging URL
-fn get_db_url() -> String {
-    std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgresql://sailtix:rGp5CuDhUa2tQcK4ao5uyA55@localhost:5433/swb-staging".to_string()
-    })
+/// Get database URL from environment (required - no defaults for security)
+fn get_db_url() -> Option<String> {
+    std::env::var("DATABASE_URL").ok()
 }
 
 /// Skip test if database is not available
 async fn get_pool() -> Option<sqlx::PgPool> {
-    let url = get_db_url();
+    let url = get_db_url()?;
     match PgPoolOptions::new()
         .max_connections(1)
         .connect(&url)

@@ -1,7 +1,7 @@
 //! Test QAIL against real staging database
 //!
 //! Setup: SSH tunnel to staging DB
-//!   ssh -L 15432:localhost:5432 sailtix -N -f
+//!   ssh -L 15432:localhost:5432 postgres -N -f
 //!
 //! Run: cargo run -p qail-pg --example staging_test
 
@@ -13,10 +13,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("🔌 Connecting to staging database...");
     println!("   Host: localhost:15432 (via SSH tunnel)");
-    println!("   Database: swb-staging");
+    println!("   Database: testdb");
     
     // Connect via SSH tunnel
-    // Note: Using swb-staging password from env
+    // Note: Using testdb password from env
     let password = std::env::var("STAGING_DB_PASSWORD")
         .unwrap_or_else(|_| {
             eprintln!("⚠️  Set STAGING_DB_PASSWORD env var");
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     
     let mut conn = PgConnection::connect_with_password(
-        "127.0.0.1", 15432, "sailtix", "swb-staging", Some(&password)
+        "127.0.0.1", 15432, "postgres", "testdb", Some(&password)
     ).await?;
     
     println!("✅ Connected via SCRAM-SHA-256!\n");

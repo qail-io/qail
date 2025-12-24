@@ -4,7 +4,7 @@
 //! - Serial: 100 queries = 100 round-trips
 //! - Pipeline: 100 queries = 1 round-trip
 //!
-//! Setup: ssh -L 15432:localhost:5432 sailtix -N -f
+//! Setup: ssh -L 15432:localhost:5432 postgres -N -f
 //! Run: STAGING_DB_PASSWORD="password" cargo run -p qail-pg --example pipeline --release
 
 use std::time::Instant;
@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Batches: {}\n", BATCHES);
     
     let mut conn = qail_pg::PgConnection::connect_with_password(
-        "127.0.0.1", 15432, "sailtix", "swb-staging", Some(&password)
+        "127.0.0.1", 15432, "postgres", "testdb", Some(&password)
     ).await?;
     
     // Warmup
