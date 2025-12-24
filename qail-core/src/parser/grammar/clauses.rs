@@ -85,8 +85,9 @@ pub fn parse_where_clause(input: &str) -> IResult<&str, Vec<Cage>> {
 /// Parse conditions with and/or
 pub fn parse_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
     let (input, first) = parse_condition(input)?;
+    // Use multispace0 before and/or to handle IS NULL case (trailing space already consumed)
     let (input, rest) = many0(preceded(
-        tuple((multispace1, alt((tag_no_case("and"), tag_no_case("or"))), multispace1)),
+        tuple((multispace0, alt((tag_no_case("and"), tag_no_case("or"))), multispace1)),
         parse_condition
     ))(input)?;
     
