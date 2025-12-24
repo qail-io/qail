@@ -379,6 +379,7 @@ fn test_having_clause() {
     cmd.columns.push(Expr::Aggregate { 
         col: "total".to_string(), 
         func: AggregateFunc::Sum,
+        distinct: false,
         filter: None,
         alias: None,
     });
@@ -405,6 +406,7 @@ fn test_group_by_rollup() {
     cmd.columns.push(Expr::Aggregate { 
         col: "amount".to_string(), 
         func: AggregateFunc::Sum,
+        distinct: false,
         filter: None,
         alias: None,
     });
@@ -423,6 +425,7 @@ fn test_group_by_cube() {
     cmd.columns.push(Expr::Aggregate { 
         col: "amount".to_string(), 
         func: AggregateFunc::Sum,
+        distinct: false,
         filter: None,
         alias: None,
     });
@@ -444,6 +447,7 @@ fn test_aggregate_filter() {
     cmd.columns.push(Expr::Aggregate {
         col: "*".to_string(),
         func: AggregateFunc::Count,
+        distinct: false,
         filter: Some(vec![Condition {
             left: Expr::Named("direction".to_string()),
             op: Operator::Eq,
