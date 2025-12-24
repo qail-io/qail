@@ -36,6 +36,13 @@ pub enum FrontendMessage {
     Sync,
     /// Terminate connection
     Terminate,
+    /// SASL initial response (first message in SCRAM)
+    SASLInitialResponse {
+        mechanism: String,
+        data: Vec<u8>,
+    },
+    /// SASL response (subsequent messages in SCRAM)
+    SASLResponse(Vec<u8>),
 }
 
 /// Backend (server → client) message types
@@ -45,6 +52,8 @@ pub enum BackendMessage {
     AuthenticationOk,
     AuthenticationMD5Password([u8; 4]),
     AuthenticationSASL(Vec<String>),
+    AuthenticationSASLContinue(Vec<u8>),
+    AuthenticationSASLFinal(Vec<u8>),
     /// Parameter status (server config)
     ParameterStatus { name: String, value: String },
     /// Backend key data (for cancel)
@@ -132,6 +141,31 @@ impl FrontendMessage {
             FrontendMessage::Terminate => {
                 vec![b'X', 0, 0, 0, 4]
             }
+            FrontendMessage::SASLInitialResponse { mechanism, data } => {
+                let mut buf = Vec::new();
+                buf.push(b'p'); // SASLInitialResponse uses 'p'
+                
+                // Build content
+                let mut content = Vec::new();
+                content.extend_from_slice(mechanism.as_bytes());
+                content.push(0); // null-terminated mechanism
+                content.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                content.extend_from_slice(data);
+                
+                let len = (content.len() + 4) as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(&content);
+                buf
+            }
+            FrontendMessage::SASLResponse(data) => {
+                let mut buf = Vec::new();
+                buf.push(b'p'); // SASLResponse also uses 'p'
+                
+                let len = (data.len() + 4) as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(data);
+                buf
+            }
             // TODO: Implement other message types
             _ => unimplemented!("Message type not yet implemented"),
         }
@@ -181,7 +215,28 @@ impl BackendMessage {
                 let salt: [u8; 4] = payload[4..8].try_into().unwrap();
                 Ok(BackendMessage::AuthenticationMD5Password(salt))
             }
-            // TODO: SASL
+            10 => {
+                // SASL - parse mechanism list
+                let mut mechanisms = Vec::new();
+                let mut pos = 4;
+                while pos < payload.len() && payload[pos] != 0 {
+                    let end = payload[pos..].iter()
+                        .position(|&b| b == 0)
+                        .map(|p| pos + p)
+                        .unwrap_or(payload.len());
+                    mechanisms.push(String::from_utf8_lossy(&payload[pos..end]).to_string());
+                    pos = end + 1;
+                }
+                Ok(BackendMessage::AuthenticationSASL(mechanisms))
+            }
+            11 => {
+                // SASL Continue - server challenge
+                Ok(BackendMessage::AuthenticationSASLContinue(payload[4..].to_vec()))
+            }
+            12 => {
+                // SASL Final - server signature
+                Ok(BackendMessage::AuthenticationSASLFinal(payload[4..].to_vec()))
+            }
             _ => Err(format!("Unknown auth type: {}", auth_type)),
         }
     }

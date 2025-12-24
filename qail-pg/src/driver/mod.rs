@@ -70,9 +70,23 @@ impl PgDriver {
         Self { connection }
     }
 
-    /// Connect to PostgreSQL and create a driver.
+    /// Connect to PostgreSQL and create a driver (trust mode, no password).
     pub async fn connect(host: &str, port: u16, user: &str, database: &str) -> PgResult<Self> {
         let connection = PgConnection::connect(host, port, user, database).await?;
+        Ok(Self::new(connection))
+    }
+
+    /// Connect to PostgreSQL with password authentication (SCRAM-SHA-256).
+    pub async fn connect_with_password(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: &str,
+    ) -> PgResult<Self> {
+        let connection = PgConnection::connect_with_password(
+            host, port, user, database, Some(password)
+        ).await?;
         Ok(Self::new(connection))
     }
 
