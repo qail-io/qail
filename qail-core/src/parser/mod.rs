@@ -14,6 +14,7 @@
 
 pub mod grammar;
 pub mod schema;
+pub mod query_file;
 
 #[cfg(test)]
 mod tests;
