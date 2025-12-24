@@ -138,6 +138,60 @@ pub enum Operator {
     NotExists,
 }
 
+impl Operator {
+    /// Returns the SQL symbol/keyword for this operator.
+    /// For simple operators, returns the symbol directly.
+    /// For complex operators (BETWEEN, EXISTS), returns the keyword.
+    pub fn sql_symbol(&self) -> &'static str {
+        match self {
+            Operator::Eq => "=",
+            Operator::Ne => "!=",
+            Operator::Gt => ">",
+            Operator::Gte => ">=",
+            Operator::Lt => "<",
+            Operator::Lte => "<=",
+            Operator::Fuzzy => "ILIKE",
+            Operator::In => "IN",
+            Operator::NotIn => "NOT IN",
+            Operator::IsNull => "IS NULL",
+            Operator::IsNotNull => "IS NOT NULL",
+            Operator::Contains => "@>",
+            Operator::KeyExists => "?",
+            Operator::JsonExists => "JSON_EXISTS",
+            Operator::JsonQuery => "JSON_QUERY",
+            Operator::JsonValue => "JSON_VALUE",
+            Operator::Like => "LIKE",
+            Operator::NotLike => "NOT LIKE",
+            Operator::ILike => "ILIKE",
+            Operator::NotILike => "NOT ILIKE",
+            Operator::Between => "BETWEEN",
+            Operator::NotBetween => "NOT BETWEEN",
+            Operator::Exists => "EXISTS",
+            Operator::NotExists => "NOT EXISTS",
+        }
+    }
+
+    /// Returns true if this operator requires a value on the right side.
+    /// IS NULL, IS NOT NULL, EXISTS, NOT EXISTS don't need values.
+    pub fn needs_value(&self) -> bool {
+        !matches!(self, 
+            Operator::IsNull | 
+            Operator::IsNotNull | 
+            Operator::Exists | 
+            Operator::NotExists
+        )
+    }
+
+    /// Returns true if this operator is a simple binary operator (col OP value).
+    pub fn is_simple_binary(&self) -> bool {
+        matches!(self,
+            Operator::Eq | Operator::Ne | Operator::Gt | Operator::Gte |
+            Operator::Lt | Operator::Lte | Operator::Like | Operator::NotLike |
+            Operator::ILike | Operator::NotILike
+        )
+    }
+}
+
 /// Aggregate functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregateFunc {

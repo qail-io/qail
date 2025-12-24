@@ -135,13 +135,13 @@ impl ConditionToSql for Condition {
         }
         
         // Normal conditions
+        // Simple binary operators use sql_symbol() for unified handling
+        if self.op.is_simple_binary() {
+            return format!("{} {} {}", col, self.op.sql_symbol(), self.to_value_sql(generator));
+        }
+        
+        // Special operators that need custom handling
         match self.op {
-            Operator::Eq => format!("{} = {}", col, self.to_value_sql(generator)),
-            Operator::Ne => format!("{} != {}", col, self.to_value_sql(generator)),
-            Operator::Gt => format!("{} > {}", col, self.to_value_sql(generator)),
-            Operator::Gte => format!("{} >= {}", col, self.to_value_sql(generator)),
-            Operator::Lt => format!("{} < {}", col, self.to_value_sql(generator)),
-            Operator::Lte => format!("{} <= {}", col, self.to_value_sql(generator)),
             Operator::Fuzzy => {
                 let val = match &self.value {
                     Value::String(s) => format!("'%{}%'", s),
@@ -172,10 +172,6 @@ impl ConditionToSql for Condition {
                 let path = self.to_value_sql(generator);
                 format!("{} = {}", generator.json_value(&col, &path.trim_matches('\'')), self.to_value_sql(generator))
             }
-            Operator::Like => format!("{} LIKE {}", col, self.to_value_sql(generator)),
-            Operator::NotLike => format!("{} NOT LIKE {}", col, self.to_value_sql(generator)),
-            Operator::ILike => format!("{} ILIKE {}", col, self.to_value_sql(generator)),
-            Operator::NotILike => format!("{} NOT ILIKE {}", col, self.to_value_sql(generator)),
             Operator::Between => {
                 // Value is Array with 2 elements [min, max]
                 if let Value::Array(vals) = &self.value {
@@ -210,6 +206,8 @@ impl ConditionToSql for Condition {
                     format!("NOT EXISTS ({})", self.value)
                 }
             }
+            // Simple binary operators are handled above by is_simple_binary()
+            _ => format!("{} {} {}", col, self.op.sql_symbol(), self.to_value_sql(generator)),
         }
     }
 
@@ -305,11 +303,6 @@ impl ConditionToSql for Condition {
                 
                 format!("{} = {}", col, value_placeholder(&self.value, params))
             },
-            Operator::Ne => format!("{} != {}", col, value_placeholder(&self.value, params)),
-            Operator::Gt => format!("{} > {}", col, value_placeholder(&self.value, params)),
-            Operator::Gte => format!("{} >= {}", col, value_placeholder(&self.value, params)),
-            Operator::Lt => format!("{} < {}", col, value_placeholder(&self.value, params)),
-            Operator::Lte => format!("{} <= {}", col, value_placeholder(&self.value, params)),
             Operator::Fuzzy => {
                 // For LIKE, we need to wrap in wildcards
                 let placeholder = value_placeholder(&self.value, params);
@@ -333,10 +326,6 @@ impl ConditionToSql for Condition {
                 let path = value_placeholder(&self.value, params);
                 format!("{} = {}", generator.json_value(&col, &path), value_placeholder(&self.value, params))
             }
-            Operator::Like => format!("{} LIKE {}", col, value_placeholder(&self.value, params)),
-            Operator::NotLike => format!("{} NOT LIKE {}", col, value_placeholder(&self.value, params)),
-            Operator::ILike => format!("{} ILIKE {}", col, value_placeholder(&self.value, params)),
-            Operator::NotILike => format!("{} NOT ILIKE {}", col, value_placeholder(&self.value, params)),
             Operator::Between => {
                 if let Value::Array(vals) = &self.value {
                     if vals.len() >= 2 {
@@ -369,6 +358,8 @@ impl ConditionToSql for Condition {
                     format!("NOT EXISTS ({})", self.value)
                 }
             }
+            // Simple operators (Ne, Gt, Gte, Lt, Lte, Like, NotLike, ILike, NotILike) use sql_symbol()
+            _ => format!("{} {} {}", col, self.op.sql_symbol(), value_placeholder(&self.value, params)),
         }
     }
 }
