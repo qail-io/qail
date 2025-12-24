@@ -47,6 +47,47 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
     // Check for FILTER (WHERE ...) clause - PostgreSQL aggregate extension
     let (input, filter_clause) = opt(parse_filter_clause)(input)?;
     
+    // Check for OVER clause (window function)
+    let (input, _) = multispace0(input)?;
+    if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("over")(input) {
+        let (remaining, _) = multispace0(remaining)?;
+        let (remaining, _) = char('(')(remaining)?;
+        let (remaining, _) = multispace0(remaining)?;
+        
+        // Parse PARTITION BY clause (optional)
+        let (remaining, partition) = opt(parse_partition_by)(remaining)?;
+        let partition = partition.unwrap_or_default();
+        let (remaining, _) = multispace0(remaining)?;
+        
+        // Parse ORDER BY clause (optional)
+        let (remaining, order) = opt(parse_window_order_by)(remaining)?;
+        let order = order.unwrap_or_default();
+        let (remaining, _) = multispace0(remaining)?;
+        
+        // Close the OVER clause
+        let (remaining, _) = char(')')(remaining)?;
+        let (remaining, _) = multispace0(remaining)?;
+        
+        // Optional alias for window function
+        let (remaining, alias) = opt(preceded(
+            tuple((multispace0, tag_no_case("as"), multispace1)),
+            parse_identifier
+        ))(remaining)?;
+        let alias_str = alias.map(|s| s.to_string()).unwrap_or_else(|| name.to_string());
+        
+        // Convert args to Values for Expr::Window
+        let params: Vec<Value> = args.iter().map(|e| Value::Function(e.to_string())).collect();
+        
+        return Ok((remaining, Expr::Window {
+            name: alias_str,
+            func: name.to_string(),
+            params,
+            partition,
+            order,
+            frame: None, // TODO: Add frame parsing if needed
+        }));
+    }
+    
     // Optional alias: AS alias_name or just alias_name (after space)
     let (input, alias) = opt(preceded(
         tuple((multispace0, tag_no_case("as"), multispace1)),
@@ -243,4 +284,58 @@ fn parse_filter_value(input: &str) -> IResult<&str, Value> {
     
     // Fallback: return as-is (shouldn't happen often)
     Ok((&input[end_pos..], Value::Function(expr_str.to_string())))
+}
+
+/// Parse PARTITION BY col1, col2 clause for window functions
+fn parse_partition_by(input: &str) -> IResult<&str, Vec<String>> {
+    let (input, _) = tag_no_case("partition")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, _) = tag_no_case("by")(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    let (input, cols) = separated_list0(
+        tuple((multispace0, char(','), multispace0)),
+        parse_identifier
+    )(input)?;
+    
+    Ok((input, cols.into_iter().map(|s| s.to_string()).collect()))
+}
+
+/// Parse ORDER BY col1 [asc|desc], col2 clause for window functions
+fn parse_window_order_by(input: &str) -> IResult<&str, Vec<Cage>> {
+    let (input, _) = tag_no_case("order")(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, _) = tag_no_case("by")(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    let (input, order_parts) = separated_list0(
+        tuple((multispace0, char(','), multispace0)),
+        parse_window_sort_item
+    )(input)?;
+    
+    Ok((input, order_parts))
+}
+
+/// Parse a single order by item: col [asc|desc]
+fn parse_window_sort_item(input: &str) -> IResult<&str, Cage> {
+    use nom::combinator::value;
+    
+    let (input, col) = parse_identifier(input)?;
+    let (input, _) = multispace0(input)?;
+    
+    let (input, order) = opt(alt((
+        value(SortOrder::Desc, tag_no_case("desc")),
+        value(SortOrder::Asc, tag_no_case("asc")),
+    )))(input)?;
+    
+    Ok((input, Cage {
+        kind: CageKind::Sort(order.unwrap_or(SortOrder::Asc)),
+        conditions: vec![Condition {
+            left: Expr::Named(col.to_string()),
+            op: Operator::Eq,
+            value: Value::Null,
+            is_array_unnest: false,
+        }],
+        logical_op: LogicalOp::And,
+    }))
 }
