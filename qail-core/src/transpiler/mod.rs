@@ -107,66 +107,40 @@ impl ToSql for QailCmd {
 
 impl ToSqlParameterized for QailCmd {
     fn to_sql_parameterized_with_dialect(&self, dialect: Dialect) -> TranspileResult {
-        use conditions::ParamContext;
-        use conditions::ConditionToSql;
+        // Use the full ToSql implementation which handles CTEs, JOINs, etc.
+        // Then post-process to extract named parameters for binding
+        let full_sql = self.to_sql_with_dialect(dialect);
         
-        let generator = dialect.generator();
-        let mut param_ctx = ParamContext::new();
+        // Extract named parameters (those starting with :) from the SQL
+        // and replace them with positional parameters ($1, $2, etc.)
+        let mut named_params: Vec<String> = Vec::new();
+        let mut processed_sql = full_sql.clone();
         
-        // Build WHERE clause with parameterized conditions
-        let mut where_parts = Vec::new();
-        for cage in &self.cages {
-            if let CageKind::Filter = cage.kind {
-                for cond in &cage.conditions {
-                    where_parts.push(cond.to_sql_parameterized(&generator, Some(self), &mut param_ctx));
-                }
+        // Find all :param_name patterns and replace with $N
+        let re = regex::Regex::new(r":([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
+        let mut param_index = 1;
+        let mut seen_params: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        
+        for cap in re.captures_iter(&full_sql) {
+            let param_name = cap.get(1).unwrap().as_str().to_string();
+            if !seen_params.contains_key(&param_name) {
+                seen_params.insert(param_name.clone(), param_index);
+                named_params.push(param_name);
+                param_index += 1;
             }
         }
-
-        // For now, build a simplified parameterized SELECT
-        // Full implementation would parameterize all DML operations
-        let table = generator.quote_identifier(&self.table);
         
-        let cols = if self.columns.is_empty() {
-            "*".to_string()
-        } else {
-            self.columns
-                .iter()
-                .map(|c| match c {
-                    Expr::Star => "*".to_string(),
-                    Expr::Named(n) => generator.quote_identifier(n),
-                    Expr::Aliased { name, alias } => {
-                        format!("{} AS {}", generator.quote_identifier(name), generator.quote_identifier(alias))
-                    }
-                    Expr::Aggregate { col, func } => {
-                        format!("{}({})", func, generator.quote_identifier(col))
-                    }
-                    _ => "*".to_string(), // Fallback for other variants
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        
-        let mut sql = format!("SELECT {} FROM {}", cols, table);
-        
-        if !where_parts.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&where_parts.join(" AND "));
+        // Replace :param with $N
+        for (name, idx) in &seen_params {
+            let pattern = format!(":{}", name);
+            let replacement = format!("${}", idx);
+            processed_sql = processed_sql.replace(&pattern, &replacement);
         }
         
-        // Handle LIMIT/OFFSET
-        for cage in &self.cages {
-            match cage.kind {
-                CageKind::Limit(n) => sql.push_str(&format!(" LIMIT {}", n)),
-                CageKind::Offset(n) => sql.push_str(&format!(" OFFSET {}", n)),
-                _ => {}
-            }
-        }
-
         TranspileResult {
-            sql,
-            params: param_ctx.params,
-            named_params: param_ctx.named_params,
+            sql: processed_sql,
+            params: Vec::new(), // Positional params not used, named_params provides mapping
+            named_params,
         }
     }
 }

@@ -1,64 +1,52 @@
-//! Test full conversation CTE pattern
+//! Test ToSqlParameterized with CTEs
 
 use qail_core::parse;
-use qail_core::transpiler::ToSql;
+use qail_core::transpiler::ToSqlParameterized;
 
 fn main() {
-    let phone_expr = "case when contact_info->>'phone' like '0%' then '62' || substring(contact_info->>'phone' from 2) else replace(contact_info->>'phone', '+', '') end";
+    // Same query as in message_repository.rs (simplified)
+    let qail = r#"with
+                latest_messages as (
+                    get distinct on (phone_number) whatsapp_messages
+                    fields phone_number, content as last_message
+                    where our_phone_number_id = :phone_id
+                    order by phone_number, created_at desc
+                ),
+                customer_names as (
+                    get distinct on (phone_number) whatsapp_messages
+                    fields phone_number, sender_name
+                    where direction = 'inbound' and sender_name is not null and our_phone_number_id = :phone_id
+                    order by phone_number, created_at desc
+                )
+                get latest_messages
+                left join customer_names on customer_names.phone_number = latest_messages.phone_number
+                fields latest_messages.phone_number, customer_names.sender_name"#;
     
-    let qail = format!(r#"with
-        latest_messages as (
-            get distinct on (phone_number) whatsapp_messages
-            fields phone_number, content as last_message, created_at as last_message_time
-            where our_phone_number_id = :phone_id
-            order by phone_number, created_at desc
-        ),
-        customer_names as (
-            get distinct on (phone_number) whatsapp_messages
-            fields phone_number, sender_name as customer_sender_name
-            where direction = 'inbound' and sender_name is not null and our_phone_number_id = :phone_id
-            order by phone_number, created_at desc
-        ),
-        unread_counts as (
-            get whatsapp_messages
-            fields phone_number, count(*) as unread_count
-            where direction = 'inbound' and status = 'received' and our_phone_number_id = :phone_id
-        ),
-        order_counts as (
-            get orders
-            fields contact_info->>'phone' as phone_number, count(*) as order_count
-            where contact_info->>'phone' is not null
-        ),
-        order_names as (
-            get distinct on ({phone_expr}) orders
-            fields {phone_expr} as normalized_phone, contact_info->>'name' as order_customer_name, user_id
-            where contact_info->>'phone' is not null
-            order by {phone_expr}, created_at desc
-        ),
-        active_sessions as (
-            get distinct on (phone_number) whatsapp_sessions
-            fields phone_number, id as session_id, status as session_status
-            order by phone_number, created_at desc
-        )
-        get latest_messages
-        left join customer_names on customer_names.phone_number = latest_messages.phone_number
-        left join unread_counts on unread_counts.phone_number = latest_messages.phone_number
-        fields latest_messages.phone_number
-        order by latest_messages.last_message_time desc"#,
-        phone_expr = phone_expr
-    );
+    println!("=== Test ToSqlParameterized with CTEs ===\n");
     
-    println!("=== FULL CTE Test ===\n");
-    match parse(&qail) {
+    match parse(qail) {
         Ok(cmd) => {
-            println!("✅ Parse OK!");
-            println!("  CTEs: {}", cmd.ctes.len());
-            let sql = cmd.to_sql();
-            println!("  SQL starts with: {}", &sql[..100.min(sql.len())]);
-            if sql.starts_with("WITH") {
-                println!("\n  ✅ WITH clause present!");
+            let result = cmd.to_sql_parameterized();
+            
+            println!("SQL: {}\n", result.sql);
+            println!("Named params: {:?}", result.named_params);
+            
+            // Check if WITH clause is present
+            if result.sql.starts_with("WITH") {
+                println!("\n✅ WITH clause present in parameterized output!");
+            } else {
+                println!("\n❌ WITH clause MISSING from parameterized output!");
+            }
+            
+            // Check if :phone_id was replaced with $1
+            if result.sql.contains("$1") && !result.sql.contains(":phone_id") {
+                println!("✅ Named params correctly replaced with positional $N");
+            } else {
+                println!("❌ Named params NOT replaced");
             }
         }
-        Err(e) => println!("❌ {}", e),
+        Err(e) => {
+            println!("❌ Parse Error: {}", e);
+        }
     }
 }
