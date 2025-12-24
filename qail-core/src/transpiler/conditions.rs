@@ -93,7 +93,10 @@ impl ConditionToSql for Condition {
     fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&QailCmd>) -> String {
         let col = match &self.left {
             Expr::Named(name) => {
-                if let Some(cmd) = context {
+                // Handle raw SQL {content} first - context-independent
+                if name.starts_with('{') && name.ends_with('}') {
+                    name[1..name.len()-1].to_string()
+                } else if let Some(cmd) = context {
                     resolve_col_syntax(name, cmd, generator.as_ref())
                 } else {
                     generator.quote_identifier(name)
@@ -250,7 +253,10 @@ impl ConditionToSql for Condition {
     ) -> String {
         let col = match &self.left {
             Expr::Named(name) => {
-                if let Some(cmd) = context {
+                // Handle raw SQL {content} first - context-independent
+                if name.starts_with('{') && name.ends_with('}') {
+                    name[1..name.len()-1].to_string()
+                } else if let Some(cmd) = context {
                     resolve_col_syntax(name, cmd, generator.as_ref())
                 } else {
                     generator.quote_identifier(name)
@@ -275,32 +281,14 @@ impl ConditionToSql for Condition {
 
         match self.op {
             Operator::Eq => {
-                // Check if this is a raw condition (column `{...}`, op=Eq, value=Null)
-                if matches!(self.value, Value::Null) && col.starts_with('{') && col.ends_with('}') {
-                    // It was already unwrapped by resolve_col_syntax if context was present
-                    // If context was NOT present, col is fully quoted?
-                    // Wait, resolve_col_syntax unquotes it.
-                    // If parse_cages/items_to_cage set column="{...}", 
-                    // resolve_col_syntax returns "..." (raw content).
-                    // BUT resolve_col_syntax is only called if context is Some.
-                    // If context is None, generate.quote_identifier is called.
-                    // Generaor quotes "{...}" -> "\"{...}\"".
-                    // We need to handle that case?
-                    // Usually context is Some in SELECT.
-                    // Let's assume context is Some which is true for Select/Update/Delete.
-                    // If resolve_col_syntax returned Raw string, we just output it.
-                    // But wait, resolve_col_syntax stripped { }.
-                    // So `col` here is just the content.
-                    // How do we distinguish "content" from "quoted_col"?
-                    // Quoted col is `"col"`. Raw content `sender IS NOT NULL`.
-                    // We can't distinguish easily unless we check `self.column`.
+                // Raw conditions ({...}, op=Eq, value=Null) are now handled at col resolution
+                if matches!(self.value, Value::Null) {
                     if let Expr::Named(name) = &self.left {
                         if name.starts_with('{') && name.ends_with('}') {
-                            return col; // Use resolved col (which is raw)
+                            return col; // col already contains raw SQL content
                         }
                     }
                 }
-                
                 format!("{} = {}", col, value_placeholder(&self.value, params))
             },
             Operator::Fuzzy => {
