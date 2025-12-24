@@ -183,6 +183,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
             Value::Subquery(_) => Expr::Named("(SUBQUERY)".to_string()),
             Value::Column(col) => Expr::Named(col),
             Value::Uuid(u) => Expr::Named(format!("'{}'", u)),
+            Value::NullUuid => Expr::Named("NULL".to_string()),
         }),
         // Fall back to full expression parsing
         parse_expression,
