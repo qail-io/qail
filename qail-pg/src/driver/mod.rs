@@ -203,6 +203,58 @@ impl PgDriver {
         // Call internal copy implementation
         self.connection.copy_in_internal(table, &columns, &str_rows).await
     }
+
+    /// Stream large result sets using PostgreSQL cursors.
+    ///
+    /// This method uses DECLARE CURSOR internally to stream rows in batches,
+    /// avoiding loading the entire result set into memory.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let cmd = QailCmd::get("large_table");
+    /// let batches = driver.stream_cmd(&cmd, 100).await?;
+    /// for batch in batches {
+    ///     for row in batch {
+    ///         // process row
+    ///     }
+    /// }
+    /// ```
+    pub async fn stream_cmd(
+        &mut self,
+        cmd: &QailCmd,
+        batch_size: usize,
+    ) -> PgResult<Vec<Vec<PgRow>>> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CURSOR_ID: AtomicU64 = AtomicU64::new(0);
+        
+        // Generate unique cursor name
+        let cursor_name = format!("qail_cursor_{}", CURSOR_ID.fetch_add(1, Ordering::SeqCst));
+        
+        // Generate SQL from AST using transpiler
+        use qail_core::transpiler::ToSqlParameterized;
+        let sql = cmd.to_sql_parameterized().sql;
+        
+        // Must be in a transaction for cursors
+        self.connection.begin_transaction().await?;
+        
+        // Declare cursor
+        self.connection.declare_cursor(&cursor_name, &sql).await?;
+        
+        // Fetch all batches
+        let mut all_batches = Vec::new();
+        while let Some(rows) = self.connection.fetch_cursor(&cursor_name, batch_size).await? {
+            let pg_rows: Vec<PgRow> = rows.into_iter()
+                .map(|cols| PgRow { columns: cols })
+                .collect();
+            all_batches.push(pg_rows);
+        }
+        
+        // Cleanup
+        self.connection.close_cursor(&cursor_name).await?;
+        self.connection.commit().await?;
+        
+        Ok(all_batches)
+    }
 }
 
 /// Convert a QAIL Value to PostgreSQL wire protocol bytes (text format).

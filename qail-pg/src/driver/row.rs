@@ -61,6 +61,58 @@ impl PgRow {
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
     }
+
+    /// Get a column value as UUID string.
+    /// Handles both text format (36-char string) and binary format (16 bytes).
+    pub fn get_uuid(&self, idx: usize) -> Option<String> {
+        let bytes = self.columns.get(idx)?.as_ref()?;
+        
+        if bytes.len() == 16 {
+            // Binary format - decode 16 bytes
+            use crate::protocol::types::decode_uuid;
+            decode_uuid(bytes).ok()
+        } else {
+            // Text format - return as-is
+            String::from_utf8(bytes.clone()).ok()
+        }
+    }
+
+    /// Get a column value as JSON string.
+    /// Handles both JSON (text) and JSONB (version byte prefix) formats.
+    pub fn get_json(&self, idx: usize) -> Option<String> {
+        let bytes = self.columns.get(idx)?.as_ref()?;
+        
+        if bytes.is_empty() {
+            return Some(String::new());
+        }
+        
+        // JSONB has version byte (1) as first byte
+        if bytes[0] == 1 && bytes.len() > 1 {
+            String::from_utf8(bytes[1..].to_vec()).ok()
+        } else {
+            String::from_utf8(bytes.clone()).ok()
+        }
+    }
+
+    /// Get a column value as timestamp string (ISO 8601 format).
+    pub fn get_timestamp(&self, idx: usize) -> Option<String> {
+        let bytes = self.columns.get(idx)?.as_ref()?;
+        String::from_utf8(bytes.clone()).ok()
+    }
+
+    /// Get a column value as text array.
+    pub fn get_text_array(&self, idx: usize) -> Option<Vec<String>> {
+        let bytes = self.columns.get(idx)?.as_ref()?;
+        let s = std::str::from_utf8(bytes).ok()?;
+        Some(crate::protocol::types::decode_text_array(s))
+    }
+
+    /// Get a column value as integer array.
+    pub fn get_int_array(&self, idx: usize) -> Option<Vec<i64>> {
+        let bytes = self.columns.get(idx)?.as_ref()?;
+        let s = std::str::from_utf8(bytes).ok()?;
+        crate::protocol::types::decode_int_array(s).ok()
+    }
 }
 
 #[cfg(test)]
