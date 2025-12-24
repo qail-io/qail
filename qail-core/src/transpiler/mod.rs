@@ -121,8 +121,15 @@ impl ToSqlParameterized for QailCmd {
         
         while let Some(c) = chars.next() {
             if c == ':' {
-                // Check if this is a named parameter (followed by identifier chars)
+                // Check if this is a Postgres cast (::) - pass through
                 if let Some(&next) = chars.peek() {
+                    if next == ':' {
+                        // Double colon - emit both and continue
+                        result.push(':');
+                        result.push(chars.next().unwrap());
+                        continue;
+                    }
+                    // Check if this is a named parameter (followed by identifier chars)
                     if next.is_ascii_alphabetic() || next == '_' {
                         // Parse the parameter name
                         let mut param_name = String::new();
