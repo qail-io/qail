@@ -8,16 +8,31 @@ use crate::transpiler::conditions::ConditionToSql;
 pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
     let generator = dialect.generator();
     
-    // Handle DISTINCT ON (Postgres-specific)
-    let mut sql = if !cmd.distinct_on.is_empty() {
-        let cols: Vec<String> = cmd.distinct_on.iter()
-            .map(|c| generator.quote_identifier(c))
+    // CTE prefix: WITH cte1 AS (...), cte2 AS (...) 
+    let cte_prefix = if !cmd.ctes.is_empty() {
+        let has_recursive = cmd.ctes.iter().any(|c| c.recursive);
+        let cte_parts: Vec<String> = cmd.ctes.iter()
+            .map(|cte| super::cte::build_single_cte(cte, dialect))
             .collect();
-        format!("SELECT DISTINCT ON ({}) ", cols.join(", "))
-    } else if cmd.distinct {
-        String::from("SELECT DISTINCT ")
+        if has_recursive {
+            format!("WITH RECURSIVE {} ", cte_parts.join(", "))
+        } else {
+            format!("WITH {} ", cte_parts.join(", "))
+        }
     } else {
-        String::from("SELECT ")
+        String::new()
+    };
+    
+    // Handle DISTINCT ON (Postgres-specific) - supports expressions
+    let mut sql = if !cmd.distinct_on.is_empty() {
+        let exprs: Vec<String> = cmd.distinct_on.iter()
+            .map(|e| render_expr_for_orderby(e, &generator, cmd))
+            .collect();
+        format!("{}SELECT DISTINCT ON ({}) ", cte_prefix, exprs.join(", "))
+    } else if cmd.distinct {
+        format!("{}SELECT DISTINCT ", cte_prefix)
+    } else {
+        format!("{}SELECT ", cte_prefix)
     };
 
     // Columns
@@ -249,10 +264,7 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         SortOrder::DescNullsFirst => "DESC NULLS FIRST",
                         SortOrder::DescNullsLast => "DESC NULLS LAST",
                     };
-                    let col_sql = match &cond.left {
-                        Expr::Named(name) => generator.quote_identifier(name),
-                        expr => expr.to_string(),
-                    };
+                    let col_sql = render_expr_for_orderby(&cond.left, &generator, cmd);
                     order_by_clauses.push(format!("{} {}", col_sql, dir));
                 }
             }
@@ -337,4 +349,80 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
     }
 
     sql
+}
+
+/// Render an expression for ORDER BY (and potentially other contexts).
+/// Handles CASE, Binary, FunctionCall, SpecialFunction, and Named expressions.
+fn render_expr_for_orderby(expr: &Expr, generator: &Box<dyn crate::transpiler::SqlGenerator>, cmd: &QailCmd) -> String {
+    match expr {
+        Expr::Named(name) => {
+            // Don't quote if already quoted, is a param, or is numeric
+            if name.starts_with('\'') || name.starts_with('"') 
+                || name.starts_with(':') || name.starts_with('$')
+                || name.parse::<f64>().is_ok()
+                || name.eq_ignore_ascii_case("NULL")
+                || name.eq_ignore_ascii_case("TRUE")
+                || name.eq_ignore_ascii_case("FALSE") {
+                name.clone()
+            } else {
+                generator.quote_identifier(name)
+            }
+        }
+        Expr::Case { when_clauses, else_value, .. } => {
+            let mut case_sql = String::from("CASE");
+            for (cond, val) in when_clauses {
+                case_sql.push_str(&format!(" WHEN {} THEN {}", 
+                    cond.to_sql(generator, Some(cmd)),
+                    render_expr_for_orderby(val, generator, cmd)));
+            }
+            if let Some(e) = else_value {
+                case_sql.push_str(&format!(" ELSE {}", render_expr_for_orderby(e, generator, cmd)));
+            }
+            case_sql.push_str(" END");
+            case_sql
+        }
+        Expr::Binary { left, op, right, .. } => {
+            let left_sql = render_expr_for_orderby(left, generator, cmd);
+            let right_sql = render_expr_for_orderby(right, generator, cmd);
+            let op_str = match op {
+                BinaryOp::Add => "+",
+                BinaryOp::Sub => "-",
+                BinaryOp::Mul => "*",
+                BinaryOp::Div => "/",
+                BinaryOp::Rem => "%",
+                BinaryOp::Concat => "||",
+            };
+            format!("({} {} {})", left_sql, op_str, right_sql)
+        }
+        Expr::FunctionCall { name, args, .. } => {
+            let args_sql: Vec<String> = args.iter()
+                .map(|a| render_expr_for_orderby(a, generator, cmd))
+                .collect();
+            format!("{}({})", name.to_uppercase(), args_sql.join(", "))
+        }
+        Expr::SpecialFunction { name, args, .. } => {
+            // Handle SUBSTRING(x FROM y [FOR z]), EXTRACT, etc.
+            match name.as_str() {
+                "SUBSTRING" => {
+                    let mut parts = Vec::new();
+                    for (kw, arg) in args {
+                        let arg_sql = render_expr_for_orderby(arg, generator, cmd);
+                        if let Some(keyword) = kw {
+                            parts.push(format!("{} {}", keyword, arg_sql));
+                        } else {
+                            parts.push(arg_sql);
+                        }
+                    }
+                    format!("SUBSTRING({})", parts.join(" "))
+                }
+                "EXTRACT" => {
+                    let field = args.first().map(|(_, e)| render_expr_for_orderby(e, generator, cmd)).unwrap_or_default();
+                    let source = args.get(1).map(|(_, e)| render_expr_for_orderby(e, generator, cmd)).unwrap_or_default();
+                    format!("EXTRACT({} FROM {})", field, source)
+                }
+                _ => format!("{}(...)", name)
+            }
+        }
+        _ => expr.to_string(), // Fallback for Star, Aliased, etc.
+    }
 }

@@ -31,14 +31,14 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
         value(Value::Bool(false), tag_no_case("false")),
         // Null
         value(Value::Null, tag_no_case("null")),
-        // String (double quoted)
+        // String (double quoted) - allow empty strings
         map(
-            delimited(char('"'), take_while1(|c| c != '"'), char('"')),
+            delimited(char('"'), nom::bytes::complete::take_while(|c| c != '"'), char('"')),
             |s: &str| Value::String(s.to_string())
         ),
-        // String (single quoted)
+        // String (single quoted) - allow empty strings
         map(
-            delimited(char('\''), take_while1(|c| c != '\''), char('\'')),
+            delimited(char('\''), nom::bytes::complete::take_while(|c| c != '\''), char('\'')),
             |s: &str| Value::String(s.to_string())
         ),
         // Float (must check before int)
@@ -132,5 +132,6 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, QailCmd> {
         ctes: vec![],
         returning: None,
         on_conflict: None,
+            source_query: None,
     }))
 }

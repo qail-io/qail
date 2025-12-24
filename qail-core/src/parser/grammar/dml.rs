@@ -58,7 +58,7 @@ pub fn parse_set_assignments(input: &str) -> IResult<&str, Vec<Condition>> {
     )(input)
 }
 
-/// Parse single assignment: column = value or column = expression (supports functions)
+/// Parse single assignment: column = value or column = expression (supports functions and subqueries)
 pub fn parse_assignment(input: &str) -> IResult<&str, Condition> {
     use nom::branch::alt;
     use super::expressions::parse_expression;
@@ -68,8 +68,10 @@ pub fn parse_assignment(input: &str) -> IResult<&str, Condition> {
     let (input, _) = char('=')(input)?;
     let (input, _) = multispace0(input)?;
     
-    // Try expression first (for function calls like coalesce), fall back to simple value
+    // Try subquery first: (get ...), then expression, then simple value
     let (input, value) = alt((
+        // Try parenthesized subquery: (get ...)
+        parse_subquery_value,
         // Try expression and convert to Value::Function
         nom::combinator::map(parse_expression, |expr| {
             Value::Function(expr.to_string())
@@ -84,6 +86,16 @@ pub fn parse_assignment(input: &str) -> IResult<&str, Condition> {
         value,
         is_array_unnest: false,
     }))
+}
+
+/// Parse a subquery value: (get ...) -> Value::Subquery
+fn parse_subquery_value(input: &str) -> IResult<&str, Value> {
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, subquery) = super::parse_root(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, Value::Subquery(Box::new(subquery))))
 }
 
 /// Parse ON CONFLICT clause: conflict (col1, col2) update col = val OR conflict (col) nothing
@@ -176,4 +188,19 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
     ))(input)?;
     
     Ok((input, (column.to_string(), expr)))
+}
+
+/// Parse: from (get ...) - source query for INSERT...SELECT
+/// 
+/// Syntax: `from (get table fields col1, col2 where ...)`
+pub fn parse_source_query(input: &str) -> IResult<&str, Box<crate::ast::QailCmd>> {
+    let (input, _) = multispace0(input)?;
+    let (input, _) = tag_no_case("from")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, subquery) = super::parse_root(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, Box::new(subquery)))
 }

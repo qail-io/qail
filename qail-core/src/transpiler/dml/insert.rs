@@ -20,8 +20,13 @@ pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
         sql.push(')');
     }
 
-    // Values from first payload/filter cage
-    if let Some(cage) = cmd.cages.first() {
+    // INSERT...SELECT: use source_query if present
+    if let Some(ref source_query) = cmd.source_query {
+        use crate::transpiler::ToSql;
+        sql.push(' ');
+        sql.push_str(&source_query.to_sql_with_dialect(dialect));
+    } else if let Some(cage) = cmd.cages.first() {
+        // Traditional INSERT with VALUES
         let values: Vec<String> = cage.conditions.iter().map(|c| c.to_value_sql(&generator)).collect();
         
         if !values.is_empty() {
