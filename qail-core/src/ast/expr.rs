@@ -214,7 +214,13 @@ impl std::fmt::Display for Expr {
                 write!(f, "{}", column)?;
                 for (path, as_text) in path_segments {
                     let op = if *as_text { "->>" } else { "->" };
-                    write!(f, "{}'{}'", op, path)?;
+                    // Integer indices should NOT be quoted (array access)
+                    // String keys should be quoted (object access)
+                    if path.parse::<i64>().is_ok() {
+                        write!(f, "{}{}", op, path)?;
+                    } else {
+                        write!(f, "{}'{}'", op, path)?;
+                    }
                 }
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;

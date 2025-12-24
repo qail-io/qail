@@ -63,7 +63,7 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                     let mut expr = generator.quote_identifier(column);
                     for (path, as_text) in path_segments {
                         let op = if *as_text { "->>" } else { "->" };
-                        expr.push_str(&format!("{}'{}'", op, path));
+                        if path.parse::<i64>().is_ok() { expr.push_str(&format!("{}{}", op, path)); } else { expr.push_str(&format!("{}'{}'", op, path)); }
                     }
                     if let Some(a) = alias {
                         format!("{} AS {}", expr, generator.quote_identifier(a))
@@ -341,7 +341,7 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                      let mut expr = generator.quote_identifier(column);
                      for (path, as_text) in path_segments {
                          let op = if *as_text { "->>" } else { "->" };
-                         expr.push_str(&format!("{}'{}'", op, path));
+                         if path.parse::<i64>().is_ok() { expr.push_str(&format!("{}{}", op, path)); } else { expr.push_str(&format!("{}'{}'", op, path)); }
                      }
                      non_aggregated_cols.push(expr);
                  }
@@ -547,7 +547,7 @@ fn render_expr_for_orderby(expr: &Expr, generator: &Box<dyn crate::transpiler::S
             let mut result = generator.quote_identifier(column);
             for (path, as_text) in path_segments {
                 let op = if *as_text { "->>" } else { "->" };
-                result.push_str(&format!("{}'{}'", op, path));
+                if path.parse::<i64>().is_ok() { result.push_str(&format!("{}{}", op, path)); } else { result.push_str(&format!("{}'{}'", op, path)); }
             }
             result
         }

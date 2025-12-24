@@ -106,7 +106,7 @@ impl ConditionToSql for Condition {
                 let mut result = generator.quote_identifier(column);
                 for (path, as_text) in path_segments {
                     let op = if *as_text { "->>" } else { "->" };
-                    result.push_str(&format!("{}'{}'", op, path));
+                    if path.parse::<i64>().is_ok() { result.push_str(&format!("{}{}", op, path)); } else { result.push_str(&format!("{}'{}'", op, path)); }
                 }
                 result
             },
@@ -270,7 +270,7 @@ impl ConditionToSql for Condition {
                 let mut result = generator.quote_identifier(column);
                 for (path, as_text) in path_segments {
                     let op = if *as_text { "->>" } else { "->" };
-                    result.push_str(&format!("{}'{}'", op, path));
+                    if path.parse::<i64>().is_ok() { result.push_str(&format!("{}{}", op, path)); } else { result.push_str(&format!("{}'{}'", op, path)); }
                 }
                 result
             },
