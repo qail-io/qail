@@ -73,12 +73,12 @@ impl std::fmt::Display for Value {
             Value::NamedParam(name) => write!(f, ":{}", name),
             Value::Function(s) => write!(f, "{}", s),
             Value::Array(arr) => {
-                write!(f, "[")?;
+                write!(f, "(")?;
                 for (i, v) in arr.iter().enumerate() {
                     if i > 0 { write!(f, ", ")?; }
                     write!(f, "{}", v)?;
                 }
-                write!(f, "]")
+                write!(f, ")")
             },
             Value::Subquery(_) => write!(f, "(SUBQUERY)"),
             Value::Column(s) => write!(f, "{}", s),
