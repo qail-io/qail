@@ -648,7 +648,13 @@ impl PgConnection {
         columns: &[&str],
         rows: &[Vec<&str>],
     ) -> PgResult<u64> {
-        // Build COPY command
+        // Validate all identifiers to prevent SQL injection
+        Self::validate_identifier(table)?;
+        for col in columns {
+            Self::validate_identifier(col)?;
+        }
+        
+        // Build COPY command with validated identifiers
         let cols = columns.join(", ");
         let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
         
