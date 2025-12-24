@@ -116,9 +116,22 @@ pub fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
     Ok((input, expr))
 }
 
-/// Parse atomic expressions (functions, case, literals, identifiers, wildcards)
+/// Parse a parenthesized expression: (expr)
+fn parse_grouped_expr(input: &str) -> IResult<&str, Expr> {
+    use nom::sequence::delimited;
+    use nom::character::complete::multispace0;
+    
+    delimited(
+        nom::sequence::tuple((nom::character::complete::char('('), multispace0)),
+        parse_expression,
+        nom::sequence::tuple((multispace0, nom::character::complete::char(')')))
+    )(input)
+}
+
+/// Parse atomic expressions (functions, case, literals, identifiers, wildcards, grouped)
 fn parse_atom(input: &str) -> IResult<&str, Expr> {
     alt((
+        parse_grouped_expr, // Try (expr) first
         parse_case,
         parse_special_function,
         parse_function_or_aggregate,
