@@ -34,13 +34,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Warmup
     for _ in 0..10 {
-        let _ = qail_conn.query("SELECT COUNT(*) FROM vessels", &[]).await?;
+        let _ = qail_conn.query_sql("SELECT COUNT(*) FROM vessels", &[]).await?;
     }
     
     // Benchmark: Simple count query
     let qail_count_start = Instant::now();
     for _ in 0..ITERATIONS {
-        let _ = qail_conn.query("SELECT COUNT(*) FROM vessels", &[]).await?;
+        let _ = qail_conn.query_sql("SELECT COUNT(*) FROM vessels", &[]).await?;
     }
     let qail_count_time = qail_count_start.elapsed();
     println!("   COUNT(*) × {}: {:?} ({:?}/iter)", 
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Benchmark: Parameterized query
     let qail_param_start = Instant::now();
     for _ in 0..ITERATIONS {
-        let _ = qail_conn.query(
+        let _ = qail_conn.query_sql(
             "SELECT id, name FROM vessels WHERE is_active = $1 LIMIT 10",
             &[Some(b"t".to_vec())]
         ).await?;
@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Benchmark: Fetch rows
     let qail_fetch_start = Instant::now();
     for _ in 0..ITERATIONS {
-        let _ = qail_conn.query("SELECT id, name, is_active FROM vessels LIMIT 20", &[]).await?;
+        let _ = qail_conn.query_sql("SELECT id, name, is_active FROM vessels LIMIT 20", &[]).await?;
     }
     let qail_fetch_time = qail_fetch_start.elapsed();
     println!("   Fetch 20 rows × {}: {:?} ({:?}/iter)",

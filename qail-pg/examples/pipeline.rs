@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Warmup
     for _ in 0..5 {
-        let _ = conn.query("SELECT 1", &[]).await?;
+        let _ = conn.query_sql("SELECT 1", &[]).await?;
     }
     
     // ===== SERIAL QUERIES =====
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..BATCHES {
         for i in 0..QUERIES_PER_BATCH {
             let param = format!("{}", i + 1);
-            let _ = conn.query(
+            let _ = conn.query_sql(
                 "SELECT id, name FROM vessels LIMIT $1",
                 &[Some(param.into_bytes())]
             ).await?;
