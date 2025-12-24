@@ -128,6 +128,10 @@ pub enum Operator {
     ILike,
     /// NOT ILIKE case-insensitive pattern match (Postgres)
     NotILike,
+    /// BETWEEN x AND y - range check (value stored as Value::Array with 2 elements)
+    Between,
+    /// NOT BETWEEN x AND y
+    NotBetween,
 }
 
 /// Aggregate functions.

@@ -134,6 +134,15 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
             let (input, _) = multispace0(input)?;
             let (input, _) = char(')')(input)?;
             (input, Value::Array(values))
+        } else if matches!(op, Operator::Between | Operator::NotBetween) {
+            // Parse BETWEEN min AND max
+            let (input, min_val) = parse_value(input)?;
+            let (input, _) = multispace1(input)?;
+            let (input, _) = tag_no_case("and")(input)?;
+            let (input, _) = multispace1(input)?;
+            let (input, max_val) = parse_value(input)?;
+            // Store as array with 2 elements [min, max]
+            (input, Value::Array(vec![min_val, max_val]))
         } else {
             // Try parsing as expression first (for now() - 24h type syntax)
             parse_filter_value(input)?
