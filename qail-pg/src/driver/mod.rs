@@ -98,12 +98,17 @@ impl PgDriver {
     /// skipping the string layer entirely.
     pub async fn fetch_all(&mut self, cmd: &QailCmd) -> PgResult<Vec<PgRow>> {
         // Layer 2: Convert AST to parameterized SQL (pure, sync)
-        use qail_core::transpiler::ToSql;
-        let sql = cmd.to_sql();  // TODO: Use to_sql_parameterized() when ready
+        use qail_core::transpiler::ToSqlParameterized;
+        let result = cmd.to_sql_parameterized();
+
+        // Convert Value params to binary bytes
+        let params: Vec<Option<Vec<u8>>> = result.params.iter()
+            .map(value_to_bytes)
+            .collect();
 
         // Layer 3: Execute via Extended Query Protocol (async I/O)
         // Parameters are binary bytes - no string interpolation
-        let raw_rows = self.connection.query(&sql, &[]).await?;
+        let raw_rows = self.connection.query(&result.sql, &params).await?;
         
         Ok(raw_rows.into_iter().map(|columns| PgRow { columns }).collect())
     }
@@ -119,14 +124,47 @@ impl PgDriver {
     /// Uses Extended Query Protocol - parameters are sent as binary bytes.
     pub async fn execute(&mut self, cmd: &QailCmd) -> PgResult<u64> {
         // Layer 2: Convert AST to parameterized SQL (pure, sync)
-        use qail_core::transpiler::ToSql;
-        let sql = cmd.to_sql();  // TODO: Use to_sql_parameterized() when ready
+        use qail_core::transpiler::ToSqlParameterized;
+        let result = cmd.to_sql_parameterized();
+
+        // Convert Value params to binary bytes
+        let params: Vec<Option<Vec<u8>>> = result.params.iter()
+            .map(value_to_bytes)
+            .collect();
 
         // Layer 3: Execute via Extended Query Protocol (async I/O)
-        let _ = self.connection.query(&sql, &[]).await?;
+        let _ = self.connection.query(&result.sql, &params).await?;
         
         // TODO: Parse affected rows from CommandComplete tag (e.g., "INSERT 0 1")
         Ok(1)
     }
 }
 
+/// Convert a QAIL Value to PostgreSQL wire protocol bytes (text format).
+fn value_to_bytes(value: &qail_core::ast::Value) -> Option<Vec<u8>> {
+    use qail_core::ast::Value;
+    
+    match value {
+        Value::Null => None,
+        Value::Bool(b) => Some(if *b { b"t".to_vec() } else { b"f".to_vec() }),
+        Value::Int(i) => Some(i.to_string().into_bytes()),
+        Value::Float(f) => Some(f.to_string().into_bytes()),
+        Value::String(s) => Some(s.as_bytes().to_vec()),
+        Value::Uuid(u) => Some(u.to_string().into_bytes()),
+        Value::NullUuid => None,
+        Value::Timestamp(ts) => Some(ts.as_bytes().to_vec()),
+        // For functions, columns, etc. - handled in SQL template, not as params
+        Value::Function(_) | Value::Column(_) | Value::Param(_) | Value::NamedParam(_) => None,
+        Value::Array(arr) => {
+            // PostgreSQL array format: {elem1,elem2,elem3}
+            let elements: Vec<String> = arr.iter()
+                .map(|v| format!("{}", v))
+                .collect();
+            Some(format!("{{{}}}", elements.join(",")).into_bytes())
+        }
+        Value::Subquery(_) => None, // Subqueries are inlined in SQL
+        Value::Interval { amount, unit } => {
+            Some(format!("{} {}", amount, unit).into_bytes())
+        }
+    }
+}
