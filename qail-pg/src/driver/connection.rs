@@ -3,11 +3,12 @@
 //! Low-level TCP connection with wire protocol handling.
 //! This is Layer 3 (async I/O).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::BytesMut;
-use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus, ScramClient};
+use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus, ScramClient, PgEncoder};
 use super::stream::PgStream;
 use super::{PgError, PgResult};
 
@@ -21,6 +22,8 @@ const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
 pub struct PgConnection {
     stream: PgStream,
     buffer: BytesMut,
+    /// Cache of prepared statement names (by SQL hash)
+    prepared_statements: HashSet<String>,
 }
 
 impl PgConnection {
@@ -43,6 +46,7 @@ impl PgConnection {
         let mut conn = Self {
             stream: PgStream::Tcp(tcp_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+            prepared_statements: HashSet::new(),
         };
 
         // Send startup message
@@ -114,6 +118,7 @@ impl PgConnection {
         let mut conn = Self {
             stream: PgStream::Tls(tls_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+            prepared_statements: HashSet::new(),
         };
 
         // Send startup message over TLS
@@ -300,6 +305,87 @@ impl PgConnection {
                 _ => {}
             }
         }
+    }
+
+    /// Execute a query with cached prepared statement.
+    ///
+    /// Like `query()`, but reuses prepared statements across calls.
+    /// The statement name is derived from a hash of the SQL text.
+    /// 
+    /// Benefits:
+    /// - Skip parsing on repeated queries (faster execution)
+    /// - Better query plan caching in PostgreSQL
+    ///
+    /// # Example
+    /// ```ignore
+    /// // First call: Parse + Bind + Execute + Sync
+    /// let rows1 = conn.query_cached("SELECT * FROM users WHERE id = $1", &[params]).await?;
+    /// 
+    /// // Second call: Bind + Execute + Sync (no Parse needed!)
+    /// let rows2 = conn.query_cached("SELECT * FROM users WHERE id = $1", &[params]).await?;
+    /// ```
+    pub async fn query_cached(
+        &mut self, 
+        sql: &str, 
+        params: &[Option<Vec<u8>>]
+    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        // Generate statement name from SQL hash
+        let stmt_name = Self::sql_to_stmt_name(sql);
+        let is_new = !self.prepared_statements.contains(&stmt_name);
+        
+        // Build the message: Parse (if new) + Bind + Execute + Sync
+        let mut buf = BytesMut::new();
+        
+        if is_new {
+            // Parse statement with name
+            buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
+        }
+        
+        // Bind to named statement
+        buf.extend(PgEncoder::encode_bind("", &stmt_name, params));
+        // Execute
+        buf.extend(PgEncoder::encode_execute("", 0));
+        // Sync
+        buf.extend(PgEncoder::encode_sync());
+        
+        self.stream.write_all(&buf).await?;
+        
+        let mut rows = Vec::new();
+        
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::ParseComplete => {
+                    // Statement parsed - add to cache
+                    self.prepared_statements.insert(stmt_name.clone());
+                }
+                BackendMessage::BindComplete => {}
+                BackendMessage::RowDescription(_) => {}
+                BackendMessage::DataRow(data) => {
+                    rows.push(data);
+                }
+                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::NoData => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(rows);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Generate a statement name from SQL hash.
+    /// Uses a simple hash to create a unique name like "stmt_12345abc".
+    fn sql_to_stmt_name(sql: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        sql.hash(&mut hasher);
+        format!("s{:016x}", hasher.finish())
     }
 
     /// Execute a mutation and return affected rows count.
