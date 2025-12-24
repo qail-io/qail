@@ -114,31 +114,48 @@ impl ToSqlParameterized for QailCmd {
         // Extract named parameters (those starting with :) from the SQL
         // and replace them with positional parameters ($1, $2, etc.)
         let mut named_params: Vec<String> = Vec::new();
-        let mut processed_sql = full_sql.clone();
-        
-        // Find all :param_name patterns and replace with $N
-        let re = regex::Regex::new(r":([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
-        let mut param_index = 1;
         let mut seen_params: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut result = String::with_capacity(full_sql.len());
+        let mut chars = full_sql.chars().peekable();
+        let mut param_index = 1;
         
-        for cap in re.captures_iter(&full_sql) {
-            let param_name = cap.get(1).unwrap().as_str().to_string();
-            if !seen_params.contains_key(&param_name) {
-                seen_params.insert(param_name.clone(), param_index);
-                named_params.push(param_name);
-                param_index += 1;
+        while let Some(c) = chars.next() {
+            if c == ':' {
+                // Check if this is a named parameter (followed by identifier chars)
+                if let Some(&next) = chars.peek() {
+                    if next.is_ascii_alphabetic() || next == '_' {
+                        // Parse the parameter name
+                        let mut param_name = String::new();
+                        while let Some(&ch) = chars.peek() {
+                            if ch.is_ascii_alphanumeric() || ch == '_' {
+                                param_name.push(chars.next().unwrap());
+                            } else {
+                                break;
+                            }
+                        }
+                        
+                        // Get or assign positional index
+                        let idx = if let Some(&existing) = seen_params.get(&param_name) {
+                            existing
+                        } else {
+                            let idx = param_index;
+                            seen_params.insert(param_name.clone(), idx);
+                            named_params.push(param_name);
+                            param_index += 1;
+                            idx
+                        };
+                        
+                        result.push('$');
+                        result.push_str(&idx.to_string());
+                        continue;
+                    }
+                }
             }
-        }
-        
-        // Replace :param with $N
-        for (name, idx) in &seen_params {
-            let pattern = format!(":{}", name);
-            let replacement = format!("${}", idx);
-            processed_sql = processed_sql.replace(&pattern, &replacement);
+            result.push(c);
         }
         
         TranspileResult {
-            sql: processed_sql,
+            sql: result,
             params: Vec::new(), // Positional params not used, named_params provides mapping
             named_params,
         }
