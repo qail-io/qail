@@ -35,4 +35,4 @@ pub mod protocol;
 pub mod driver;
 
 pub use protocol::PgEncoder;
-pub use driver::{PgDriver, PgConnection, PgRow, PgError, PgResult};
+pub use driver::{PgDriver, PgConnection, PgRow, PgError, PgResult, PgPool, PoolConfig, PooledConnection};
