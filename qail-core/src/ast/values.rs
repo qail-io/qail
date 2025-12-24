@@ -59,6 +59,8 @@ pub enum Value {
     NullUuid,
     /// Time interval (e.g., 24 hours, 7 days)
     Interval { amount: i64, unit: IntervalUnit },
+    /// Timestamp value (for DateTime binding)
+    Timestamp(String),
 }
 
 impl std::fmt::Display for Value {
@@ -85,6 +87,7 @@ impl std::fmt::Display for Value {
             Value::Uuid(u) => write!(f, "'{}'", u),
             Value::NullUuid => write!(f, "NULL"),
             Value::Interval { amount, unit } => write!(f, "INTERVAL '{} {}'", amount, unit),
+            Value::Timestamp(ts) => write!(f, "'{}'", ts),
         }
     }
 }
