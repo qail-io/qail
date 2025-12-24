@@ -3,7 +3,7 @@ use nom::{
     bytes::complete::{tag_no_case},
     character::complete::{char, multispace0, multispace1, digit1},
     combinator::{opt, map, value},
-    multi::{separated_list1, many0},
+    multi::{separated_list0, separated_list1, many0},
     sequence::{tuple, preceded, delimited},
     IResult,
 };
@@ -134,9 +134,29 @@ pub fn parse_condition(input: &str) -> IResult<&str, Condition> {
     let (input, op) = parse_operator(input)?;
     let (input, _) = multispace0(input)?;
     
-    // Parse value (handle is null / is not null separately)
+    // Parse value (handle special operators)
     let (input, value) = if matches!(op, Operator::IsNull | Operator::IsNotNull) {
         (input, Value::Null)
+    } else if matches!(op, Operator::Between | Operator::NotBetween) {
+        // Parse BETWEEN min AND max
+        let (input, min_val) = parse_value(input)?;
+        let (input, _) = multispace1(input)?;
+        let (input, _) = tag_no_case("and")(input)?;
+        let (input, _) = multispace1(input)?;
+        let (input, max_val) = parse_value(input)?;
+        // Store as array with 2 elements [min, max]
+        (input, Value::Array(vec![min_val, max_val]))
+    } else if matches!(op, Operator::In | Operator::NotIn) {
+        // Parse IN (val1, val2, ...)
+        let (input, _) = char('(')(input)?;
+        let (input, _) = multispace0(input)?;
+        let (input, values) = separated_list0(
+            tuple((multispace0, char(','), multispace0)),
+            parse_value
+        )(input)?;
+        let (input, _) = multispace0(input)?;
+        let (input, _) = char(')')(input)?;
+        (input, Value::Array(values))
     } else {
         if let Ok((i, val)) = parse_value(input) {
             (i, val)

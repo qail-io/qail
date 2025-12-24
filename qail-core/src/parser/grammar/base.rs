@@ -80,6 +80,8 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
 pub fn parse_operator(input: &str) -> IResult<&str, Operator> {
     alt((
         // Multi-char operators first
+        value(Operator::NotBetween, tag_no_case("not between")),
+        value(Operator::Between, tag_no_case("between")),
         value(Operator::IsNotNull, tag_no_case("is not null")),
         value(Operator::IsNull, tag_no_case("is null")),
         value(Operator::NotIn, tag_no_case("not in")),
