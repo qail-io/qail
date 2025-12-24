@@ -87,9 +87,80 @@ Era 4: QAIL             → "Type-safe AST that compiles to wire protocol"
 - [ ] Connection pooling skeleton
 
 ### Medium Priority
-- [ ] Builder API for ergonomic AST construction
+- [x] Builder API for ergonomic AST construction ✅ Done!
 - [ ] Transaction support (BEGIN/COMMIT/ROLLBACK)
 - [ ] Error mapping (PG error codes → Rust errors)
+
+---
+
+## 📦 v0.9.1 - AST-Native Migrations
+
+**Theme:** "Schema as Code, Migrations as Data"
+
+### The Vision
+
+```
+┌──────────────┐     ┌──────────────┐
+│ schema_v1    │ ──► │ schema_v2    │
+│ (JSON)       │     │ (JSON)       │
+└──────────────┘     └──────────────┘
+        │                   │
+        └───────┬───────────┘
+                ▼
+┌───────────────────────────────┐
+│ DiffVisitor                   │
+│ schema_v1 ⊕ schema_v2         │
+│ → Vec<QailCmd>                │  ← Pure AST
+└───────────────────────────────┘
+                │
+                ▼
+┌───────────────────────────────┐
+│ PgEncoder::encode(cmd)        │  ← Layer 2: Pure bytes
+└───────────────────────────────┘
+                │
+                ▼
+┌───────────────────────────────┐
+│ driver.execute(bytes)         │  ← Layer 3: Apply
+└───────────────────────────────┘
+```
+
+### Implementation Plan
+
+| Component | Location | Description |
+|-----------|----------|-------------|
+| **Schema Diff** | `qail-core/src/diff.rs` | Compare two schemas → `Vec<QailCmd>` |
+| **CLI: diff** | `qail-cli` | `qail diff old.json new.json` |
+| **CLI: migrate** | `qail-cli` | `qail migrate --up <db_url>` |
+| **Migration Files** | `.qail/migrations/` | Store AST as JSON, not SQL |
+
+### Why AST-Native Migrations?
+
+| Traditional | QAIL |
+|-------------|------|
+| Hand-write SQL | Generate from schema diff |
+| One dialect per file | Encode to any database |
+| String manipulation | Type-safe AST transforms |
+| Runtime errors | Compile-time validation |
+
+### CLI Workflow
+
+```bash
+# Pull current schema
+qail pull postgres://localhost/mydb > schema.json
+
+# Make changes (add column, create table, etc.)
+vim schema.json
+
+# Generate migration
+qail diff schema_old.json schema.json -o migrations/001_add_users.qail
+
+# Preview SQL (any dialect)
+qail show migrations/001_add_users.qail --dialect postgres
+qail show migrations/001_add_users.qail --dialect mysql
+
+# Apply migration
+qail migrate up postgres://localhost/mydb
+```
 
 ---
 
@@ -111,7 +182,7 @@ Era 4: QAIL             → "Type-safe AST that compiles to wire protocol"
 ### Ecosystem
 - [ ] `qail-mysql` - MySQL wire protocol
 - [ ] `qail-sqlite` - SQLite (embedded, no network)
-- [ ] Migration tooling
+- [ ] Migration tooling (from v0.9.1)
 
 ---
 
