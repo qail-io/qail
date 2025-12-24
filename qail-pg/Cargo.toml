@@ -19,6 +19,10 @@ pbkdf2 = { version = "0.12", features = ["simple"] }
 base64 = "0.22"
 rand = "0.9"
 
+# TLS/SSL support
+tokio-rustls = "0.26"
+rustls-native-certs = "0.8"
+
 [lints]
 workspace = true
 

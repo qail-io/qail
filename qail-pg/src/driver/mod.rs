@@ -6,6 +6,7 @@
 mod connection;
 mod row;
 mod pool;
+mod stream;
 
 pub use connection::PgConnection;
 pub use pool::{PgPool, PoolConfig, PooledConnection};

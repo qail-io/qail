@@ -3,18 +3,23 @@
 //! Low-level TCP connection with wire protocol handling.
 //! This is Layer 3 (async I/O).
 
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::BytesMut;
 use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus, ScramClient};
+use super::stream::PgStream;
 use super::{PgError, PgResult};
 
 /// Initial buffer capacity (8KB - typical response size)
 const BUFFER_CAPACITY: usize = 8192;
 
+/// SSLRequest message bytes (request code: 80877103)
+const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
+
 /// A raw PostgreSQL connection.
 pub struct PgConnection {
-    stream: TcpStream,
+    stream: PgStream,
     buffer: BytesMut,
 }
 
@@ -33,14 +38,85 @@ impl PgConnection {
         password: Option<&str>,
     ) -> PgResult<Self> {
         let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect(&addr).await?;
+        let tcp_stream = TcpStream::connect(&addr).await?;
 
         let mut conn = Self {
-            stream,
+            stream: PgStream::Tcp(tcp_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
         };
 
         // Send startup message
+        conn.send(FrontendMessage::Startup {
+            user: user.to_string(),
+            database: database.to_string(),
+        }).await?;
+
+        // Handle authentication
+        conn.handle_startup(user, password).await?;
+
+        Ok(conn)
+    }
+
+    /// Connect to PostgreSQL server with TLS encryption.
+    ///
+    /// This method:
+    /// 1. Connects via TCP
+    /// 2. Sends SSLRequest
+    /// 3. If server accepts ('S'), performs TLS handshake
+    /// 4. Continues with normal startup over encrypted connection
+    pub async fn connect_tls(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+    ) -> PgResult<Self> {
+        use tokio_rustls::TlsConnector;
+        use tokio_rustls::rustls::ClientConfig;
+        use tokio_rustls::rustls::pki_types::ServerName;
+        
+        let addr = format!("{}:{}", host, port);
+        let mut tcp_stream = TcpStream::connect(&addr).await?;
+
+        // Step 1: Send SSLRequest
+        tcp_stream.write_all(&SSL_REQUEST).await?;
+
+        // Step 2: Read server response (single byte: 'S' or 'N')
+        let mut response = [0u8; 1];
+        tcp_stream.read_exact(&mut response).await?;
+
+        if response[0] != b'S' {
+            return Err(PgError::Connection(
+                "Server does not support TLS".to_string()
+            ));
+        }
+
+        // Step 3: Perform TLS handshake
+        let certs = rustls_native_certs::load_native_certs();
+        
+        let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();
+        for cert in certs.certs {
+            let _ = root_cert_store.add(cert); // Ignore invalid certs
+        }
+        
+        let config = ClientConfig::builder()
+            .with_root_certificates(root_cert_store)
+            .with_no_client_auth();
+        
+        let connector = TlsConnector::from(Arc::new(config));
+        let server_name = ServerName::try_from(host.to_string())
+            .map_err(|_| PgError::Connection("Invalid hostname for TLS".to_string()))?;
+        
+        let tls_stream = connector.connect(server_name, tcp_stream).await
+            .map_err(|e| PgError::Connection(format!("TLS handshake failed: {}", e)))?;
+
+        // Step 4: Create connection with TLS stream
+        let mut conn = Self {
+            stream: PgStream::Tls(tls_stream),
+            buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+        };
+
+        // Send startup message over TLS
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
