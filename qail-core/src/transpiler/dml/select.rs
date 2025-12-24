@@ -224,8 +224,20 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
     let mut non_aggregated_cols = Vec::new();
     if has_aggregates {
          for col in &cmd.columns {
-             if let Expr::Named(name) = col {
-                 non_aggregated_cols.push(generator.quote_identifier(name));
+             match col {
+                 Expr::Named(name) => {
+                     non_aggregated_cols.push(generator.quote_identifier(name));
+                 }
+                 Expr::Aliased { name, .. } => {
+                     // Use the base column name for GROUP BY (before AS alias)
+                     non_aggregated_cols.push(generator.quote_identifier(name));
+                 }
+                 Expr::JsonAccess { column, path, as_text, .. } => {
+                     // Include JSON access expression in GROUP BY
+                     let op = if *as_text { "->>" } else { "->" };
+                     non_aggregated_cols.push(format!("{}{}'{}'", generator.quote_identifier(column), op, path));
+                 }
+                 _ => {} // Aggregates and other expressions not added to GROUP BY
              }
          }
     }
