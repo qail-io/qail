@@ -18,6 +18,17 @@ pub struct PgRow {
     pub columns: Vec<Option<Vec<u8>>>,
 }
 
+/// PostgreSQL notification from LISTEN/NOTIFY.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    /// Process ID of the notifying backend
+    pub process_id: i32,
+    /// Channel name
+    pub channel: String,
+    /// Notification payload
+    pub payload: String,
+}
+
 /// Error type for PostgreSQL driver operations.
 #[derive(Debug)]
 pub enum PgError {

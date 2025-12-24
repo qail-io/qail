@@ -76,6 +76,14 @@ pub enum BackendMessage {
     NoData,
     /// Copy in response (server ready to receive COPY data)
     CopyInResponse { format: u8, column_formats: Vec<u8> },
+    /// Notification response (async notification from LISTEN/NOTIFY)
+    NotificationResponse { 
+        process_id: i32, 
+        channel: String, 
+        payload: String,
+    },
+    /// Empty query response
+    EmptyQueryResponse,
 }
 
 /// Transaction status
@@ -204,6 +212,8 @@ impl BackendMessage {
             b'2' => BackendMessage::BindComplete,
             b'n' => BackendMessage::NoData,
             b'G' => Self::decode_copy_in_response(payload)?,
+            b'A' => Self::decode_notification_response(payload)?,
+            b'I' => BackendMessage::EmptyQueryResponse,
             _ => return Err(format!("Unknown message type: {}", msg_type as char)),
         };
         
@@ -409,5 +419,28 @@ impl BackendMessage {
             vec![]
         };
         Ok(BackendMessage::CopyInResponse { format, column_formats })
+    }
+
+    fn decode_notification_response(payload: &[u8]) -> Result<Self, String> {
+        if payload.len() < 4 {
+            return Err("NotificationResponse too short".to_string());
+        }
+        let process_id = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        
+        // Channel name (null-terminated)
+        let mut i = 4;
+        let channel_end = payload[i..].iter().position(|&b| b == 0).unwrap_or(0) + i;
+        let channel = String::from_utf8_lossy(&payload[i..channel_end]).to_string();
+        i = channel_end + 1;
+        
+        // Payload (null-terminated)
+        let payload_end = payload[i..].iter().position(|&b| b == 0).unwrap_or(0) + i;
+        let notification_payload = String::from_utf8_lossy(&payload[i..payload_end]).to_string();
+        
+        Ok(BackendMessage::NotificationResponse {
+            process_id,
+            channel,
+            payload: notification_payload,
+        })
     }
 }
