@@ -188,4 +188,64 @@ impl PgConnection {
             }
         }
     }
+
+    /// Execute an extended query with binary parameters.
+    ///
+    /// This uses the Parse/Bind/Execute protocol:
+    /// 1. Parse: Send SQL template with $1, $2, etc. placeholders
+    /// 2. Bind: Send parameter values as binary bytes
+    /// 3. Execute: Run the query
+    /// 4. Sync: End the pipeline
+    ///
+    /// Parameters skip the string layer - they're sent as raw bytes.
+    pub async fn extended_query(
+        &mut self, 
+        sql: &str, 
+        params: &[Option<Vec<u8>>]
+    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        use crate::protocol::PgEncoder;
+        
+        // Send Parse + Bind + Execute + Sync as one pipeline
+        let bytes = PgEncoder::encode_extended_query(sql, params);
+        self.stream.write_all(&bytes).await?;
+
+        let mut rows = Vec::new();
+
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::ParseComplete => {
+                    // Parse succeeded
+                }
+                BackendMessage::BindComplete => {
+                    // Bind succeeded
+                }
+                BackendMessage::RowDescription(_) => {
+                    // Column metadata
+                }
+                BackendMessage::DataRow(data) => {
+                    rows.push(data);
+                }
+                BackendMessage::CommandComplete(_) => {
+                    // Query done
+                }
+                BackendMessage::NoData => {
+                    // No rows (for non-SELECT)
+                }
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(rows);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Send raw bytes to the stream.
+    pub async fn send_bytes(&mut self, bytes: &[u8]) -> PgResult<()> {
+        self.stream.write_all(bytes).await?;
+        Ok(())
+    }
 }
