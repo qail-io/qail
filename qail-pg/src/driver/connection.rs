@@ -3,7 +3,7 @@
 //! Low-level TCP connection with wire protocol handling.
 //! This is Layer 3 (async I/O).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,8 +22,8 @@ const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
 pub struct PgConnection {
     stream: PgStream,
     buffer: BytesMut,
-    /// Cache of prepared statement names (by SQL hash)
-    prepared_statements: HashSet<String>,
+    /// Cache of prepared statements: stmt_name -> SQL text (for debugging)
+    prepared_statements: HashMap<String, String>,
 }
 
 impl PgConnection {
@@ -46,7 +46,7 @@ impl PgConnection {
         let mut conn = Self {
             stream: PgStream::Tcp(tcp_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
-            prepared_statements: HashSet::new(),
+            prepared_statements: HashMap::new(),
         };
 
         // Send startup message
@@ -118,7 +118,7 @@ impl PgConnection {
         let mut conn = Self {
             stream: PgStream::Tls(tls_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
-            prepared_statements: HashSet::new(),
+            prepared_statements: HashMap::new(),
         };
 
         // Send startup message over TLS
@@ -331,7 +331,7 @@ impl PgConnection {
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
         // Generate statement name from SQL hash
         let stmt_name = Self::sql_to_stmt_name(sql);
-        let is_new = !self.prepared_statements.contains(&stmt_name);
+        let is_new = !self.prepared_statements.contains_key(&stmt_name);
         
         // Build the message: Parse (if new) + Bind + Execute + Sync
         let mut buf = BytesMut::new();
@@ -351,13 +351,14 @@ impl PgConnection {
         self.stream.write_all(&buf).await?;
         
         let mut rows = Vec::new();
+        let sql_owned = sql.to_string(); // For storing in cache
         
         loop {
             let msg = self.recv().await?;
             match msg {
                 BackendMessage::ParseComplete => {
-                    // Statement parsed - add to cache
-                    self.prepared_statements.insert(stmt_name.clone());
+                    // Statement parsed - store with SQL text for debugging
+                    self.prepared_statements.insert(stmt_name.clone(), sql_owned.clone());
                 }
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
