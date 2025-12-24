@@ -26,13 +26,31 @@ pub struct ColumnDef {
 
 impl Schema {
     pub fn load() -> Option<Self> {
-        let paths = [
+        // First, try native .qail format (priority)
+        let qail_paths = [
+            "schema.qail",
+            ".qail/schema.qail",
+            "db/schema.qail",
+            "../schema.qail",
+        ];
+        
+        for path in qail_paths {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(parsed) = qail_core::parser::schema::Schema::parse(&content) {
+                    // Convert from qail-core schema to macro schema
+                    return Some(Self::from_core_schema(&parsed));
+                }
+            }
+        }
+        
+        // Fallback to JSON format
+        let json_paths = [
             "qail.schema.json",
             ".qail/schema.json",
             "../qail.schema.json",
         ];
 
-        for path in paths {
+        for path in json_paths {
             if let Ok(content) = std::fs::read_to_string(path) {
                 if let Ok(schema) = serde_json::from_str(&content) {
                     return Some(schema);
@@ -40,6 +58,21 @@ impl Schema {
             }
         }
         None
+    }
+    
+    /// Convert from qail-core schema to macro schema
+    fn from_core_schema(core: &qail_core::parser::schema::Schema) -> Self {
+        Self {
+            tables: core.tables.iter().map(|t| TableDef {
+                name: t.name.clone(),
+                columns: t.columns.iter().map(|c| ColumnDef {
+                    name: c.name.clone(),
+                    typ: c.typ.clone(),
+                    nullable: c.nullable,
+                    primary_key: c.primary_key,
+                }).collect(),
+            }).collect(),
+        }
     }
 
     pub fn find_table(&self, name: &str) -> Option<&TableDef> {
