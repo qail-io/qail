@@ -1,167 +1,174 @@
-# QAIL Roadmap: The Data Control Plane
+# QAIL Roadmap: AST-Native Database Access
 
 ## 🎯 Vision Statement
 
-**QAIL is not an ORM. QAIL is the universal language for data access.**
+**QAIL is the universal AST for database operations.**
 
-> "Before JSON, data formats were fragmented. JSON became the lingua franca.  
-> Before QAIL, queries are fragmented. QAIL becomes the lingua franca for data access."
+> "SQL is a text protocol designed for humans to type.  
+> QAIL is a binary protocol designed for machines to optimize."
 
 ---
 
 ## The Evolution
 
 ```
-Level 1: Raw SQL         → "I hope this string works"
-Level 2: ORMs (SeaORM)   → "Safe, but locked to one language"  
-Level 3: QAIL            → "Universal, type-safe, works everywhere"
+Era 1: SQL Strings      → "Trust me, this string is safe"
+Era 2: ORMs             → "Safe, but locked to one language"
+Era 3: Query Builders   → "Safe, but still generates strings"
+Era 4: QAIL             → "Type-safe AST that compiles to wire protocol"
 ```
 
 ---
 
-## Architecture: The Stack
+## Architecture: The Layers
 
-| Layer | Component | Status |
-|-------|-----------|--------|
-| **Syntax** | QAIL Language (`get users where...`) | ✅ Complete |
-| **Parser** | `nom` combinators → `QailCmd` AST | ✅ Complete |
-| **Validator** | Schema-aware compile-time checks | ✅ `qail!` macro |
-| **Transpiler** | AST → SQL/NoSQL dialects | ✅ 18 dialects |
-| **Bindings** | Rust, Python, JS, FFI, WASM | 🔄 In Progress |
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Layer 1: Intent (App Code)                                    │
+│   - User constructs QailCmd AST                               │
+│   - Pure data, no I/O                                         │
+├──────────────────────────────────────────────────────────────┤
+│ Layer 2: Brain (Pure Logic)                                   │
+│   - PgEncoder compiles AST → BytesMut                         │
+│   - NO async, NO tokio, NO networking                         │
+│   - Can compile to WASM                                       │
+├──────────────────────────────────────────────────────────────┤
+│ Layer 3: Muscle (Async Runtime)                               │
+│   - Tokio TcpStream sends bytes                               │
+│   - ONLY layer with runtime dependency                        │
+│   - Swappable: tokio → async-std → glommio                    │
+├──────────────────────────────────────────────────────────────┤
+│ Layer 4: Reality (Database)                                   │
+│   - PostgreSQL, MySQL, etc.                                   │
+│   - Each speaks its own wire protocol                         │
+└──────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## ✅ Completed (v0.8.x)
+## ✅ Completed
 
-### Core Parser & AST
+### Core AST (qail-core)
 - [x] `QailCmd` universal AST representation
 - [x] DML: `get`, `add`, `set`, `del` commands
 - [x] DDL: `make` (CREATE TABLE), `index` (CREATE INDEX)
-- [x] Joins: left/right/inner/outer with aliases
-- [x] CTEs: `with` clause support
-- [x] Expressions: CASE WHEN, COALESCE, subqueries
-- [x] Operators: LIKE, ILIKE, IN, BETWEEN, IS NULL
-- [x] Ordering: ORDER BY, DISTINCT ON
-- [x] Pagination: LIMIT, OFFSET
+- [x] Joins: left/right/inner with ON conditions
+- [x] CTEs: WITH clause support
+- [x] Expressions: CASE WHEN, aggregates, window functions
+- [x] Parser: Text → AST (for CLI, LSP, WASM)
 
-### SQL Transpilers (11 dialects)
-- [x] PostgreSQL (primary)
-- [x] MySQL / MariaDB
-- [x] SQLite
-- [x] SQL Server
-- [x] Oracle
-- [x] BigQuery
-- [x] Snowflake
-- [x] Redshift
-- [x] DuckDB
-- [x] InfluxDB
-
-### NoSQL Transpilers (7 dialects)
-- [x] MongoDB (aggregation pipeline)
-- [x] DynamoDB
-- [x] Redis
-- [x] Cassandra (CQL)
-- [x] Elasticsearch (Query DSL)
-- [x] Neo4j (Cypher)
-- [x] Qdrant (vector search)
-
-### Rust Integration (qail-sqlx)
-- [x] `QailExecutor` trait for `PgPool`
-- [x] Named parameters (`:id`, `:status`)
-- [x] `qail_params!` macro
-- [x] `qail_fetch_all`, `qail_fetch_one`, `qail_execute`
-
-### Compile-Time Safety (qail-macros) ⭐ NEW
-- [x] `qail!` proc-macro with schema validation
-- [x] `qail_one!`, `qail_optional!`, `qail_execute!` variants
-- [x] "Did you mean?" suggestions (Levenshtein)
-- [x] Schema introspection: `qail pull <db_url>`
-- [x] Offline validation via `schema.json`
+### PostgreSQL Driver (qail-pg)
+- [x] Wire protocol types (FrontendMessage, BackendMessage)
+- [x] `PgEncoder::encode_simple_query()` - AST → BytesMut
+- [x] Basic connection handling with tokio
+- [x] Layer 2/3 separation (protocol/ vs driver/)
 
 ### Developer Tools
 - [x] CLI: `qail` command with REPL
-- [x] `qail pull` - schema introspection
-- [x] `qail fmt` - query formatter (v2 syntax)
-- [x] LSP: VS Code extension (qail-lsp)
-- [x] WASM: Browser playground (qail-wasm)
+- [x] LSP: VS Code extension
+- [x] WASM: Browser playground
+
+### SQL Transpiler (Legacy Path)
+- [x] PostgreSQL, MySQL, SQLite, SQL Server
+- [x] Oracle, BigQuery, Snowflake, Redshift
+- [x] MongoDB, DynamoDB, Redis, Cassandra
+- [x] Elasticsearch, Neo4j, Qdrant
 
 ---
 
-## 🚀 v0.9.0 - Static Compiler Release
+## 🚀 v0.9.0 - Wire Protocol Release
 
-**Theme:** "Compile-time safety for everyone"
+**Theme:** "AST to Bytes, No Strings Attached"
 
 ### High Priority
-- [ ] `qail check` CLI linter for Python/JS
-- [ ] Re-export `qail!` macros from `qail-sqlx`
-- [ ] Schema diff: `qail diff` (compare schema.json versions)
-- [ ] Improved error spans in macro errors
+- [ ] Extended Query Protocol (Parse/Bind/Execute)
+- [ ] Parameter binding in wire protocol
+- [ ] Row decoding (bytes → typed values)
+- [ ] Connection pooling skeleton
 
 ### Medium Priority
-- [ ] `qail-py` Python bindings (via PyO3)
-- [ ] `qail-node` Node.js bindings (via napi-rs)
-- [ ] GitHub Action: `qail-check-action`
+- [ ] Builder API for ergonomic AST construction
+- [ ] Transaction support (BEGIN/COMMIT/ROLLBACK)
+- [ ] Error mapping (PG error codes → Rust errors)
 
 ---
 
 ## 🔮 v1.0.0 - Production Ready
 
-**Theme:** "Enterprise-grade data control plane"
+**Theme:** "Replace sqlx in production"
 
 ### Core Features
-- [ ] Query plan analysis
-- [ ] Automatic query optimization hints
-- [ ] Transaction support in DSL
-- [ ] Migration generation from schema diffs
+- [ ] Full Extended Query Protocol
+- [ ] Prepared statement caching
+- [ ] SSL/TLS support
+- [ ] SCRAM-SHA-256 authentication
+
+### Performance
+- [ ] Zero-copy row decoding
+- [ ] Pipeline mode (batch queries)
+- [ ] Benchmark suite vs sqlx/tokio-postgres
 
 ### Ecosystem
-- [ ] `qail-studio` - Visual query builder
-- [ ] `qail-proxy` - Database proxy with validation
-- [ ] OpenTelemetry tracing integration
+- [ ] `qail-mysql` - MySQL wire protocol
+- [ ] `qail-sqlite` - SQLite (embedded, no network)
+- [ ] Migration tooling
 
-### Documentation
-- [ ] Complete language specification
-- [ ] Interactive tutorial site
-- [ ] Video course
+---
+
+## 🌍 v2.0.0 - Universal Platform
+
+**Theme:** "One AST, Every Database, Every Language"
+
+### Multi-Database
+- [ ] MySQL driver (qail-mysql)
+- [ ] SQLite driver (qail-sqlite)
+- [ ] Unified connection abstraction
+
+### Multi-Language
+- [ ] Python bindings (PyO3)
+- [ ] JavaScript bindings (napi-rs)
+- [ ] Go bindings (cgo)
+
+### Advanced Features
+- [ ] Query plan analysis
+- [ ] Automatic query optimization
+- [ ] Distributed transaction coordination
 
 ---
 
 ## 📊 Progress Summary
 
-| Category | Items | Done | Progress |
-|----------|-------|------|----------|
-| SQL Dialects | 11 | 11 | 100% |
-| NoSQL Dialects | 7 | 7 | 100% |
-| Core Parser | 15 | 15 | 100% |
-| qail-sqlx | 8 | 8 | 100% |
-| qail-macros | 6 | 6 | 100% |
-| Dev Tools | 5 | 5 | 100% |
-| **v0.9 Features** | 7 | 0 | 0% |
+| Component | Status | Notes |
+|-----------|--------|-------|
+| AST (`QailCmd`) | ✅ Complete | Universal representation |
+| Parser | ✅ Complete | Text → AST for tools |
+| SQL Transpiler | ✅ Complete | AST → SQL text (legacy) |
+| PG Wire Encoder | 🔄 In Progress | AST → BytesMut |
+| PG Driver | 🔄 Skeleton | Async I/O |
+| MySQL Wire Encoder | 📋 Planned | - |
+| Builder API | 📋 Planned | Ergonomic AST construction |
 
 ---
 
-## 💡 Why QAIL is Different
+## 💡 Why AST-Native?
 
-| Aspect | Traditional ORMs | QAIL |
-|--------|-----------------|------|
-| **Scope** | One language (Rust/Python/etc) | Universal |
-| **Validation** | Runtime or model-based | **Schema file (offline)** |
-| **Databases** | Usually SQL-only | SQL + NoSQL |
-| **Distribution** | Library | **Platform** |
-| **Lock-in** | Framework-specific | **Standard syntax** |
+| Aspect | SQL Strings | QAIL AST |
+|--------|-------------|----------|
+| **Type Safety** | Runtime errors | Compile-time |
+| **Injection Risk** | Possible | Impossible |
+| **Parsing** | At runtime | At compile |
+| **Portability** | Text encoding issues | Binary, exact |
+| **Optimization** | Hard | AST transformations |
 
 ---
 
-## 🏆 The Competitive Landscape
+## 🏗️ Removed / Deprecated
 
-| Tool | Type | QAIL Advantage |
-|------|------|----------------|
-| SQLx | Rust ORM | QAIL has universal syntax + NoSQL |
-| SeaORM | Rust ORM | QAIL works in Python/JS too |
-| Prisma | Node ORM | QAIL has Rust performance + more dialects |
-| LINQ | C# DSL | QAIL is not locked to Microsoft |
-
-**QAIL is the "TypeScript for Databases"** - adding compile-time safety to a historically runtime-only domain.
+| Component | Status | Reason |
+|-----------|--------|--------|
+| `qail-sqlx` | ❌ Deleted | Replaced by native drivers |
+| `qail-driver` | ❌ Deleted | Merged into qail-pg |
+| `qail-macros` | ⏸️ Paused | AST-native doesn't need string macros |
 
 ---
 
@@ -169,8 +176,8 @@ Level 3: QAIL            → "Universal, type-safe, works everywhere"
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| 0.8.0 | Dec 2024 | Initial release, parser + transpiler |
-| 0.8.5 | Dec 2024 | Named parameters, qail-sqlx |
-| 0.8.10 | Dec 2024 | **qail! macro, compile-time validation** |
-| 0.9.0 | TBD | qail check CLI, Python/JS bindings |
-| 1.0.0 | TBD | Production release |
+| 0.8.0 | Dec 2024 | Parser + SQL transpiler |
+| 0.8.12 | Dec 2024 | nom v8 migration |
+| 0.8.13 | Dec 2024 | **AST-native pivot, PgEncoder** |
+| 0.9.0 | TBD | Extended Query Protocol |
+| 1.0.0 | TBD | Production-ready PG driver |

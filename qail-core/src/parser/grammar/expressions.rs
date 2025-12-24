@@ -12,7 +12,8 @@ use nom::{
     bytes::complete::{tag, tag_no_case},
     character::complete::multispace0,
     combinator::{map, opt},
-    sequence::preceded,
+    sequence::{preceded, delimited},
+    Parser,
     IResult,
 };
 use crate::ast::*;
@@ -40,7 +41,7 @@ pub fn parse_expression_with_alias(input: &str) -> IResult<&str, Expr> {
     let (input, _) = multispace0(input)?;
     
     // Check for optional AS alias
-    if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("as")(input) {
+    if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("as").parse(input) {
         let (remaining, _) = nom::character::complete::multispace1(remaining)?;
         let (remaining, alias) = parse_identifier(remaining)?;
         expr = set_expr_alias(expr, alias.to_string());
@@ -83,7 +84,7 @@ pub fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
         let (remaining, json_op) = opt(alt((
             tag("->>"),
             tag("->"),
-        )))(input)?;
+        ))).parse(input)?;
         
         if let Some(op) = json_op {
             let (remaining, _) = multispace0(remaining)?;
@@ -120,7 +121,7 @@ pub fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
     let (input, cast_type) = opt(preceded(
         tag("::"),
         parse_identifier
-    ))(input)?;
+    )).parse(input)?;
     
     if let Some(target_type) = cast_type {
         expr = Expr::Cast {
@@ -135,14 +136,13 @@ pub fn parse_json_or_ident(input: &str) -> IResult<&str, Expr> {
 
 /// Parse a parenthesized expression: (expr)
 fn parse_grouped_expr(input: &str) -> IResult<&str, Expr> {
-    use nom::sequence::delimited;
     use nom::character::complete::multispace0;
     
     delimited(
-        nom::sequence::tuple((nom::character::complete::char('('), multispace0)),
+        (nom::character::complete::char('('), multispace0),
         parse_expression,
-        nom::sequence::tuple((multispace0, nom::character::complete::char(')')))
-    )(input)
+        (multispace0, nom::character::complete::char(')'))
+    ).parse(input)
 }
 
 /// Parse atomic expressions (functions, case, literals, identifiers, wildcards, grouped)
@@ -155,11 +155,11 @@ fn parse_atom(input: &str) -> IResult<&str, Expr> {
         parse_star,
         parse_literal,
         parse_simple_ident,
-    ))(input)
+    )).parse(input)
 }
 
 fn parse_star(input: &str) -> IResult<&str, Expr> {
-    map(tag("*"), |_| Expr::Star)(input)
+    map(tag("*"), |_| Expr::Star).parse(input)
 }
 
 /// Parse literal values (strings, numbers, named params) as expressions
@@ -179,9 +179,9 @@ fn parse_literal(input: &str) -> IResult<&str, Expr> {
         Value::Interval { amount, unit } => Expr::Named(format!("INTERVAL '{} {}'", amount, unit)),
         // Fall back to Display for other variants
         _ => Expr::Named(v.to_string()),
-    })(input)
+    }).parse(input)
 }
 
 fn parse_simple_ident(input: &str) -> IResult<&str, Expr> {
-    map(parse_identifier, |s| Expr::Named(s.to_string()))(input)
+    map(parse_identifier, |s| Expr::Named(s.to_string())).parse(input)
 }
