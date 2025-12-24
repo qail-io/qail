@@ -14,3 +14,31 @@ pub struct Condition {
     #[serde(default)]
     pub is_array_unnest: bool,
 }
+
+impl std::fmt::Display for Condition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let op_str = match self.op {
+            Operator::Eq => "=",
+            Operator::Ne => "!=",
+            Operator::Gt => ">",
+            Operator::Gte => ">=",
+            Operator::Lt => "<",
+            Operator::Lte => "<=",
+            Operator::Like => "LIKE",
+            Operator::ILike => "ILIKE",
+            Operator::NotLike => "NOT LIKE",
+            Operator::NotILike => "NOT ILIKE",
+            Operator::In => "IN",
+            Operator::NotIn => "NOT IN",
+            Operator::IsNull => "IS NULL",
+            Operator::IsNotNull => "IS NOT NULL",
+            Operator::Fuzzy => "ILIKE",
+            Operator::Contains => "@>",
+            Operator::KeyExists => "?",
+            Operator::JsonExists => "JSON_EXISTS",
+            Operator::JsonQuery => "JSON_QUERY",
+            Operator::JsonValue => "JSON_VALUE",
+        };
+        write!(f, "{} {} {}", self.left, op_str, self.value)
+    }
+}

@@ -154,9 +154,20 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                         }
                     }
                 }
-                Expr::Aggregate { col, func, alias } => {
+                Expr::Aggregate { col, func, filter, alias } => {
                     // Render aggregate function: COUNT(*), SUM(col), etc.
-                    let expr = format!("{}({})", func, if col == "*" { "*".to_string() } else { generator.quote_identifier(col) });
+                    let mut expr = format!("{}({})", func, if col == "*" { "*".to_string() } else { generator.quote_identifier(col) });
+                    
+                    // Add FILTER clause if present (PostgreSQL extension)
+                    if let Some(conditions) = filter {
+                        if !conditions.is_empty() {
+                            let filter_parts: Vec<String> = conditions.iter()
+                                .map(|c| c.to_string())
+                                .collect();
+                            expr.push_str(&format!(" FILTER (WHERE {})", filter_parts.join(" AND ")));
+                        }
+                    }
+                    
                     if let Some(a) = alias {
                         format!("{} AS {}", expr, generator.quote_identifier(a))
                     } else {

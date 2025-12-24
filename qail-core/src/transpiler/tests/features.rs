@@ -379,6 +379,7 @@ fn test_having_clause() {
     cmd.columns.push(Expr::Aggregate { 
         col: "total".to_string(), 
         func: AggregateFunc::Sum,
+        filter: None,
         alias: None,
     });
     cmd.having.push(Condition {
@@ -404,6 +405,7 @@ fn test_group_by_rollup() {
     cmd.columns.push(Expr::Aggregate { 
         col: "amount".to_string(), 
         func: AggregateFunc::Sum,
+        filter: None,
         alias: None,
     });
     cmd.group_by_mode = GroupByMode::Rollup;
@@ -421,6 +423,7 @@ fn test_group_by_cube() {
     cmd.columns.push(Expr::Aggregate { 
         col: "amount".to_string(), 
         func: AggregateFunc::Sum,
+        filter: None,
         alias: None,
     });
     cmd.group_by_mode = GroupByMode::Cube;
@@ -428,6 +431,33 @@ fn test_group_by_cube() {
     let sql = cmd.to_sql();
     println!("CUBE: {}", sql);
     assert!(sql.contains("GROUP BY CUBE("));
+}
+
+// ============= AGGREGATE FILTER =============
+
+#[test]
+fn test_aggregate_filter() {
+    // Test PostgreSQL FILTER (WHERE ...) clause on aggregates
+    let mut cmd = QailCmd::get("messages");
+    
+    // COUNT(*) FILTER (WHERE direction = 'outbound')
+    cmd.columns.push(Expr::Aggregate {
+        col: "*".to_string(),
+        func: AggregateFunc::Count,
+        filter: Some(vec![Condition {
+            left: Expr::Named("direction".to_string()),
+            op: Operator::Eq,
+            value: Value::String("outbound".to_string()),
+            is_array_unnest: false,
+        }]),
+        alias: Some("sent_count".to_string()),
+    });
+    
+    let sql = cmd.to_sql();
+    println!("FILTER clause: {}", sql);
+    assert!(sql.contains("FILTER"));
+    assert!(sql.contains("WHERE"));
+    assert!(sql.contains("direction"));
 }
 
 // ============= RECURSIVE CTEs =============
