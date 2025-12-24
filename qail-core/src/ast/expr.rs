@@ -212,7 +212,7 @@ impl std::fmt::Display for Expr {
             }
             Expr::JsonAccess { column, path, as_text, alias } => {
                 let op = if *as_text { "->>" } else { "->" };
-                write!(f, "{}{}{}", column, op, path)?;
+                write!(f, "{}{}'{}'", column, op, path)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
                 }
