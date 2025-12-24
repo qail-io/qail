@@ -139,7 +139,11 @@ fn parse_literal(input: &str) -> IResult<&str, Expr> {
         Value::Param(n) => Expr::Named(format!("${}", n)),
         Value::String(s) => Expr::Named(format!("'{}'", s)),
         Value::Int(n) => Expr::Named(n.to_string()),
-        Value::Float(f) => Expr::Named(f.to_string()),
+        Value::Float(f) => {
+            // Ensure float always has decimal point (100.0 not 100)
+            let s = f.to_string();
+            if s.contains('.') { Expr::Named(s) } else { Expr::Named(format!("{}.0", s)) }
+        },
         Value::Bool(b) => Expr::Named(if b { "TRUE".to_string() } else { "FALSE".to_string() }),
         Value::Null => Expr::Named("NULL".to_string()),
         _ => Expr::Named("VALUE".to_string()),
