@@ -63,6 +63,13 @@ enum CliDialect {
     Sqlserver,
 }
 
+#[derive(Clone, ValueEnum, Default)]
+enum SchemaFormat {
+    #[default]
+    Json,
+    Qail,
+}
+
 impl From<CliDialect> for Dialect {
     fn from(val: CliDialect) -> Self {
         match val {
@@ -97,6 +104,9 @@ enum Commands {
     Pull {
         /// Database connection URL (postgres:// or mysql://)
         url: String,
+        /// Output format (json or qail)
+        #[arg(short, long, value_enum, default_value = "json")]
+        format: SchemaFormat,
     },
     /// Format a QAIL query to canonical v2 syntax
     Fmt {
@@ -116,8 +126,12 @@ async fn main() -> Result<()> {
         Some(Commands::Mig { query, name }) => {
             generate_migration(query, name.clone())?;
         },
-        Some(Commands::Pull { url }) => {
-            qail::introspection::pull_schema(url).await?;
+        Some(Commands::Pull { url, format }) => {
+            let output_format = match format {
+                SchemaFormat::Json => qail::introspection::SchemaOutputFormat::Json,
+                SchemaFormat::Qail => qail::introspection::SchemaOutputFormat::Qail,
+            };
+            qail::introspection::pull_schema(url, output_format).await?;
         },
         Some(Commands::Fmt { query }) => {
             format_query(query)?;

@@ -1,7 +1,7 @@
 [package]
 name = "qail"
 version = "0.8.12"
-edition = "2024"
+edition = "2021"
 description = "The Universal Query Transpiler - SQL is Assembly, Compile to Safety"
 license = "MIT"
 repository = "https://github.com/qail-rs/qail"
