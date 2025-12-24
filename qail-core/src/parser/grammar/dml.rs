@@ -68,16 +68,16 @@ pub fn parse_assignment(input: &str) -> IResult<&str, Condition> {
     let (input, _) = char('=')(input)?;
     let (input, _) = multispace0(input)?;
     
-    // Try subquery first: (get ...), then expression, then simple value
+    // Try simple value first (booleans, strings, numbers, params), then subquery, then expression
     let (input, value) = alt((
+        // Try simple value parsing first (handles booleans, strings, numbers, params)
+        parse_value,
         // Try parenthesized subquery: (get ...)
         parse_subquery_value,
-        // Try expression and convert to Value::Function
+        // Fall back to expression and convert to Value::Function
         nom::combinator::map(parse_expression, |expr| {
             Value::Function(expr.to_string())
         }),
-        // Fall back to simple value parsing
-        parse_value,
     ))(input)?;
     
     Ok((input, Condition {

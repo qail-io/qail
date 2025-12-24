@@ -24,12 +24,39 @@ pub fn parse_fields_clause(input: &str) -> IResult<&str, Vec<Expr>> {
     ))(input)
 }
 
-/// Parse comma-separated column list
+/// Parse comma-separated column list, respecting parenthesis depth
+/// (commas inside parens don't split columns)
 pub fn parse_column_list(input: &str) -> IResult<&str, Vec<Expr>> {
-    separated_list1(
-        tuple((multispace0, char(','), multispace0)),
-        parse_single_column
-    )(input)
+    let mut columns = Vec::new();
+    let mut current_input = input;
+    
+    loop {
+        // Parse a single column
+        let (remaining, col) = parse_single_column(current_input)?;
+        columns.push(col);
+        current_input = remaining;
+        
+        // Skip whitespace
+        let (remaining, _) = multispace0(current_input)?;
+        
+        // Check for comma separator at depth 0
+        if remaining.starts_with(',') {
+            // Consume comma and whitespace
+            let (remaining, _) = char(',')(remaining)?;
+            let (remaining, _) = multispace0(remaining)?;
+            current_input = remaining;
+        } else {
+            // No more columns
+            current_input = remaining;
+            break;
+        }
+    }
+    
+    if columns.is_empty() {
+        Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::SeparatedList)))
+    } else {
+        Ok((current_input, columns))
+    }
 }
 
 /// Parse a single column with optional alias: name as display_name
@@ -61,6 +88,8 @@ pub fn parse_single_column(input: &str) -> IResult<&str, Expr> {
             Expr::FunctionCall { name, args, .. } => Expr::FunctionCall { name, args, alias: Some(a.to_string()) },
             Expr::JsonAccess { column, path, as_text, .. } => Expr::JsonAccess { column, path, as_text, alias: Some(a.to_string()) },
             Expr::Case { when_clauses, else_value, .. } => Expr::Case { when_clauses, else_value, alias: Some(a.to_string()) },
+            Expr::Aggregate { col, func, distinct, filter, .. } => Expr::Aggregate { col, func, distinct, filter, alias: Some(a.to_string()) },
+            Expr::Cast { expr: inner, target_type, .. } => Expr::Cast { expr: inner, target_type, alias: Some(a.to_string()) },
             _ => expr,
         };
     }

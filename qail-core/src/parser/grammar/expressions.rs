@@ -316,7 +316,6 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
             (input, Value::Array(values))
         } else {
             // Try parsing as expression first (for now() - 24h type syntax)
-            // then convert to Value::Function with the expression string
             parse_filter_value(input)?
         };
         
@@ -329,16 +328,17 @@ fn parse_filter_conditions(input: &str) -> IResult<&str, Vec<Condition>> {
         
         current_input = input;
         
-        // Check for AND
+        // Check for AND (use multispace0 since parse_filter_value may consume trailing space)
         let and_result: IResult<&str, _> = preceded(
-            tuple((multispace1, tag_no_case("and"), multispace1)),
+            tuple((multispace0, tag_no_case("and"), multispace1)),
             peek(parse_identifier)
         )(current_input);
         
         if let Ok((_next_input, _)) = and_result {
-            // Skip the AND keyword
-            let (next_input, _) = multispace1(current_input)?;
+            // Skip the AND keyword and trailing whitespace
+            let (next_input, _) = multispace0(current_input)?;
             let (next_input, _) = tag_no_case("and")(next_input)?;
+            let (next_input, _) = multispace1(next_input)?;
             current_input = next_input;
         } else {
             break;
