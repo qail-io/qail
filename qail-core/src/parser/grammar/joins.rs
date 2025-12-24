@@ -40,6 +40,9 @@ pub fn parse_join_clause(input: &str) -> IResult<&str, Join> {
         parse_join_condition
     ))(input)?;
     
+    // Consume trailing whitespace so many0 can find the next JOIN
+    let (input, _) = multispace0(input)?;
+    
     Ok((input, Join {
         table: table.to_string(),
         kind,

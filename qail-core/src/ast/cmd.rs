@@ -36,9 +36,9 @@ pub struct QailCmd {
     /// CTE definitions (for WITH/WITH RECURSIVE queries)
     #[serde(default)]
     pub ctes: Vec<CTEDef>,
-    /// DISTINCT ON columns (Postgres-specific)
+    /// DISTINCT ON expressions (Postgres-specific) - supports columns and expressions
     #[serde(default)]
-    pub distinct_on: Vec<String>,
+    pub distinct_on: Vec<Expr>,
     /// RETURNING clause columns (for INSERT/UPDATE/DELETE)
     /// Empty = RETURNING *, Some([]) = no RETURNING, Some([cols]) = RETURNING cols
     #[serde(default)]
@@ -46,6 +46,10 @@ pub struct QailCmd {
     /// ON CONFLICT clause for upsert operations (INSERT only)
     #[serde(default)]
     pub on_conflict: Option<OnConflict>,
+    /// Source query for INSERT...SELECT (INSERT only)
+    /// When present, values come from this subquery instead of VALUES clause
+    #[serde(default)]
+    pub source_query: Option<Box<QailCmd>>,
 }
 
 /// CTE (Common Table Expression) definition
@@ -114,6 +118,7 @@ impl QailCmd {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            source_query: None,
         }
     }
 
@@ -135,6 +140,7 @@ impl QailCmd {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            source_query: None,
         }
     }
 
@@ -156,6 +162,7 @@ impl QailCmd {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            source_query: None,
         }
     }
 
@@ -177,6 +184,7 @@ impl QailCmd {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            source_query: None,
         }
     }
 
@@ -198,6 +206,7 @@ impl QailCmd {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            source_query: None,
         }
     }
 
@@ -219,6 +228,7 @@ impl QailCmd {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            source_query: None,
         }
     }
 
@@ -240,6 +250,7 @@ impl QailCmd {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            source_query: None,
         }
     }
 
@@ -342,6 +353,7 @@ impl QailCmd {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            source_query: None,
             ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,

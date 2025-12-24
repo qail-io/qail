@@ -48,7 +48,10 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     }
     
     // Try WITH clause (CTE) parsing
-    let (input, ctes) = if input.to_lowercase().starts_with("with ") {
+    // Check for 'with' followed by any whitespace (space, newline, tab)
+    let lower_input = input.to_lowercase();
+    let (input, ctes) = if lower_input.starts_with("with") && 
+        lower_input.chars().nth(4).map(|c| c.is_whitespace()).unwrap_or(false) {
         let (remaining, (cte_defs, _is_recursive)) = cte::parse_with_clause(input)?;
         let (remaining, _) = multispace0(remaining)?;
         (remaining, cte_defs)
@@ -60,22 +63,23 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     let (input, (action, distinct)) = parse_action(input)?;
     let (input, _) = multispace1(input)?;
     
-    // Check for DISTINCT ON (col1, col2) after action (Postgres-specific)
+    // Check for DISTINCT ON (expr1, expr2) after action (Postgres-specific)
+    // Supports expressions like: CASE WHEN ... END, functions, columns
     let (input, distinct_on) = if distinct {
         // If already parsed "get distinct", check for "on (...)"
         if let Ok((remaining, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("on")(input) {
             let (remaining, _) = multispace0(remaining)?;
-            // Parse (col1, col2)
-            let (remaining, cols) = nom::sequence::delimited(
+            // Parse (expr1, expr2) - full expressions, not just identifiers
+            let (remaining, exprs) = nom::sequence::delimited(
                 nom::character::complete::char('('),
                 nom::multi::separated_list1(
                     nom::sequence::tuple((multispace0, nom::character::complete::char(','), multispace0)),
-                    |i| parse_identifier(i).map(|(r, s)| (r, s.to_string()))
+                    expressions::parse_expression
                 ),
                 nom::character::complete::char(')')
             )(remaining)?;
             let (remaining, _) = multispace1(remaining)?;
-            (remaining, cols)
+            (remaining, exprs)
         } else {
             (input, vec![])
         }
@@ -108,8 +112,16 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
     let (input, columns) = opt(parse_fields_clause)(input)?;
     let (input, _) = multispace0(input)?;
     
-    // For ADD/INSERT: parse "values val1, val2" AFTER fields clause
-    let (input, add_cages) = if matches!(action, Action::Add) {
+    // For ADD/INSERT: try "from (get ...)" first, then fall back to "values val1, val2"
+    let (input, source_query) = if matches!(action, Action::Add) {
+        opt(dml::parse_source_query)(input)?
+    } else {
+        (input, None)
+    };
+    let (input, _) = multispace0(input)?;
+    
+    // Only parse values if no source_query (INSERT...SELECT takes precedence)
+    let (input, add_cages) = if source_query.is_none() && matches!(action, Action::Add) {
         opt(dml::parse_insert_values)(input)?
     } else {
         (input, None)
@@ -175,6 +187,7 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
         returning: None,
         ctes,
         on_conflict,
+        source_query,
     }))
 }
 
