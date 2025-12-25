@@ -6,6 +6,7 @@ pub mod transpiler;
 pub mod schema;
 pub mod fmt;
 pub mod migrate;
+pub mod analyzer;
 
 pub use parser::parse;
 
