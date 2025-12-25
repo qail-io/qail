@@ -20,7 +20,9 @@
 pub mod schema;
 pub mod diff;
 pub mod parser;
+pub mod types;
 
 pub use schema::{Schema, Table, Column, Index, MigrationHint, to_qail_string};
 pub use diff::diff_schemas;
 pub use parser::parse_qail;
+pub use types::ColumnType;

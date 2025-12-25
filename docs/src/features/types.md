@@ -18,6 +18,27 @@ QAIL provides type conversion between Rust and PostgreSQL.
 | `Json` | JSON, JSONB | |
 | `Decimal` | NUMERIC | Arbitrary precision |
 
+## Compile-Time Type Safety
+
+QAIL uses the `ColumnType` enum for compile-time validation in schema definitions:
+
+```rust
+use qail_core::migrate::{Column, ColumnType};
+
+// ✅ Compile-time enforced - no typos possible
+Column::new("id", ColumnType::Uuid).primary_key()
+Column::new("name", ColumnType::Text).not_null()
+Column::new("email", ColumnType::Varchar(Some(255))).unique()
+
+// Available types:
+// Uuid, Text, Varchar, Int, BigInt, Serial, BigSerial,
+// Bool, Float, Decimal, Jsonb, Timestamp, Timestamptz, Date, Time, Bytea
+```
+
+**Validation at compile time:**
+- `primary_key()` validates the type can be a PK (UUID, INT, SERIAL)
+- `unique()` validates the type supports indexing (not JSONB, BYTEA)
+
 ## Usage
 
 ### Reading Values

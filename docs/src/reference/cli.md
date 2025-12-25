@@ -35,6 +35,27 @@ Compare two schemas and show migration commands:
 qail diff old.qail new.qail
 ```
 
+### `qail check`
+
+Validate a schema file or preview migration safety:
+
+```bash
+# Validate schema
+qail check schema.qail
+# ✓ Schema is valid
+#   Tables: 80
+#   Columns: 1110
+#   Indexes: 287
+#   ✓ 82 primary key(s)
+
+# Check migration safety
+qail check old.qail:new.qail
+# ✓ Both schemas are valid
+# Migration preview: 4 operation(s)
+#   ✓ 3 safe operation(s)
+#   ⚠️  1 reversible operation(s)
+```
+
 ### `qail migrate up`
 
 Apply migrations:

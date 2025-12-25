@@ -71,7 +71,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let is_nullable = is_nullable_str == "YES";
         let is_primary: bool = row.get("is_primary");
         
-        let col_type = map_pg_type(&udt_name);
+        // Map PostgreSQL type to QAIL ColumnType
+        let col_type_str = map_pg_type(&udt_name);
+        let col_type = qail_core::migrate::ColumnType::from_str(col_type_str)
+            .unwrap_or(qail_core::migrate::ColumnType::Text);
 
         let mut col = Column::new(&col_name, col_type);
         col.nullable = is_nullable;
@@ -177,7 +180,10 @@ async fn inspect_mysql(url: &str) -> Result<Schema> {
         let is_nullable = is_nullable_str == "YES";
         let is_primary = column_key == "PRI";
         
-        let col_type = map_mysql_type(&data_type);
+        // Map MySQL type to QAIL ColumnType  
+        let col_type_str = map_mysql_type(&data_type);
+        let col_type = qail_core::migrate::ColumnType::from_str(col_type_str)
+            .unwrap_or(qail_core::migrate::ColumnType::Text);
 
         let mut col = Column::new(&col_name, col_type);
         col.nullable = is_nullable;

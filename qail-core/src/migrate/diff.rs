@@ -88,7 +88,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                 
                 Expr::Def {
                     name: col.name.clone(),
-                    data_type: col.data_type.clone(),
+                    data_type: col.data_type.to_pg_type(),
                     constraints,
                 }
             }).collect();
@@ -149,7 +149,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                             table: name.clone(),
                             columns: vec![Expr::Def {
                                 name: col.name.clone(),
-                                data_type: col.data_type.clone(),
+                                data_type: col.data_type.to_pg_type(),
                                 constraints,
                             }],
                             ..Default::default()
@@ -228,11 +228,12 @@ mod tests {
 
     #[test]
     fn test_diff_new_table() {
+        use super::super::types::ColumnType;
         let old = Schema::default();
         let mut new = Schema::default();
         new.add_table(Table::new("users")
-            .column(Column::new("id", "serial").primary_key())
-            .column(Column::new("name", "text").not_null()));
+            .column(Column::new("id", ColumnType::Serial).primary_key())
+            .column(Column::new("name", ColumnType::Text).not_null()));
         
         let cmds = diff_schemas(&old, &new);
         assert_eq!(cmds.len(), 1);
@@ -241,13 +242,14 @@ mod tests {
 
     #[test]
     fn test_diff_rename_with_hint() {
+        use super::super::types::ColumnType;
         let mut old = Schema::default();
         old.add_table(Table::new("users")
-            .column(Column::new("username", "text")));
+            .column(Column::new("username", ColumnType::Text)));
         
         let mut new = Schema::default();
         new.add_table(Table::new("users")
-            .column(Column::new("name", "text")));
+            .column(Column::new("name", ColumnType::Text)));
         new.add_hint(MigrationHint::Rename {
             from: "users.username".into(),
             to: "users.name".into(),

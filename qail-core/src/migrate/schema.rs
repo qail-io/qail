@@ -15,6 +15,7 @@
 //! ```
 
 use std::collections::HashMap;
+use super::types::ColumnType;
 
 /// A complete database schema.
 #[derive(Debug, Clone, Default)]
@@ -31,11 +32,11 @@ pub struct Table {
     pub columns: Vec<Column>,
 }
 
-/// A column definition.
+/// A column definition with compile-time type safety.
 #[derive(Debug, Clone)]
 pub struct Column {
     pub name: String,
-    pub data_type: String,
+    pub data_type: ColumnType,
     pub nullable: bool,
     pub primary_key: bool,
     pub unique: bool,
@@ -95,10 +96,11 @@ impl Table {
 }
 
 impl Column {
-    pub fn new(name: impl Into<String>, data_type: impl Into<String>) -> Self {
+    /// Create a new column with compile-time type validation.
+    pub fn new(name: impl Into<String>, data_type: ColumnType) -> Self {
         Self {
             name: name.into(),
-            data_type: data_type.into(),
+            data_type,
             nullable: true,
             primary_key: false,
             unique: false,
@@ -111,13 +113,36 @@ impl Column {
         self
     }
 
+    /// Set as primary key with compile-time validation.
+    /// 
+    /// Validates that the column type can be a primary key.
+    /// Panics at runtime if type doesn't support PK (caught in tests).
     pub fn primary_key(mut self) -> Self {
+        if !self.data_type.can_be_primary_key() {
+            panic!(
+                "Column '{}' of type {} cannot be a primary key. \
+                 Valid PK types: UUID, SERIAL, BIGSERIAL, INT, BIGINT",
+                self.name,
+                self.data_type.name()
+            );
+        }
         self.primary_key = true;
         self.nullable = false;
         self
     }
 
+    /// Set as unique with compile-time validation.
+    /// 
+    /// Validates that the column type supports indexing.
     pub fn unique(mut self) -> Self {
+        if !self.data_type.supports_indexing() {
+            panic!(
+                "Column '{}' of type {} cannot have UNIQUE constraint. \
+                 JSONB and BYTEA types do not support standard indexing.",
+                self.name,
+                self.data_type.name()
+            );
+        }
         self.unique = true;
         self
     }
@@ -172,7 +197,7 @@ pub fn to_qail_string(schema: &Schema) -> String {
                 format!(" {}", constraints.join(" "))
             };
             
-            output.push_str(&format!("  {} {}{}\n", col.name, col.data_type, constraint_str));
+            output.push_str(&format!("  {} {}{}\n", col.name, col.data_type.to_pg_type(), constraint_str));
         }
         output.push_str("}\n\n");
     }
@@ -215,16 +240,16 @@ mod tests {
         let mut schema = Schema::new();
         
         let users = Table::new("users")
-            .column(Column::new("id", "serial").primary_key())
-            .column(Column::new("name", "text").not_null())
-            .column(Column::new("email", "text").unique());
+            .column(Column::new("id", ColumnType::Serial).primary_key())
+            .column(Column::new("name", ColumnType::Text).not_null())
+            .column(Column::new("email", ColumnType::Text).unique());
         
         schema.add_table(users);
         schema.add_index(Index::new("idx_users_email", "users", vec!["email".into()]).unique());
         
         let output = to_qail_string(&schema);
         assert!(output.contains("table users"));
-        assert!(output.contains("id serial primary_key"));
+        assert!(output.contains("id SERIAL primary_key"));
         assert!(output.contains("unique index idx_users_email"));
     }
 
@@ -238,5 +263,19 @@ mod tests {
         
         let output = to_qail_string(&schema);
         assert!(output.contains("rename users.username -> users.name"));
+    }
+    
+    #[test]
+    #[should_panic(expected = "cannot be a primary key")]
+    fn test_invalid_primary_key_type() {
+        // TEXT cannot be a primary key
+        Column::new("data", ColumnType::Text).primary_key();
+    }
+    
+    #[test]
+    #[should_panic(expected = "cannot have UNIQUE")]
+    fn test_invalid_unique_type() {
+        // JSONB cannot have standard unique index
+        Column::new("data", ColumnType::Jsonb).unique();
     }
 }

@@ -111,11 +111,16 @@ enum Commands {
         /// The QAIL query to format
         query: String,
     },
+    /// Validate a QAIL schema file
+    Check {
+        /// Schema file path (or old:new for migration validation)
+        schema: String,
+    },
     /// Diff two schema files and show migration AST
     Diff {
-        /// Old schema JSON file
+        /// Old schema .qail file
         old: String,
-        /// New schema JSON file
+        /// New schema .qail file
         new: String,
         /// Output format (sql or json)
         #[arg(short, long, value_enum, default_value = "sql")]
@@ -162,6 +167,9 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Fmt { query }) => {
             format_query(query)?;
+        },
+        Some(Commands::Check { schema }) => {
+            check_schema(schema)?;
         },
         Some(Commands::Diff { old, new, format }) => {
             diff_schemas_cmd(old, new, format.clone(), &cli)?;
@@ -490,6 +498,120 @@ fn show_symbols() {
             sql.dimmed()
         );
     }
+    println!();
+}
+
+/// Validate a QAIL schema file with detailed error reporting.
+fn check_schema(schema_path: &str) -> Result<()> {
+    // Check if validating a migration (old:new format)
+    if schema_path.contains(':') && !schema_path.starts_with("postgres") {
+        let parts: Vec<&str> = schema_path.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            println!("{} {} → {}", "Checking migration:".cyan().bold(), parts[0].yellow(), parts[1].yellow());
+            return check_migration(parts[0], parts[1]);
+        }
+    }
+    
+    // Single schema file validation
+    println!("{} {}", "Checking schema:".cyan().bold(), schema_path.yellow());
+    
+    let content = std::fs::read_to_string(schema_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read schema file '{}': {}", schema_path, e))?;
+    
+    match parse_qail(&content) {
+        Ok(schema) => {
+            println!("{}", "✓ Schema is valid".green().bold());
+            println!("  Tables: {}", schema.tables.len());
+            
+            // Detailed breakdown
+            let mut total_columns = 0;
+            let mut primary_keys = 0;
+            let mut unique_constraints = 0;
+            
+            for table in schema.tables.values() {
+                total_columns += table.columns.len();
+                for col in &table.columns {
+                    if col.primary_key {
+                        primary_keys += 1;
+                    }
+                    if col.unique {
+                        unique_constraints += 1;
+                    }
+                }
+            }
+            
+            println!("  Columns: {}", total_columns);
+            println!("  Indexes: {}", schema.indexes.len());
+            println!("  Migration Hints: {}", schema.migrations.len());
+            
+            if primary_keys > 0 {
+                println!("  {} {} primary key(s)", "✓".green(), primary_keys);
+            }
+            if unique_constraints > 0 {
+                println!("  {} {} unique constraint(s)", "✓".green(), unique_constraints);
+            }
+            
+            Ok(())
+        }
+        Err(e) => {
+            println!("{} {}", "✗ Schema validation failed:".red().bold(), e);
+            Err(anyhow::anyhow!("Schema is invalid"))
+        }
+    }
+}
+
+/// Validate a migration between two schemas.
+fn check_migration(old_path: &str, new_path: &str) -> Result<()> {
+    // Load old schema
+    let old_content = std::fs::read_to_string(old_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read old schema '{}': {}", old_path, e))?;
+    let old_schema = parse_qail(&old_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
+    
+    // Load new schema
+    let new_content = std::fs::read_to_string(new_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read new schema '{}': {}", new_path, e))?;
+    let new_schema = parse_qail(&new_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
+    
+    println!("{}", "✓ Both schemas are valid".green().bold());
+    
+    // Compute diff
+    let cmds = diff_schemas(&old_schema, &new_schema);
+    
+    if cmds.is_empty() {
+        println!("{}", "✓ No migration needed - schemas are identical".green());
+        return Ok(());
+    }
+    
+    println!("{} {} operation(s)", "Migration preview:".cyan().bold(), cmds.len());
+    
+    // Classify operations by safety
+    let mut safe_ops = 0;
+    let mut reversible_ops = 0;
+    let mut destructive_ops = 0;
+    
+    for cmd in &cmds {
+        match cmd.action {
+            Action::Make | Action::Alter | Action::Index => safe_ops += 1,
+            Action::Set | Action::Mod => reversible_ops += 1,
+            Action::Drop | Action::AlterDrop | Action::DropIndex => destructive_ops += 1,
+            _ => {}
+        }
+    }
+    
+    if safe_ops > 0 {
+        println!("  {} {} safe operation(s) (CREATE TABLE, ADD COLUMN, CREATE INDEX)", "✓".green(), safe_ops);
+    }
+    if reversible_ops > 0 {
+        println!("  {} {} reversible operation(s) (UPDATE, RENAME)", "⚠️ ".yellow(), reversible_ops);
+    }
+    if destructive_ops > 0 {
+        println!("  {} {} destructive operation(s) (DROP)", "⚠️ ".red(), destructive_ops);
+        println!("    {} Review carefully before applying!", "⚠ WARNING:".red().bold());
+    }
+    
+    Ok(())
 }
 
 /// Compare two schema .qail files and output migration commands.
