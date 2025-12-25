@@ -76,6 +76,12 @@ pub enum BackendMessage {
     NoData,
     /// Copy in response (server ready to receive COPY data)
     CopyInResponse { format: u8, column_formats: Vec<u8> },
+    /// Copy out response (server will send COPY data)
+    CopyOutResponse { format: u8, column_formats: Vec<u8> },
+    /// Copy data (row data during COPY)
+    CopyData(Vec<u8>),
+    /// Copy done (end of COPY data)
+    CopyDone,
     /// Notification response (async notification from LISTEN/NOTIFY)
     NotificationResponse { 
         process_id: i32, 
@@ -84,6 +90,8 @@ pub enum BackendMessage {
     },
     /// Empty query response
     EmptyQueryResponse,
+    /// Notice response (warning/info messages, not errors)
+    NoticeResponse(ErrorFields),
 }
 
 /// Transaction status
@@ -212,8 +220,12 @@ impl BackendMessage {
             b'2' => BackendMessage::BindComplete,
             b'n' => BackendMessage::NoData,
             b'G' => Self::decode_copy_in_response(payload)?,
+            b'H' => Self::decode_copy_out_response(payload)?,
+            b'd' => BackendMessage::CopyData(payload.to_vec()),
+            b'c' => BackendMessage::CopyDone,
             b'A' => Self::decode_notification_response(payload)?,
             b'I' => BackendMessage::EmptyQueryResponse,
+            b'N' => BackendMessage::NoticeResponse(Self::parse_error_fields(payload)?),
             _ => return Err(format!("Unknown message type: {}", msg_type as char)),
         };
         
@@ -382,6 +394,10 @@ impl BackendMessage {
     }
     
     fn decode_error_response(payload: &[u8]) -> Result<Self, String> {
+        Ok(BackendMessage::ErrorResponse(Self::parse_error_fields(payload)?))
+    }
+
+    fn parse_error_fields(payload: &[u8]) -> Result<ErrorFields, String> {
         let mut fields = ErrorFields::default();
         let mut i = 0;
         while i < payload.len() && payload[i] != 0 {
@@ -400,7 +416,7 @@ impl BackendMessage {
                 _ => {}
             }
         }
-        Ok(BackendMessage::ErrorResponse(fields))
+        Ok(fields)
     }
 
     fn decode_copy_in_response(payload: &[u8]) -> Result<Self, String> {
@@ -419,6 +435,24 @@ impl BackendMessage {
             vec![]
         };
         Ok(BackendMessage::CopyInResponse { format, column_formats })
+    }
+
+    fn decode_copy_out_response(payload: &[u8]) -> Result<Self, String> {
+        if payload.is_empty() {
+            return Err("Empty CopyOutResponse payload".to_string());
+        }
+        let format = payload[0];
+        let num_columns = if payload.len() >= 3 {
+            i16::from_be_bytes([payload[1], payload[2]]) as usize
+        } else {
+            0
+        };
+        let column_formats: Vec<u8> = if payload.len() > 3 && num_columns > 0 {
+            payload[3..].iter().take(num_columns).copied().collect()
+        } else {
+            vec![]
+        };
+        Ok(BackendMessage::CopyOutResponse { format, column_formats })
     }
 
     fn decode_notification_response(payload: &[u8]) -> Result<Self, String> {

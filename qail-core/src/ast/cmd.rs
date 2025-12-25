@@ -99,6 +99,29 @@ impl Default for OnConflict {
     }
 }
 
+impl Default for QailCmd {
+    fn default() -> Self {
+        Self {
+            action: Action::Get,
+            table: String::new(),
+            columns: vec![],
+            joins: vec![],
+            cages: vec![],
+            distinct: false,
+            index_def: None,
+            table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            ctes: vec![],
+            distinct_on: vec![],
+            returning: None,
+            on_conflict: None,
+            source_query: None,
+        }
+    }
+}
+
 impl QailCmd {
     /// Create a new GET command for the given table.
     pub fn get(table: impl Into<String>) -> Self {
@@ -214,6 +237,44 @@ impl QailCmd {
     pub fn put(table: impl Into<String>) -> Self {
         Self {
             action: Action::Put,
+            table: table.into(),
+            joins: vec![],
+            columns: vec![],
+            cages: vec![],
+            distinct: false,
+            index_def: None,
+            table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::Simple,
+            ctes: vec![],
+            distinct_on: vec![],
+            returning: None,
+            on_conflict: None,
+            source_query: None,
+        }
+    }
+
+    /// Create a new EXPORT (COPY TO STDOUT) command for the given table.
+    /// 
+    /// Used for bulk data export via PostgreSQL COPY protocol.
+    /// 
+    /// # Example
+    /// ```
+    /// use qail_core::ast::QailCmd;
+    /// 
+    /// // Export all users
+    /// let cmd = QailCmd::export("users")
+    ///     .columns(["id", "name", "email"]);
+    /// 
+    /// // Export with filter
+    /// let cmd = QailCmd::export("users")
+    ///     .columns(["id", "name"])
+    ///     .filter("active", true);
+    /// ```
+    pub fn export(table: impl Into<String>) -> Self {
+        Self {
+            action: Action::Export,
             table: table.into(),
             joins: vec![],
             columns: vec![],
