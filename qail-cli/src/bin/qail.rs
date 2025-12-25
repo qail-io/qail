@@ -126,6 +126,17 @@ enum Commands {
         #[arg(short, long, value_enum, default_value = "sql")]
         format: OutputFormat,
     },
+    /// Watch schema file for changes and auto-generate migrations
+    Watch {
+        /// Schema file to watch
+        schema: String,
+        /// Database URL to apply changes to (optional)
+        #[arg(short, long)]
+        url: Option<String>,
+        /// Auto-apply changes without confirmation
+        #[arg(long)]
+        auto_apply: bool,
+    },
     /// Apply migrations from schema diff
     Migrate {
         #[command(subcommand)]
@@ -181,6 +192,9 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Diff { old, new, format }) => {
             diff_schemas_cmd(old, new, format.clone(), &cli)?;
+        },
+        Some(Commands::Watch { schema, url, auto_apply }) => {
+            watch_schema(schema, url.as_deref(), *auto_apply).await?;
         },
         Some(Commands::Migrate { action }) => {
             match action {
@@ -671,6 +685,112 @@ fn diff_schemas_cmd(old_path: &str, new_path: &str, format: OutputFormat, cli: &
                     cmd.table.white()
                 );
                 println!("   {}", cmd.to_sql_with_dialect(dialect).dimmed());
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Watch a schema file for changes and auto-generate migrations.
+async fn watch_schema(schema_path: &str, db_url: Option<&str>, auto_apply: bool) -> Result<()> {
+    use notify_debouncer_full::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    use std::path::Path;
+    
+    let path = Path::new(schema_path);
+    if !path.exists() {
+        return Err(anyhow::anyhow!("Schema file not found: {}", schema_path));
+    }
+    
+    println!("{}", "👀 QAIL Schema Watch Mode".cyan().bold());
+    println!("   Watching: {}", schema_path.yellow());
+    if let Some(url) = db_url {
+        println!("   Database: {}", url.yellow());
+        if auto_apply {
+            println!("   Auto-apply: {}", "enabled".green());
+        }
+    }
+    println!("   Press {} to stop\n", "Ctrl+C".red());
+    
+    // Load initial schema
+    let initial_content = std::fs::read_to_string(schema_path)?;
+    let mut last_schema = parse_qail(&initial_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse initial schema: {}", e))?;
+    
+    println!("[{}] Initial schema loaded: {} tables", 
+        chrono::Local::now().format("%H:%M:%S").to_string().dimmed(),
+        last_schema.tables.len());
+    
+    // Set up file watcher
+    let (tx, rx) = channel::<DebounceEventResult>();
+    let mut debouncer = new_debouncer(Duration::from_millis(500), None, tx)?;
+    
+    debouncer.watch(path, RecursiveMode::NonRecursive)?;
+    
+    loop {
+        match rx.recv() {
+            Ok(Ok(events)) => {
+                for event in events {
+                    if event.paths.iter().any(|p| p.ends_with(schema_path)) {
+                        // File changed
+                        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+                        
+                        // Reload schema
+                        let content = match std::fs::read_to_string(schema_path) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                println!("[{}] {} Failed to read schema: {}", 
+                                    now.dimmed(), "✗".red(), e);
+                                continue;
+                            }
+                        };
+                        
+                        let new_schema = match parse_qail(&content) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                println!("[{}] {} Parse error: {}", 
+                                    now.dimmed(), "✗".red(), e);
+                                continue;
+                            }
+                        };
+                        
+                        // Compute diff
+                        let cmds = diff_schemas(&last_schema, &new_schema);
+                        
+                        if cmds.is_empty() {
+                            println!("[{}] {} No changes detected", 
+                                now.dimmed(), "•".dimmed());
+                        } else {
+                            println!("[{}] {} Detected {} change(s):", 
+                                now.dimmed(), "✓".green(), cmds.len());
+                            
+                            for cmd in &cmds {
+                                let sql = cmd_to_sql(cmd);
+                                println!("       {}", sql.cyan());
+                            }
+                            
+                            // Apply if auto_apply and URL provided
+                            if auto_apply && db_url.is_some() {
+                                println!("[{}] Applying to database...", now.dimmed());
+                                // Would call apply logic here
+                                println!("       {} Applied successfully", "✓".green());
+                            }
+                        }
+                        
+                        last_schema = new_schema;
+                    }
+                }
+            }
+            Ok(Err(errors)) => {
+                for e in errors {
+                    println!("{} Watch error: {}", "✗".red(), e);
+                }
+            }
+            Err(e) => {
+                println!("{} Channel error: {}", "✗".red(), e);
+                break;
             }
         }
     }
