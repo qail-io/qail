@@ -20,7 +20,7 @@ impl PgConnection {
         loop {
             // Try to decode from buffer first
             if self.buffer.len() >= 5 {
-                let msg_len = i32::from_be_bytes([
+                let msg_len = u32::from_be_bytes([
                     self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
                 ]) as usize;
                 
@@ -35,8 +35,8 @@ impl PgConnection {
             
             // Need more data - read directly into BytesMut (no temp buffer)
             // Reserve space if needed
-            if self.buffer.capacity() - self.buffer.len() < 32768 {
-                self.buffer.reserve(32768);  // 32KB buffer
+            if self.buffer.capacity() - self.buffer.len() < 65536 {
+                self.buffer.reserve(131072);  // 128KB buffer - reserve once, use many
             }
             
             let n = self.stream.read_buf(&mut self.buffer).await?;
@@ -53,6 +53,25 @@ impl PgConnection {
         Ok(())
     }
     
+    // ==================== BUFFERED WRITE API (High Performance) ====================
+    
+    /// Buffer bytes for later flush (NO SYSCALL).
+    /// Use flush_write_buf() to send all buffered data.
+    #[inline]
+    pub fn buffer_bytes(&mut self, bytes: &[u8]) {
+        self.write_buf.extend_from_slice(bytes);
+    }
+    
+    /// Flush the write buffer to the stream.
+    /// This is the only syscall in the buffered write path.
+    pub async fn flush_write_buf(&mut self) -> PgResult<()> {
+        if !self.write_buf.is_empty() {
+            self.stream.write_all(&self.write_buf).await?;
+            self.write_buf.clear();
+        }
+        Ok(())
+    }
+    
     /// FAST receive - returns only message type byte, skips parsing.
     /// This is ~10x faster than recv() for pipelining benchmarks.
     /// Returns: message_type
@@ -61,7 +80,7 @@ impl PgConnection {
         loop {
             // Check if we have at least the header
             if self.buffer.len() >= 5 {
-                let msg_len = i32::from_be_bytes([
+                let msg_len = u32::from_be_bytes([
                     self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
                 ]) as usize;
                 
@@ -88,7 +107,7 @@ impl PgConnection {
             
             // Need more data - use large buffer to reduce syscalls
             if self.buffer.capacity() - self.buffer.len() < 65536 {
-                self.buffer.reserve(65536);  // 64KB buffer for maximum pipeline throughput
+                self.buffer.reserve(131072);  // 128KB buffer - reserve once, use many
             }
             
             let n = self.stream.read_buf(&mut self.buffer).await?;

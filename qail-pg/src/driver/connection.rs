@@ -34,6 +34,8 @@ pub(crate) const CANCEL_REQUEST_CODE: i32 = 80877102;
 pub struct PgConnection {
     pub(crate) stream: PgStream,
     pub(crate) buffer: BytesMut,
+    /// Write buffer for batching outgoing messages (reduces syscalls)
+    pub(crate) write_buf: BytesMut,
     /// Cache of prepared statements: stmt_name -> SQL text
     pub(crate) prepared_statements: HashMap<String, String>,
     /// Backend process ID (for query cancellation)  
@@ -65,6 +67,7 @@ impl PgConnection {
         let mut conn = Self {
             stream: PgStream::Tcp(tcp_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+            write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),  // 64KB write buffer
             prepared_statements: HashMap::new(),
             process_id: 0,
             secret_key: 0,
@@ -128,6 +131,7 @@ impl PgConnection {
         let mut conn = Self {
             stream: PgStream::Tls(tls_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+            write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),  // 64KB write buffer
             prepared_statements: HashMap::new(),
             process_id: 0,
             secret_key: 0,
@@ -158,6 +162,7 @@ impl PgConnection {
         let mut conn = Self {
             stream: PgStream::Unix(unix_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+            write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),  // 64KB write buffer
             prepared_statements: HashMap::new(),
             process_id: 0,
             secret_key: 0,

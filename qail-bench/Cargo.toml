@@ -1,15 +1,21 @@
 [package]
 name = "qail-bench"
-version = "0.9.2"
-edition = "2024"
+version = "0.9.3"
+edition = "2021"
 
 [[bench]]
 name = "query_benchmark"
 harness = false
 
+[[bin]]
+name = "fifty_million_benchmark"
+path = "src/bin/fifty_million_benchmark.rs"
+
 [dependencies]
 qail-core = { path = "../qail-core" }
+qail-pg = { path = "../qail-pg" }
 criterion = { version = "0.5", features = ["html_reports"] }
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

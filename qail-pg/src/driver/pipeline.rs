@@ -297,22 +297,19 @@ impl PgConnection {
             return Ok(0);
         }
         
+        // Local buffer - faster than reusing connection buffer
         let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
         
         // Check if statement is already prepared
         let is_new = !self.prepared_statements.contains_key(&stmt.name);
         
         if is_new {
-            // Need to send Parse - but we don't have SQL here!
-            // For now, caller must ensure statement is prepared first
-            // Future: store SQL in PreparedStatement
             return Err(PgError::Query(
                 "Statement not prepared. Call prepare() first.".to_string()
             ));
         }
         
-        // No hash, no lookup - just use the pre-computed name!
-        // ZERO ALLOCATION: write directly to shared buffer
+        // ZERO ALLOCATION: write directly to local buffer
         for params in params_batch {
             PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
             PgEncoder::encode_execute_to(&mut buf);
@@ -320,6 +317,7 @@ impl PgConnection {
         
         PgEncoder::encode_sync_to(&mut buf);
         
+        // Write and flush
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
         
