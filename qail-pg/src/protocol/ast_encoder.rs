@@ -7,7 +7,7 @@
 //! QailCmd → BytesMut (no to_sql() call)
 
 use bytes::BytesMut;
-use qail_core::ast::{Action, QailCmd, Expr, CageKind, Value, Condition, Operator, SortOrder};
+use qail_core::ast::{Action, QailCmd, Expr, CageKind, Value, Condition, Operator, SortOrder, Constraint, TableConstraint};
 
 // ============================================================================
 // PRE-COMPUTED LOOKUP TABLES - ZERO ALLOCATION!
@@ -112,6 +112,13 @@ impl AstEncoder {
             Action::Add => Self::encode_insert(cmd, &mut sql_buf, &mut params),
             Action::Set => Self::encode_update(cmd, &mut sql_buf, &mut params),
             Action::Del => Self::encode_delete(cmd, &mut sql_buf, &mut params),
+            Action::Export => Self::encode_export(cmd, &mut sql_buf, &mut params),
+            Action::Make => Self::encode_make(cmd, &mut sql_buf),
+            Action::Index => Self::encode_index(cmd, &mut sql_buf),
+            Action::Drop => Self::encode_drop_table(cmd, &mut sql_buf),
+            Action::DropIndex => Self::encode_drop_index(cmd, &mut sql_buf),
+            Action::Alter => Self::encode_alter_add_column(cmd, &mut sql_buf),
+            Action::AlterDrop => Self::encode_alter_drop_column(cmd, &mut sql_buf),
             _ => {
                 // STRICT: No fallback to to_sql() - panic on unsupported actions
                 panic!("Unsupported action {:?} in AST-native encoder. Use legacy encoder for DDL.", cmd.action);
@@ -138,6 +145,9 @@ impl AstEncoder {
             Action::Add => Self::encode_insert(cmd, &mut sql_buf, &mut params),
             Action::Set => Self::encode_update(cmd, &mut sql_buf, &mut params),
             Action::Del => Self::encode_delete(cmd, &mut sql_buf, &mut params),
+            Action::Export => Self::encode_export(cmd, &mut sql_buf, &mut params),
+            Action::Make => Self::encode_make(cmd, &mut sql_buf),
+            Action::Index => Self::encode_index(cmd, &mut sql_buf),
             _ => {
                 panic!("Unsupported action {:?} in AST-native encoder.", cmd.action);
             }
@@ -302,6 +312,226 @@ impl AstEncoder {
                 buf.extend_from_slice(b" WHERE ");
                 Self::encode_conditions(&cage.conditions, buf, params);
             }
+        }
+    }
+
+    /// Encode EXPORT command as COPY (SELECT ...) TO STDOUT.
+    /// 
+    /// Reuses encode_select and wraps with COPY.
+    fn encode_export(cmd: &QailCmd, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+        buf.extend_from_slice(b"COPY (");
+        
+        // Reuse SELECT encoder for the subquery
+        Self::encode_select(cmd, buf, params);
+        
+        buf.extend_from_slice(b") TO STDOUT");
+    }
+
+    /// Encode CREATE TABLE statement (DDL).
+    fn encode_make(cmd: &QailCmd, buf: &mut BytesMut) {
+        buf.extend_from_slice(b"CREATE TABLE ");
+        buf.extend_from_slice(cmd.table.as_bytes());
+        buf.extend_from_slice(b" (");
+        
+        let mut first = true;
+        for col in &cmd.columns {
+            if let Expr::Def { name, data_type, constraints } = col {
+                if !first {
+                    buf.extend_from_slice(b", ");
+                }
+                first = false;
+                
+                // Column name
+                buf.extend_from_slice(name.as_bytes());
+                buf.extend_from_slice(b" ");
+                
+                // Map QAIL type to PostgreSQL type
+                let sql_type = Self::map_type(data_type);
+                buf.extend_from_slice(sql_type.as_bytes());
+                
+                // Default to NOT NULL unless Nullable constraint present
+                let is_nullable = constraints.contains(&Constraint::Nullable);
+                if !is_nullable {
+                    buf.extend_from_slice(b" NOT NULL");
+                }
+                
+                // Handle DEFAULT
+                for constraint in constraints {
+                    if let Constraint::Default(val) = constraint {
+                        buf.extend_from_slice(b" DEFAULT ");
+                        // Map common QAIL functions to SQL
+                        let sql_default = match val.as_str() {
+                            "uuid()" => "gen_random_uuid()",
+                            "now()" => "NOW()",
+                            other => other,
+                        };
+                        buf.extend_from_slice(sql_default.as_bytes());
+                    }
+                }
+                
+                // PRIMARY KEY
+                if constraints.contains(&Constraint::PrimaryKey) {
+                    buf.extend_from_slice(b" PRIMARY KEY");
+                }
+                
+                // UNIQUE
+                if constraints.contains(&Constraint::Unique) {
+                    buf.extend_from_slice(b" UNIQUE");
+                }
+                
+                // CHECK constraint
+                for constraint in constraints {
+                    if let Constraint::Check(vals) = constraint {
+                        buf.extend_from_slice(b" CHECK (");
+                        buf.extend_from_slice(name.as_bytes());
+                        buf.extend_from_slice(b" IN (");
+                        for (i, v) in vals.iter().enumerate() {
+                            if i > 0 {
+                                buf.extend_from_slice(b", ");
+                            }
+                            buf.extend_from_slice(b"'");
+                            buf.extend_from_slice(v.as_bytes());
+                            buf.extend_from_slice(b"'");
+                        }
+                        buf.extend_from_slice(b"))");
+                    }
+                }
+            }
+        }
+        
+        // Handle table-level constraints
+        for tc in &cmd.table_constraints {
+            buf.extend_from_slice(b", ");
+            match tc {
+                TableConstraint::Unique(cols) => {
+                    buf.extend_from_slice(b"UNIQUE (");
+                    for (i, col) in cols.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        buf.extend_from_slice(col.as_bytes());
+                    }
+                    buf.extend_from_slice(b")");
+                }
+                TableConstraint::PrimaryKey(cols) => {
+                    buf.extend_from_slice(b"PRIMARY KEY (");
+                    for (i, col) in cols.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        buf.extend_from_slice(col.as_bytes());
+                    }
+                    buf.extend_from_slice(b")");
+                }
+            }
+        }
+        
+        buf.extend_from_slice(b")");
+    }
+
+    /// Encode CREATE INDEX statement (DDL).
+    fn encode_index(cmd: &QailCmd, buf: &mut BytesMut) {
+        if let Some(idx) = &cmd.index_def {
+            if idx.unique {
+                buf.extend_from_slice(b"CREATE UNIQUE INDEX ");
+            } else {
+                buf.extend_from_slice(b"CREATE INDEX ");
+            }
+            buf.extend_from_slice(idx.name.as_bytes());
+            buf.extend_from_slice(b" ON ");
+            buf.extend_from_slice(idx.table.as_bytes());
+            buf.extend_from_slice(b" (");
+            for (i, col) in idx.columns.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                buf.extend_from_slice(col.as_bytes());
+            }
+            buf.extend_from_slice(b")");
+        }
+    }
+
+    /// Encode DROP TABLE statement (DDL).
+    fn encode_drop_table(cmd: &QailCmd, buf: &mut BytesMut) {
+        buf.extend_from_slice(b"DROP TABLE IF EXISTS ");
+        buf.extend_from_slice(cmd.table.as_bytes());
+    }
+
+    /// Encode DROP INDEX statement (DDL).
+    fn encode_drop_index(cmd: &QailCmd, buf: &mut BytesMut) {
+        buf.extend_from_slice(b"DROP INDEX IF EXISTS ");
+        buf.extend_from_slice(cmd.table.as_bytes()); // Index name stored in table field
+    }
+
+    /// Encode ALTER TABLE ADD COLUMN statement (DDL).
+    fn encode_alter_add_column(cmd: &QailCmd, buf: &mut BytesMut) {
+        for col in &cmd.columns {
+            if let Expr::Def { name, data_type, constraints } = col {
+                buf.extend_from_slice(b"ALTER TABLE ");
+                buf.extend_from_slice(cmd.table.as_bytes());
+                buf.extend_from_slice(b" ADD COLUMN ");
+                buf.extend_from_slice(name.as_bytes());
+                buf.extend_from_slice(b" ");
+                buf.extend_from_slice(Self::map_type(data_type).as_bytes());
+                
+                // Handle nullable
+                let is_nullable = constraints.contains(&Constraint::Nullable);
+                if !is_nullable {
+                    buf.extend_from_slice(b" NOT NULL");
+                }
+                
+                // Handle default
+                for constraint in constraints {
+                    if let Constraint::Default(val) = constraint {
+                        buf.extend_from_slice(b" DEFAULT ");
+                        let sql_default = match val.as_str() {
+                            "uuid()" => "gen_random_uuid()",
+                            "now()" => "NOW()",
+                            other => other,
+                        };
+                        buf.extend_from_slice(sql_default.as_bytes());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Encode ALTER TABLE DROP COLUMN statement (DDL).
+    fn encode_alter_drop_column(cmd: &QailCmd, buf: &mut BytesMut) {
+        for col in &cmd.columns {
+            let col_name = match col {
+                Expr::Named(n) => n.clone(),
+                Expr::Def { name, .. } => name.clone(),
+                _ => continue,
+            };
+            
+            buf.extend_from_slice(b"ALTER TABLE ");
+            buf.extend_from_slice(cmd.table.as_bytes());
+            buf.extend_from_slice(b" DROP COLUMN ");
+            buf.extend_from_slice(col_name.as_bytes());
+        }
+    }
+
+    /// Map QAIL types to PostgreSQL types.
+    #[inline]
+    fn map_type(t: &str) -> &'static str {
+        match t {
+            "str" | "text" | "string" | "TEXT" => "TEXT",
+            "int" | "i32" | "INT" | "INTEGER" => "INT",
+            "bigint" | "i64" | "BIGINT" => "BIGINT",
+            "uuid" | "UUID" => "UUID",
+            "bool" | "boolean" | "BOOLEAN" => "BOOLEAN",
+            "dec" | "decimal" | "DECIMAL" => "DECIMAL",
+            "float" | "f64" | "DOUBLE PRECISION" => "DOUBLE PRECISION",
+            "serial" | "SERIAL" => "SERIAL",
+            "bigserial" | "BIGSERIAL" => "BIGSERIAL",
+            "timestamp" | "time" | "TIMESTAMP" => "TIMESTAMP",
+            "timestamptz" | "TIMESTAMPTZ" => "TIMESTAMPTZ",
+            "date" | "DATE" => "DATE",
+            "json" | "jsonb" | "JSON" | "JSONB" => "JSONB",
+            "varchar" | "VARCHAR" => "VARCHAR(255)",
+            // Default fallback for unknown types
+            _ => "TEXT"
         }
     }
 
@@ -650,5 +880,37 @@ mod tests {
         assert!(wire_str.contains("WHERE"));
         assert!(wire_str.contains("$1"));
         assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_encode_export() {
+        let cmd = QailCmd::export("users")
+            .columns(["id", "name"]);
+        
+        let (sql, _params) = AstEncoder::encode_cmd_sql(&cmd);
+        
+        // Should generate COPY (SELECT ...) TO STDOUT
+        assert!(sql.starts_with("COPY (SELECT"));
+        assert!(sql.contains("FROM users"));
+        assert!(sql.ends_with(") TO STDOUT"));
+        println!("Generated SQL: {}", sql);
+    }
+
+    #[test]
+    fn test_encode_export_with_filter() {
+        use qail_core::ast::Operator;
+        
+        let cmd = QailCmd::export("users")
+            .columns(["id", "name"])
+            .filter("active", Operator::Eq, true);
+        
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd);
+        
+        assert!(sql.contains("COPY (SELECT"));
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("$1"));
+        assert!(sql.ends_with(") TO STDOUT"));
+        assert_eq!(params.len(), 1);
+        println!("Generated SQL: {}", sql);
     }
 }

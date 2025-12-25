@@ -30,6 +30,32 @@ const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
 /// CancelRequest protocol code: 80877102
 pub(crate) const CANCEL_REQUEST_CODE: i32 = 80877102;
 
+/// TLS configuration for mutual TLS (client certificate authentication).
+#[derive(Clone)]
+pub struct TlsConfig {
+    /// Client certificate in PEM format
+    pub client_cert_pem: Vec<u8>,
+    /// Client private key in PEM format
+    pub client_key_pem: Vec<u8>,
+    /// Optional CA certificate for server verification (uses system certs if None)
+    pub ca_cert_pem: Option<Vec<u8>>,
+}
+
+impl TlsConfig {
+    /// Create a new TLS config from file paths.
+    pub fn from_files(
+        cert_path: impl AsRef<std::path::Path>,
+        key_path: impl AsRef<std::path::Path>,
+        ca_path: Option<impl AsRef<std::path::Path>>,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            client_cert_pem: std::fs::read(cert_path)?,
+            client_key_pem: std::fs::read(key_path)?,
+            ca_cert_pem: ca_path.map(|p| std::fs::read(p)).transpose()?,
+        })
+    }
+}
+
 /// A raw PostgreSQL connection.
 pub struct PgConnection {
     pub(crate) stream: PgStream,
@@ -143,6 +169,111 @@ impl PgConnection {
         }).await?;
 
         conn.handle_startup(user, password).await?;
+
+        Ok(conn)
+    }
+
+    /// Connect with mutual TLS (client certificate authentication).
+    /// 
+    /// # Arguments
+    /// * `host` - PostgreSQL server hostname
+    /// * `port` - PostgreSQL server port
+    /// * `user` - Database user
+    /// * `database` - Database name
+    /// * `config` - TLS configuration with client cert/key
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let config = TlsConfig {
+    ///     client_cert_pem: include_bytes!("client.crt").to_vec(),
+    ///     client_key_pem: include_bytes!("client.key").to_vec(),
+    ///     ca_cert_pem: Some(include_bytes!("ca.crt").to_vec()),
+    /// };
+    /// 
+    /// let conn = PgConnection::connect_mtls("localhost", 5432, "user", "db", config).await?;
+    /// ```
+    pub async fn connect_mtls(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        config: TlsConfig,
+    ) -> PgResult<Self> {
+        use tokio::io::AsyncReadExt;
+        use tokio_rustls::TlsConnector;
+        use tokio_rustls::rustls::{ClientConfig, pki_types::{ServerName, CertificateDer}};
+        
+        let addr = format!("{}:{}", host, port);
+        let mut tcp_stream = TcpStream::connect(&addr).await?;
+
+        // Send SSLRequest
+        tcp_stream.write_all(&SSL_REQUEST).await?;
+
+        // Read response
+        let mut response = [0u8; 1];
+        tcp_stream.read_exact(&mut response).await?;
+
+        if response[0] != b'S' {
+            return Err(PgError::Connection("Server does not support TLS".to_string()));
+        }
+
+        // Build root cert store
+        let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();
+        
+        // Add custom CA if provided
+        if let Some(ca_pem) = &config.ca_cert_pem {
+            let certs = rustls_pemfile::certs(&mut ca_pem.as_slice())
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            for cert in certs {
+                let _ = root_cert_store.add(cert);
+            }
+        } else {
+            // Use system certs
+            let certs = rustls_native_certs::load_native_certs();
+            for cert in certs.certs {
+                let _ = root_cert_store.add(cert);
+            }
+        }
+
+        // Parse client cert and key
+        let client_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut config.client_cert_pem.as_slice())
+            .filter_map(|r| r.ok())
+            .collect();
+        
+        let client_key = rustls_pemfile::private_key(&mut config.client_key_pem.as_slice())
+            .map_err(|e| PgError::Connection(format!("Invalid client key: {:?}", e)))?
+            .ok_or_else(|| PgError::Connection("No private key found in PEM".to_string()))?;
+
+        // Build TLS config with client auth
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_cert_store)
+            .with_client_auth_cert(client_certs, client_key)
+            .map_err(|e| PgError::Connection(format!("Invalid client cert/key: {}", e)))?;
+        
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        let server_name = ServerName::try_from(host.to_string())
+            .map_err(|_| PgError::Connection("Invalid hostname for TLS".to_string()))?;
+        
+        let tls_stream = connector.connect(server_name, tcp_stream).await
+            .map_err(|e| PgError::Connection(format!("mTLS handshake failed: {}", e)))?;
+
+        let mut conn = Self {
+            stream: PgStream::Tls(tls_stream),
+            buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+            write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),
+            prepared_statements: HashMap::new(),
+            process_id: 0,
+            secret_key: 0,
+        };
+
+        conn.send(FrontendMessage::Startup {
+            user: user.to_string(),
+            database: database.to_string(),
+        }).await?;
+
+        // mTLS typically uses cert auth, no password needed
+        conn.handle_startup(user, None).await?;
 
         Ok(conn)
     }

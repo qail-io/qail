@@ -33,6 +33,8 @@
 
 pub mod protocol;
 pub mod driver;
+pub mod types;
 
 pub use protocol::PgEncoder;
 pub use driver::{PgDriver, PgConnection, PgRow, PgError, PgResult, PgPool, PoolConfig, PooledConnection};
+pub use types::{FromPg, ToPg, TypeError, Uuid, Json, Timestamp, Date, Time, Numeric};

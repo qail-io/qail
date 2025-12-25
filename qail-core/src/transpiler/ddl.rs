@@ -143,6 +143,20 @@ pub fn build_alter_table(cmd: &QailCmd, dialect: Dialect) -> String {
                     }
                 }
             }
+            // Handle rename: "old_name -> new_name" format
+            Expr::Named(rename_expr) if rename_expr.contains(" -> ") => {
+                let parts: Vec<&str> = rename_expr.split(" -> ").collect();
+                if parts.len() == 2 {
+                    let old_name = parts[0].trim();
+                    let new_name = parts[1].trim();
+                    stmts.push(format!(
+                        "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                        table_name,
+                        generator.quote_identifier(old_name),
+                        generator.quote_identifier(new_name)
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -230,4 +244,63 @@ pub fn build_alter_column(cmd: &QailCmd, dialect: Dialect) -> String {
         },
         _ => "/* ERROR: Unknown Column Action */".to_string()
     }
+}
+
+/// Generate ALTER TABLE ADD COLUMN SQL (for migrations).
+pub fn build_alter_add_column(cmd: &QailCmd, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    let table = generator.quote_identifier(&cmd.table);
+    
+    let mut parts = Vec::new();
+    
+    for col in &cmd.columns {
+        if let Expr::Def { name, data_type, constraints } = col {
+            let sql_type = map_type(data_type);
+            let quoted_name = generator.quote_identifier(name);
+            
+            let mut col_def = format!("{} {}", quoted_name, sql_type);
+            
+            let is_nullable = constraints.contains(&Constraint::Nullable);
+            if !is_nullable {
+                col_def.push_str(" NOT NULL");
+            }
+            
+            for constraint in constraints {
+                if let Constraint::Default(val) = constraint {
+                    col_def.push_str(" DEFAULT ");
+                    let sql_default = match val.as_str() {
+                        "uuid()" => "gen_random_uuid()",
+                        "now()" => "NOW()",
+                        other => other,
+                    };
+                    col_def.push_str(sql_default);
+                }
+            }
+            
+            parts.push(format!("ALTER TABLE {} ADD COLUMN {}", table, col_def));
+        }
+    }
+    
+    parts.join(";\n")
+}
+
+/// Generate ALTER TABLE DROP COLUMN SQL (for migrations).
+pub fn build_alter_drop_column(cmd: &QailCmd, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    let table = generator.quote_identifier(&cmd.table);
+    
+    let mut parts = Vec::new();
+    
+    for col in &cmd.columns {
+        let col_name = match col {
+            Expr::Named(n) => n.clone(),
+            Expr::Def { name, .. } => name.clone(),
+            _ => continue,
+        };
+        
+        let quoted_col = generator.quote_identifier(&col_name);
+        parts.push(format!("ALTER TABLE {} DROP COLUMN {}", table, quoted_col));
+    }
+    
+    parts.join(";\n")
 }

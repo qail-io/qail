@@ -22,6 +22,7 @@ rand = "0.9"
 # TLS/SSL support
 tokio-rustls = "0.26"
 rustls-native-certs = "0.8"
+rustls-pemfile = "2.2.0"
 
 [lints]
 workspace = true

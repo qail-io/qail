@@ -92,6 +92,9 @@ impl ToSql for QailCmd {
             Action::Over => dml::window::build_window(self, dialect),
             Action::With => dml::cte::build_cte(self, dialect),
             Action::Index => ddl::build_create_index(self, dialect),
+            Action::DropIndex => format!("DROP INDEX {}", self.table),
+            Action::Alter => ddl::build_alter_add_column(self, dialect),
+            Action::AlterDrop => ddl::build_alter_drop_column(self, dialect),
             // Stubs
             Action::TxnStart => "BEGIN TRANSACTION;".to_string(), // Default stub
             Action::TxnCommit => "COMMIT;".to_string(),
@@ -101,6 +104,8 @@ impl ToSql for QailCmd {
             Action::DropCol | Action::RenameCol => ddl::build_alter_column(self, dialect),
             // JSON features
             Action::JsonTable => dml::json_table::build_json_table(self, dialect),
+            // COPY protocol (AST-native in qail-pg, generates SELECT for fallback)
+            Action::Export => dml::select::build_select(self, dialect),
         }
     }
 }

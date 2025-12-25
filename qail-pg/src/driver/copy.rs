@@ -1,8 +1,11 @@
 //! COPY protocol methods for PostgreSQL bulk operations.
+//!
+//! All methods use AST-native approach - no raw SQL strings.
 
 use bytes::BytesMut;
 use tokio::io::AsyncWriteExt;
-use crate::protocol::{BackendMessage, PgEncoder};
+use qail_core::ast::{QailCmd, Action};
+use crate::protocol::{BackendMessage, PgEncoder, AstEncoder};
 use super::{PgConnection, PgError, PgResult, parse_affected_rows};
 
 impl PgConnection {
@@ -80,5 +83,74 @@ impl PgConnection {
         // CopyDone: 'c' + length (4)
         self.stream.write_all(&[b'c', 0, 0, 0, 4]).await?;
         Ok(())
+    }
+
+    /// Export data using COPY TO STDOUT (AST-native).
+    /// 
+    /// Takes a QailCmd::Export and returns rows as Vec<Vec<String>>.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmd = QailCmd::export("users")
+    ///     .columns(["id", "name"])
+    ///     .filter("active", true);
+    /// 
+    /// let rows = conn.copy_export(&cmd).await?;
+    /// ```
+    pub async fn copy_export(
+        &mut self,
+        cmd: &QailCmd,
+    ) -> PgResult<Vec<Vec<String>>> {
+        // Validate action
+        if cmd.action != Action::Export {
+            return Err(PgError::Query(
+                "copy_export requires QailCmd::Export action".to_string()
+            ));
+        }
+
+        // Encode command to SQL using AST encoder
+        let (sql, _params) = AstEncoder::encode_cmd_sql(cmd);
+        
+        // Send COPY command
+        let bytes = PgEncoder::encode_query_string(&sql);
+        self.stream.write_all(&bytes).await?;
+
+        // Wait for CopyOutResponse
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CopyOutResponse { .. } => break,
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+
+        // Receive CopyData messages until CopyDone
+        let mut rows = Vec::new();
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CopyData(data) => {
+                    // Parse tab-separated line
+                    let line = String::from_utf8_lossy(&data);
+                    let line = line.trim_end_matches('\n');
+                    let cols: Vec<String> = line.split('\t')
+                        .map(|s| s.to_string())
+                        .collect();
+                    rows.push(cols);
+                }
+                BackendMessage::CopyDone => {}
+                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(rows);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
     }
 }

@@ -17,6 +17,8 @@ use colored::*;
 use qail_core::prelude::*;
 use qail_core::transpiler::{ToSql, Dialect};
 use qail_core::fmt::Formatter;
+use qail_core::migrate::{diff_schemas, parse_qail};
+use qail_pg::driver::PgDriver;
 use anyhow::Result;
 
 #[derive(Parser)]
@@ -66,7 +68,6 @@ enum CliDialect {
 #[derive(Clone, ValueEnum, Default)]
 enum SchemaFormat {
     #[default]
-    Json,
     Qail,
 }
 
@@ -100,18 +101,48 @@ enum Commands {
         #[arg(short, long)]
         name: Option<String>,
     },
-    /// Introspect database schema and update qail.schema.json
+    /// Introspect database schema and output schema.qail
     Pull {
         /// Database connection URL (postgres:// or mysql://)
         url: String,
-        /// Output format (json or qail)
-        #[arg(short, long, value_enum, default_value = "json")]
-        format: SchemaFormat,
     },
     /// Format a QAIL query to canonical v2 syntax
     Fmt {
         /// The QAIL query to format
         query: String,
+    },
+    /// Diff two schema files and show migration AST
+    Diff {
+        /// Old schema JSON file
+        old: String,
+        /// New schema JSON file
+        new: String,
+        /// Output format (sql or json)
+        #[arg(short, long, value_enum, default_value = "sql")]
+        format: OutputFormat,
+    },
+    /// Apply migrations from schema diff
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateAction,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum MigrateAction {
+    /// Apply migrations (forward)
+    Up {
+        /// Schema diff file or inline diff
+        schema_diff: String,
+        /// Database URL
+        url: String,
+    },
+    /// Rollback migrations
+    Down {
+        /// Schema diff file or inline diff
+        schema_diff: String,
+        /// Database URL
+        url: String,
     },
 }
 
@@ -126,15 +157,24 @@ async fn main() -> Result<()> {
         Some(Commands::Mig { query, name }) => {
             generate_migration(query, name.clone())?;
         },
-        Some(Commands::Pull { url, format }) => {
-            let output_format = match format {
-                SchemaFormat::Json => qail::introspection::SchemaOutputFormat::Json,
-                SchemaFormat::Qail => qail::introspection::SchemaOutputFormat::Qail,
-            };
-            qail::introspection::pull_schema(url, output_format).await?;
+        Some(Commands::Pull { url }) => {
+            qail::introspection::pull_schema(url, qail::introspection::SchemaOutputFormat::Qail).await?;
         },
         Some(Commands::Fmt { query }) => {
             format_query(query)?;
+        },
+        Some(Commands::Diff { old, new, format }) => {
+            diff_schemas_cmd(old, new, format.clone(), &cli)?;
+        },
+        Some(Commands::Migrate { action }) => {
+            match action {
+                MigrateAction::Up { schema_diff, url } => {
+                    migrate_up(schema_diff, url).await?;
+                },
+                MigrateAction::Down { schema_diff, url } => {
+                    migrate_down(schema_diff, url).await?;
+                },
+            }
         },
         None => {
             if let Some(query) = &cli.query {
@@ -450,4 +490,198 @@ fn show_symbols() {
             sql.dimmed()
         );
     }
+}
+
+/// Compare two schema .qail files and output migration commands.
+fn diff_schemas_cmd(old_path: &str, new_path: &str, format: OutputFormat, cli: &Cli) -> Result<()> {
+    println!("{} {} → {}", "Diffing:".cyan(), old_path.yellow(), new_path.yellow());
+    
+    // Load old schema
+    let old_content = std::fs::read_to_string(old_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read old schema '{}': {}", old_path, e))?;
+    let old_schema = parse_qail(&old_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
+    
+    // Load new schema
+    let new_content = std::fs::read_to_string(new_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read new schema '{}': {}", new_path, e))?;
+    let new_schema = parse_qail(&new_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
+    
+    // Compute diff
+    let cmds = diff_schemas(&old_schema, &new_schema);
+    
+    if cmds.is_empty() {
+        println!("{}", "No changes detected.".green());
+        return Ok(());
+    }
+    
+    println!("{} {} migration command(s):", "Found:".green(), cmds.len());
+    println!();
+    
+    let dialect: Dialect = cli.dialect.clone().into();
+    
+    match format {
+        OutputFormat::Sql => {
+            for cmd in &cmds {
+                println!("{};", cmd.to_sql_with_dialect(dialect));
+            }
+        }
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&cmds)?);
+        }
+        OutputFormat::Pretty => {
+            for (i, cmd) in cmds.iter().enumerate() {
+                println!("{} {} {}", 
+                    format!("{}.", i + 1).cyan(),
+                    format!("{}", cmd.action).yellow(),
+                    cmd.table.white()
+                );
+                println!("   {}", cmd.to_sql_with_dialect(dialect).dimmed());
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Apply migrations forward using qail-pg native driver.
+async fn migrate_up(schema_diff_path: &str, url: &str) -> Result<()> {
+    println!("{} {}", "Migrating UP:".cyan().bold(), url.yellow());
+    
+    // Load the two schemas and compute diff
+    // schema_diff_path can be either:
+    // 1. A single diff file (JSON of Vec<QailCmd>)
+    // 2. Two schema files separated by ":"
+    
+    let cmds = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
+        // Two schema files: old:new
+        let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
+        let old_path = parts[0];
+        let new_path = parts[1];
+        
+        let old_content = std::fs::read_to_string(old_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
+        let new_content = std::fs::read_to_string(new_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
+        
+        let old_schema = parse_qail(&old_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
+        let new_schema = parse_qail(&new_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
+        
+        diff_schemas(&old_schema, &new_schema)
+    } else {
+        // For now, only support two-file format
+        return Err(anyhow::anyhow!("Please provide two .qail files: old.qail:new.qail"));
+    };
+    
+    if cmds.is_empty() {
+        println!("{}", "No migrations to apply.".green());
+        return Ok(());
+    }
+    
+    println!("{} {} migration(s) to apply", "Found:".cyan(), cmds.len());
+    
+    // Parse URL and connect using qail-pg
+    let (host, port, user, password, database) = parse_pg_url(url)?;
+    let mut driver = if let Some(pwd) = password {
+        PgDriver::connect_with_password(&host, port, &user, &database, &pwd).await
+            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
+    } else {
+        PgDriver::connect(&host, port, &user, &database).await
+            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
+    };
+    
+    for (i, cmd) in cmds.iter().enumerate() {
+        println!("  {} {} {}", format!("[{}/{}]", i + 1, cmds.len()).cyan(), format!("{}", cmd.action).yellow(), &cmd.table);
+        
+        driver.execute(cmd).await
+            .map_err(|e| anyhow::anyhow!("Migration failed: {}", e))?;
+    }
+    
+    println!("{}", "✓ All migrations applied successfully!".green().bold());
+    Ok(())
+}
+
+/// Rollback migrations using qail-pg native driver.
+async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
+    println!("{} {}", "Migrating DOWN:".cyan().bold(), url.yellow());
+    
+    // For rollback, we reverse the diff: old becomes new, new becomes old
+    let cmds = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
+        let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
+        let old_path = parts[0];
+        let new_path = parts[1];
+        
+        // Swap: rollback means going from new -> old
+        let old_content = std::fs::read_to_string(new_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
+        let new_content = std::fs::read_to_string(old_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
+        
+        let old_schema = parse_qail(&old_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
+        let new_schema = parse_qail(&new_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
+        
+        diff_schemas(&old_schema, &new_schema)
+    } else {
+        println!("{}", "Warning: Rollback requires two .qail files".yellow());
+        println!("  Use format: qail migrate down old.qail:new.qail <url>");
+        return Ok(());
+    };
+    
+    if cmds.is_empty() {
+        println!("{}", "No rollbacks to apply.".green());
+        return Ok(());
+    }
+    
+    println!("{} {} rollback(s) to apply", "Found:".cyan(), cmds.len());
+    
+    let (host, port, user, password, database) = parse_pg_url(url)?;
+    let mut driver = if let Some(pwd) = password {
+        PgDriver::connect_with_password(&host, port, &user, &database, &pwd).await
+            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
+    } else {
+        PgDriver::connect(&host, port, &user, &database).await
+            .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
+    };
+    
+    for (i, cmd) in cmds.iter().enumerate() {
+        println!("  {} {} {}", format!("[{}/{}]", i + 1, cmds.len()).cyan(), format!("{}", cmd.action).yellow(), &cmd.table);
+        
+        driver.execute(cmd).await
+            .map_err(|e| anyhow::anyhow!("Rollback failed: {}", e))?;
+    }
+    
+    println!("{}", "✓ All rollbacks applied successfully!".green().bold());
+    Ok(())
+}
+
+/// Parse a PostgreSQL URL into (host, port, user, password, database).
+fn parse_pg_url(url: &str) -> Result<(String, u16, String, Option<String>, String)> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+    
+    let host = parsed.host_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing host in URL"))?
+        .to_string();
+    
+    let port = parsed.port().unwrap_or(5432);
+    
+    let user = if parsed.username().is_empty() {
+        "postgres".to_string()
+    } else {
+        parsed.username().to_string()
+    };
+    
+    let password = parsed.password().map(|s| s.to_string());
+    
+    let database = parsed.path().trim_start_matches('/').to_string();
+    if database.is_empty() {
+        return Err(anyhow::anyhow!("Missing database in URL"));
+    }
+    
+    Ok((host, port, user, password, database))
 }

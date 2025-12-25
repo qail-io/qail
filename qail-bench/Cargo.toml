@@ -15,11 +15,15 @@ path = "src/bin/fifty_million_benchmark.rs"
 name = "fifty_million_consume"
 path = "src/bin/fifty_million_consume.rs"
 
+[[bin]]
+name = "pool_benchmark"
+path = "src/bin/pool_benchmark.rs"
+
 [dependencies]
 qail-core = { path = "../qail-core" }
 qail-pg = { path = "../qail-pg" }
 criterion = { version = "0.5", features = ["html_reports"] }
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -139,19 +139,19 @@ pub struct PgPool {
 impl PgPool {
     /// Create a new connection pool.
     pub async fn connect(config: PoolConfig) -> PgResult<Self> {
+        // Semaphore starts with max_connections permits
         let semaphore = Semaphore::new(config.max_connections);
         
-        // Create initial connections
+        // Create initial connections (they go to idle pool)
         let mut initial_connections = Vec::new();
         for _ in 0..config.min_connections {
             let conn = Self::create_connection(&config).await?;
             initial_connections.push(conn);
         }
         
-        // Reserve permits for initial connections
-        for _ in 0..initial_connections.len() {
-            semaphore.acquire().await.unwrap().forget();
-        }
+        // NOTE: Don't acquire permits for initial connections!
+        // They are idle (available), not in-use.
+        // Permits are only consumed when acquire() is called.
 
         let inner = Arc::new(PgPoolInner {
             config,
