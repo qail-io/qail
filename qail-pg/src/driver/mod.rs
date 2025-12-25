@@ -2,14 +2,34 @@
 //!
 //! This module contains the async runtime-specific code.
 //! Uses tokio for networking.
+//!
+//! Connection methods are split across modules for easier maintenance:
+//! - `connection.rs` - Core struct and connect methods
+//! - `io.rs` - send, recv, recv_msg_type_fast
+//! - `query.rs` - query, query_cached, execute_simple
+//! - `transaction.rs` - begin_transaction, commit, rollback
+//! - `cursor.rs` - declare_cursor, fetch_cursor, close_cursor  
+//! - `copy.rs` - COPY protocol for bulk operations
+//! - `pipeline.rs` - High-performance pipelining (275k q/s)
+//! - `cancel.rs` - Query cancellation
 
 mod connection;
+mod io;
+mod query;
+mod transaction;
+mod cursor;
+mod copy;
+mod pipeline;
+mod cancel;
+mod prepared;
 mod row;
 mod pool;
 mod stream;
 
 pub use connection::PgConnection;
+pub(crate) use connection::{parse_affected_rows, CANCEL_REQUEST_CODE};
 pub use pool::{PgPool, PoolConfig, PooledConnection};
+pub use prepared::PreparedStatement;
 
 use qail_core::ast::QailCmd;
 
@@ -93,25 +113,40 @@ impl PgDriver {
         Ok(Self::new(connection))
     }
 
-    /// Execute a QAIL command and fetch all rows.
+    /// Execute a QAIL command and fetch all rows (AST-NATIVE).
     ///
-    /// Uses Extended Query Protocol - parameters are sent as binary bytes,
-    /// skipping the string layer entirely.
+    /// Uses AstEncoder to directly encode AST to wire protocol bytes.
+    /// NO SQL STRING GENERATION!
     pub async fn fetch_all(&mut self, cmd: &QailCmd) -> PgResult<Vec<PgRow>> {
-        // Layer 2: Convert AST to parameterized SQL (pure, sync)
-        use qail_core::transpiler::ToSqlParameterized;
-        let result = cmd.to_sql_parameterized();
-
-        // Convert Value params to binary bytes
-        let params: Vec<Option<Vec<u8>>> = result.params.iter()
-            .map(value_to_bytes)
-            .collect();
-
-        // Layer 3: Execute via Extended Query Protocol (async I/O)
-        // Parameters are binary bytes - no string interpolation
-        let raw_rows = self.connection.query(&result.sql, &params).await?;
+        use crate::protocol::AstEncoder;
         
-        Ok(raw_rows.into_iter().map(|columns| PgRow { columns }).collect())
+        // AST-NATIVE: Encode directly to wire bytes (no to_sql()!)
+        let (wire_bytes, _params) = AstEncoder::encode_cmd(cmd);
+        
+        // Send wire bytes and receive response
+        self.connection.send_bytes(&wire_bytes).await?;
+        
+        // Collect results
+        let mut rows: Vec<PgRow> = Vec::new();
+        loop {
+            let msg = self.connection.recv().await?;
+            match msg {
+                crate::protocol::BackendMessage::ParseComplete | 
+                crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::RowDescription(_) => {}
+                crate::protocol::BackendMessage::DataRow(data) => {
+                    rows.push(PgRow { columns: data });
+                }
+                crate::protocol::BackendMessage::CommandComplete(_) => {}
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    return Ok(rows);
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Execute a QAIL command and fetch one row.
@@ -120,23 +155,43 @@ impl PgDriver {
         rows.into_iter().next().ok_or(PgError::NoRows)
     }
 
-    /// Execute a QAIL command (for mutations).
+    /// Execute a QAIL command (for mutations) - AST-NATIVE.
     ///
-    /// Uses Extended Query Protocol - parameters are sent as binary bytes.
+    /// Uses AstEncoder to directly encode AST to wire protocol bytes.
     /// Returns the number of affected rows.
     pub async fn execute(&mut self, cmd: &QailCmd) -> PgResult<u64> {
-        // Layer 2: Convert AST to parameterized SQL (pure, sync)
-        use qail_core::transpiler::ToSqlParameterized;
-        let result = cmd.to_sql_parameterized();
-
-        // Convert Value params to binary bytes
-        let params: Vec<Option<Vec<u8>>> = result.params.iter()
-            .map(value_to_bytes)
-            .collect();
-
-        // Layer 3: Execute via Extended Query Protocol (async I/O)
-        let affected = self.connection.execute_raw(&result.sql, &params).await?;
-        Ok(affected)
+        use crate::protocol::AstEncoder;
+        
+        // AST-NATIVE: Encode directly to wire bytes (no to_sql()!)
+        let (wire_bytes, _params) = AstEncoder::encode_cmd(cmd);
+        
+        // Send wire bytes and receive response
+        self.connection.send_bytes(&wire_bytes).await?;
+        
+        // Parse response for affected rows
+        let mut affected = 0u64;
+        loop {
+            let msg = self.connection.recv().await?;
+            match msg {
+                crate::protocol::BackendMessage::ParseComplete | 
+                crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::RowDescription(_) => {}
+                crate::protocol::BackendMessage::DataRow(_) => {}
+                crate::protocol::BackendMessage::CommandComplete(tag) => {
+                    // Parse "INSERT 0 5" or "UPDATE 3" etc
+                    if let Some(n) = tag.split_whitespace().last() {
+                        affected = n.parse().unwrap_or(0);
+                    }
+                }
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    return Ok(affected);
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Bulk insert data using PostgreSQL COPY protocol (AST-native).
@@ -230,9 +285,12 @@ impl PgDriver {
         // Generate unique cursor name
         let cursor_name = format!("qail_cursor_{}", CURSOR_ID.fetch_add(1, Ordering::SeqCst));
         
-        // Generate SQL from AST using transpiler
-        use qail_core::transpiler::ToSqlParameterized;
-        let sql = cmd.to_sql_parameterized().sql;
+        // AST-NATIVE: Generate SQL directly from AST (no to_sql_parameterized!)
+        use crate::protocol::AstEncoder;
+        let mut sql_buf = bytes::BytesMut::with_capacity(256);
+        let mut params: Vec<Option<Vec<u8>>> = Vec::new();
+        AstEncoder::encode_select_sql(cmd, &mut sql_buf, &mut params);
+        let sql = String::from_utf8_lossy(&sql_buf).to_string();
         
         // Must be in a transaction for cursors
         self.connection.begin_transaction().await?;
@@ -254,34 +312,5 @@ impl PgDriver {
         self.connection.commit().await?;
         
         Ok(all_batches)
-    }
-}
-
-/// Convert a QAIL Value to PostgreSQL wire protocol bytes (text format).
-fn value_to_bytes(value: &qail_core::ast::Value) -> Option<Vec<u8>> {
-    use qail_core::ast::Value;
-    
-    match value {
-        Value::Null => None,
-        Value::Bool(b) => Some(if *b { b"t".to_vec() } else { b"f".to_vec() }),
-        Value::Int(i) => Some(i.to_string().into_bytes()),
-        Value::Float(f) => Some(f.to_string().into_bytes()),
-        Value::String(s) => Some(s.as_bytes().to_vec()),
-        Value::Uuid(u) => Some(u.to_string().into_bytes()),
-        Value::NullUuid => None,
-        Value::Timestamp(ts) => Some(ts.as_bytes().to_vec()),
-        // For functions, columns, etc. - handled in SQL template, not as params
-        Value::Function(_) | Value::Column(_) | Value::Param(_) | Value::NamedParam(_) => None,
-        Value::Array(arr) => {
-            // PostgreSQL array format: {elem1,elem2,elem3}
-            let elements: Vec<String> = arr.iter()
-                .map(|v| format!("{}", v))
-                .collect();
-            Some(format!("{{{}}}", elements.join(",")).into_bytes())
-        }
-        Value::Subquery(_) => None, // Subqueries are inlined in SQL
-        Value::Interval { amount, unit } => {
-            Some(format!("{} {}", amount, unit).into_bytes())
-        }
     }
 }
