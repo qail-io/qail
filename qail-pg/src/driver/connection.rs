@@ -506,21 +506,33 @@ impl PgConnection {
     /// conn.commit().await?;  // Both inserts succeed or neither do
     /// ```
     pub async fn begin_transaction(&mut self) -> PgResult<()> {
-        self.execute_simple("BEGIN").await
+        use qail_core::ast::{QailCmd, Action};
+        use qail_core::transpiler::ToSql;
+        let mut cmd = QailCmd::get("");
+        cmd.action = Action::TxnStart;
+        self.execute_simple(&cmd.to_sql()).await
     }
 
     /// Commit the current transaction.
     ///
     /// Makes all changes since `begin_transaction()` permanent.
     pub async fn commit(&mut self) -> PgResult<()> {
-        self.execute_simple("COMMIT").await
+        use qail_core::ast::{QailCmd, Action};
+        use qail_core::transpiler::ToSql;
+        let mut cmd = QailCmd::get("");
+        cmd.action = Action::TxnCommit;
+        self.execute_simple(&cmd.to_sql()).await
     }
 
     /// Rollback the current transaction.
     ///
     /// Discards all changes since `begin_transaction()`.
     pub async fn rollback(&mut self) -> PgResult<()> {
-        self.execute_simple("ROLLBACK").await
+        use qail_core::ast::{QailCmd, Action};
+        use qail_core::transpiler::ToSql;
+        let mut cmd = QailCmd::get("");
+        cmd.action = Action::TxnRollback;
+        self.execute_simple(&cmd.to_sql()).await
     }
 
     // ==================== Query Cancellation ====================
