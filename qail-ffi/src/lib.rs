@@ -35,7 +35,7 @@ fn clear_error() {
 /// Parse QAIL and return SQL string.
 /// Returns NULL on error (check qail_last_error).
 /// Caller must free the returned string with qail_free().
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn qail_transpile(qail: *const c_char) -> *mut c_char {
     clear_error();
     
@@ -71,7 +71,7 @@ pub extern "C" fn qail_transpile(qail: *const c_char) -> *mut c_char {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn qail_transpile_with_dialect(qail: *const c_char, dialect: *const c_char) -> *mut c_char {
     clear_error();
 
@@ -132,7 +132,7 @@ pub extern "C" fn qail_transpile_with_dialect(qail: *const c_char, dialect: *con
 /// Parse QAIL and return AST as JSON string.
 /// Returns NULL on error.
 /// Caller must free the returned string with qail_free().
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn qail_parse_json(qail: *const c_char) -> *mut c_char {
     clear_error();
     
@@ -177,7 +177,7 @@ pub extern "C" fn qail_parse_json(qail: *const c_char) -> *mut c_char {
 
 /// Validate QAIL syntax.
 /// Returns 1 if valid, 0 if invalid.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn qail_validate(qail: *const c_char) -> i32 {
     if qail.is_null() {
         return 0;
@@ -195,7 +195,7 @@ pub extern "C" fn qail_validate(qail: *const c_char) -> i32 {
 /// Get the last error message.
 /// Returns NULL if no error.
 /// The returned string is valid until the next QAIL function call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn qail_last_error() -> *const c_char {
     thread_local! {
         static ERROR_CSTRING: RefCell<Option<CString>> = RefCell::new(None);
@@ -219,7 +219,7 @@ pub extern "C" fn qail_last_error() -> *const c_char {
 
 /// Free a string returned by QAIL functions.
 /// Safe to call with NULL.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn qail_free(ptr: *mut c_char) {
     if !ptr.is_null() {
         unsafe {
@@ -230,7 +230,7 @@ pub extern "C" fn qail_free(ptr: *mut c_char) {
 
 /// Get QAIL version string.
 /// Caller must free the returned string with qail_free().
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn qail_version() -> *mut c_char {
     let version = env!("CARGO_PKG_VERSION");
     CString::new(version)

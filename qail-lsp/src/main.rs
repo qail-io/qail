@@ -247,7 +247,7 @@ impl QailLanguageServer {
                                                 severity: Some(DiagnosticSeverity::WARNING),
                                                 code: Some(NumberOrString::String("qail-schema".to_string())),
                                                 source: Some("qail-lsp".to_string()),
-                                                message: error,
+                                                message: error.to_string(),
                                                 ..Default::default()
                                             });
                                         }
