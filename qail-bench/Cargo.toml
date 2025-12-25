@@ -1,6 +1,6 @@
 [package]
 name = "qail-bench"
-version = "0.9.3"
+version = "0.9.4"
 edition = "2021"
 
 [[bench]]
@@ -10,6 +10,10 @@ harness = false
 [[bin]]
 name = "fifty_million_benchmark"
 path = "src/bin/fifty_million_benchmark.rs"
+
+[[bin]]
+name = "fifty_million_consume"
+path = "src/bin/fifty_million_consume.rs"
 
 [dependencies]
 qail-core = { path = "../qail-core" }
