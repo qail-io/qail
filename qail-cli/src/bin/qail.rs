@@ -135,6 +135,14 @@ enum Commands {
 
 #[derive(Subcommand, Clone)]
 enum MigrateAction {
+    /// Preview migration SQL without executing (dry-run)
+    Plan {
+        /// Schema diff (old.qail:new.qail)
+        schema_diff: String,
+        /// Save SQL to file
+        #[arg(short, long)]
+        output: Option<String>,
+    },
     /// Apply migrations (forward)
     Up {
         /// Schema diff file or inline diff
@@ -176,6 +184,9 @@ async fn main() -> Result<()> {
         },
         Some(Commands::Migrate { action }) => {
             match action {
+                MigrateAction::Plan { schema_diff, output } => {
+                    migrate_plan(schema_diff, output.as_deref())?;
+                },
                 MigrateAction::Up { schema_diff, url } => {
                     migrate_up(schema_diff, url).await?;
                 },
@@ -665,6 +676,202 @@ fn diff_schemas_cmd(old_path: &str, new_path: &str, format: OutputFormat, cli: &
     }
     
     Ok(())
+}
+
+/// Preview migration SQL without executing (dry-run).
+fn migrate_plan(schema_diff_path: &str, output: Option<&str>) -> Result<()> {
+    println!("{}", "📋 Migration Plan (dry-run)".cyan().bold());
+    println!();
+    
+    // Parse schema files
+    let cmds = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
+        let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
+        let old_path = parts[0];
+        let new_path = parts[1];
+        
+        println!("  {} → {}", old_path.yellow(), new_path.yellow());
+        println!();
+        
+        let old_content = std::fs::read_to_string(old_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
+        let new_content = std::fs::read_to_string(new_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
+        
+        let old_schema = parse_qail(&old_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
+        let new_schema = parse_qail(&new_content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
+        
+        diff_schemas(&old_schema, &new_schema)
+    } else {
+        return Err(anyhow::anyhow!("Please provide two .qail files: old.qail:new.qail"));
+    };
+    
+    if cmds.is_empty() {
+        println!("{}", "✓ No migrations needed - schemas are identical".green());
+        return Ok(());
+    }
+    
+    // Generate UP SQL
+    let mut up_sql = Vec::new();
+    let mut down_sql = Vec::new();
+    
+    println!("┌─ {} ({} operations) ─────────────────────────────────┐", "UP".green().bold(), cmds.len());
+    for (i, cmd) in cmds.iter().enumerate() {
+        let sql = cmd_to_sql(cmd);
+        println!("│ {}. {}", i + 1, sql.cyan());
+        up_sql.push(format!("{}. {}", i + 1, sql));
+        
+        // Generate rollback SQL
+        let rollback = generate_rollback_sql(cmd);
+        down_sql.push(format!("{}. {}", i + 1, rollback));
+    }
+    println!("└──────────────────────────────────────────────────────────────┘");
+    println!();
+    
+    println!("┌─ {} ({} operations) ──────────────────────────────┐", "DOWN".yellow().bold(), cmds.len());
+    for sql in &down_sql {
+        println!("│ {}", sql.yellow());
+    }
+    println!("└──────────────────────────────────────────────────────────────┘");
+    
+    // Save to file if requested
+    if let Some(path) = output {
+        let mut content = String::new();
+        content.push_str("-- Migration UP\n");
+        for cmd in &cmds {
+            content.push_str(&format!("{};\n", cmd_to_sql(cmd)));
+        }
+        content.push_str("\n-- Migration DOWN (rollback)\n");
+        for (i, cmd) in cmds.iter().enumerate() {
+            content.push_str(&format!("-- {}. {};\n", i + 1, generate_rollback_sql(cmd)));
+        }
+        std::fs::write(path, &content)?;
+        println!();
+        println!("{} {}", "Saved to:".green(), path);
+    }
+    
+    println!();
+    println!("{} Run 'qail migrate up old.qail:new.qail <URL>' to apply", "💡".yellow());
+    
+    Ok(())
+}
+
+/// Convert QailCmd to SQL string for preview.
+fn cmd_to_sql(cmd: &QailCmd) -> String {
+    // Generate SQL for migration DDL operations
+    match cmd.action {
+        Action::Make => {
+            // CREATE TABLE
+            let mut sql = format!("CREATE TABLE {} (", cmd.table);
+            let cols: Vec<String> = cmd.columns.iter().filter_map(|col| {
+                if let Expr::Def { name, data_type, constraints } = col {
+                    let mut col_def = format!("{} {}", name, data_type);
+                    for c in constraints {
+                        match c {
+                            Constraint::PrimaryKey => col_def.push_str(" PRIMARY KEY"),
+                            Constraint::Nullable => {},
+                            Constraint::Unique => col_def.push_str(" UNIQUE"),
+                            Constraint::Default(v) => col_def.push_str(&format!(" DEFAULT {}", v)),
+                            _ => {},
+                        }
+                    }
+                    Some(col_def)
+                } else {
+                    None
+                }
+            }).collect();
+            sql.push_str(&cols.join(", "));
+            sql.push(')');
+            sql
+        },
+        Action::Drop => {
+            format!("DROP TABLE IF EXISTS {}", cmd.table)
+        },
+        Action::Alter => {
+            // ADD COLUMN
+            if let Some(Expr::Def { name, data_type, constraints }) = cmd.columns.first() {
+                let mut sql = format!("ALTER TABLE {} ADD COLUMN {} {}", cmd.table, name, data_type);
+                for c in constraints {
+                    match c {
+                        Constraint::Nullable => {},
+                        Constraint::Unique => sql.push_str(" UNIQUE"),
+                        Constraint::Default(v) => sql.push_str(&format!(" DEFAULT {}", v)),
+                        _ => {},
+                    }
+                }
+                return sql;
+            }
+            format!("ALTER TABLE {} ADD COLUMN ...", cmd.table)
+        },
+        Action::AlterDrop => {
+            // DROP COLUMN
+            if let Some(Expr::Named(name)) = cmd.columns.first() {
+                return format!("ALTER TABLE {} DROP COLUMN {}", cmd.table, name);
+            }
+            if let Some(Expr::Def { name, .. }) = cmd.columns.first() {
+                return format!("ALTER TABLE {} DROP COLUMN {}", cmd.table, name);
+            }
+            format!("ALTER TABLE {} DROP COLUMN ...", cmd.table)
+        },
+        Action::Index => {
+            if let Some(ref idx) = cmd.index_def {
+                let unique = if idx.unique { "UNIQUE " } else { "" };
+                return format!("CREATE {}INDEX {} ON {} ({})", 
+                    unique, idx.name, cmd.table, idx.columns.join(", "));
+            }
+            format!("CREATE INDEX ON {} (...)", cmd.table)
+        },
+        Action::DropIndex => {
+            if let Some(ref idx) = cmd.index_def {
+                return format!("DROP INDEX IF EXISTS {}", idx.name);
+            }
+            "DROP INDEX ...".to_string()
+        },
+        Action::Mod => {
+            // RENAME COLUMN
+            format!("ALTER TABLE {} RENAME COLUMN ... TO ...", cmd.table)
+        },
+        _ => format!("-- Unsupported action: {:?}", cmd.action),
+    }
+}
+
+/// Generate rollback SQL for a command.
+fn generate_rollback_sql(cmd: &QailCmd) -> String {
+    match cmd.action {
+        Action::Make => {
+            format!("DROP TABLE IF EXISTS {}", cmd.table)
+        },
+        Action::Drop => {
+            format!("-- Cannot auto-rollback DROP TABLE {} (data lost)", cmd.table)
+        },
+        Action::Alter => {
+            // ADD COLUMN -> DROP COLUMN
+            if let Some(col) = cmd.columns.first() {
+                if let Expr::Def { name, .. } = col {
+                    return format!("ALTER TABLE {} DROP COLUMN {}", cmd.table, name);
+                }
+            }
+            format!("-- Cannot determine rollback for ALTER on {}", cmd.table)
+        },
+        Action::AlterDrop => {
+            // DROP COLUMN -> cannot easily reverse
+            format!("-- Cannot auto-rollback DROP COLUMN on {} (data lost)", cmd.table)
+        },
+        Action::Index => {
+            if let Some(ref idx) = cmd.index_def {
+                return format!("DROP INDEX IF EXISTS {}", idx.name);
+            }
+            "-- Cannot determine index name for rollback".to_string()
+        },
+        Action::DropIndex => {
+            format!("-- Cannot auto-rollback DROP INDEX (need original definition)")
+        },
+        Action::Mod => {
+            format!("-- RENAME operation: reverse manually")
+        },
+        _ => format!("-- No rollback for {:?}", cmd.action),
+    }
 }
 
 /// Apply migrations forward using qail-pg native driver.
