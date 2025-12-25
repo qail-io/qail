@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.9.3"
+version = "0.9.4"
 edition = "2024"
 description = "PostgreSQL driver for QAIL - native wire protocol"
 license = "MIT"
