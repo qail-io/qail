@@ -2,35 +2,44 @@
 //!
 //! Low-level TCP connection with wire protocol handling.
 //! This is Layer 3 (async I/O).
+//!
+//! Methods are split across modules for easier maintenance:
+//! - `io.rs` - Core I/O (send, recv)
+//! - `query.rs` - Query execution
+//! - `transaction.rs` - Transaction control
+//! - `cursor.rs` - Streaming cursors
+//! - `copy.rs` - COPY protocol
+//! - `pipeline.rs` - High-performance pipelining
+//! - `cancel.rs` - Query cancellation
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use bytes::BytesMut;
-use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus, ScramClient, PgEncoder};
+use crate::protocol::{FrontendMessage, BackendMessage, TransactionStatus, ScramClient};
 use super::stream::PgStream;
 use super::{PgError, PgResult};
 
-/// Initial buffer capacity (8KB - typical response size)
-const BUFFER_CAPACITY: usize = 8192;
+/// Initial buffer capacity (64KB for pipeline performance)
+pub(crate) const BUFFER_CAPACITY: usize = 65536;
 
 /// SSLRequest message bytes (request code: 80877103)
 const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
 
 /// CancelRequest protocol code: 80877102
-const CANCEL_REQUEST_CODE: i32 = 80877102;
+pub(crate) const CANCEL_REQUEST_CODE: i32 = 80877102;
 
 /// A raw PostgreSQL connection.
 pub struct PgConnection {
-    stream: PgStream,
-    buffer: BytesMut,
-    /// Cache of prepared statements: stmt_name -> SQL text (for debugging)
-    prepared_statements: HashMap<String, String>,
+    pub(crate) stream: PgStream,
+    pub(crate) buffer: BytesMut,
+    /// Cache of prepared statements: stmt_name -> SQL text
+    pub(crate) prepared_statements: HashMap<String, String>,
     /// Backend process ID (for query cancellation)  
-    process_id: i32,
+    pub(crate) process_id: i32,
     /// Backend secret key (for query cancellation)
-    secret_key: i32,
+    pub(crate) secret_key: i32,
 }
 
 impl PgConnection {
@@ -49,6 +58,9 @@ impl PgConnection {
     ) -> PgResult<Self> {
         let addr = format!("{}:{}", host, port);
         let tcp_stream = TcpStream::connect(&addr).await?;
+        
+        // Disable Nagle's algorithm for lower latency
+        tcp_stream.set_nodelay(true)?;
 
         let mut conn = Self {
             stream: PgStream::Tcp(tcp_stream),
@@ -58,25 +70,17 @@ impl PgConnection {
             secret_key: 0,
         };
 
-        // Send startup message
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
         }).await?;
 
-        // Handle authentication
         conn.handle_startup(user, password).await?;
 
         Ok(conn)
     }
 
     /// Connect to PostgreSQL server with TLS encryption.
-    ///
-    /// This method:
-    /// 1. Connects via TCP
-    /// 2. Sends SSLRequest
-    /// 3. If server accepts ('S'), performs TLS handshake
-    /// 4. Continues with normal startup over encrypted connection
     pub async fn connect_tls(
         host: &str,
         port: u16,
@@ -84,6 +88,7 @@ impl PgConnection {
         database: &str,
         password: Option<&str>,
     ) -> PgResult<Self> {
+        use tokio::io::AsyncReadExt;
         use tokio_rustls::TlsConnector;
         use tokio_rustls::rustls::ClientConfig;
         use tokio_rustls::rustls::pki_types::ServerName;
@@ -91,25 +96,22 @@ impl PgConnection {
         let addr = format!("{}:{}", host, port);
         let mut tcp_stream = TcpStream::connect(&addr).await?;
 
-        // Step 1: Send SSLRequest
+        // Send SSLRequest
         tcp_stream.write_all(&SSL_REQUEST).await?;
 
-        // Step 2: Read server response (single byte: 'S' or 'N')
+        // Read response
         let mut response = [0u8; 1];
         tcp_stream.read_exact(&mut response).await?;
 
         if response[0] != b'S' {
-            return Err(PgError::Connection(
-                "Server does not support TLS".to_string()
-            ));
+            return Err(PgError::Connection("Server does not support TLS".to_string()));
         }
 
-        // Step 3: Perform TLS handshake
+        // TLS handshake
         let certs = rustls_native_certs::load_native_certs();
-        
         let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();
         for cert in certs.certs {
-            let _ = root_cert_store.add(cert); // Ignore invalid certs
+            let _ = root_cert_store.add(cert);
         }
         
         let config = ClientConfig::builder()
@@ -123,7 +125,6 @@ impl PgConnection {
         let tls_stream = connector.connect(server_name, tcp_stream).await
             .map_err(|e| PgError::Connection(format!("TLS handshake failed: {}", e)))?;
 
-        // Step 4: Create connection with TLS stream
         let mut conn = Self {
             stream: PgStream::Tls(tls_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
@@ -132,33 +133,17 @@ impl PgConnection {
             secret_key: 0,
         };
 
-        // Send startup message over TLS
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
         }).await?;
 
-        // Handle authentication
         conn.handle_startup(user, password).await?;
 
         Ok(conn)
     }
 
     /// Connect to PostgreSQL server via Unix domain socket.
-    ///
-    /// This is faster than TCP for local connections as it avoids
-    /// the network stack overhead.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Connect via default PostgreSQL socket
-    /// let conn = PgConnection::connect_unix(
-    ///     "/var/run/postgresql/.s.PGSQL.5432",
-    ///     "postgres",
-    ///     "mydb",
-    ///     Some("password")
-    /// ).await?;
-    /// ```
     #[cfg(unix)]
     pub async fn connect_unix(
         socket_path: &str,
@@ -178,55 +163,14 @@ impl PgConnection {
             secret_key: 0,
         };
 
-        // Send startup message
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
         }).await?;
 
-        // Handle authentication
         conn.handle_startup(user, password).await?;
 
         Ok(conn)
-    }
-
-    /// Send a frontend message.
-    pub async fn send(&mut self, msg: FrontendMessage) -> PgResult<()> {
-        let bytes = msg.encode();
-        self.stream.write_all(&bytes).await?;
-        Ok(())
-    }
-
-    /// Receive backend messages.
-    /// Loops until a complete message is available.
-    pub async fn recv(&mut self) -> PgResult<BackendMessage> {
-        loop {
-            // Try to decode from buffer first
-            if self.buffer.len() >= 5 {
-                let msg_len = i32::from_be_bytes([
-                    self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
-                ]) as usize;
-                
-                if self.buffer.len() >= msg_len + 1 {
-                    // We have a complete message - zero-copy split
-                    let msg_bytes = self.buffer.split_to(msg_len + 1);
-                    let (msg, _) = BackendMessage::decode(&msg_bytes)
-                        .map_err(PgError::Protocol)?;
-                    return Ok(msg);
-                }
-            }
-            
-            // Need more data - read directly into BytesMut (no temp buffer)
-            // Reserve space if needed
-            if self.buffer.capacity() - self.buffer.len() < 4096 {
-                self.buffer.reserve(4096);
-            }
-            
-            let n = self.stream.read_buf(&mut self.buffer).await?;
-            if n == 0 {
-                return Err(PgError::Connection("Connection closed".to_string()));
-            }
-        }
     }
 
     /// Handle startup sequence (auth + params).
@@ -236,14 +180,11 @@ impl PgConnection {
         loop {
             let msg = self.recv().await?;
             match msg {
-                BackendMessage::AuthenticationOk => {
-                    // Authentication successful, continue to receive params
-                }
+                BackendMessage::AuthenticationOk => {}
                 BackendMessage::AuthenticationMD5Password(_salt) => {
                     return Err(PgError::Auth("MD5 auth not supported. Use SCRAM-SHA-256.".to_string()));
                 }
                 BackendMessage::AuthenticationSASL(mechanisms) => {
-                    // SCRAM-SHA-256 authentication requested
                     let password = password.ok_or_else(|| {
                         PgError::Auth("Password required for SCRAM authentication".to_string())
                     })?;
@@ -255,11 +196,9 @@ impl PgConnection {
                         )));
                     }
 
-                    // Initialize SCRAM client
                     let client = ScramClient::new(user, password);
                     let first_message = client.client_first_message();
 
-                    // Send SASL initial response
                     self.send(FrontendMessage::SASLInitialResponse {
                         mechanism: "SCRAM-SHA-256".to_string(),
                         data: first_message,
@@ -268,7 +207,6 @@ impl PgConnection {
                     scram_client = Some(client);
                 }
                 BackendMessage::AuthenticationSASLContinue(server_data) => {
-                    // Process server challenge and send final response
                     let client = scram_client.as_mut().ok_or_else(|| {
                         PgError::Auth("Received SASL Continue without SASL init".to_string())
                     })?;
@@ -279,24 +217,19 @@ impl PgConnection {
                     self.send(FrontendMessage::SASLResponse(final_message)).await?;
                 }
                 BackendMessage::AuthenticationSASLFinal(server_signature) => {
-                    // Verify server signature
                     if let Some(client) = scram_client.as_ref() {
                         client.verify_server_final(&server_signature)
                             .map_err(|e| PgError::Auth(format!("Server verification failed: {}", e)))?;
                     }
                 }
-                BackendMessage::ParameterStatus { .. } => {
-                    // Store server parameters if needed
-                }
+                BackendMessage::ParameterStatus { .. } => {}
                 BackendMessage::BackendKeyData { process_id, secret_key } => {
-                    // Store for cancel requests
                     self.process_id = process_id;
                     self.secret_key = secret_key;
                 }
                 BackendMessage::ReadyForQuery(TransactionStatus::Idle) |
                 BackendMessage::ReadyForQuery(TransactionStatus::InBlock) |
                 BackendMessage::ReadyForQuery(TransactionStatus::Failed) => {
-                    // Connection ready!
                     return Ok(());
                 }
                 BackendMessage::ErrorResponse(err) => {
@@ -306,502 +239,10 @@ impl PgConnection {
             }
         }
     }
-
-    /// Execute a query with binary parameters (crate-internal).
-    ///
-    /// This uses the Extended Query Protocol (Parse/Bind/Execute/Sync):
-    /// - Parameters are sent as binary bytes, skipping the string layer
-    /// - No SQL injection possible - parameters are never interpolated
-    /// - Better performance via prepared statement reuse
-    ///
-    /// # Example
-    /// ```ignore
-    /// let rows = conn.query(
-    ///     "SELECT * FROM users WHERE name = $1",
-    ///     &[Some(b"Alice".to_vec())]
-    /// ).await?;
-    /// ```
-    pub(crate) async fn query(
-        &mut self, 
-        sql: &str, 
-        params: &[Option<Vec<u8>>]
-    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        use crate::protocol::PgEncoder;
-        
-        // Send Parse + Bind + Execute + Sync as one pipeline
-        let bytes = PgEncoder::encode_extended_query(sql, params);
-        self.stream.write_all(&bytes).await?;
-
-        let mut rows = Vec::new();
-
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::ParseComplete => {
-                    // Parse succeeded
-                }
-                BackendMessage::BindComplete => {
-                    // Bind succeeded
-                }
-                BackendMessage::RowDescription(_) => {
-                    // Column metadata
-                }
-                BackendMessage::DataRow(data) => {
-                    rows.push(data);
-                }
-                BackendMessage::CommandComplete(_) => {
-                    // Query done
-                }
-                BackendMessage::NoData => {
-                    // No rows (for non-SELECT)
-                }
-                BackendMessage::ReadyForQuery(_) => {
-                    return Ok(rows);
-                }
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Execute a query with cached prepared statement.
-    ///
-    /// Like `query()`, but reuses prepared statements across calls.
-    /// The statement name is derived from a hash of the SQL text.
-    /// 
-    /// Benefits:
-    /// - Skip parsing on repeated queries (faster execution)
-    /// - Better query plan caching in PostgreSQL
-    ///
-    /// # Example
-    /// ```ignore
-    /// // First call: Parse + Bind + Execute + Sync
-    /// let rows1 = conn.query_cached("SELECT * FROM users WHERE id = $1", &[params]).await?;
-    /// 
-    /// // Second call: Bind + Execute + Sync (no Parse needed!)
-    /// let rows2 = conn.query_cached("SELECT * FROM users WHERE id = $1", &[params]).await?;
-    /// ```
-    pub async fn query_cached(
-        &mut self, 
-        sql: &str, 
-        params: &[Option<Vec<u8>>]
-    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        // Generate statement name from SQL hash
-        let stmt_name = Self::sql_to_stmt_name(sql);
-        let is_new = !self.prepared_statements.contains_key(&stmt_name);
-        
-        // Build the message: Parse (if new) + Bind + Execute + Sync
-        let mut buf = BytesMut::new();
-        
-        if is_new {
-            // Parse statement with name
-            buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
-        }
-        
-        // Bind to named statement
-        buf.extend(PgEncoder::encode_bind("", &stmt_name, params));
-        // Execute
-        buf.extend(PgEncoder::encode_execute("", 0));
-        // Sync
-        buf.extend(PgEncoder::encode_sync());
-        
-        self.stream.write_all(&buf).await?;
-        
-        let mut rows = Vec::new();
-        let sql_owned = sql.to_string(); // For storing in cache
-        
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::ParseComplete => {
-                    // Statement parsed - store with SQL text for debugging
-                    self.prepared_statements.insert(stmt_name.clone(), sql_owned.clone());
-                }
-                BackendMessage::BindComplete => {}
-                BackendMessage::RowDescription(_) => {}
-                BackendMessage::DataRow(data) => {
-                    rows.push(data);
-                }
-                BackendMessage::CommandComplete(_) => {}
-                BackendMessage::NoData => {}
-                BackendMessage::ReadyForQuery(_) => {
-                    return Ok(rows);
-                }
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Generate a statement name from SQL hash.
-    /// Uses a simple hash to create a unique name like "stmt_12345abc".
-    fn sql_to_stmt_name(sql: &str) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        
-        let mut hasher = DefaultHasher::new();
-        sql.hash(&mut hasher);
-        format!("s{:016x}", hasher.finish())
-    }
-
-    /// Execute a mutation and return affected rows count.
-    ///
-    /// Parses the affected rows from CommandComplete tag:
-    /// - "INSERT 0 1" → 1
-    /// - "UPDATE 5" → 5
-    /// - "DELETE 10" → 10
-    pub(crate) async fn execute_raw(
-        &mut self,
-        sql: &str,
-        params: &[Option<Vec<u8>>]
-    ) -> PgResult<u64> {
-        use crate::protocol::PgEncoder;
-        
-        // Send Parse + Bind + Execute + Sync as one pipeline
-        let bytes = PgEncoder::encode_extended_query(sql, params);
-        self.stream.write_all(&bytes).await?;
-
-        let mut affected_rows = 0u64;
-
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::ParseComplete => {}
-                BackendMessage::BindComplete => {}
-                BackendMessage::NoData => {}
-                BackendMessage::DataRow(_) => {
-                    // Mutations might return rows (RETURNING clause)
-                }
-                BackendMessage::CommandComplete(tag) => {
-                    // Parse affected rows from tag: "INSERT 0 1", "UPDATE 5", "DELETE 10"
-                    affected_rows = parse_affected_rows(&tag);
-                }
-                BackendMessage::ReadyForQuery(_) => {
-                    return Ok(affected_rows);
-                }
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // ==================== Transaction Support ====================
-
-    /// Begin a new transaction.
-    ///
-    /// After calling this, all queries run within the transaction
-    /// until `commit()` or `rollback()` is called.
-    ///
-    /// # Example
-    /// ```ignore
-    /// conn.begin_transaction().await?;
-    /// conn.execute_raw("INSERT INTO users (name) VALUES ($1)", &[Some(b"Alice".to_vec())]).await?;
-    /// conn.execute_raw("INSERT INTO profiles (user_id) VALUES ($1)", &[Some(b"1".to_vec())]).await?;
-    /// conn.commit().await?;  // Both inserts succeed or neither do
-    /// ```
-    pub async fn begin_transaction(&mut self) -> PgResult<()> {
-        use qail_core::ast::{QailCmd, Action};
-        use qail_core::transpiler::ToSql;
-        let mut cmd = QailCmd::get("");
-        cmd.action = Action::TxnStart;
-        self.execute_simple(&cmd.to_sql()).await
-    }
-
-    /// Commit the current transaction.
-    ///
-    /// Makes all changes since `begin_transaction()` permanent.
-    pub async fn commit(&mut self) -> PgResult<()> {
-        use qail_core::ast::{QailCmd, Action};
-        use qail_core::transpiler::ToSql;
-        let mut cmd = QailCmd::get("");
-        cmd.action = Action::TxnCommit;
-        self.execute_simple(&cmd.to_sql()).await
-    }
-
-    /// Rollback the current transaction.
-    ///
-    /// Discards all changes since `begin_transaction()`.
-    pub async fn rollback(&mut self) -> PgResult<()> {
-        use qail_core::ast::{QailCmd, Action};
-        use qail_core::transpiler::ToSql;
-        let mut cmd = QailCmd::get("");
-        cmd.action = Action::TxnRollback;
-        self.execute_simple(&cmd.to_sql()).await
-    }
-
-    // ==================== Query Cancellation ====================
-
-    /// Get the cancel key for this connection.
-    /// 
-    /// Returns (host, port, process_id, secret_key) needed to cancel queries.
-    /// Use with `cancel_query()` from another task.
-    pub fn get_cancel_key(&self) -> (i32, i32) {
-        (self.process_id, self.secret_key)
-    }
-
-    /// Cancel a running query on a PostgreSQL backend.
-    ///
-    /// This opens a new TCP connection and sends a CancelRequest message.
-    /// The original connection continues running but the query is interrupted.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // From another task, cancel a long-running query
-    /// let (pid, key) = conn.get_cancel_key();
-    /// PgConnection::cancel_query("127.0.0.1", 5432, pid, key).await?;
-    /// ```
-    pub async fn cancel_query(
-        host: &str,
-        port: u16, 
-        process_id: i32,
-        secret_key: i32,
-    ) -> PgResult<()> {
-        // Open new connection just for cancel
-        let addr = format!("{}:{}", host, port);
-        let mut stream = TcpStream::connect(&addr).await?;
-        
-        // Send CancelRequest message:
-        // Length (16) + CancelRequest code (80877102) + process_id + secret_key
-        let mut buf = [0u8; 16];
-        buf[0..4].copy_from_slice(&16i32.to_be_bytes()); // Length
-        buf[4..8].copy_from_slice(&CANCEL_REQUEST_CODE.to_be_bytes());
-        buf[8..12].copy_from_slice(&process_id.to_be_bytes());
-        buf[12..16].copy_from_slice(&secret_key.to_be_bytes());
-        
-        stream.write_all(&buf).await?;
-        
-        // Server will close connection after receiving cancel request
-        Ok(())
-    }
-
-    /// Execute a simple SQL statement (no parameters).
-    /// Used internally for transaction control.
-    async fn execute_simple(&mut self, sql: &str) -> PgResult<()> {
-        let bytes = PgEncoder::encode_query_string(sql);
-        self.stream.write_all(&bytes).await?;
-
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::CommandComplete(_) => {}
-                BackendMessage::ReadyForQuery(_) => {
-                    return Ok(());
-                }
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // ==================== Streaming Cursors ====================
-
-    /// Declare a cursor for streaming large result sets.
-    ///
-    /// This uses PostgreSQL's DECLARE CURSOR to avoid loading all rows into memory.
-    /// The cursor_name should be a simple identifier (no special characters).
-    ///
-    /// # Example
-    /// ```ignore
-    /// conn.declare_cursor("my_cursor", "SELECT * FROM large_table").await?;
-    /// while let Some(rows) = conn.fetch_cursor("my_cursor", 100).await? {
-    ///     for row in rows { /* process */ }
-    /// }
-    /// conn.close_cursor("my_cursor").await?;
-    /// ```
-    pub(crate) async fn declare_cursor(&mut self, name: &str, sql: &str) -> PgResult<()> {
-        // Cursor names must be valid identifiers - hardcoded name format
-        let declare_sql = format!("DECLARE {} CURSOR FOR {}", name, sql);
-        self.execute_simple(&declare_sql).await
-    }
-
-    /// Fetch rows from a cursor in batches.
-    ///
-    /// Returns None when cursor is exhausted.
-    pub(crate) async fn fetch_cursor(
-        &mut self,
-        name: &str,
-        batch_size: usize,
-    ) -> PgResult<Option<Vec<Vec<Option<Vec<u8>>>>>> {
-        let fetch_sql = format!("FETCH {} FROM {}", batch_size, name);
-        let rows = self.query(&fetch_sql, &[]).await?;
-        
-        if rows.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(rows))
-        }
-    }
-
-    /// Close a cursor and release server resources.
-    pub(crate) async fn close_cursor(&mut self, name: &str) -> PgResult<()> {
-        let close_sql = format!("CLOSE {}", name);
-        self.execute_simple(&close_sql).await
-    }
-
-    // ==================== COPY Protocol ====================
-
-    /// Internal bulk insert using COPY protocol (crate-private).
-    ///
-    /// Use `PgDriver::copy_bulk(&QailCmd)` for AST-native access.
-    pub(crate) async fn copy_in_internal(
-        &mut self,
-        table: &str,
-        columns: &[String],
-        rows: &[Vec<String>],
-    ) -> PgResult<u64> {
-        // Table and columns come from validated AST - no string-based validation needed here
-        // Build COPY command
-        let cols = columns.join(", ");
-        let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
-        
-        // Send COPY command
-        let bytes = PgEncoder::encode_query_string(&sql);
-        self.stream.write_all(&bytes).await?;
-
-        // Wait for CopyInResponse
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::CopyInResponse { .. } => break,
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-
-        // Send data rows as CopyData messages
-        for row in rows {
-            let line = row.join("\t") + "\n";
-            self.send_copy_data(line.as_bytes()).await?;
-        }
-
-        // Send CopyDone
-        self.send_copy_done().await?;
-
-        // Wait for CommandComplete
-        let mut affected = 0u64;
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::CommandComplete(tag) => {
-                    affected = parse_affected_rows(&tag);
-                }
-                BackendMessage::ReadyForQuery(_) => {
-                    return Ok(affected);
-                }
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Send CopyData message (raw bytes).
-    async fn send_copy_data(&mut self, data: &[u8]) -> PgResult<()> {
-        // CopyData: 'd' + length + data
-        let len = (data.len() + 4) as i32;
-        let mut buf = BytesMut::with_capacity(1 + 4 + data.len());
-        buf.extend_from_slice(&[b'd']);
-        buf.extend_from_slice(&len.to_be_bytes());
-        buf.extend_from_slice(data);
-        self.stream.write_all(&buf).await?;
-        Ok(())
-    }
-
-    /// Send CopyDone message.
-    async fn send_copy_done(&mut self) -> PgResult<()> {
-        // CopyDone: 'c' + length (4)
-        self.stream.write_all(&[b'c', 0, 0, 0, 4]).await?;
-        Ok(())
-    }
-
-    /// Execute multiple queries in a single network round-trip (PIPELINING).
-    ///
-    /// This sends all queries at once, then reads all responses.
-    /// Reduces N queries from N round-trips to 1 round-trip.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let results = conn.query_pipeline(&[
-    ///     ("SELECT * FROM users WHERE id = $1", &[Some(b"1".to_vec())]),
-    ///     ("SELECT * FROM orders WHERE user_id = $1", &[Some(b"1".to_vec())]),
-    /// ]).await?;
-    /// ```
-    pub async fn query_pipeline(
-        &mut self,
-        queries: &[(&str, &[Option<Vec<u8>>])]
-    ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
-        use bytes::BytesMut;
-        use crate::protocol::PgEncoder;
-        
-        // Encode all queries into a single buffer
-        let mut buf = BytesMut::new();
-        for (sql, params) in queries {
-            buf.extend(PgEncoder::encode_extended_query(sql, params));
-        }
-        
-        // Send all queries in ONE write
-        self.stream.write_all(&buf).await?;
-        
-        // Collect all results
-        let mut all_results: Vec<Vec<Vec<Option<Vec<u8>>>>> = Vec::with_capacity(queries.len());
-        let mut current_rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
-        let mut queries_completed = 0;
-        
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::ParseComplete | BackendMessage::BindComplete => {}
-                BackendMessage::RowDescription(_) => {}
-                BackendMessage::DataRow(data) => {
-                    current_rows.push(data);
-                }
-                BackendMessage::CommandComplete(_) => {
-                    // One query finished - save results and reset
-                    all_results.push(std::mem::take(&mut current_rows));
-                    queries_completed += 1;
-                }
-                BackendMessage::NoData => {
-                    // Non-SELECT query completed
-                    all_results.push(Vec::new());
-                    queries_completed += 1;
-                }
-                BackendMessage::ReadyForQuery(_) => {
-                    // All queries done
-                    if queries_completed == queries.len() {
-                        return Ok(all_results);
-                    }
-                }
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Send raw bytes to the stream.
-    pub async fn send_bytes(&mut self, bytes: &[u8]) -> PgResult<()> {
-        self.stream.write_all(bytes).await?;
-        Ok(())
-    }
 }
 
 /// Parse affected rows from CommandComplete tag.
-/// Examples: "INSERT 0 1" → 1, "UPDATE 5" → 5, "DELETE 10" → 10
-fn parse_affected_rows(tag: &str) -> u64 {
-    // Format is: "COMMAND [OID] ROWS" where OID is only for INSERT
-    // Examples: "INSERT 0 5", "UPDATE 5", "DELETE 10", "SELECT 100"
+pub(crate) fn parse_affected_rows(tag: &str) -> u64 {
     tag.split_whitespace()
         .last()
         .and_then(|s| s.parse().ok())

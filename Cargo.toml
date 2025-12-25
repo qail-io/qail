@@ -16,3 +16,7 @@ unused = "deny"
 dead_code = "deny"
 unused_imports = "deny"
 unused_variables = "deny"
+
+# Profiling: enable debug symbols in release builds
+[profile.release]
+debug = true

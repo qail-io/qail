@@ -12,8 +12,6 @@
 //! The async I/O layer (Layer 3) consumes these bytes.
 
 use bytes::BytesMut;
-use qail_core::ast::QailCmd;
-use qail_core::transpiler::ToSql;
 
 /// PostgreSQL protocol encoder.
 ///
@@ -22,22 +20,6 @@ use qail_core::transpiler::ToSql;
 pub struct PgEncoder;
 
 impl PgEncoder {
-    /// Encode a QailCmd as a Simple Query message.
-    ///
-    /// Simple Query protocol sends SQL as text.
-    /// The database parses, plans, and executes in one round-trip.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let cmd = QailCmd::get("users");
-    /// let bytes = PgEncoder::encode_simple_query(&cmd);
-    /// // bytes can now be written to TcpStream by Layer 3
-    /// ```
-    pub fn encode_simple_query(cmd: &QailCmd) -> BytesMut {
-        let sql = cmd.to_sql();
-        Self::encode_query_string(&sql)
-    }
-
     /// Encode a raw SQL string as a Simple Query message.
     ///
     /// Wire format:
@@ -306,22 +288,8 @@ impl PgEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qail_core::ast::QailCmd;
 
-    #[test]
-    fn test_encode_simple_query() {
-        let cmd = QailCmd::get("users");
-        let bytes = PgEncoder::encode_simple_query(&cmd);
-        
-        // Should start with 'Q'
-        assert_eq!(bytes[0], b'Q');
-        
-        // Should contain "SELECT * FROM users"
-        let content = String::from_utf8_lossy(&bytes[5..]);
-        assert!(content.contains("SELECT"));
-        assert!(content.contains("users"));
-    }
-
+    // NOTE: test_encode_simple_query removed - use AstEncoder instead
     #[test]
     fn test_encode_query_string() {
         let sql = "SELECT 1";
@@ -405,3 +373,70 @@ mod tests {
         assert!(bytes.windows(1).any(|w| w == [b'S']));
     }
 }
+
+// ==================== Zero-Allocation Hot Path Encoders ====================
+impl PgEncoder {
+    /// Encode Bind message directly into existing buffer (ZERO ALLOCATION).
+    ///
+    /// This is the hot path optimization - no intermediate Vec allocation.
+    #[inline]
+    pub fn encode_bind_to(buf: &mut BytesMut, statement: &str, params: &[Option<Vec<u8>>]) {
+        // Calculate content length upfront
+        // portal(1) + statement(len+1) + format_codes(2) + param_count(2) + params_data + result_format(2)
+        let params_size: usize = params.iter()
+            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
+            .sum();
+        let content_len = 1 + statement.len() + 1 + 2 + 2 + params_size + 2;
+        
+        // Reserve space upfront
+        buf.reserve(1 + 4 + content_len);
+        
+        // Message type 'B'
+        buf.extend_from_slice(&[b'B']);
+        
+        // Length (includes itself)
+        buf.extend_from_slice(&((content_len + 4) as i32).to_be_bytes());
+        
+        // Portal name (empty, null-terminated)
+        buf.extend_from_slice(&[0]);
+        
+        // Statement name (null-terminated)
+        buf.extend_from_slice(statement.as_bytes());
+        buf.extend_from_slice(&[0]);
+        
+        // Format codes count (0 = default text)
+        buf.extend_from_slice(&0i16.to_be_bytes());
+        
+        // Parameter count
+        buf.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        
+        // Parameters
+        for param in params {
+            match param {
+                None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(data) => {
+                    buf.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                    buf.extend_from_slice(data);
+                }
+            }
+        }
+        
+        // Result format codes count (0 = default text)
+        buf.extend_from_slice(&0i16.to_be_bytes());
+    }
+    
+    /// Encode Execute message directly into existing buffer (ZERO ALLOCATION).
+    #[inline]
+    pub fn encode_execute_to(buf: &mut BytesMut) {
+        // Execute with empty portal, max_rows=0 (unlimited)
+        // Content: portal(1) + max_rows(4) = 5 bytes
+        buf.extend_from_slice(&[b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0]);
+    }
+    
+    /// Encode Sync message directly into existing buffer (ZERO ALLOCATION).
+    #[inline]
+    pub fn encode_sync_to(buf: &mut BytesMut) {
+        buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
+    }
+}
+
