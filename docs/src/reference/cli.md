@@ -125,6 +125,49 @@ qail watch schema.qail
 qail watch schema.qail --url postgres://... --auto-apply
 ```
 
+### `qail lint`
+
+Check schema for best practices and potential issues:
+
+```bash
+qail lint schema.qail
+# 🔍 Schema Linter
+# ⚠ 144 warning(s)
+# ℹ 266 info(s)
+#
+# ⚠ users.customer_id Possible FK column without references()
+#   → Consider adding '.references("table", "id")' for referential integrity
+#
+# ⚠ orders Missing updated_at column
+#   → Add 'updated_at TIMESTAMPTZ not_null' for audit trail
+
+# Strict mode (errors only, for CI)
+qail lint schema.qail --strict
+```
+
+**Lint Checks:**
+
+| Check | Level | Description |
+|-------|-------|-------------|
+| Missing primary key | 🔴 ERROR | Every table needs a PK |
+| Missing created_at/updated_at | ⚠️ WARNING | Audit trail columns |
+| `_id` column without `references()` | ⚠️ WARNING | FK integrity |
+| Uppercase table names | ⚠️ WARNING | Use snake_case |
+| SERIAL vs UUID | ℹ️ INFO | Consider UUID for distributed |
+| Nullable without default | ℹ️ INFO | Consider default value |
+
+### `qail migrate status`
+
+View migration history for a database:
+
+```bash
+qail migrate status postgres://...
+# 📋 Migration Status
+#   Database: mydb
+#   Migration table: _qail_migrations
+#   ✓ Migration history table is ready
+```
+
 ### `qail fmt`
 
 Format QAIL text:
