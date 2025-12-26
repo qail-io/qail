@@ -9,3 +9,4 @@ preferred-dark-theme = "coal"
 git-repository-url = "https://github.com/qail-rs/qail"
 edit-url-template = "https://github.com/qail-rs/qail/edit/main/docs/{path}"
 additional-css = ["theme/custom.css"]
+additional-js = ["theme/header.js"]

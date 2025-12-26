@@ -8,9 +8,12 @@ pub mod encoder;
 pub mod auth;
 pub mod types;
 pub mod ast_encoder;
+pub mod copy_encoder;
 
 pub use wire::*;
 pub use encoder::PgEncoder;
 pub use auth::ScramClient;
 pub use types::{oid, oid_to_name, is_array_oid};
 pub use ast_encoder::AstEncoder;
+pub use copy_encoder::{encode_copy_value, encode_copy_batch};
+

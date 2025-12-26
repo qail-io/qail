@@ -5,6 +5,7 @@ pub mod cages;
 pub mod joins;
 pub mod expr;
 pub mod cmd;
+pub mod builders;
 
 pub use self::operators::{
     Action, AggregateFunc, GroupByMode, JoinKind, LogicalOp, ModKind, Operator, SetOp, SortOrder,

@@ -8,7 +8,7 @@ members = [
     "qail-wasm",
     "qail-ffi",
     "qail-pg",
-    # qail-macros removed: String-based approach deprecated in favor of pure AST builder API
+    "qail-py",
 ]
 
 [workspace.lints.rust]

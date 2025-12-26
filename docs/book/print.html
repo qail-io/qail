@@ -29,7 +29,7 @@
         <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
-        <link rel="stylesheet" href="theme/custom-ec95d119.css">
+        <link rel="stylesheet" href="theme/custom-882851d8.css">
 
 
         <!-- Provide site root and default themes to javascript -->
@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
-            window.path_to_searchindex_js = "searchindex-f8c91626.js";
+            window.path_to_searchindex_js = "searchindex-4a0cf978.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-0a9c4167.js"></script>
+        <script src="toc-f5af500f.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -391,6 +391,181 @@ let cmd = QailCmd::get("users")
 </tbody>
 </table>
 </div>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="expression-builders"><a class="header" href="#expression-builders">Expression Builders</a></h1>
+<p>QAIL provides ergonomic builder functions for constructing AST expressions without verbose struct creation.</p>
+<h2 id="import"><a class="header" href="#import">Import</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use qail_core::ast::builders::*;
+<span class="boring">}</span></code></pre>
+<h2 id="column-references"><a class="header" href="#column-references">Column References</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Named column
+col("phone_number")
+
+// Star (*)
+star()
+<span class="boring">}</span></code></pre>
+<h2 id="aggregate-functions"><a class="header" href="#aggregate-functions">Aggregate Functions</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// COUNT(*)
+count()
+
+// COUNT(DISTINCT column)
+count_distinct("phone_number")
+
+// COUNT(*) FILTER (WHERE ...)
+count_filter(vec![
+    eq("direction", "outbound"),
+    gt("created_at", now_minus("24 hours")),
+]).alias("messages_sent_24h")
+
+// Other aggregates
+sum("amount")
+avg("score")
+min("price")
+max("quantity")
+<span class="boring">}</span></code></pre>
+<p>All aggregates support:</p>
+<ul>
+<li><code>.distinct()</code> — Add DISTINCT modifier</li>
+<li><code>.filter(conditions)</code> — Add FILTER clause</li>
+<li><code>.alias("name")</code> — Add AS alias</li>
+</ul>
+<h2 id="time-functions"><a class="header" href="#time-functions">Time Functions</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// NOW()
+now()
+
+// INTERVAL 'duration'
+interval("24 hours")
+
+// NOW() - INTERVAL 'duration' (common pattern)
+now_minus("24 hours")
+
+// NOW() + INTERVAL 'duration'
+now_plus("7 days")
+<span class="boring">}</span></code></pre>
+<h2 id="type-casting"><a class="header" href="#type-casting">Type Casting</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// expr::type
+cast(col("amount"), "float8")
+
+// With alias
+cast(col("amount"), "float8").alias("amount_f")
+<span class="boring">}</span></code></pre>
+<h2 id="case-when-expressions"><a class="header" href="#case-when-expressions">CASE WHEN Expressions</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Simple CASE
+case_when(gt("score", 80), text("A"))
+    .otherwise(text("F"))
+    .alias("grade")
+
+// Multiple WHEN clauses
+case_when(gt("score", 90), text("A"))
+    .when(gt("score", 80), text("B"))
+    .when(gt("score", 70), text("C"))
+    .otherwise(text("F"))
+    .alias("grade")
+<span class="boring">}</span></code></pre>
+<h2 id="condition-helpers"><a class="header" href="#condition-helpers">Condition Helpers</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Equality
+eq("status", "active")      // status = 'active'
+ne("status", "deleted")     // status != 'deleted'
+
+// Comparisons
+gt("created_at", now_minus("24 hours"))   // created_at &gt; NOW() - INTERVAL '24 hours'
+gte("age", 18)              // age &gt;= 18
+lt("price", 100)            // price &lt; 100
+lte("quantity", 10)         // quantity &lt;= 10
+
+// IN / NOT IN
+is_in("status", ["delivered", "read"])    // status IN ('delivered', 'read')
+not_in("type", ["spam", "junk"])          // type NOT IN ('spam', 'junk')
+
+// NULL checks
+is_null("deleted_at")       // deleted_at IS NULL
+is_not_null("email")        // email IS NOT NULL
+
+// Pattern matching
+like("name", "John%")       // name LIKE 'John%'
+ilike("email", "%@gmail%")  // email ILIKE '%@gmail%'
+<span class="boring">}</span></code></pre>
+<h2 id="function-calls"><a class="header" href="#function-calls">Function Calls</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Generic function
+func("MY_FUNC", vec![col("a"), col("b")])
+
+// COALESCE
+coalesce(vec![col("nickname"), col("name"), text("Anonymous")])
+
+// NULLIF
+nullif(col("value"), int(0))
+<span class="boring">}</span></code></pre>
+<h2 id="binary-expressions"><a class="header" href="#binary-expressions">Binary Expressions</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// Arithmetic
+binary(col("price"), BinaryOp::Mul, col("quantity"))
+
+// With alias
+binary(
+    cast(col("success"), "float8"),
+    BinaryOp::Div,
+    cast(col("total"), "float8")
+).alias("success_rate")
+<span class="boring">}</span></code></pre>
+<h2 id="literals"><a class="header" href="#literals">Literals</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>int(42)           // Integer literal
+float(3.14)       // Float literal
+text("hello")     // String literal (quoted)
+<span class="boring">}</span></code></pre>
+<h2 id="complete-example"><a class="header" href="#complete-example">Complete Example</a></h2>
+<p>Here’s a complex analytics query using all the builders:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use qail_core::ast::builders::*;
+
+let stats = QailCmd::get("whatsapp_messages")
+    .columns([
+        count_distinct("phone_number").alias("total_contacts"),
+        count().alias("total_messages"),
+        count_filter(vec![
+            eq("direction", "outbound"),
+            gt("created_at", now_minus("24 hours")),
+        ]).alias("messages_sent_24h"),
+        count_filter(vec![
+            eq("direction", "inbound"),
+            eq("status", "received"),
+        ]).alias("unread_messages"),
+    ]);
+
+let cmd = QailCmd::get("stats")
+    .with_cte("stats", stats)
+    .columns([
+        col("total_contacts"),
+        col("total_messages"),
+        case_when(gt("messages_sent_24h", 0),
+            binary(
+                cast(col("successful"), "float8"),
+                BinaryOp::Div,
+                cast(col("messages_sent_24h"), "float8")
+            )
+        ).otherwise(float(0.0)).alias("delivery_rate"),
+    ]);
+<span class="boring">}</span></code></pre>
+<p>This replaces 40+ lines of raw SQL with type-safe, compile-time checked Rust code.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="text-syntax"><a class="header" href="#text-syntax">Text Syntax</a></h1>
 <p>For CLI, LSP, and WASM playground. Parses to AST internally.</p>
@@ -1480,6 +1655,7 @@ qail lint schema.qail --strict
         <script src="book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
+        <script src="theme/header-c05cfed5.js"></script>
 
         <script>
         window.addEventListener('load', function() {

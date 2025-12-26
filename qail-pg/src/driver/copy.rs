@@ -12,6 +12,8 @@ impl PgConnection {
     /// Internal bulk insert using COPY protocol (crate-private).
     ///
     /// Use `PgDriver::copy_bulk(&QailCmd)` for AST-native access.
+    /// Note: Prefer `copy_in_fast` for better performance.
+    #[allow(dead_code)]
     pub(crate) async fn copy_in_internal(
         &mut self,
         table: &str,
@@ -43,6 +45,125 @@ impl PgConnection {
             let line = row.join("\t") + "\n";
             self.send_copy_data(line.as_bytes()).await?;
         }
+
+        // Send CopyDone
+        self.send_copy_done().await?;
+
+        // Wait for CommandComplete
+        let mut affected = 0u64;
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CommandComplete(tag) => {
+                    affected = parse_affected_rows(&tag);
+                }
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(affected);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// **Fast** bulk insert using COPY protocol with zero-allocation encoding.
+    ///
+    /// Encodes all rows into a single buffer and writes with one syscall.
+    /// ~2x faster than `copy_in_internal` due to batched I/O.
+    pub(crate) async fn copy_in_fast(
+        &mut self,
+        table: &str,
+        columns: &[String],
+        rows: &[Vec<qail_core::ast::Value>],
+    ) -> PgResult<u64> {
+        use crate::protocol::encode_copy_batch;
+        
+        // Build COPY command
+        let cols = columns.join(", ");
+        let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
+        
+        // Send COPY command
+        let bytes = PgEncoder::encode_query_string(&sql);
+        self.stream.write_all(&bytes).await?;
+
+        // Wait for CopyInResponse
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CopyInResponse { .. } => break,
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+
+        // Encode ALL rows into a single buffer (zero-allocation per value)
+        let batch_data = encode_copy_batch(rows);
+        
+        // Single write for entire batch!
+        self.send_copy_data(&batch_data).await?;
+
+        // Send CopyDone
+        self.send_copy_done().await?;
+
+        // Wait for CommandComplete
+        let mut affected = 0u64;
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CommandComplete(tag) => {
+                    affected = parse_affected_rows(&tag);
+                }
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(affected);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// **Fastest** bulk insert using COPY protocol with pre-encoded data.
+    ///
+    /// Accepts raw COPY text format bytes, no encoding needed.
+    /// Use when caller has already encoded rows to COPY format.
+    ///
+    /// # Format
+    /// Data should be tab-separated rows with newlines:
+    /// `1\thello\t3.14\n2\tworld\t2.71\n`
+    pub(crate) async fn copy_in_raw(
+        &mut self,
+        table: &str,
+        columns: &[String],
+        data: &[u8],
+    ) -> PgResult<u64> {
+        // Build COPY command
+        let cols = columns.join(", ");
+        let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
+        
+        // Send COPY command
+        let bytes = PgEncoder::encode_query_string(&sql);
+        self.stream.write_all(&bytes).await?;
+
+        // Wait for CopyInResponse
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::CopyInResponse { .. } => break,
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+
+        // Single write - data is already encoded!
+        self.send_copy_data(data).await?;
 
         // Send CopyDone
         self.send_copy_done().await?;

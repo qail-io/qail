@@ -253,6 +253,25 @@ impl PgDriver {
         self.connection.rollback().await
     }
     
+    // ==================== PIPELINE (BATCH) ====================
+    
+    /// Execute multiple QailCmd ASTs in a single network round-trip (PIPELINING).
+    /// 
+    /// This is the high-performance path for batch operations.
+    /// Returns the count of successful queries.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let cmds: Vec<QailCmd> = (1..=1000)
+    ///     .map(|i| QailCmd::get("harbors").columns(["id", "name"]).limit(i))
+    ///     .collect();
+    /// let count = driver.pipeline_batch(&cmds).await?;
+    /// assert_eq!(count, 1000);
+    /// ```
+    pub async fn pipeline_batch(&mut self, cmds: &[QailCmd]) -> PgResult<usize> {
+        self.connection.pipeline_ast_fast(cmds).await
+    }
+    
     // ==================== LEGACY/BOOTSTRAP ====================
     
     /// Execute a raw SQL string.
@@ -318,15 +337,58 @@ impl PgDriver {
             ));
         }
         
-        // Convert Value rows to string representations for COPY format
-        let str_rows: Vec<Vec<String>> = rows.iter()
-            .map(|row| {
-                row.iter().map(|v| format!("{}", v)).collect()
+        // Use optimized COPY path: direct Value → bytes encoding, single syscall
+        self.connection.copy_in_fast(table, &columns, rows).await
+    }
+
+    /// **Fastest** bulk insert using pre-encoded COPY data.
+    ///
+    /// Accepts raw COPY text format bytes. Use when caller has already 
+    /// encoded rows to avoid any encoding overhead.
+    ///
+    /// # Format
+    /// Data should be tab-separated rows with newlines (COPY text format):
+    /// `1\thello\t3.14\n2\tworld\t2.71\n`
+    ///
+    /// # Example
+    /// ```ignore
+    /// let cmd = QailCmd::add("users").columns(["id", "name"]);
+    /// let data = b"1\tAlice\n2\tBob\n";
+    /// driver.copy_bulk_bytes(&cmd, data).await?;
+    /// ```
+    pub async fn copy_bulk_bytes(
+        &mut self,
+        cmd: &QailCmd,
+        data: &[u8],
+    ) -> PgResult<u64> {
+        use qail_core::ast::Action;
+        
+        if cmd.action != Action::Add {
+            return Err(PgError::Query(
+                "copy_bulk_bytes requires QailCmd::Add action".to_string()
+            ));
+        }
+        
+        let table = &cmd.table;
+        let columns: Vec<String> = cmd.columns.iter()
+            .filter_map(|expr| {
+                use qail_core::ast::Expr;
+                match expr {
+                    Expr::Named(name) => Some(name.clone()),
+                    Expr::Aliased { name, .. } => Some(name.clone()),
+                    _ => None,
+                }
             })
             .collect();
         
-        // Call internal copy implementation
-        self.connection.copy_in_internal(table, &columns, &str_rows).await
+        if columns.is_empty() {
+            return Err(PgError::Query(
+                "copy_bulk_bytes requires columns in QailCmd".to_string()
+            ));
+        }
+        
+        // Direct to raw COPY - zero encoding!
+        self.connection.copy_in_raw(table, &columns, data).await
     }
 
     /// Stream large result sets using PostgreSQL cursors.
