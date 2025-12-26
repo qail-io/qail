@@ -3,7 +3,7 @@
 //! Parses .qail text format into Schema AST.
 //!
 //! ## Grammar
-//! ```
+//! ```text
 //! schema = { table_def | index_def | migration_hint }*
 //! 
 //! table_def = "table" IDENT "{" column_def* "}"
