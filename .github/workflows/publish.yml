@@ -44,16 +44,16 @@ jobs:
         run: |
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
           CORE_VERSION=$(grep '^version' qail-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          MACROS_VERSION=$(grep '^version' qail-macros/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          PG_VERSION=$(grep '^version' qail-pg/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           CLI_VERSION=$(grep '^version' qail-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           
           echo "Tag version: $TAG_VERSION"
           echo "Core version: $CORE_VERSION"
-          echo "Macros version: $MACROS_VERSION"
+          echo "PG version: $PG_VERSION"
           echo "CLI version: $CLI_VERSION"
           
-          if [ "$CORE_VERSION" != "$TAG_VERSION" ] || [ "$MACROS_VERSION" != "$TAG_VERSION" ] || [ "$CLI_VERSION" != "$TAG_VERSION" ]; then
-            echo "❌ Version mismatch! Tag: $TAG_VERSION, Core: $CORE_VERSION, Macros: $MACROS_VERSION, CLI: $CLI_VERSION"
+          if [ "$CORE_VERSION" != "$TAG_VERSION" ] || [ "$PG_VERSION" != "$TAG_VERSION" ] || [ "$CLI_VERSION" != "$TAG_VERSION" ]; then
+            echo "❌ Version mismatch! Tag: $TAG_VERSION, Core: $CORE_VERSION, PG: $PG_VERSION, CLI: $CLI_VERSION"
             exit 1
           fi
           echo "✅ All versions match tag"
@@ -70,25 +70,24 @@ jobs:
         run: cargo publish -p qail-core || echo "qail-core already published, skipping"
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        # env: CARGO_REGISTRY_TOKEN removed for Trusted Publishing
 
       - name: Wait for qail-core to be available
         if: ${{ !inputs.dry_run }}
         run: sleep 30
 
-      - name: Publish qail-macros
+      - name: Publish qail-pg
         if: ${{ !inputs.dry_run }}
-        run: cargo publish -p qail-macros || echo "qail-macros already published, skipping"
+        run: cargo publish -p qail-pg || echo "qail-pg already published, skipping"
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-      - name: Wait for qail-macros to be available
+      - name: Wait for qail-pg to be available
         if: ${{ !inputs.dry_run }}
         run: sleep 30
 
       - name: Publish qail (CLI)
         if: ${{ !inputs.dry_run }}
-        run: cargo publish -p qail
+        run: cargo publish -p qail || echo "qail already published, skipping"
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
@@ -97,5 +96,5 @@ jobs:
         run: |
           echo "🔍 Dry run completed - no packages were published"
           cargo publish -p qail-core --dry-run
-          cargo publish -p qail-macros --dry-run
+          cargo publish -p qail-pg --dry-run
           cargo publish -p qail --dry-run
