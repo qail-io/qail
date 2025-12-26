@@ -9,6 +9,7 @@ members = [
     "qail-ffi",
     "qail-pg",
     "qail-py",
+    "qail-go",
 ]
 
 [workspace.lints.rust]
