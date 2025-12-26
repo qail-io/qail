@@ -347,3 +347,26 @@ pub enum TableConstraint {
     /// PRIMARY KEY (col1, col2, ...)
     PrimaryKey(Vec<String>),
 }
+
+// ==================== From Implementations for Ergonomic API ====================
+
+impl From<&str> for Expr {
+    /// Convert a string reference to a Named expression.
+    /// Enables: `.select(["id", "name"])` instead of `.select([col("id"), col("name")])`
+    fn from(s: &str) -> Self {
+        Expr::Named(s.to_string())
+    }
+}
+
+impl From<String> for Expr {
+    fn from(s: String) -> Self {
+        Expr::Named(s)
+    }
+}
+
+impl From<&String> for Expr {
+    fn from(s: &String) -> Self {
+        Expr::Named(s.clone())
+    }
+}
+
