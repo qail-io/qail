@@ -123,6 +123,9 @@ pub enum Expr {
         right: Box<Expr>,
         alias: Option<String>,
     },
+    /// Literal value (string, number) for use in expressions
+    /// e.g., '62', 0, 'active'
+    Literal(Value),
 }
 
 impl std::fmt::Display for Expr {
@@ -257,6 +260,7 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
+            Expr::Literal(value) => write!(f, "{}", value),
         }
     }
 }
