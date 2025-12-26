@@ -4,6 +4,7 @@
 //! Connections are reused across queries to avoid reconnection overhead.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use super::{PgConnection, PgResult, PgError};
 
@@ -24,10 +25,16 @@ pub struct PoolConfig {
     pub max_connections: usize,
     /// Minimum number of idle connections to maintain
     pub min_connections: usize,
+    /// Maximum time a connection can be idle before being closed
+    pub idle_timeout: Duration,
+    /// Maximum time to wait for a connection from the pool
+    pub acquire_timeout: Duration,
+    /// Maximum time to wait when establishing a new connection
+    pub connect_timeout: Duration,
 }
 
 impl PoolConfig {
-    /// Create a new pool configuration.
+    /// Create a new pool configuration with sensible defaults.
     pub fn new(host: &str, port: u16, user: &str, database: &str) -> Self {
         Self {
             host: host.to_string(),
@@ -37,6 +44,9 @@ impl PoolConfig {
             password: None,
             max_connections: 10,
             min_connections: 1,
+            idle_timeout: Duration::from_secs(600),      // 10 minutes
+            acquire_timeout: Duration::from_secs(30),    // 30 seconds
+            connect_timeout: Duration::from_secs(10),    // 10 seconds
         }
     }
 
@@ -57,6 +67,32 @@ impl PoolConfig {
         self.min_connections = min;
         self
     }
+
+    /// Set idle timeout (connections idle longer than this are closed).
+    pub fn idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
+
+    /// Set acquire timeout (max wait time when getting a connection).
+    pub fn acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.acquire_timeout = timeout;
+        self
+    }
+
+    /// Set connect timeout (max time to establish new connection).
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+}
+
+/// A pooled connection with creation timestamp for idle tracking.
+struct PooledConn {
+    conn: PgConnection,
+    #[allow(dead_code)]
+    created_at: Instant,
+    last_used: Instant,
 }
 
 /// A pooled connection that returns to the pool when dropped.
@@ -101,7 +137,7 @@ impl std::ops::DerefMut for PooledConnection {
 /// Inner pool state (shared across clones).
 struct PgPoolInner {
     config: PoolConfig,
-    connections: Mutex<Vec<PgConnection>>,
+    connections: Mutex<Vec<PooledConn>>,
     semaphore: Semaphore,
 }
 
@@ -109,10 +145,32 @@ impl PgPoolInner {
     async fn return_connection(&self, conn: PgConnection) {
         let mut connections = self.connections.lock().await;
         if connections.len() < self.config.max_connections {
-            connections.push(conn);
+            connections.push(PooledConn {
+                conn,
+                created_at: Instant::now(),
+                last_used: Instant::now(),
+            });
         }
         // Connection dropped if pool is full
         self.semaphore.add_permits(1);
+    }
+
+    /// Get a healthy connection from the pool, or None if pool is empty.
+    async fn get_healthy_connection(&self) -> Option<PgConnection> {
+        let mut connections = self.connections.lock().await;
+        
+        while let Some(pooled) = connections.pop() {
+            // Check if connection is too old (idle timeout)
+            if pooled.last_used.elapsed() > self.config.idle_timeout {
+                // Connection is stale, drop it
+                continue;
+            }
+            
+            // Return the connection
+            return Some(pooled.conn);
+        }
+        
+        None
     }
 }
 
@@ -146,7 +204,11 @@ impl PgPool {
         let mut initial_connections = Vec::new();
         for _ in 0..config.min_connections {
             let conn = Self::create_connection(&config).await?;
-            initial_connections.push(conn);
+            initial_connections.push(PooledConn {
+                conn,
+                created_at: Instant::now(),
+                last_used: Instant::now(),
+            });
         }
         
         // NOTE: Don't acquire permits for initial connections!
@@ -164,20 +226,28 @@ impl PgPool {
 
     /// Acquire a connection from the pool.
     ///
-    /// Waits if all connections are in use.
+    /// Waits if all connections are in use (up to acquire_timeout).
+    /// Stale connections (idle > idle_timeout) are automatically discarded.
     /// Connection is automatically returned when dropped.
     pub async fn acquire(&self) -> PgResult<PooledConnection> {
-        // Wait for available slot
-        let permit = self.inner.semaphore.acquire().await
+        // Wait for available slot with timeout
+        let acquire_timeout = self.inner.config.acquire_timeout;
+        let permit = tokio::time::timeout(
+            acquire_timeout,
+            self.inner.semaphore.acquire()
+        ).await
+            .map_err(|_| PgError::Connection(format!(
+                "Timed out waiting for connection ({}s)", 
+                acquire_timeout.as_secs()
+            )))?
             .map_err(|_| PgError::Connection("Pool closed".to_string()))?;
         permit.forget();
 
-        // Try to get existing connection
-        let mut connections = self.inner.connections.lock().await;
-        let conn = if let Some(conn) = connections.pop() {
+        // Try to get existing healthy connection
+        let conn = if let Some(conn) = self.inner.get_healthy_connection().await {
             conn
         } else {
-            drop(connections); // Release lock before connecting
+            // Create new connection
             Self::create_connection(&self.inner.config).await?
         };
 

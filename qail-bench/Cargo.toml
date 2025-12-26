@@ -1,6 +1,6 @@
 [package]
 name = "qail-bench"
-version = "0.9.4"
+version = "0.9.6"
 edition = "2021"
 
 [[bench]]

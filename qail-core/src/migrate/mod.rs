@@ -21,8 +21,11 @@ pub mod schema;
 pub mod diff;
 pub mod parser;
 pub mod types;
+pub mod named_migration;
 
 pub use schema::{Schema, Table, Column, Index, MigrationHint, ForeignKey, FkAction, to_qail_string};
 pub use diff::diff_schemas;
 pub use parser::parse_qail;
 pub use types::ColumnType;
+pub use named_migration::{MigrationMeta, parse_migration_meta, validate_dependencies};
+

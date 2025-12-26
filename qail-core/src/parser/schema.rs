@@ -129,6 +129,52 @@ impl TableDef {
     pub fn find_column(&self, name: &str) -> Option<&ColumnDef> {
         self.columns.iter().find(|c| c.name.eq_ignore_ascii_case(name))
     }
+    
+    /// Generate CREATE TABLE IF NOT EXISTS SQL (AST-native DDL).
+    pub fn to_ddl(&self) -> String {
+        let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", self.name);
+        
+        let mut col_defs = Vec::new();
+        for col in &self.columns {
+            let mut line = format!("    {}", col.name);
+            
+            // Type with params
+            let mut typ = col.typ.to_uppercase();
+            if let Some(params) = &col.type_params {
+                typ = format!("{}({})", typ, params.join(", "));
+            }
+            if col.is_array {
+                typ.push_str("[]");
+            }
+            line.push_str(&format!(" {}", typ));
+            
+            // Constraints
+            if col.primary_key {
+                line.push_str(" PRIMARY KEY");
+            }
+            if !col.nullable && !col.primary_key && !col.is_serial {
+                line.push_str(" NOT NULL");
+            }
+            if col.unique && !col.primary_key {
+                line.push_str(" UNIQUE");
+            }
+            if let Some(ref default) = col.default_value {
+                line.push_str(&format!(" DEFAULT {}", default));
+            }
+            if let Some(ref refs) = col.references {
+                line.push_str(&format!(" REFERENCES {}", refs));
+            }
+            if let Some(ref check) = col.check {
+                line.push_str(&format!(" CHECK({})", check));
+            }
+            
+            col_defs.push(line);
+        }
+        
+        sql.push_str(&col_defs.join(",\n"));
+        sql.push_str("\n)");
+        sql
+    }
 }
 
 // =============================================================================

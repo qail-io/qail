@@ -33,10 +33,43 @@ pub use pool::{PgPool, PoolConfig, PooledConnection};
 pub use prepared::PreparedStatement;
 
 use qail_core::ast::QailCmd;
+use std::sync::Arc;
+use std::collections::HashMap;
 
-/// PostgreSQL row (raw bytes for now).
+/// Column metadata from RowDescription (shared across rows via Arc).
+#[derive(Debug, Clone)]
+pub struct ColumnInfo {
+    /// Column name -> index mapping
+    pub name_to_index: HashMap<String, usize>,
+    /// Column OIDs
+    pub oids: Vec<u32>,
+    /// Column format codes (0=text, 1=binary)
+    pub formats: Vec<i16>,
+}
+
+impl ColumnInfo {
+    /// Create from FieldDescriptions.
+    pub fn from_fields(fields: &[crate::protocol::FieldDescription]) -> Self {
+        let mut name_to_index = HashMap::with_capacity(fields.len());
+        let mut oids = Vec::with_capacity(fields.len());
+        let mut formats = Vec::with_capacity(fields.len());
+        
+        for (i, field) in fields.iter().enumerate() {
+            name_to_index.insert(field.name.clone(), i);
+            oids.push(field.type_oid);
+            formats.push(field.format);
+        }
+        
+        Self { name_to_index, oids, formats }
+    }
+}
+
+/// PostgreSQL row with column data and metadata.
 pub struct PgRow {
+    /// Column values (None = NULL)
     pub columns: Vec<Option<Vec<u8>>>,
+    /// Column metadata (shared across rows via Arc)
+    pub column_info: Option<Arc<ColumnInfo>>,
 }
 
 /// Error type for PostgreSQL driver operations.
@@ -129,14 +162,22 @@ impl PgDriver {
         
         // Collect results
         let mut rows: Vec<PgRow> = Vec::new();
+        let mut column_info: Option<Arc<ColumnInfo>> = None;
+        
         loop {
             let msg = self.connection.recv().await?;
             match msg {
                 crate::protocol::BackendMessage::ParseComplete | 
                 crate::protocol::BackendMessage::BindComplete => {}
-                crate::protocol::BackendMessage::RowDescription(_) => {}
+                crate::protocol::BackendMessage::RowDescription(fields) => {
+                    // Create and share column metadata across all rows
+                    column_info = Some(Arc::new(ColumnInfo::from_fields(&fields)));
+                }
                 crate::protocol::BackendMessage::DataRow(data) => {
-                    rows.push(PgRow { columns: data });
+                    rows.push(PgRow { 
+                        columns: data,
+                        column_info: column_info.clone(),
+                    });
                 }
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
@@ -195,9 +236,30 @@ impl PgDriver {
         }
     }
     
-    /// Execute a raw SQL string (for BEGIN, COMMIT, ROLLBACK, etc.).
+    // ==================== TRANSACTION CONTROL ====================
+    
+    /// Begin a transaction (AST-native).
+    pub async fn begin(&mut self) -> PgResult<()> {
+        self.connection.begin_transaction().await
+    }
+    
+    /// Commit the current transaction (AST-native).
+    pub async fn commit(&mut self) -> PgResult<()> {
+        self.connection.commit().await
+    }
+    
+    /// Rollback the current transaction (AST-native).
+    pub async fn rollback(&mut self) -> PgResult<()> {
+        self.connection.rollback().await
+    }
+    
+    // ==================== LEGACY/BOOTSTRAP ====================
+    
+    /// Execute a raw SQL string.
     ///
-    /// Use sparingly - prefer AST-native methods when possible.
+    /// ⚠️ **Discouraged**: Violates AST-native philosophy.
+    /// Use for bootstrap DDL only (e.g., migration table creation).
+    /// For transactions, use `begin()`, `commit()`, `rollback()`.
     pub async fn execute_raw(&mut self, sql: &str) -> PgResult<()> {
         self.connection.execute_simple(sql).await
     }
@@ -310,7 +372,7 @@ impl PgDriver {
         let mut all_batches = Vec::new();
         while let Some(rows) = self.connection.fetch_cursor(&cursor_name, batch_size).await? {
             let pg_rows: Vec<PgRow> = rows.into_iter()
-                .map(|cols| PgRow { columns: cols })
+                .map(|cols| PgRow { columns: cols, column_info: None })
                 .collect();
             all_batches.push(pg_rows);
         }
