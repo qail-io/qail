@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.9.6"
+version = "0.9.7"
 edition = "2024"
 description = "PostgreSQL driver for QAIL - native wire protocol"
 license = "MIT"
@@ -18,6 +18,10 @@ hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 base64 = "0.22"
 rand = "0.9"
+
+# Zero-allocation formatting for COPY encoder
+itoa = "1"
+ryu = "1"
 
 # TLS/SSL support
 tokio-rustls = "0.26"

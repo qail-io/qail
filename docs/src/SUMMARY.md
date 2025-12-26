@@ -10,6 +10,7 @@
 # Core Concepts
 
 - [AST Builder API](./core/builder-api.md)
+- [Expression Builders](./core/builders.md)
 - [Text Syntax](./core/text-syntax.md)
 - [PostgreSQL Driver](./core/pg-driver.md)
 
