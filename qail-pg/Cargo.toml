@@ -5,6 +5,7 @@ edition = "2024"
 description = "PostgreSQL driver for QAIL - native wire protocol"
 license = "MIT"
 repository = "https://github.com/qail-rs/qail"
+readme = "README.md"
 
 [dependencies]
 qail-core = { version = "0.9.7", path = "../qail-core" }
