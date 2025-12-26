@@ -1,0 +1,19 @@
+[package]
+name = "qail-encoder"
+version = "0.10.1"
+edition = "2024"
+description = "QAIL Encoder - Lightweight wire protocol encoding (no I/O, no TLS)"
+license = "MIT"
+repository = "https://github.com/qail-rs/qail"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+qail-core = { path = "../qail-core" }
+
+# Minimal dependencies - just encoding!
+# NO tokio, NO TLS, NO async
+
+[lints]
+workspace = true
