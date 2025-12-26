@@ -2209,8 +2209,10 @@ name = "qail-go"
 version = "0.10.1"
 dependencies = [
  "libc",
+ "once_cell",
  "qail-core",
  "qail-pg",
+ "tokio",
 ]
 
 [[package]]
@@ -2246,6 +2248,15 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "uuid",
+]
+
+[[package]]
+name = "qail-php"
+version = "0.10.1"
+dependencies = [
+ "libc",
+ "qail-core",
+ "qail-pg",
 ]
 
 [[package]]

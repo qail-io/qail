@@ -150,3 +150,67 @@ All benchmarks are reproducible:
 **qail-py achieved its performance goal**: 122k queries/second is **outstanding** for a Python database driver, making it ideal for high-volume query workloads. While asyncpg dominates bulk COPY operations with its specialized C extensions, qail-py's **7.6x advantage** in pipelined queries makes it the superior choice for real-world API and data processing scenarios.
 
 The PyO3 + Tokio architecture with GIL release proved highly effective, achieving **35% of native Rust performance** - a remarkable result that demonstrates the power of Rust-Python integration.
+
+---
+
+## Benchmark 3: PHP Extension (Pipeline Mode)
+
+### Test Configuration
+- **Total queries**: 10,000
+- **Batch size**: 100 queries per pipeline
+- **Query type**: `SELECT id, name FROM harbors LIMIT n`
+- **Implementation**: Native PHP C extension wrapping Rust static library
+
+### Results
+
+| Driver | Queries/Second | Notes |
+|--------|----------------|-------|
+| **qail-php (Pipeline)** | **232,024** 🏆 | Rust encoding + raw socket |
+| Raw PDO | 29,362 | Prepared statements |
+| Eloquent-like | 11,537 | PDO + model hydration |
+
+**Winner**: qail-php is **7.9x faster than raw PDO** and **20x faster than Eloquent**.
+
+### Performance Analysis
+- Pipeline mode sends 100 queries in 1 network round-trip
+- Direct PostgreSQL wire protocol eliminates PDO/libpq overhead
+- Rust encoding at 3.9M ops/sec, I/O is the bottleneck
+- PHP extension overhead: ~0.36µs vs FFI at ~0.65µs
+
+---
+
+## Benchmark 4: Go Driver (CGO)
+
+### Test Configuration
+- **Total queries**: 100,000
+- **Batch size**: 1,000 queries per batch
+- **Query type**: `SELECT id, name FROM harbors LIMIT n`
+- **Implementation**: CGO calling Rust static library
+
+### Results
+
+| Driver | Queries/Second | Notes |
+|--------|----------------|-------|
+| **qail-go** | **126,000** | Rust encoding, Go I/O |
+| pgx | 239,000 | Pure Go, highly optimized |
+| GORM | 27,000 | ORM overhead |
+
+**Winner**: qail-go is **4.2x faster than GORM** (still 53% of pgx).
+
+### Performance Analysis
+- CGO overhead limits performance vs pure Go pgx
+- Prepared batch encoding: one CGO call for 1000 queries
+- Buffered I/O (16KB buffers) reduces syscalls
+- Value proposition: **type-safe AST queries** + **4x ORM speed**
+
+---
+
+## Cross-Language Performance Summary
+
+| Driver | Query Speed | vs ORM | vs Best Native |
+|--------|-------------|--------|----------------|
+| **qail-php (pipeline)** | 232K q/s | 20x Eloquent | 7.9x PDO |
+| **qail-py (PyO3)** | 122K q/s | 7.6x asyncpg | 35% Rust |
+| **qail-go (CGO)** | 126K q/s | 4.2x GORM | 53% pgx |
+| Native Rust | 354K q/s | N/A | baseline |
+

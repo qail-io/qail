@@ -10,6 +10,7 @@ members = [
     "qail-pg",
     "qail-py",
     "qail-go",
+    "qail-php",
 ]
 
 [workspace.lints.rust]
