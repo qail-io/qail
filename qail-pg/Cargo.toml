@@ -4,9 +4,10 @@ version = "0.9.7"
 edition = "2024"
 description = "PostgreSQL driver for QAIL - native wire protocol"
 license = "MIT"
+repository = "https://github.com/qail-rs/qail"
 
 [dependencies]
-qail-core = { path = "../qail-core" }
+qail-core = { version = "0.9.7", path = "../qail-core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 async-trait = "0.1"
