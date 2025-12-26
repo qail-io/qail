@@ -29,7 +29,7 @@ let mut driver = PgDriver::connect("localhost", 5432, "user", "db").await?;
 let rows = driver.query(&cmd).await?;
 ```
 
-## Current Status (~60% Production Ready)
+## Current Status (~70% Production Ready)
 
 | Feature | Status |
 |---------|--------|
@@ -39,8 +39,16 @@ let rows = driver.query(&cmd).await?;
 | AST-Native Migrations | ✅ |
 | JSON/JSONB Types | ✅ |
 | UUID, Timestamps | ✅ |
-| Arrays | 🚧 |
-| COPY Protocol | 🚧 |
+| CTEs (WITH) | ✅ |
+| DISTINCT ON | ✅ |
+| CASE WHEN | ✅ |
+| Ergonomic Builders | ✅ |
+| qail-lsp (IDE) | ✅ |
+| COPY Protocol | ✅ |
+| Arrays (Value::Array) | ✅ |
+| Transactions (BEGIN/COMMIT) | ✅ |
+| Savepoints | 🚧 |
+| Prepared Statements | 🚧 |
 
 ## Getting Help
 

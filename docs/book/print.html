@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
-            window.path_to_searchindex_js = "searchindex-88dad26c.js";
+            window.path_to_searchindex_js = "searchindex-c0ba21ca.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-07f5cd42.js"></script>
@@ -213,7 +213,7 @@ let cmd = QailCmd::get("users")
 let mut driver = PgDriver::connect("localhost", 5432, "user", "db").await?;
 let rows = driver.query(&amp;cmd).await?;
 <span class="boring">}</span></code></pre>
-<h2 id="current-status-60-production-ready"><a class="header" href="#current-status-60-production-ready">Current Status (~60% Production Ready)</a></h2>
+<h2 id="current-status-70-production-ready"><a class="header" href="#current-status-70-production-ready">Current Status (~70% Production Ready)</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -226,8 +226,16 @@ let rows = driver.query(&amp;cmd).await?;
 <tr><td>AST-Native Migrations</td><td>✅</td></tr>
 <tr><td>JSON/JSONB Types</td><td>✅</td></tr>
 <tr><td>UUID, Timestamps</td><td>✅</td></tr>
-<tr><td>Arrays</td><td>🚧</td></tr>
-<tr><td>COPY Protocol</td><td>🚧</td></tr>
+<tr><td>CTEs (WITH)</td><td>✅</td></tr>
+<tr><td>DISTINCT ON</td><td>✅</td></tr>
+<tr><td>CASE WHEN</td><td>✅</td></tr>
+<tr><td>Ergonomic Builders</td><td>✅</td></tr>
+<tr><td>qail-lsp (IDE)</td><td>✅</td></tr>
+<tr><td>COPY Protocol</td><td>✅</td></tr>
+<tr><td>Arrays (Value::Array)</td><td>✅</td></tr>
+<tr><td>Transactions (BEGIN/COMMIT)</td><td>✅</td></tr>
+<tr><td>Savepoints</td><td>🚧</td></tr>
+<tr><td>Prepared Statements</td><td>🚧</td></tr>
 </tbody>
 </table>
 </div>
