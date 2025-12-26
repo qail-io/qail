@@ -1,17 +1,17 @@
 [package]
 name = "qail"
-version = "0.9.8"
+version = "0.9.9"
 edition = "2024"
-description = "The Universal Query Transpiler - SQL is Assembly, Compile to Safety"
+description = "Schema-first database toolkit - migrations, diff, lint, and query generation"
 license = "MIT"
 repository = "https://github.com/qail-rs/qail"
-readme = "../README.md"
+readme = "README.md"
 categories = ["database", "command-line-utilities", "parser-implementations"]
 keywords = ["db", "sql", "cli", "query", "database"]
 
 [dependencies]
-qail-core = { path = "../qail-core", version = "0.9.8" }
-qail-pg = { path = "../qail-pg", version = "0.9.8" }
+qail-core = { path = "../qail-core", version = "0.9.9" }
+qail-pg = { path = "../qail-pg", version = "0.9.9" }
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -1,11 +1,11 @@
 [package]
 name = "qail-core"
-version = "0.9.8"
+version = "0.9.9"
 edition = "2024"
-description = "The Universal Query Transpiler - Core parser and transpiler"
+description = "AST-native query builder - type-safe expressions, zero SQL strings"
 license = "MIT"
 repository = "https://github.com/qail-rs/qail"
-readme = "../README.md"
+readme = "README.md"
 categories = ["database", "parser-implementations"]
 keywords = ["qail", "sql", "parser"]
 
