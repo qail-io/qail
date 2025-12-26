@@ -63,79 +63,8 @@ pub fn build_upsert(cmd: &QailCmd, dialect: Dialect) -> String {
             } else {
                 sql.push_str(&updates.join(", "));
             }
-            // Postgres 17+ supports RETURNING on upsert
+            // Postgres supports RETURNING on upsert (SQLite depends on version, but usually fine in simple cases or ignored)
             sql.push_str(" RETURNING *");
-        },
-        Dialect::MySQL | Dialect::MariaDB => {
-             // MySQL doesn't use Conflict Target, it just uses ON DUPLICATE KEY
-             sql.push_str(" ON DUPLICATE KEY UPDATE ");
-             let updates: Vec<String> = data_cols.iter()
-                .filter(|c| !pk_cols.contains(c)) 
-                .map(|c| {
-                    let quoted = generator.quote_identifier(c);
-                    format!("{} = VALUES({})", quoted, quoted)
-                }).collect();
-             sql.push_str(&updates.join(", "));
-        },
-        Dialect::Oracle => {
-            // MERGE INTO target t USING (SELECT 1 as id, 'val' as col FROM dual) s ON (t.id = s.id) ...
-            let source_select_parts: Vec<String> = data_cols.iter().zip(data_vals.iter()).map(|(col, val)| {
-                format!("{} AS {}", val, generator.quote_identifier(col))
-            }).collect();
-            let source_query = format!("SELECT {} FROM dual", source_select_parts.join(", "));
-            
-            sql = format!("MERGE INTO {} t USING ({}) s ON ({})", 
-                table,
-                source_query,
-                pk_cols.iter().map(|c| format!("t.{} = s.{}", generator.quote_identifier(c), generator.quote_identifier(c))).collect::<Vec<_>>().join(" AND ")
-            );
-            
-            // UPDATE clause
-            let updates: Vec<String> = data_cols.iter()
-                .filter(|c| !pk_cols.contains(c))
-                .map(|c| {
-                    let quoted = generator.quote_identifier(c);
-                    format!("t.{} = s.{}", quoted, quoted)
-                }).collect();
-            
-            if !updates.is_empty() {
-                sql.push_str(&format!(" WHEN MATCHED THEN UPDATE SET {}", updates.join(", ")));
-            }
-            
-            // INSERT clause
-            sql.push_str(&format!(" WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})",
-                 data_cols.iter().map(|c| generator.quote_identifier(c)).collect::<Vec<_>>().join(", "),
-                 data_cols.iter().map(|c| format!("s.{}", generator.quote_identifier(c))).collect::<Vec<_>>().join(", ")
-            ));
-        },
-        Dialect::SqlServer => {
-            // MERGE INTO target t USING (VALUES (1, 'val')) AS s(id, col) ON t.id = s.id ...
-            sql = format!("MERGE INTO {} t USING (VALUES ({})) AS s({}) ON ({})", 
-                table,
-                data_vals.join(", "),
-                data_cols.iter().map(|c| generator.quote_identifier(c)).collect::<Vec<_>>().join(", "),
-                pk_cols.iter().map(|c| format!("t.{} = s.{}", generator.quote_identifier(c), generator.quote_identifier(c))).collect::<Vec<_>>().join(" AND ")
-            );
-             
-            // UPDATE clause
-            let updates: Vec<String> = data_cols.iter()
-                .filter(|c| !pk_cols.contains(c))
-                .map(|c| {
-                    let quoted = generator.quote_identifier(c);
-                    format!("t.{} = s.{}", quoted, quoted)
-                }).collect();
-                
-            if !updates.is_empty() {
-                sql.push_str(&format!(" WHEN MATCHED THEN UPDATE SET {}", updates.join(", ")));
-            }
-             
-            sql.push_str(&format!(" WHEN NOT MATCHED THEN INSERT ({}) VALUES ({});", 
-                 data_cols.iter().map(|c| generator.quote_identifier(c)).collect::<Vec<_>>().join(", "),
-                 data_cols.iter().map(|c| format!("s.{}", generator.quote_identifier(c))).collect::<Vec<_>>().join(", ")
-            ));
-        },
-        _ => {
-            return format!("/* UPSERT NOT SUPPORTED FOR {:?} */", dialect);
         }
     }
     

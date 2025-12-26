@@ -13,10 +13,6 @@ pub mod dml;
 pub mod nosql;
 pub use nosql::mongo::ToMongo;
 pub use nosql::dynamo::ToDynamo;
-pub use nosql::cassandra::ToCassandra;
-pub use nosql::redis::ToRedis;
-pub use nosql::elastic::ToElastic;
-pub use nosql::neo4j::ToNeo4j;
 pub use nosql::qdrant::ToQdrant;
 
 #[cfg(test)]
@@ -106,6 +102,26 @@ impl ToSql for QailCmd {
             Action::JsonTable => dml::json_table::build_json_table(self, dialect),
             // COPY protocol (AST-native in qail-pg, generates SELECT for fallback)
             Action::Export => dml::select::build_select(self, dialect),
+            // TRUNCATE TABLE
+            Action::Truncate => format!("TRUNCATE TABLE {}", self.table),
+            // EXPLAIN - wrap SELECT query
+            Action::Explain => format!("EXPLAIN {}", dml::select::build_select(self, dialect)),
+            // EXPLAIN ANALYZE - execute and analyze query
+            Action::ExplainAnalyze => format!("EXPLAIN ANALYZE {}", dml::select::build_select(self, dialect)),
+            // LOCK TABLE
+            Action::Lock => format!("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE", self.table),
+            // CREATE MATERIALIZED VIEW - uses source_query for the view definition
+            Action::CreateMaterializedView => {
+                if let Some(source) = &self.source_query {
+                    format!("CREATE MATERIALIZED VIEW {} AS {}", self.table, source.to_sql_with_dialect(dialect))
+                } else {
+                    format!("CREATE MATERIALIZED VIEW {} AS {}", self.table, dml::select::build_select(self, dialect))
+                }
+            }
+            // REFRESH MATERIALIZED VIEW
+            Action::RefreshMaterializedView => format!("REFRESH MATERIALIZED VIEW {}", self.table),
+            // DROP MATERIALIZED VIEW
+            Action::DropMaterializedView => format!("DROP MATERIALIZED VIEW {}", self.table),
         }
     }
 }
