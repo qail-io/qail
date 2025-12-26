@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.9.7"
+version = "0.9.8"
 edition = "2024"
 description = "PostgreSQL driver for QAIL - native wire protocol"
 license = "MIT"
@@ -8,7 +8,7 @@ repository = "https://github.com/qail-rs/qail"
 readme = "README.md"
 
 [dependencies]
-qail-core = { version = "0.9.7", path = "../qail-core" }
+qail-core = { version = "0.9.8", path = "../qail-core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 async-trait = "0.1"
