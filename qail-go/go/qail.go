@@ -54,9 +54,22 @@ extern uint8_t* qail_encode_select_batch_fast(
     size_t count,
     size_t* out_len
 );
+
+// RUST I/O: All TCP in Rust Tokio - bypasses Go I/O completely!
+typedef void* ConnHandle;
+extern ConnHandle qail_connect(const char* host, uint16_t port, const char* user, const char* database);
+extern int64_t qail_execute_batch(ConnHandle conn, const char* table, const char* columns, int64_t* limits, size_t count);
+extern void qail_conn_close(ConnHandle handle);
+
+// V2: Channel-based async - NO block_on overhead!
+typedef void* ConnHandleV2;
+extern ConnHandleV2 qail_connect_v2(const char* host, uint16_t port, const char* user, const char* database);
+extern int64_t qail_execute_batch_v2(ConnHandleV2 conn, const char* table, const char* columns, int64_t* limits, size_t count);
+extern void qail_conn_close_v2(ConnHandleV2 handle);
 */
 import "C"
 import (
+	"fmt"
 	"unsafe"
 )
 
@@ -236,4 +249,134 @@ func EncodeSelectBatchFast(table, columns string, limits []int64) []byte {
 	bytes := C.GoBytes(unsafe.Pointer(ptr), C.int(outLen))
 	C.qail_bytes_free(ptr, outLen)
 	return bytes
+}
+
+// =============================================================================
+// RUST I/O: Connection and execution entirely in Rust Tokio
+// =============================================================================
+
+// RustConn represents a PostgreSQL connection managed by Rust.
+// All I/O happens in Rust - bypasses Go's network layer completely.
+type RustConn struct {
+	handle C.ConnHandle
+}
+
+// RustConnect creates a connection using Rust Tokio for I/O.
+// This is the FAST PATH - all TCP is handled by Rust.
+func RustConnect(host string, port uint16, user, database string) (*RustConn, error) {
+	cHost := C.CString(host)
+	defer C.free(unsafe.Pointer(cHost))
+
+	cUser := C.CString(user)
+	defer C.free(unsafe.Pointer(cUser))
+
+	cDatabase := C.CString(database)
+	defer C.free(unsafe.Pointer(cDatabase))
+
+	handle := C.qail_connect(cHost, C.uint16_t(port), cUser, cDatabase)
+	if handle == nil {
+		return nil, fmt.Errorf("failed to connect to %s:%d", host, port)
+	}
+
+	return &RustConn{handle: handle}, nil
+}
+
+// ExecuteBatch executes a batch of queries entirely in Rust.
+// ONE CGO call for: encode + TCP write + TCP read + parse
+func (c *RustConn) ExecuteBatch(table, columns string, limits []int64) (int64, error) {
+	if len(limits) == 0 {
+		return 0, nil
+	}
+
+	cTable := C.CString(table)
+	defer C.free(unsafe.Pointer(cTable))
+
+	cColumns := C.CString(columns)
+	defer C.free(unsafe.Pointer(cColumns))
+
+	result := C.qail_execute_batch(
+		c.handle,
+		cTable,
+		cColumns,
+		(*C.int64_t)(&limits[0]),
+		C.size_t(len(limits)),
+	)
+
+	if result < 0 {
+		return 0, fmt.Errorf("batch execution failed")
+	}
+
+	return int64(result), nil
+}
+
+// Close closes the Rust connection.
+func (c *RustConn) Close() {
+	if c.handle != nil {
+		C.qail_conn_close(c.handle)
+		c.handle = nil
+	}
+}
+
+// =============================================================================
+// V2: Channel-based async - NO block_on overhead!
+// =============================================================================
+
+// RustConnV2 uses spawned Tokio task with channels - fastest path!
+type RustConnV2 struct {
+	handle C.ConnHandleV2
+}
+
+// RustConnectV2 creates a connection using channel-based async.
+// This is the FASTEST PATH - no block_on per query!
+func RustConnectV2(host string, port uint16, user, database string) (*RustConnV2, error) {
+	cHost := C.CString(host)
+	defer C.free(unsafe.Pointer(cHost))
+
+	cUser := C.CString(user)
+	defer C.free(unsafe.Pointer(cUser))
+
+	cDatabase := C.CString(database)
+	defer C.free(unsafe.Pointer(cDatabase))
+
+	handle := C.qail_connect_v2(cHost, C.uint16_t(port), cUser, cDatabase)
+	if handle == nil {
+		return nil, fmt.Errorf("failed to connect to %s:%d", host, port)
+	}
+
+	return &RustConnV2{handle: handle}, nil
+}
+
+// ExecuteBatch executes a batch of queries via async channel.
+func (c *RustConnV2) ExecuteBatch(table, columns string, limits []int64) (int64, error) {
+	if len(limits) == 0 {
+		return 0, nil
+	}
+
+	cTable := C.CString(table)
+	defer C.free(unsafe.Pointer(cTable))
+
+	cColumns := C.CString(columns)
+	defer C.free(unsafe.Pointer(cColumns))
+
+	result := C.qail_execute_batch_v2(
+		c.handle,
+		cTable,
+		cColumns,
+		(*C.int64_t)(&limits[0]),
+		C.size_t(len(limits)),
+	)
+
+	if result < 0 {
+		return 0, fmt.Errorf("batch execution failed")
+	}
+
+	return int64(result), nil
+}
+
+// Close closes the connection.
+func (c *RustConnV2) Close() {
+	if c.handle != nil {
+		C.qail_conn_close_v2(c.handle)
+		c.handle = nil
+	}
 }

@@ -48,7 +48,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build static library
-        run: cargo build --release --package qail-php --target ${{ matrix.target }}
+        run: cargo build --release --package qail-ffi --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -56,7 +56,7 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/libqail_php.a dist/${{ matrix.asset_name }}
+          cp target/${{ matrix.target }}/release/libqail_ffi.a dist/${{ matrix.asset_name }}
           gzip -9 dist/${{ matrix.asset_name }}
 
       - name: Package artifact (Windows)
@@ -64,7 +64,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Copy-Item target/${{ matrix.target }}/release/qail_php.lib dist/${{ matrix.asset_name }}
+          Copy-Item target/${{ matrix.target }}/release/qail_ffi.lib dist/${{ matrix.asset_name }}
           Compress-Archive -Path dist/${{ matrix.asset_name }} -DestinationPath dist/${{ matrix.asset_name }}.zip
 
       - name: Upload artifact
