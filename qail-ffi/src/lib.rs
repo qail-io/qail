@@ -102,11 +102,8 @@ pub extern "C" fn qail_transpile_with_dialect(qail: *const c_char, dialect: *con
 
     let d = match dialect_str.to_lowercase().as_str() {
         "postgres" | "postgresql" => Dialect::Postgres,
-        "mysql" => Dialect::MySQL,
-        "sqlite" => Dialect::SQLite,
-        "sqlserver" | "mssql" => Dialect::SqlServer,
         _ => {
-            set_error(format!("Unsupported dialect: {}", dialect_str));
+            set_error(format!("Unsupported dialect: {}. Only 'postgres' is supported.", dialect_str));
             return std::ptr::null_mut();
         }
     };
