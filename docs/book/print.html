@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "coal";
             const default_dark_theme = "coal";
-            window.path_to_searchindex_js = "searchindex-4a0cf978.js";
+            window.path_to_searchindex_js = "searchindex-88dad26c.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-f5af500f.js"></script>
+        <script src="toc-07f5cd42.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -566,6 +566,242 @@ let cmd = QailCmd::get("stats")
     ]);
 <span class="boring">}</span></code></pre>
 <p>This replaces 40+ lines of raw SQL with type-safe, compile-time checked Rust code.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="qail-vs-other-query-builders"><a class="header" href="#qail-vs-other-query-builders">QAIL vs Other Query Builders</a></h1>
+<p>This page compares QAIL’s approach to building complex SQL queries against SQLx, Diesel, and SeaORM.</p>
+<h2 id="the-example-query"><a class="header" href="#the-example-query">The Example Query</a></h2>
+<p>A real-world production query from a WhatsApp integration that:</p>
+<ul>
+<li>SELECTs 7 columns with aliases</li>
+<li>Uses COALESCE for fallbacks</li>
+<li>Accesses nested JSON (<code>metadata-&gt;'vessel_bookings'-&gt;0-&gt;&gt;'key'</code>)</li>
+<li>Concatenates strings (<code>||</code>)</li>
+<li>Casts types (<code>::text</code>, <code>::float</code>)</li>
+<li>Filters on JSON with OR</li>
+<li>Limits results</li>
+</ul>
+<hr>
+<h2 id="sqlx-raw-sql-strings"><a class="header" href="#sqlx-raw-sql-strings">SQLx (Raw SQL Strings)</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>sqlx::query_as::&lt;_, OrderRow&gt;(
+    r#"
+    SELECT o.id,
+           COALESCE(o.booking_number, 'N/A') AS booking_number,
+           o.status::text AS status,
+           COALESCE(
+               (o.metadata-&gt;'vessel_bookings'-&gt;0-&gt;&gt;'depart_departure_loc') || ' → ' ||
+               (o.metadata-&gt;'vessel_bookings'-&gt;0-&gt;&gt;'depart_arrival_loc'),
+               'Route'
+           ) AS route,
+           COALESCE(o.metadata-&gt;'vessel_bookings'-&gt;0-&gt;&gt;'depart_travel_date', 'TBD') AS travel_date,
+           COALESCE((o.total_fare::float / 100.0), 0) AS total_amount,
+           COALESCE(o.currency, 'IDR') AS currency
+    FROM orders o
+    WHERE o.contact_info-&gt;&gt;'phone' = $1 
+       OR REPLACE(o.contact_info-&gt;&gt;'phone', '+', '') = $1
+    ORDER BY o.created_at DESC
+    LIMIT 10
+    "#,
+).bind(phone).fetch_all(&amp;pool).await?
+<span class="boring">}</span></code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Pros</th><th>Cons</th></tr>
+</thead>
+<tbody>
+<tr><td>Full SQL power</td><td>⚠️ SQL injection possible if not careful</td></tr>
+<tr><td>No abstraction overhead</td><td>❌ No compile-time column checks</td></tr>
+<tr><td></td><td>❌ String interpolation risk</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="diesel-orm-with-dsl"><a class="header" href="#diesel-orm-with-dsl">Diesel (ORM with DSL)</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// First, define schema.rs...
+table! {
+    orders (id) {
+        id -&gt; Uuid,
+        booking_number -&gt; Nullable&lt;Text&gt;,
+        metadata -&gt; Jsonb,
+        contact_info -&gt; Jsonb,
+        status -&gt; Text,
+        total_fare -&gt; Int8,
+        currency -&gt; Nullable&lt;Text&gt;,
+        created_at -&gt; Timestamptz,
+    }
+}
+
+// Query - but JSON operators are NOT natively supported!
+orders::table
+    .select((
+        orders::id,
+        coalesce(orders::booking_number, "N/A"),
+        orders::status,
+        // ❌ CANNOT DO: metadata-&gt;'vessel_bookings'-&gt;0-&gt;&gt;'key'
+        // ❌ CANNOT DO: string concatenation with ||
+    ))
+    .filter(/* JSON access not supported without extension */)
+    .order(orders::created_at.desc())
+    .limit(10)
+    .load::&lt;OrderRow&gt;(&amp;mut conn)?
+<span class="boring">}</span></code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Pros</th><th>Cons</th></tr>
+</thead>
+<tbody>
+<tr><td>✅ Compile-time schema validation</td><td>❌ <strong>No native JSON operators</strong></td></tr>
+<tr><td>✅ Type-safe</td><td>❌ No async support</td></tr>
+<tr><td></td><td>❌ Must use <code>sql_query()</code> for this query</td></tr>
+<tr><td></td><td>❌ Heavy proc-macro compile times</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="seaorm-orm-with-entity"><a class="header" href="#seaorm-orm-with-entity">SeaORM (ORM with Entity)</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// First, define entity...
+#[derive(Clone, Debug, DeriveEntityModel)]
+#[sea_orm(table_name = "orders")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    pub id: Uuid,
+    pub booking_number: Option&lt;String&gt;,
+    pub metadata: Json&lt;Value&gt;,  // Opaque JSON
+    pub contact_info: Json&lt;Value&gt;,
+    pub status: String,
+    pub total_fare: i64,
+    pub currency: Option&lt;String&gt;,
+    pub created_at: DateTimeUtc,
+}
+
+// Query - JSON access NOT supported!
+Order::find()
+    .filter(/* ❌ Cannot filter on contact_info-&gt;&gt;'phone' */)
+    .order_by_desc(Column::CreatedAt)
+    .limit(10)
+    .all(&amp;pool)
+    .await?
+
+// Must fall back to raw SQL:
+Order::find()
+    .from_raw_sql(Statement::from_string(
+        DatabaseBackend::Postgres,
+        "SELECT ... the whole query ...".to_string()
+    ))
+<span class="boring">}</span></code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Pros</th><th>Cons</th></tr>
+</thead>
+<tbody>
+<tr><td>✅ Clean API for simple queries</td><td>❌ <strong>No JSON operators</strong></td></tr>
+<tr><td>✅ Async support</td><td>❌ No COALESCE builder</td></tr>
+<tr><td></td><td>❌ Must use raw SQL for complex queries</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="qail-ast-native"><a class="header" href="#qail-ast-native">QAIL (AST-Native)</a></h2>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use qail_core::ast::{QailCmd, Operator, builders::*};
+
+let route = coalesce([
+    concat([
+        json_path("o.metadata", ["vessel_bookings", "0", "depart_departure_loc"]),
+        text(" → "),
+        json_path("o.metadata", ["vessel_bookings", "0", "depart_arrival_loc"]),
+    ]),
+    text("Route"),
+]).alias("route");
+
+let cmd = QailCmd::get("orders")
+    .table_alias("o")
+    // SELECT columns
+    .column_expr(col("o.id"))
+    .column_expr(coalesce([col("o.booking_number"), text("N/A")]).alias("booking_number"))
+    .column_expr(cast(col("o.status"), "text").alias("status"))
+    .column_expr(route)
+    .column_expr(coalesce([
+        json_path("o.metadata", ["vessel_bookings", "0", "depart_travel_date"]),
+        text("TBD")
+    ]).alias("travel_date"))
+    .column_expr(coalesce([
+        binary(cast(col("o.total_fare"), "float"), BinaryOp::Div, float(100.0)),
+        int(0)
+    ]).alias("total_amount"))
+    .column_expr(coalesce([col("o.currency"), text("IDR")]).alias("currency"))
+    // WHERE with JSON
+    .filter_cond(cond(json("o.contact_info", "phone"), Operator::Eq, param(1)))
+    .or_filter_cond(cond(
+        replace(json("o.contact_info", "phone"), text("+"), text("")),
+        Operator::Eq, 
+        param(1)
+    ))
+    .order_desc("o.created_at")
+    .limit(10);
+
+let orders = pool.fetch_all::&lt;OrderRow&gt;(&amp;cmd).await?;
+<span class="boring">}</span></code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Pros</th><th>Cons</th></tr>
+</thead>
+<tbody>
+<tr><td>✅ SQL injection <strong>impossible</strong></td><td>Learning curve</td></tr>
+<tr><td>✅ Full JSON operator support</td><td>More verbose than raw SQL</td></tr>
+<tr><td>✅ COALESCE, CASE WHEN, CTEs</td><td></td></tr>
+<tr><td>✅ String concat, type casting</td><td></td></tr>
+<tr><td>✅ Async + connection pooling</td><td></td></tr>
+<tr><td>✅ 28% faster than asyncpg (COPY)</td><td></td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="summary"><a class="header" href="#summary">Summary</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Feature</th><th>SQLx</th><th>Diesel</th><th>SeaORM</th><th><strong>QAIL</strong></th></tr>
+</thead>
+<tbody>
+<tr><td>SQL Injection</td><td>⚠️ Possible</td><td>✅ Safe</td><td>✅ Safe</td><td>✅ <strong>Impossible</strong></td></tr>
+<tr><td>JSON Operators</td><td>✅ String</td><td>❌ Extension</td><td>❌ Raw SQL</td><td>✅ <strong>Native json()</strong></td></tr>
+<tr><td>COALESCE</td><td>✅ String</td><td>⚠️ Limited</td><td>❌ Raw SQL</td><td>✅ <strong>coalesce()</strong></td></tr>
+<tr><td>String Concat</td><td>✅ String</td><td>❌ Raw SQL</td><td>❌ Raw SQL</td><td>✅ <strong>concat()</strong></td></tr>
+<tr><td>CTEs</td><td>✅ String</td><td>❌ Raw SQL</td><td>❌ Raw SQL</td><td>✅ <strong>with_cte()</strong></td></tr>
+<tr><td>Async</td><td>✅ Yes</td><td>❌ No</td><td>✅ Yes</td><td>✅ <strong>Yes</strong></td></tr>
+<tr><td>Type Validation</td><td>⚠️ DB/cache</td><td>✅ schema!</td><td>✅ Entity</td><td>✅ <strong>ColumnType enum</strong></td></tr>
+<tr><td>PK Validation</td><td>❌ Runtime</td><td>⚠️ Schema</td><td>⚠️ Schema</td><td>✅ <strong>can_be_primary_key()</strong></td></tr>
+<tr><td>IDE Support</td><td>⚠️ Limited</td><td>⚠️ Limited</td><td>⚠️ Limited</td><td>✅ <strong>qail-lsp</strong></td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="qails-columntype-enum"><a class="header" href="#qails-columntype-enum">QAIL’s ColumnType Enum</a></h3>
+<p>QAIL provides compile-time type validation through the <code>ColumnType</code> enum:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub enum ColumnType {
+    Uuid, Text, Varchar(Option&lt;u16&gt;), Int, BigInt, 
+    Serial, BigSerial, Bool, Float, Decimal(Option&lt;(u8,u8)&gt;),
+    Jsonb, Timestamp, Timestamptz, Date, Time, Bytea,
+}
+
+// Compile-time validation methods
+ColumnType::Uuid.can_be_primary_key()     // ✅ true
+ColumnType::Jsonb.can_be_primary_key()    // ❌ false - caught at compile time!
+ColumnType::Jsonb.supports_indexing()     // ❌ false - warned before migration
+<span class="boring">}</span></code></pre>
+<p><strong>QAIL’s Sweet Spot:</strong> Complex PostgreSQL queries with JSON, CTEs, and advanced SQL features—all type-safe with <code>ColumnType</code> validation, without falling back to raw SQL strings.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="text-syntax"><a class="header" href="#text-syntax">Text Syntax</a></h1>
 <p>For CLI, LSP, and WASM playground. Parses to AST internally.</p>

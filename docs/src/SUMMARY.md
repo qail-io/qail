@@ -11,6 +11,7 @@
 
 - [AST Builder API](./core/builder-api.md)
 - [Expression Builders](./core/builders.md)
+- [QAIL vs Others](./core/comparison.md)
 - [Text Syntax](./core/text-syntax.md)
 - [PostgreSQL Driver](./core/pg-driver.md)
 
