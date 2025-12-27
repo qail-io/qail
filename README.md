@@ -135,13 +135,19 @@ driver.send(&bytes).await?;
 
 ---
 
+## New in v0.10.2
+
+- **io_uring Auto-detection**: On Linux 5.1+, automatically uses io_uring for I/O. Falls back to tokio on macOS/Windows or older kernels.
+- **Connection Pool**: Production-ready pooling with health checks
+- **TLS/SSL**: Full TLS support via rustls
+
 ## Supported Databases
 
-| Database | Status | Crate |
-|----------|--------|-------|
-| PostgreSQL | 🔄 In Progress | `qail-pg` |
-| MySQL | 📋 Planned | `qail-mysql` |
-| SQLite | 📋 Planned | `qail-sqlite` |
+| Database | Status | Crate | Performance |
+|----------|--------|-------|-------------|
+| PostgreSQL | ✅ Production | `qail-pg` | 294K q/s (M3) |
+| MySQL | 📋 Planned | `qail-mysql` | - |
+| SQLite | 📋 Planned | `qail-sqlite` | - |
 
 Each database has its own wire protocol, so each gets its own encoder.
 
