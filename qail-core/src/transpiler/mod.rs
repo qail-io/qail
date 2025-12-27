@@ -122,6 +122,54 @@ impl ToSql for QailCmd {
             Action::RefreshMaterializedView => format!("REFRESH MATERIALIZED VIEW {}", self.table),
             // DROP MATERIALIZED VIEW
             Action::DropMaterializedView => format!("DROP MATERIALIZED VIEW {}", self.table),
+            // LISTEN/NOTIFY (Pub/Sub)
+            Action::Listen => {
+                if let Some(ch) = &self.channel {
+                    format!("LISTEN {}", ch)
+                } else {
+                    "LISTEN".to_string()
+                }
+            }
+            Action::Notify => {
+                if let Some(ch) = &self.channel {
+                    if let Some(msg) = &self.payload {
+                        format!("NOTIFY {}, '{}'", ch, msg)
+                    } else {
+                        format!("NOTIFY {}", ch)
+                    }
+                } else {
+                    "NOTIFY".to_string()
+                }
+            }
+            Action::Unlisten => {
+                if let Some(ch) = &self.channel {
+                    format!("UNLISTEN {}", ch)
+                } else {
+                    "UNLISTEN *".to_string()
+                }
+            }
+            // Savepoints
+            Action::Savepoint => {
+                if let Some(name) = &self.savepoint_name {
+                    format!("SAVEPOINT {}", name)
+                } else {
+                    "SAVEPOINT".to_string()
+                }
+            }
+            Action::ReleaseSavepoint => {
+                if let Some(name) = &self.savepoint_name {
+                    format!("RELEASE SAVEPOINT {}", name)
+                } else {
+                    "RELEASE SAVEPOINT".to_string()
+                }
+            }
+            Action::RollbackToSavepoint => {
+                if let Some(name) = &self.savepoint_name {
+                    format!("ROLLBACK TO SAVEPOINT {}", name)
+                } else {
+                    "ROLLBACK TO SAVEPOINT".to_string()
+                }
+            }
         }
     }
 }

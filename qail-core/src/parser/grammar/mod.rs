@@ -197,6 +197,9 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
         ctes,
         on_conflict,
         source_query,
+        channel: None,
+        payload: None,
+        savepoint_name: None,
     }))
 }
 

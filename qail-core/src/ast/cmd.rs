@@ -50,6 +50,15 @@ pub struct QailCmd {
     /// When present, values come from this subquery instead of VALUES clause
     #[serde(default)]
     pub source_query: Option<Box<QailCmd>>,
+    /// Channel name for LISTEN/NOTIFY operations
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// Payload for NOTIFY operations
+    #[serde(default)]
+    pub payload: Option<String>,
+    /// Savepoint name for SAVEPOINT/RELEASE/ROLLBACK TO operations
+    #[serde(default)]
+    pub savepoint_name: Option<String>,
 }
 
 /// CTE (Common Table Expression) definition
@@ -118,6 +127,9 @@ impl Default for QailCmd {
             returning: None,
             on_conflict: None,
             source_query: None,
+            channel: None,
+            payload: None,
+            savepoint_name: None,
         }
     }
 }
@@ -128,20 +140,7 @@ impl QailCmd {
         Self {
             action: Action::Get,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -150,20 +149,7 @@ impl QailCmd {
         Self {
             action: Action::Get,
             table: sql.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -172,20 +158,7 @@ impl QailCmd {
         Self {
             action: Action::Set,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -194,20 +167,7 @@ impl QailCmd {
         Self {
             action: Action::Del,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -216,20 +176,7 @@ impl QailCmd {
         Self {
             action: Action::Add,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -238,58 +185,18 @@ impl QailCmd {
         Self {
             action: Action::Put,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
     /// Create a new EXPORT (COPY TO STDOUT) command for the given table.
     /// 
     /// Used for bulk data export via PostgreSQL COPY protocol.
-    /// 
-    /// # Example
-    /// ```
-    /// use qail_core::ast::{QailCmd, Operator};
-    /// 
-    /// // Export all users
-    /// let cmd = QailCmd::export("users")
-    ///     .columns(["id", "name", "email"]);
-    /// 
-    /// // Export with filter
-    /// let cmd = QailCmd::export("users")
-    ///     .columns(["id", "name"])
-    ///     .filter("active", Operator::Eq, true);
-    /// ```
     pub fn export(table: impl Into<String>) -> Self {
         Self {
             action: Action::Export,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -298,20 +205,7 @@ impl QailCmd {
         Self {
             action: Action::Make,
             table: table.into(),
-            joins: vec![],
-            columns: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            ctes: vec![],
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
+            ..Default::default()
         }
     }
 
@@ -818,6 +712,9 @@ impl QailCmd {
             returning: None,
             on_conflict: None,
             source_query: None,
+            channel: None,
+            payload: None,
+            savepoint_name: None,
             ctes: vec![CTEDef {
                 name: cte_name,
                 recursive: false,
