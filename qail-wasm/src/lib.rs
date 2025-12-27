@@ -1,7 +1,7 @@
 //! QAIL WebAssembly Bindings
 //!
-//! Provides QAIL parsing and SQL transpilation for JavaScript/TypeScript.
-//! Wraps `qail-core` for full feature parity.
+//! Provides QAIL parsing and PostgreSQL transpilation for JavaScript/TypeScript.
+//! Focused on AST-native PostgreSQL wire protocol.
 //!
 //! ## Usage (npm)
 //! ```javascript
@@ -23,33 +23,14 @@
 //! ```
 
 use wasm_bindgen::prelude::*;
-use qail_core::transpiler::{ToSql, Dialect};
-use qail_core::transpiler::{ToMongo, ToDynamo, ToCassandra, ToRedis, ToElastic, ToNeo4j, ToQdrant};
+use qail_core::transpiler::ToSql;
 
-/// Parse QAIL and return SQL string.
+/// Parse QAIL and return SQL string (PostgreSQL dialect).
 #[wasm_bindgen]
 pub fn parse_and_transpile(qail: &str) -> Result<String, JsError> {
     let cmd = qail_core::parse(qail)
         .map_err(|e| JsError::new(&format!("{:?}", e)))?;
     Ok(cmd.to_sql())
-}
-
-/// Parse QAIL and return SQL string with specific dialect.
-/// Dialect: "postgres", "mysql", "sqlite", "sqlserver"
-#[wasm_bindgen]
-pub fn parse_and_transpile_with_dialect(qail: &str, dialect: &str) -> Result<String, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-    
-    let d = match dialect.to_lowercase().as_str() {
-        "postgres" | "postgresql" => Dialect::Postgres,
-        "mysql" => Dialect::MySQL,
-        "sqlite" => Dialect::SQLite,
-        "sqlserver" | "mssql" => Dialect::SqlServer,
-        _ => return Err(JsError::new(&format!("Unsupported dialect: {}", dialect))),
-    };
-
-    Ok(cmd.to_sql_with_dialect(d))
 }
 
 /// Parse QAIL and return AST as JSON.
@@ -71,64 +52,6 @@ pub fn validate(qail: &str) -> bool {
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
-}
-
-// ============= NoSQL Transpilation Functions =============
-
-/// Parse QAIL and return MongoDB query/command.
-#[wasm_bindgen]
-pub fn to_mongo(qail: &str) -> Result<String, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-    Ok(cmd.to_mongo())
-}
-
-/// Parse QAIL and return DynamoDB JSON.
-#[wasm_bindgen]
-pub fn to_dynamo(qail: &str) -> Result<String, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-    Ok(cmd.to_dynamo())
-}
-
-/// Parse QAIL and return Cassandra CQL.
-#[wasm_bindgen]
-pub fn to_cassandra(qail: &str) -> Result<String, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-    Ok(cmd.to_cassandra())
-}
-
-/// Parse QAIL and return Redis/RediSearch command.
-#[wasm_bindgen]
-pub fn to_redis(qail: &str) -> Result<String, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-    Ok(cmd.to_redis_search())
-}
-
-/// Parse QAIL and return Elasticsearch DSL JSON.
-#[wasm_bindgen]
-pub fn to_elastic(qail: &str) -> Result<String, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-    Ok(cmd.to_elastic())
-}
-
-/// Parse QAIL and return Neo4j Cypher query.
-#[wasm_bindgen]
-pub fn to_neo4j(qail: &str) -> Result<String, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-    Ok(cmd.to_cypher())
-}
-
-/// Parse QAIL and return Qdrant vector search JSON.
-#[wasm_bindgen]
-pub fn to_qdrant(qail: &str) -> Result<String, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-    Ok(cmd.to_qdrant_search())
 }
 
 #[cfg(test)]
@@ -157,6 +80,4 @@ mod tests {
         let sql = transpile("get distinct users fields role");
         assert!(sql.contains("SELECT DISTINCT"));
     }
-
-    // DDL tests disabled temporarily - use qail-core tests for DDL verification
 }
