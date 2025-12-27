@@ -60,9 +60,15 @@ qail.rs/
 │   ├── parser/         #   Text → AST (for CLI, LSP)
 │   └── transpiler/     #   AST → SQL text (legacy path)
 │
-├── qail-pg/            # PostgreSQL Driver
+├── qail-pg/            # PostgreSQL Driver (Rust)
 │   ├── protocol/       #   Layer 2: AST → BytesMut (pure, sync)
 │   └── driver/         #   Layer 3: Async I/O (tokio)
+│
+├── qail-encoder/       # Lightweight FFI (no tokio/TLS)
+│                       #   For language bindings: Zig, Go, etc.
+│
+├── qail-zig/           # PostgreSQL Driver (Zig) 🦎
+│                       #   Native I/O, 95% of Rust speed!
 │
 ├── qail-cli/           # Command-line tool
 ├── qail-lsp/           # Language server
