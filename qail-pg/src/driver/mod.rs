@@ -1,7 +1,9 @@
 //! PostgreSQL Driver Module (Layer 3: Async I/O)
 //!
 //! This module contains the async runtime-specific code.
-//! Uses tokio for networking.
+//! Auto-detects the best I/O backend:
+//! - Linux 5.1+: io_uring (fastest)
+//! - Linux < 5.1 / macOS / Windows: tokio
 //!
 //! Connection methods are split across modules for easier maintenance:
 //! - `connection.rs` - Core struct and connect methods
@@ -12,6 +14,7 @@
 //! - `copy.rs` - COPY protocol for bulk operations
 //! - `pipeline.rs` - High-performance pipelining (275k q/s)
 //! - `cancel.rs` - Query cancellation
+//! - `io_backend.rs` - Runtime I/O backend detection
 
 mod connection;
 mod io;
@@ -25,12 +28,14 @@ mod prepared;
 mod row;
 mod pool;
 mod stream;
+pub mod io_backend;
 
 pub use connection::PgConnection;
 pub use connection::TlsConfig;
 pub(crate) use connection::{parse_affected_rows, CANCEL_REQUEST_CODE};
 pub use pool::{PgPool, PoolConfig, PooledConnection};
 pub use prepared::PreparedStatement;
+pub use io_backend::{detect as detect_io_backend, IoBackend, backend_name};
 
 use qail_core::ast::QailCmd;
 use std::sync::Arc;

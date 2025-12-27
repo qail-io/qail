@@ -61,6 +61,8 @@ pub enum Value {
     Interval { amount: i64, unit: IntervalUnit },
     /// Timestamp value (for DateTime binding)
     Timestamp(String),
+    /// Binary data (bytea)
+    Bytes(Vec<u8>),
 }
 
 impl std::fmt::Display for Value {
@@ -88,6 +90,13 @@ impl std::fmt::Display for Value {
             Value::NullUuid => write!(f, "NULL"),
             Value::Interval { amount, unit } => write!(f, "INTERVAL '{} {}'", amount, unit),
             Value::Timestamp(ts) => write!(f, "'{}'", ts),
+            Value::Bytes(bytes) => {
+                write!(f, "'\\x")?;
+                for byte in bytes {
+                    write!(f, "{:02x}", byte)?;
+                }
+                write!(f, "'")
+            }
         }
     }
 }

@@ -186,6 +186,10 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
             Value::NullUuid => Expr::Named("NULL".to_string()),
             Value::Interval { amount, unit } => Expr::Named(format!("INTERVAL '{} {}'", amount, unit)),
             Value::Timestamp(ts) => Expr::Named(format!("'{}'", ts)),
+            Value::Bytes(bytes) => {
+                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                Expr::Named(format!("'\\x{}'", hex))
+            },
         }),
         // Fall back to full expression parsing
         parse_expression,
