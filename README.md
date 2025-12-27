@@ -67,9 +67,6 @@ qail.rs/
 ├── qail-encoder/       # Lightweight FFI (no tokio/TLS)
 │                       #   For language bindings: Zig, Go, etc.
 │
-├── qail-zig/           # PostgreSQL Driver (Zig) 🦎
-│                       #   Native I/O, 95% of Rust speed!
-│
 ├── qail-cli/           # Command-line tool
 ├── qail-lsp/           # Language server
 ├── qail-wasm/          # Browser playground
