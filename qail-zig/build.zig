@@ -94,4 +94,50 @@ pub fn build(b: *std.Build) void {
     run_io.step.dependOn(b.getInstallStep());
     const run_io_step = b.step("bench-io", "Run I/O benchmark");
     run_io_step.dependOn(&run_io.step);
+
+    // 50 Million benchmark
+    const fifty_m = b.addExecutable(.{
+        .name = "qail-zig-50m",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fifty_million.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fifty_m.addLibraryPath(.{ .cwd_relative = "lib" });
+    fifty_m.linkSystemLibrary("qail_encoder");
+    fifty_m.linkSystemLibrary("c");
+    if (target.result.os.tag != .windows) {
+        fifty_m.linkSystemLibrary("resolv");
+    }
+    fifty_m.linkSystemLibrary("c++");
+    b.installArtifact(fifty_m);
+
+    const run_50m = b.addRunArtifact(fifty_m);
+    run_50m.step.dependOn(b.getInstallStep());
+    const run_50m_step = b.step("50m", "Run 50 million query benchmark");
+    run_50m_step.dependOn(&run_50m.step);
+
+    // 50 Million PREPARED benchmark
+    const fifty_m_prep = b.addExecutable(.{
+        .name = "qail-zig-50m-prepared",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fifty_million_prepared.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fifty_m_prep.addLibraryPath(.{ .cwd_relative = "lib" });
+    fifty_m_prep.linkSystemLibrary("qail_encoder");
+    fifty_m_prep.linkSystemLibrary("c");
+    if (target.result.os.tag != .windows) {
+        fifty_m_prep.linkSystemLibrary("resolv");
+    }
+    fifty_m_prep.linkSystemLibrary("c++");
+    b.installArtifact(fifty_m_prep);
+
+    const run_50m_prep = b.addRunArtifact(fifty_m_prep);
+    run_50m_prep.step.dependOn(b.getInstallStep());
+    const run_50m_prep_step = b.step("50m-prep", "Run 50M prepared statement benchmark");
+    run_50m_prep_step.dependOn(&run_50m_prep.step);
 }
