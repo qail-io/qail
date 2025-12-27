@@ -39,7 +39,10 @@ pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Q
         ctes: vec![],
         returning: None,
         on_conflict: None,
-            source_query: None,
+        source_query: None,
+        channel: None,
+        payload: None,
+        savepoint_name: None,
     }))
 }
 
@@ -191,6 +194,9 @@ pub fn parse_create_index(input: &str) -> IResult<&str, QailCmd> {
         ctes: vec![],
         returning: None,
         on_conflict: None,
-            source_query: None,
+        source_query: None,
+        channel: None,
+        payload: None,
+        savepoint_name: None,
     }))
 }
