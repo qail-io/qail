@@ -105,6 +105,6 @@ jobs:
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.DISPATCH_TOKEN }}
-          repository: qail-rs/qail-zig
+          repository: qail-io/qail-zig
           event-type: new-release
           client-payload: '{"version": "${{ github.ref_name }}"}'

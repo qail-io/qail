@@ -4,7 +4,7 @@ version = "0.10.1"
 edition = "2024"
 description = "Fastest async PostgreSQL driver - AST to wire protocol, 28% faster than asyncpg"
 license = "MIT"
-repository = "https://github.com/qail-rs/qail"
+repository = "https://github.com/qail-io/qail"
 readme = "README.md"
 
 [dependencies]
