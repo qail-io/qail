@@ -1,0 +1,15 @@
+[package]
+name = "qail-mysql"
+version = "0.10.2"
+edition = "2024"
+description = "QAIL MySQL read-only driver for high-speed data migration"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["net", "io-util"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "0.26"
+bytes = "1.5"
+sha1 = "0.10"
+sha2 = "0.10"

@@ -457,3 +457,320 @@ pub extern "C" fn qail_pipeline_exec_limits(
         Err(_) => -1,
     }
 }
+
+// ==================== Streaming COPY FFI ====================
+
+/// Handle for streaming COPY operation.
+/// Buffers rows in Rust to minimize FFI overhead and memory allocation.
+pub struct QailCopyStream {
+    conn: *mut QailConnection,
+    table: String,
+    columns: Vec<String>,
+    buffer: Mutex<Vec<u8>>,
+    row_count: std::sync::atomic::AtomicUsize,
+}
+
+/// Start a COPY stream for bulk inserts.
+/// 
+/// Returns a handle for streaming rows, or NULL on failure.
+/// Call qail_copy_row() to add rows, then qail_copy_end() to commit.
+/// 
+/// # Example (PHP)
+/// ```php
+/// $copy = qail_copy_start($conn, "users", "id,name,email");
+/// while ($row = $mysql->fetch()) {
+///     qail_copy_row_3($copy, $row['id'], $row['name'], $row['email']);
+/// }
+/// $count = qail_copy_end($copy);
+/// ```
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_copy_start(
+    conn: *mut QailConnection,
+    table: *const c_char,
+    columns: *const c_char,
+) -> *mut QailCopyStream {
+    if conn.is_null() || table.is_null() || columns.is_null() {
+        return std::ptr::null_mut();
+    }
+    
+    let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") }.to_string();
+    let columns_str = unsafe { CStr::from_ptr(columns).to_str().unwrap_or("") };
+    let columns: Vec<String> = columns_str.split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    
+    if table.is_empty() || columns.is_empty() {
+        return std::ptr::null_mut();
+    }
+    
+    let stream = Box::new(QailCopyStream {
+        conn,
+        table,
+        columns,
+        buffer: Mutex::new(Vec::with_capacity(1024 * 1024)), // 1MB initial buffer
+        row_count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    
+    Box::into_raw(stream)
+}
+
+/// Add a row to the COPY stream (3-column version for users table).
+/// 
+/// Returns 1 on success, 0 on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_copy_row_3(
+    stream: *mut QailCopyStream,
+    col0: *const c_char,
+    col1: *const c_char,
+    col2: *const c_char,
+) -> i32 {
+    if stream.is_null() {
+        return 0;
+    }
+    
+    let stream_ref = unsafe { &*stream };
+    let mut buffer = match stream_ref.buffer.lock() {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    
+    // Encode values as TSV line
+    let v0 = if col0.is_null() { "\\N" } else { 
+        unsafe { CStr::from_ptr(col0).to_str().unwrap_or("\\N") }
+    };
+    let v1 = if col1.is_null() { "\\N" } else { 
+        unsafe { CStr::from_ptr(col1).to_str().unwrap_or("\\N") }
+    };
+    let v2 = if col2.is_null() { "\\N" } else { 
+        unsafe { CStr::from_ptr(col2).to_str().unwrap_or("\\N") }
+    };
+    
+    // Write TSV line: col0\tcol1\tcol2\n
+    buffer.extend_from_slice(v0.as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(v1.as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(v2.as_bytes());
+    buffer.push(b'\n');
+    
+    stream_ref.row_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    1
+}
+
+/// Add a row to the COPY stream (4-column version).
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_copy_row_4(
+    stream: *mut QailCopyStream,
+    col0: *const c_char,
+    col1: *const c_char,
+    col2: *const c_char,
+    col3: *const c_char,
+) -> i32 {
+    if stream.is_null() {
+        return 0;
+    }
+    
+    let stream_ref = unsafe { &*stream };
+    let mut buffer = match stream_ref.buffer.lock() {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    
+    fn get_val(ptr: *const c_char) -> &'static str {
+        if ptr.is_null() { "\\N" } else { 
+            unsafe { CStr::from_ptr(ptr).to_str().unwrap_or("\\N") }
+        }
+    }
+    
+    buffer.extend_from_slice(get_val(col0).as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(get_val(col1).as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(get_val(col2).as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(get_val(col3).as_bytes());
+    buffer.push(b'\n');
+    
+    stream_ref.row_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    1
+}
+
+/// Add a row to the COPY stream (6-column version for orders table).
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_copy_row_6(
+    stream: *mut QailCopyStream,
+    col0: *const c_char,
+    col1: *const c_char,
+    col2: *const c_char,
+    col3: *const c_char,
+    col4: *const c_char,
+    col5: *const c_char,
+) -> i32 {
+    if stream.is_null() {
+        return 0;
+    }
+    
+    let stream_ref = unsafe { &*stream };
+    let mut buffer = match stream_ref.buffer.lock() {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    
+    fn get_val(ptr: *const c_char) -> &'static str {
+        if ptr.is_null() { "\\N" } else { 
+            unsafe { CStr::from_ptr(ptr).to_str().unwrap_or("\\N") }
+        }
+    }
+    
+    buffer.extend_from_slice(get_val(col0).as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(get_val(col1).as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(get_val(col2).as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(get_val(col3).as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(get_val(col4).as_bytes());
+    buffer.push(b'\t');
+    buffer.extend_from_slice(get_val(col5).as_bytes());
+    buffer.push(b'\n');
+    
+    stream_ref.row_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    1
+}
+
+/// End the COPY stream and commit to PostgreSQL.
+/// 
+/// Returns number of rows inserted, or -1 on failure.
+/// Frees the stream handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_copy_end(stream: *mut QailCopyStream) -> i64 {
+    if stream.is_null() {
+        return -1;
+    }
+    
+    // Take ownership of stream
+    let stream = unsafe { Box::from_raw(stream) };
+    
+    let conn_ref = unsafe { &*stream.conn };
+    let buffer = match stream.buffer.lock() {
+        Ok(b) => b,
+        Err(_) => return -1,
+    };
+    
+    if buffer.is_empty() {
+        return 0;
+    }
+    
+    // Execute COPY using Rust's async runtime
+    let result = RUNTIME.block_on(async {
+        let mut conn_guard = conn_ref.inner.lock().unwrap();
+        
+        // Use copy_in_raw for maximum speed
+        conn_guard.copy_in_raw(
+            &stream.table,
+            &stream.columns,
+            &buffer
+        ).await
+    });
+    
+    match result {
+        Ok(count) => count as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Cancel and free a COPY stream without committing.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_copy_cancel(stream: *mut QailCopyStream) {
+    if !stream.is_null() {
+        unsafe {
+            let _ = Box::from_raw(stream);
+        }
+    }
+}
+
+// ==================== Direct MySQL→PostgreSQL Migration ====================
+
+/// Direct Rust-to-Rust MySQL → PostgreSQL migration.
+/// 
+/// Bypasses PHP loop entirely for maximum throughput.
+/// Expected: 600K+ rows/s vs 330K rows/s with PHP loop.
+/// 
+/// # Arguments
+/// * `mysql_host`, `mysql_port`, `mysql_user`, `mysql_pass`, `mysql_db` - MySQL connection
+/// * `pg_conn` - Existing PostgreSQL connection from qail_connect()
+/// * `sql` - SELECT query to execute on MySQL
+/// * `pg_table` - Target PostgreSQL table name
+/// * `pg_columns` - Comma-separated column names for COPY
+/// 
+/// # Returns
+/// Number of rows migrated, or -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_mysql_to_pg(
+    mysql_host: *const c_char,
+    mysql_port: u16,
+    mysql_user: *const c_char,
+    mysql_pass: *const c_char,
+    mysql_db: *const c_char,
+    pg_conn: *mut QailConnection,
+    sql: *const c_char,
+    pg_table: *const c_char,
+    pg_columns: *const c_char,
+) -> i64 {
+    if mysql_host.is_null() || mysql_user.is_null() || mysql_db.is_null() 
+        || pg_conn.is_null() || sql.is_null() || pg_table.is_null() || pg_columns.is_null() {
+        return -1;
+    }
+    
+    let mysql_host = unsafe { CStr::from_ptr(mysql_host).to_str().unwrap_or("127.0.0.1") };
+    let mysql_user = unsafe { CStr::from_ptr(mysql_user).to_str().unwrap_or("root") };
+    let mysql_pass = if mysql_pass.is_null() { "" } else {
+        unsafe { CStr::from_ptr(mysql_pass).to_str().unwrap_or("") }
+    };
+    let mysql_db = unsafe { CStr::from_ptr(mysql_db).to_str().unwrap_or("") };
+    let sql = unsafe { CStr::from_ptr(sql).to_str().unwrap_or("") };
+    let pg_table = unsafe { CStr::from_ptr(pg_table).to_str().unwrap_or("") };
+    let pg_columns_str = unsafe { CStr::from_ptr(pg_columns).to_str().unwrap_or("") };
+    
+    let pg_columns: Vec<String> = pg_columns_str.split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    
+    let pg_conn_ref = unsafe { &*pg_conn };
+    
+    // Initialize TLS crypto provider
+    qail_mysql::init();
+    
+    // Execute migration in tokio runtime
+    let result = RUNTIME.block_on(async {
+        // Connect to MySQL with TLS
+        let mut mysql_conn = match qail_mysql::MySqlConnection::connect(
+            mysql_host, mysql_port, mysql_user, mysql_pass, mysql_db
+        ).await {
+            Ok(c) => c,
+            Err(e) => return Err(format!("MySQL connection failed: {}", e)),
+        };
+        
+        // Execute query and get TSV data
+        let tsv_data = match mysql_conn.query_to_tsv(sql).await {
+            Ok(data) => data,
+            Err(e) => return Err(format!("MySQL query failed: {}", e)),
+        };
+        
+        // Write to PostgreSQL using COPY
+        let mut pg_guard = pg_conn_ref.inner.lock().unwrap();
+        match pg_guard.copy_in_raw(pg_table, &pg_columns, &tsv_data).await {
+            Ok(count) => Ok(count),
+            Err(e) => Err(format!("PostgreSQL COPY failed: {}", e)),
+        }
+    });
+    
+    match result {
+        Ok(count) => count as i64,
+        Err(msg) => {
+            eprintln!("qail_mysql_to_pg error: {}", msg);
+            -1
+        }
+    }
+}

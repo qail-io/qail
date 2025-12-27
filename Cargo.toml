@@ -13,6 +13,7 @@ members = [
     "qail-go",
     "qail-php",
     "qail-daemon",
+    "qail-mysql",
 ]
 
 [workspace.lints.rust]
