@@ -1,6 +1,32 @@
 /target
 .DS_Store
 
+# Zig
+zig-cache/
+zig-out/
+.zig-cache/
+
+# Rust
+**/*.rs.bk
+Cargo.lock
+
+# Python
+__pycache__/
+*.pyc
+.venv*/
+.env
+.pytest_cache/
+
+# Node
+node_modules/
+
+# PHP
+vendor/
+
+# Go
+qail-go/go/bin/
+qail-go/go/pkg/
+
 # Prevent DB connection info leaks (examples contain connection strings)
 qail-pg/examples/
 
@@ -9,3 +35,8 @@ docs/README.md
 
 # Build artifacts (60MB static lib)
 qail-zig/lib/
+
+# Benchmarking outputs
+*.txt
+*.prof
+*.test

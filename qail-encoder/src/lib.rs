@@ -542,6 +542,268 @@ fn encode_bind_to_buf(buf: &mut Vec<u8>, statement: &str, param: Option<&str>) {
     buf.extend_from_slice(&0i16.to_be_bytes()); // Result format (text)
 }
 
+// ============================================================================
+// Response Parsing (for fair comparison with pg.zig)
+// Enabled only with the "response" feature to keep library size small
+// ============================================================================
+
+#[cfg(feature = "response")]
+use qail_pg::protocol::wire::BackendMessage;
+
+#[cfg(feature = "response")]
+/// Opaque handle to decoded response
+pub struct QailResponse {
+    pub rows: Vec<Vec<Option<Vec<u8>>>>,
+    pub affected_rows: u64,
+    pub error: Option<String>,
+}
+
+#[cfg(feature = "response")]
+
+/// Decode PostgreSQL response bytes.
+/// Returns a handle that must be freed with qail_response_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_decode_response(
+    data: *const u8,
+    len: usize,
+    out_handle: *mut *mut QailResponse,
+) -> i32 {
+    clear_error();
+    
+    if data.is_null() || out_handle.is_null() {
+        set_error("Null pointer".to_string());
+        return -1;
+    }
+    
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    let mut response = QailResponse {
+        rows: Vec::new(),
+        affected_rows: 0,
+        error: None,
+    };
+    
+    let mut offset = 0;
+    while offset < bytes.len() {
+        match BackendMessage::decode(&bytes[offset..]) {
+            Ok((msg, consumed)) => {
+                offset += consumed;
+                
+                match msg {
+                    BackendMessage::DataRow(columns) => {
+                        response.rows.push(columns);
+                    }
+                    BackendMessage::CommandComplete(tag) => {
+                        // Parse affected rows from tag like "INSERT 0 5" or "UPDATE 10"
+                        if let Some(num) = tag.split_whitespace().last() {
+                            response.affected_rows = num.parse().unwrap_or(0);
+                        }
+                    }
+                    BackendMessage::ErrorResponse(fields) => {
+                        response.error = Some(if fields.message.is_empty() { 
+                            "Unknown error".to_string() 
+                        } else { 
+                            fields.message 
+                        });
+                    }
+                    BackendMessage::ReadyForQuery(_) => {
+                        break; // Done
+                    }
+                    _ => {} // Skip other messages
+                }
+            }
+            Err(e) => {
+                // Not enough data yet, or parse error
+                if e.contains("not enough") || e.contains("Need") {
+                    break;
+                }
+                set_error(e);
+                return -1;
+            }
+        }
+    }
+    
+    let boxed = Box::new(response);
+    unsafe { *out_handle = Box::into_raw(boxed) };
+    0
+}
+
+#[cfg(feature = "response")]
+/// Get number of rows in response.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_row_count(handle: *const QailResponse) -> usize {
+    if handle.is_null() { return 0; }
+    unsafe { (&*handle).rows.len() }
+}
+
+#[cfg(feature = "response")]
+/// Get number of columns in a row.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_column_count(handle: *const QailResponse, row: usize) -> usize {
+    if handle.is_null() { return 0; }
+    unsafe { (&*handle).rows.get(row).map(|r| r.len()).unwrap_or(0) }
+}
+
+#[cfg(feature = "response")]
+/// Get affected row count.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_affected_rows(handle: *const QailResponse) -> u64 {
+    if handle.is_null() { return 0; }
+    unsafe { (&*handle).affected_rows }
+}
+
+#[cfg(feature = "response")]
+/// Check if a column is NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_is_null(handle: *const QailResponse, row: usize, col: usize) -> i32 {
+    if handle.is_null() { return 1; }
+    unsafe {
+        let resp = &*handle;
+        resp.rows.get(row)
+            .and_then(|r| r.get(col))
+            .map(|c| if c.is_none() { 1 } else { 0 })
+            .unwrap_or(1)
+    }
+}
+
+#[cfg(feature = "response")]
+/// Get column value as string.
+/// Returns pointer to null-terminated string, or NULL if value is NULL.
+/// The returned string is only valid until the response is freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_get_string(
+    handle: *const QailResponse,
+    row: usize,
+    col: usize,
+    out_ptr: *mut *const u8,
+    out_len: *mut usize,
+) -> i32 {
+    if handle.is_null() || out_ptr.is_null() || out_len.is_null() { return -1; }
+    
+    unsafe {
+        let resp = &*handle;
+        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
+            *out_ptr = bytes.as_ptr();
+            *out_len = bytes.len();
+            0
+        } else {
+            *out_ptr = std::ptr::null();
+            *out_len = 0;
+            0 // NULL is not an error
+        }
+    }
+}
+
+#[cfg(feature = "response")]
+/// Get column value as i32.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_get_i32(
+    handle: *const QailResponse,
+    row: usize,
+    col: usize,
+    out_value: *mut i32,
+) -> i32 {
+    if handle.is_null() || out_value.is_null() { return -1; }
+    
+    unsafe {
+        let resp = &*handle;
+        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                if let Ok(v) = s.parse::<i32>() {
+                    *out_value = v;
+                    return 0;
+                }
+            }
+        }
+        -1
+    }
+}
+
+#[cfg(feature = "response")]
+/// Get column value as i64.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_get_i64(
+    handle: *const QailResponse,
+    row: usize,
+    col: usize,
+    out_value: *mut i64,
+) -> i32 {
+    if handle.is_null() || out_value.is_null() { return -1; }
+    
+    unsafe {
+        let resp = &*handle;
+        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                if let Ok(v) = s.parse::<i64>() {
+                    *out_value = v;
+                    return 0;
+                }
+            }
+        }
+        -1
+    }
+}
+
+#[cfg(feature = "response")]
+/// Get column value as f64.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_get_f64(
+    handle: *const QailResponse,
+    row: usize,
+    col: usize,
+    out_value: *mut f64,
+) -> i32 {
+    if handle.is_null() || out_value.is_null() { return -1; }
+    
+    unsafe {
+        let resp = &*handle;
+        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                if let Ok(v) = s.parse::<f64>() {
+                    *out_value = v;
+                    return 0;
+                }
+            }
+        }
+        -1
+    }
+}
+
+#[cfg(feature = "response")]
+/// Get column value as bool.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_get_bool(
+    handle: *const QailResponse,
+    row: usize,
+    col: usize,
+    out_value: *mut i32,
+) -> i32 {
+    if handle.is_null() || out_value.is_null() { return -1; }
+    
+    unsafe {
+        let resp = &*handle;
+        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                *out_value = match s {
+                    "t" | "true" | "1" => 1,
+                    "f" | "false" | "0" => 0,
+                    _ => return -1,
+                };
+                return 0;
+            }
+        }
+        -1
+    }
+}
+
+#[cfg(feature = "response")]
+/// Free a response handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn qail_response_free(handle: *mut QailResponse) {
+    if !handle.is_null() {
+        unsafe { let _ = Box::from_raw(handle); }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

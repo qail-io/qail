@@ -11,9 +11,14 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 qail-core = { path = "../qail-core" }
+qail-pg = { path = "../qail-pg", default-features = false, optional = true }
 
-# Minimal dependencies - just encoding!
-# NO tokio, NO TLS, NO async
+[features]
+default = []
+response = ["qail-pg"]
+
+# Minimal dependencies - just encoding by default!
+# Enable "response" feature for response parsing
 
 [lints]
 workspace = true

@@ -22,6 +22,20 @@ extern fn qail_encode_parse(name: ?[*:0]const u8, sql: [*:0]const u8, out_ptr: *
 extern fn qail_encode_sync(out_ptr: *?[*]u8, out_len: *usize) i32;
 extern fn qail_encode_bind_execute_batch(statement: [*:0]const u8, params: [*]const [*:0]const u8, params_count: usize, count: usize, out_ptr: *?[*]u8, out_len: *usize) i32;
 
+// Response Parsing (for fair comparison with pg.zig)
+const QailResponse = opaque {};
+extern fn qail_decode_response(data: [*]const u8, len: usize, out_handle: *?*QailResponse) i32;
+extern fn qail_response_row_count(handle: ?*const QailResponse) usize;
+extern fn qail_response_column_count(handle: ?*const QailResponse, row: usize) usize;
+extern fn qail_response_affected_rows(handle: ?*const QailResponse) u64;
+extern fn qail_response_is_null(handle: ?*const QailResponse, row: usize, col: usize) i32;
+extern fn qail_response_get_string(handle: ?*const QailResponse, row: usize, col: usize, out_ptr: *?[*]const u8, out_len: *usize) i32;
+extern fn qail_response_get_i32(handle: ?*const QailResponse, row: usize, col: usize, out_value: *i32) i32;
+extern fn qail_response_get_i64(handle: ?*const QailResponse, row: usize, col: usize, out_value: *i64) i32;
+extern fn qail_response_get_f64(handle: ?*const QailResponse, row: usize, col: usize, out_value: *f64) i32;
+extern fn qail_response_get_bool(handle: ?*const QailResponse, row: usize, col: usize, out_value: *i32) i32;
+extern fn qail_response_free(handle: ?*QailResponse) void;
+
 /// Get QAIL version string
 pub fn version() []const u8 {
     const ptr = qail_version();
@@ -173,6 +187,96 @@ pub fn transpile(allocator: std.mem.Allocator, qail_text: [:0]const u8) !?[]cons
 
     return null;
 }
+
+// ============================================================================
+// Response Parsing (for fair comparison with pg.zig)
+// ============================================================================
+
+/// Parsed PostgreSQL response with row access
+pub const Response = struct {
+    handle: ?*QailResponse,
+
+    /// Parse PostgreSQL wire protocol response bytes
+    pub fn parse(data: []const u8) ?Response {
+        var handle: ?*QailResponse = null;
+        const result = qail_decode_response(data.ptr, data.len, &handle);
+        if (result == 0 and handle != null) {
+            return .{ .handle = handle };
+        }
+        return null;
+    }
+
+    /// Free the response
+    pub fn deinit(self: *Response) void {
+        if (self.handle) |h| {
+            qail_response_free(h);
+            self.handle = null;
+        }
+    }
+
+    /// Get number of rows
+    pub fn rowCount(self: Response) usize {
+        return qail_response_row_count(self.handle);
+    }
+
+    /// Get number of columns in a row
+    pub fn columnCount(self: Response, row: usize) usize {
+        return qail_response_column_count(self.handle, row);
+    }
+
+    /// Get affected row count (for INSERT/UPDATE)
+    pub fn affectedRows(self: Response) u64 {
+        return qail_response_affected_rows(self.handle);
+    }
+
+    /// Check if column is NULL
+    pub fn isNull(self: Response, row: usize, col: usize) bool {
+        return qail_response_is_null(self.handle, row, col) != 0;
+    }
+
+    /// Get column as string slice (valid until Response.deinit)
+    pub fn getString(self: Response, row: usize, col: usize) ?[]const u8 {
+        var out_ptr: ?[*]const u8 = null;
+        var out_len: usize = 0;
+        const result = qail_response_get_string(self.handle, row, col, &out_ptr, &out_len);
+        if (result == 0 and out_ptr != null) {
+            return out_ptr.?[0..out_len];
+        }
+        return null;
+    }
+
+    /// Get column as i32
+    pub fn getI32(self: Response, row: usize, col: usize) ?i32 {
+        var value: i32 = 0;
+        const result = qail_response_get_i32(self.handle, row, col, &value);
+        if (result == 0) return value;
+        return null;
+    }
+
+    /// Get column as i64
+    pub fn getI64(self: Response, row: usize, col: usize) ?i64 {
+        var value: i64 = 0;
+        const result = qail_response_get_i64(self.handle, row, col, &value);
+        if (result == 0) return value;
+        return null;
+    }
+
+    /// Get column as f64
+    pub fn getF64(self: Response, row: usize, col: usize) ?f64 {
+        var value: f64 = 0;
+        const result = qail_response_get_f64(self.handle, row, col, &value);
+        if (result == 0) return value;
+        return null;
+    }
+
+    /// Get column as bool
+    pub fn getBool(self: Response, row: usize, col: usize) ?bool {
+        var value: i32 = 0;
+        const result = qail_response_get_bool(self.handle, row, col, &value);
+        if (result == 0) return value != 0;
+        return null;
+    }
+};
 
 // ============================================================================
 // Tests

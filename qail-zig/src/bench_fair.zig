@@ -1,7 +1,7 @@
-//! QAIL-Zig vs pg.zig Benchmark (TRULY FAIR - Single Query)
+//! QAIL-Zig vs pg.zig Benchmark (TRULY FAIR with Response Parsing)
 //!
-//! Both execute single queries, no batching.
-//! This is the fairest comparison possible.
+//! Both execute single queries AND parse responses.
+//! This is apples-to-apples comparison.
 
 const std = @import("std");
 const pg = @import("pg_zig");
@@ -15,10 +15,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("🏁 QAIL-Zig vs pg.zig (TRULY FAIR)\n", .{});
-    std.debug.print("===================================\n", .{});
+    std.debug.print("🏁 QAIL-Zig vs pg.zig (TRULY FAIR - With Response Parsing)\n", .{});
+    std.debug.print("============================================================\n", .{});
     std.debug.print("Queries: {d}\n", .{QUERIES});
-    std.debug.print("Mode: Single query (no batching)\n\n", .{});
+    std.debug.print("Mode: Single query with response parsing\n\n", .{});
 
     // ========== Test 1: pg.zig (native Zig) ==========
     std.debug.print("📊 [1/2] pg.zig (pure Zig)...\n", .{});
@@ -27,6 +27,7 @@ pub fn main() !void {
     var pool = try pg.Pool.initUri(allocator, uri, .{});
     defer pool.deinit();
 
+    var pg_total_rows: usize = 0;
     const start1 = std.time.nanoTimestamp();
 
     var i: usize = 0;
@@ -36,16 +37,23 @@ pub fn main() !void {
         var result = try pool.query("SELECT id, name FROM harbors LIMIT $1", .{limit});
         defer result.deinit();
 
-        while (try result.next()) |_| {}
+        while (try result.next()) |row| {
+            // Parse each column (same work as QAIL-Zig)
+            const id = row.get(i32, 0);
+            const name = row.get([]u8, 1);
+            _ = id;
+            _ = name;
+            pg_total_rows += 1;
+        }
     }
 
     const elapsed1 = @as(f64, @floatFromInt(@as(u64, @intCast(std.time.nanoTimestamp() - start1)))) / 1_000_000.0;
     const qps1 = @as(f64, @floatFromInt(QUERIES)) / (elapsed1 / 1000.0);
 
-    std.debug.print("   {d:.0} q/s\n\n", .{qps1});
+    std.debug.print("   {d:.0} q/s ({d} rows parsed)\n\n", .{ qps1, pg_total_rows });
 
-    // ========== Test 2: QAIL-Zig (single query, no batch) ==========
-    std.debug.print("📊 [2/2] QAIL-Zig (single query)...\n", .{});
+    // ========== Test 2: QAIL-Zig (with response parsing) ==========
+    std.debug.print("📊 [2/2] QAIL-Zig (with response parsing)...\n", .{});
 
     const address = try net.Address.parseIp4("127.0.0.1", 5432);
     var stream = try net.tcpConnectToAddress(address);
@@ -66,28 +74,48 @@ pub fn main() !void {
     _ = try stream.read(&auth_buf);
 
     var read_buf: [65536]u8 = undefined;
+    var qail_total_rows: usize = 0;
     const start2 = std.time.nanoTimestamp();
 
     var j: usize = 0;
     while (j < QUERIES) : (j += 1) {
         const limit: i64 = @intCast(@mod(j, 10) + 1);
 
-        // Single query - Simple Query protocol (like pg.zig does internally)
+        // Encode and send query
         var query = qail.encodeSelect("harbors", "id,name", limit);
         defer query.deinit();
-
         _ = try stream.write(query.data);
 
-        // Read until 'Z' (ReadyForQuery)
+        // Read full response until 'Z' (ReadyForQuery)
+        var total_read: usize = 0;
         var done = false;
         while (!done) {
-            const n = try stream.read(&read_buf);
+            const n = try stream.read(read_buf[total_read..]);
             if (n == 0) break;
-            for (read_buf[0..n]) |byte| {
+            total_read += n;
+
+            // Check for ReadyForQuery at end
+            for (read_buf[0..total_read]) |byte| {
                 if (byte == 'Z') {
                     done = true;
                     break;
                 }
+            }
+        }
+
+        // Parse response (same work as pg.zig)
+        if (qail.Response.parse(read_buf[0..total_read])) |resp| {
+            var response = resp; // Make mutable copy
+            defer response.deinit();
+
+            var row_idx: usize = 0;
+            while (row_idx < response.rowCount()) : (row_idx += 1) {
+                // Parse each column (same work as pg.zig)
+                const id = response.getI32(row_idx, 0);
+                const name = response.getString(row_idx, 1);
+                _ = id;
+                _ = name;
+                qail_total_rows += 1;
             }
         }
     }
@@ -95,30 +123,30 @@ pub fn main() !void {
     const elapsed2 = @as(f64, @floatFromInt(@as(u64, @intCast(std.time.nanoTimestamp() - start2)))) / 1_000_000.0;
     const qps2 = @as(f64, @floatFromInt(QUERIES)) / (elapsed2 / 1000.0);
 
-    std.debug.print("   {d:.0} q/s\n\n", .{qps2});
+    std.debug.print("   {d:.0} q/s ({d} rows parsed)\n\n", .{ qps2, qail_total_rows });
 
     // Summary
-    std.debug.print("📈 RESULTS (FAIR - Both Single Query):\n", .{});
-    std.debug.print("┌────────────────────────────────────┐\n", .{});
-    std.debug.print("│ pg.zig:     {:>10.0} q/s        │\n", .{qps1});
-    std.debug.print("│ QAIL-Zig:   {:>10.0} q/s        │\n", .{qps2});
-    std.debug.print("├────────────────────────────────────┤\n", .{});
+    std.debug.print("📈 RESULTS (FAIR - Both Parse Responses):\n", .{});
+    std.debug.print("┌────────────────────────────────────────┐\n", .{});
+    std.debug.print("│ pg.zig:     {:>10.0} q/s             │\n", .{qps1});
+    std.debug.print("│ QAIL-Zig:   {:>10.0} q/s             │\n", .{qps2});
+    std.debug.print("├────────────────────────────────────────┤\n", .{});
     if (qps1 > qps2) {
         const ratio = qps1 / qps2;
         if (ratio > 1.1) {
-            std.debug.print("│ pg.zig is {d:.1}x faster           │\n", .{ratio});
+            std.debug.print("│ pg.zig is {d:.1}x faster                │\n", .{ratio});
         } else {
-            std.debug.print("│ Performance is similar (~equal)  │\n", .{});
+            std.debug.print("│ Performance is similar (~equal)       │\n", .{});
         }
     } else {
         const ratio = qps2 / qps1;
         if (ratio > 1.1) {
-            std.debug.print("│ QAIL-Zig is {d:.1}x faster         │\n", .{ratio});
+            std.debug.print("│ QAIL-Zig is {d:.1}x faster              │\n", .{ratio});
         } else {
-            std.debug.print("│ Performance is similar (~equal)  │\n", .{});
+            std.debug.print("│ Performance is similar (~equal)       │\n", .{});
         }
     }
-    std.debug.print("└────────────────────────────────────┘\n", .{});
+    std.debug.print("└────────────────────────────────────────┘\n", .{});
 }
 
 fn writeParam(buf: []u8, offset: usize, name: []const u8, value: []const u8) usize {
