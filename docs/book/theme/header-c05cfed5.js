@@ -18,7 +18,7 @@ document.addEventListener('DOMContentLoaded', function () {
             <a href="/playground">Playground</a>
             <a href="/docs" class="active">Docs</a>
             <a href="/benchmarks">Benchmarks</a>
-            <a href="https://github.com/qail-rs/qail" target="_blank">GitHub</a>
+            <a href="https://github.com/qail-io/qail" target="_blank">GitHub</a>
         </div>
     `;
     document.body.insertBefore(header, document.body.firstChild);

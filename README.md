@@ -153,7 +153,7 @@ Each database has its own wire protocol, so each gets its own encoder.
 ## Contributing
 
 ```bash
-git clone https://github.com/qail-rs/qail.git
+git clone https://github.com/qail-io/qail.git
 cd qail
 cargo test
 ```

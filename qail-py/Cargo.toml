@@ -4,7 +4,7 @@ version = "0.10.1"
 edition = "2021"
 description = "Python bindings for QAIL - The fastest PostgreSQL driver"
 license = "MIT"
-repository = "https://github.com/qail-rs/qail"
+repository = "https://github.com/qail-io/qail"
 keywords = ["python", "postgres", "database", "async", "pyo3"]
 
 [lib]

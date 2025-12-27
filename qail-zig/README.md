@@ -16,7 +16,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .qail = .{
-        .url = "https://github.com/qail-rs/qail/releases/download/v0.10.2/qail-zig-0.10.2.tar.gz",
+        .url = "https://github.com/qail-io/qail/releases/download/v0.10.2/qail-zig-0.10.2.tar.gz",
         .hash = "...", // Run `zig fetch` to get the hash
     },
 },
@@ -24,7 +24,7 @@ Add to your `build.zig.zon`:
 
 Then fetch the dependency:
 ```bash
-zig fetch --save https://github.com/qail-rs/qail/releases/download/v0.10.2/qail-zig-0.10.2.tar.gz
+zig fetch --save https://github.com/qail-io/qail/releases/download/v0.10.2/qail-zig-0.10.2.tar.gz
 ```
 
 ## Quick Start
