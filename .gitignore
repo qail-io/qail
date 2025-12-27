@@ -6,3 +6,6 @@ qail-pg/examples/
 
 # Internal documentation workflow
 docs/README.md
+
+# Build artifacts (60MB static lib)
+qail-zig/lib/
