@@ -4,7 +4,7 @@ authors = ["QAIL Team"]
 language = "en"
 
 [build]
-build-dir = "../../qail-web/docs"
+build-dir = "../../qail-web/public/docs"
 
 [output.html]
 default-theme = "coal"
