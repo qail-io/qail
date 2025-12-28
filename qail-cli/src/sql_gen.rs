@@ -12,16 +12,28 @@ pub fn cmd_to_sql(cmd: &QailCmd) -> String {
             let cols: Vec<String> = cmd.columns.iter().filter_map(|col| {
                 if let Expr::Def { name, data_type, constraints } = col {
                     let mut col_def = format!("{} {}", name, data_type);
+                    
+                    // Check if this is a primary key (no NOT NULL needed)
+                    let is_pk = constraints.iter().any(|c| matches!(c, Constraint::PrimaryKey));
+                    // Check if nullable (if so, don't add NOT NULL)
+                    let is_nullable = constraints.iter().any(|c| matches!(c, Constraint::Nullable));
+                    
                     for c in constraints {
                         match c {
                             Constraint::PrimaryKey => col_def.push_str(" PRIMARY KEY"),
-                            Constraint::Nullable => {},
+                            Constraint::Nullable => {}, // Columns are NOT NULL by default unless marked Nullable
                             Constraint::Unique => col_def.push_str(" UNIQUE"),
                             Constraint::Default(v) => col_def.push_str(&format!(" DEFAULT {}", v)),
                             Constraint::References(target) => col_def.push_str(&format!(" REFERENCES {}", target)),
                             _ => {},
                         }
                     }
+                    
+                    // Add NOT NULL if not primary key and not nullable
+                    if !is_pk && !is_nullable {
+                        col_def.push_str(" NOT NULL");
+                    }
+                    
                     Some(col_def)
                 } else {
                     None
