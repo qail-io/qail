@@ -31,6 +31,8 @@ pub enum Action {
     Alter,
     /// ALTER TABLE DROP COLUMN
     AlterDrop,
+    /// ALTER TABLE ALTER COLUMN TYPE
+    AlterType,
     // Transactions
     TxnStart,
     TxnCommit,
@@ -90,6 +92,7 @@ impl std::fmt::Display for Action {
             Action::DropIndex => write!(f, "DROP_INDEX"),
             Action::Alter => write!(f, "ALTER"),
             Action::AlterDrop => write!(f, "ALTER_DROP"),
+            Action::AlterType => write!(f, "ALTER_TYPE"),
             Action::TxnStart => write!(f, "TXN_START"),
             Action::TxnCommit => write!(f, "TXN_COMMIT"),
             Action::TxnRollback => write!(f, "TXN_ROLLBACK"),

@@ -77,6 +77,13 @@ pub fn cmd_to_sql(cmd: &QailCmd) -> String {
             // RENAME COLUMN
             format!("ALTER TABLE {} RENAME COLUMN ... TO ...", cmd.table)
         },
+        Action::AlterType => {
+            // ALTER COLUMN TYPE
+            if let Some(Expr::Def { name, data_type, .. }) = cmd.columns.first() {
+                return format!("ALTER TABLE {} ALTER COLUMN {} TYPE {}", cmd.table, name, data_type);
+            }
+            format!("ALTER TABLE {} ALTER COLUMN ... TYPE ...", cmd.table)
+        },
         _ => format!("-- Unsupported action: {:?}", cmd.action),
     }
 }
@@ -114,6 +121,10 @@ pub fn generate_rollback_sql(cmd: &QailCmd) -> String {
         },
         Action::Mod => {
             format!("-- RENAME operation: reverse manually")
+        },
+        Action::AlterType => {
+            // ALTER COLUMN TYPE -> cannot easily reverse (may lose data)
+            format!("-- Cannot auto-rollback TYPE change on {} (may need USING clause)", cmd.table)
         },
         _ => format!("-- No rollback for {:?}", cmd.action),
     }

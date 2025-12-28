@@ -304,3 +304,23 @@ pub fn build_alter_drop_column(cmd: &QailCmd, dialect: Dialect) -> String {
     
     parts.join(";\n")
 }
+
+/// Generate ALTER TABLE ALTER COLUMN TYPE SQL (for migrations).
+pub fn build_alter_column_type(cmd: &QailCmd, dialect: Dialect) -> String {
+    let generator = dialect.generator();
+    let table = generator.quote_identifier(&cmd.table);
+    
+    let mut parts = Vec::new();
+    
+    for col in &cmd.columns {
+        let (col_name, new_type) = match col {
+            Expr::Def { name, data_type, .. } => (name.clone(), data_type.clone()),
+            _ => continue,
+        };
+        
+        let quoted_col = generator.quote_identifier(&col_name);
+        parts.push(format!("ALTER TABLE {} ALTER COLUMN {} TYPE {}", table, quoted_col, new_type));
+    }
+    
+    parts.join(";\n")
+}

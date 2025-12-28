@@ -91,6 +91,7 @@ impl ToSql for QailCmd {
             Action::DropIndex => format!("DROP INDEX {}", self.table),
             Action::Alter => ddl::build_alter_add_column(self, dialect),
             Action::AlterDrop => ddl::build_alter_drop_column(self, dialect),
+            Action::AlterType => ddl::build_alter_column_type(self, dialect),
             // Stubs
             Action::TxnStart => "BEGIN TRANSACTION;".to_string(), // Default stub
             Action::TxnCommit => "COMMIT;".to_string(),

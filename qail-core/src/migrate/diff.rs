@@ -175,6 +175,28 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                     }
                 }
             }
+
+            // Detect type changes in existing columns
+            for new_col in &new_table.columns {
+                if let Some(old_col) = old_table.columns.iter().find(|c| c.name == new_col.name) {
+                    let old_type = old_col.data_type.to_pg_type();
+                    let new_type = new_col.data_type.to_pg_type();
+                    
+                    if old_type != new_type {
+                        // Type changed - ALTER COLUMN TYPE
+                        cmds.push(QailCmd {
+                            action: Action::AlterType,
+                            table: name.clone(),
+                            columns: vec![Expr::Def {
+                                name: new_col.name.clone(),
+                                data_type: new_type,
+                                constraints: vec![],
+                            }],
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
         }
     }
 
