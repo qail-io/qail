@@ -119,6 +119,7 @@ impl AstEncoder {
             Action::DropIndex => Self::encode_drop_index(cmd, &mut sql_buf),
             Action::Alter => Self::encode_alter_add_column(cmd, &mut sql_buf),
             Action::AlterDrop => Self::encode_alter_drop_column(cmd, &mut sql_buf),
+            Action::AlterType => Self::encode_alter_column_type(cmd, &mut sql_buf),
             _ => {
                 // STRICT: No fallback to to_sql() - panic on unsupported actions
                 panic!("Unsupported action {:?} in AST-native encoder. Use legacy encoder for DDL.", cmd.action);
@@ -509,6 +510,20 @@ impl AstEncoder {
             buf.extend_from_slice(cmd.table.as_bytes());
             buf.extend_from_slice(b" DROP COLUMN ");
             buf.extend_from_slice(col_name.as_bytes());
+        }
+    }
+
+    /// Encode ALTER TABLE ALTER COLUMN TYPE statement (DDL).
+    fn encode_alter_column_type(cmd: &QailCmd, buf: &mut BytesMut) {
+        for col in &cmd.columns {
+            if let Expr::Def { name, data_type, .. } = col {
+                buf.extend_from_slice(b"ALTER TABLE ");
+                buf.extend_from_slice(cmd.table.as_bytes());
+                buf.extend_from_slice(b" ALTER COLUMN ");
+                buf.extend_from_slice(name.as_bytes());
+                buf.extend_from_slice(b" TYPE ");
+                buf.extend_from_slice(Self::map_type(data_type).as_bytes());
+            }
         }
     }
 
