@@ -97,14 +97,14 @@ impl Schema {
             }
             
             // Match "table tablename ("
-            if line.starts_with("table ") {
+            if let Some(rest) = line.strip_prefix("table ") {
                 // Save previous table if any
                 if let Some(t) = current_table.take() {
                     schema.tables.push(t);
                 }
                 
                 // Parse table name: "table users (" -> "users"
-                let rest = &line[6..]; // Skip "table "
+                // Skip "table "
                 let name = rest.split('(').next()
                     .map(|s| s.trim())
                     .ok_or_else(|| format!("Invalid table line: {}", line))?;

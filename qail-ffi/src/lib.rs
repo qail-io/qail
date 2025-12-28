@@ -17,7 +17,7 @@ use qail_core::transpiler::{ToSql, Dialect};
 use std::cell::RefCell;
 
 thread_local! {
-    static LAST_ERROR: RefCell<Option<String>> = RefCell::new(None);
+    static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn set_error(msg: String) {
@@ -195,7 +195,7 @@ pub extern "C" fn qail_validate(qail: *const c_char) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_last_error() -> *const c_char {
     thread_local! {
-        static ERROR_CSTRING: RefCell<Option<CString>> = RefCell::new(None);
+        static ERROR_CSTRING: RefCell<Option<CString>> = const { RefCell::new(None) };
     }
     
     LAST_ERROR.with(|e| {

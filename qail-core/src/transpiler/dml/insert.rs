@@ -75,7 +75,7 @@ fn build_on_conflict_postgres(
         .map(|c| generator.quote_identifier(c))
         .collect();
     sql.push_str(&cols.join(", "));
-    sql.push_str(")");
+    sql.push(')');
     
     match &on_conflict.action {
         ConflictAction::DoNothing => {

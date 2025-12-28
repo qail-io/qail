@@ -270,7 +270,7 @@ impl BackendMessage {
         let parts: Vec<&[u8]> = payload.split(|&b| b == 0).collect();
         let empty: &[u8] = b"";
         Ok(BackendMessage::ParameterStatus {
-            name: String::from_utf8_lossy(parts.get(0).unwrap_or(&empty)).to_string(),
+            name: String::from_utf8_lossy(parts.first().unwrap_or(&empty)).to_string(),
             value: String::from_utf8_lossy(parts.get(1).unwrap_or(&empty)).to_string(),
         })
     }

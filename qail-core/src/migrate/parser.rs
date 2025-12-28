@@ -82,7 +82,7 @@ where
     let mut consumed = 0;
     
     // Parse columns until }
-    while let Some(line) = lines.next() {
+    for line in lines.by_ref() {
         consumed += 1;
         let line = line.trim();
         
@@ -113,8 +113,8 @@ fn parse_column(line: &str) -> Result<Column, String> {
     let type_str = parts[1];
     
     // Parse type string to ColumnType enum
-    let data_type = super::types::ColumnType::from_str(type_str)
-        .ok_or_else(|| format!("Unknown column type: {}", type_str))?;
+    let data_type: super::types::ColumnType = type_str.parse()
+        .map_err(|_| format!("Unknown column type: {}", type_str))?;
     
     let mut col = Column::new(&name, data_type);
     
@@ -155,12 +155,12 @@ fn parse_column(line: &str) -> Result<Column, String> {
                 };
                 
                 // Parse "table(column)" format
-                if let Some(paren_start) = fk_str.find('(') {
-                    if let Some(paren_end) = fk_str.find(')') {
-                        let table = &fk_str[..paren_start];
-                        let column = &fk_str[paren_start + 1..paren_end];
-                        col = col.references(table, column);
-                    }
+                if let Some(paren_start) = fk_str.find('(')
+                    && let Some(paren_end) = fk_str.find(')') 
+                {
+                    let table = &fk_str[..paren_start];
+                    let column = &fk_str[paren_start + 1..paren_end];
+                    col = col.references(table, column);
                 }
             }
             _ => {

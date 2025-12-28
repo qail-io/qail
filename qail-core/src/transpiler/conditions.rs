@@ -74,6 +74,7 @@ fn resolve_col_syntax(col: &str, cmd: &QailCmd, generator: &dyn SqlGenerator) ->
     generator.json_access(col_name, path)
 }
 
+#[allow(clippy::borrowed_box)]
 pub trait ConditionToSql {
     fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&QailCmd>) -> String;
     fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String;
@@ -169,31 +170,29 @@ impl ConditionToSql for Condition {
             // Postgres 17+ SQL/JSON standard functions
             Operator::JsonExists => {
                 let path = self.to_value_sql(generator);
-                generator.json_exists(&col, &path.trim_matches('\''))
+                generator.json_exists(&col, path.trim_matches('\''))
             }
             Operator::JsonQuery => {
                 let path = self.to_value_sql(generator);
-                generator.json_query(&col, &path.trim_matches('\''))
+                generator.json_query(&col, path.trim_matches('\''))
             }
             Operator::JsonValue => {
                 let path = self.to_value_sql(generator);
-                format!("{} = {}", generator.json_value(&col, &path.trim_matches('\'')), self.to_value_sql(generator))
+                format!("{} = {}", generator.json_value(&col, path.trim_matches('\'')), self.to_value_sql(generator))
             }
             Operator::Between => {
                 // Value is Array with 2 elements [min, max]
-                if let Value::Array(vals) = &self.value {
-                    if vals.len() >= 2 {
+                if let Value::Array(vals) = &self.value
+                    && vals.len() >= 2 {
                         return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
                     }
-                }
                 format!("{} BETWEEN {}", col, self.value)
             }
             Operator::NotBetween => {
-                if let Value::Array(vals) = &self.value {
-                    if vals.len() >= 2 {
+                if let Value::Array(vals) = &self.value
+                    && vals.len() >= 2 {
                         return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
                     }
-                }
                 format!("{} NOT BETWEEN {}", col, self.value)
             }
             Operator::Exists => {
@@ -290,13 +289,11 @@ impl ConditionToSql for Condition {
         match self.op {
             Operator::Eq => {
                 // Raw conditions ({...}, op=Eq, value=Null) are now handled at col resolution
-                if matches!(self.value, Value::Null) {
-                    if let Expr::Named(name) = &self.left {
-                        if name.starts_with('{') && name.ends_with('}') {
+                if matches!(self.value, Value::Null)
+                    && let Expr::Named(name) = &self.left
+                        && name.starts_with('{') && name.ends_with('}') {
                             return col; // col already contains raw SQL content
                         }
-                    }
-                }
                 format!("{} = {}", col, value_placeholder(&self.value, params))
             },
             Operator::Fuzzy => {
@@ -323,19 +320,17 @@ impl ConditionToSql for Condition {
                 format!("{} = {}", generator.json_value(&col, &path), value_placeholder(&self.value, params))
             }
             Operator::Between => {
-                if let Value::Array(vals) = &self.value {
-                    if vals.len() >= 2 {
+                if let Value::Array(vals) = &self.value
+                    && vals.len() >= 2 {
                         return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
                     }
-                }
                 format!("{} BETWEEN {}", col, self.value)
             }
             Operator::NotBetween => {
-                if let Value::Array(vals) = &self.value {
-                    if vals.len() >= 2 {
+                if let Value::Array(vals) = &self.value
+                    && vals.len() >= 2 {
                         return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
                     }
-                }
                 format!("{} NOT BETWEEN {}", col, self.value)
             }
             Operator::Exists => {

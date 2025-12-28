@@ -72,10 +72,7 @@ fn build_get_item(cmd: &QailCmd) -> String {
          parts.push(format!("\"ProjectionExpression\": \"{}\"", cols.join(", ")));
     }
     
-    match get_limit(cmd) {
-        Some(n) => parts.push(format!("\"Limit\": {}", n)),
-        None => {}
-    }
+    if let Some(n) = get_limit(cmd) { parts.push(format!("\"Limit\": {}", n)) }
 
     format!("{{ {} }}", parts.join(", "))
 }
@@ -183,8 +180,8 @@ fn build_item_json(cmd: &QailCmd) -> String {
 fn build_key_from_filter(cmd: &QailCmd) -> String {
     // Use the first filter condition as the primary key.
     for cage in &cmd.cages {
-        if let CageKind::Filter = cage.kind {
-             if let Some(cond) = cage.conditions.first() {
+        if let CageKind::Filter = cage.kind
+             && let Some(cond) = cage.conditions.first() {
                   let val = value_to_dynamo(&cond.value);
                   let col_str = match &cond.left {
                       Expr::Named(name) => name.clone(),
@@ -192,7 +189,6 @@ fn build_key_from_filter(cmd: &QailCmd) -> String {
                   };
                   return format!("\"{}\": {}", col_str, val);
              }
-        }
     }
     "\"pk\": { \"S\": \"unknown\" }".to_string()
 }
@@ -237,8 +233,8 @@ fn build_create_table(cmd: &QailCmd) -> String {
     let mut key_schema = Vec::new();
     
     for col in &cmd.columns {
-        if let Expr::Def { name, data_type, constraints } = col {
-            if constraints.contains(&Constraint::PrimaryKey) {
+        if let Expr::Def { name, data_type, constraints } = col
+            && constraints.contains(&Constraint::PrimaryKey) {
                 let dtype = match data_type.as_str() {
                     "int" | "i32" | "float" => "N",
                     _ => "S",
@@ -246,7 +242,6 @@ fn build_create_table(cmd: &QailCmd) -> String {
                 attr_defs.push(format!("{{ \"AttributeName\": \"{}\", \"AttributeType\": \"{}\" }}", name, dtype));
                 key_schema.push(format!("{{ \"AttributeName\": \"{}\", \"KeyType\": \"HASH\" }}", name));
             }
-        }
     }
     
     // Fallback: If no PK is explicitly marked, use 'id' as the default HASH key.

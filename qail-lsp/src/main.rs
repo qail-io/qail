@@ -38,26 +38,24 @@ impl QailLanguageServer {
     fn load_schema(&self, workspace_root: &str) {
         // Try schema.qail first (QAIL native format)
         let qail_path = format!("{}/schema.qail", workspace_root);
-        if let Ok(content) = std::fs::read_to_string(&qail_path) {
-            if let Ok(schema) = Schema::from_qail_schema(&content) {
+        if let Ok(content) = std::fs::read_to_string(&qail_path)
+            && let Ok(schema) = Schema::from_qail_schema(&content) {
                 let validator = schema.to_validator();
                 if let Ok(mut s) = self.schema.write() {
                     *s = Some(validator);
                     return;
                 }
             }
-        }
         
         // Fall back to qail.schema.json (JSON format)
         let json_path = format!("{}/qail.schema.json", workspace_root);
-        if let Ok(content) = std::fs::read_to_string(&json_path) {
-            if let Ok(schema) = Schema::from_json(&content) {
+        if let Ok(content) = std::fs::read_to_string(&json_path)
+            && let Ok(schema) = Schema::from_json(&content) {
                 let validator = schema.to_validator();
                 if let Ok(mut s) = self.schema.write() {
                     *s = Some(validator);
                 }
             }
-        }
     }
 
     /// Extract QAIL query at a given line from cached document
@@ -229,9 +227,9 @@ impl QailLanguageServer {
                         }
                         Ok(cmd) => {
                             // Validate against schema if available
-                            if let Ok(schema_guard) = self.schema.read() {
-                                if let Some(validator) = schema_guard.as_ref() {
-                                    if let Err(errors) = validator.validate_command(&cmd) {
+                            if let Ok(schema_guard) = self.schema.read()
+                                && let Some(validator) = schema_guard.as_ref()
+                                    && let Err(errors) = validator.validate_command(&cmd) {
                                         for error in errors {
                                             diagnostics.push(Diagnostic {
                                                 range: Range {
@@ -252,8 +250,6 @@ impl QailLanguageServer {
                                             });
                                         }
                                     }
-                                }
-                            }
                         }
                     }
                 }
@@ -391,8 +387,8 @@ impl LanguageServer for QailLanguageServer {
                 if let Some(schema_uri) = root_uri {
                     // Try to find line number
                     let mut line_num = 0;
-                    if let Ok(path) = schema_uri.to_file_path() {
-                        if let Ok(content) = std::fs::read_to_string(path) {
+                    if let Ok(path) = schema_uri.to_file_path()
+                        && let Ok(content) = std::fs::read_to_string(path) {
                             for (i, l) in content.lines().enumerate() {
                                 if l.contains(&format!("\"name\": \"{}\"", word)) {
                                     line_num = i;
@@ -400,7 +396,6 @@ impl LanguageServer for QailLanguageServer {
                                 }
                             }
                         }
-                    }
 
                     return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                         uri: schema_uri,
@@ -425,8 +420,8 @@ impl LanguageServer for QailLanguageServer {
         // Get word at cursor
         if let Some(word) = self.get_word_at_position(&uri, line, col) {
             // Read document content
-            if let Ok(docs) = self.documents.read() {
-                if let Some(content) = docs.get(&uri) {
+            if let Ok(docs) = self.documents.read()
+                && let Some(content) = docs.get(&uri) {
                     let mut edits = Vec::new();
                     
                     // Simple textual find/replace in current doc (MVP)
@@ -439,8 +434,8 @@ impl LanguageServer for QailLanguageServer {
                             let prev_char = if abs_idx > 0 { line_str.chars().nth(abs_idx - 1) } else { None };
                             let next_char = line_str.chars().nth(abs_idx + word.len());
                             
-                            let is_start_boundary = prev_char.map_or(true, |c| !c.is_alphanumeric() && c != '_');
-                            let is_end_boundary = next_char.map_or(true, |c| !c.is_alphanumeric() && c != '_');
+                            let is_start_boundary = prev_char.is_none_or(|c| !c.is_alphanumeric() && c != '_');
+                            let is_end_boundary = next_char.is_none_or(|c| !c.is_alphanumeric() && c != '_');
 
                             if is_start_boundary && is_end_boundary {
                                 edits.push(TextEdit {
@@ -464,7 +459,6 @@ impl LanguageServer for QailLanguageServer {
                          }));
                     }
                 }
-            }
         }
         Ok(None)
     }
@@ -473,9 +467,9 @@ impl LanguageServer for QailLanguageServer {
         let mut actions = Vec::new();
 
         for diagnostic in params.context.diagnostics {
-            if let Some(code) = &diagnostic.code {
-                if let NumberOrString::String(s) = code {
-                    if s == "qail-schema" {
+            if let Some(code) = &diagnostic.code
+                && let NumberOrString::String(s) = code
+                    && s == "qail-schema" {
                         // Check for "Did you mean '...'" in message
                         if let Some(start_idx) = diagnostic.message.find("Did you mean '") {
                             let rest = &diagnostic.message[start_idx + 14..];
@@ -503,8 +497,6 @@ impl LanguageServer for QailLanguageServer {
                             }
                         }
                     }
-                }
-            }
         }
 
         Ok(Some(actions))
@@ -691,8 +683,8 @@ impl LanguageServer for QailLanguageServer {
         ];
 
         // Add schema-aware table completions
-        if let Ok(schema_guard) = self.schema.read() {
-            if let Some(validator) = schema_guard.as_ref() {
+        if let Ok(schema_guard) = self.schema.read()
+            && let Some(validator) = schema_guard.as_ref() {
                 for table in validator.table_names() {
                     completions.push(CompletionItem {
                         label: format!("get::{}'_", table),
@@ -725,8 +717,8 @@ impl LanguageServer for QailLanguageServer {
                 let line = _params.text_document_position.position.line as usize;
                 let col = _params.text_document_position.position.character as usize;
 
-                if let Some(table) = self.get_context_table(&uri, line, col) {
-                   if let Some(columns) = validator.column_names(&table) {
+                if let Some(table) = self.get_context_table(&uri, line, col)
+                   && let Some(columns) = validator.column_names(&table) {
                        for col_name in columns {
                            completions.push(CompletionItem {
                                label: col_name.clone(),
@@ -736,9 +728,7 @@ impl LanguageServer for QailLanguageServer {
                            });
                        }
                    }
-                }
             }
-        }
 
         Ok(Some(CompletionResponse::Array(completions)))
     }
@@ -749,6 +739,6 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::new(|client| QailLanguageServer::new(client));
+    let (service, socket) = LspService::new(QailLanguageServer::new);
     Server::new(stdin, stdout, socket).serve(service).await;
 }

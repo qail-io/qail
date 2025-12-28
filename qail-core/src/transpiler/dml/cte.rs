@@ -78,12 +78,11 @@ pub fn build_single_cte(cte: &CTEDef, dialect: Dialect) -> String {
     }
     
     // Recursive part (if RECURSIVE)
-    if cte.recursive {
-        if let Some(ref recursive_query) = cte.recursive_query {
+    if cte.recursive
+        && let Some(ref recursive_query) = cte.recursive_query {
             sql.push_str(" UNION ALL ");
             sql.push_str(&build_select(recursive_query, dialect));
         }
-    }
     
     sql.push(')');
     sql

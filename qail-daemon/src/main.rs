@@ -267,7 +267,7 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
                                     columns: r
                                         .columns
                                         .iter()
-                                        .map(|c| column_to_value(c))
+                                        .map(column_to_value)
                                         .collect(),
                                 })
                                 .collect();
@@ -309,7 +309,7 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
                                         columns: r
                                             .columns
                                             .iter()
-                                            .map(|c| column_to_value(c))
+                                            .map(column_to_value)
                                             .collect(),
                                     })
                                     .collect();
@@ -362,7 +362,7 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
                                             columns: r
                                                 .columns
                                                 .iter()
-                                                .map(|c| column_to_value(c))
+                                                .map(column_to_value)
                                                 .collect(),
                                         })
                                         .collect(),

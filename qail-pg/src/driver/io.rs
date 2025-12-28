@@ -24,7 +24,7 @@ impl PgConnection {
                     self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
                 ]) as usize;
                 
-                if self.buffer.len() >= msg_len + 1 {
+                if self.buffer.len() > msg_len {
                     // We have a complete message - zero-copy split
                     let msg_bytes = self.buffer.split_to(msg_len + 1);
                     let (msg, _) = BackendMessage::decode(&msg_bytes)
@@ -84,7 +84,7 @@ impl PgConnection {
                     self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
                 ]) as usize;
                 
-                if self.buffer.len() >= msg_len + 1 {
+                if self.buffer.len() > msg_len {
                     // Get message type, then skip the whole message
                     let msg_type = self.buffer[0];
                     
@@ -132,7 +132,7 @@ impl PgConnection {
                     self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
                 ]) as usize;
                 
-                if self.buffer.len() >= msg_len + 1 {
+                if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
                     
                     // Check for error
@@ -213,7 +213,7 @@ impl PgConnection {
                     self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
                 ]) as usize;
                 
-                if self.buffer.len() >= msg_len + 1 {
+                if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
                     
                     // Check for error
@@ -294,7 +294,7 @@ impl PgConnection {
                     self.buffer[1], self.buffer[2], self.buffer[3], self.buffer[4]
                 ]) as usize;
                 
-                if self.buffer.len() >= msg_len + 1 {
+                if self.buffer.len() > msg_len {
                     let msg_type = self.buffer[0];
                     
                     // Error check

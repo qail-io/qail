@@ -167,14 +167,13 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
                     };
                     
                     // Add FILTER clause if present (PostgreSQL extension)
-                    if let Some(conditions) = filter {
-                        if !conditions.is_empty() {
+                    if let Some(conditions) = filter
+                        && !conditions.is_empty() {
                             let filter_parts: Vec<String> = conditions.iter()
                                 .map(|c| c.to_string())
                                 .collect();
                             expr.push_str(&format!(" FILTER (WHERE {})", filter_parts.join(" AND ")));
                         }
-                    }
                     
                     if let Some(a) = alias {
                         format!("{} AS {}", expr, generator.quote_identifier(a))
@@ -443,15 +442,14 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
     // QUALIFY (Snowflake, BigQuery, Databricks) - filter on window function results
     // Appears after ORDER BY, before LIMIT
     for cage in &cmd.cages {
-        if let CageKind::Qualify = cage.kind {
-            if !cage.conditions.is_empty() {
+        if let CageKind::Qualify = cage.kind
+            && !cage.conditions.is_empty() {
                 let qualify_conds: Vec<String> = cage.conditions.iter()
                     .map(|c| c.to_sql(&generator, Some(cmd)))
                     .collect();
                 sql.push_str(" QUALIFY ");
                 sql.push_str(&qualify_conds.join(" AND "));
             }
-        }
     }
 
     // LIMIT / OFFSET
@@ -473,6 +471,7 @@ pub fn build_select(cmd: &QailCmd, dialect: Dialect) -> String {
 
 /// Render an expression for ORDER BY (and potentially other contexts).
 /// Handles CASE, Binary, FunctionCall, SpecialFunction, and Named expressions.
+#[allow(clippy::borrowed_box)]
 fn render_expr_for_orderby(expr: &Expr, generator: &Box<dyn crate::transpiler::SqlGenerator>, cmd: &QailCmd) -> String {
     match expr {
         Expr::Named(name) => {

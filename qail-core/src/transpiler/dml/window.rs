@@ -58,10 +58,10 @@ pub fn build_window(cmd: &QailCmd, dialect: Dialect) -> String {
                     over_clause.push(' ');
                     match fr {
                         WindowFrame::Rows { start, end } => {
-                            over_clause.push_str(&format!("ROWS BETWEEN {} AND {}", bound_to_sql(&start), bound_to_sql(&end)));
+                            over_clause.push_str(&format!("ROWS BETWEEN {} AND {}", bound_to_sql(start), bound_to_sql(end)));
                         }
                         WindowFrame::Range { start, end } => {
-                             over_clause.push_str(&format!("RANGE BETWEEN {} AND {}", bound_to_sql(&start), bound_to_sql(&end)));
+                             over_clause.push_str(&format!("RANGE BETWEEN {} AND {}", bound_to_sql(start), bound_to_sql(end)));
                         }
                     }
                 }

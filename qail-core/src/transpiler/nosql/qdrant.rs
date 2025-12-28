@@ -62,11 +62,10 @@ fn build_qdrant_delete(cmd: &QailCmd) -> String {
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
             for cond in &cage.conditions {
-                 if let Expr::Named(name) = &cond.left {
-                     if name == "id" {
+                 if let Expr::Named(name) = &cond.left
+                     && name == "id" {
                          ids.push(value_to_json(&cond.value));
                      }
-                 }
             }
         }
     }
@@ -192,10 +191,7 @@ fn build_filter(cmd: &QailCmd) -> String {
 
 fn get_cage_val(cmd: &QailCmd, kind_example: CageKind) -> Option<usize> {
     for cage in &cmd.cages {
-        match (&cage.kind, &kind_example) {
-            (CageKind::Limit(n), CageKind::Limit(_)) => return Some(*n),
-            _ => {}
-        }
+        if let (CageKind::Limit(n), CageKind::Limit(_)) = (&cage.kind, &kind_example) { return Some(*n) }
     }
     None
 }

@@ -72,7 +72,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         
         // Map PostgreSQL type to QAIL ColumnType
         let col_type_str = map_pg_type(&udt_name);
-        let col_type = qail_core::migrate::ColumnType::from_str(col_type_str)
+        let col_type: qail_core::migrate::ColumnType = col_type_str.parse()
             .unwrap_or(qail_core::migrate::ColumnType::Text);
 
         let mut col = Column::new(&col_name, col_type);
@@ -186,11 +186,10 @@ fn map_pg_type(udt_name: &str) -> &'static str {
 
 fn parse_index_columns(def: &str) -> Vec<String> {
     // Parse "(col1, col2)" from index definition
-    if let Some(start) = def.rfind('(') {
-        if let Some(end) = def.rfind(')') {
+    if let Some(start) = def.rfind('(')
+        && let Some(end) = def.rfind(')') {
             let cols_str = &def[start + 1..end];
             return cols_str.split(',').map(|s| s.trim().to_string()).collect();
         }
-    }
     vec![]
 }

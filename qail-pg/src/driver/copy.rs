@@ -9,65 +9,6 @@ use crate::protocol::{BackendMessage, PgEncoder, AstEncoder};
 use super::{PgConnection, PgError, PgResult, parse_affected_rows};
 
 impl PgConnection {
-    /// Internal bulk insert using COPY protocol (crate-private).
-    ///
-    /// Use `PgDriver::copy_bulk(&QailCmd)` for AST-native access.
-    /// Note: Prefer `copy_in_fast` for better performance.
-    #[allow(dead_code)]
-    pub(crate) async fn copy_in_internal(
-        &mut self,
-        table: &str,
-        columns: &[String],
-        rows: &[Vec<String>],
-    ) -> PgResult<u64> {
-        // Build COPY command
-        let cols = columns.join(", ");
-        let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
-        
-        // Send COPY command
-        let bytes = PgEncoder::encode_query_string(&sql);
-        self.stream.write_all(&bytes).await?;
-
-        // Wait for CopyInResponse
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::CopyInResponse { .. } => break,
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-
-        // Send data rows as CopyData messages
-        for row in rows {
-            let line = row.join("\t") + "\n";
-            self.send_copy_data(line.as_bytes()).await?;
-        }
-
-        // Send CopyDone
-        self.send_copy_done().await?;
-
-        // Wait for CommandComplete
-        let mut affected = 0u64;
-        loop {
-            let msg = self.recv().await?;
-            match msg {
-                BackendMessage::CommandComplete(tag) => {
-                    affected = parse_affected_rows(&tag);
-                }
-                BackendMessage::ReadyForQuery(_) => {
-                    return Ok(affected);
-                }
-                BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// **Fast** bulk insert using COPY protocol with zero-allocation encoding.
     ///
     /// Encodes all rows into a single buffer and writes with one syscall.
@@ -192,7 +133,7 @@ impl PgConnection {
         // CopyData: 'd' + length + data
         let len = (data.len() + 4) as i32;
         let mut buf = BytesMut::with_capacity(1 + 4 + data.len());
-        buf.extend_from_slice(&[b'd']);
+        buf.extend_from_slice(b"d");
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(data);
         self.stream.write_all(&buf).await?;

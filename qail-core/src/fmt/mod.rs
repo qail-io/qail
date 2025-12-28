@@ -9,6 +9,12 @@ pub struct Formatter {
     buffer: String,
 }
 
+impl Default for Formatter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Formatter {
     pub fn new() -> Self {
         Self {
@@ -39,15 +45,14 @@ impl Formatter {
             self.visit_cmd(&cte.base_query)?;
             
             // Handle recursive part if present
-            if cte.recursive {
-                if let Some(ref recursive_query) = cte.recursive_query {
+            if cte.recursive
+                && let Some(ref recursive_query) = cte.recursive_query {
                     writeln!(self.buffer)?;
                     self.indent()?;
                     writeln!(self.buffer, "union all")?;
                     self.indent()?;
                     self.visit_cmd(recursive_query)?;
                 }
-            }
             
             self.indent_level -= 1;
             writeln!(self.buffer)?;
@@ -220,16 +225,15 @@ impl Formatter {
             crate::ast::JoinKind::Lateral => write!(self.buffer, "lateral join {}", join.table)?,
         }
 
-        if let Some(conditions) = &join.on {
-            if !conditions.is_empty() {
-                write!(self.buffer, "\n")?;
+        if let Some(conditions) = &join.on
+            && !conditions.is_empty() {
+                writeln!(self.buffer)?;
                 self.indent_level += 1;
                 self.indent()?;
                 write!(self.buffer, "on ")?;
                 self.format_conditions(conditions, LogicalOp::And)?;
                 self.indent_level -= 1;
             }
-        }
         Ok(())
     }
 

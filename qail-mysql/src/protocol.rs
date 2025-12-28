@@ -6,7 +6,7 @@
 //! - COM_QUERY
 //! - Result Set (columns + rows)
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 
 /// MySQL packet header: 3-byte length + 1-byte sequence
 pub const HEADER_SIZE: usize = 4;
@@ -251,7 +251,7 @@ pub struct ColumnDef {
 
 impl ColumnDef {
     pub fn parse(data: &[u8]) -> Option<Self> {
-        let mut buf = &data[..];
+        let mut buf = data;
         
         // Skip catalog, schema, table, org_table
         let _catalog = read_len_enc_string(&mut buf);

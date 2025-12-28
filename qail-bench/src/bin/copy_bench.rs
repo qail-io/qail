@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create QailCmd for COPY
     let cmd = QailCmd::add("_test")
-        .columns(&["a", "b", "c", "d", "e", "f", "g"]);
+        .columns(["a", "b", "c", "d", "e", "f", "g"]);
     
     println!("\n📊 Executing COPY operations...\n");
     

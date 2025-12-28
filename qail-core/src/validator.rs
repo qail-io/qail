@@ -195,11 +195,10 @@ impl Validator {
 
         // Check SELECT columns
         for col in &cmd.columns {
-            if let Some(name) = Self::extract_column_name(col) {
-                if let Err(e) = self.validate_column(&cmd.table, &name) {
+            if let Some(name) = Self::extract_column_name(col)
+                && let Err(e) = self.validate_column(&cmd.table, &name) {
                     errors.push(e);
                 }
-            }
         }
 
         // Check filter/payload conditions
@@ -209,11 +208,10 @@ impl Validator {
                     // For join conditions, column might be qualified (table.column)
                     if name.contains('.') {
                         let parts: Vec<&str> = name.split('.').collect();
-                        if parts.len() == 2 {
-                            if let Err(e) = self.validate_column(parts[0], parts[1]) {
+                        if parts.len() == 2
+                            && let Err(e) = self.validate_column(parts[0], parts[1]) {
                                 errors.push(e);
                             }
-                        }
                     } else if let Err(e) = self.validate_column(&cmd.table, &name) {
                         errors.push(e);
                     }
@@ -231,27 +229,23 @@ impl Validator {
             // Validate columns in ON conditions
             if let Some(conditions) = &join.on {
                 for cond in conditions {
-                    if let Some(name) = Self::extract_column_name(&cond.left) {
-                        if name.contains('.') {
+                    if let Some(name) = Self::extract_column_name(&cond.left)
+                        && name.contains('.') {
                             let parts: Vec<&str> = name.split('.').collect();
-                            if parts.len() == 2 {
-                                if let Err(e) = self.validate_column(parts[0], parts[1]) {
+                            if parts.len() == 2
+                                && let Err(e) = self.validate_column(parts[0], parts[1]) {
                                     errors.push(e);
                                 }
-                            }
                         }
-                    }
                     // Also check right side if it's a column reference
-                    if let crate::ast::Value::Column(col_name) = &cond.value {
-                        if col_name.contains('.') {
+                    if let crate::ast::Value::Column(col_name) = &cond.value
+                        && col_name.contains('.') {
                             let parts: Vec<&str> = col_name.split('.').collect();
-                            if parts.len() == 2 {
-                                if let Err(e) = self.validate_column(parts[0], parts[1]) {
+                            if parts.len() == 2
+                                && let Err(e) = self.validate_column(parts[0], parts[1]) {
                                     errors.push(e);
                                 }
-                            }
                         }
-                    }
                 }
             }
         }
@@ -259,11 +253,10 @@ impl Validator {
         // Check RETURNING columns
         if let Some(returning) = &cmd.returning {
             for col in returning {
-                if let Some(name) = Self::extract_column_name(col) {
-                    if let Err(e) = self.validate_column(&cmd.table, &name) {
+                if let Some(name) = Self::extract_column_name(col)
+                    && let Err(e) = self.validate_column(&cmd.table, &name) {
                         errors.push(e);
                     }
-                }
             }
         }
 

@@ -69,10 +69,10 @@ impl CodebaseScanner {
         let mut refs = Vec::new();
         
         if path.is_file() {
-            if let Some(ext) = path.extension() {
-                if ext == "rs" || ext == "ts" || ext == "js" || ext == "py" {
-                    refs.extend(self.scan_file(path));
-                }
+            if let Some(ext) = path.extension()
+                && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py") 
+            {
+                refs.extend(self.scan_file(path));
             }
         } else if path.is_dir() {
             self.scan_dir_recursive(path, &mut refs);
@@ -99,10 +99,10 @@ impl CodebaseScanner {
                     continue;
                 }
                 self.scan_dir_recursive(&path, refs);
-            } else if let Some(ext) = path.extension() {
-                if ext == "rs" || ext == "ts" || ext == "js" || ext == "py" {
-                    refs.extend(self.scan_file(&path));
-                }
+            } else if let Some(ext) = path.extension()
+                && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py") 
+            {
+                refs.extend(self.scan_file(&path));
             }
         }
     }

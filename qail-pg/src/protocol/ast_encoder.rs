@@ -76,9 +76,9 @@ fn write_usize(buf: &mut BytesMut, n: usize) {
 #[inline(always)]
 #[allow(dead_code)]  // May be used for future optimizations
 fn write_i64(buf: &mut BytesMut, n: i64) {
-    if n >= 0 && n < 100 {
+    if (0..100).contains(&n) {
         buf.extend_from_slice(NUMERIC_VALUES[n as usize]);
-    } else if n >= 0 && n < 1000 {
+    } else if (0..1000).contains(&n) {
         write_usize(buf, n as usize);
     } else {
         // Fallback for negatives and large numbers
@@ -89,7 +89,7 @@ fn write_i64(buf: &mut BytesMut, n: i64) {
 /// Convert i64 to bytes for parameter - ZERO ALLOCATION for common cases
 #[inline(always)]
 fn i64_to_bytes(n: i64) -> Vec<u8> {
-    if n >= 0 && n < 100 {
+    if (0..100).contains(&n) {
         NUMERIC_VALUES[n as usize].to_vec()
     } else {
         n.to_string().into_bytes()
@@ -202,12 +202,11 @@ impl AstEncoder {
         
         // WHERE
         let filter_cage = cmd.cages.iter().find(|c| c.kind == CageKind::Filter);
-        if let Some(cage) = filter_cage {
-            if !cage.conditions.is_empty() {
+        if let Some(cage) = filter_cage
+            && !cage.conditions.is_empty() {
                 buf.extend_from_slice(b" WHERE ");
                 Self::encode_conditions(&cage.conditions, buf, params);
             }
-        }
         
         // ORDER BY - CageKind::Sort(SortOrder)
         for cage in &cmd.cages {
@@ -294,12 +293,11 @@ impl AstEncoder {
         }
         
         // WHERE
-        if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter) {
-            if !cage.conditions.is_empty() {
+        if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter)
+            && !cage.conditions.is_empty() {
                 buf.extend_from_slice(b" WHERE ");
                 Self::encode_conditions(&cage.conditions, buf, params);
             }
-        }
     }
 
     /// Encode DELETE statement.
@@ -308,12 +306,11 @@ impl AstEncoder {
         buf.extend_from_slice(cmd.table.as_bytes());
         
         // WHERE
-        if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter) {
-            if !cage.conditions.is_empty() {
+        if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter)
+            && !cage.conditions.is_empty() {
                 buf.extend_from_slice(b" WHERE ");
                 Self::encode_conditions(&cage.conditions, buf, params);
             }
-        }
     }
 
     /// Encode EXPORT command as COPY (SELECT ...) TO STDOUT.
@@ -721,7 +718,7 @@ impl AstEncoder {
         let mut buf = BytesMut::with_capacity(total_size);
         
         // ===== PARSE =====
-        buf.extend_from_slice(&[b'P']);
+        buf.extend_from_slice(b"P");
         let parse_len = (1 + sql.len() + 1 + 2 + 4) as i32;
         buf.extend_from_slice(&parse_len.to_be_bytes());
         buf.extend_from_slice(&[0]); // Unnamed statement
@@ -730,7 +727,7 @@ impl AstEncoder {
         buf.extend_from_slice(&0i16.to_be_bytes()); // No param types
         
         // ===== BIND =====
-        buf.extend_from_slice(&[b'B']);
+        buf.extend_from_slice(b"B");
         let bind_len = (1 + 1 + 2 + 2 + params_size + 2 + 4) as i32;
         buf.extend_from_slice(&bind_len.to_be_bytes());
         buf.extend_from_slice(&[0]); // Unnamed portal
@@ -749,7 +746,7 @@ impl AstEncoder {
         buf.extend_from_slice(&0i16.to_be_bytes()); // Result format
         
         // ===== EXECUTE =====
-        buf.extend_from_slice(&[b'E']);
+        buf.extend_from_slice(b"E");
         buf.extend_from_slice(&9i32.to_be_bytes());
         buf.extend_from_slice(&[0]); // Unnamed portal
         buf.extend_from_slice(&0i32.to_be_bytes()); // Unlimited rows
@@ -787,7 +784,7 @@ impl AstEncoder {
                 .sum();
             
             // PARSE
-            total_buf.extend_from_slice(&[b'P']);
+            total_buf.extend_from_slice(b"P");
             let parse_len = (1 + sql_bytes.len() + 1 + 2 + 4) as i32;
             total_buf.extend_from_slice(&parse_len.to_be_bytes());
             total_buf.extend_from_slice(&[0]);
@@ -796,7 +793,7 @@ impl AstEncoder {
             total_buf.extend_from_slice(&0i16.to_be_bytes());
             
             // BIND
-            total_buf.extend_from_slice(&[b'B']);
+            total_buf.extend_from_slice(b"B");
             let bind_len = (1 + 1 + 2 + 2 + params_size + 2 + 4) as i32;
             total_buf.extend_from_slice(&bind_len.to_be_bytes());
             total_buf.extend_from_slice(&[0]);
@@ -815,7 +812,7 @@ impl AstEncoder {
             total_buf.extend_from_slice(&0i16.to_be_bytes());
             
             // EXECUTE
-            total_buf.extend_from_slice(&[b'E']);
+            total_buf.extend_from_slice(b"E");
             total_buf.extend_from_slice(&9i32.to_be_bytes());
             total_buf.extend_from_slice(&[0]);
             total_buf.extend_from_slice(&0i32.to_be_bytes());
