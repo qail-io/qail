@@ -3,10 +3,10 @@
 //! Provides connection pooling for efficient resource management.
 //! Connections are reused across queries to avoid reconnection overhead.
 
+use super::{PgConnection, PgError, PgResult};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
-use super::{PgConnection, PgResult, PgError};
 
 /// Connection pool configuration.
 #[derive(Clone)]
@@ -44,9 +44,9 @@ impl PoolConfig {
             password: None,
             max_connections: 10,
             min_connections: 1,
-            idle_timeout: Duration::from_secs(600),      // 10 minutes
-            acquire_timeout: Duration::from_secs(30),    // 30 seconds
-            connect_timeout: Duration::from_secs(10),    // 10 seconds
+            idle_timeout: Duration::from_secs(600), // 10 minutes
+            acquire_timeout: Duration::from_secs(30), // 30 seconds
+            connect_timeout: Duration::from_secs(10), // 10 seconds
         }
     }
 
@@ -104,7 +104,9 @@ pub struct PooledConnection {
 impl PooledConnection {
     /// Get a mutable reference to the underlying connection.
     pub fn get_mut(&mut self) -> &mut PgConnection {
-        self.conn.as_mut().expect("Connection should always be present")
+        self.conn
+            .as_mut()
+            .expect("Connection should always be present")
     }
 }
 
@@ -124,13 +126,17 @@ impl std::ops::Deref for PooledConnection {
     type Target = PgConnection;
 
     fn deref(&self) -> &Self::Target {
-        self.conn.as_ref().expect("Connection should always be present")
+        self.conn
+            .as_ref()
+            .expect("Connection should always be present")
     }
 }
 
 impl std::ops::DerefMut for PooledConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.conn.as_mut().expect("Connection should always be present")
+        self.conn
+            .as_mut()
+            .expect("Connection should always be present")
     }
 }
 
@@ -158,18 +164,18 @@ impl PgPoolInner {
     /// Get a healthy connection from the pool, or None if pool is empty.
     async fn get_healthy_connection(&self) -> Option<PgConnection> {
         let mut connections = self.connections.lock().await;
-        
+
         while let Some(pooled) = connections.pop() {
             // Check if connection is too old (idle timeout)
             if pooled.last_used.elapsed() > self.config.idle_timeout {
                 // Connection is stale, drop it
                 continue;
             }
-            
+
             // Return the connection
             return Some(pooled.conn);
         }
-        
+
         None
     }
 }
@@ -199,7 +205,7 @@ impl PgPool {
     pub async fn connect(config: PoolConfig) -> PgResult<Self> {
         // Semaphore starts with max_connections permits
         let semaphore = Semaphore::new(config.max_connections);
-        
+
         // Create initial connections (they go to idle pool)
         let mut initial_connections = Vec::new();
         for _ in 0..config.min_connections {
@@ -210,7 +216,7 @@ impl PgPool {
                 last_used: Instant::now(),
             });
         }
-        
+
         // NOTE: Don't acquire permits for initial connections!
         // They are idle (available), not in-use.
         // Permits are only consumed when acquire() is called.
@@ -232,14 +238,14 @@ impl PgPool {
     pub async fn acquire(&self) -> PgResult<PooledConnection> {
         // Wait for available slot with timeout
         let acquire_timeout = self.inner.config.acquire_timeout;
-        let permit = tokio::time::timeout(
-            acquire_timeout,
-            self.inner.semaphore.acquire()
-        ).await
-            .map_err(|_| PgError::Connection(format!(
-                "Timed out waiting for connection ({}s)", 
-                acquire_timeout.as_secs()
-            )))?
+        let permit = tokio::time::timeout(acquire_timeout, self.inner.semaphore.acquire())
+            .await
+            .map_err(|_| {
+                PgError::Connection(format!(
+                    "Timed out waiting for connection ({}s)",
+                    acquire_timeout.as_secs()
+                ))
+            })?
             .map_err(|_| PgError::Connection("Pool closed".to_string()))?;
         permit.forget();
 
@@ -277,15 +283,12 @@ impl PgPool {
                     &config.user,
                     &config.database,
                     Some(password),
-                ).await
+                )
+                .await
             }
             None => {
-                PgConnection::connect(
-                    &config.host,
-                    config.port,
-                    &config.user,
-                    &config.database,
-                ).await
+                PgConnection::connect(&config.host, config.port, &config.user, &config.database)
+                    .await
             }
         }
     }

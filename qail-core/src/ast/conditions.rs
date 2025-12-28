@@ -1,5 +1,5 @@
+use crate::ast::{Expr, Operator, Value};
 use serde::{Deserialize, Serialize};
-use crate::ast::{Operator, Value, Expr};
 
 /// A single condition within a cage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

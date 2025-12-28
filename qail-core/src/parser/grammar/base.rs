@@ -1,14 +1,13 @@
+use crate::ast::values::IntervalUnit;
+use crate::ast::*;
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while1},
-    character::complete::{char, multispace1, digit1},
-    combinator::{opt, map, value, recognize},
-    sequence::{preceded, delimited},
-    Parser,
-    IResult,
+    character::complete::{char, digit1, multispace1},
+    combinator::{map, opt, recognize, value},
+    sequence::{delimited, preceded},
 };
-use crate::ast::*;
-use crate::ast::values::IntervalUnit;
 
 /// Parse checking identifier (table name, column name, or qualified name like table.column)
 pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
@@ -19,7 +18,7 @@ pub fn parse_identifier(input: &str) -> IResult<&str, &str> {
 pub fn parse_interval(input: &str) -> IResult<&str, Value> {
     let (input, num_str) = digit1(input)?;
     let amount: i64 = num_str.parse().unwrap_or(0);
-    
+
     // Parse unit suffix
     let (input, unit) = alt((
         value(IntervalUnit::Second, tag_no_case("s")),
@@ -29,8 +28,9 @@ pub fn parse_interval(input: &str) -> IResult<&str, Value> {
         value(IntervalUnit::Week, tag_no_case("w")),
         value(IntervalUnit::Month, tag_no_case("mo")),
         value(IntervalUnit::Year, tag_no_case("y")),
-    )).parse(input)?;
-    
+    ))
+    .parse(input)?;
+
     Ok((input, Value::Interval { amount, unit }))
 }
 
@@ -38,14 +38,16 @@ pub fn parse_interval(input: &str) -> IResult<&str, Value> {
 pub fn parse_value(input: &str) -> IResult<&str, Value> {
     alt((
         // Parameter: $1, $2
-        map(
-            preceded(char('$'), digit1),
-            |d: &str| Value::Param(d.parse().unwrap_or(0))
-        ),
+        map(preceded(char('$'), digit1), |d: &str| {
+            Value::Param(d.parse().unwrap_or(0))
+        }),
         // Named parameter: :name, :id, :user_id
         map(
-            preceded(char(':'), take_while1(|c: char| c.is_alphanumeric() || c == '_')),
-            |name: &str| Value::NamedParam(name.to_string())
+            preceded(
+                char(':'),
+                take_while1(|c: char| c.is_alphanumeric() || c == '_'),
+            ),
+            |name: &str| Value::NamedParam(name.to_string()),
         ),
         // Boolean
         value(Value::Bool(true), tag_no_case("true")),
@@ -54,27 +56,35 @@ pub fn parse_value(input: &str) -> IResult<&str, Value> {
         value(Value::Null, tag_no_case("null")),
         // String (double quoted) - allow empty strings
         map(
-            delimited(char('"'), nom::bytes::complete::take_while(|c| c != '"'), char('"')),
-            |s: &str| Value::String(s.to_string())
+            delimited(
+                char('"'),
+                nom::bytes::complete::take_while(|c| c != '"'),
+                char('"'),
+            ),
+            |s: &str| Value::String(s.to_string()),
         ),
         // String (single quoted) - allow empty strings
         map(
-            delimited(char('\''), nom::bytes::complete::take_while(|c| c != '\''), char('\'')),
-            |s: &str| Value::String(s.to_string())
+            delimited(
+                char('\''),
+                nom::bytes::complete::take_while(|c| c != '\''),
+                char('\''),
+            ),
+            |s: &str| Value::String(s.to_string()),
         ),
         // Float (must check before int)
         map(
             recognize((opt(char('-')), digit1, char('.'), digit1)),
-            |s: &str| Value::Float(s.parse().unwrap_or(0.0))
+            |s: &str| Value::Float(s.parse().unwrap_or(0.0)),
         ),
         // Interval shorthand before plain integers: 24h, 7d, 1w
         parse_interval,
         // Integer (last, after interval)
-        map(
-            recognize((opt(char('-')), digit1)),
-            |s: &str| Value::Int(s.parse().unwrap_or(0))
-        ),
-    )).parse(input)
+        map(recognize((opt(char('-')), digit1)), |s: &str| {
+            Value::Int(s.parse().unwrap_or(0))
+        }),
+    ))
+    .parse(input)
 }
 
 /// Parse comparison operator
@@ -100,7 +110,8 @@ pub fn parse_operator(input: &str) -> IResult<&str, Operator> {
         value(Operator::Gt, tag(">")),
         value(Operator::Lt, tag("<")),
         value(Operator::Fuzzy, tag("~")),
-    )).parse(input)
+    ))
+    .parse(input)
 }
 
 /// Parse action keyword: get, set, del, add, make
@@ -109,7 +120,7 @@ pub fn parse_action(input: &str) -> IResult<&str, (Action, bool)> {
         // get distinct
         map(
             (tag_no_case("get"), multispace1, tag_no_case("distinct")),
-            |_| (Action::Get, true)
+            |_| (Action::Get, true),
         ),
         // get
         value((Action::Get, false), tag_no_case("get")),
@@ -130,7 +141,8 @@ pub fn parse_action(input: &str) -> IResult<&str, (Action, bool)> {
             value((Action::Make, false), tag_no_case("create")),
             value((Action::Make, false), tag_no_case("make")),
         )),
-    )).parse(input)
+    ))
+    .parse(input)
 }
 
 /// Parse transaction commands: begin, commit, rollback
@@ -139,27 +151,31 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, QailCmd> {
         value(Action::TxnStart, tag_no_case("begin")),
         value(Action::TxnCommit, tag_no_case("commit")),
         value(Action::TxnRollback, tag_no_case("rollback")),
-    )).parse(input)?;
-    
-    Ok((input, QailCmd {
-        action,
-        table: String::new(),
-        columns: vec![],
-        joins: vec![],
-        cages: vec![],
-        distinct: false,
-        distinct_on: vec![],
-        index_def: None,
-        table_constraints: vec![],
-        set_ops: vec![],
-        having: vec![],
-        group_by_mode: GroupByMode::default(),
-        ctes: vec![],
-        returning: None,
-        on_conflict: None,
-        source_query: None,
-        channel: None,
-        payload: None,
-        savepoint_name: None,
-    }))
+    ))
+    .parse(input)?;
+
+    Ok((
+        input,
+        QailCmd {
+            action,
+            table: String::new(),
+            columns: vec![],
+            joins: vec![],
+            cages: vec![],
+            distinct: false,
+            distinct_on: vec![],
+            index_def: None,
+            table_constraints: vec![],
+            set_ops: vec![],
+            having: vec![],
+            group_by_mode: GroupByMode::default(),
+            ctes: vec![],
+            returning: None,
+            on_conflict: None,
+            source_query: None,
+            channel: None,
+            payload: None,
+            savepoint_name: None,
+        },
+    ))
 }

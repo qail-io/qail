@@ -46,7 +46,7 @@ pub fn detect() -> IoBackend {
                 }
             }
         }
-        
+
         #[cfg(not(target_os = "linux"))]
         {
             IoBackend::Tokio

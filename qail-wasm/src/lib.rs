@@ -22,24 +22,21 @@
 //! console.log(index); // "CREATE UNIQUE INDEX idx_email ON users (email)"
 //! ```
 
-use wasm_bindgen::prelude::*;
 use qail_core::transpiler::ToSql;
+use wasm_bindgen::prelude::*;
 
 /// Parse QAIL and return SQL string (PostgreSQL dialect).
 #[wasm_bindgen]
 pub fn parse_and_transpile(qail: &str) -> Result<String, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    let cmd = qail_core::parse(qail).map_err(|e| JsError::new(&format!("{:?}", e)))?;
     Ok(cmd.to_sql())
 }
 
 /// Parse QAIL and return AST as JSON.
 #[wasm_bindgen]
 pub fn parse(qail: &str) -> Result<JsValue, JsError> {
-    let cmd = qail_core::parse(qail)
-        .map_err(|e| JsError::new(&format!("{:?}", e)))?;
-    serde_wasm_bindgen::to_value(&cmd)
-        .map_err(|e| JsError::new(&e.to_string()))
+    let cmd = qail_core::parse(qail).map_err(|e| JsError::new(&format!("{:?}", e)))?;
+    serde_wasm_bindgen::to_value(&cmd).map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// Validate QAIL syntax (returns true if valid).

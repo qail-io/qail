@@ -2,7 +2,7 @@
 
 use crate::ast::*;
 use crate::parser::parse;
-use crate::transpiler::{ToSql, Dialect};
+use crate::transpiler::{Dialect, ToSql};
 
 // ============= DDL Tests =============
 
@@ -24,7 +24,8 @@ fn test_index_sql_unique() {
 #[test]
 fn test_composite_pk_sql() {
     // make order_items order_id:uuid, item_id:uuid primary key(order_id, item_id)
-    let cmd = parse("make order_items order_id:uuid, item_id:uuid primary key(order_id, item_id)").unwrap();
+    let cmd = parse("make order_items order_id:uuid, item_id:uuid primary key(order_id, item_id)")
+        .unwrap();
     let sql = cmd.to_sql();
     assert!(sql.contains("PRIMARY KEY (order_id, item_id)"));
 }
@@ -69,9 +70,24 @@ fn test_upsert_postgres() {
     cmd.cages.push(Cage {
         kind: CageKind::Payload,
         conditions: vec![
-            Condition { left: Expr::Named("id".to_string()), op: Operator::Eq, value: Value::Int(1), is_array_unnest: false },
-            Condition { left: Expr::Named("name".to_string()), op: Operator::Eq, value: Value::String("John".to_string()), is_array_unnest: false },
-            Condition { left: Expr::Named("role".to_string()), op: Operator::Eq, value: Value::String("admin".to_string()), is_array_unnest: false },
+            Condition {
+                left: Expr::Named("id".to_string()),
+                op: Operator::Eq,
+                value: Value::Int(1),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("name".to_string()),
+                op: Operator::Eq,
+                value: Value::String("John".to_string()),
+                is_array_unnest: false,
+            },
+            Condition {
+                left: Expr::Named("role".to_string()),
+                op: Operator::Eq,
+                value: Value::String("admin".to_string()),
+                is_array_unnest: false,
+            },
         ],
         logical_op: LogicalOp::And,
     });
@@ -81,8 +97,6 @@ fn test_upsert_postgres() {
     assert!(sql.contains("name = EXCLUDED.name"));
     assert!(sql.contains("RETURNING *"));
 }
-
-
 
 // ============= JSON Tests =============
 
@@ -221,7 +235,7 @@ fn test_json_exists() {
         }],
         logical_op: LogicalOp::And,
     });
-    
+
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
     println!("JSON_EXISTS: {}", sql);
     assert!(sql.contains("JSON_EXISTS("));
@@ -241,7 +255,7 @@ fn test_json_query() {
         }],
         logical_op: LogicalOp::And,
     });
-    
+
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
     println!("JSON_QUERY: {}", sql);
     assert!(sql.contains("JSON_QUERY("));
@@ -260,7 +274,7 @@ fn test_json_value() {
         }],
         logical_op: LogicalOp::And,
     });
-    
+
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
     println!("JSON_VALUE: {}", sql);
     assert!(sql.contains("JSON_VALUE("));
@@ -272,12 +286,12 @@ fn test_json_value() {
 fn test_union() {
     let mut users_cmd = QailCmd::get("users");
     users_cmd.columns.push(Expr::Named("name".to_string()));
-    
+
     let mut admins_cmd = QailCmd::get("admins");
     admins_cmd.columns.push(Expr::Named("name".to_string()));
-    
+
     users_cmd.set_ops.push((SetOp::Union, Box::new(admins_cmd)));
-    
+
     let sql = users_cmd.to_sql_with_dialect(Dialect::Postgres);
     println!("UNION: {}", sql);
     assert!(sql.contains("UNION"));
@@ -289,9 +303,9 @@ fn test_union() {
 fn test_union_all() {
     let mut q1 = QailCmd::get("active_users");
     let q2 = QailCmd::get("inactive_users");
-    
+
     q1.set_ops.push((SetOp::UnionAll, Box::new(q2)));
-    
+
     let sql = q1.to_sql();
     println!("UNION ALL: {}", sql);
     assert!(sql.contains("UNION ALL"));
@@ -301,12 +315,12 @@ fn test_union_all() {
 fn test_intersect() {
     let mut q1 = QailCmd::get("premium_users");
     q1.columns.push(Expr::Named("id".to_string()));
-    
+
     let mut q2 = QailCmd::get("verified_users");
     q2.columns.push(Expr::Named("id".to_string()));
-    
+
     q1.set_ops.push((SetOp::Intersect, Box::new(q2)));
-    
+
     let sql = q1.to_sql();
     println!("INTERSECT: {}", sql);
     assert!(sql.contains("INTERSECT"));
@@ -320,23 +334,29 @@ fn test_case_expression() {
     cmd.columns.push(Expr::Named("name".to_string()));
     cmd.columns.push(Expr::Case {
         when_clauses: vec![
-            (Condition {
-                left: Expr::Named("status".to_string()),
-                op: Operator::Eq,
-                value: Value::String("active".to_string()),
-                is_array_unnest: false,
-            }, Box::new(Expr::Named("1".to_string()))),
-            (Condition {
-                left: Expr::Named("status".to_string()),
-                op: Operator::Eq,
-                value: Value::String("pending".to_string()),
-                is_array_unnest: false,
-            }, Box::new(Expr::Named("2".to_string()))),
+            (
+                Condition {
+                    left: Expr::Named("status".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("active".to_string()),
+                    is_array_unnest: false,
+                },
+                Box::new(Expr::Named("1".to_string())),
+            ),
+            (
+                Condition {
+                    left: Expr::Named("status".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("pending".to_string()),
+                    is_array_unnest: false,
+                },
+                Box::new(Expr::Named("2".to_string())),
+            ),
         ],
         else_value: Some(Box::new(Expr::Named("0".to_string()))),
         alias: Some("priority".to_string()),
     });
-    
+
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
     println!("CASE: {}", sql);
     assert!(sql.contains("CASE"));
@@ -353,8 +373,8 @@ fn test_case_expression() {
 fn test_having_clause() {
     let mut cmd = QailCmd::get("orders");
     cmd.columns.push(Expr::Named("customer_id".to_string()));
-    cmd.columns.push(Expr::Aggregate { 
-        col: "total".to_string(), 
+    cmd.columns.push(Expr::Aggregate {
+        col: "total".to_string(),
         func: AggregateFunc::Sum,
         distinct: false,
         filter: None,
@@ -366,7 +386,7 @@ fn test_having_clause() {
         value: Value::Int(100),
         is_array_unnest: false,
     });
-    
+
     let sql = cmd.to_sql();
     println!("HAVING: {}", sql);
     assert!(sql.contains("HAVING"));
@@ -380,15 +400,15 @@ fn test_group_by_rollup() {
     let mut cmd = QailCmd::get("sales");
     cmd.columns.push(Expr::Named("region".to_string()));
     cmd.columns.push(Expr::Named("year".to_string()));
-    cmd.columns.push(Expr::Aggregate { 
-        col: "amount".to_string(), 
+    cmd.columns.push(Expr::Aggregate {
+        col: "amount".to_string(),
         func: AggregateFunc::Sum,
         distinct: false,
         filter: None,
         alias: None,
     });
     cmd.group_by_mode = GroupByMode::Rollup;
-    
+
     let sql = cmd.to_sql();
     println!("ROLLUP: {}", sql);
     assert!(sql.contains("GROUP BY ROLLUP("));
@@ -399,15 +419,15 @@ fn test_group_by_cube() {
     let mut cmd = QailCmd::get("sales");
     cmd.columns.push(Expr::Named("region".to_string()));
     cmd.columns.push(Expr::Named("product".to_string()));
-    cmd.columns.push(Expr::Aggregate { 
-        col: "amount".to_string(), 
+    cmd.columns.push(Expr::Aggregate {
+        col: "amount".to_string(),
         func: AggregateFunc::Sum,
         distinct: false,
         filter: None,
         alias: None,
     });
     cmd.group_by_mode = GroupByMode::Cube;
-    
+
     let sql = cmd.to_sql();
     println!("CUBE: {}", sql);
     assert!(sql.contains("GROUP BY CUBE("));
@@ -419,7 +439,7 @@ fn test_group_by_cube() {
 fn test_aggregate_filter() {
     // Test PostgreSQL FILTER (WHERE ...) clause on aggregates
     let mut cmd = QailCmd::get("messages");
-    
+
     // COUNT(*) FILTER (WHERE direction = 'outbound')
     cmd.columns.push(Expr::Aggregate {
         col: "*".to_string(),
@@ -433,7 +453,7 @@ fn test_aggregate_filter() {
         }]),
         alias: Some("sent_count".to_string()),
     });
-    
+
     let sql = cmd.to_sql();
     println!("FILTER clause: {}", sql);
     assert!(sql.contains("FILTER"));
@@ -460,25 +480,31 @@ fn test_recursive_cte() {
         }],
         logical_op: LogicalOp::And,
     });
-    
+
     // Build recursive query: SELECT e.id, e.name, e.manager_id FROM employees e JOIN emp_tree ...
     let mut recursive = QailCmd::get("employees");
     recursive.columns.push(Expr::Named("id".to_string()));
     recursive.columns.push(Expr::Named("name".to_string()));
-    recursive.columns.push(Expr::Named("manager_id".to_string()));
-    
+    recursive
+        .columns
+        .push(Expr::Named("manager_id".to_string()));
+
     // Outer query with CTE
     let mut cmd = QailCmd::get("emp_tree");
     cmd.ctes = vec![CTEDef {
         name: "emp_tree".to_string(),
         recursive: true,
-        columns: vec!["id".to_string(), "name".to_string(), "manager_id".to_string()],
+        columns: vec![
+            "id".to_string(),
+            "name".to_string(),
+            "manager_id".to_string(),
+        ],
         base_query: Box::new(base),
         recursive_query: Some(Box::new(recursive)),
         source_table: Some("employees".to_string()),
     }];
     cmd.action = Action::With;
-    
+
     use crate::transpiler::dml::cte::build_cte;
     let sql = build_cte(&cmd, Dialect::Postgres);
     println!("RECURSIVE CTE: {}", sql);
@@ -486,7 +512,6 @@ fn test_recursive_cte() {
     assert!(sql.contains("emp_tree"));
     assert!(sql.contains("UNION ALL"));
 }
-
 
 // ============= v0.8.6: Custom JOINs & DISTINCT ON =============
 
@@ -507,7 +532,11 @@ fn test_custom_join_on() {
     });
     let sql = cmd.to_sql();
     // Identifiers are unquoted if safe in Postgres dialect implementation used
-    assert!(sql.contains("INNER JOIN orders ON users.id = orders.user_id"), "SQL was: {}", sql);
+    assert!(
+        sql.contains("INNER JOIN orders ON users.id = orders.user_id"),
+        "SQL was: {}",
+        sql
+    );
 }
 
 #[test]
@@ -533,7 +562,11 @@ fn test_custom_join_multiple_conditions() {
         on_true: false,
     });
     let sql = cmd.to_sql();
-    assert!(sql.contains("INNER JOIN B ON A.x = B.x AND A.y = B.y"), "SQL was: {}", sql);
+    assert!(
+        sql.contains("INNER JOIN B ON A.x = B.x AND A.y = B.y"),
+        "SQL was: {}",
+        sql
+    );
     // Verify AST structure
     assert!(cmd.joins[0].on.is_some());
     assert_eq!(cmd.joins[0].on.as_ref().unwrap().len(), 2);
@@ -543,9 +576,16 @@ fn test_custom_join_multiple_conditions() {
 fn test_distinct_on() {
     // Manual construction for DISTINCT ON
     let mut cmd = QailCmd::get("employees");
-    cmd.distinct_on = vec![Expr::Named("department".to_string()), Expr::Named("role".to_string())];
-    
+    cmd.distinct_on = vec![
+        Expr::Named("department".to_string()),
+        Expr::Named("role".to_string()),
+    ];
+
     // Transpiler check (Postgres default)
     let sql = cmd.to_sql();
-    assert!(sql.starts_with("SELECT DISTINCT ON (department, role)"), "SQL was: {}", sql);
+    assert!(
+        sql.starts_with("SELECT DISTINCT ON (department, role)"),
+        "SQL was: {}",
+        sql
+    );
 }

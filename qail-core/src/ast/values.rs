@@ -1,6 +1,6 @@
+use crate::ast::QailCmd;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::ast::QailCmd;
 
 /// Time interval unit for duration expressions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,11 +79,13 @@ impl std::fmt::Display for Value {
             Value::Array(arr) => {
                 write!(f, "(")?;
                 for (i, v) in arr.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", v)?;
                 }
                 write!(f, ")")
-            },
+            }
             Value::Subquery(_) => write!(f, "(SUBQUERY)"),
             Value::Column(s) => write!(f, "{}", s),
             Value::Uuid(u) => write!(f, "'{}'", u),
@@ -136,7 +138,6 @@ impl From<String> for Value {
         Value::String(s)
     }
 }
-
 
 impl From<Uuid> for Value {
     fn from(u: Uuid) -> Self {

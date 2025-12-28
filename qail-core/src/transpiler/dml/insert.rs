@@ -1,9 +1,9 @@
 //! INSERT SQL generation.
 
 use crate::ast::*;
-use crate::transpiler::dialect::Dialect;
-use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::SqlGenerator;
+use crate::transpiler::conditions::ConditionToSql;
+use crate::transpiler::dialect::Dialect;
 
 /// Generate INSERT SQL.
 pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
@@ -12,8 +12,8 @@ pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
     sql.push_str(&generator.quote_identifier(&cmd.table));
 
     // For ADD queries, we use columns and first cage contains values
-    let cols: Vec<String> = cmd.columns.iter().map(|c| c.to_string()).collect(); 
-    
+    let cols: Vec<String> = cmd.columns.iter().map(|c| c.to_string()).collect();
+
     if !cols.is_empty() {
         sql.push_str(" (");
         sql.push_str(&cols.join(", "));
@@ -27,8 +27,12 @@ pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
         sql.push_str(&source_query.to_sql_with_dialect(dialect));
     } else if let Some(cage) = cmd.cages.first() {
         // Traditional INSERT with VALUES
-        let values: Vec<String> = cage.conditions.iter().map(|c| c.to_value_sql(&generator)).collect();
-        
+        let values: Vec<String> = cage
+            .conditions
+            .iter()
+            .map(|c| c.to_value_sql(&generator))
+            .collect();
+
         if !values.is_empty() {
             sql.push_str(" VALUES (");
             sql.push_str(&values.join(", "));
@@ -38,13 +42,17 @@ pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
 
     // ON CONFLICT clause
     if let Some(on_conflict) = &cmd.on_conflict {
-        sql.push_str(&build_on_conflict(on_conflict, &dialect, generator.as_ref()));
+        sql.push_str(&build_on_conflict(
+            on_conflict,
+            &dialect,
+            generator.as_ref(),
+        ));
     }
 
     // RETURNING clause - configurable
     match &cmd.returning {
         None => sql.push_str(" RETURNING *"), // Default: return all
-        Some(cols) if cols.is_empty() => {}, // Explicitly no RETURNING
+        Some(cols) if cols.is_empty() => {}   // Explicitly no RETURNING
         Some(cols) => {
             let col_strs: Vec<String> = cols.iter().map(|e| e.to_string()).collect();
             sql.push_str(" RETURNING ");
@@ -66,30 +74,29 @@ fn build_on_conflict(
 }
 
 /// PostgreSQL/SQLite style: ON CONFLICT (cols) DO UPDATE SET ... or DO NOTHING
-fn build_on_conflict_postgres(
-    on_conflict: &OnConflict,
-    generator: &dyn SqlGenerator,
-) -> String {
+fn build_on_conflict_postgres(on_conflict: &OnConflict, generator: &dyn SqlGenerator) -> String {
     let mut sql = String::from(" ON CONFLICT (");
-    let cols: Vec<String> = on_conflict.columns.iter()
+    let cols: Vec<String> = on_conflict
+        .columns
+        .iter()
         .map(|c| generator.quote_identifier(c))
         .collect();
     sql.push_str(&cols.join(", "));
     sql.push(')');
-    
+
     match &on_conflict.action {
         ConflictAction::DoNothing => {
             sql.push_str(" DO NOTHING");
         }
         ConflictAction::DoUpdate { assignments } => {
             sql.push_str(" DO UPDATE SET ");
-            let sets: Vec<String> = assignments.iter()
+            let sets: Vec<String> = assignments
+                .iter()
                 .map(|(col, expr)| format!("{} = {}", generator.quote_identifier(col), expr))
                 .collect();
             sql.push_str(&sets.join(", "));
         }
     }
-    
+
     sql
 }
-

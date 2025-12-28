@@ -2,11 +2,11 @@
 //!
 //! All methods use AST-native approach - no raw SQL strings.
 
-use bytes::BytesMut;
-use tokio::io::AsyncWriteExt;
-use qail_core::ast::{QailCmd, Action};
-use crate::protocol::{BackendMessage, PgEncoder, AstEncoder};
 use super::{PgConnection, PgError, PgResult, parse_affected_rows};
+use crate::protocol::{AstEncoder, BackendMessage, PgEncoder};
+use bytes::BytesMut;
+use qail_core::ast::{Action, QailCmd};
+use tokio::io::AsyncWriteExt;
 
 impl PgConnection {
     /// **Fast** bulk insert using COPY protocol with zero-allocation encoding.
@@ -20,11 +20,11 @@ impl PgConnection {
         rows: &[Vec<qail_core::ast::Value>],
     ) -> PgResult<u64> {
         use crate::protocol::encode_copy_batch;
-        
+
         // Build COPY command
         let cols = columns.join(", ");
         let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
-        
+
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(&sql);
         self.stream.write_all(&bytes).await?;
@@ -43,7 +43,7 @@ impl PgConnection {
 
         // Encode ALL rows into a single buffer (zero-allocation per value)
         let batch_data = encode_copy_batch(rows);
-        
+
         // Single write for entire batch!
         self.send_copy_data(&batch_data).await?;
 
@@ -86,7 +86,7 @@ impl PgConnection {
         // Build COPY command
         let cols = columns.join(", ");
         let sql = format!("COPY {} ({}) FROM STDIN", table, cols);
-        
+
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(&sql);
         self.stream.write_all(&bytes).await?;
@@ -148,31 +148,28 @@ impl PgConnection {
     }
 
     /// Export data using COPY TO STDOUT (AST-native).
-    /// 
+    ///
     /// Takes a QailCmd::Export and returns rows as Vec<Vec<String>>.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmd = QailCmd::export("users")
     ///     .columns(["id", "name"])
     ///     .filter("active", true);
-    /// 
+    ///
     /// let rows = conn.copy_export(&cmd).await?;
     /// ```
-    pub async fn copy_export(
-        &mut self,
-        cmd: &QailCmd,
-    ) -> PgResult<Vec<Vec<String>>> {
+    pub async fn copy_export(&mut self, cmd: &QailCmd) -> PgResult<Vec<Vec<String>>> {
         // Validate action
         if cmd.action != Action::Export {
             return Err(PgError::Query(
-                "copy_export requires QailCmd::Export action".to_string()
+                "copy_export requires QailCmd::Export action".to_string(),
             ));
         }
 
         // Encode command to SQL using AST encoder
         let (sql, _params) = AstEncoder::encode_cmd_sql(cmd);
-        
+
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(&sql);
         self.stream.write_all(&bytes).await?;
@@ -198,9 +195,7 @@ impl PgConnection {
                     // Parse tab-separated line
                     let line = String::from_utf8_lossy(&data);
                     let line = line.trim_end_matches('\n');
-                    let cols: Vec<String> = line.split('\t')
-                        .map(|s| s.to_string())
-                        .collect();
+                    let cols: Vec<String> = line.split('\t').map(|s| s.to_string()).collect();
                     rows.push(cols);
                 }
                 BackendMessage::CopyDone => {}

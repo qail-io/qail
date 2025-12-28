@@ -5,7 +5,7 @@
 //! ## Grammar
 //! ```text
 //! schema = { table_def | index_def | migration_hint }*
-//! 
+//!
 //! table_def = "table" IDENT "{" column_def* "}"
 //! column_def = IDENT TYPE constraint*
 //! constraint = "primary_key" | "not_null" | "nullable" | "unique" | "default" VALUE
@@ -17,21 +17,21 @@
 //!                | "drop" PATH ["confirm"]
 //! ```
 
-use super::schema::{Schema, Table, Column, Index, MigrationHint};
+use super::schema::{Column, Index, MigrationHint, Schema, Table};
 
 /// Parse a .qail file into a Schema.
 pub fn parse_qail(input: &str) -> Result<Schema, String> {
     let mut schema = Schema::new();
     let mut lines = input.lines().peekable();
-    
+
     while let Some(line) = lines.next() {
         let line = line.trim();
-        
+
         // Skip empty lines and comments
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        
+
         // Parse table definition
         if line.starts_with("table ") {
             let (table, consumed) = parse_table(line, &mut lines)?;
@@ -48,76 +48,77 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
         else if line.starts_with("rename ") {
             let hint = parse_rename(line)?;
             schema.add_hint(hint);
-        }
-        else if line.starts_with("transform ") {
+        } else if line.starts_with("transform ") {
             let hint = parse_transform(line)?;
             schema.add_hint(hint);
-        }
-        else if line.starts_with("drop ") {
+        } else if line.starts_with("drop ") {
             let hint = parse_drop(line)?;
             schema.add_hint(hint);
-        }
-        else {
+        } else {
             return Err(format!("Unknown statement: {}", line));
         }
     }
-    
+
     Ok(schema)
 }
 
 /// Parse a table definition with columns.
-fn parse_table<'a, I>(first_line: &str, lines: &mut std::iter::Peekable<I>) -> Result<(Table, usize), String>
+fn parse_table<'a, I>(
+    first_line: &str,
+    lines: &mut std::iter::Peekable<I>,
+) -> Result<(Table, usize), String>
 where
     I: Iterator<Item = &'a str>,
 {
     // Parse: table users {
     let rest = first_line.strip_prefix("table ").unwrap();
     let name = rest.trim_end_matches('{').trim().to_string();
-    
+
     if name.is_empty() {
         return Err("Table name required".to_string());
     }
-    
+
     let mut table = Table::new(&name);
     let mut consumed = 0;
-    
+
     // Parse columns until }
     for line in lines.by_ref() {
         consumed += 1;
         let line = line.trim();
-        
+
         if line == "}" || line.starts_with('}') {
             break;
         }
-        
+
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        
+
         let col = parse_column(line)?;
         table.columns.push(col);
     }
-    
+
     Ok((table, consumed))
 }
 
 /// Parse a column definition.
 fn parse_column(line: &str) -> Result<Column, String> {
     let parts: Vec<&str> = line.split_whitespace().collect();
-    
+
     if parts.len() < 2 {
         return Err(format!("Invalid column: {}", line));
     }
-    
+
     let name = parts[0].to_string();
     let type_str = parts[1];
-    
+
     // Parse type string to ColumnType enum
-    let data_type: super::types::ColumnType = type_str.parse()
+    let data_type: super::types::ColumnType = type_str
+        .parse()
         .map_err(|_| format!("Unknown column type: {}", type_str))?;
-    
+
     let mut col = Column::new(&name, data_type);
-    
+
     // Parse constraints
     let mut i = 2;
     while i < parts.len() {
@@ -153,10 +154,10 @@ fn parse_column(line: &str) -> Result<Column, String> {
                 } else {
                     ""
                 };
-                
+
                 // Parse "table(column)" format
                 if let Some(paren_start) = fk_str.find('(')
-                    && let Some(paren_end) = fk_str.find(')') 
+                    && let Some(paren_end) = fk_str.find(')')
                 {
                     let table = &fk_str[..paren_start];
                     let column = &fk_str[paren_start + 1..paren_end];
@@ -169,7 +170,7 @@ fn parse_column(line: &str) -> Result<Column, String> {
         }
         i += 1;
     }
-    
+
     Ok(col)
 }
 
@@ -181,29 +182,29 @@ fn parse_index(line: &str) -> Result<Index, String> {
     } else {
         line.strip_prefix("index ").unwrap()
     };
-    
+
     // Parse: idx_name on table_name (col1, col2)
     let parts: Vec<&str> = rest.splitn(2, " on ").collect();
     if parts.len() != 2 {
         return Err(format!("Invalid index: {}", line));
     }
-    
+
     let name = parts[0].trim().to_string();
     let rest = parts[1];
-    
+
     // Parse table (columns)
     let paren_start = rest.find('(').ok_or("Missing ( in index")?;
     let paren_end = rest.find(')').ok_or("Missing ) in index")?;
-    
+
     let table = rest[..paren_start].trim().to_string();
     let cols_str = &rest[paren_start + 1..paren_end];
     let columns: Vec<String> = cols_str.split(',').map(|s| s.trim().to_string()).collect();
-    
+
     let mut index = Index::new(&name, &table, columns);
     if is_unique {
         index.unique = true;
     }
-    
+
     Ok(index)
 }
 
@@ -212,11 +213,11 @@ fn parse_rename(line: &str) -> Result<MigrationHint, String> {
     // rename users.username -> users.name
     let rest = line.strip_prefix("rename ").unwrap();
     let parts: Vec<&str> = rest.split(" -> ").collect();
-    
+
     if parts.len() != 2 {
         return Err(format!("Invalid rename: {}", line));
     }
-    
+
     Ok(MigrationHint::Rename {
         from: parts[0].trim().to_string(),
         to: parts[1].trim().to_string(),
@@ -228,11 +229,11 @@ fn parse_transform(line: &str) -> Result<MigrationHint, String> {
     // transform age * 12 -> age_months
     let rest = line.strip_prefix("transform ").unwrap();
     let parts: Vec<&str> = rest.split(" -> ").collect();
-    
+
     if parts.len() != 2 {
         return Err(format!("Invalid transform: {}", line));
     }
-    
+
     Ok(MigrationHint::Transform {
         expression: parts[0].trim().to_string(),
         target: parts[1].trim().to_string(),
@@ -249,7 +250,7 @@ fn parse_drop(line: &str) -> Result<MigrationHint, String> {
     } else {
         rest.trim().to_string()
     };
-    
+
     Ok(MigrationHint::Drop { target, confirmed })
 }
 
@@ -289,8 +290,10 @@ table users {
         let input = "rename users.username -> users.name";
         let schema = parse_qail(input).unwrap();
         assert_eq!(schema.migrations.len(), 1);
-        assert!(matches!(&schema.migrations[0], MigrationHint::Rename { from, to } 
-            if from == "users.username" && to == "users.name"));
+        assert!(matches!(
+            &schema.migrations[0],
+            MigrationHint::Rename { from, to } if from == "users.username" && to == "users.name"
+        ));
     }
 
     #[test]

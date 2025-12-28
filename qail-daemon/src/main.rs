@@ -47,9 +47,9 @@ pub enum Request {
     /// Prepare a SQL statement (returns handle for reuse)
     Prepare { sql: String },
     /// Execute prepared statement with params batch (FASTEST - like native Rust)
-    PreparedPipeline { 
+    PreparedPipeline {
         handle: String,
-        params_batch: Vec<Vec<String>>,  // Each inner vec is params for one query
+        params_batch: Vec<Vec<String>>, // Each inner vec is params for one query
     },
     /// Close the connection
     Close,
@@ -116,7 +116,7 @@ struct ConnectionState {
 
 impl ConnectionState {
     fn new() -> Self {
-        Self { 
+        Self {
             driver: None,
             prepared_stmts: HashMap::new(),
         }
@@ -264,11 +264,7 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
                             let rows = pg_rows
                                 .iter()
                                 .map(|r| Row {
-                                    columns: r
-                                        .columns
-                                        .iter()
-                                        .map(column_to_value)
-                                        .collect(),
+                                    columns: r.columns.iter().map(column_to_value).collect(),
                                 })
                                 .collect();
                             Response::Results { rows, affected: 0 }
@@ -306,11 +302,7 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
                                 let rows = pg_rows
                                     .iter()
                                     .map(|r| Row {
-                                        columns: r
-                                            .columns
-                                            .iter()
-                                            .map(column_to_value)
-                                            .collect(),
+                                        columns: r.columns.iter().map(column_to_value).collect(),
                                     })
                                     .collect();
                                 results.push(QueryResult { rows, affected: 0 });
@@ -418,28 +410,29 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
         Request::Prepare { sql } => {
             let mut state = state.write().await;
             match &mut state.driver {
-                Some(driver) => {
-                    match driver.prepare(&sql).await {
-                        Ok(stmt) => {
-                            let handle = stmt.name().to_string();
-                            state.prepared_stmts.insert(handle.clone(), stmt);
-                            info!("Prepared statement: {}", handle);
-                            Response::PreparedHandle { handle }
-                        }
-                        Err(e) => Response::Error {
-                            message: format!("Prepare failed: {}", e),
-                        },
+                Some(driver) => match driver.prepare(&sql).await {
+                    Ok(stmt) => {
+                        let handle = stmt.name().to_string();
+                        state.prepared_stmts.insert(handle.clone(), stmt);
+                        info!("Prepared statement: {}", handle);
+                        Response::PreparedHandle { handle }
                     }
-                }
+                    Err(e) => Response::Error {
+                        message: format!("Prepare failed: {}", e),
+                    },
+                },
                 None => Response::Error {
                     message: "Not connected".to_string(),
                 },
             }
         }
 
-        Request::PreparedPipeline { handle, params_batch } => {
+        Request::PreparedPipeline {
+            handle,
+            params_batch,
+        } => {
             let mut state = state.write().await;
-            
+
             // First check if we have the prepared statement
             let stmt = match state.prepared_stmts.get(&handle) {
                 Some(s) => s.clone(),
@@ -449,7 +442,7 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
                     };
                 }
             };
-            
+
             match &mut state.driver {
                 Some(driver) => {
                     // Convert String params to Option<Vec<u8>> format
@@ -457,7 +450,7 @@ async fn handle_request(state: &Arc<RwLock<ConnectionState>>, request: Request) 
                         .iter()
                         .map(|p| p.iter().map(|s| Some(s.as_bytes().to_vec())).collect())
                         .collect();
-                    
+
                     // Use the FASTEST pipeline method (like native Rust benchmark)
                     match driver.pipeline_prepared_fast(&stmt, &params).await {
                         Ok(count) => Response::Count { count },

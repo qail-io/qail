@@ -31,10 +31,12 @@
 //! let rows = driver.fetch_all(&cmd).await?;
 //! ```
 
-pub mod protocol;
 pub mod driver;
+pub mod protocol;
 pub mod types;
 
+pub use driver::{
+    PgConnection, PgDriver, PgError, PgPool, PgResult, PgRow, PoolConfig, PooledConnection,
+};
 pub use protocol::PgEncoder;
-pub use driver::{PgDriver, PgConnection, PgRow, PgError, PgResult, PgPool, PoolConfig, PooledConnection};
-pub use types::{FromPg, ToPg, TypeError, Uuid, Json, Timestamp, Date, Time, Numeric};
+pub use types::{Date, FromPg, Json, Numeric, Time, Timestamp, ToPg, TypeError, Uuid};

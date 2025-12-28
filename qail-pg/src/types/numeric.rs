@@ -37,7 +37,10 @@ impl Numeric {
 impl FromPg for Numeric {
     fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
         if oid_val != oid::NUMERIC {
-            return Err(TypeError::UnexpectedOid { expected: "numeric", got: oid_val });
+            return Err(TypeError::UnexpectedOid {
+                expected: "numeric",
+                got: oid_val,
+            });
         }
 
         if format == 1 {
@@ -47,8 +50,8 @@ impl FromPg for Numeric {
             decode_numeric_binary(bytes)
         } else {
             // Text format: just the string
-            let s = std::str::from_utf8(bytes)
-                .map_err(|e| TypeError::InvalidData(e.to_string()))?;
+            let s =
+                std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
             Ok(Numeric(s.to_string()))
         }
     }

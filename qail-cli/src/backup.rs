@@ -4,7 +4,7 @@
 
 use anyhow::{Result, anyhow};
 use colored::*;
-use qail_core::ast::{QailCmd, Action, Expr};
+use qail_core::ast::{Action, Expr, QailCmd};
 use qail_pg::driver::PgDriver;
 use std::path::PathBuf;
 
@@ -42,7 +42,7 @@ pub async fn analyze_impact(driver: &mut PgDriver, cmd: &QailCmd) -> Result<Migr
             // DROP COLUMN - count rows with non-null values
             impact.operation = "DROP COLUMN".to_string();
             impact.is_destructive = true;
-            
+
             for col in &cmd.columns {
                 if let Expr::Named(name) = col {
                     impact.dropped_columns.push(name.clone());
@@ -68,65 +68,68 @@ pub async fn analyze_impact(driver: &mut PgDriver, cmd: &QailCmd) -> Result<Migr
 
 /// Count rows in a table using AST-native query
 async fn count_table_rows(driver: &mut PgDriver, table: &str) -> Result<u64> {
-    
     // SELECT COUNT(*) FROM table (using AST)
-    let cmd = QailCmd::get(table)
-        .column("count(*)");
-    
-    let rows = driver.fetch_all(&cmd).await
+    let cmd = QailCmd::get(table).column("count(*)");
+
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
         .map_err(|e| anyhow!("Failed to count rows: {}", e))?;
-    
+
     if let Some(row) = rows.first()
-        && let Some(count_str) = row.get_string(0) {
-            return Ok(count_str.parse().unwrap_or(0));
-        }
-    
+        && let Some(count_str) = row.get_string(0)
+    {
+        return Ok(count_str.parse().unwrap_or(0));
+    }
+
     Ok(0)
 }
 
 /// Count non-null values in a column using AST-native query
 async fn count_column_values(driver: &mut PgDriver, table: &str, column: &str) -> Result<u64> {
-    
     // SELECT COUNT(column) FROM table WHERE column IS NOT NULL
-    let cmd = QailCmd::get(table)
-        .column(format!("count({})", column));
-    
-    let rows = driver.fetch_all(&cmd).await
+    let cmd = QailCmd::get(table).column(format!("count({})", column));
+
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
         .map_err(|e| anyhow!("Failed to count column values: {}", e))?;
-    
+
     if let Some(row) = rows.first()
-        && let Some(count_str) = row.get_string(0) {
-            return Ok(count_str.parse().unwrap_or(0));
-        }
-    
+        && let Some(count_str) = row.get_string(0)
+    {
+        return Ok(count_str.parse().unwrap_or(0));
+    }
+
     Ok(0)
 }
 
 /// Display impact analysis to user
 pub fn display_impact(impacts: &[MigrationImpact]) {
     let destructive: Vec<_> = impacts.iter().filter(|i| i.is_destructive).collect();
-    
+
     if destructive.is_empty() {
         println!("{}", "✓ No destructive operations detected".green());
         return;
     }
-    
+
     println!();
     println!("{}", "🚨 Migration Impact Analysis".red().bold());
     println!("{}", "━".repeat(40).dimmed());
-    
+
     let mut total_rows = 0u64;
-    
+
     for impact in &destructive {
         let op_colored = match impact.operation.as_str() {
             "DROP TABLE" => impact.operation.red().bold(),
             "DROP COLUMN" => impact.operation.yellow().bold(),
             _ => impact.operation.normal(),
         };
-        
+
         if !impact.dropped_columns.is_empty() {
             for col in &impact.dropped_columns {
-                println!("  {} {}.{} → {} values at risk",
+                println!(
+                    "  {} {}.{} → {} values at risk",
                     op_colored,
                     impact.table.cyan(),
                     col.yellow(),
@@ -134,18 +137,22 @@ pub fn display_impact(impacts: &[MigrationImpact]) {
                 );
             }
         } else {
-            println!("  {} {} → {} rows affected",
+            println!(
+                "  {} {} → {} rows affected",
                 op_colored,
                 impact.table.cyan(),
                 impact.rows_affected.to_string().red().bold()
             );
         }
-        
+
         total_rows += impact.rows_affected;
     }
-    
+
     println!("{}", "━".repeat(40).dimmed());
-    println!("  Total: {} records at risk", total_rows.to_string().red().bold());
+    println!(
+        "  Total: {} records at risk",
+        total_rows.to_string().red().bold()
+    );
     println!();
 }
 
@@ -163,14 +170,17 @@ pub fn prompt_migration_choice() -> MigrationChoice {
     println!("Choose an option:");
     println!("  {} Proceed (I have my own backup)", "[1]".cyan());
     println!("  {} Backup to files (_qail_snapshots/)", "[2]".green());
-    println!("  {} Backup to database (with rollback support)", "[3]".green().bold());
+    println!(
+        "  {} Backup to database (with rollback support)",
+        "[3]".green().bold()
+    );
     println!("  {} Cancel migration", "[4]".red());
     print!("> ");
-    
+
     // Flush stdout
     use std::io::Write;
     std::io::stdout().flush().ok();
-    
+
     let mut input = String::new();
     if std::io::stdin().read_line(&mut input).is_ok() {
         match input.trim() {
@@ -181,7 +191,7 @@ pub fn prompt_migration_choice() -> MigrationChoice {
             _ => {}
         }
     }
-    
+
     MigrationChoice::Cancel
 }
 
@@ -200,17 +210,19 @@ pub async fn backup_table(driver: &mut PgDriver, table: &str) -> Result<PathBuf>
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!("{}_{}.csv", timestamp, table);
     let path = snapshot_dir.join(&filename);
-    
+
     // Use fetch_all for backup
     let cmd = QailCmd::get(table);
-    
-    let rows = driver.fetch_all(&cmd).await
+
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
         .map_err(|e| anyhow!("Failed to export table {}: {}", table, e))?;
-    
+
     // Write to file as TSV
     let mut content = String::new();
     for row in rows {
-        let line: Vec<String> = (0..10)  // Assume max 10 columns
+        let line: Vec<String> = (0..10) // Assume max 10 columns
             .filter_map(|i| row.get_string(i))
             .collect();
         if !line.is_empty() {
@@ -218,60 +230,67 @@ pub async fn backup_table(driver: &mut PgDriver, table: &str) -> Result<PathBuf>
             content.push('\n');
         }
     }
-    
+
     std::fs::write(&path, content)?;
-    
+
     Ok(path)
 }
 
 /// Backup specific columns from a table
-pub async fn backup_columns(driver: &mut PgDriver, table: &str, columns: &[String]) -> Result<PathBuf> {
+pub async fn backup_columns(
+    driver: &mut PgDriver,
+    table: &str,
+    columns: &[String],
+) -> Result<PathBuf> {
     let snapshot_dir = ensure_snapshot_dir()?;
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let col_names = columns.join("_");
     let filename = format!("{}_{}_{}.csv", timestamp, table, col_names);
     let path = snapshot_dir.join(&filename);
-    
+
     // Build export command with specific columns (need primary key for restore)
     // Assuming 'id' is common primary key - this is a simplification
     let mut cols: Vec<&str> = vec!["id"];
     cols.extend(columns.iter().map(|s| s.as_str()));
-    
+
     let cols_len = cols.len();
     let cmd = QailCmd::get(table).columns(cols);
-    
-    let rows = driver.fetch_all(&cmd).await
+
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
         .map_err(|e| anyhow!("Failed to export columns from {}: {}", table, e))?;
-    
+
     // Write to file as TSV
     let mut content = String::new();
     for row in rows {
-        let line: Vec<String> = (0..cols_len)
-            .filter_map(|i| row.get_string(i))
-            .collect();
+        let line: Vec<String> = (0..cols_len).filter_map(|i| row.get_string(i)).collect();
         if !line.is_empty() {
             content.push_str(&line.join("\t"));
             content.push('\n');
         }
     }
-    
+
     std::fs::write(&path, content)?;
-    
+
     Ok(path)
 }
 
 /// Create snapshots for all destructive operations
-pub async fn create_snapshots(driver: &mut PgDriver, impacts: &[MigrationImpact]) -> Result<Vec<PathBuf>> {
+pub async fn create_snapshots(
+    driver: &mut PgDriver,
+    impacts: &[MigrationImpact],
+) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    
+
     println!();
     println!("{}", "📦 Creating snapshots...".cyan().bold());
-    
+
     for impact in impacts {
         if !impact.is_destructive {
             continue;
         }
-        
+
         let path = if impact.operation == "DROP TABLE" {
             backup_table(driver, &impact.table).await?
         } else if !impact.dropped_columns.is_empty() {
@@ -279,19 +298,20 @@ pub async fn create_snapshots(driver: &mut PgDriver, impacts: &[MigrationImpact]
         } else {
             continue;
         };
-        
-        println!("  {} {} → {}", 
-            "✓".green(), 
+
+        println!(
+            "  {} {} → {}",
+            "✓".green(),
             format!("{}.{}", impact.table, impact.dropped_columns.join(",")).cyan(),
             path.display().to_string().dimmed()
         );
-        
+
         paths.push(path);
     }
-    
+
     println!("  {}", "Done".green().bold());
     println!();
-    
+
     Ok(paths)
 }
 
@@ -326,7 +346,9 @@ pub fn data_snapshots_ddl() -> String {
 
 /// Ensure data snapshots table exists
 pub async fn ensure_snapshots_table(driver: &mut PgDriver) -> Result<()> {
-    driver.execute_raw(&data_snapshots_ddl()).await
+    driver
+        .execute_raw(&data_snapshots_ddl())
+        .await
         .map_err(|e| anyhow!("Failed to create data snapshots table: {}", e))?;
     Ok(())
 }
@@ -358,38 +380,49 @@ pub async fn snapshot_column_to_db(
 ) -> Result<u64> {
     // Ensure snapshots table exists
     ensure_snapshots_table(driver).await?;
-    
+
     // Fetch all rows with id and column value
     let cmd = QailCmd::get(table).columns(["id", column]);
-    let rows = driver.fetch_all(&cmd).await
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
         .map_err(|e| anyhow!("Failed to fetch column data: {}", e))?;
-    
+
     let mut saved = 0u64;
-    
+
     for row in rows {
         let row_id = row.get_string(0).unwrap_or_default();
         let value = row.get_string(1);
-        
+
         if let Some(val) = value {
             // Insert snapshot record
             let snapshot_cmd = QailCmd::add("_qail_data_snapshots")
-                .columns(["migration_version", "table_name", "column_name", "row_id", "value_json", "snapshot_type"])
+                .columns([
+                    "migration_version",
+                    "table_name",
+                    "column_name",
+                    "row_id",
+                    "value_json",
+                    "snapshot_type",
+                ])
                 .values([
                     migration_version.to_string(),
                     table.to_string(),
                     column.to_string(),
                     row_id,
-                    format!("\"{}\"", val.replace('"', "\\\"")),  // JSON string
+                    format!("\"{}\"", val.replace('"', "\\\"")), // JSON string
                     SnapshotType::DropColumn.to_string(),
                 ]);
-            
-            driver.execute(&snapshot_cmd).await
+
+            driver
+                .execute(&snapshot_cmd)
+                .await
                 .map_err(|e| anyhow!("Failed to save snapshot: {}", e))?;
-            
+
             saved += 1;
         }
     }
-    
+
     Ok(saved)
 }
 
@@ -401,30 +434,39 @@ pub async fn snapshot_table_to_db(
 ) -> Result<u64> {
     // Ensure snapshots table exists
     ensure_snapshots_table(driver).await?;
-    
+
     // Fetch all rows as JSON
     let cmd = QailCmd::get(table);
-    let rows = driver.fetch_all(&cmd).await
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
         .map_err(|e| anyhow!("Failed to fetch table data: {}", e))?;
-    
+
     let mut saved = 0u64;
-    
+
     for (idx, row) in rows.iter().enumerate() {
         // Try to get row ID from first column, or use index
         let row_id = row.get_string(0).unwrap_or_else(|| idx.to_string());
-        
+
         // Build JSON object from row columns
         let mut json_parts = Vec::new();
-        for i in 0..20 {  // Max 20 columns
+        for i in 0..20 {
+            // Max 20 columns
             if let Some(val) = row.get_string(i) {
                 json_parts.push(format!("\"col_{}\": \"{}\"", i, val.replace('"', "\\\"")));
             }
         }
         let value_json = format!("{{{}}}", json_parts.join(", "));
-        
+
         // Insert snapshot record
         let snapshot_cmd = QailCmd::add("_qail_data_snapshots")
-            .columns(["migration_version", "table_name", "row_id", "value_json", "snapshot_type"])
+            .columns([
+                "migration_version",
+                "table_name",
+                "row_id",
+                "value_json",
+                "snapshot_type",
+            ])
             .values([
                 migration_version.to_string(),
                 table.to_string(),
@@ -432,13 +474,15 @@ pub async fn snapshot_table_to_db(
                 value_json,
                 SnapshotType::DropTable.to_string(),
             ]);
-        
-        driver.execute(&snapshot_cmd).await
+
+        driver
+            .execute(&snapshot_cmd)
+            .await
             .map_err(|e| anyhow!("Failed to save table snapshot: {}", e))?;
-        
+
         saved += 1;
     }
-    
+
     Ok(saved)
 }
 
@@ -449,19 +493,23 @@ pub async fn create_db_snapshots(
     impacts: &[MigrationImpact],
 ) -> Result<u64> {
     let mut total_saved = 0u64;
-    
+
     println!();
-    println!("{}", "💾 Creating database snapshots (Phase 2)...".cyan().bold());
-    
+    println!(
+        "{}",
+        "💾 Creating database snapshots (Phase 2)...".cyan().bold()
+    );
+
     for impact in impacts {
         if !impact.is_destructive {
             continue;
         }
-        
+
         let saved = if impact.operation == "DROP TABLE" {
             let count = snapshot_table_to_db(driver, migration_version, &impact.table).await?;
-            println!("  {} {} → {} rows saved to _qail_data_snapshots", 
-                "✓".green(), 
+            println!(
+                "  {} {} → {} rows saved to _qail_data_snapshots",
+                "✓".green(),
                 impact.table.cyan(),
                 count.to_string().green()
             );
@@ -469,9 +517,11 @@ pub async fn create_db_snapshots(
         } else if !impact.dropped_columns.is_empty() {
             let mut col_saved = 0u64;
             for col in &impact.dropped_columns {
-                let count = snapshot_column_to_db(driver, migration_version, &impact.table, col).await?;
-                println!("  {} {}.{} → {} values saved", 
-                    "✓".green(), 
+                let count =
+                    snapshot_column_to_db(driver, migration_version, &impact.table, col).await?;
+                println!(
+                    "  {} {}.{} → {} values saved",
+                    "✓".green(),
                     impact.table.cyan(),
                     col.yellow(),
                     count.to_string().green()
@@ -482,13 +532,17 @@ pub async fn create_db_snapshots(
         } else {
             0
         };
-        
+
         total_saved += saved;
     }
-    
-    println!("  {} Total: {} records backed up to database", "✓".green().bold(), total_saved.to_string().cyan());
+
+    println!(
+        "  {} Total: {} records backed up to database",
+        "✓".green().bold(),
+        total_saved.to_string().cyan()
+    );
     println!();
-    
+
     Ok(total_saved)
 }
 
@@ -500,65 +554,76 @@ pub async fn restore_column_from_db(
     column: &str,
 ) -> Result<u64> {
     use qail_core::ast::Operator;
-    
+
     // Query snapshots for this migration/table/column
     let query_cmd = QailCmd::get("_qail_data_snapshots")
         .columns(["row_id", "value_json"])
         .filter("migration_version", Operator::Eq, migration_version)
         .filter("table_name", Operator::Eq, table)
         .filter("column_name", Operator::Eq, column);
-    
-    let rows = driver.fetch_all(&query_cmd).await
+
+    let rows = driver
+        .fetch_all(&query_cmd)
+        .await
         .map_err(|e| anyhow!("Failed to query snapshots: {}", e))?;
-    
+
     let mut restored = 0u64;
-    
+
     for row in rows {
         let row_id = row.get_string(0).unwrap_or_default();
         let value_json = row.get_string(1).unwrap_or_default();
-        
+
         // Parse JSON value (remove quotes)
         let value = value_json.trim_matches('"').replace("\\\"", "\"");
-        
+
         // Update the row
         let update_cmd = QailCmd::set(table)
             .set_value(column, value)
             .where_eq("id", row_id);
-        
+
         if driver.execute(&update_cmd).await.is_ok() {
             restored += 1;
         }
     }
-    
+
     Ok(restored)
 }
 
 /// List available snapshots for a migration version
-pub async fn list_snapshots(driver: &mut PgDriver, migration_version: Option<&str>) -> Result<Vec<(String, String, String, u64)>> {
+pub async fn list_snapshots(
+    driver: &mut PgDriver,
+    migration_version: Option<&str>,
+) -> Result<Vec<(String, String, String, u64)>> {
     use qail_core::ast::Operator;
-    
-    let mut cmd = QailCmd::get("_qail_data_snapshots")
-        .columns(["migration_version", "table_name", "column_name", "count(*)"]);
-    
+
+    let mut cmd = QailCmd::get("_qail_data_snapshots").columns([
+        "migration_version",
+        "table_name",
+        "column_name",
+        "count(*)",
+    ]);
+
     if let Some(version) = migration_version {
         cmd = cmd.filter("migration_version", Operator::Eq, version);
     }
-    
+
     cmd = cmd.group_by(["migration_version", "table_name", "column_name"]);
-    
-    let rows = driver.fetch_all(&cmd).await
+
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
         .map_err(|e| anyhow!("Failed to list snapshots: {}", e))?;
-    
+
     let mut results = Vec::new();
-    
+
     for row in rows {
         let version = row.get_string(0).unwrap_or_default();
         let table = row.get_string(1).unwrap_or_default();
         let column = row.get_string(2).unwrap_or_default();
         let count: u64 = row.get_string(3).unwrap_or_default().parse().unwrap_or(0);
-        
+
         results.push((version, table, column, count));
     }
-    
+
     Ok(results)
 }

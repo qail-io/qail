@@ -5,9 +5,9 @@
 //!
 //! NOT A FULL DRIVER: No transactions, no prepared statements, no writes.
 
-pub mod protocol;
-pub mod connection;
 pub mod auth;
+pub mod connection;
+pub mod protocol;
 
 pub use connection::MySqlConnection;
 

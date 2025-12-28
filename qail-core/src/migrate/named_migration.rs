@@ -46,19 +46,19 @@ impl MigrationMeta {
     /// Generate metadata header for a migration file.
     pub fn to_header(&self) -> String {
         let mut lines = vec![format!("-- migration: {}", self.name)];
-        
+
         if !self.depends.is_empty() {
             lines.push(format!("-- depends: {}", self.depends.join(", ")));
         }
-        
+
         if let Some(ref author) = self.author {
             lines.push(format!("-- author: {}", author));
         }
-        
+
         if let Some(ref created) = self.created {
             lines.push(format!("-- created: {}", created));
         }
-        
+
         lines.push(String::new()); // blank line after header
         lines.join("\n")
     }
@@ -73,7 +73,7 @@ pub fn parse_migration_meta(content: &str) -> Option<MigrationMeta> {
 
     for line in content.lines() {
         let line = line.trim();
-        
+
         if let Some(name) = line.strip_prefix("-- migration:") {
             meta.name = name.trim().to_string();
             found_name = true;
@@ -93,19 +93,13 @@ pub fn parse_migration_meta(content: &str) -> Option<MigrationMeta> {
         }
     }
 
-    if found_name {
-        Some(meta)
-    } else {
-        None
-    }
+    if found_name { Some(meta) } else { None }
 }
 
 /// Validate migration dependencies (check for cycles and missing deps).
-pub fn validate_dependencies(
-    migrations: &[MigrationMeta],
-) -> Result<Vec<String>, String> {
+pub fn validate_dependencies(migrations: &[MigrationMeta]) -> Result<Vec<String>, String> {
     let names: HashSet<_> = migrations.iter().map(|m| m.name.as_str()).collect();
-    
+
     // Check all dependencies exist
     for mig in migrations {
         for dep in &mig.depends {
@@ -117,12 +111,12 @@ pub fn validate_dependencies(
             }
         }
     }
-    
+
     // Topological sort to get execution order
     let mut order = Vec::new();
     let mut visited = HashSet::new();
     let mut in_progress = HashSet::new();
-    
+
     fn visit<'a>(
         name: &'a str,
         migrations: &'a [MigrationMeta],
@@ -136,26 +130,32 @@ pub fn validate_dependencies(
         if visited.contains(name) {
             return Ok(());
         }
-        
+
         in_progress.insert(name);
-        
+
         if let Some(mig) = migrations.iter().find(|m| m.name == name) {
             for dep in &mig.depends {
                 visit(dep, migrations, visited, in_progress, order)?;
             }
         }
-        
+
         in_progress.remove(name);
         visited.insert(name);
         order.push(name.to_string());
-        
+
         Ok(())
     }
-    
+
     for mig in migrations {
-        visit(&mig.name, migrations, &mut visited, &mut in_progress, &mut order)?;
+        visit(
+            &mig.name,
+            migrations,
+            &mut visited,
+            &mut in_progress,
+            &mut order,
+        )?;
     }
-    
+
     Ok(order)
 }
 
@@ -184,7 +184,7 @@ mod tests {
         let meta = MigrationMeta::new("test_migration")
             .with_depends(vec!["dep1".to_string()])
             .with_author("tester");
-        
+
         let header = meta.to_header();
         assert!(header.contains("-- migration: test_migration"));
         assert!(header.contains("-- depends: dep1"));
@@ -198,7 +198,7 @@ mod tests {
             MigrationMeta::new("002_users").with_depends(vec!["001_init".to_string()]),
             MigrationMeta::new("003_posts").with_depends(vec!["002_users".to_string()]),
         ];
-        
+
         let order = validate_dependencies(&migs).unwrap();
         assert_eq!(order, vec!["001_init", "002_users", "003_posts"]);
     }

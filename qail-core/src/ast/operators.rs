@@ -245,20 +245,26 @@ impl Operator {
     /// Returns true if this operator requires a value on the right side.
     /// IS NULL, IS NOT NULL, EXISTS, NOT EXISTS don't need values.
     pub fn needs_value(&self) -> bool {
-        !matches!(self, 
-            Operator::IsNull | 
-            Operator::IsNotNull | 
-            Operator::Exists | 
-            Operator::NotExists
+        !matches!(
+            self,
+            Operator::IsNull | Operator::IsNotNull | Operator::Exists | Operator::NotExists
         )
     }
 
     /// Returns true if this operator is a simple binary operator (col OP value).
     pub fn is_simple_binary(&self) -> bool {
-        matches!(self,
-            Operator::Eq | Operator::Ne | Operator::Gt | Operator::Gte |
-            Operator::Lt | Operator::Lte | Operator::Like | Operator::NotLike |
-            Operator::ILike | Operator::NotILike
+        matches!(
+            self,
+            Operator::Eq
+                | Operator::Ne
+                | Operator::Gt
+                | Operator::Gte
+                | Operator::Lt
+                | Operator::Lte
+                | Operator::Like
+                | Operator::NotLike
+                | Operator::ILike
+                | Operator::NotILike
         )
     }
 }

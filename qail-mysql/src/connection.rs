@@ -1,16 +1,16 @@
 //! MySQL connection with TLS and read-only query support.
 
-use std::sync::Arc;
 use bytes::BytesMut;
+use rustls::ClientConfig;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use rustls::ClientConfig;
 
-use crate::auth::{mysql_native_password, caching_sha2_password};
+use crate::auth::{caching_sha2_password, mysql_native_password};
 use crate::protocol::{
-    InitialHandshake, ColumnDef, encode_handshake_response, encode_query,
-    encode_ssl_request, read_len_enc_string, HEADER_SIZE,
+    ColumnDef, HEADER_SIZE, InitialHandshake, encode_handshake_response, encode_query,
+    encode_ssl_request, read_len_enc_string,
 };
 use crate::{MySqlError, MySqlResult};
 
@@ -32,7 +32,7 @@ impl MysqlStream {
         }
         Ok(())
     }
-    
+
     async fn write_all(&mut self, buf: &[u8]) -> MySqlResult<()> {
         match self {
             MysqlStream::Plain(s) => {
@@ -64,48 +64,50 @@ impl MySqlConnection {
     ) -> MySqlResult<Self> {
         let addr = format!("{}:{}", host, port);
         let mut stream = TcpStream::connect(&addr).await?;
-        
+
         // Read initial handshake
         let mut header = [0u8; HEADER_SIZE];
         stream.read_exact(&mut header).await?;
         let packet_len = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
         let mut sequence_id = header[3];
-        
+
         let mut packet = vec![0u8; packet_len];
         stream.read_exact(&mut packet).await?;
-        
+
         let handshake = InitialHandshake::parse(&packet)
             .ok_or_else(|| MySqlError::Protocol("Failed to parse handshake".into()))?;
-        
+
         // Check if server supports SSL
         let ssl_supported = (handshake.capability_flags & 0x00000800) != 0;
         let is_caching_sha2 = handshake.auth_plugin_name.contains("caching_sha2_password");
-        
+
         // If caching_sha2_password, we need TLS for first-time auth
         let mut mysql_stream = if ssl_supported && is_caching_sha2 {
             // Send SSL request
             sequence_id = sequence_id.wrapping_add(1);
             let ssl_request = encode_ssl_request(handshake.character_set);
             Self::send_packet_raw(&mut stream, sequence_id, &ssl_request).await?;
-            
+
             // For local MySQL, skip certificate verification
             let config = ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
                 .with_no_client_auth();
-            
+
             let connector = TlsConnector::from(Arc::new(config));
             let domain = rustls::pki_types::ServerName::try_from(host.to_string())
                 .map_err(|_| MySqlError::Protocol("Invalid hostname".into()))?;
-            
-            let tls_stream = connector.connect(domain, stream).await
+
+            let tls_stream = connector
+                .connect(domain, stream)
+                .await
                 .map_err(|e| MySqlError::Protocol(format!("TLS error: {}", e)))?;
-            
+
             MysqlStream::Tls(Box::new(tls_stream))
         } else {
             MysqlStream::Plain(stream)
         };
-        
+
         // Compute auth response
         let auth_response = if password.is_empty() {
             Vec::new()
@@ -114,10 +116,14 @@ impl MySqlConnection {
         } else {
             mysql_native_password(password.as_bytes(), &handshake.auth_plugin_data).to_vec()
         };
-        
+
         // Send handshake response
         sequence_id = sequence_id.wrapping_add(1);
-        let auth_plugin = if is_caching_sha2 { "caching_sha2_password" } else { "mysql_native_password" };
+        let auth_plugin = if is_caching_sha2 {
+            "caching_sha2_password"
+        } else {
+            "mysql_native_password"
+        };
         let response = encode_handshake_response(
             user,
             &auth_response,
@@ -125,13 +131,13 @@ impl MySqlConnection {
             handshake.character_set,
             auth_plugin,
         );
-        
+
         Self::send_packet(&mut mysql_stream, sequence_id, &response).await?;
-        
+
         // Read auth result
         let (packet, new_seq) = Self::read_packet_internal(&mut mysql_stream).await?;
         sequence_id = new_seq;
-        
+
         // Handle auth response
         match packet.first() {
             Some(0x00) => {} // OK - auth complete
@@ -139,7 +145,8 @@ impl MySqlConnection {
                 // AuthMoreData
                 if packet.get(1) == Some(&0x03) {
                     // Fast auth succeeded, read OK packet
-                    let (ok_packet, new_seq) = Self::read_packet_internal(&mut mysql_stream).await?;
+                    let (ok_packet, new_seq) =
+                        Self::read_packet_internal(&mut mysql_stream).await?;
                     sequence_id = new_seq;
                     if ok_packet.first() != Some(&0x00) && ok_packet.first() != Some(&0xfe) {
                         let msg = String::from_utf8_lossy(&ok_packet[3..]).to_string();
@@ -151,9 +158,10 @@ impl MySqlConnection {
                     let mut pwd = password.as_bytes().to_vec();
                     pwd.push(0); // null terminate
                     Self::send_packet(&mut mysql_stream, sequence_id, &pwd).await?;
-                    
+
                     // Read OK
-                    let (ok_packet, new_seq) = Self::read_packet_internal(&mut mysql_stream).await?;
+                    let (ok_packet, new_seq) =
+                        Self::read_packet_internal(&mut mysql_stream).await?;
                     sequence_id = new_seq;
                     if ok_packet.first() != Some(&0x00) {
                         let msg = String::from_utf8_lossy(&ok_packet).to_string();
@@ -166,7 +174,7 @@ impl MySqlConnection {
                 // Just send empty response - we already authenticated with caching_sha2
                 sequence_id = sequence_id.wrapping_add(1);
                 Self::send_packet(&mut mysql_stream, sequence_id, &[]).await?;
-                
+
                 // Read OK
                 let (ok_packet, _new_seq) = Self::read_packet_internal(&mut mysql_stream).await?;
                 if ok_packet.first() != Some(&0x00) {
@@ -179,57 +187,67 @@ impl MySqlConnection {
                 return Err(MySqlError::Auth(msg));
             }
             other => {
-                return Err(MySqlError::Protocol(format!("Unexpected auth response: {:?}, packet len: {}", other, packet.len())));
+                return Err(MySqlError::Protocol(format!(
+                    "Unexpected auth response: {:?}, packet len: {}",
+                    other,
+                    packet.len()
+                )));
             }
         }
-        
+
         Ok(Self {
             stream: mysql_stream,
             sequence_id,
             read_buf: Vec::with_capacity(65536),
         })
     }
-    
+
     /// Send a packet to the server (raw TcpStream).
     async fn send_packet_raw(stream: &mut TcpStream, seq: u8, data: &[u8]) -> MySqlResult<()> {
         let len = data.len();
         let mut buf = BytesMut::with_capacity(HEADER_SIZE + len);
-        buf.extend_from_slice(&[(len & 0xff) as u8, ((len >> 8) & 0xff) as u8, ((len >> 16) & 0xff) as u8, seq]);
+        buf.extend_from_slice(&[
+            (len & 0xff) as u8,
+            ((len >> 8) & 0xff) as u8,
+            ((len >> 16) & 0xff) as u8,
+            seq,
+        ]);
         buf.extend_from_slice(data);
         stream.write_all(&buf).await?;
         Ok(())
     }
-    
+
     /// Send a packet to the server (MysqlStream).
     async fn send_packet(stream: &mut MysqlStream, seq: u8, data: &[u8]) -> MySqlResult<()> {
         let len = data.len();
         let mut buf = BytesMut::with_capacity(HEADER_SIZE + len);
-        buf.extend_from_slice(&[(len & 0xff) as u8, ((len >> 8) & 0xff) as u8, ((len >> 16) & 0xff) as u8, seq]);
+        buf.extend_from_slice(&[
+            (len & 0xff) as u8,
+            ((len >> 8) & 0xff) as u8,
+            ((len >> 16) & 0xff) as u8,
+            seq,
+        ]);
         buf.extend_from_slice(data);
         stream.write_all(&buf).await?;
         Ok(())
     }
-    
+
     /// Read a packet from MysqlStream (internal helper).
     async fn read_packet_internal(stream: &mut MysqlStream) -> MySqlResult<(Vec<u8>, u8)> {
         let mut header = [0u8; HEADER_SIZE];
         stream.read_exact(&mut header).await?;
-        
+
         let packet_len = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
         let sequence_id = header[3];
-        
+
         let mut packet = vec![0u8; packet_len];
         stream.read_exact(&mut packet).await?;
-        
+
         Ok((packet, sequence_id))
     }
-    
+
     /// Execute a SELECT query and stream rows to callback.
-    pub async fn query_stream<F>(
-        &mut self,
-        sql: &str,
-        mut callback: F,
-    ) -> MySqlResult<u64>
+    pub async fn query_stream<F>(&mut self, sql: &str, mut callback: F) -> MySqlResult<u64>
     where
         F: FnMut(&[Vec<u8>]),
     {
@@ -237,21 +255,21 @@ impl MySqlConnection {
         self.sequence_id = 0;
         let query = encode_query(sql);
         Self::send_packet(&mut self.stream, self.sequence_id, &query).await?;
-        
+
         // Read column count
         let packet = self.read_packet().await?;
         if packet.first() == Some(&0xff) {
             let msg = String::from_utf8_lossy(&packet[3..]).to_string();
             return Err(MySqlError::Protocol(msg));
         }
-        
+
         let mut buf = &packet[..];
         let column_count = crate::protocol::read_len_enc_int(&mut buf) as usize;
-        
+
         if column_count == 0 {
             return Ok(0);
         }
-        
+
         // Read column definitions
         let mut columns = Vec::with_capacity(column_count);
         for _ in 0..column_count {
@@ -260,17 +278,17 @@ impl MySqlConnection {
                 columns.push(col);
             }
         }
-        
+
         // Read EOF packet
         let _eof = self.read_packet().await?;
-        
+
         // Read rows
         let mut row_count = 0u64;
         let mut row_values: Vec<Vec<u8>> = vec![Vec::new(); column_count];
-        
+
         loop {
             let packet = self.read_packet().await?;
-            
+
             match packet.first() {
                 Some(0xfe) if packet.len() < 9 => {
                     // EOF packet - end of result set
@@ -290,30 +308,32 @@ impl MySqlConnection {
                 }
             }
         }
-        
+
         Ok(row_count)
     }
-    
+
     /// Read a single packet from the stream.
     async fn read_packet(&mut self) -> MySqlResult<Vec<u8>> {
         let mut header = [0u8; HEADER_SIZE];
         self.stream.read_exact(&mut header).await?;
-        
+
         let packet_len = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
         self.sequence_id = header[3];
-        
+
         if self.read_buf.len() < packet_len {
             self.read_buf.resize(packet_len, 0);
         }
-        self.stream.read_exact(&mut self.read_buf[..packet_len]).await?;
-        
+        self.stream
+            .read_exact(&mut self.read_buf[..packet_len])
+            .await?;
+
         Ok(self.read_buf[..packet_len].to_vec())
     }
-    
+
     /// Execute query and collect all rows into TSV format (for COPY).
     pub async fn query_to_tsv(&mut self, sql: &str) -> MySqlResult<Vec<u8>> {
         let mut buffer = Vec::with_capacity(1024 * 1024);
-        
+
         self.query_stream(sql, |row| {
             for (i, col) in row.iter().enumerate() {
                 if i > 0 {
@@ -326,8 +346,9 @@ impl MySqlConnection {
                 }
             }
             buffer.push(b'\n');
-        }).await?;
-        
+        })
+        .await?;
+
         Ok(buffer)
     }
 }
@@ -347,7 +368,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
-    
+
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
@@ -356,7 +377,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
-    
+
     fn verify_tls13_signature(
         &self,
         _message: &[u8],
@@ -365,7 +386,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
     }
-    
+
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         vec![
             rustls::SignatureScheme::RSA_PKCS1_SHA256,

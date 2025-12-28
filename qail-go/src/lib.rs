@@ -6,9 +6,9 @@
 // FFI functions check pointers before dereferencing, clippy doesn't understand this pattern
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::ffi::{CStr, c_char, c_int};
 use qail_core::prelude::*;
 use qail_pg::protocol::AstEncoder;
+use std::ffi::{CStr, c_char, c_int};
 
 /// Opaque handle to QailCmd
 pub struct QailCmdHandle {
@@ -51,7 +51,9 @@ pub extern "C" fn qail_del(table: *const c_char) -> *mut QailCmdHandle {
 /// Add column to command
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_cmd_column(handle: *mut QailCmdHandle, col: *const c_char) {
-    if handle.is_null() { return; }
+    if handle.is_null() {
+        return;
+    }
     let col = unsafe { CStr::from_ptr(col).to_str().unwrap_or("") };
     unsafe {
         (*handle).cmd.columns.push(Expr::Named(col.to_string()));
@@ -66,7 +68,9 @@ pub extern "C" fn qail_cmd_filter_int(
     op: c_int,
     value: i64,
 ) {
-    if handle.is_null() { return; }
+    if handle.is_null() {
+        return;
+    }
     let col = unsafe { CStr::from_ptr(col).to_str().unwrap_or("") };
     let operator = int_to_operator(op);
     unsafe {
@@ -82,7 +86,9 @@ pub extern "C" fn qail_cmd_filter_str(
     op: c_int,
     value: *const c_char,
 ) {
-    if handle.is_null() { return; }
+    if handle.is_null() {
+        return;
+    }
     let col = unsafe { CStr::from_ptr(col).to_str().unwrap_or("") };
     let value = unsafe { CStr::from_ptr(value).to_str().unwrap_or("") };
     let operator = int_to_operator(op);
@@ -99,7 +105,9 @@ pub extern "C" fn qail_cmd_filter_bool(
     op: c_int,
     value: c_int,
 ) {
-    if handle.is_null() { return; }
+    if handle.is_null() {
+        return;
+    }
     let col = unsafe { CStr::from_ptr(col).to_str().unwrap_or("") };
     let operator = int_to_operator(op);
     let bool_val = value != 0;
@@ -111,7 +119,9 @@ pub extern "C" fn qail_cmd_filter_bool(
 /// Set LIMIT
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_cmd_limit(handle: *mut QailCmdHandle, limit: i64) {
-    if handle.is_null() { return; }
+    if handle.is_null() {
+        return;
+    }
     unsafe {
         (*handle).cmd = (*handle).cmd.clone().limit(limit);
     }
@@ -120,7 +130,9 @@ pub extern "C" fn qail_cmd_limit(handle: *mut QailCmdHandle, limit: i64) {
 /// Set OFFSET
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_cmd_offset(handle: *mut QailCmdHandle, offset: i64) {
-    if handle.is_null() { return; }
+    if handle.is_null() {
+        return;
+    }
     unsafe {
         (*handle).cmd = (*handle).cmd.clone().offset(offset);
     }
@@ -130,23 +142,24 @@ pub extern "C" fn qail_cmd_offset(handle: *mut QailCmdHandle, offset: i64) {
 /// Returns pointer to bytes, sets out_len to length
 /// Caller must free with qail_bytes_free
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_cmd_encode(
-    handle: *const QailCmdHandle,
-    out_len: *mut usize,
-) -> *mut u8 {
+pub extern "C" fn qail_cmd_encode(handle: *const QailCmdHandle, out_len: *mut usize) -> *mut u8 {
     if handle.is_null() {
-        unsafe { *out_len = 0; }
+        unsafe {
+            *out_len = 0;
+        }
         return std::ptr::null_mut();
     }
-    
+
     let cmd = unsafe { &(*handle).cmd };
     let (wire_bytes, _params) = AstEncoder::encode_cmd(cmd);
     let bytes = wire_bytes.to_vec();
-    
+
     let len = bytes.len();
     let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
-    
-    unsafe { *out_len = len; }
+
+    unsafe {
+        *out_len = len;
+    }
     ptr
 }
 
@@ -159,10 +172,12 @@ pub extern "C" fn qail_batch_encode(
     out_len: *mut usize,
 ) -> *mut u8 {
     if handles.is_null() || count == 0 {
-        unsafe { *out_len = 0; }
+        unsafe {
+            *out_len = 0;
+        }
         return std::ptr::null_mut();
     }
-    
+
     // Collect all commands
     let mut cmds = Vec::with_capacity(count);
     for i in 0..count {
@@ -172,15 +187,17 @@ pub extern "C" fn qail_batch_encode(
             cmds.push(cmd.clone());
         }
     }
-    
+
     // Encode batch
     let wire_bytes = AstEncoder::encode_batch(&cmds);
     let bytes = wire_bytes.to_vec();
-    
+
     let len = bytes.len();
     let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
-    
-    unsafe { *out_len = len; }
+
+    unsafe {
+        *out_len = len;
+    }
     ptr
 }
 
@@ -188,7 +205,9 @@ pub extern "C" fn qail_batch_encode(
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_cmd_free(handle: *mut QailCmdHandle) {
     if !handle.is_null() {
-        unsafe { let _ = Box::from_raw(handle); }
+        unsafe {
+            let _ = Box::from_raw(handle);
+        }
     }
 }
 
@@ -229,68 +248,71 @@ fn int_to_operator(op: c_int) -> Operator {
 
 /// Encode SELECT directly without intermediate handle.
 /// ONE CGO call instead of 5+!
-/// 
+///
 /// columns: comma-separated column names (e.g., "id,name")
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_encode_select_fast(
     table: *const c_char,
-    columns: *const c_char,  // comma-separated
+    columns: *const c_char, // comma-separated
     limit: i64,
     out_len: *mut usize,
 ) -> *mut u8 {
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
     let columns_str = unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") };
-    
+
     // Build command directly
     let mut cmd = QailCmd::get(table);
-    
+
     // Parse comma-separated columns
     if !columns_str.is_empty() && columns_str != "*" {
         for col in columns_str.split(',') {
             cmd.columns.push(Expr::Named(col.trim().to_string()));
         }
     }
-    
+
     // Add limit
     if limit > 0 {
         cmd = cmd.limit(limit);
     }
-    
+
     // Encode directly
     let (wire_bytes, _params) = AstEncoder::encode_cmd(&cmd);
     let bytes = wire_bytes.to_vec();
-    
+
     let len = bytes.len();
     let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
-    
-    unsafe { *out_len = len; }
+
+    unsafe {
+        *out_len = len;
+    }
     ptr
 }
 
 /// Encode batch of SELECT queries with same structure but different limits.
 /// Returns all wire bytes in one buffer.
-/// 
+///
 /// ONE CGO call for entire batch!
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_encode_select_batch_fast(
     table: *const c_char,
-    columns: *const c_char,  // comma-separated
-    limits: *const i64,      // array of limit values
+    columns: *const c_char, // comma-separated
+    limits: *const i64,     // array of limit values
     count: usize,
     out_len: *mut usize,
 ) -> *mut u8 {
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
     let columns_str = unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") };
-    
+
     // Pre-parse columns once
     let col_exprs: Vec<Expr> = if !columns_str.is_empty() && columns_str != "*" {
-        columns_str.split(',')
+        columns_str
+            .split(',')
             .map(|col| Expr::Named(col.trim().to_string()))
             .collect()
     } else {
         vec![]
     };
-    
+
     // Build all commands
     let mut cmds = Vec::with_capacity(count);
     for i in 0..count {
@@ -302,15 +324,17 @@ pub extern "C" fn qail_encode_select_batch_fast(
         }
         cmds.push(cmd);
     }
-    
+
     // Encode batch
     let wire_bytes = AstEncoder::encode_batch(&cmds);
     let bytes = wire_bytes.to_vec();
-    
+
     let len = bytes.len();
     let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
-    
-    unsafe { *out_len = len; }
+
+    unsafe {
+        *out_len = len;
+    }
     ptr
 }
 
@@ -319,10 +343,10 @@ pub extern "C" fn qail_encode_select_batch_fast(
 // =============================================================================
 
 use once_cell::sync::Lazy;
-use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, oneshot};
 use qail_pg::PgConnection;
 use std::sync::Mutex;
+use tokio::runtime::Runtime;
+use tokio::sync::{mpsc, oneshot};
 
 /// Global Tokio runtime - multi-thread for CGO compatibility
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
@@ -359,18 +383,18 @@ pub extern "C" fn qail_connect_v2(
     let host = unsafe { CStr::from_ptr(host).to_str().unwrap_or("127.0.0.1") }.to_string();
     let user = unsafe { CStr::from_ptr(user).to_str().unwrap_or("postgres") }.to_string();
     let database = unsafe { CStr::from_ptr(database).to_str().unwrap_or("postgres") }.to_string();
-    
+
     let (tx, mut rx) = mpsc::unbounded_channel::<ConnCmd>();
-    
+
     // Spawn connection task that lives for duration of connection
     RUNTIME.spawn(async move {
         let conn_result = PgConnection::connect(&host, port, &user, &database).await;
-        
+
         let mut conn = match conn_result {
             Ok(c) => c,
             Err(_) => return, // Connection failed, task exits
         };
-        
+
         // Process commands until Close or channel drops
         while let Some(cmd) = rx.recv().await {
             match cmd {
@@ -382,10 +406,10 @@ pub extern "C" fn qail_connect_v2(
             }
         }
     });
-    
+
     // Small delay to let connection establish
     std::thread::sleep(std::time::Duration::from_millis(50));
-    
+
     Box::into_raw(Box::new(ConnHandleV2 { tx }))
 }
 
@@ -402,19 +426,20 @@ pub extern "C" fn qail_execute_batch_v2(
     if conn_handle.is_null() || count == 0 {
         return -1;
     }
-    
+
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
     let columns_str = unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") };
-    
+
     // Pre-parse columns once
     let col_exprs: Vec<Expr> = if !columns_str.is_empty() && columns_str != "*" {
-        columns_str.split(',')
+        columns_str
+            .split(',')
             .map(|col| Expr::Named(col.trim().to_string()))
             .collect()
     } else {
         vec![]
     };
-    
+
     // Build all commands
     let mut cmds = Vec::with_capacity(count);
     for i in 0..count {
@@ -426,15 +451,22 @@ pub extern "C" fn qail_execute_batch_v2(
         }
         cmds.push(cmd);
     }
-    
+
     // Send via channel - async task processes it
     let handle = unsafe { &*conn_handle };
     let (reply_tx, reply_rx) = oneshot::channel();
-    
-    if handle.tx.send(ConnCmd::ExecuteBatch { cmds, reply: reply_tx }).is_err() {
+
+    if handle
+        .tx
+        .send(ConnCmd::ExecuteBatch {
+            cmds,
+            reply: reply_tx,
+        })
+        .is_err()
+    {
         return -1;
     }
-    
+
     // Wait for result via oneshot (this DOES block, but with less overhead)
     match reply_rx.blocking_recv() {
         Ok(Ok(n)) => n as i64,
@@ -467,11 +499,10 @@ pub extern "C" fn qail_connect(
     let host = unsafe { CStr::from_ptr(host).to_str().unwrap_or("127.0.0.1") };
     let user = unsafe { CStr::from_ptr(user).to_str().unwrap_or("postgres") };
     let database = unsafe { CStr::from_ptr(database).to_str().unwrap_or("postgres") };
-    
-    let result = RUNTIME.block_on(async {
-        PgConnection::connect(host, port, user, database).await
-    });
-    
+
+    let result =
+        RUNTIME.block_on(async { PgConnection::connect(host, port, user, database).await });
+
     match result {
         Ok(conn) => Box::into_raw(Box::new(ConnHandle {
             conn: Mutex::new(Some(conn)),
@@ -491,18 +522,19 @@ pub extern "C" fn qail_execute_batch(
     if conn_handle.is_null() || count == 0 {
         return -1;
     }
-    
+
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
     let columns_str = unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") };
-    
+
     let col_exprs: Vec<Expr> = if !columns_str.is_empty() && columns_str != "*" {
-        columns_str.split(',')
+        columns_str
+            .split(',')
             .map(|col| Expr::Named(col.trim().to_string()))
             .collect()
     } else {
         vec![]
     };
-    
+
     let mut cmds = Vec::with_capacity(count);
     for i in 0..count {
         let limit = unsafe { *limits.add(i) };
@@ -513,15 +545,13 @@ pub extern "C" fn qail_execute_batch(
         }
         cmds.push(cmd);
     }
-    
+
     let handle = unsafe { &*conn_handle };
     let mut guard = handle.conn.lock().unwrap();
-    
+
     if let Some(conn) = guard.as_mut() {
-        let result = RUNTIME.block_on(async {
-            conn.pipeline_ast_fast(&cmds).await
-        });
-        
+        let result = RUNTIME.block_on(async { conn.pipeline_ast_fast(&cmds).await });
+
         match result {
             Ok(n) => n as i64,
             Err(_) => -1,
@@ -534,7 +564,8 @@ pub extern "C" fn qail_execute_batch(
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_conn_close(handle: *mut ConnHandle) {
     if !handle.is_null() {
-        unsafe { let _ = Box::from_raw(handle); }
+        unsafe {
+            let _ = Box::from_raw(handle);
+        }
     }
 }
-

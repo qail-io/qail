@@ -5,7 +5,7 @@
 //! # Example
 //! ```
 //! use qail_core::schema::Schema;
-//! 
+//!
 //! let json = r#"{
 //!     "tables": [{
 //!         "name": "users",
@@ -15,13 +15,13 @@
 //!         ]
 //!     }]
 //! }"#;
-//! 
+//!
 //! let schema: Schema = serde_json::from_str(json).unwrap();
 //! let validator = schema.to_validator();
 //! ```
 
-use serde::{Deserialize, Serialize};
 use crate::validator::Validator;
+use serde::{Deserialize, Serialize};
 
 /// Database schema definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +75,7 @@ impl Schema {
     }
 
     /// Load schema from QAIL schema format (schema.qail).
-    /// 
+    ///
     /// Parses text like:
     /// ```text
     /// table users (
@@ -87,28 +87,30 @@ impl Schema {
     pub fn from_qail_schema(input: &str) -> Result<Self, String> {
         let mut schema = Schema::new();
         let mut current_table: Option<TableDef> = None;
-        
+
         for line in input.lines() {
             let line = line.trim();
-            
+
             // Skip empty lines and comments
             if line.is_empty() || line.starts_with("--") {
                 continue;
             }
-            
+
             // Match "table tablename ("
             if let Some(rest) = line.strip_prefix("table ") {
                 // Save previous table if any
                 if let Some(t) = current_table.take() {
                     schema.tables.push(t);
                 }
-                
+
                 // Parse table name: "table users (" -> "users"
                 // Skip "table "
-                let name = rest.split('(').next()
+                let name = rest
+                    .split('(')
+                    .next()
                     .map(|s| s.trim())
                     .ok_or_else(|| format!("Invalid table line: {}", line))?;
-                
+
                 current_table = Some(TableDef::new(name));
             }
             // Match closing paren
@@ -121,15 +123,15 @@ impl Schema {
             else if let Some(ref mut table) = current_table {
                 // Remove trailing comma
                 let line = line.trim_end_matches(',');
-                
+
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
                     let col_name = parts[0];
                     let col_type = parts[1];
-                    let not_null = parts.len() > 2 && 
-                        parts.iter().any(|&p| p.eq_ignore_ascii_case("not")) &&
-                        parts.iter().any(|&p| p.eq_ignore_ascii_case("null"));
-                    
+                    let not_null = parts.len() > 2
+                        && parts.iter().any(|&p| p.eq_ignore_ascii_case("not"))
+                        && parts.iter().any(|&p| p.eq_ignore_ascii_case("null"));
+
                     table.columns.push(ColumnDef {
                         name: col_name.to_string(),
                         typ: col_type.to_string(),
@@ -139,12 +141,12 @@ impl Schema {
                 }
             }
         }
-        
+
         // Don't forget the last table
         if let Some(t) = current_table {
             schema.tables.push(t);
         }
-        
+
         Ok(schema)
     }
 
@@ -152,7 +154,7 @@ impl Schema {
     pub fn from_file(path: &std::path::Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-        
+
         // Detect format: .json -> JSON, else -> QAIL schema
         if path.extension().map(|e| e == "json").unwrap_or(false) {
             Self::from_json(&content).map_err(|e| e.to_string())
@@ -231,7 +233,9 @@ mod tests {
     fn test_schema_to_validator() {
         let schema = Schema {
             tables: vec![
-                TableDef::new("users").pk("id", "uuid").column("email", "varchar"),
+                TableDef::new("users")
+                    .pk("id", "uuid")
+                    .column("email", "varchar"),
             ],
         };
 

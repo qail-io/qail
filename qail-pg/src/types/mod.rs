@@ -2,13 +2,13 @@
 //!
 //! This module provides traits for converting Rust types to/from PostgreSQL wire format.
 
-pub mod temporal;
 pub mod numeric;
+pub mod temporal;
 
-pub use temporal::{Timestamp, Date, Time};
 pub use numeric::Numeric;
+pub use temporal::{Date, Time, Timestamp};
 
-use crate::protocol::types::{oid, decode_uuid, decode_jsonb, decode_json, decode_text_array};
+use crate::protocol::types::{decode_json, decode_jsonb, decode_text_array, decode_uuid, oid};
 
 /// Error type for type conversion failures.
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ impl std::error::Error for TypeError {}
 /// Trait for converting PostgreSQL binary/text data to Rust types.
 pub trait FromPg: Sized {
     /// Convert from PostgreSQL wire format.
-    /// 
+    ///
     /// # Arguments
     /// * `bytes` - Raw bytes from PostgreSQL (may be text or binary format)
     /// * `oid` - PostgreSQL type OID
@@ -81,7 +81,9 @@ impl FromPg for i32 {
         if format == 1 {
             // Binary format: 4 bytes big-endian
             if bytes.len() != 4 {
-                return Err(TypeError::InvalidData("Expected 4 bytes for i32".to_string()));
+                return Err(TypeError::InvalidData(
+                    "Expected 4 bytes for i32".to_string(),
+                ));
             }
             Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         } else {
@@ -105,11 +107,12 @@ impl FromPg for i64 {
         if format == 1 {
             // Binary format: 8 bytes big-endian
             if bytes.len() != 8 {
-                return Err(TypeError::InvalidData("Expected 8 bytes for i64".to_string()));
+                return Err(TypeError::InvalidData(
+                    "Expected 8 bytes for i64".to_string(),
+                ));
             }
             Ok(i64::from_be_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]))
         } else {
             // Text format
@@ -134,11 +137,12 @@ impl FromPg for f64 {
         if format == 1 {
             // Binary format: 8 bytes IEEE 754
             if bytes.len() != 8 {
-                return Err(TypeError::InvalidData("Expected 8 bytes for f64".to_string()));
+                return Err(TypeError::InvalidData(
+                    "Expected 8 bytes for f64".to_string(),
+                ));
             }
             Ok(f64::from_be_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]))
         } else {
             // Text format
@@ -189,14 +193,15 @@ pub struct Uuid(pub String);
 impl FromPg for Uuid {
     fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
         if oid_val != oid::UUID {
-            return Err(TypeError::UnexpectedOid { expected: "uuid", got: oid_val });
+            return Err(TypeError::UnexpectedOid {
+                expected: "uuid",
+                got: oid_val,
+            });
         }
-        
+
         if format == 1 && bytes.len() == 16 {
             // Binary format: 16 bytes
-            decode_uuid(bytes)
-                .map(Uuid)
-                .map_err(TypeError::InvalidData)
+            decode_uuid(bytes).map(Uuid).map_err(TypeError::InvalidData)
         } else {
             // Text format
             String::from_utf8(bytes.to_vec())
@@ -244,18 +249,15 @@ impl ToPg for Json {
 
 impl FromPg for Vec<String> {
     fn from_pg(bytes: &[u8], _oid: u32, _format: i16) -> Result<Self, TypeError> {
-        let s = std::str::from_utf8(bytes)
-            .map_err(|e| TypeError::InvalidData(e.to_string()))?;
+        let s = std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
         Ok(decode_text_array(s))
     }
 }
 
 impl FromPg for Vec<i64> {
     fn from_pg(bytes: &[u8], _oid: u32, _format: i16) -> Result<Self, TypeError> {
-        let s = std::str::from_utf8(bytes)
-            .map_err(|e| TypeError::InvalidData(e.to_string()))?;
-        crate::protocol::types::decode_int_array(s)
-            .map_err(TypeError::InvalidData)
+        let s = std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
+        crate::protocol::types::decode_int_array(s).map_err(TypeError::InvalidData)
     }
 }
 
@@ -322,8 +324,8 @@ mod tests {
     #[test]
     fn test_uuid_from_pg_binary() {
         let uuid_bytes: [u8; 16] = [
-            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4,
-            0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00,
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
         ];
         let result = Uuid::from_pg(&uuid_bytes, oid::UUID, 1).unwrap();
         assert_eq!(result.0, "550e8400-e29b-41d4-a716-446655440000");
