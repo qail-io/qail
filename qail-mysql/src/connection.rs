@@ -17,7 +17,7 @@ use crate::{MySqlError, MySqlResult};
 /// MySQL stream wrapper supporting both plain and TLS connections.
 enum MysqlStream {
     Plain(TcpStream),
-    Tls(tokio_rustls::client::TlsStream<TcpStream>),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
 }
 
 impl MysqlStream {
@@ -88,13 +88,6 @@ impl MySqlConnection {
             let ssl_request = encode_ssl_request(handshake.character_set);
             Self::send_packet_raw(&mut stream, sequence_id, &ssl_request).await?;
             
-            // Upgrade to TLS
-            let tls_config = ClientConfig::builder()
-                .with_root_certificates(rustls::RootCertStore::from_iter(
-                    webpki_roots::TLS_SERVER_ROOTS.iter().cloned()
-                ))
-                .with_no_client_auth();
-            
             // For local MySQL, skip certificate verification
             let config = ClientConfig::builder()
                 .dangerous()
@@ -108,7 +101,7 @@ impl MySqlConnection {
             let tls_stream = connector.connect(domain, stream).await
                 .map_err(|e| MySqlError::Protocol(format!("TLS error: {}", e)))?;
             
-            MysqlStream::Tls(tls_stream)
+            MysqlStream::Tls(Box::new(tls_stream))
         } else {
             MysqlStream::Plain(stream)
         };

@@ -7,7 +7,8 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::ffi::{CStr, c_char};
-use std::sync::Mutex;
+use std::sync::Mutex as SyncMutex;
+use tokio::sync::Mutex as AsyncMutex;
 use qail_core::prelude::*;
 use qail_pg::protocol::AstEncoder;
 use qail_pg::driver::PreparedStatement as PgPreparedStatement;
@@ -24,16 +25,14 @@ static RUNTIME: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
 });
 
 // ==================== Connection Handle ====================
-// Opaque handle for PHP - wraps PgConnection in a Mutex for thread safety
+// Opaque handle for PHP - wraps PgConnection in an async Mutex for thread safety
 pub struct QailConnection {
-    inner: Mutex<qail_pg::PgConnection>,
+    inner: AsyncMutex<qail_pg::PgConnection>,
 }
 
 // ==================== Prepared Statement Handle ====================
 pub struct QailPreparedStatement {
-    name: String,
     sql: String,
-    param_count: usize,
 }
 
 // ==================== Encoding Functions (existing) ====================
@@ -213,7 +212,7 @@ pub extern "C" fn qail_connect(
     match result {
         Ok(conn) => {
             let handle = Box::new(QailConnection {
-                inner: Mutex::new(conn),
+                inner: AsyncMutex::new(conn),
             });
             Box::into_raw(handle)
         }
@@ -248,18 +247,14 @@ pub extern "C" fn qail_prepare(
     let conn_ref = unsafe { &*conn };
     
     let result = RUNTIME.block_on(async {
-        let mut conn_guard = conn_ref.inner.lock().unwrap();
+        let mut conn_guard = conn_ref.inner.lock().await;
         conn_guard.prepare(sql_str).await
     });
     
     match result {
-        Ok(stmt) => {
-            // Use public accessors - param_count from SQL $ placeholders
-            let param_count = sql_str.matches('$').count();
+        Ok(_stmt) => {
             let handle = Box::new(QailPreparedStatement {
-                name: stmt.name().to_string(),
                 sql: sql_str.to_string(),
-                param_count,
             });
             Box::into_raw(handle)
         }
@@ -318,7 +313,7 @@ pub extern "C" fn qail_pipeline_exec(
     
     // Execute pipeline
     let result = RUNTIME.block_on(async {
-        let mut conn_guard = conn_ref.inner.lock().unwrap();
+        let mut conn_guard = conn_ref.inner.lock().await;
         
         // Create PreparedStatement handle for driver using from_sql
         let driver_stmt = PgPreparedStatement::from_sql(&stmt_ref.sql);
@@ -366,7 +361,7 @@ pub extern "C" fn qail_pipeline_exec_json(
     
     // Execute pipeline with results
     let result = RUNTIME.block_on(async {
-        let mut conn_guard = conn_ref.inner.lock().unwrap();
+        let mut conn_guard = conn_ref.inner.lock().await;
         
         let driver_stmt = PgPreparedStatement::from_sql(&stmt_ref.sql);
         
@@ -450,7 +445,7 @@ pub extern "C" fn qail_pipeline_exec_limits(
     
     // Execute pipeline
     let result = RUNTIME.block_on(async {
-        let mut conn_guard = conn_ref.inner.lock().unwrap();
+        let mut conn_guard = conn_ref.inner.lock().await;
         let driver_stmt = PgPreparedStatement::from_sql(&stmt_ref.sql);
         conn_guard.pipeline_prepared_fast(&driver_stmt, &params_batch).await
     });
@@ -469,7 +464,7 @@ pub struct QailCopyStream {
     conn: *mut QailConnection,
     table: String,
     columns: Vec<String>,
-    buffer: Mutex<Vec<u8>>,
+    buffer: SyncMutex<Vec<u8>>,
     row_count: std::sync::atomic::AtomicUsize,
 }
 
@@ -510,7 +505,7 @@ pub extern "C" fn qail_copy_start(
         conn,
         table,
         columns,
-        buffer: Mutex::new(Vec::with_capacity(1024 * 1024)), // 1MB initial buffer
+        buffer: SyncMutex::new(Vec::with_capacity(1024 * 1024)), // 1MB initial buffer
         row_count: std::sync::atomic::AtomicUsize::new(0),
     });
     
@@ -667,7 +662,7 @@ pub extern "C" fn qail_copy_end(stream: *mut QailCopyStream) -> i64 {
     
     // Execute COPY using Rust's async runtime
     let result = RUNTIME.block_on(async {
-        let mut conn_guard = conn_ref.inner.lock().unwrap();
+        let mut conn_guard = conn_ref.inner.lock().await;
         
         // Use copy_in_raw for maximum speed
         conn_guard.copy_in_raw(
@@ -762,7 +757,7 @@ pub extern "C" fn qail_mysql_to_pg(
         };
         
         // Write to PostgreSQL using COPY
-        let mut pg_guard = pg_conn_ref.inner.lock().unwrap();
+        let mut pg_guard = pg_conn_ref.inner.lock().await;
         match pg_guard.copy_in_raw(pg_table, &pg_columns, &tsv_data).await {
             Ok(count) => Ok(count),
             Err(e) => Err(format!("PostgreSQL COPY failed: {}", e)),
