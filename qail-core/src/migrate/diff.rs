@@ -85,6 +85,9 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<QailCmd> {
                 if let Some(def) = &col.default {
                     constraints.push(Constraint::Default(def.clone()));
                 }
+                if let Some(ref fk) = col.foreign_key {
+                    constraints.push(Constraint::References(format!("{}({})", fk.table, fk.column)));
+                }
                 
                 Expr::Def {
                     name: col.name.clone(),

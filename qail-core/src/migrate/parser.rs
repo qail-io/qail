@@ -141,6 +141,28 @@ fn parse_column(line: &str) -> Result<Column, String> {
                     i += 1;
                 }
             }
+            s if s.starts_with("references") => {
+                // Handle "references table(column)" format
+                let fk_str = if s.contains('(') {
+                    // references is attached: "references users(id)"
+                    s.strip_prefix("references").unwrap_or(s)
+                } else if i + 1 < parts.len() {
+                    // references is separate: "references" "users(id)"
+                    i += 1;
+                    parts[i]
+                } else {
+                    ""
+                };
+                
+                // Parse "table(column)" format
+                if let Some(paren_start) = fk_str.find('(') {
+                    if let Some(paren_end) = fk_str.find(')') {
+                        let table = &fk_str[..paren_start];
+                        let column = &fk_str[paren_start + 1..paren_end];
+                        col = col.references(table, column);
+                    }
+                }
+            }
             _ => {
                 // Unknown constraint, might be part of default value
             }

@@ -18,6 +18,7 @@ pub fn cmd_to_sql(cmd: &QailCmd) -> String {
                             Constraint::Nullable => {},
                             Constraint::Unique => col_def.push_str(" UNIQUE"),
                             Constraint::Default(v) => col_def.push_str(&format!(" DEFAULT {}", v)),
+                            Constraint::References(target) => col_def.push_str(&format!(" REFERENCES {}", target)),
                             _ => {},
                         }
                     }
