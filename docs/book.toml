@@ -3,6 +3,9 @@ title = "QAIL Documentation"
 authors = ["QAIL Team"]
 language = "en"
 
+[build]
+build-dir = "../../qail-web/docs"
+
 [output.html]
 default-theme = "coal"
 preferred-dark-theme = "coal"
