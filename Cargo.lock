@@ -2172,7 +2172,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "qail-bench"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "criterion",
  "qail-core",
@@ -2202,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "chrono",
  "colored 3.0.0",
@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "qail-encoder"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "qail-core",
  "qail-pg",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "qail-ffi"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "qail-core",
  "qail-pg",
@@ -2248,7 +2248,7 @@ dependencies = [
 
 [[package]]
 name = "qail-go"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "libc",
  "once_cell",
@@ -2259,13 +2259,26 @@ dependencies = [
 
 [[package]]
 name = "qail-lsp"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "qail-core",
  "serde",
  "serde_json",
  "tokio",
  "tower-lsp",
+]
+
+[[package]]
+name = "qail-mysql"
+version = "0.10.2"
+dependencies = [
+ "bytes",
+ "rustls",
+ "sha1",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -2296,16 +2309,19 @@ dependencies = [
 
 [[package]]
 name = "qail-php"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "libc",
+ "once_cell",
  "qail-core",
+ "qail-mysql",
  "qail-pg",
+ "tokio",
 ]
 
 [[package]]
 name = "qail-py"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "once_cell",
  "pyo3",
@@ -2317,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "qail-wasm"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "js-sys",
  "qail-core",
@@ -2614,6 +2630,7 @@ dependencies = [
  "aws-lc-rs",
  "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -3942,6 +3959,24 @@ checksum = "9b32828d774c412041098d182a8b38b16ea816958e07cf40eec2bc080ae137ac"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.4",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2878ef029c47c6e8cf779119f20fcf52bde7ad42a731b2a304bc221df17571e"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
