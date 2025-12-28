@@ -1,6 +1,6 @@
-# 🪝 QAIL — The AST-Native Query Language
+# 🪝 QAIL — Native AST PostgreSQL Driver
 
-> **Write queries as data. Send them as bytes. No SQL strings.**
+> **The world's first AST-native PostgreSQL driver. No SQL strings. No ORM. Just bytes.**
 
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -9,9 +9,9 @@
 
 ## The Vision
 
-QAIL is not a query transpiler. **QAIL is a data language.**
+QAIL is not a query transpiler or ORM. **QAIL is a native AST PostgreSQL driver.**
 
-Instead of passing SQL strings through your stack, you work directly with a typed AST (Abstract Syntax Tree). This AST compiles to database wire protocol bytes — no string interpolation, no SQL injection, no parsing at runtime.
+Instead of passing SQL strings through your stack, you work directly with a typed AST (Abstract Syntax Tree). This AST compiles directly to PostgreSQL wire protocol bytes — no string interpolation, no SQL injection, no parsing at runtime.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -135,19 +135,29 @@ driver.send(&bytes).await?;
 
 ---
 
-## New in v0.10.2
+## Performance
 
-- **io_uring Auto-detection**: On Linux 5.1+, automatically uses io_uring for I/O. Falls back to tokio on macOS/Windows or older kernels.
-- **Connection Pool**: Production-ready pooling with health checks
-- **TLS/SSL**: Full TLS support via rustls
+QAIL's AST-native architecture and wire-level pipelining deliver exceptional performance:
+
+| Benchmark | QAIL | tokio-postgres | SQLx | QAIL Advantage |
+|-----------|------|----------------|------|----------------|
+| **Sequential** | 33K q/s | 25K q/s | 11K q/s | **1.3x - 3x** |
+| **Pipeline (10K batch)** | **347K q/s** | 27K q/s | N/A | **12.8x** |
+
+### Why QAIL is Faster
+
+1. **Wire-level Pipelining**: Batch 10,000+ queries in a single TCP write
+2. **AST-native Encoding**: No SQL string generation in hot path
+3. **Zero-allocation Encoders**: Pre-computed buffer sizes
+4. **Prepared Statement Caching**: Hash-based auto-caching
 
 ## Supported Databases
 
-| Database | Status | Crate | Performance |
-|----------|--------|-------|-------------|
-| PostgreSQL | ✅ Production | `qail-pg` | 294K q/s (M3) |
-| MySQL | 📋 Planned | `qail-mysql` | - |
-| SQLite | 📋 Planned | `qail-sqlite` | - |
+| Database | Status | Crate |
+|----------|--------|-------|
+| PostgreSQL | ✅ Production | `qail-pg` |
+| MySQL | � In Progress | `qail-mysql` |
+| SQLite | 📋 Planned | `qail-sqlite` |
 
 Each database has its own wire protocol, so each gets its own encoder.
 

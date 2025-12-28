@@ -51,6 +51,8 @@ impl PgConnection {
     ///
     /// Like `query()`, but reuses prepared statements across calls.
     /// The statement name is derived from a hash of the SQL text.
+    ///
+    /// OPTIMIZED: Pre-allocated buffer + ultra-fast encoders.
     pub async fn query_cached(
         &mut self,
         sql: &str,
@@ -60,33 +62,42 @@ impl PgConnection {
         let stmt_name = Self::sql_to_stmt_name(sql);
         let is_new = !self.prepared_statements.contains_key(&stmt_name);
 
-        // Build the message: Parse (if new) + Bind + Execute + Sync
-        let mut buf = BytesMut::new();
+        // Pre-calculate buffer size for single allocation
+        let params_size: usize = params
+            .iter()
+            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
+            .sum();
+        
+        // Parse: ~25 + sql.len() + stmt.len(), Bind: ~15 + stmt.len() + params_size, Execute: 10, Sync: 5
+        let estimated_size = if is_new {
+            50 + sql.len() + stmt_name.len() * 2 + params_size
+        } else {
+            30 + stmt_name.len() + params_size
+        };
+        
+        let mut buf = BytesMut::with_capacity(estimated_size);
 
         if is_new {
             // Parse statement with name
             buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
+            // Cache the SQL for debugging
+            self.prepared_statements.insert(stmt_name.clone(), sql.to_string());
         }
 
-        // Bind to named statement
-        buf.extend(PgEncoder::encode_bind("", &stmt_name, params));
-        // Execute
-        buf.extend(PgEncoder::encode_execute("", 0));
-        // Sync
-        buf.extend(PgEncoder::encode_sync());
+        // Use ULTRA-OPTIMIZED encoders - write directly to buffer
+        PgEncoder::encode_bind_to(&mut buf, &stmt_name, params);
+        PgEncoder::encode_execute_to(&mut buf);
+        PgEncoder::encode_sync_to(&mut buf);
 
         self.stream.write_all(&buf).await?;
 
         let mut rows = Vec::new();
-        let sql_owned = sql.to_string(); // For storing in cache
 
         loop {
             let msg = self.recv().await?;
             match msg {
                 BackendMessage::ParseComplete => {
-                    // Statement parsed - store with SQL text for debugging
-                    self.prepared_statements
-                        .insert(stmt_name.clone(), sql_owned.clone());
+                    // Already cached in is_new block above
                 }
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
@@ -129,6 +140,65 @@ impl PgConnection {
                 BackendMessage::CommandComplete(_) => {}
                 BackendMessage::ReadyForQuery(_) => {
                     return Ok(());
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// ZERO-HASH sequential query using pre-computed PreparedStatement.
+    ///
+    /// This is the FASTEST sequential path because it skips:
+    /// - SQL generation from AST (done once outside loop)
+    /// - Hash computation for statement name (pre-computed in PreparedStatement)
+    /// - HashMap lookup for is_new check (statement already prepared)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let stmt = conn.prepare("SELECT * FROM users WHERE id = $1").await?;
+    /// for id in 1..10000 {
+    ///     let rows = conn.query_prepared_single(&stmt, &[Some(id.to_string().into_bytes())]).await?;
+    /// }
+    /// ```
+    #[inline]
+    pub async fn query_prepared_single(
+        &mut self,
+        stmt: &super::PreparedStatement,
+        params: &[Option<Vec<u8>>],
+    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        // Pre-calculate buffer size for single allocation
+        let params_size: usize = params
+            .iter()
+            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
+            .sum();
+        
+        // Bind: ~15 + stmt.name.len() + params_size, Execute: 10, Sync: 5
+        let mut buf = BytesMut::with_capacity(30 + stmt.name.len() + params_size);
+
+        // ZERO HASH, ZERO LOOKUP - just encode and send!
+        PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
+        PgEncoder::encode_execute_to(&mut buf);
+        PgEncoder::encode_sync_to(&mut buf);
+
+        self.stream.write_all(&buf).await?;
+
+        let mut rows = Vec::new();
+
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::BindComplete => {}
+                BackendMessage::RowDescription(_) => {}
+                BackendMessage::DataRow(data) => {
+                    rows.push(data);
+                }
+                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::NoData => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
                     return Err(PgError::Query(err.message));
