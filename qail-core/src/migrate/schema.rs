@@ -278,6 +278,9 @@ pub fn to_qail_string(schema: &Schema) -> String {
             if let Some(def) = &col.default {
                 constraints.push(format!("default {}", def));
             }
+            if let Some(ref fk) = col.foreign_key {
+                constraints.push(format!("references {}({})", fk.table, fk.column));
+            }
             
             let constraint_str = if constraints.is_empty() {
                 String::new()
