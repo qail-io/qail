@@ -11,6 +11,9 @@
 //! qail_free(sql);
 //! ```
 
+// FFI functions check pointers before dereferencing, clippy doesn't understand this pattern
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use qail_core::transpiler::{ToSql, Dialect};

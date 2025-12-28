@@ -3,6 +3,9 @@
 //! Exports functions that PHP can call via FFI extension.
 //! Provides high-performance query encoding and true pipelining.
 
+// FFI functions check pointers before dereferencing, clippy doesn't understand this pattern
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{CStr, c_char};
 use std::sync::Mutex;
 use qail_core::prelude::*;

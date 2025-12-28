@@ -3,6 +3,9 @@
 //! Exports sync encoding functions that Go can call via CGO.
 //! All I/O is done in Go - Rust only handles AST encoding.
 
+// FFI functions check pointers before dereferencing, clippy doesn't understand this pattern
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{CStr, c_char, c_int};
 use qail_core::prelude::*;
 use qail_pg::protocol::AstEncoder;

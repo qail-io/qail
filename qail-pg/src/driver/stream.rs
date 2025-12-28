@@ -12,6 +12,7 @@ use tokio::net::UnixStream;
 use tokio_rustls::client::TlsStream;
 
 /// A PostgreSQL connection stream (TCP, TLS, or Unix).
+#[allow(clippy::large_enum_variant)]
 pub enum PgStream {
     /// Plain TCP connection (unencrypted)
     Tcp(TcpStream),

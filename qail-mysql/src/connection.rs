@@ -289,8 +289,8 @@ impl MySqlConnection {
                 }
                 _ => {
                     let mut buf = &packet[..];
-                    for i in 0..column_count {
-                        row_values[i] = read_len_enc_string(&mut buf);
+                    for row_val in row_values.iter_mut().take(column_count) {
+                        *row_val = read_len_enc_string(&mut buf);
                     }
                     callback(&row_values);
                     row_count += 1;
