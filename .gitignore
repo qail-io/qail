@@ -40,3 +40,4 @@ qail-zig/lib/
 *.txt
 *.prof
 *.test
+docs/book/
