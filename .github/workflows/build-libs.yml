@@ -100,11 +100,3 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Trigger qail-zig update
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.DISPATCH_TOKEN }}
-          repository: qail-io/qail-zig
-          event-type: new-release
-          client-payload: '{"version": "${{ github.ref_name }}"}'
