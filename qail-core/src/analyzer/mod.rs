@@ -12,5 +12,5 @@ mod rust_ast;
 mod scanner;
 
 pub use impact::{BreakingChange, MigrationImpact};
-pub use rust_ast::RustAnalyzer;
+pub use rust_ast::{detect_raw_sql, detect_raw_sql_in_file, RawSqlMatch, RustAnalyzer};
 pub use scanner::{AnalysisMode, CodeReference, CodebaseScanner, FileAnalysis, QueryType, ScanResult};

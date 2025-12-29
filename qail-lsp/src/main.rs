@@ -10,6 +10,7 @@ use qail_core::parse;
 use qail_core::schema::Schema;
 use qail_core::transpiler::ToSql;
 use qail_core::validator::Validator;
+use qail_core::analyzer::detect_raw_sql;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
@@ -522,7 +523,60 @@ impl LanguageServer for QailLanguageServer {
         params: CodeActionParams,
     ) -> Result<Option<Vec<CodeActionOrCommand>>> {
         let mut actions = Vec::new();
+        let uri = params.text_document.uri.clone();
 
+        // Get document content for raw SQL detection
+        let docs = self.documents.read().unwrap();
+        if let Some(content) = docs.get(uri.as_str()) {
+            // Only scan .rs files for raw SQL
+            if uri.as_str().ends_with(".rs") {
+                let sql_matches = detect_raw_sql(content);
+                
+                for sql_match in sql_matches {
+                    // Check if match overlaps with requested range
+                    let match_range = Range {
+                        start: Position {
+                            line: (sql_match.line - 1) as u32,
+                            character: (sql_match.column - 1) as u32,
+                        },
+                        end: Position {
+                            line: (sql_match.end_line - 1) as u32,
+                            character: sql_match.end_column as u32,
+                        },
+                    };
+                    
+                    // Check if requested range overlaps with this SQL match
+                    if params.range.start.line <= match_range.end.line
+                        && params.range.end.line >= match_range.start.line
+                    {
+                        // Create code action to convert to QAIL
+                        let mut changes = HashMap::new();
+                        changes.insert(
+                            uri.clone(),
+                            vec![TextEdit {
+                                range: match_range,
+                                new_text: sql_match.suggested_qail.clone(),
+                            }],
+                        );
+
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: format!("🦀 Convert {} to QAIL (type-safe)", sql_match.sql_type),
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            diagnostics: None,
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }),
+                            is_preferred: Some(true),
+                            ..Default::default()
+                        }));
+                    }
+                }
+            }
+        }
+        drop(docs);
+
+        // Handle schema validation fixes
         for diagnostic in params.context.diagnostics {
             if let Some(code) = &diagnostic.code
                 && let NumberOrString::String(s) = code

@@ -264,6 +264,162 @@ impl RustAnalyzer {
     }
 }
 
+// =============================================================================
+// Raw SQL Detection (for VS Code extension)
+// =============================================================================
+
+/// A raw SQL statement detected in Rust source code
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RawSqlMatch {
+    /// Line number (1-indexed)
+    pub line: usize,
+    /// Column number (1-indexed)
+    pub column: usize,
+    /// End line number (1-indexed)
+    pub end_line: usize,
+    /// End column number (1-indexed)
+    pub end_column: usize,
+    /// Type of SQL statement
+    pub sql_type: String,
+    /// The raw SQL content
+    pub raw_sql: String,
+    /// Suggested QAIL equivalent
+    pub suggested_qail: String,
+}
+
+/// Visitor that finds raw SQL strings in Rust code
+struct SqlDetectorVisitor {
+    matches: Vec<RawSqlMatch>,
+}
+
+impl SqlDetectorVisitor {
+    fn new() -> Self {
+        Self { matches: Vec::new() }
+    }
+
+    /// Check if a string literal contains SQL
+    fn check_string_literal(&mut self, lit: &LitStr) {
+        let value = lit.value();
+        let upper = value.to_uppercase();
+        
+        // Check for SQL keywords
+        let sql_type = if upper.contains("SELECT") && upper.contains("FROM") {
+            "SELECT"
+        } else if upper.contains("INSERT INTO") {
+            "INSERT"
+        } else if upper.contains("UPDATE") && upper.contains("SET") {
+            "UPDATE"
+        } else if upper.contains("DELETE FROM") {
+            "DELETE"
+        } else {
+            return; // Not SQL
+        };
+
+        let span = lit.span();
+        let start = span.start();
+        let end = span.end();
+
+        self.matches.push(RawSqlMatch {
+            line: start.line,
+            column: start.column + 1,
+            end_line: end.line,
+            end_column: end.column + 1,
+            sql_type: sql_type.to_string(),
+            raw_sql: value.clone(),
+            suggested_qail: Self::generate_qail(&value, sql_type),
+        });
+    }
+
+    /// Generate QAIL equivalent for SQL
+    fn generate_qail(sql: &str, sql_type: &str) -> String {
+        match sql_type {
+            "SELECT" => {
+                // Extract table from FROM clause
+                let table = sql
+                    .to_uppercase()
+                    .find("FROM ")
+                    .and_then(|i| {
+                        let rest = &sql[i + 5..];
+                        rest.split_whitespace().next()
+                    })
+                    .unwrap_or("table")
+                    .to_lowercase();
+                
+                format!("QailCmd::get(\"{}\")\n    .columns([\"*\"])", table)
+            }
+            "INSERT" => {
+                let table = sql
+                    .to_uppercase()
+                    .find("INTO ")
+                    .and_then(|i| {
+                        let rest = &sql[i + 5..];
+                        rest.split(|c: char| !c.is_alphanumeric() && c != '_').next()
+                    })
+                    .unwrap_or("table")
+                    .to_lowercase();
+                
+                format!("QailCmd::add(\"{}\")\n    // TODO: add .set_value() calls", table)
+            }
+            "UPDATE" => {
+                let table = sql
+                    .to_uppercase()
+                    .find("UPDATE ")
+                    .and_then(|i| {
+                        let rest = &sql[i + 7..];
+                        rest.split_whitespace().next()
+                    })
+                    .unwrap_or("table")
+                    .to_lowercase();
+                
+                format!("QailCmd::set(\"{}\")\n    // TODO: add .set_value() and .filter() calls", table)
+            }
+            "DELETE" => {
+                let table = sql
+                    .to_uppercase()
+                    .find("FROM ")
+                    .and_then(|i| {
+                        let rest = &sql[i + 5..];
+                        rest.split_whitespace().next()
+                    })
+                    .unwrap_or("table")
+                    .to_lowercase();
+                
+                format!("QailCmd::del(\"{}\")\n    // TODO: add .filter() call", table)
+            }
+            _ => format!("// TODO: Convert to QAIL")
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for SqlDetectorVisitor {
+    fn visit_lit(&mut self, lit: &'ast Lit) {
+        if let Lit::Str(lit_str) = lit {
+            self.check_string_literal(lit_str);
+        }
+        syn::visit::visit_lit(self, lit);
+    }
+}
+
+/// Detect raw SQL strings in a Rust source file
+pub fn detect_raw_sql(source: &str) -> Vec<RawSqlMatch> {
+    match syn::parse_file(source) {
+        Ok(syntax) => {
+            let mut visitor = SqlDetectorVisitor::new();
+            visitor.visit_file(&syntax);
+            visitor.matches
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Detect raw SQL strings in a file by path
+pub fn detect_raw_sql_in_file(path: &Path) -> Vec<RawSqlMatch> {
+    match fs::read_to_string(path) {
+        Ok(source) => detect_raw_sql(&source),
+        Err(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,4 +444,20 @@ mod tests {
         // Should find "status" column
         assert!(visitor.patterns.iter().any(|p| p.columns.contains(&"status".to_string())));
     }
+
+    #[test]
+    fn test_detect_raw_sql() {
+        let code = r#"
+            fn query() {
+                let sql = "SELECT id, name FROM users WHERE status = 'active'";
+                sqlx::query(sql);
+            }
+        "#;
+
+        let matches = detect_raw_sql(code);
+        assert!(!matches.is_empty());
+        assert_eq!(matches[0].sql_type, "SELECT");
+        assert!(matches[0].suggested_qail.contains("QailCmd::get"));
+    }
 }
+
