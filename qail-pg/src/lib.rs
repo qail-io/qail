@@ -56,7 +56,7 @@ pub mod protocol;
 pub mod types;
 
 pub use driver::{
-    PgConnection, PgDriver, PgError, PgPool, PgResult, PgRow, PoolConfig, PoolStats,
+    PgConnection, PgDriver, PgDriverBuilder, PgError, PgPool, PgResult, PgRow, PoolConfig, PoolStats,
     PooledConnection,
 };
 pub use protocol::PgEncoder;

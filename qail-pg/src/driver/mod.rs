@@ -136,6 +136,23 @@ impl PgDriver {
         Self { connection }
     }
 
+    /// Builder pattern for ergonomic connection configuration.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let driver = PgDriver::builder()
+    ///     .host("localhost")
+    ///     .port(5432)
+    ///     .user("admin")
+    ///     .database("mydb")
+    ///     .password("secret")  // Optional
+    ///     .connect()
+    ///     .await?;
+    /// ```
+    pub fn builder() -> PgDriverBuilder {
+        PgDriverBuilder::new()
+    }
+
     /// Connect to PostgreSQL and create a driver (trust mode, no password).
     pub async fn connect(host: &str, port: u16, user: &str, database: &str) -> PgResult<Self> {
         let connection = PgConnection::connect(host, port, user, database).await?;
@@ -648,5 +665,107 @@ impl PgDriver {
         self.connection.commit().await?;
 
         Ok(all_batches)
+    }
+}
+
+// ============================================================================
+// Connection Builder
+// ============================================================================
+
+/// Builder for creating PgDriver connections with named parameters.
+///
+/// # Example
+/// ```ignore
+/// let driver = PgDriver::builder()
+///     .host("localhost")
+///     .port(5432)
+///     .user("admin")
+///     .database("mydb")
+///     .password("secret")
+///     .connect()
+///     .await?;
+/// ```
+#[derive(Default)]
+pub struct PgDriverBuilder {
+    host: Option<String>,
+    port: Option<u16>,
+    user: Option<String>,
+    database: Option<String>,
+    password: Option<String>,
+    timeout: Option<std::time::Duration>,
+}
+
+impl PgDriverBuilder {
+    /// Create a new builder with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the host (default: "127.0.0.1").
+    pub fn host(mut self, host: impl Into<String>) -> Self {
+        self.host = Some(host.into());
+        self
+    }
+
+    /// Set the port (default: 5432).
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    /// Set the username (required).
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
+    }
+
+    /// Set the database name (required).
+    pub fn database(mut self, database: impl Into<String>) -> Self {
+        self.database = Some(database.into());
+        self
+    }
+
+    /// Set the password (optional, for SCRAM-SHA-256 auth).
+    pub fn password(mut self, password: impl Into<String>) -> Self {
+        self.password = Some(password.into());
+        self
+    }
+
+    /// Set connection timeout (optional).
+    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Connect to PostgreSQL using the configured parameters.
+    pub async fn connect(self) -> PgResult<PgDriver> {
+        let host = self.host.as_deref().unwrap_or("127.0.0.1");
+        let port = self.port.unwrap_or(5432);
+        let user = self.user.as_deref().ok_or_else(|| {
+            PgError::Connection("User is required".to_string())
+        })?;
+        let database = self.database.as_deref().ok_or_else(|| {
+            PgError::Connection("Database is required".to_string())
+        })?;
+
+        match (self.password.as_deref(), self.timeout) {
+            (Some(password), Some(timeout)) => {
+                PgDriver::connect_with_timeout(host, port, user, database, password, timeout).await
+            }
+            (Some(password), None) => {
+                PgDriver::connect_with_password(host, port, user, database, password).await
+            }
+            (None, Some(timeout)) => {
+                tokio::time::timeout(
+                    timeout,
+                    PgDriver::connect(host, port, user, database),
+                )
+                .await
+                .map_err(|_| PgError::Connection(format!("Connection timeout after {:?}", timeout)))?
+            }
+            (None, None) => {
+                PgDriver::connect(host, port, user, database).await
+            }
+        }
     }
 }
