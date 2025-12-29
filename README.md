@@ -55,22 +55,22 @@ Instead of passing SQL strings through your stack, you work directly with a type
 
 ```
 qail.rs/
-├── qail-core/          # Layer 1: AST + Parser
+├── core/               # Layer 1: AST + Parser
 │   ├── ast/            #   QailCmd, Expr, Value
 │   ├── parser/         #   Text → AST (for CLI, LSP)
 │   └── transpiler/     #   AST → SQL text (legacy path)
 │
-├── qail-pg/            # PostgreSQL Driver (Rust)
+├── pg/                 # PostgreSQL Driver (Rust)
 │   ├── protocol/       #   Layer 2: AST → BytesMut (pure, sync)
 │   └── driver/         #   Layer 3: Async I/O (tokio)
 │
-├── qail-encoder/       # Lightweight FFI (no tokio/TLS)
+├── encoder/            # Lightweight FFI (no tokio/TLS)
 │                       #   For language bindings: Zig, Go, etc.
 │
-├── qail-cli/           # Command-line tool
-├── qail-lsp/           # Language server
-├── qail-wasm/          # Browser playground
-└── qail-ffi/           # C-API for other languages
+├── cli/                # Command-line tool
+├── lsp/                # Language server
+├── wasm/               # Browser playground
+└── ffi/                # C-API for other languages
 ```
 
 ---
