@@ -14,8 +14,8 @@ use tower_lsp::{Client, LanguageServer};
 pub struct QailLanguageServer {
     pub client: Client,
     pub documents: RwLock<HashMap<String, String>>,
-    #[allow(dead_code)] // Schema support is planned but not yet fully implemented
     pub schema: RwLock<Option<Validator>>,
+    schema_loaded: RwLock<bool>,
 }
 
 impl QailLanguageServer {
@@ -24,13 +24,28 @@ impl QailLanguageServer {
             client,
             documents: RwLock::new(HashMap::new()),
             schema: RwLock::new(None),
+            schema_loaded: RwLock::new(false),
         }
     }
 
-    /// Load schema from workspace
-    #[allow(dead_code)] // Will be used when workspace folder detection is added
-    pub fn load_schema(&self, workspace_root: &str) {
-        // Try schema.qail first
+    pub fn try_load_schema_from_uri(&self, uri: &str) {
+        if let Ok(loaded) = self.schema_loaded.read()
+            && *loaded
+        {
+            return;
+        }
+        
+        if let Some(workspace_root) = uri.strip_prefix("file://").and_then(|p| {
+            std::path::Path::new(p).parent().map(|p| p.to_string_lossy().to_string())
+        }) {
+            self.load_schema(&workspace_root);
+            if let Ok(mut loaded) = self.schema_loaded.write() {
+                *loaded = true;
+            }
+        }
+    }
+
+    fn load_schema(&self, workspace_root: &str) {
         let qail_path = format!("{}/schema.qail", workspace_root);
         if let Ok(content) = std::fs::read_to_string(&qail_path)
             && let Ok(schema) = Schema::from_qail_schema(&content)
@@ -40,7 +55,6 @@ impl QailLanguageServer {
             return;
         }
 
-        // Fall back to qail.schema.json
         let json_path = format!("{}/qail.schema.json", workspace_root);
         if let Ok(content) = std::fs::read_to_string(&json_path)
             && let Ok(schema) = Schema::from_json(&content)
@@ -50,13 +64,11 @@ impl QailLanguageServer {
         }
     }
 
-    /// Extract QAIL query at line for hover
     pub fn extract_qail_at_line(&self, uri: &str, line: usize) -> Option<String> {
         let docs = self.documents.read().ok()?;
         let content = docs.get(uri)?;
         let target_line = content.lines().nth(line)?;
 
-        // QAIL patterns to detect
         let patterns = ["get::", "set::", "del::", "add::", "make::", "mod::"];
 
         for pattern in patterns {
@@ -76,7 +88,6 @@ impl QailLanguageServer {
         None
     }
 
-    /// Generate diagnostics for QAIL content
     pub fn get_diagnostics(&self, text: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         let patterns = ["get::", "set::", "del::", "add::", "make::", "mod::"];
