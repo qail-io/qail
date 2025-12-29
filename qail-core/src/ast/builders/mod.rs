@@ -48,15 +48,18 @@ pub mod time;
 pub use columns::{col, param, star};
 
 // Aggregates
-pub use aggregates::{AggregateBuilder, avg, count, count_distinct, count_filter, max, min, sum};
+pub use aggregates::{
+    AggregateBuilder, array_agg, avg, bool_and, bool_or, count, count_distinct, count_filter,
+    json_agg, jsonb_agg, max, min, sum,
+};
 
 // JSON
 pub use json::{JsonBuilder, json, json_obj, json_path};
 
 // Functions
 pub use functions::{
-    ConcatBuilder, FunctionBuilder, coalesce, concat, func, nullif, replace, substring,
-    substring_for,
+    ConcatBuilder, FunctionBuilder, coalesce, concat, func, nullif, replace, string_agg,
+    substring, substring_for,
 };
 
 // Literals
@@ -64,7 +67,8 @@ pub use literals::{bind, boolean, float, int, null, text};
 
 // Conditions
 pub use conditions::{
-    cond, eq, gt, gte, ilike, is_in, is_not_null, is_null, like, lt, lte, ne, not_in,
+    between, cond, contains, eq, gt, gte, ilike, is_in, is_not_null, is_null, key_exists, like, lt,
+    lte, ne, not_between, not_in, not_like, overlaps, regex, regex_i, similar_to,
 };
 
 // Time

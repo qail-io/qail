@@ -36,6 +36,19 @@ pub fn replace(
     func("REPLACE", vec![source.into(), from.into(), to.into()])
 }
 
+/// STRING_AGG(column, delimiter) - concatenate all values with delimiter
+///
+/// # Example
+/// ```ignore
+/// string_agg("name", ", ")  // STRING_AGG(name, ', ')
+/// ```
+pub fn string_agg(column: impl Into<Expr>, delimiter: &str) -> FunctionBuilder {
+    func(
+        "STRING_AGG",
+        vec![column.into(), Expr::Literal(crate::ast::Value::String(delimiter.to_string()))],
+    )
+}
+
 /// Builder for function call expressions
 #[derive(Debug, Clone)]
 pub struct FunctionBuilder {

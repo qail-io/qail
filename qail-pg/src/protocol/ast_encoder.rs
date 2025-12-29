@@ -8,8 +8,8 @@
 
 use bytes::BytesMut;
 use qail_core::ast::{
-    Action, CageKind, Condition, Constraint, Expr, Operator, QailCmd, SortOrder, TableConstraint,
-    Value,
+    Action, CageKind, Condition, Constraint, Expr, JoinKind, Operator, QailCmd, SortOrder,
+    TableConstraint, Value,
 };
 
 // ============================================================================
@@ -202,6 +202,33 @@ impl AstEncoder {
         // FROM
         buf.extend_from_slice(b" FROM ");
         buf.extend_from_slice(cmd.table.as_bytes());
+
+        // JOINs
+        for join in &cmd.joins {
+            match join.kind {
+                JoinKind::Inner => buf.extend_from_slice(b" INNER JOIN "),
+                JoinKind::Left => buf.extend_from_slice(b" LEFT JOIN "),
+                JoinKind::Right => buf.extend_from_slice(b" RIGHT JOIN "),
+                JoinKind::Full => buf.extend_from_slice(b" FULL OUTER JOIN "),
+                JoinKind::Cross => buf.extend_from_slice(b" CROSS JOIN "),
+                JoinKind::Lateral => buf.extend_from_slice(b" LEFT JOIN LATERAL "),
+            }
+            buf.extend_from_slice(join.table.as_bytes());
+            
+            if join.on_true {
+                buf.extend_from_slice(b" ON TRUE");
+            } else if let Some(conditions) = &join.on && !conditions.is_empty() {
+                buf.extend_from_slice(b" ON ");
+                for (i, cond) in conditions.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b" AND ");
+                    }
+                    Self::encode_expr(&cond.left, buf);
+                    buf.extend_from_slice(b" = ");
+                    buf.extend_from_slice(cond.value.to_string().as_bytes());
+                }
+            }
+        }
 
         // WHERE
         let filter_cage = cmd.cages.iter().find(|c| c.kind == CageKind::Filter);
@@ -580,21 +607,273 @@ impl AstEncoder {
             if i > 0 {
                 buf.extend_from_slice(b", ");
             }
-            match col {
-                Expr::Star => buf.extend_from_slice(b"*"),
-                Expr::Named(name) => buf.extend_from_slice(name.as_bytes()),
-                Expr::Aliased { name, alias } => {
-                    buf.extend_from_slice(name.as_bytes());
-                    buf.extend_from_slice(b" AS ");
-                    buf.extend_from_slice(alias.as_bytes());
+            Self::encode_column_expr(col, buf);
+        }
+    }
+
+    /// Encode a single column expression (supports complex expressions).
+    fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
+        match col {
+            Expr::Star => buf.extend_from_slice(b"*"),
+            Expr::Named(name) => buf.extend_from_slice(name.as_bytes()),
+            Expr::Aliased { name, alias } => {
+                buf.extend_from_slice(name.as_bytes());
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(alias.as_bytes());
+            }
+            Expr::Aggregate {
+                col,
+                func,
+                distinct,
+                filter: _,
+                alias,
+            } => {
+                // Format: FUNC(col) or FUNC(DISTINCT col)
+                buf.extend_from_slice(func.to_string().as_bytes());
+                buf.extend_from_slice(b"(");
+                if *distinct {
+                    buf.extend_from_slice(b"DISTINCT ");
                 }
-                _ => {
-                    // STRICT: No fallback - panic on complex expressions
-                    // These should be handled by the caller or use simpler queries
-                    buf.extend_from_slice(b"*"); // Safe fallback to avoid panic in production
+                buf.extend_from_slice(col.as_bytes());
+                buf.extend_from_slice(b")");
+                if let Some(a) = alias {
+                    buf.extend_from_slice(b" AS ");
+                    buf.extend_from_slice(a.as_bytes());
                 }
             }
+            Expr::FunctionCall { name, args, alias } => {
+                // Format: FUNC(arg1, arg2, ...)
+                buf.extend_from_slice(name.to_uppercase().as_bytes());
+                buf.extend_from_slice(b"(");
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    Self::encode_column_expr(arg, buf);
+                }
+                buf.extend_from_slice(b")");
+                if let Some(a) = alias {
+                    buf.extend_from_slice(b" AS ");
+                    buf.extend_from_slice(a.as_bytes());
+                }
+            }
+            Expr::Cast {
+                expr,
+                target_type,
+                alias,
+            } => {
+                // Format: expr::type
+                Self::encode_column_expr(expr, buf);
+                buf.extend_from_slice(b"::");
+                buf.extend_from_slice(target_type.as_bytes());
+                if let Some(a) = alias {
+                    buf.extend_from_slice(b" AS ");
+                    buf.extend_from_slice(a.as_bytes());
+                }
+            }
+            Expr::Binary {
+                left,
+                op,
+                right,
+                alias,
+            } => {
+                // Format: (left OP right)
+                buf.extend_from_slice(b"(");
+                Self::encode_column_expr(left, buf);
+                buf.extend_from_slice(b" ");
+                buf.extend_from_slice(op.to_string().as_bytes());
+                buf.extend_from_slice(b" ");
+                Self::encode_column_expr(right, buf);
+                buf.extend_from_slice(b")");
+                if let Some(a) = alias {
+                    buf.extend_from_slice(b" AS ");
+                    buf.extend_from_slice(a.as_bytes());
+                }
+            }
+            Expr::Literal(val) => {
+                // Format: 'value' or number
+                let s = val.to_string();
+                buf.extend_from_slice(s.as_bytes());
+            }
+            Expr::Case {
+                when_clauses,
+                else_value,
+                alias,
+            } => {
+                // CASE WHEN cond THEN val ... ELSE val END
+                buf.extend_from_slice(b"CASE");
+                for (cond, then_expr) in when_clauses {
+                    buf.extend_from_slice(b" WHEN ");
+                    // Simple condition encoding
+                    buf.extend_from_slice(cond.left.to_string().as_bytes());
+                    buf.extend_from_slice(b" ");
+                    Self::encode_operator(&cond.op, buf);
+                    buf.extend_from_slice(b" ");
+                    buf.extend_from_slice(cond.value.to_string().as_bytes());
+                    buf.extend_from_slice(b" THEN ");
+                    Self::encode_column_expr(then_expr, buf);
+                }
+                if let Some(else_val) = else_value {
+                    buf.extend_from_slice(b" ELSE ");
+                    Self::encode_column_expr(else_val, buf);
+                }
+                buf.extend_from_slice(b" END");
+                if let Some(a) = alias {
+                    buf.extend_from_slice(b" AS ");
+                    buf.extend_from_slice(a.as_bytes());
+                }
+            }
+            Expr::SpecialFunction { name, args, alias } => {
+                // Special SQL functions with keyword args: INTERVAL 'x', EXTRACT(YEAR FROM x)
+                // For INTERVAL, just output: INTERVAL 'duration'
+                if name.eq_ignore_ascii_case("INTERVAL") {
+                    buf.extend_from_slice(b"INTERVAL ");
+                    // Args are (None, expr) pairs, extract the expr
+                    for (_kw, expr) in args {
+                        Self::encode_column_expr(expr, buf);
+                    }
+                } else {
+                    // Generic special function: NAME(arg KEYWORD arg ...)
+                    buf.extend_from_slice(name.to_uppercase().as_bytes());
+                    buf.extend_from_slice(b"(");
+                    for (i, (keyword, expr)) in args.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b" ");
+                        }
+                        if let Some(kw) = keyword {
+                            buf.extend_from_slice(kw.as_bytes());
+                            buf.extend_from_slice(b" ");
+                        }
+                        Self::encode_column_expr(expr, buf);
+                    }
+                    buf.extend_from_slice(b")");
+                }
+                if let Some(a) = alias {
+                    buf.extend_from_slice(b" AS ");
+                    buf.extend_from_slice(a.as_bytes());
+                }
+            }
+            Expr::JsonAccess {
+                column,
+                path_segments,
+                alias,
+            } => {
+                // JSON accessor: col->>'key' or col->'a'->>'b'
+                buf.extend_from_slice(column.as_bytes());
+                for (key, as_text) in path_segments {
+                    if *as_text {
+                        buf.extend_from_slice(b"->>'");
+                    } else {
+                        buf.extend_from_slice(b"->'");
+                    }
+                    buf.extend_from_slice(key.as_bytes());
+                    buf.extend_from_slice(b"'");
+                }
+                if let Some(a) = alias {
+                    buf.extend_from_slice(b" AS ");
+                    buf.extend_from_slice(a.as_bytes());
+                }
+            }
+            Expr::Window {
+                name,
+                func,
+                params,
+                partition,
+                order,
+                frame: _,
+            } => {
+                // Window function: FUNC(params) OVER (PARTITION BY ... ORDER BY ...)
+                buf.extend_from_slice(func.to_uppercase().as_bytes());
+                buf.extend_from_slice(b"(");
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(p.to_string().as_bytes());
+                }
+                buf.extend_from_slice(b") OVER (");
+                if !partition.is_empty() {
+                    buf.extend_from_slice(b"PARTITION BY ");
+                    for (i, col) in partition.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        buf.extend_from_slice(col.as_bytes());
+                    }
+                }
+                if !order.is_empty() {
+                    if !partition.is_empty() {
+                        buf.extend_from_slice(b" ");
+                    }
+                    buf.extend_from_slice(b"ORDER BY ");
+                    for (i, cage) in order.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        // Extract column from first condition's left side
+                        if let Some(cond) = cage.conditions.first() {
+                            buf.extend_from_slice(cond.left.to_string().as_bytes());
+                        }
+                        // Extract sort order from CageKind::Sort
+                        if let CageKind::Sort(sort) = &cage.kind {
+                            match sort {
+                                SortOrder::Asc => buf.extend_from_slice(b" ASC"),
+                                SortOrder::Desc => buf.extend_from_slice(b" DESC"),
+                                SortOrder::AscNullsFirst => buf.extend_from_slice(b" ASC NULLS FIRST"),
+                                SortOrder::AscNullsLast => buf.extend_from_slice(b" ASC NULLS LAST"),
+                                SortOrder::DescNullsFirst => buf.extend_from_slice(b" DESC NULLS FIRST"),
+                                SortOrder::DescNullsLast => buf.extend_from_slice(b" DESC NULLS LAST"),
+                            }
+                        }
+                    }
+                }
+                buf.extend_from_slice(b")");
+                if !name.is_empty() {
+                    buf.extend_from_slice(b" AS ");
+                    buf.extend_from_slice(name.as_bytes());
+                }
+            }
+            _ => {
+                // Fallback for DDL types (Def, Mod) - not relevant for SELECT
+                buf.extend_from_slice(b"*");
+            }
         }
+    }
+
+    /// Encode an operator to bytes.
+    fn encode_operator(op: &Operator, buf: &mut BytesMut) {
+        let bytes: &[u8] = match op {
+            Operator::Eq => b"=",
+            Operator::Ne => b"!=",
+            Operator::Gt => b">",
+            Operator::Gte => b">=",
+            Operator::Lt => b"<",
+            Operator::Lte => b"<=",
+            Operator::Like => b"LIKE",
+            Operator::NotLike => b"NOT LIKE",
+            Operator::ILike => b"ILIKE",
+            Operator::NotILike => b"NOT ILIKE",
+            Operator::Fuzzy => b"ILIKE",  // Fuzzy maps to ILIKE
+            Operator::In => b"IN",
+            Operator::NotIn => b"NOT IN",
+            Operator::IsNull => b"IS NULL",
+            Operator::IsNotNull => b"IS NOT NULL",
+            Operator::Between => b"BETWEEN",
+            Operator::NotBetween => b"NOT BETWEEN",
+            Operator::Regex => b"~",
+            Operator::RegexI => b"~*",
+            Operator::SimilarTo => b"SIMILAR TO",
+            Operator::Contains => b"@>",
+            Operator::ContainedBy => b"<@",
+            Operator::Overlaps => b"&&",
+            Operator::KeyExists => b"?",
+            Operator::JsonExists => b"JSON_EXISTS",
+            Operator::JsonQuery => b"JSON_QUERY",
+            Operator::JsonValue => b"JSON_VALUE",
+            Operator::Exists => b"EXISTS",
+            Operator::NotExists => b"NOT EXISTS",
+        };
+        buf.extend_from_slice(bytes);
     }
 
     /// Encode WHERE conditions with parameter extraction.
@@ -617,9 +896,39 @@ impl AstEncoder {
                 Operator::Lt => buf.extend_from_slice(b" < "),
                 Operator::Lte => buf.extend_from_slice(b" <= "),
                 Operator::Like => buf.extend_from_slice(b" LIKE "),
+                Operator::NotLike => buf.extend_from_slice(b" NOT LIKE "),
                 Operator::ILike => buf.extend_from_slice(b" ILIKE "),
-                Operator::In => buf.extend_from_slice(b" IN "),
-                Operator::NotIn => buf.extend_from_slice(b" NOT IN "),
+                Operator::NotILike => buf.extend_from_slice(b" NOT ILIKE "),
+                Operator::In => {
+                    // IN (v1, v2, v3) - expand array values
+                    if let Value::Array(vals) = &cond.value {
+                        buf.extend_from_slice(b" IN (");
+                        for (j, v) in vals.iter().enumerate() {
+                            if j > 0 {
+                                buf.extend_from_slice(b", ");
+                            }
+                            Self::encode_value(v, buf, params);
+                        }
+                        buf.extend_from_slice(b")");
+                        continue;
+                    }
+                    buf.extend_from_slice(b" IN ");
+                }
+                Operator::NotIn => {
+                    // NOT IN (v1, v2, v3) - expand array values
+                    if let Value::Array(vals) = &cond.value {
+                        buf.extend_from_slice(b" NOT IN (");
+                        for (j, v) in vals.iter().enumerate() {
+                            if j > 0 {
+                                buf.extend_from_slice(b", ");
+                            }
+                            Self::encode_value(v, buf, params);
+                        }
+                        buf.extend_from_slice(b")");
+                        continue;
+                    }
+                    buf.extend_from_slice(b" NOT IN ");
+                }
                 Operator::IsNull => {
                     buf.extend_from_slice(b" IS NULL");
                     continue;
@@ -628,7 +937,48 @@ impl AstEncoder {
                     buf.extend_from_slice(b" IS NOT NULL");
                     continue;
                 }
-                _ => buf.extend_from_slice(b" = "),
+                Operator::Between => {
+                    // BETWEEN x AND y - value must be Array with 2 elements
+                    if let Value::Array(vals) = &cond.value
+                        && vals.len() >= 2
+                    {
+                        buf.extend_from_slice(b" BETWEEN ");
+                        Self::encode_value(&vals[0], buf, params);
+                        buf.extend_from_slice(b" AND ");
+                        Self::encode_value(&vals[1], buf, params);
+                        continue;
+                    }
+                    // Fallback
+                    buf.extend_from_slice(b" = ");
+                }
+                Operator::NotBetween => {
+                    if let Value::Array(vals) = &cond.value
+                        && vals.len() >= 2
+                    {
+                        buf.extend_from_slice(b" NOT BETWEEN ");
+                        Self::encode_value(&vals[0], buf, params);
+                        buf.extend_from_slice(b" AND ");
+                        Self::encode_value(&vals[1], buf, params);
+                        continue;
+                    }
+                    buf.extend_from_slice(b" = ");
+                }
+                Operator::Regex => buf.extend_from_slice(b" ~ "),
+                Operator::RegexI => buf.extend_from_slice(b" ~* "),
+                Operator::SimilarTo => buf.extend_from_slice(b" SIMILAR TO "),
+                Operator::Contains => buf.extend_from_slice(b" @> "),
+                Operator::ContainedBy => buf.extend_from_slice(b" <@ "),
+                Operator::Overlaps => buf.extend_from_slice(b" && "),
+                Operator::Fuzzy => buf.extend_from_slice(b" ILIKE "),
+                Operator::KeyExists => buf.extend_from_slice(b" ? "),
+                Operator::JsonExists | Operator::JsonQuery | Operator::JsonValue => {
+                    // JSON SQL/JSON path operators - output as function call syntax
+                    buf.extend_from_slice(b" = ");  // Fallback for now
+                }
+                Operator::Exists | Operator::NotExists => {
+                    // EXISTS/NOT EXISTS require subquery handling
+                    buf.extend_from_slice(b" = ");  // Fallback for now
+                }
             }
 
             Self::encode_value(&cond.value, buf, params);

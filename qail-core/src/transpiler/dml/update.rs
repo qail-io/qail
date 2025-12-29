@@ -7,7 +7,11 @@ use crate::transpiler::dialect::Dialect;
 /// Generate UPDATE SQL.
 pub fn build_update(cmd: &QailCmd, dialect: Dialect) -> String {
     let generator = dialect.generator();
-    let mut sql = String::from("UPDATE ");
+    let mut sql = if cmd.only_table {
+        String::from("UPDATE ONLY ")
+    } else {
+        String::from("UPDATE ")
+    };
     sql.push_str(&generator.quote_identifier(&cmd.table));
 
     let mut set_clauses: Vec<String> = Vec::new();
@@ -39,6 +43,18 @@ pub fn build_update(cmd: &QailCmd, dialect: Dialect) -> String {
     if !set_clauses.is_empty() {
         sql.push_str(" SET ");
         sql.push_str(&set_clauses.join(", "));
+    }
+
+    // FROM clause (multi-table update)
+    if !cmd.from_tables.is_empty() {
+        sql.push_str(" FROM ");
+        sql.push_str(
+            &cmd.from_tables
+                .iter()
+                .map(|t| generator.quote_identifier(t))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
     }
 
     // WHERE clause

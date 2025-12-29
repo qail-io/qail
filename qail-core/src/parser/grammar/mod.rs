@@ -212,6 +212,14 @@ pub fn parse_root(input: &str) -> IResult<&str, QailCmd> {
             channel: None,
             payload: None,
             savepoint_name: None,
+            from_tables: vec![],
+            using_tables: vec![],
+            lock_mode: None,
+            fetch: None,
+            default_values: false,
+            overriding: None,
+            sample: None,
+            only_table: false,
         },
     ))
 }

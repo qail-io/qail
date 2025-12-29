@@ -45,6 +45,14 @@ pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Q
             channel: None,
             payload: None,
             savepoint_name: None,
+            from_tables: vec![],
+            using_tables: vec![],
+            lock_mode: None,
+            fetch: None,
+            default_values: false,
+            overriding: None,
+            sample: None,
+            only_table: false,
         },
     ))
 }
@@ -197,6 +205,14 @@ pub fn parse_create_index(input: &str) -> IResult<&str, QailCmd> {
             channel: None,
             payload: None,
             savepoint_name: None,
+            from_tables: vec![],
+            using_tables: vec![],
+            lock_mode: None,
+            fetch: None,
+            default_values: false,
+            overriding: None,
+            sample: None,
+            only_table: false,
         },
     ))
 }
