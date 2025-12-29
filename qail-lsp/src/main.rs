@@ -66,11 +66,15 @@ impl QailLanguageServer {
         let content = docs.get(uri)?;
         let target_line = content.lines().nth(line)?;
 
-        // Find QAIL pattern in line (v1 or v2 syntax)
+        // Find QAIL pattern in line (v1, v2 text, or v2 Rust AST syntax)
         let v1_patterns = [
             "get::", "set::", "del::", "add::", "make::", "mod::", "gen::",
         ];
-        let v2_patterns = ["get ", "set ", "del ", "add ", "with "];
+        let v2_text_patterns = ["get ", "set ", "del ", "add ", "with "];
+        let v2_rust_patterns = [
+            "QailCmd::get(", "QailCmd::set(", "QailCmd::del(", "QailCmd::add(",
+            ".columns(", ".filter(", ".set_value("
+        ];
 
         // Try v1 patterns first
         for pattern in v1_patterns {
@@ -95,10 +99,18 @@ impl QailLanguageServer {
             }
         }
 
-        // Try v2 patterns
-        for pattern in v2_patterns {
+        // Try v2 text patterns
+        for pattern in v2_text_patterns {
             if let Some(start) = target_line.find(pattern) {
                 // For v2 syntax, query extends to end of line or newline
+                let rest = &target_line[start..];
+                return Some(rest.to_string());
+            }
+        }
+
+        // Try v2 Rust AST patterns (QailCmd::get, .columns, etc.)
+        for pattern in v2_rust_patterns {
+            if let Some(start) = target_line.find(pattern) {
                 let rest = &target_line[start..];
                 return Some(rest.to_string());
             }
