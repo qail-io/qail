@@ -472,10 +472,11 @@ pub fn migrate_plan(schema_diff_path: &str, output: Option<&str>) -> Result<()> 
 }
 
 /// Apply migrations forward using qail-pg native driver.
-pub async fn migrate_up(schema_diff_path: &str, url: &str) -> Result<()> {
+pub async fn migrate_up(schema_diff_path: &str, url: &str, codebase: Option<&str>, force: bool) -> Result<()> {
     println!("{} {}", "Migrating UP:".cyan().bold(), url.yellow());
 
-    let cmds = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
+    // Parse schema files to get old/new schemas and commands
+    let (old_schema, new_schema, cmds) = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {
         // Two schema files: old:new
         let parts: Vec<&str> = schema_diff_path.splitn(2, ':').collect();
         let old_path = parts[0];
@@ -491,7 +492,8 @@ pub async fn migrate_up(schema_diff_path: &str, url: &str) -> Result<()> {
         let new_schema = parse_qail(&new_content)
             .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
-        diff_schemas(&old_schema, &new_schema)
+        let cmds = diff_schemas(&old_schema, &new_schema);
+        (old_schema, new_schema, cmds)
     } else {
         return Err(anyhow::anyhow!(
             "Please provide two .qail files: old.qail:new.qail"
@@ -504,6 +506,64 @@ pub async fn migrate_up(schema_diff_path: &str, url: &str) -> Result<()> {
     }
 
     println!("{} {} migration(s) to apply", "Found:".cyan(), cmds.len());
+
+    // === PHASE 0: Codebase Impact Analysis ===
+    if let Some(codebase_path) = codebase {
+        use qail_core::analyzer::{CodebaseScanner, MigrationImpact};
+        use std::path::Path;
+
+        println!();
+        println!("{}", "🔍 Scanning codebase for breaking changes...".cyan());
+        
+        let scanner = CodebaseScanner::new();
+        let code_path = Path::new(codebase_path);
+
+        if !code_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Codebase path not found: {}",
+                codebase_path
+            ));
+        }
+
+        let code_refs = scanner.scan(code_path);
+        let impact = MigrationImpact::analyze(&cmds, &code_refs, &old_schema, &new_schema);
+
+        if !impact.safe_to_run {
+            println!();
+            println!("{}", "⚠️  BREAKING CHANGES DETECTED IN CODEBASE".red().bold());
+            println!("   {} file(s) affected, {} reference(s) found", impact.affected_files, code_refs.len());
+            println!();
+
+            for change in &impact.breaking_changes {
+                match change {
+                    qail_core::analyzer::BreakingChange::DroppedColumn { table, column, references } => {
+                        println!("   {} {}.{} ({} refs)", "DROP COLUMN".red(), table.yellow(), column.yellow(), references.len());
+                        for r in references.iter().take(3) {
+                            println!("     ❌ {}:{} → {}", r.file.display(), r.line, r.snippet.cyan());
+                        }
+                    }
+                    qail_core::analyzer::BreakingChange::DroppedTable { table, references } => {
+                        println!("   {} {} ({} refs)", "DROP TABLE".red(), table.yellow(), references.len());
+                        for r in references.iter().take(3) {
+                            println!("     ❌ {}:{} → {}", r.file.display(), r.line, r.snippet.cyan());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if !force {
+                println!();
+                println!("{}", "Migration BLOCKED. Fix your code first, or use --force to proceed anyway.".red());
+                return Ok(());
+            } else {
+                println!();
+                println!("{}", "⚠️  Proceeding anyway due to --force flag...".yellow());
+            }
+        } else {
+            println!("   {} No breaking changes detected", "✓".green());
+        }
+    }
 
     // Parse URL and connect using qail-pg
     let (host, port, user, password, database) = parse_pg_url(url)?;

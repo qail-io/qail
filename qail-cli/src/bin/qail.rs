@@ -170,6 +170,12 @@ enum MigrateAction {
         schema_diff: String,
         /// Database URL
         url: String,
+        /// Codebase path to scan for breaking changes (blocks if found)
+        #[arg(short, long)]
+        codebase: Option<String>,
+        /// Force migration even if breaking changes detected
+        #[arg(long)]
+        force: bool,
     },
     /// Rollback migrations
     Down {
@@ -284,7 +290,7 @@ async fn main() -> Result<()> {
                 schema_diff,
                 output,
             } => migrate_plan(schema_diff, output.as_deref())?,
-            MigrateAction::Up { schema_diff, url } => migrate_up(schema_diff, url).await?,
+            MigrateAction::Up { schema_diff, url, codebase, force } => migrate_up(schema_diff, url, codebase.as_deref(), *force).await?,
             MigrateAction::Down { schema_diff, url } => migrate_down(schema_diff, url).await?,
             MigrateAction::Create {
                 name,
