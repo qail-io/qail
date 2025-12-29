@@ -165,15 +165,88 @@ impl FrontendMessage {
             }
             FrontendMessage::SASLResponse(data) => {
                 let mut buf = Vec::new();
-                buf.push(b'p'); // SASLResponse also uses 'p'
+                buf.push(b'p');
 
                 let len = (data.len() + 4) as i32;
                 buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(data);
                 buf
             }
-            // TODO: Implement other message types
-            _ => unimplemented!("Message type not yet implemented"),
+            FrontendMessage::PasswordMessage(password) => {
+                let mut buf = Vec::new();
+                buf.push(b'p');
+                let content = format!("{}\0", password);
+                let len = (content.len() + 4) as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(content.as_bytes());
+                buf
+            }
+            FrontendMessage::Parse { name, query, param_types } => {
+                let mut buf = Vec::new();
+                buf.push(b'P');
+
+                let mut content = Vec::new();
+                content.extend_from_slice(name.as_bytes());
+                content.push(0);
+                content.extend_from_slice(query.as_bytes());
+                content.push(0);
+                content.extend_from_slice(&(param_types.len() as i16).to_be_bytes());
+                for oid in param_types {
+                    content.extend_from_slice(&oid.to_be_bytes());
+                }
+
+                let len = (content.len() + 4) as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(&content);
+                buf
+            }
+            FrontendMessage::Bind { portal, statement, params } => {
+                let mut buf = Vec::new();
+                buf.push(b'B');
+
+                let mut content = Vec::new();
+                content.extend_from_slice(portal.as_bytes());
+                content.push(0);
+                content.extend_from_slice(statement.as_bytes());
+                content.push(0);
+                // Format codes (0 = all text)
+                content.extend_from_slice(&0i16.to_be_bytes());
+                // Parameter count
+                content.extend_from_slice(&(params.len() as i16).to_be_bytes());
+                for param in params {
+                    match param {
+                        Some(data) => {
+                            content.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                            content.extend_from_slice(data);
+                        }
+                        None => content.extend_from_slice(&(-1i32).to_be_bytes()),
+                    }
+                }
+                // Result format codes (0 = all text)
+                content.extend_from_slice(&0i16.to_be_bytes());
+
+                let len = (content.len() + 4) as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(&content);
+                buf
+            }
+            FrontendMessage::Execute { portal, max_rows } => {
+                let mut buf = Vec::new();
+                buf.push(b'E');
+
+                let mut content = Vec::new();
+                content.extend_from_slice(portal.as_bytes());
+                content.push(0);
+                content.extend_from_slice(&max_rows.to_be_bytes());
+
+                let len = (content.len() + 4) as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(&content);
+                buf
+            }
+            FrontendMessage::Sync => {
+                vec![b'S', 0, 0, 0, 4]
+            }
         }
     }
 }

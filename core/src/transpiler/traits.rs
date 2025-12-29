@@ -128,4 +128,16 @@ pub trait SqlGenerator {
     fn json_value(&self, col: &str, path: &str) -> String {
         format!("JSON_VALUE({}, '{}')", col, path)
     }
+
+    /// Generate IN array check (col IN value)
+    /// Default: Postgres-style `col = ANY(value)` for array params
+    fn in_array(&self, col: &str, value: &str) -> String {
+        format!("{} = ANY({})", col, value)
+    }
+
+    /// Generate NOT IN array check (col NOT IN value)
+    /// Default: Postgres-style `col != ALL(value)` for array params
+    fn not_in_array(&self, col: &str, value: &str) -> String {
+        format!("{} != ALL({})", col, value)
+    }
 }
