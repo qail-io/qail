@@ -1,6 +1,6 @@
 [package]
 name = "qail-go"
-version = "0.11.3"
+version = "0.11.4"
 edition = "2024"
 description = "QAIL Go bindings - Rust FFI for CGO"
 license = "MIT"
@@ -9,8 +9,8 @@ license = "MIT"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-qail-core = { path = "../qail-core", version = "0.11.3" }
-qail-pg = { path = "../qail-pg", version = "0.11.3" }
+qail-core = { path = "../qail-core", version = "0.11.4" }
+qail-pg = { path = "../qail-pg", version = "0.11.4" }
 libc = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 once_cell = "1.19"
