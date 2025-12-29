@@ -365,13 +365,15 @@ impl QailCmd {
         }
     }
 
-    /// Add columns to hook (select).
+    /// Add columns to select.
+    #[deprecated(since = "0.11.0", note = "Use .columns([...]) instead")]
     pub fn hook(mut self, cols: &[&str]) -> Self {
         self.columns = cols.iter().map(|c| Expr::Named(c.to_string())).collect();
         self
     }
 
-    /// Add a filter cage.
+    /// Add a filter condition (equals).
+    #[deprecated(since = "0.11.0", note = "Use .filter(column, Operator::Eq, value) or .where_eq(column, value) instead")]
     pub fn cage(mut self, column: &str, value: impl Into<Value>) -> Self {
         self.cages.push(Cage {
             kind: CageKind::Filter,
@@ -396,7 +398,8 @@ impl QailCmd {
         self
     }
 
-    /// Add a sort cage (ascending).
+    /// Add ORDER BY ascending.
+    #[deprecated(since = "0.11.0", note = "Use .order_asc(column) instead")]
     pub fn sort_asc(mut self, column: &str) -> Self {
         self.cages.push(Cage {
             kind: CageKind::Sort(SortOrder::Asc),
@@ -757,8 +760,8 @@ impl QailCmd {
     /// # Example
     /// ```ignore
     /// let cte = QailCmd::get("employees")
-    ///     .hook(&["id", "name"])
-    ///     .cage("manager_id", Value::Null)
+    ///     .columns(["id", "name"])
+    ///     .where_eq("manager_id", Value::Null)
     ///     .as_cte("emp_tree");
     /// ```
     pub fn as_cte(self, name: impl Into<String>) -> Self {
