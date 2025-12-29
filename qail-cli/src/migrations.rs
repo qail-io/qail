@@ -95,12 +95,19 @@ pub async fn migrate_status(url: &str) -> Result<()> {
 }
 
 /// Analyze migration impact on codebase before executing.
-pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str) -> Result<()> {
+pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: bool) -> Result<()> {
     use qail_core::analyzer::{CodebaseScanner, MigrationImpact};
     use std::path::Path;
 
-    println!("{}", "🔍 Migration Impact Analyzer".cyan().bold());
-    println!();
+    // Detect CI mode: explicit flag OR environment variable
+    let ci_mode = ci_flag 
+        || std::env::var("CI").is_ok() 
+        || std::env::var("GITHUB_ACTIONS").is_ok();
+
+    if !ci_mode {
+        println!("{}", "🔍 Migration Impact Analyzer".cyan().bold());
+        println!();
+    }
 
     // Parse schema files
     let (old_schema, new_schema, cmds) =
@@ -137,7 +144,22 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str) -> Result<()
         return Ok(());
     }
 
-    println!("  Codebase: {}", codebase_path.yellow());
+    // Format codebase path for human readability
+    let display_path = {
+        let p = codebase_path.to_string();
+        // Replace home dir with ~
+        if let Ok(home) = std::env::var("HOME") {
+            if p.starts_with(&home) {
+                p.replacen(&home, "~", 1)
+            } else {
+                p
+            }
+        } else {
+            p
+        }
+    };
+    
+    println!("  Codebase: {}", display_path.yellow());
     println!();
 
     // Scan codebase
@@ -152,111 +174,215 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str) -> Result<()
     }
 
     println!("{}", "Scanning codebase...".dimmed());
-    let code_refs = scanner.scan(code_path);
+    let scan_result = scanner.scan_with_details(code_path);
+    
+    // Show per-file analysis breakdown with badges
+    println!("🔍 {}", "Analyzing files...".dimmed());
+    for file_analysis in &scan_result.files {
+        let relative_path = file_analysis.file.strip_prefix(code_path).unwrap_or(&file_analysis.file);
+        let mode_badge = match file_analysis.mode {
+            qail_core::analyzer::AnalysisMode::RustAST => "🦀",  // Ferris (Rust)
+            qail_core::analyzer::AnalysisMode::Regex => {
+                // Check extension for better icon
+                match file_analysis.file.extension().and_then(|e| e.to_str()) {
+                    Some("ts") | Some("tsx") | Some("js") | Some("jsx") => "📘",
+                    Some("py") => "🐍",
+                    _ => "📄",
+                }
+            }
+        };
+        let mode_name = match file_analysis.mode {
+            qail_core::analyzer::AnalysisMode::RustAST => "AST",
+            qail_core::analyzer::AnalysisMode::Regex => "Regex",
+        };
+        println!("   ├── {} {} ({}: {} refs)", 
+            mode_badge, 
+            relative_path.display().to_string().cyan(),
+            mode_name.dimmed(),
+            file_analysis.ref_count
+        );
+    }
+    if !scan_result.files.is_empty() {
+        println!("   └── {} files analyzed", scan_result.files.len());
+    }
+    println!();
+    
+    let code_refs = scan_result.refs;
     println!("  Found {} query references\n", code_refs.len());
 
     // Analyze impact
     let impact = MigrationImpact::analyze(&cmds, &code_refs, &old_schema, &new_schema);
 
     if impact.safe_to_run {
-        println!("{}", "✓ Migration is safe to run".green().bold());
-        println!("  No breaking changes detected in codebase\n");
+        if ci_mode {
+            // CI mode: quiet success
+            println!("✅ No breaking changes detected");
+        } else {
+            println!("{}", "✓ Migration is safe to run".green().bold());
+            println!("  No breaking changes detected in codebase\n");
 
-        println!("{}", "Migration preview:".cyan());
-        for cmd in &cmds {
-            let sql = cmd_to_sql(cmd);
-            println!("  {}", sql);
-        }
-    } else {
-        println!("{}", "⚠️  BREAKING CHANGES DETECTED".red().bold());
-        println!();
-        println!("Affected files: {}", impact.affected_files);
-        println!();
-
-        for change in &impact.breaking_changes {
-            match change {
-                qail_core::analyzer::BreakingChange::DroppedTable { table, references } => {
-                    println!(
-                        "┌─ {} {} ({} references) ─────────────────────────┐",
-                        "DROP TABLE".red(),
-                        table.yellow(),
-                        references.len()
-                    );
-                    for r in references.iter().take(5) {
-                        println!(
-                            "│ {} {}:{} → {}",
-                            "❌".red(),
-                            r.file.display(),
-                            r.line,
-                            r.snippet.cyan()
-                        );
-                    }
-                    if references.len() > 5 {
-                        println!("│ ... and {} more", references.len() - 5);
-                    }
-                    println!("└──────────────────────────────────────────────────────┘");
-                    println!();
-                }
-                qail_core::analyzer::BreakingChange::DroppedColumn {
-                    table,
-                    column,
-                    references,
-                } => {
-                    println!(
-                        "┌─ {} {}.{} ({} references) ─────────────────┐",
-                        "DROP COLUMN".red(),
-                        table.yellow(),
-                        column.yellow(),
-                        references.len()
-                    );
-                    for r in references.iter().take(5) {
-                        println!(
-                            "│ {} {}:{} → {}",
-                            "❌".red(),
-                            r.file.display(),
-                            r.line,
-                            r.snippet.cyan()
-                        );
-                    }
-                    println!("└──────────────────────────────────────────────────────┘");
-                    println!();
-                }
-                qail_core::analyzer::BreakingChange::RenamedColumn {
-                    table, references, ..
-                } => {
-                    println!(
-                        "┌─ {} on {} ({} references) ───────────────────┐",
-                        "RENAME".yellow(),
-                        table.yellow(),
-                        references.len()
-                    );
-                    for r in references.iter().take(5) {
-                        println!(
-                            "│ {} {}:{} → {}",
-                            "⚠️ ".yellow(),
-                            r.file.display(),
-                            r.line,
-                            r.snippet.cyan()
-                        );
-                    }
-                    println!("└──────────────────────────────────────────────────────┘");
-                    println!();
-                }
-                _ => {}
+            println!("{}", "Migration preview:".cyan());
+            for cmd in &cmds {
+                let sql = cmd_to_sql(cmd);
+                println!("  {}", sql);
             }
         }
+    } else {
+        // Breaking changes detected
+        if ci_mode {
+            // Find repo root (walk up to find .git or Cargo.toml)
+            let repo_root = {
+                let mut current = code_path.to_path_buf();
+                loop {
+                    if current.join(".git").exists() || current.join("Cargo.toml").exists() {
+                        break current;
+                    }
+                    if !current.pop() {
+                        // Fall back to codebase path if no repo root found
+                        break code_path.to_path_buf();
+                    }
+                }
+            };
+            
+            // GitHub Actions annotation format
+            // Format: ::error file=<path>,line=<line>,title=<title>::<message>
+            for change in &impact.breaking_changes {
+                match change {
+                    qail_core::analyzer::BreakingChange::DroppedTable { table, references } => {
+                        for r in references {
+                            // Strip repo root to get repo-relative path for GitHub annotations
+                            let file_path = r.file.strip_prefix(&repo_root).unwrap_or(&r.file);
+                            println!(
+                                "::error file={},line={},title=Breaking Change::Table '{}' is being dropped but referenced here",
+                                file_path.display(),
+                                r.line,
+                                table
+                            );
+                        }
+                    }
+                    qail_core::analyzer::BreakingChange::DroppedColumn { table, column, references } => {
+                        for r in references {
+                            let file_path = r.file.strip_prefix(&repo_root).unwrap_or(&r.file);
+                            println!(
+                                "::error file={},line={},title=Breaking Change::Column '{}.{}' is being dropped but referenced here in {}",
+                                file_path.display(),
+                                r.line,
+                                table,
+                                column,
+                                r.snippet
+                            );
+                        }
+                    }
+                    qail_core::analyzer::BreakingChange::RenamedColumn { table, old_name, new_name, references } => {
+                        for r in references {
+                            let file_path = r.file.strip_prefix(&repo_root).unwrap_or(&r.file);
+                            println!(
+                                "::warning file={},line={},title=Column Renamed::Column '{}.{}' renamed to '{}', update reference",
+                                file_path.display(),
+                                r.line,
+                                table,
+                                old_name,
+                                new_name
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // CI summary
+            println!("::group::Migration Impact Summary");
+            println!("{} breaking changes found in {} files", impact.breaking_changes.len(), impact.affected_files);
+            println!("::endgroup::");
+            
+            // Exit with error code for CI pipeline failure
+            std::process::exit(1);
+        } else {
+            // Human-readable format
+            println!("{}", "⚠️  BREAKING CHANGES DETECTED".red().bold());
+            println!();
+            println!("Affected files: {}", impact.affected_files);
+            println!();
 
-        println!("What would you like to do?");
-        println!(
-            "  1. {} (DANGEROUS - will cause {} runtime errors)",
-            "Run anyway".red(),
-            impact.breaking_changes.len()
-        );
-        println!(
-            "  2. {} (show SQL, don't execute)",
-            "Dry-run first".yellow()
-        );
-        println!("  3. {} (exit)", "Let me fix the code first".green());
+            for change in &impact.breaking_changes {
+                match change {
+                    qail_core::analyzer::BreakingChange::DroppedTable { table, references } => {
+                        println!(
+                            "┌─ {} {} ({} references) ─────────────────────────┐",
+                            "DROP TABLE".red(),
+                            table.yellow(),
+                            references.len()
+                        );
+                        for r in references.iter().take(5) {
+                            println!(
+                                "│ {} {}:{} → {}",
+                                "❌".red(),
+                                r.file.display(),
+                                r.line,
+                                r.snippet.cyan()
+                            );
+                        }
+                        if references.len() > 5 {
+                            println!("│ ... and {} more", references.len() - 5);
+                        }
+                        println!("└──────────────────────────────────────────────────────┘");
+                        println!();
+                    }
+                    qail_core::analyzer::BreakingChange::DroppedColumn { table, column, references } => {
+                        println!(
+                            "┌─ {} {}.{} ({} references) ─────────────────┐",
+                            "DROP COLUMN".red(),
+                            table.yellow(),
+                            column.yellow(),
+                            references.len()
+                        );
+                        for r in references.iter().take(5) {
+                            println!(
+                                "│ {} {}:{} → uses {} in {}",
+                                "❌".red(),
+                                r.file.display(),
+                                r.line,
+                                column.cyan().bold(),
+                                r.snippet.dimmed()
+                            );
+                        }
+                        println!("└──────────────────────────────────────────────────────┘");
+                        println!();
+                    }
+                    qail_core::analyzer::BreakingChange::RenamedColumn { table, references, .. } => {
+                        println!(
+                            "┌─ {} on {} ({} references) ───────────────────┐",
+                            "RENAME".yellow(),
+                            table.yellow(),
+                            references.len()
+                        );
+                        for r in references.iter().take(5) {
+                            println!(
+                                "│ {} {}:{} → {}",
+                                "⚠️ ".yellow(),
+                                r.file.display(),
+                                r.line,
+                                r.snippet.cyan()
+                            );
+                        }
+                        println!("└──────────────────────────────────────────────────────┘");
+                        println!();
+                    }
+                    _ => {}
+                }
+            }
+
+            println!("What would you like to do?");
+            println!(
+                "  1. {} (DANGEROUS - will cause {} runtime errors)",
+                "Run anyway".red(),
+                impact.breaking_changes.len()
+            );
+            println!(
+                "  2. {} (show SQL, don't execute)",
+                "Dry-run first".yellow()
+            );
+            println!("  3. {} (exit)", "Let me fix the code first".green());
+        }
     }
 
     Ok(())
@@ -539,7 +665,7 @@ pub async fn migrate_up(schema_diff_path: &str, url: &str, codebase: Option<&str
                     qail_core::analyzer::BreakingChange::DroppedColumn { table, column, references } => {
                         println!("   {} {}.{} ({} refs)", "DROP COLUMN".red(), table.yellow(), column.yellow(), references.len());
                         for r in references.iter().take(3) {
-                            println!("     ❌ {}:{} → {}", r.file.display(), r.line, r.snippet.cyan());
+                            println!("     ❌ {}:{} → uses {} in {}", r.file.display(), r.line, column.cyan().bold(), r.snippet.dimmed());
                         }
                     }
                     qail_core::analyzer::BreakingChange::DroppedTable { table, references } => {

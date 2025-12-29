@@ -31,7 +31,7 @@ use qail::schema::{OutputFormat as SchemaOutputFormat, check_schema, diff_schema
 #[derive(Parser)]
 #[command(name = "qail")]
 #[command(author = "QAIL Contributors")]
-#[command(version = "0.9.4")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "🪝 QAIL — Schema-First Database Toolkit", long_about = None)]
 #[command(after_help = "EXAMPLES:
     qail pull postgres://...           # Extract schema from DB
@@ -155,6 +155,9 @@ enum MigrateAction {
         /// Codebase path to scan
         #[arg(short, long, default_value = "./src")]
         codebase: String,
+        /// CI/CD mode: output GitHub Actions annotations, exit code 1 on errors
+        #[arg(long)]
+        ci: bool,
     },
     /// Preview migration SQL without executing (dry-run)
     Plan {
@@ -285,7 +288,8 @@ async fn main() -> Result<()> {
             MigrateAction::Analyze {
                 schema_diff,
                 codebase,
-            } => migrate_analyze(schema_diff, codebase)?,
+                ci,
+            } => migrate_analyze(schema_diff, codebase, *ci)?,
             MigrateAction::Plan {
                 schema_diff,
                 output,
