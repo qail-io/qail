@@ -51,111 +51,95 @@ impl QailVisitor {
         span.start().line
     }
 
-    /// Check if this is a QailCmd constructor call
+    /// Extract all string literals from any expression (generic approach)
+    fn extract_strings_from_expr(expr: &Expr) -> Vec<String> {
+        let mut strings = Vec::new();
+        match expr {
+            // Direct string literal
+            Expr::Lit(lit) => {
+                if let Lit::Str(s) = &lit.lit {
+                    strings.push(Self::extract_string(s));
+                }
+            }
+            // Array of strings [\"a\", \"b\", \"c\"]
+            Expr::Array(arr) => {
+                for elem in &arr.elems {
+                    strings.extend(Self::extract_strings_from_expr(elem));
+                }
+            }
+            // Reference &\"string\"
+            Expr::Reference(r) => {
+                strings.extend(Self::extract_strings_from_expr(&r.expr));
+            }
+            _ => {}
+        }
+        strings
+    }
+
+    /// Check if this is a QailCmd constructor call (generic - detects ALL constructors)
     fn check_qailcmd_call(&mut self, path: &syn::ExprPath, args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>) {
-        // Look for QailCmd::get, QailCmd::set, QailCmd::del, QailCmd::add
         let segments: Vec<_> = path.path.segments.iter().map(|s| s.ident.to_string()).collect();
         
+        // Match QailCmd::* where * is any method
         if segments.len() >= 2 && segments[0] == "QailCmd" {
             let action = &segments[1];
-            if matches!(action.as_str(), "get" | "set" | "del" | "add") {
-                // First argument should be table name
-                if let Some(Expr::Lit(expr_lit)) = args.first() {
-                    if let Lit::Str(lit_str) = &expr_lit.lit {
-                        let table = Self::extract_string(lit_str);
-                        self.patterns.push(RustPattern {
-                            table: table.clone(),
-                            columns: vec![],
-                            line: self.line_from_span(lit_str.span()),
-                            snippet: format!("QailCmd::{}(\"{}\")", action, table),
-                        });
-                    }
+            
+            // Extract table name from first string argument
+            let mut columns = Vec::new();
+            let mut table = String::new();
+            
+            for arg in args {
+                let extracted = Self::extract_strings_from_expr(arg);
+                if table.is_empty() && !extracted.is_empty() {
+                    table = extracted[0].clone();
+                } else {
+                    columns.extend(extracted);
                 }
+            }
+            
+            if !table.is_empty() {
+                self.patterns.push(RustPattern {
+                    table: table.clone(),
+                    columns,
+                    line: self.line_from_span(path.path.segments.first().map(|s| s.ident.span()).unwrap_or_else(Span::call_site)),
+                    snippet: format!("QailCmd::{}(\"{}\")", action, table),
+                });
             }
         }
     }
 
-    /// Check method calls for column references
+    /// Check method calls for column/table references (generic - captures ALL string arguments)
     fn check_method_call(&mut self, method: &str, args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>, span: Span) {
-        match method {
-            // .filter("column", op, value) - column is first arg
-            "filter" | "where_eq" | "where_ne" | "where_gt" | "where_lt" => {
-                if let Some(Expr::Lit(expr_lit)) = args.first() {
-                    if let Lit::Str(lit_str) = &expr_lit.lit {
-                        let column = Self::extract_string(lit_str);
-                        self.patterns.push(RustPattern {
-                            table: String::new(), // Will be merged with parent
-                            columns: vec![column.clone()],
-                            line: self.line_from_span(span),
-                            snippet: format!(".{}(\"{}\"...)", method, column),
-                        });
-                    }
-                }
-            }
-            // .columns(["a", "b", "c"]) - array of columns
-            "columns" | "select" => {
-                if let Some(Expr::Array(arr)) = args.first() {
-                    let columns: Vec<String> = arr.elems.iter().filter_map(|elem| {
-                        if let Expr::Lit(expr_lit) = elem {
-                            if let Lit::Str(lit_str) = &expr_lit.lit {
-                                return Some(Self::extract_string(lit_str));
-                            }
-                        }
-                        None
-                    }).collect();
-                    
-                    if !columns.is_empty() {
-                        // Show actual column names in snippet
-                        let cols_display = if columns.len() > 3 {
-                            format!("{}, {} +{}", columns[0], columns[1], columns.len() - 2)
-                        } else {
-                            columns.join(", ")
-                        };
-                        self.patterns.push(RustPattern {
-                            table: String::new(),
-                            columns,
-                            line: self.line_from_span(span),
-                            snippet: format!(".{}([{}])", method, cols_display),
-                        });
-                    }
-                }
-            }
-            // .set_value("column", value)
-            "set_value" => {
-                if let Some(Expr::Lit(expr_lit)) = args.first() {
-                    if let Lit::Str(lit_str) = &expr_lit.lit {
-                        let column = Self::extract_string(lit_str);
-                        self.patterns.push(RustPattern {
-                            table: String::new(),
-                            columns: vec![column.clone()],
-                            line: self.line_from_span(span),
-                            snippet: format!(".set_value(\"{}\"...)", column),
-                        });
-                    }
-                }
-            }
-            // .order_asc("column"), .order_desc("column")
-            "order_asc" | "order_desc" => {
-                if let Some(Expr::Lit(expr_lit)) = args.first() {
-                    if let Lit::Str(lit_str) = &expr_lit.lit {
-                        let column = Self::extract_string(lit_str);
-                        self.patterns.push(RustPattern {
-                            table: String::new(),
-                            columns: vec![column.clone()],
-                            line: self.line_from_span(span),
-                            snippet: format!(".{}(\"{}\")", method, column),
-                        });
-                    }
-                }
-            }
-            _ => {}
+        // Extract ALL string literals from arguments (generic approach)
+        let mut all_strings = Vec::new();
+        for arg in args {
+            all_strings.extend(Self::extract_strings_from_expr(arg));
+        }
+        
+        // If we found any strings, record this method call
+        if !all_strings.is_empty() {
+            // Create human-readable snippet
+            let snippet = if all_strings.len() == 1 {
+                format!(".{}(\"{}\")", method, all_strings[0])
+            } else if all_strings.len() <= 3 {
+                format!(".{}([{}])", method, all_strings.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", "))
+            } else {
+                format!(".{}([\"{}\" +{}])", method, all_strings[0], all_strings.len() - 1)
+            };
+            
+            self.patterns.push(RustPattern {
+                table: String::new(), // Will be merged with parent
+                columns: all_strings,
+                line: self.line_from_span(span),
+                snippet,
+            });
         }
     }
 }
 
 impl<'ast> Visit<'ast> for QailVisitor {
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        // Check for QailCmd::get("table") style calls
+        // Check for QailCmd::*(...) style calls
         if let Expr::Path(path) = &*node.func {
             self.check_qailcmd_call(path, &node.args);
         }
