@@ -197,6 +197,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
                 let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
                 Expr::Named(format!("'\\x{}'", hex))
             }
+            Value::Expr(expr) => (*expr).clone(),
         }),
         // Fall back to full expression parsing
         parse_expression,
