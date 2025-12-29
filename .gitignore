@@ -57,3 +57,6 @@ flamegraph*.svg
 
 # Compiled binaries
 bench/benchmarks/fifty_million_consume
+# Go bench
+go/go/bench/
+pg/examples/*.go
