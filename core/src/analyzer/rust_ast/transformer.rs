@@ -177,26 +177,50 @@ fn transform_where(expr: &Expr) -> String {
             let val = expr_to_string(right);
             let op_str = match op {
                 sqlparser::ast::BinaryOperator::Eq => "Operator::Eq",
-                sqlparser::ast::BinaryOperator::NotEq => "Operator::NotEq",
+                sqlparser::ast::BinaryOperator::NotEq => "Operator::Ne",
                 sqlparser::ast::BinaryOperator::Lt => "Operator::Lt",
-                sqlparser::ast::BinaryOperator::LtEq => "Operator::LtEq",
+                sqlparser::ast::BinaryOperator::LtEq => "Operator::Lte",
                 sqlparser::ast::BinaryOperator::Gt => "Operator::Gt",
-                sqlparser::ast::BinaryOperator::GtEq => "Operator::GtEq",
+                sqlparser::ast::BinaryOperator::GtEq => "Operator::Gte",
                 sqlparser::ast::BinaryOperator::And => {
                     let left_filter = transform_where(left);
                     let right_filter = transform_where(right);
+                    return format!("{}\n    {}", left_filter, right_filter);
+                }
+                sqlparser::ast::BinaryOperator::Or => {
+                    let left_filter = transform_where(left);
+                    let right_filter = transform_where(right).replace(".filter(", ".or_filter(");
                     return format!("{}\n    {}", left_filter, right_filter);
                 }
                 _ => "Operator::Eq",
             };
             format!(".filter(\"{}\", {}, {})", col, op_str, val)
         }
-        Expr::InList { expr, list, .. } => {
+        Expr::InList { expr, list, negated } => {
             let col = expr_to_string(expr);
             let vals: Vec<String> = list.iter().map(expr_to_string).collect();
-            format!("// IN clause: .filter(\"{}\", Operator::In, [{}])", col, vals.join(", "))
+            let op = if *negated { "Operator::NotIn" } else { "Operator::In" };
+            format!(".filter(\"{}\", {}, vec![{}])", col, op, vals.join(", "))
         }
-        _ => format!("// TODO: WHERE {}", expr),
+        Expr::IsNull(e) => {
+            format!(".filter(\"{}\", Operator::IsNull, Value::Null)", expr_to_string(e))
+        }
+        Expr::IsNotNull(e) => {
+            format!(".filter(\"{}\", Operator::IsNotNull, Value::Null)", expr_to_string(e))
+        }
+        Expr::Between { expr, low, high, negated } => {
+            let col = expr_to_string(expr);
+            let op = if *negated { "Operator::NotBetween" } else { "Operator::Between" };
+            format!(".filter(\"{}\", {}, ({}, {}))", col, op, expr_to_string(low), expr_to_string(high))
+        }
+        Expr::Nested(inner) => transform_where(inner),
+        Expr::Like { expr, pattern, .. } => {
+            format!(".filter(\"{}\", Operator::Like, {})", expr_to_string(expr), expr_to_string(pattern))
+        }
+        Expr::ILike { expr, pattern, .. } => {
+            format!(".filter(\"{}\", Operator::ILike, {})", expr_to_string(expr), expr_to_string(pattern))
+        }
+        _ => format!("// Complex WHERE: {}", expr),
     }
 }
 
