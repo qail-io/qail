@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.4] - 2025-12-31
+
+### Added
+- **Core:** `Expr::ArrayConstructor` for `ARRAY[col1, col2, ...]` syntax.
+- **Core:** `Expr::RowConstructor` for `ROW(a, b, c)` syntax.
+- **Core:** `Expr::Subscript` for array/string subscripting `arr[1]`.
+- **Core:** `Expr::Collate` for collation expressions `col COLLATE "C"`.
+- **Core:** `Expr::FieldAccess` for composite field selection `(row).field`.
+- **PG:** Wire protocol encoders for all 5 new expression types.
+
+### Changed
+- **Core:** Expression grammar coverage now ~100% for standard PostgreSQL.
+
 ## [0.14.3] - 2025-12-31
 
 ### Added
