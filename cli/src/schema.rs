@@ -5,6 +5,7 @@ use colored::*;
 use qail_core::migrate::{diff_schemas, parse_qail};
 use qail_core::prelude::*;
 use qail_core::transpiler::Dialect;
+use crate::migrations::types::{MigrationClass, classify_migration};
 
 /// Output format for schema operations.
 #[derive(Clone)]
@@ -209,6 +210,12 @@ pub fn diff_schemas_cmd(
         }
         OutputFormat::Pretty => {
             for (i, cmd) in cmds.iter().enumerate() {
+                let class = classify_migration(cmd);
+                let class_str = match class {
+                    MigrationClass::Reversible => "reversible".green(),
+                    MigrationClass::DataLosing => "data-losing".red(),
+                    MigrationClass::Irreversible => "irreversible".red().bold(),
+                };
                 println!(
                     "{} {} {}",
                     format!("{}.", i + 1).cyan(),
@@ -216,6 +223,7 @@ pub fn diff_schemas_cmd(
                     cmd.table.white()
                 );
                 println!("   {}", cmd.to_sql_with_dialect(dialect).dimmed());
+                println!("   Class: {}", class_str);
             }
         }
     }
