@@ -67,49 +67,63 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
         }
     }
 
-    // Detect new tables
-    for (name, table) in &new.tables {
-        if !old.tables.contains_key(name) {
-            // New table - CREATE TABLE
-            let columns: Vec<Expr> = table
-                .columns
-                .iter()
-                .map(|col| {
-                    let mut constraints = Vec::new();
-                    if col.primary_key {
-                        constraints.push(Constraint::PrimaryKey);
-                    }
-                    if col.nullable {
-                        constraints.push(Constraint::Nullable);
-                    }
-                    if col.unique {
-                        constraints.push(Constraint::Unique);
-                    }
-                    if let Some(def) = &col.default {
-                        constraints.push(Constraint::Default(def.clone()));
-                    }
-                    if let Some(ref fk) = col.foreign_key {
-                        constraints.push(Constraint::References(format!(
-                            "{}({})",
-                            fk.table, fk.column
-                        )));
-                    }
+    // Collect new tables (not in old schema), sorted by FK dependencies
+    let mut new_table_names: Vec<&String> = new
+        .tables
+        .keys()
+        .filter(|name| !old.tables.contains_key(*name))
+        .collect();
 
-                    Expr::Def {
-                        name: col.name.clone(),
-                        data_type: col.data_type.to_pg_type(),
-                        constraints,
-                    }
-                })
-                .collect();
+    // Simple FK-aware sort: tables with no FK deps first, then others
+    // This handles the common case of parent -> child relationships
+    new_table_names.sort_by_key(|name| {
+        new.tables
+            .get(*name)
+            .map(|t| t.columns.iter().filter(|c| c.foreign_key.is_some()).count())
+            .unwrap_or(0)
+    });
 
-            cmds.push(Qail {
-                action: Action::Make,
-                table: name.clone(),
-                columns,
-                ..Default::default()
-            });
-        }
+    // Generate CREATE TABLE commands in dependency order
+    for name in new_table_names {
+        let table = &new.tables[name];
+        let columns: Vec<Expr> = table
+            .columns
+            .iter()
+            .map(|col| {
+                let mut constraints = Vec::new();
+                if col.primary_key {
+                    constraints.push(Constraint::PrimaryKey);
+                }
+                if col.nullable {
+                    constraints.push(Constraint::Nullable);
+                }
+                if col.unique {
+                    constraints.push(Constraint::Unique);
+                }
+                if let Some(def) = &col.default {
+                    constraints.push(Constraint::Default(def.clone()));
+                }
+                if let Some(ref fk) = col.foreign_key {
+                    constraints.push(Constraint::References(format!(
+                        "{}({})",
+                        fk.table, fk.column
+                    )));
+                }
+
+                Expr::Def {
+                    name: col.name.clone(),
+                    data_type: col.data_type.to_pg_type(),
+                    constraints,
+                }
+            })
+            .collect();
+
+        cmds.push(Qail {
+            action: Action::Make,
+            table: name.clone(),
+            columns,
+            ..Default::default()
+        });
     }
 
     // Detect dropped tables (only if not already handled by hints)
