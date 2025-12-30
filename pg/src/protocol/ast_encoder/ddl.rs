@@ -73,6 +73,14 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
                 buf.extend_from_slice(b" UNIQUE");
             }
 
+            // REFERENCES (foreign key)
+            for constraint in constraints {
+                if let Constraint::References(target) = constraint {
+                    buf.extend_from_slice(b" REFERENCES ");
+                    buf.extend_from_slice(target.as_bytes());
+                }
+            }
+
             // CHECK constraint
             for constraint in constraints {
                 if let Constraint::Check(vals) = constraint {
