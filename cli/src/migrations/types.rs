@@ -142,4 +142,18 @@ mod tests {
         // Narrowing is unsafe
         assert!(!is_safe_cast("TEXT", "INT"));
     }
+
+    #[test]
+    fn test_classify_alter_type_to_int() {
+        // AlterType TEXT -> INT should be Irreversible
+        let mut cmd = Qail::make("inquiries");
+        cmd.action = Action::AlterType;
+        cmd.columns = vec![Expr::Def {
+            name: "priority".to_string(),
+            data_type: "INT".to_string(),
+            constraints: vec![],
+        }];
+        
+        assert_eq!(classify_migration(&cmd), MigrationClass::Irreversible);
+    }
 }
