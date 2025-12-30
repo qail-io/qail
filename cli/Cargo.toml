@@ -1,6 +1,6 @@
 [package]
 name = "qail"
-version = "0.11.11"
+version = "0.12.0"
 edition = "2024"
 description = "Schema-first database toolkit - migrations, diff, lint, and query generation"
 license = "MIT"
@@ -10,8 +10,8 @@ categories = ["database", "command-line-utilities", "parser-implementations"]
 keywords = ["db", "sql", "cli", "query", "database"]
 
 [dependencies]
-qail-core = { path = "../core", version = "0.11.11" }
-qail-pg = { path = "../pg", version = "0.11.11" }
+qail-core = { path = "../core", version = "0.12.0" }
+qail-pg = { path = "../pg", version = "0.12.0" }
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
