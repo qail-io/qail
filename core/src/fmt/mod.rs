@@ -227,8 +227,79 @@ impl Formatter {
                     write!(self.buffer, " as {}", a)?;
                 }
             }
-            // TODO: Handle Window, Case, JsonAccess
-            _ => write!(self.buffer, "/* TODO: {:?} */", col)?,
+            Expr::Window { name, func, params, partition, .. } => {
+                // Use Window function format: func(params) OVER (PARTITION BY ...)
+                let params_str: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+                write!(self.buffer, "{}({})", func, params_str.join(", "))?;
+                if !partition.is_empty() {
+                    write!(self.buffer, " over (partition by {})", partition.join(", "))?;
+                }
+                write!(self.buffer, " as {}", name)?;
+            }
+            Expr::Case { when_clauses, else_value, alias } => {
+                write!(self.buffer, "case")?;
+                for (cond, val) in when_clauses {
+                    write!(self.buffer, " when {} then {}", cond.left, val)?;
+                }
+                if let Some(e) = else_value {
+                    write!(self.buffer, " else {}", e)?;
+                }
+                write!(self.buffer, " end")?;
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
+            }
+            Expr::JsonAccess { column, path_segments, alias } => {
+                write!(self.buffer, "{}", column)?;
+                for (path, as_text) in path_segments {
+                    let op = if *as_text { "->>" } else { "->" };
+                    if path.parse::<i64>().is_ok() {
+                        write!(self.buffer, "{}{}", op, path)?;
+                    } else {
+                        write!(self.buffer, "{}'{}'", op, path)?;
+                    }
+                }
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
+            }
+            Expr::Cast { expr, target_type, alias } => {
+                write!(self.buffer, "{}::{}", expr, target_type)?;
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
+            }
+            Expr::Binary { left, op, right, alias } => {
+                write!(self.buffer, "({} {} {})", left, op, right)?;
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
+            }
+            Expr::SpecialFunction { name, args, alias } => {
+                write!(self.buffer, "{}(", name)?;
+                for (i, (keyword, expr)) in args.iter().enumerate() {
+                    if i > 0 { write!(self.buffer, " ")?; }
+                    if let Some(kw) = keyword {
+                        write!(self.buffer, "{} ", kw)?;
+                    }
+                    write!(self.buffer, "{}", expr)?;
+                }
+                write!(self.buffer, ")")?;
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
+            }
+            Expr::Literal(val) => self.format_value(val)?,
+            Expr::Def { name, data_type, constraints } => {
+                write!(self.buffer, "{}:{}", name, data_type)?;
+                for c in constraints {
+                    write!(self.buffer, "^{}", c)?;
+                }
+            }
+            Expr::Mod { kind, col } => {
+                let prefix = match kind { crate::ast::ModKind::Add => "+", crate::ast::ModKind::Drop => "-" };
+                write!(self.buffer, "{}{}", prefix, col)?;
+            }
         }
         Ok(())
     }
