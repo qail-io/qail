@@ -14,7 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI:** `migrate down` now uses natural `current:target` argument order instead of confusing swap logic.
 - **CLI:** `migrate` parser now correctly handles `--` SQL-style comments and version directives.
 - **DDL:** Foreign key `REFERENCES` constraint now correctly emitted in CREATE TABLE statements.
+- **DDL:** Tables now created in FK dependency order (parent before child).
 - **Code:** Collapsed nested if statements using Rust 2024 let-chains (clippy fixes).
+
+### Known Issues
+- Type-change rollback (e.g., TEXT → INT) requires manual `USING` clause in PostgreSQL. Rollback will fail if cast is not automatic.
 
 ## [0.13.1] - 2025-12-30
 
