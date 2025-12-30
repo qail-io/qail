@@ -3,7 +3,7 @@
 //! Functions for encoding Expr, Value, Operator, and conditions to wire format.
 
 use bytes::BytesMut;
-use qail_core::ast::{Action, CageKind, Condition, Expr, Operator, SortOrder, Value};
+use qail_core::ast::{Action, CageKind, Condition, Expr, FrameBound, Operator, SortOrder, Value, WindowFrame};
 
 use super::super::helpers::{i64_to_bytes, write_param_placeholder, NUMERIC_VALUES};
 
@@ -32,7 +32,7 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
             buf.extend_from_slice(b" AS ");
             buf.extend_from_slice(alias.as_bytes());
         }
-        Expr::Aggregate { col, func, distinct, filter: _, alias } => {
+        Expr::Aggregate { col, func, distinct, filter, alias } => {
             buf.extend_from_slice(func.to_string().as_bytes());
             buf.extend_from_slice(b"(");
             if *distinct {
@@ -40,6 +40,22 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
             }
             buf.extend_from_slice(col.as_bytes());
             buf.extend_from_slice(b")");
+            
+            // FILTER (WHERE ...) clause for aggregates
+            if let Some(conditions) = filter {
+                if !conditions.is_empty() {
+                    buf.extend_from_slice(b" FILTER (WHERE ");
+                    for (i, cond) in conditions.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b" AND ");
+                        }
+                        // Encode condition inline (no params for filter conditions)
+                        buf.extend_from_slice(cond.to_string().as_bytes());
+                    }
+                    buf.extend_from_slice(b")");
+                }
+            }
+            
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
                 buf.extend_from_slice(a.as_bytes());
@@ -149,14 +165,14 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
                 buf.extend_from_slice(a.as_bytes());
             }
         }
-        Expr::Window { name, func, params, partition, order, frame: _ } => {
+        Expr::Window { name, func, params, partition, order, frame } => {
             buf.extend_from_slice(func.to_uppercase().as_bytes());
             buf.extend_from_slice(b"(");
             for (i, p) in params.iter().enumerate() {
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                buf.extend_from_slice(p.to_string().as_bytes());
+                encode_column_expr(p, buf);  // Use Expr encoding for column references
             }
             buf.extend_from_slice(b") OVER (");
             if !partition.is_empty() {
@@ -191,6 +207,11 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
                         }
                     }
                 }
+            }
+            // FRAME clause (ROWS/RANGE BETWEEN ... AND ...)
+            if let Some(f) = frame {
+                buf.extend_from_slice(b" ");
+                encode_window_frame(f, buf);
             }
             buf.extend_from_slice(b")");
             if !name.is_empty() {
@@ -496,5 +517,40 @@ pub fn write_value_to_array(buf: &mut Vec<u8>, value: &Value) {
         Value::Null => buf.extend_from_slice(b"NULL"),
         Value::Float(f) => buf.extend_from_slice(f.to_string().as_bytes()),
         _ => buf.extend_from_slice(value.to_string().as_bytes()),
+    }
+}
+
+/// Encode window frame (ROWS/RANGE BETWEEN ... AND ...)
+fn encode_window_frame(frame: &WindowFrame, buf: &mut BytesMut) {
+    match frame {
+        WindowFrame::Rows { start, end } => {
+            buf.extend_from_slice(b"ROWS BETWEEN ");
+            encode_frame_bound(start, buf);
+            buf.extend_from_slice(b" AND ");
+            encode_frame_bound(end, buf);
+        }
+        WindowFrame::Range { start, end } => {
+            buf.extend_from_slice(b"RANGE BETWEEN ");
+            encode_frame_bound(start, buf);
+            buf.extend_from_slice(b" AND ");
+            encode_frame_bound(end, buf);
+        }
+    }
+}
+
+/// Encode a single frame bound
+fn encode_frame_bound(bound: &FrameBound, buf: &mut BytesMut) {
+    match bound {
+        FrameBound::UnboundedPreceding => buf.extend_from_slice(b"UNBOUNDED PRECEDING"),
+        FrameBound::Preceding(n) => {
+            buf.extend_from_slice(n.to_string().as_bytes());
+            buf.extend_from_slice(b" PRECEDING");
+        }
+        FrameBound::CurrentRow => buf.extend_from_slice(b"CURRENT ROW"),
+        FrameBound::Following(n) => {
+            buf.extend_from_slice(n.to_string().as_bytes());
+            buf.extend_from_slice(b" FOLLOWING");
+        }
+        FrameBound::UnboundedFollowing => buf.extend_from_slice(b"UNBOUNDED FOLLOWING"),
     }
 }

@@ -71,17 +71,13 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
             .map(|s| s.to_string())
             .unwrap_or_else(|| name.to_string());
 
-        let params: Vec<Value> = args
-            .iter()
-            .map(|e| Value::Function(e.to_string()))
-            .collect();
-
+        // args are already Vec<Expr> from parse_function_arg - use directly (native AST)
         return Ok((
             remaining,
             Expr::Window {
                 name: alias_str,
                 func: name.to_string(),
-                params,
+                params: args,  // Pass Expr args directly for native AST
                 partition,
                 order,
                 frame,
