@@ -307,4 +307,88 @@ mod tests {
         assert!(cmds.iter().any(|c| matches!(c.action, Action::Mod)));
         assert!(!cmds.iter().any(|c| matches!(c.action, Action::AlterDrop)));
     }
+
+    /// Regression test: FK parent tables must be created before child tables
+    #[test]
+    fn test_fk_ordering_parent_before_child() {
+        use super::super::types::ColumnType;
+        
+        let old = Schema::default();
+        
+        let mut new = Schema::default();
+        // Child table with FK to parent
+        new.add_table(
+            Table::new("child")
+                .column(Column::new("id", ColumnType::Serial).primary_key())
+                .column(Column::new("parent_id", ColumnType::Int).references("parent", "id")),
+        );
+        // Parent table (no FK)
+        new.add_table(
+            Table::new("parent")
+                .column(Column::new("id", ColumnType::Serial).primary_key())
+                .column(Column::new("name", ColumnType::Text)),
+        );
+
+        let cmds = diff_schemas(&old, &new);
+        
+        // Should have 2 CREATE TABLE commands
+        let make_cmds: Vec<_> = cmds.iter().filter(|c| matches!(c.action, Action::Make)).collect();
+        assert_eq!(make_cmds.len(), 2);
+        
+        // Parent (0 FKs) should come BEFORE child (1 FK)
+        let parent_idx = make_cmds.iter().position(|c| c.table == "parent").unwrap();
+        let child_idx = make_cmds.iter().position(|c| c.table == "child").unwrap();
+        assert!(parent_idx < child_idx, "parent table should be created before child with FK");
+    }
+
+    /// Regression test: Multiple FK dependencies should be sorted correctly
+    #[test]
+    fn test_fk_ordering_multiple_dependencies() {
+        use super::super::types::ColumnType;
+        
+        let old = Schema::default();
+        
+        let mut new = Schema::default();
+        // Table with 2 FKs (should be last)
+        new.add_table(
+            Table::new("order_items")
+                .column(Column::new("id", ColumnType::Serial).primary_key())
+                .column(Column::new("order_id", ColumnType::Int).references("orders", "id"))
+                .column(Column::new("product_id", ColumnType::Int).references("products", "id")),
+        );
+        // Table with 1 FK (should be middle)
+        new.add_table(
+            Table::new("orders")
+                .column(Column::new("id", ColumnType::Serial).primary_key())
+                .column(Column::new("user_id", ColumnType::Int).references("users", "id")),
+        );
+        // Table with 0 FKs (should be first)
+        new.add_table(
+            Table::new("users")
+                .column(Column::new("id", ColumnType::Serial).primary_key()),
+        );
+        new.add_table(
+            Table::new("products")
+                .column(Column::new("id", ColumnType::Serial).primary_key()),
+        );
+
+        let cmds = diff_schemas(&old, &new);
+        
+        let make_cmds: Vec<_> = cmds.iter().filter(|c| matches!(c.action, Action::Make)).collect();
+        assert_eq!(make_cmds.len(), 4);
+        
+        // Get positions
+        let users_idx = make_cmds.iter().position(|c| c.table == "users").unwrap();
+        let products_idx = make_cmds.iter().position(|c| c.table == "products").unwrap();
+        let orders_idx = make_cmds.iter().position(|c| c.table == "orders").unwrap();
+        let items_idx = make_cmds.iter().position(|c| c.table == "order_items").unwrap();
+        
+        // Tables with 0 FKs should come first
+        assert!(users_idx < orders_idx, "users (0 FK) before orders (1 FK)");
+        assert!(products_idx < items_idx, "products (0 FK) before order_items (2 FK)");
+        
+        // orders (1 FK) should come before order_items (2 FKs)
+        assert!(orders_idx < items_idx, "orders (1 FK) before order_items (2 FK)");
+    }
 }
+
