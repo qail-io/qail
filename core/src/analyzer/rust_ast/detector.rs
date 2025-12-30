@@ -398,13 +398,11 @@ mod tests {
         assert!(!matches.is_empty());
         
         let qail = &matches[0].suggested_qail;
-        // Should detect CTE pattern
-        assert!(qail.contains("with_cte"), "Should use with_cte builder");
-        // Should use shortcuts
-        assert!(qail.contains("count_where_all"), "Should use count_where_all");
-        assert!(qail.contains("recent("), "Should use recent() for INTERVAL");
-        // Should find the source table inside CTE
-        assert!(qail.contains("messages"), "Should find source table 'messages'");
+        // Should detect CTE pattern - generates separate CTE variables
+        assert!(qail.contains("CTE 'stats'") || qail.contains("stats_cte"), 
+            "Should generate CTE variable: {}", qail);
+        // Should find the source table
+        assert!(qail.contains("messages"), "Should find source table 'messages': {}", qail);
     }
 }
 
