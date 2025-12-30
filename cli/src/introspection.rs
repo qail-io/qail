@@ -1,11 +1,11 @@
 //! Database Schema Introspection
 //!
 //! Extracts schema from live databases into QAIL format.
-//! Uses pure AST-native queries via QailCmd (no raw SQL).
+//! Uses pure AST-native queries via Qail (no raw SQL).
 
 use anyhow::{Result, anyhow};
 use colored::*;
-use qail_core::ast::{Operator, QailCmd};
+use qail_core::ast::{Operator, Qail};
 use qail_core::migrate::{Column, Schema, Table, to_qail_string};
 use qail_pg::driver::PgDriver;
 use url::Url;
@@ -56,7 +56,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     };
 
     // Query columns from information_schema (AST-native)
-    let columns_cmd = QailCmd::get("information_schema.columns")
+    let columns_cmd = Qail::get("information_schema.columns")
         .columns(["table_name", "column_name", "udt_name", "is_nullable"])
         .filter("table_schema", Operator::Eq, "public");
 
@@ -88,7 +88,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     }
 
     // Query primary keys (AST-native)
-    let pk_cmd = QailCmd::get("information_schema.table_constraints")
+    let pk_cmd = Qail::get("information_schema.table_constraints")
         .columns(["table_name", "constraint_type"])
         .filter("table_schema", Operator::Eq, "public")
         .filter("constraint_type", Operator::Eq, "PRIMARY KEY");
@@ -104,7 +104,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .collect();
 
     // Query key column usage for primary key columns (AST-native)
-    let kcu_cmd = QailCmd::get("information_schema.key_column_usage")
+    let kcu_cmd = Qail::get("information_schema.key_column_usage")
         .columns(["table_name", "column_name", "constraint_name"])
         .filter("table_schema", Operator::Eq, "public");
 
@@ -138,7 +138,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     }
 
     // Query indexes from pg_indexes (AST-native)
-    let idx_cmd = QailCmd::get("pg_indexes")
+    let idx_cmd = Qail::get("pg_indexes")
         .columns(["indexname", "tablename", "indexdef"])
         .filter("schemaname", Operator::Eq, "public");
 

@@ -205,7 +205,7 @@ fn parse_conflict_assignment(input: &str) -> IResult<&str, (String, Expr)> {
 /// Parse: from (get ...) - source query for INSERT...SELECT
 ///
 /// Syntax: `from (get table fields col1, col2 where ...)`
-pub fn parse_source_query(input: &str) -> IResult<&str, Box<crate::ast::QailCmd>> {
+pub fn parse_source_query(input: &str) -> IResult<&str, Box<crate::ast::Qail>> {
     let (input, _) = multispace0(input)?;
     let (input, _) = tag_no_case("from").parse(input)?;
     let (input, _) = multispace0(input)?;

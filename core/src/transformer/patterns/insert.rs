@@ -83,11 +83,11 @@ impl SqlPattern for InsertPattern {
         let mut lines = Vec::new();
 
         if ctx.include_imports {
-            lines.push("use qail_core::ast::QailCmd;".to_string());
+            lines.push("use qail_core::ast::Qail;".to_string());
             lines.push(String::new());
         }
 
-        let mut chain = format!("let cmd = QailCmd::add(\"{}\")", table);
+        let mut chain = format!("let cmd = Qail::add(\"{}\")", table);
 
         for (i, col) in columns.iter().enumerate() {
             let value = values.get(i).map(|v| format_value(v, &ctx.binds)).unwrap_or_else(|| "None".to_string());

@@ -8,7 +8,7 @@ This eliminates the Tokio bridge overhead.
 import asyncio
 import struct
 from typing import Optional
-from . import QailCmd, encode_cmd, encode_batch
+from . import Qail, encode_cmd, encode_batch
 
 
 def _encode_startup(user: str, database: str) -> bytes:
@@ -148,7 +148,7 @@ class PgDriver:
         data = await self._reader.readexactly(length) if length > 0 else b''
         return msg_type, data
     
-    async def fetch_all(self, cmd: QailCmd) -> list[Row]:
+    async def fetch_all(self, cmd: Qail) -> list[Row]:
         """Execute query and fetch all rows."""
         wire_bytes = encode_cmd(cmd)  # Returns PyBytes directly
         self._writer.write(wire_bytes)
@@ -208,7 +208,7 @@ class PgDriver:
                 offset += length
         return columns
     
-    async def pipeline_batch(self, cmds: list[QailCmd]) -> int:
+    async def pipeline_batch(self, cmds: list[Qail]) -> int:
         """Execute batch of commands in single round-trip."""
         wire_bytes = encode_batch(cmds)  # Returns PyBytes directly
         self._writer.write(wire_bytes)

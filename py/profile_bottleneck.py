@@ -19,29 +19,31 @@ DB_NAME = 'swb_staging_local'
 NUM_ITERATIONS = 10000
 
 def profile_cmd_building():
-    """Measure time to build QailCmd (Python → Rust)"""
-    from qail import QailCmd, Operator
+    """Measure time to build Qail (Python → Rust)"""
+    from qail import Qail, Operator
     
     start = time.perf_counter()
     for _ in range(NUM_ITERATIONS):
-        cmd = (QailCmd.get("destinations")
+        cmd = (Qail.get("destinations")
                .columns(["id", "name", "slug", "is_active"])
+               .filter("is_active", Operator.eq(), True)
                .order_by("name")
                .limit(10))
     elapsed = time.perf_counter() - start
     
     ops_per_sec = NUM_ITERATIONS / elapsed
     us_per_op = (elapsed / NUM_ITERATIONS) * 1_000_000
-    print(f"QailCmd building:     {ops_per_sec:>10,.0f} ops/s  ({us_per_op:.2f} µs/op)")
+    print(f"Qail building:        {ops_per_sec:>10,.0f} ops/s  ({us_per_op:.2f} µs/op)")
     return elapsed
 
-def profile_encoding():
-    """Measure time to encode QailCmd to wire bytes"""
-    from qail import QailCmd, encode_cmd
+def bench_encoding():
+    """Measure time to encode Qail to wire bytes"""
+    from qail import Qail, encode_cmd
     
     # Pre-build cmd
-    cmd = (QailCmd.get("destinations")
+    cmd = (Qail.get("destinations")
            .columns(["id", "name", "slug", "is_active"])
+           .filter("is_active", Operator.eq(), True)
            .order_by("name")
            .limit(10))
     
@@ -57,11 +59,11 @@ def profile_encoding():
 
 def profile_build_plus_encode():
     """Measure combined build + encode time"""
-    from qail import QailCmd, encode_cmd
+    from qail import Qail, encode_cmd
     
     start = time.perf_counter()
     for _ in range(NUM_ITERATIONS):
-        cmd = (QailCmd.get("destinations")
+        cmd = (Qail.get("destinations")
                .columns(["id", "name", "slug", "is_active"])
                .order_by("name")
                .limit(10))
@@ -99,12 +101,12 @@ async def profile_asyncpg_query():
 
 async def profile_qail_async_driver():
     """Measure qail AsyncPgDriver (Python asyncio + PyO3 encode)"""
-    from qail import AsyncPgDriver, QailCmd
+    from qail import AsyncPgDriver, Qail
     
     driver = await AsyncPgDriver.connect(DB_HOST, DB_PORT, DB_USER, DB_NAME, None)
     
     # Pre-build cmd
-    cmd = (QailCmd.get("destinations")
+    cmd = (Qail.get("destinations")
            .columns(["id", "name", "slug", "is_active"])
            .order_by("name")
            .limit(10))
@@ -128,14 +130,14 @@ async def profile_qail_async_driver():
 
 async def profile_qail_pyo3_driver():
     """Measure qail PyO3 driver (Rust tokio with GIL release)"""
-    from qail import PgDriver, QailCmd
+    from qail import PgDriver, Qail
     
     driver = await asyncio.to_thread(
         PgDriver.connect, DB_HOST, DB_PORT, DB_USER, DB_NAME, ""
     )
     
     # Pre-build cmd
-    cmd = (QailCmd.get("destinations")
+    cmd = (Qail.get("destinations")
            .columns(["id", "name", "slug", "is_active"])
            .order_by("name")
            .limit(10))

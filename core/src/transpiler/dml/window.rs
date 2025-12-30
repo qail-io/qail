@@ -5,7 +5,7 @@ use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
 /// Generate Window Function SQL (Pillar 8).
-pub fn build_window(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_window(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let mut sql = String::from("SELECT ");
 

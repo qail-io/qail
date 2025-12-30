@@ -61,3 +61,10 @@ MIT © 2025 QAIL Contributors
 <p align="center">
   <a href="https://qail.rs">qail.rs</a>
 </p>
+
+## 🤝 Contributing & Support
+
+We welcome issue reports on GitHub! Please provide detailed descriptions to help us reproduce and fix the problem. We aim to address critical issues within 1-5 business days.
+
+> [!CAUTION]
+> **Alpha Software**: QAIL is currently in **alpha**. While we strive for stability, the API is evolving to ensure it remains ergonomic and truly AST-native. **Do not use in production environments yet.**

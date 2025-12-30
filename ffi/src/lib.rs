@@ -290,7 +290,7 @@ pub extern "C" fn qail_encode_get(
     };
 
     // Build QailCmd
-    let mut cmd = qail_core::ast::QailCmd::get(table_str);
+    let mut cmd = qail_core::ast::Qail::get(table_str);
 
     // Parse columns
     if !columns.is_null() {
@@ -405,7 +405,7 @@ pub extern "C" fn qail_encode_batch_get(
             }
         };
 
-        let mut cmd = qail_core::ast::QailCmd::get(table_str);
+        let mut cmd = qail_core::ast::Qail::get(table_str);
 
         // Parse columns
         if !cols_ptr.is_null() {
@@ -498,7 +498,7 @@ pub extern "C" fn qail_encode_uniform_batch(
     };
 
     // Build the base command
-    let mut base_cmd = qail_core::ast::QailCmd::get(table_str);
+    let mut base_cmd = qail_core::ast::Qail::get(table_str);
 
     if !columns.is_null() {
         if let Ok(cols_str) = unsafe { CStr::from_ptr(columns) }.to_str() {
@@ -555,14 +555,14 @@ pub extern "C" fn qail_version() -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qail_core::ast::{Expr, QailCmd};
+    use qail_core::ast::{Expr, Qail};
     use qail_core::transpiler::ToSql;
     use std::ffi::CString;
 
     // Test via AST construction - immune to syntax changes
     #[test]
     fn test_ast_transpile() {
-        let mut cmd = QailCmd::get("users");
+        let mut cmd = Qail::get("users");
         cmd.columns.push(Expr::Star);
         let sql = cmd.to_sql();
         assert!(sql.contains("SELECT"));
