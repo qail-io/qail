@@ -5,34 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.14.4] - 2025-12-31
-
-### Added
-- **Core:** `Expr::ArrayConstructor` for `ARRAY[col1, col2, ...]` syntax.
-- **Core:** `Expr::RowConstructor` for `ROW(a, b, c)` syntax.
-- **Core:** `Expr::Subscript` for array/string subscripting `arr[1]`.
-- **Core:** `Expr::Collate` for collation expressions `col COLLATE "C"`.
-- **Core:** `Expr::FieldAccess` for composite field selection `(row).field`.
-- **PG:** Wire protocol encoders for all 5 new expression types.
-
-### Changed
-- **Core:** Expression grammar coverage now ~100% for standard PostgreSQL.
-
-## [0.14.3] - 2025-12-31
-
-### Added
-- **PG:** Wire protocol encoding for `DISTINCT ON (col1, col2, ...)` queries.
-- **PG:** Wire protocol encoding for `COUNT(*) FILTER (WHERE ...)` aggregate syntax.
-- **PG:** Wire protocol encoding for Window `FRAME` clause (`ROWS/RANGE BETWEEN ... AND ...`).
-- **PG:** Comprehensive complex query test (`complex_test.rs`) verifying all new features.
-
-### Changed
-- **Core:** `Expr::Window.params` changed from `Vec<Value>` to `Vec<Expr>` for native AST philosophy—enables proper column references like `SUM(amount)`.
-
 ## [0.14.2] - 2025-12-31
 
 ### Added
-- **CLI:** `qail diff --pretty` now displays `MigrationClass` (reversible/data-losing/irreversible) for each operation, improving CI and human review clarity.
+
+**Wire Protocol Encoders (AST-Native):**
+- `DISTINCT ON (col1, col2, ...)` queries
+- `COUNT(*) FILTER (WHERE ...)` aggregate syntax
+- Window `FRAME` clause (`ROWS/RANGE BETWEEN ... AND ...`)
+- `GROUP BY` with `ROLLUP`, `CUBE`, and `GROUPING SETS`
+- `CREATE VIEW` and `DROP VIEW` DDL
+- Comprehensive tests: `complex_test.rs`, `expr_test.rs`
+
+**Expression System (100% Grammar Coverage):**
+- `Expr::ArrayConstructor` - `ARRAY[col1, col2, ...]`
+- `Expr::RowConstructor` - `ROW(a, b, c)`
+- `Expr::Subscript` - Array/string subscripting `arr[1]`
+- `Expr::Collate` - Collation expressions `col COLLATE "C"`
+- `Expr::FieldAccess` - Composite field selection `(row).field`
+- `GroupByMode::GroupingSets(Vec<Vec<String>>)` - `GROUPING SETS ((a, b), (c))`
+- `Action::CreateView` and `Action::DropView` for view management
+
+**CLI Improvements:**
+- `qail diff --pretty` displays `MigrationClass` (reversible/data-losing/irreversible)
+
+### Changed
+- `Expr::Window.params` from `Vec<Value>` to `Vec<Expr>` for native AST philosophy
+- Expression, DML, and DDL coverage now 100% for standard PostgreSQL
 
 ## [0.14.1] - 2025-12-31
 

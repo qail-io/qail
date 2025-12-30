@@ -92,17 +92,17 @@ pub fn is_safe_cast(from: &str, to: &str) -> bool {
     }
     
     // INT -> BIGINT is safe (widening)
-    if from_upper == "INT" || from_upper == "INTEGER" {
-        if to_upper == "BIGINT" || to_upper == "TEXT" {
-            return true;
-        }
+    if (from_upper == "INT" || from_upper == "INTEGER")
+        && (to_upper == "BIGINT" || to_upper == "TEXT")
+    {
+        return true;
     }
     
     // SMALLINT -> INT/BIGINT is safe
-    if from_upper == "SMALLINT" {
-        if to_upper == "INT" || to_upper == "INTEGER" || to_upper == "BIGINT" {
-            return true;
-        }
+    if from_upper == "SMALLINT"
+        && (to_upper == "INT" || to_upper == "INTEGER" || to_upper == "BIGINT")
+    {
+        return true;
     }
     
     // If target is a narrowing type and source is TEXT/VARCHAR, it's unsafe

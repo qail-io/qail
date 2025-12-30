@@ -42,18 +42,18 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
             buf.extend_from_slice(b")");
             
             // FILTER (WHERE ...) clause for aggregates
-            if let Some(conditions) = filter {
-                if !conditions.is_empty() {
-                    buf.extend_from_slice(b" FILTER (WHERE ");
-                    for (i, cond) in conditions.iter().enumerate() {
-                        if i > 0 {
-                            buf.extend_from_slice(b" AND ");
-                        }
-                        // Encode condition inline (no params for filter conditions)
-                        buf.extend_from_slice(cond.to_string().as_bytes());
+            if let Some(conditions) = filter
+                && !conditions.is_empty()
+            {
+                buf.extend_from_slice(b" FILTER (WHERE ");
+                for (i, cond) in conditions.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b" AND ");
                     }
-                    buf.extend_from_slice(b")");
+                    // Encode condition inline (no params for filter conditions)
+                    buf.extend_from_slice(cond.to_string().as_bytes());
                 }
+                buf.extend_from_slice(b")");
             }
             
             if let Some(a) = alias {
