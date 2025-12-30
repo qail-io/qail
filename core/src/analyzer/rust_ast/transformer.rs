@@ -81,7 +81,7 @@ fn transform_statement(stmt: &Statement) -> String {
 /// Transform a SELECT query to QAIL code.
 fn transform_query(query: &Query) -> String {
     let mut result = String::new();
-    result.push_str("use qail_core::ast::{QailCmd, Operator, Order};\n\n");
+    result.push_str("use qail_core::ast::{Qail, Operator, Order};\n\n");
 
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
@@ -92,7 +92,7 @@ fn transform_query(query: &Query) -> String {
             ));
             // Transform the inner CTE query
             let inner_code = transform_query(&cte.query)
-                .replace("use qail_core::ast::{QailCmd, Operator, Order};\n\n", "")
+                .replace("use qail_core::ast::{Qail, Operator, Order};\n\n", "")
                 .replace("// Execute with qail-pg driver:\n// let rows = driver.fetch(&cmd).await?;", "")
                 .replace(";\n\n", "")
                 .trim()
@@ -106,7 +106,7 @@ fn transform_query(query: &Query) -> String {
         let table = extract_table(select);
         let columns = extract_columns(select);
 
-        result.push_str(&format!("let cmd = QailCmd::get(\"{}\")\n", table));
+        result.push_str(&format!("let cmd = Qail::get(\"{}\")\n", table));
         result.push_str(&format!("    .columns([{}])", columns));
 
         if let Some(selection) = &select.selection {
@@ -245,8 +245,8 @@ fn transform_insert(table_name: &str, columns: &[String]) -> String {
         set_values = "    // Add .set_value(col, val) for each column\n".to_string();
     }
     format!(
-        "use qail_core::ast::QailCmd;\n\n\
-         let cmd = QailCmd::add(\"{}\")\n{};
+        "use qail_core::ast::Qail;\n\n\
+         let cmd = Qail::add(\"{}\")\n{};
 
 \
          let result = driver.execute(&cmd).await?;",
@@ -264,8 +264,8 @@ fn transform_update(table_name: &str, assignments: &[(String, String)]) -> Strin
         set_values = "    // Add .set_value(col, val) for each column\n".to_string();
     }
     format!(
-        "use qail_core::ast::{{QailCmd, Operator}};\n\n\
-         let cmd = QailCmd::set(\"{}\")\n{}    .filter(\"id\", Operator::Eq, id);\n\n\
+        "use qail_core::ast::{{Qail, Operator}};\n\n\
+         let cmd = Qail::set(\"{}\")\n{}    .filter(\"id\", Operator::Eq, id);\n\n\
          let result = driver.execute(&cmd).await?;",
         table_name, set_values
     )
@@ -274,8 +274,8 @@ fn transform_update(table_name: &str, assignments: &[(String, String)]) -> Strin
 /// Transform DELETE to QAIL.
 fn transform_delete(table_name: &str) -> String {
     format!(
-        "use qail_core::ast::{{QailCmd, Operator}};\n\n\
-         let cmd = QailCmd::del(\"{}\")\n    \
+        "use qail_core::ast::{{Qail, Operator}};\n\n\
+         let cmd = Qail::del(\"{}\")\n    \
          .filter(\"id\", Operator::Eq, id);\n\n\
          let result = driver.execute(&cmd).await?;",
         table_name
@@ -303,8 +303,8 @@ fn expr_to_string(expr: &Expr) -> String {
 /// Transform CREATE TABLE to QAIL.
 fn transform_create_table(table_name: &str) -> String {
     format!(
-        "use qail_core::ast::QailCmd;\n\n\
-         let cmd = QailCmd::make(\"{}\")\n    \
+        "use qail_core::ast::Qail;\n\n\
+         let cmd = Qail::make(\"{}\")\n    \
          // Add column definitions with .column_def(name, type, constraints)\n;\n\n\
          let result = driver.execute(&cmd).await?;",
         table_name
@@ -321,14 +321,14 @@ fn transform_drop(object_type: &sqlparser::ast::ObjectType, names: &[sqlparser::
     
     match object_type {
         ObjectType::Table => format!(
-            "use qail_core::ast::{{QailCmd, Action}};\n\n\
-             let cmd = QailCmd {{ action: Action::Drop, table: \"{}\".into(), ..Default::default() }};\n\n\
+            "use qail_core::ast::{{Qail, Action}};\n\n\
+             let cmd = Qail {{ action: Action::Drop, table: \"{}\".into(), ..Default::default() }};\n\n\
              let result = driver.execute(&cmd).await?;",
             table
         ),
         ObjectType::Index => format!(
-            "use qail_core::ast::{{QailCmd, Action}};\n\n\
-             let cmd = QailCmd {{ action: Action::DropIndex, table: \"{}\".into(), ..Default::default() }};\n\n\
+            "use qail_core::ast::{{Qail, Action}};\n\n\
+             let cmd = Qail {{ action: Action::DropIndex, table: \"{}\".into(), ..Default::default() }};\n\n\
              let result = driver.execute(&cmd).await?;",
             table
         ),
@@ -339,8 +339,8 @@ fn transform_drop(object_type: &sqlparser::ast::ObjectType, names: &[sqlparser::
 /// Transform TRUNCATE to QAIL.
 fn transform_truncate(table_name: &str) -> String {
     format!(
-        "use qail_core::ast::QailCmd;\n\n\
-         let cmd = QailCmd::truncate(\"{}\");\n\n\
+        "use qail_core::ast::Qail;\n\n\
+         let cmd = Qail::truncate(\"{}\");\n\n\
          let result = driver.execute(&cmd).await?;",
         table_name
     )
@@ -354,13 +354,13 @@ fn transform_explain(statement: &Statement, analyze: bool) -> String {
     if analyze {
         format!(
             "// EXPLAIN ANALYZE wrapper:\n\
-             // Use QailCmd::explain_analyze(table) instead of QailCmd::get(table)\n\n\
+             // Use Qail::explain_analyze(table) instead of Qail::get(table)\n\n\
              {}", inner
         )
     } else {
         format!(
             "// EXPLAIN wrapper:\n\
-             // Use QailCmd::explain(table) instead of QailCmd::get(table)\n\n\
+             // Use Qail::explain(table) instead of Qail::get(table)\n\n\
              {}", inner
         )
     }
@@ -374,7 +374,7 @@ mod tests {
     fn test_simple_select() {
         let sql = "SELECT id, name FROM users WHERE active = true ORDER BY name ASC";
         let result = sql_to_qail(sql).unwrap();
-        assert!(result.contains("QailCmd::get(\"users\")"));
+        assert!(result.contains("Qail::get(\"users\")"));
         assert!(result.contains(".columns"));
         assert!(result.contains(".filter"));
         assert!(result.contains(".order_by"));
@@ -391,21 +391,21 @@ mod tests {
     fn test_insert() {
         let sql = "INSERT INTO users (name, email) VALUES ('test', 'test@example.com')";
         let result = sql_to_qail(sql).unwrap();
-        assert!(result.contains("QailCmd::add"));
+        assert!(result.contains("Qail::add"));
     }
 
     #[test]
     fn test_update() {
         let sql = "UPDATE users SET name = 'new' WHERE id = 1";
         let result = sql_to_qail(sql).unwrap();
-        assert!(result.contains("QailCmd::set"));
+        assert!(result.contains("Qail::set"));
     }
 
     #[test]
     fn test_delete() {
         let sql = "DELETE FROM users WHERE id = 1";
         let result = sql_to_qail(sql).unwrap();
-        assert!(result.contains("QailCmd::del"));
+        assert!(result.contains("Qail::del"));
     }
 
     #[test]

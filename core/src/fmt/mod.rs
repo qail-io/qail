@@ -1,5 +1,5 @@
 use crate::ast::{
-    Action, Cage, CageKind, Condition, Expr, Join, LogicalOp, Operator, QailCmd, SortOrder, Value,
+    Action, Cage, CageKind, Condition, Expr, Join, LogicalOp, Operator, Qail, SortOrder, Value,
 };
 use std::fmt::{Result, Write};
 
@@ -25,7 +25,7 @@ impl Formatter {
         }
     }
 
-    pub fn format(mut self, cmd: &QailCmd) -> std::result::Result<String, std::fmt::Error> {
+    pub fn format(mut self, cmd: &Qail) -> std::result::Result<String, std::fmt::Error> {
         self.visit_cmd(cmd)?;
         Ok(self.buffer)
     }
@@ -37,7 +37,7 @@ impl Formatter {
         Ok(())
     }
 
-    fn visit_cmd(&mut self, cmd: &QailCmd) -> Result {
+    fn visit_cmd(&mut self, cmd: &Qail) -> Result {
         for cte in &cmd.ctes {
             write!(self.buffer, "with {} = ", cte.name)?;
             self.indent_level += 1;

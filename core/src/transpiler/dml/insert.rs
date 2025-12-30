@@ -5,7 +5,7 @@ use crate::transpiler::SqlGenerator;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
-pub fn build_insert(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let mut sql = String::from("INSERT INTO ");
     sql.push_str(&generator.quote_identifier(&cmd.table));

@@ -74,7 +74,7 @@ pub trait ToSql {
     fn to_sql_with_dialect(&self, dialect: Dialect) -> String;
 }
 
-impl ToSql for QailCmd {
+impl ToSql for Qail {
     fn to_sql_with_dialect(&self, dialect: Dialect) -> String {
         match self.action {
             Action::Get => dml::select::build_select(self, dialect),
@@ -185,7 +185,7 @@ impl ToSql for QailCmd {
     }
 }
 
-impl ToSqlParameterized for QailCmd {
+impl ToSqlParameterized for Qail {
     fn to_sql_parameterized_with_dialect(&self, dialect: Dialect) -> TranspileResult {
         // Use the full ToSql implementation which handles CTEs, JOINs, etc.
         // Then post-process to extract named parameters for binding

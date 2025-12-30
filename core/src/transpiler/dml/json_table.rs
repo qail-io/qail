@@ -14,7 +14,7 @@ use crate::transpiler::dialect::Dialect;
 ///     quantity INT PATH '$.qty'
 /// )) AS jt;
 /// ```
-pub fn build_json_table(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_json_table(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
 
     let parts: Vec<&str> = cmd.table.split('.').collect();

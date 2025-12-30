@@ -118,7 +118,7 @@ fn test_make_composite_pk() {
 #[test]
 fn test_ddl_commands_manual() {
     // Put command (not fully in v2 parser yet)
-    let mut cmd = QailCmd::put("users");
+    let mut cmd = Qail::put("users");
     cmd.columns.push(Expr::Named("id".to_string())); // Conflict col
     cmd.cages.push(Cage {
         kind: CageKind::Payload,
@@ -133,13 +133,13 @@ fn test_ddl_commands_manual() {
     assert_eq!(cmd.action, Action::Put);
 
     // Drop column (Action::DropCol) - no parser syntax yet
-    let mut cmd_drop = QailCmd::get("users");
+    let mut cmd_drop = Qail::get("users");
     cmd_drop.action = Action::DropCol;
     cmd_drop.columns.push(Expr::Named("password".to_string()));
     assert_eq!(cmd_drop.action, Action::DropCol);
 
     // Rename column (Action::RenameCol) - no parser syntax yet
-    let mut cmd_ren = QailCmd::get("users");
+    let mut cmd_ren = Qail::get("users");
     cmd_ren.action = Action::RenameCol;
     cmd_ren.columns.push(Expr::Named("oldname".to_string()));
     assert_eq!(cmd_ren.action, Action::RenameCol);

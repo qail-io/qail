@@ -5,7 +5,7 @@
 //!
 //! Uses PyO3 0.27's `Python::detach` API for GIL release.
 
-use crate::cmd::PyQailCmd;
+use crate::cmd::PyQail;
 use crate::row::PyRow;
 use once_cell::sync::Lazy;
 use pyo3::exceptions::PyRuntimeError;
@@ -82,7 +82,7 @@ impl PyPgDriver {
     /// Fetch all rows from a query.
     ///
     /// BLOCKING with GIL release. AST → wire protocol → Postgres.
-    fn fetch_all(&self, py: Python<'_>, cmd: &PyQailCmd) -> PyResult<Vec<PyRow>> {
+    fn fetch_all(&self, py: Python<'_>, cmd: &PyQail) -> PyResult<Vec<PyRow>> {
         let cmd_clone = cmd.inner.clone();
         let driver_arc = Arc::clone(&self.inner);
 
@@ -104,7 +104,7 @@ impl PyPgDriver {
     ///
     /// HIGH PERFORMANCE: All commands pipelined, GIL released.
     /// This is the fastest path for bulk operations.
-    fn pipeline_batch(&self, py: Python<'_>, cmds: Vec<PyQailCmd>) -> PyResult<usize> {
+    fn pipeline_batch(&self, py: Python<'_>, cmds: Vec<PyQail>) -> PyResult<usize> {
         let inner_cmds: Vec<_> = cmds.into_iter().map(|c| c.inner).collect();
         let driver_arc = Arc::clone(&self.inner);
 
@@ -122,7 +122,7 @@ impl PyPgDriver {
     }
 
     /// Execute a command without returning rows.
-    fn execute(&self, py: Python<'_>, cmd: &PyQailCmd) -> PyResult<u64> {
+    fn execute(&self, py: Python<'_>, cmd: &PyQail) -> PyResult<u64> {
         let cmd_clone = cmd.inner.clone();
         let driver_arc = Arc::clone(&self.inner);
 
@@ -189,11 +189,11 @@ impl PyPgDriver {
     /// Bulk insert using PostgreSQL COPY protocol.
     ///
     /// HIGH PERFORMANCE: Uses COPY FROM STDIN for maximum throughput.
-    /// Requires QailCmd::Add with columns specified.
+    /// Requires Qail::Add with columns specified.
     fn copy_bulk(
         &self,
         py: Python<'_>,
-        cmd: &PyQailCmd,
+        cmd: &PyQail,
         rows: Vec<Vec<Bound<'_, PyAny>>>,
     ) -> PyResult<u64> {
         use qail_core::ast::Value;
@@ -246,7 +246,7 @@ impl PyPgDriver {
     /// Example:
     ///     data = b"1\thello\t3.14\n2\tworld\t2.71\n"
     ///     driver.copy_bulk_bytes(cmd, data)
-    fn copy_bulk_bytes(&self, py: Python<'_>, cmd: &PyQailCmd, data: &[u8]) -> PyResult<u64> {
+    fn copy_bulk_bytes(&self, py: Python<'_>, cmd: &PyQail, data: &[u8]) -> PyResult<u64> {
         let cmd_clone = cmd.inner.clone();
         let driver_arc = Arc::clone(&self.inner);
         let data_vec = data.to_vec(); // Copy bytes (fast - no type extraction)

@@ -10,47 +10,47 @@ use qail_core::prelude::*;
 use qail_pg::protocol::AstEncoder;
 use std::ffi::{CStr, c_char, c_int};
 
-/// Opaque handle to QailCmd
-pub struct QailCmdHandle {
-    cmd: QailCmd,
+/// Opaque handle to Qail
+pub struct QailHandle {
+    cmd: Qail,
 }
 
 /// Create a GET command
-/// Returns opaque handle, caller must free with qail_cmd_free
+/// Returns opaque handle, caller must free with qail_free
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_get(table: *const c_char) -> *mut QailCmdHandle {
+pub extern "C" fn qail_get(table: *const c_char) -> *mut QailHandle {
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
-    let cmd = QailCmd::get(table);
-    Box::into_raw(Box::new(QailCmdHandle { cmd }))
+    let cmd = Qail::get(table);
+    Box::into_raw(Box::new(QailHandle { cmd }))
 }
 
 /// Create an ADD (INSERT) command
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_add(table: *const c_char) -> *mut QailCmdHandle {
+pub extern "C" fn qail_add(table: *const c_char) -> *mut QailHandle {
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
-    let cmd = QailCmd::add(table);
-    Box::into_raw(Box::new(QailCmdHandle { cmd }))
+    let cmd = Qail::add(table);
+    Box::into_raw(Box::new(QailHandle { cmd }))
 }
 
 /// Create a SET (UPDATE) command
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_set(table: *const c_char) -> *mut QailCmdHandle {
+pub extern "C" fn qail_set(table: *const c_char) -> *mut QailHandle {
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
-    let cmd = QailCmd::set(table);
-    Box::into_raw(Box::new(QailCmdHandle { cmd }))
+    let cmd = Qail::set(table);
+    Box::into_raw(Box::new(QailHandle { cmd }))
 }
 
 /// Create a DEL (DELETE) command
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_del(table: *const c_char) -> *mut QailCmdHandle {
+pub extern "C" fn qail_del(table: *const c_char) -> *mut QailHandle {
     let table = unsafe { CStr::from_ptr(table).to_str().unwrap_or("") };
-    let cmd = QailCmd::del(table);
-    Box::into_raw(Box::new(QailCmdHandle { cmd }))
+    let cmd = Qail::del(table);
+    Box::into_raw(Box::new(QailHandle { cmd }))
 }
 
 /// Add column to command
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_cmd_column(handle: *mut QailCmdHandle, col: *const c_char) {
+pub extern "C" fn qail_column(handle: *mut QailHandle, col: *const c_char) {
     if handle.is_null() {
         return;
     }
@@ -62,8 +62,8 @@ pub extern "C" fn qail_cmd_column(handle: *mut QailCmdHandle, col: *const c_char
 
 /// Add filter condition with int value
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_cmd_filter_int(
-    handle: *mut QailCmdHandle,
+pub extern "C" fn qail_filter_int(
+    handle: *mut QailHandle,
     col: *const c_char,
     op: c_int,
     value: i64,
@@ -80,8 +80,8 @@ pub extern "C" fn qail_cmd_filter_int(
 
 /// Add filter with string value
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_cmd_filter_str(
-    handle: *mut QailCmdHandle,
+pub extern "C" fn qail_filter_str(
+    handle: *mut QailHandle,
     col: *const c_char,
     op: c_int,
     value: *const c_char,
@@ -99,8 +99,8 @@ pub extern "C" fn qail_cmd_filter_str(
 
 /// Add filter with bool value
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_cmd_filter_bool(
-    handle: *mut QailCmdHandle,
+pub extern "C" fn qail_filter_bool(
+    handle: *mut QailHandle,
     col: *const c_char,
     op: c_int,
     value: c_int,
@@ -118,7 +118,7 @@ pub extern "C" fn qail_cmd_filter_bool(
 
 /// Set LIMIT
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_cmd_limit(handle: *mut QailCmdHandle, limit: i64) {
+pub extern "C" fn qail_limit(handle: *mut QailHandle, limit: i64) {
     if handle.is_null() {
         return;
     }
@@ -129,7 +129,7 @@ pub extern "C" fn qail_cmd_limit(handle: *mut QailCmdHandle, limit: i64) {
 
 /// Set OFFSET
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_cmd_offset(handle: *mut QailCmdHandle, offset: i64) {
+pub extern "C" fn qail_offset(handle: *mut QailHandle, offset: i64) {
     if handle.is_null() {
         return;
     }
@@ -142,7 +142,7 @@ pub extern "C" fn qail_cmd_offset(handle: *mut QailCmdHandle, offset: i64) {
 /// Returns pointer to bytes, sets out_len to length
 /// Caller must free with qail_bytes_free
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_cmd_encode(handle: *const QailCmdHandle, out_len: *mut usize) -> *mut u8 {
+pub extern "C" fn qail_encode(handle: *const QailHandle, out_len: *mut usize) -> *mut u8 {
     if handle.is_null() {
         unsafe {
             *out_len = 0;
@@ -167,7 +167,7 @@ pub extern "C" fn qail_cmd_encode(handle: *const QailCmdHandle, out_len: *mut us
 /// Returns single buffer with all commands encoded
 #[unsafe(no_mangle)]
 pub extern "C" fn qail_batch_encode(
-    handles: *const *const QailCmdHandle,
+    handles: *const *const QailHandle,
     count: usize,
     out_len: *mut usize,
 ) -> *mut u8 {
@@ -203,7 +203,7 @@ pub extern "C" fn qail_batch_encode(
 
 /// Free command handle
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_cmd_free(handle: *mut QailCmdHandle) {
+pub extern "C" fn qail_free(handle: *mut QailHandle) {
     if !handle.is_null() {
         unsafe {
             let _ = Box::from_raw(handle);
@@ -261,7 +261,7 @@ pub extern "C" fn qail_encode_select_fast(
     let columns_str = unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") };
 
     // Build command directly
-    let mut cmd = QailCmd::get(table);
+    let mut cmd = Qail::get(table);
 
     // Parse comma-separated columns
     if !columns_str.is_empty() && columns_str != "*" {
@@ -317,7 +317,7 @@ pub extern "C" fn qail_encode_select_batch_fast(
     let mut cmds = Vec::with_capacity(count);
     for i in 0..count {
         let limit = unsafe { *limits.add(i) };
-        let mut cmd = QailCmd::get(table);
+        let mut cmd = Qail::get(table);
         cmd.columns = col_exprs.clone();
         if limit > 0 {
             cmd = cmd.limit(limit);
@@ -360,7 +360,7 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 /// Command sent to the connection task
 enum ConnCmd {
     ExecuteBatch {
-        cmds: Vec<QailCmd>,
+        cmds: Vec<Qail>,
         reply: oneshot::Sender<Result<usize, String>>,
     },
     Close,
@@ -444,7 +444,7 @@ pub extern "C" fn qail_execute_batch_v2(
     let mut cmds = Vec::with_capacity(count);
     for i in 0..count {
         let limit = unsafe { *limits.add(i) };
-        let mut cmd = QailCmd::get(table);
+        let mut cmd = Qail::get(table);
         cmd.columns = col_exprs.clone();
         if limit > 0 {
             cmd = cmd.limit(limit);
@@ -538,7 +538,7 @@ pub extern "C" fn qail_execute_batch(
     let mut cmds = Vec::with_capacity(count);
     for i in 0..count {
         let limit = unsafe { *limits.add(i) };
-        let mut cmd = QailCmd::get(table);
+        let mut cmd = Qail::get(table);
         cmd.columns = col_exprs.clone();
         if limit > 0 {
             cmd = cmd.limit(limit);

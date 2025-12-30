@@ -1,20 +1,20 @@
-//! QailCmd wrapper - AST builder for Python.
+//! Qail wrapper - AST builder for Python.
 
 use crate::types::{py_to_value, PyOperator};
 use pyo3::prelude::*;
-use qail_core::ast::{JoinKind, Operator, QailCmd, SortOrder};
+use qail_core::ast::{JoinKind, Operator, Qail, SortOrder};
 
-/// Python-exposed QailCmd AST builder.
+/// Python-exposed Qail AST builder.
 ///
 /// All methods return `Self` for fluent chaining.
-#[pyclass(name = "QailCmd")]
+#[pyclass(name = "Qail")]
 #[derive(Clone)]
-pub struct PyQailCmd {
-    pub inner: QailCmd,
+pub struct PyQail {
+    pub inner: Qail,
 }
 
 #[pymethods]
-impl PyQailCmd {
+impl PyQail {
     // =========================================================================
     // Static Constructors
     // =========================================================================
@@ -23,7 +23,7 @@ impl PyQailCmd {
     #[staticmethod]
     fn get(table: &str) -> Self {
         Self {
-            inner: QailCmd::get(table),
+            inner: Qail::get(table),
         }
     }
 
@@ -31,7 +31,7 @@ impl PyQailCmd {
     #[staticmethod]
     fn set(table: &str) -> Self {
         Self {
-            inner: QailCmd::set(table),
+            inner: Qail::set(table),
         }
     }
 
@@ -39,7 +39,7 @@ impl PyQailCmd {
     #[staticmethod]
     fn del(table: &str) -> Self {
         Self {
-            inner: QailCmd::del(table),
+            inner: Qail::del(table),
         }
     }
 
@@ -47,7 +47,7 @@ impl PyQailCmd {
     #[staticmethod]
     fn add(table: &str) -> Self {
         Self {
-            inner: QailCmd::add(table),
+            inner: Qail::add(table),
         }
     }
 
@@ -55,7 +55,7 @@ impl PyQailCmd {
     #[staticmethod]
     fn put(table: &str) -> Self {
         Self {
-            inner: QailCmd::put(table),
+            inner: Qail::put(table),
         }
     }
 
@@ -238,6 +238,6 @@ impl PyQailCmd {
     // =========================================================================
 
     fn __repr__(&self) -> String {
-        format!("QailCmd({:?})", self.inner.action)
+        format!("Qail({:?})", self.inner.action)
     }
 }

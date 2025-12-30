@@ -2,8 +2,8 @@
 
 use qail_core::prelude::*;
 
-/// Convert QailCmd to SQL string for preview.
-pub fn cmd_to_sql(cmd: &QailCmd) -> String {
+/// Convert Qail to SQL string for preview.
+pub fn cmd_to_sql(cmd: &Qail) -> String {
     match cmd.action {
         Action::Make => {
             // CREATE TABLE
@@ -134,7 +134,7 @@ pub fn cmd_to_sql(cmd: &QailCmd) -> String {
 }
 
 /// Generate rollback SQL for a command.
-pub fn generate_rollback_sql(cmd: &QailCmd) -> String {
+pub fn generate_rollback_sql(cmd: &Qail) -> String {
     match cmd.action {
         Action::Make => {
             format!("DROP TABLE IF EXISTS {}", cmd.table)
@@ -183,6 +183,6 @@ pub fn generate_rollback_sql(cmd: &QailCmd) -> String {
 }
 
 /// Generate DOWN SQL for a migration command.
-pub fn generate_down_sql(cmd: &QailCmd) -> String {
+pub fn generate_down_sql(cmd: &Qail) -> String {
     generate_rollback_sql(cmd)
 }

@@ -5,7 +5,7 @@ use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
 /// Supports Postgres ON CONFLICT, MySQL ON DUPLICATE KEY, and Oracle/SQL Server MERGE.
-pub fn build_upsert(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_upsert(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
 

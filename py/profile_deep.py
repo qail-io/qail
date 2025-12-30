@@ -23,7 +23,7 @@ NUM_ITERATIONS = 10000
 
 async def profile_raw_socket_query():
     """Measure raw socket I/O without AsyncPgDriver overhead"""
-    from qail import QailCmd, encode_cmd
+    from qail import Qail, encode_cmd
     
     # Connect directly (same as AsyncPgDriver)
     reader, writer = await asyncio.open_connection(DB_HOST, DB_PORT)
@@ -45,7 +45,7 @@ async def profile_raw_socket_query():
             break
     
     # Pre-build and pre-encode cmd
-    cmd = (QailCmd.get("destinations")
+    cmd = (Qail.get("destinations")
            .columns(["id", "name", "slug", "is_active"])
            .order_by("name")
            .limit(10))
@@ -89,7 +89,7 @@ async def profile_raw_socket_query():
 
 async def profile_raw_socket_encode_each():
     """Same as above but encode each time"""
-    from qail import QailCmd, encode_cmd
+    from qail import Qail, encode_cmd
     
     reader, writer = await asyncio.open_connection(DB_HOST, DB_PORT)
     
@@ -109,7 +109,7 @@ async def profile_raw_socket_encode_each():
             break
     
     # Pre-build cmd (but encode each time)
-    cmd = (QailCmd.get("destinations")
+    cmd = (Qail.get("destinations")
            .columns(["id", "name", "slug", "is_active"])
            .order_by("name")
            .limit(10))
@@ -158,7 +158,7 @@ async def main():
     print()
     
     import asyncpg
-    from qail import AsyncPgDriver, QailCmd
+    from qail import AsyncPgDriver, Qail
     
     # Baseline asyncpg
     conn = await asyncpg.connect(host=DB_HOST, port=DB_PORT, user=DB_USER, database=DB_NAME)
@@ -179,7 +179,7 @@ async def main():
     
     # AsyncPgDriver (includes parsing)
     driver = await AsyncPgDriver.connect(DB_HOST, DB_PORT, DB_USER, DB_NAME, None)
-    cmd = (QailCmd.get("destinations")
+    cmd = (Qail.get("destinations")
            .columns(["id", "name", "slug", "is_active"])
            .order_by("name")
            .limit(10))

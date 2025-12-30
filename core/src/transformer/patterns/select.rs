@@ -92,11 +92,11 @@ impl SqlPattern for SelectPattern {
         let mut lines = Vec::new();
 
         if ctx.include_imports {
-            lines.push("use qail_core::ast::{QailCmd, Operator, Order};".to_string());
+            lines.push("use qail_core::ast::{Qail, Operator, Order};".to_string());
             lines.push(String::new());
         }
 
-        let mut chain = format!("let cmd = QailCmd::get(\"{}\")", table);
+        let mut chain = format!("let cmd = Qail::get(\"{}\")", table);
 
         if !columns.is_empty() && columns[0] != "*" {
             let cols: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c)).collect();

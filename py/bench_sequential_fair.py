@@ -57,7 +57,7 @@ async def bench_asyncpg():
 async def bench_qail_pyo3():
     """Benchmark qail PyO3 driver (embedded Rust)"""
     try:
-        from qail import PgDriver, QailCmd, Operator
+        from qail import PgDriver, Qail, Operator
     except ImportError as e:
         print(f"  qail not installed, skipping PyO3 test: {e}")
         return None
@@ -67,9 +67,9 @@ async def bench_qail_pyo3():
         DB_HOST, DB_PORT, DB_USER, DB_NAME, ""  # Empty password for trust auth
     )
     
-    # Build the same query using QailCmd
+    # Build the same query using Qail
     def make_cmd():
-        return (QailCmd.get("destinations")
+        return (Qail.get("destinations")
                 .columns(["id", "name", "slug", "is_active"])
                 .order_by("name")
                 .limit(10))
@@ -90,7 +90,7 @@ async def bench_qail_pyo3():
 async def bench_qail_async():
     """Benchmark qail AsyncPgDriver (pure Python + PyO3 encoder)"""
     try:
-        from qail import AsyncPgDriver, QailCmd, Operator
+        from qail import AsyncPgDriver, Qail, Operator
     except ImportError as e:
         print(f"  qail AsyncPgDriver not available, skipping: {e}")
         return None
@@ -103,9 +103,9 @@ async def bench_qail_async():
         print(f"  AsyncPgDriver connection failed: {e}")
         return None
     
-    # Build the same query using QailCmd
+    # Build the same query using Qail
     def make_cmd():
-        return (QailCmd.get("destinations")
+        return (Qail.get("destinations")
                 .columns(["id", "name", "slug", "is_active"])
                 .order_by("name")
                 .limit(10))

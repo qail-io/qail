@@ -26,7 +26,7 @@ mod types;
 // Keep driver.rs for backward compat but prefer Python driver
 mod driver;
 
-pub use cmd::PyQailCmd;
+pub use cmd::PyQail;
 pub use driver::PyPgDriver;
 pub use row::PyRow;
 pub use types::PyOperator;
@@ -35,7 +35,7 @@ pub use types::PyOperator;
 #[pymodule]
 fn qail(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOperator>()?;
-    m.add_class::<PyQailCmd>()?;
+    m.add_class::<PyQail>()?;
     m.add_class::<PyRow>()?;
     m.add_class::<PyPgDriver>()?;
 

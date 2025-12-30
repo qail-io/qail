@@ -59,7 +59,7 @@ pub extern "C" fn qail_encode_select(
         unsafe { CStr::from_ptr(columns).to_str().unwrap_or("*") }
     };
 
-    let mut cmd = QailCmd::get(table);
+    let mut cmd = Qail::get(table);
 
     if !columns_str.is_empty() && columns_str != "*" {
         cmd.columns = columns_str
@@ -118,7 +118,7 @@ pub extern "C" fn qail_encode_batch(
     let mut cmds = Vec::with_capacity(count);
     for i in 0..count {
         let limit = unsafe { *limits.add(i) };
-        let mut cmd = QailCmd::get(table);
+        let mut cmd = Qail::get(table);
         cmd.columns = col_exprs.clone();
         if limit > 0 {
             cmd = cmd.limit(limit);

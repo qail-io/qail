@@ -12,11 +12,11 @@
 //! ## Architecture
 //!
 //! ```text
-//! QailCmd (AST) → PgEncoder → BytesMut → TCP → PostgreSQL
+//! Qail (AST) → PgEncoder → BytesMut → TCP → PostgreSQL
 //! ```
 //!
 //! ### Layer 2: Protocol (Pure, Sync)
-//! - `PgEncoder` - Compiles QailCmd directly to wire protocol bytes
+//! - `PgEncoder` - Compiles Qail directly to wire protocol bytes
 //! - No async, no I/O, no tokio, no SQL string generation
 //! - Input: AST → Output: BytesMut
 //!
@@ -37,11 +37,11 @@
 //! ## Example
 //!
 //! ```ignore
-//! use qail_core::ast::QailCmd;
+//! use qail_core::ast::Qail;
 //! use qail_pg::PgDriver;
 //!
 //! // Build query as typed AST
-//! let cmd = QailCmd::get("users")
+//! let cmd = Qail::get("users")
 //!     .column("id")
 //!     .column("email")
 //!     .filter("active", Operator::Eq, true);

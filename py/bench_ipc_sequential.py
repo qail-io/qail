@@ -125,13 +125,13 @@ async def bench_asyncpg():
 
 async def bench_qail_pyo3():
     """PyO3 driver"""
-    from qail import PgDriver, QailCmd
+    from qail import PgDriver, Qail
     
     driver = await asyncio.to_thread(
         PgDriver.connect, DB_HOST, DB_PORT, DB_USER, DB_NAME, ""
     )
     
-    cmd = (QailCmd.get("destinations")
+    cmd = (Qail.get("destinations")
            .columns(["id", "name", "slug", "is_active"])
            .order_by("name")
            .limit(10))

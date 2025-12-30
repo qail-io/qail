@@ -5,25 +5,25 @@
 //!
 //! Returns PyBytes directly for zero-copy to Python.
 
-use crate::cmd::PyQailCmd;
+use crate::cmd::PyQail;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use qail_pg::protocol::AstEncoder;
 
-/// Encode a single QailCmd to PostgreSQL wire protocol bytes.
+/// Encode a single Qail to PostgreSQL wire protocol bytes.
 ///
 /// Returns bytes ready to send directly to PostgreSQL TCP socket.
 #[pyfunction]
-pub fn encode_cmd<'py>(py: Python<'py>, cmd: &PyQailCmd) -> Bound<'py, PyBytes> {
+pub fn encode_cmd<'py>(py: Python<'py>, cmd: &PyQail) -> Bound<'py, PyBytes> {
     let (wire_bytes, _) = AstEncoder::encode_cmd(&cmd.inner);
     PyBytes::new(py, &wire_bytes)
 }
 
-/// Encode multiple QailCmds to wire bytes for pipeline execution.
+/// Encode multiple Qails to wire bytes for pipeline execution.
 ///
 /// All commands in one buffer for single network round-trip.
 #[pyfunction]
-pub fn encode_batch<'py>(py: Python<'py>, cmds: Vec<PyQailCmd>) -> Bound<'py, PyBytes> {
+pub fn encode_batch<'py>(py: Python<'py>, cmds: Vec<PyQail>) -> Bound<'py, PyBytes> {
     let inner: Vec<_> = cmds.into_iter().map(|c| c.inner).collect();
     let wire_bytes = AstEncoder::encode_batch(&inner);
     PyBytes::new(py, &wire_bytes)

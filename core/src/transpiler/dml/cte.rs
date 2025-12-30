@@ -10,7 +10,7 @@ use crate::transpiler::dml::select::build_select;
 /// - Single CTE: `WITH x AS (...) SELECT ...`
 /// - Multiple CTEs: `WITH x AS (...), y AS (...), z AS (...) SELECT ...`
 /// - Recursive CTEs: `WITH RECURSIVE x AS (base UNION ALL recursive) SELECT ...`
-pub fn build_cte(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_cte(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
 
     // If no CTEs, just return a select

@@ -1,12 +1,12 @@
 use super::Formatter;
 use crate::ast::{
-    CTEDef, Cage, CageKind, Condition, Expr, Join, JoinKind, LogicalOp, Operator, QailCmd,
+    CTEDef, Cage, CageKind, Condition, Expr, Join, JoinKind, LogicalOp, Operator, Qail,
     SortOrder, Value,
 };
 
 #[test]
 fn test_fmt_simple_get() {
-    let cmd = QailCmd::get("users");
+    let cmd = Qail::get("users");
     let formatter = Formatter::new();
     let output = formatter.format(&cmd).unwrap();
     assert_eq!(output.trim(), "get users");
@@ -14,7 +14,7 @@ fn test_fmt_simple_get() {
 
 #[test]
 fn test_fmt_get_fields() {
-    let mut cmd = QailCmd::get("users");
+    let mut cmd = Qail::get("users");
     cmd.columns = vec![
         Expr::Named("id".to_string()),
         Expr::Aliased {
@@ -45,7 +45,7 @@ fn test_fmt_complex_query() {
     // join message_stats
     // order by created_at desc
 
-    let mut cmd = QailCmd::get("whatsapp_contacts");
+    let mut cmd = Qail::get("whatsapp_contacts");
 
     cmd.columns = vec![
         Expr::Named("id".to_string()),
@@ -115,12 +115,12 @@ fn test_fmt_cte() {
     // with cte = get table
     // get cte
 
-    let mut cmd = QailCmd::get("cte");
+    let mut cmd = Qail::get("cte");
     cmd.ctes.push(CTEDef {
         name: "cte".to_string(),
         recursive: false,
         columns: vec![],
-        base_query: Box::new(QailCmd::get("table")),
+        base_query: Box::new(Qail::get("table")),
         recursive_query: None,
         source_table: None,
     });

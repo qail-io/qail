@@ -8,8 +8,8 @@ pub mod operators;
 pub mod values;
 
 pub use self::cages::{Cage, CageKind};
-#[deprecated(since = "0.12.0", note = "Use `Qail` instead of `QailCmd`")]
-pub use self::cmd::QailCmd;
+#[deprecated(since = "0.12.0", note = "Use `Qail` instead of `Qail`")]
+pub use self::cmd::Qail;
 pub use self::cmd::{CTEDef, ConflictAction, OnConflict};
 pub use self::conditions::Condition;
 pub use self::expr::{

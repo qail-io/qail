@@ -21,7 +21,7 @@
 //! ```ignore
 //! use qail_core::ast::builders::*;
 //!
-//! let query = QailCmd::get("orders")
+//! let query = Qail::get("orders")
 //!     .column_expr(col("id"))
 //!     .column_expr(json("contact_info", "phone").alias("phone"))
 //!     .column_expr(coalesce([col("name"), text("Unknown")]).alias("name"))

@@ -90,7 +90,7 @@ class Operator:
         """JSON key exists (?)"""
         ...
 
-class QailCmd:
+class Qail:
     """AST builder for database queries.
     
     All methods return `Self` for fluent chaining.
@@ -98,27 +98,27 @@ class QailCmd:
     
     # Static constructors
     @staticmethod
-    def get(table: str) -> QailCmd:
+    def get(table: str) -> Qail:
         """Create a GET (SELECT) command."""
         ...
     
     @staticmethod
-    def set(table: str) -> QailCmd:
+    def set(table: str) -> Qail:
         """Create a SET (UPDATE) command."""
         ...
     
     @staticmethod
-    def del_(table: str) -> QailCmd:
+    def del_(table: str) -> Qail:
         """Create a DEL (DELETE) command."""
         ...
     
     @staticmethod
-    def add(table: str) -> QailCmd:
+    def add(table: str) -> Qail:
         """Create an ADD (INSERT) command."""
         ...
     
     @staticmethod
-    def put(table: str) -> QailCmd:
+    def put(table: str) -> Qail:
         """Create a PUT (UPSERT) command."""
         ...
     
@@ -204,6 +204,9 @@ class QailCmd:
     def returning_all(self) -> Self:
         """Return all columns."""
         ...
+    
+    def __repr__(self) -> str:
+        ...
 
 class Row:
     """A row from query results."""
@@ -231,7 +234,7 @@ class Row:
 class PgDriver:
     """AST-native PostgreSQL driver.
     
-    Encodes QailCmd AST directly to PostgreSQL wire protocol bytes.
+    Encodes Qail AST directly to PostgreSQL wire protocol bytes.
     No SQL strings are generated.
     """
     
@@ -256,15 +259,15 @@ class PgDriver:
         """Connect without password (trust mode)."""
         ...
     
-    async def fetch_all(self, cmd: QailCmd) -> List[Row]:
+    async def fetch_all(self, cmd: Qail) -> List[Row]:
         """Fetch all rows from a query."""
         ...
     
-    async def fetch_one(self, cmd: QailCmd) -> Row:
+    async def fetch_one(self, cmd: Qail) -> Row:
         """Fetch one row from a query."""
         ...
     
-    async def execute(self, cmd: QailCmd) -> int:
+    async def execute(self, cmd: Qail) -> int:
         """Execute a command (for mutations). Returns affected rows."""
         ...
     

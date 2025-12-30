@@ -81,11 +81,11 @@ impl SqlPattern for UpdatePattern {
         let mut lines = Vec::new();
 
         if ctx.include_imports {
-            lines.push("use qail_core::ast::{QailCmd, Operator};".to_string());
+            lines.push("use qail_core::ast::{Qail, Operator};".to_string());
             lines.push(String::new());
         }
 
-        let mut chain = format!("let cmd = QailCmd::set(\"{}\")", table);
+        let mut chain = format!("let cmd = Qail::set(\"{}\")", table);
 
         for sv in set_values {
             let value = format_value(&sv.value, &ctx.binds);

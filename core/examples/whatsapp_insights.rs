@@ -11,7 +11,7 @@ use qail_core::transpiler::ToSql;
 
 fn main() {
     // Build the stats CTE subquery
-    let mut stats_query = QailCmd::get("whatsapp_messages");
+    let mut stats_query = Qail::get("whatsapp_messages");
 
     // COUNT(DISTINCT phone_number) AS total_contacts
     stats_query.columns.push(Expr::Aggregate {
@@ -128,11 +128,11 @@ fn main() {
         alias: Some("successful_deliveries_24h".to_string()),
     });
 
-    // Wrap as CTE
-    let cte_query = stats_query.as_cte("stats");
+    // Create CTE definition (using new API)
+    let stats_cte = stats_query.to_cte("stats");
 
     // Build final SELECT from CTE with CASE expression for delivery_rate
-    let mut final_query = cte_query;
+    let mut final_query = Qail::get("stats").with_cte(stats_cte);
     final_query.columns = vec![
         Expr::Named("total_contacts".to_string()),
         Expr::Named("total_messages".to_string()),

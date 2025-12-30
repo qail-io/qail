@@ -4,7 +4,7 @@
 
 use anyhow::{Result, anyhow};
 use colored::*;
-use qail_core::ast::{Action, Expr, QailCmd};
+use qail_core::ast::{Action, Expr, Qail};
 use qail_pg::driver::PgDriver;
 use std::path::PathBuf;
 
@@ -22,7 +22,7 @@ pub struct MigrationImpact {
 }
 
 /// Analyze the impact of a migration command
-pub async fn analyze_impact(driver: &mut PgDriver, cmd: &QailCmd) -> Result<MigrationImpact> {
+pub async fn analyze_impact(driver: &mut PgDriver, cmd: &Qail) -> Result<MigrationImpact> {
     let mut impact = MigrationImpact {
         table: cmd.table.clone(),
         operation: format!("{:?}", cmd.action),
@@ -67,7 +67,7 @@ pub async fn analyze_impact(driver: &mut PgDriver, cmd: &QailCmd) -> Result<Migr
 /// Count rows in a table using AST-native query
 async fn count_table_rows(driver: &mut PgDriver, table: &str) -> Result<u64> {
     // SELECT COUNT(*) FROM table (using AST)
-    let cmd = QailCmd::get(table).column("count(*)");
+    let cmd = Qail::get(table).column("count(*)");
 
     let rows = driver
         .fetch_all(&cmd)
@@ -86,7 +86,7 @@ async fn count_table_rows(driver: &mut PgDriver, table: &str) -> Result<u64> {
 /// Count non-null values in a column using AST-native query
 async fn count_column_values(driver: &mut PgDriver, table: &str, column: &str) -> Result<u64> {
     // SELECT COUNT(column) FROM table WHERE column IS NOT NULL
-    let cmd = QailCmd::get(table).column(format!("count({})", column));
+    let cmd = Qail::get(table).column(format!("count({})", column));
 
     let rows = driver
         .fetch_all(&cmd)
@@ -210,7 +210,7 @@ pub async fn backup_table(driver: &mut PgDriver, table: &str) -> Result<PathBuf>
     let path = snapshot_dir.join(&filename);
 
     // Use fetch_all for backup
-    let cmd = QailCmd::get(table);
+    let cmd = Qail::get(table);
 
     let rows = driver
         .fetch_all(&cmd)
@@ -251,7 +251,7 @@ pub async fn backup_columns(
     cols.extend(columns.iter().map(|s| s.as_str()));
 
     let cols_len = cols.len();
-    let cmd = QailCmd::get(table).columns(cols);
+    let cmd = Qail::get(table).columns(cols);
 
     let rows = driver
         .fetch_all(&cmd)
@@ -379,7 +379,7 @@ pub async fn snapshot_column_to_db(
     ensure_snapshots_table(driver).await?;
 
     // Fetch all rows with id and column value
-    let cmd = QailCmd::get(table).columns(["id", column]);
+    let cmd = Qail::get(table).columns(["id", column]);
     let rows = driver
         .fetch_all(&cmd)
         .await
@@ -393,7 +393,7 @@ pub async fn snapshot_column_to_db(
 
         if let Some(val) = value {
             // Insert snapshot record
-            let snapshot_cmd = QailCmd::add("_qail_data_snapshots")
+            let snapshot_cmd = Qail::add("_qail_data_snapshots")
                 .columns([
                     "migration_version",
                     "table_name",
@@ -433,7 +433,7 @@ pub async fn snapshot_table_to_db(
     ensure_snapshots_table(driver).await?;
 
     // Fetch all rows as JSON
-    let cmd = QailCmd::get(table);
+    let cmd = Qail::get(table);
     let rows = driver
         .fetch_all(&cmd)
         .await
@@ -455,7 +455,7 @@ pub async fn snapshot_table_to_db(
         let value_json = format!("{{{}}}", json_parts.join(", "));
 
         // Insert snapshot record
-        let snapshot_cmd = QailCmd::add("_qail_data_snapshots")
+        let snapshot_cmd = Qail::add("_qail_data_snapshots")
             .columns([
                 "migration_version",
                 "table_name",
@@ -552,7 +552,7 @@ pub async fn restore_column_from_db(
     use qail_core::ast::Operator;
 
     // Query snapshots for this migration/table/column
-    let query_cmd = QailCmd::get("_qail_data_snapshots")
+    let query_cmd = Qail::get("_qail_data_snapshots")
         .columns(["row_id", "value_json"])
         .filter("migration_version", Operator::Eq, migration_version)
         .filter("table_name", Operator::Eq, table)
@@ -572,7 +572,7 @@ pub async fn restore_column_from_db(
         let value = value_json.trim_matches('"').replace("\\\"", "\"");
 
         // Update the row
-        let update_cmd = QailCmd::set(table)
+        let update_cmd = Qail::set(table)
             .set_value(column, value)
             .where_eq("id", row_id);
 
@@ -591,7 +591,7 @@ pub async fn list_snapshots(
 ) -> Result<Vec<(String, String, String, u64)>> {
     use qail_core::ast::Operator;
 
-    let mut cmd = QailCmd::get("_qail_data_snapshots").columns([
+    let mut cmd = Qail::get("_qail_data_snapshots").columns([
         "migration_version",
         "table_name",
         "column_name",

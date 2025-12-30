@@ -1,7 +1,7 @@
 //! Migration impact analysis.
 
 use super::scanner::CodeReference;
-use crate::ast::{Action, QailCmd};
+use crate::ast::{Action, Qail};
 use crate::migrate::Schema;
 use std::collections::HashMap;
 
@@ -60,7 +60,7 @@ pub enum Warning {
 impl MigrationImpact {
     /// Analyze migration commands against codebase references.
     pub fn analyze(
-        commands: &[QailCmd],
+        commands: &[Qail],
         code_refs: &[CodeReference],
         _old_schema: &Schema,
         _new_schema: &Schema,
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_detect_dropped_table() {
-        let cmd = QailCmd {
+        let cmd = Qail {
             action: Action::Drop,
             table: "users".to_string(),
             ..Default::default()

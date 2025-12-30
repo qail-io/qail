@@ -36,7 +36,7 @@ pub use io_backend::{IoBackend, backend_name, detect as detect_io_backend};
 pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection};
 pub use prepared::PreparedStatement;
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -190,7 +190,7 @@ impl PgDriver {
     ///
     /// Uses AstEncoder to directly encode AST to wire protocol bytes.
     /// NO SQL STRING GENERATION!
-    pub async fn fetch_all(&mut self, cmd: &QailCmd) -> PgResult<Vec<PgRow>> {
+    pub async fn fetch_all(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
 
         // AST-NATIVE: Encode directly to wire bytes (no to_sql()!)
@@ -230,7 +230,7 @@ impl PgDriver {
     }
 
     /// Execute a QAIL command and fetch one row.
-    pub async fn fetch_one(&mut self, cmd: &QailCmd) -> PgResult<PgRow> {
+    pub async fn fetch_one(&mut self, cmd: &Qail) -> PgResult<PgRow> {
         let rows = self.fetch_all(cmd).await?;
         rows.into_iter().next().ok_or(PgError::NoRows)
     }
@@ -242,7 +242,7 @@ impl PgDriver {
     /// On subsequent calls: sends only Bind + Execute + Sync (much faster!)
     ///
     /// Use this for repeated queries with the same AST structure.
-    pub async fn fetch_all_cached(&mut self, cmd: &QailCmd) -> PgResult<Vec<PgRow>> {
+    pub async fn fetch_all_cached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
 
         let (sql, params) = AstEncoder::encode_cmd_sql(cmd);
@@ -264,7 +264,7 @@ impl PgDriver {
     /// Execute a QAIL command (for mutations) - AST-NATIVE.
     ///
     /// Uses AstEncoder to directly encode AST to wire protocol bytes.
-    pub async fn execute(&mut self, cmd: &QailCmd) -> PgResult<u64> {
+    pub async fn execute(&mut self, cmd: &Qail) -> PgResult<u64> {
         use crate::protocol::AstEncoder;
 
         // AST-NATIVE: Encode directly to wire bytes (no to_sql()!)
@@ -356,13 +356,13 @@ impl PgDriver {
     /// # Example
     /// ```ignore
     /// let cmds = vec![
-    ///     QailCmd::add("users").columns(["name"]).values(["Alice"]),
-    ///     QailCmd::add("users").columns(["name"]).values(["Bob"]),
+    ///     Qail::add("users").columns(["name"]).values(["Alice"]),
+    ///     Qail::add("users").columns(["name"]).values(["Bob"]),
     /// ];
     /// let results = driver.execute_batch(&cmds).await?;
     /// // results = [1, 1] (rows affected)
     /// ```
-    pub async fn execute_batch(&mut self, cmds: &[QailCmd]) -> PgResult<Vec<u64>> {
+    pub async fn execute_batch(&mut self, cmds: &[Qail]) -> PgResult<Vec<u64>> {
         self.begin().await?;
         let mut results = Vec::with_capacity(cmds.len());
         for cmd in cmds {
@@ -401,28 +401,28 @@ impl PgDriver {
 
     // ==================== PIPELINE (BATCH) ====================
 
-    /// Execute multiple QailCmd ASTs in a single network round-trip (PIPELINING).
+    /// Execute multiple Qail ASTs in a single network round-trip (PIPELINING).
     ///
     /// This is the high-performance path for batch operations.
     ///
     /// # Example
     /// ```ignore
-    /// let cmds: Vec<QailCmd> = (1..=1000)
-    ///     .map(|i| QailCmd::get("harbors").columns(["id", "name"]).limit(i))
+    /// let cmds: Vec<Qail> = (1..=1000)
+    ///     .map(|i| Qail::get("harbors").columns(["id", "name"]).limit(i))
     ///     .collect();
     /// let count = driver.pipeline_batch(&cmds).await?;
     /// assert_eq!(count, 1000);
     /// ```
-    pub async fn pipeline_batch(&mut self, cmds: &[QailCmd]) -> PgResult<usize> {
+    pub async fn pipeline_batch(&mut self, cmds: &[Qail]) -> PgResult<usize> {
         self.connection.pipeline_ast_fast(cmds).await
     }
 
-    /// Execute multiple QailCmd ASTs and return full row data.
+    /// Execute multiple Qail ASTs and return full row data.
     ///
     /// Unlike `pipeline_batch` which only returns count, this method
     /// collects and returns all row data from each query.
     ///
-    pub async fn pipeline_fetch(&mut self, cmds: &[QailCmd]) -> PgResult<Vec<Vec<PgRow>>> {
+    pub async fn pipeline_fetch(&mut self, cmds: &[Qail]) -> PgResult<Vec<Vec<PgRow>>> {
         let raw_results = self.connection.pipeline_ast(cmds).await?;
 
         let results: Vec<Vec<PgRow>> = raw_results
@@ -473,13 +473,13 @@ impl PgDriver {
 
     /// Bulk insert data using PostgreSQL COPY protocol (AST-native).
     ///
-    /// Uses a QailCmd::Add to get validated table and column names from the AST,
+    /// Uses a Qail::Add to get validated table and column names from the AST,
     /// not user-provided strings. This is the sound, AST-native approach.
     ///
     /// # Example
     /// ```ignore
-    /// // Create a QailCmd::Add to define table and columns
-    /// let cmd = QailCmd::add("users")
+    /// // Create a Qail::Add to define table and columns
+    /// let cmd = Qail::add("users")
     ///     .columns(["id", "name", "email"]);
     ///
     /// // Bulk insert rows
@@ -491,7 +491,7 @@ impl PgDriver {
     /// ```
     pub async fn copy_bulk(
         &mut self,
-        cmd: &QailCmd,
+        cmd: &Qail,
         rows: &[Vec<qail_core::ast::Value>],
     ) -> PgResult<u64> {
         use qail_core::ast::Action;
@@ -499,7 +499,7 @@ impl PgDriver {
         // Validate this is an Add command
         if cmd.action != Action::Add {
             return Err(PgError::Query(
-                "copy_bulk requires QailCmd::Add action".to_string(),
+                "copy_bulk requires Qail::Add action".to_string(),
             ));
         }
 
@@ -521,7 +521,7 @@ impl PgDriver {
 
         if columns.is_empty() {
             return Err(PgError::Query(
-                "copy_bulk requires columns in QailCmd".to_string(),
+                "copy_bulk requires columns in Qail".to_string(),
             ));
         }
 
@@ -540,16 +540,16 @@ impl PgDriver {
     ///
     /// # Example
     /// ```ignore
-    /// let cmd = QailCmd::add("users").columns(["id", "name"]);
+    /// let cmd = Qail::add("users").columns(["id", "name"]);
     /// let data = b"1\tAlice\n2\tBob\n";
     /// driver.copy_bulk_bytes(&cmd, data).await?;
     /// ```
-    pub async fn copy_bulk_bytes(&mut self, cmd: &QailCmd, data: &[u8]) -> PgResult<u64> {
+    pub async fn copy_bulk_bytes(&mut self, cmd: &Qail, data: &[u8]) -> PgResult<u64> {
         use qail_core::ast::Action;
 
         if cmd.action != Action::Add {
             return Err(PgError::Query(
-                "copy_bulk_bytes requires QailCmd::Add action".to_string(),
+                "copy_bulk_bytes requires Qail::Add action".to_string(),
             ));
         }
 
@@ -569,7 +569,7 @@ impl PgDriver {
 
         if columns.is_empty() {
             return Err(PgError::Query(
-                "copy_bulk_bytes requires columns in QailCmd".to_string(),
+                "copy_bulk_bytes requires columns in Qail".to_string(),
             ));
         }
 
@@ -584,7 +584,7 @@ impl PgDriver {
     ///
     /// # Example
     /// ```ignore
-    /// let cmd = QailCmd::get("large_table");
+    /// let cmd = Qail::get("large_table");
     /// let batches = driver.stream_cmd(&cmd, 100).await?;
     /// for batch in batches {
     ///     for row in batch {
@@ -594,7 +594,7 @@ impl PgDriver {
     /// ```
     pub async fn stream_cmd(
         &mut self,
-        cmd: &QailCmd,
+        cmd: &Qail,
         batch_size: usize,
     ) -> PgResult<Vec<Vec<PgRow>>> {
         use std::sync::atomic::{AtomicU64, Ordering};

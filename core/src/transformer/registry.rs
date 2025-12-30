@@ -97,7 +97,7 @@ mod tests {
 
         assert!(result.is_ok());
         let code = result.unwrap();
-        assert!(code.contains("QailCmd::get"));
+        assert!(code.contains("Qail::get"));
         assert!(code.contains("users"));
     }
 }

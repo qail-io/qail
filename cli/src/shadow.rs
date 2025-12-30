@@ -10,7 +10,7 @@
 
 use anyhow::{Result, anyhow};
 use colored::*;
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use qail_pg::driver::PgDriver;
 
 use crate::util::parse_pg_url;
@@ -83,7 +83,7 @@ pub async fn create_shadow_database(primary_url: &str) -> Result<ShadowState> {
             .map_err(|e| anyhow!("Failed to connect to postgres: {}", e))?
     };
 
-    let check_cmd = QailCmd::get("pg_database")
+    let check_cmd = Qail::get("pg_database")
         .column("datname")
         .where_eq("datname", state.shadow_name.clone());
 
@@ -109,7 +109,7 @@ pub async fn create_shadow_database(primary_url: &str) -> Result<ShadowState> {
 }
 
 /// Apply migrations to shadow database
-pub async fn apply_migrations_to_shadow(state: &mut ShadowState, cmds: &[QailCmd]) -> Result<()> {
+pub async fn apply_migrations_to_shadow(state: &mut ShadowState, cmds: &[Qail]) -> Result<()> {
     println!("  {} Applying migration to shadow...", "[2/4]".cyan());
 
     let (host, port, user, password, _) = parse_pg_url(&state.primary_url)?;
@@ -168,7 +168,7 @@ pub async fn sync_data_to_shadow(state: &mut ShadowState) -> Result<()> {
     };
 
     use qail_core::ast::Operator;
-    let tables_cmd = QailCmd::get("information_schema.tables")
+    let tables_cmd = Qail::get("information_schema.tables")
         .column("table_name")
         .filter("table_schema", Operator::Eq, "public")
         .filter("table_type", Operator::Eq, "BASE TABLE");
@@ -188,7 +188,7 @@ pub async fn sync_data_to_shadow(state: &mut ShadowState) -> Result<()> {
 
     for table in &tables {
         // Fetch all rows from primary
-        let fetch_cmd = QailCmd::get(table);
+        let fetch_cmd = Qail::get(table);
         let rows = primary_driver
             .fetch_all(&fetch_cmd)
             .await
@@ -361,7 +361,7 @@ pub async fn abort_shadow(primary_url: &str) -> Result<()> {
 }
 
 /// Run shadow migration (create, apply, sync, display status)
-pub async fn run_shadow_migration(primary_url: &str, cmds: &[QailCmd]) -> Result<ShadowState> {
+pub async fn run_shadow_migration(primary_url: &str, cmds: &[Qail]) -> Result<ShadowState> {
     let mut state = create_shadow_database(primary_url).await?;
 
     apply_migrations_to_shadow(&mut state, cmds).await?;

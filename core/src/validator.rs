@@ -1,9 +1,9 @@
 //! Schema validator and fuzzy matching suggestions.
 //!
-//! Provides compile-time-like validation for QailCmd against a known schema.
+//! Provides compile-time-like validation for Qail against a known schema.
 //! Used by CLI, LSP, and the encoder to catch errors before they hit the wire.
 
-use crate::ast::{Expr, QailCmd};
+use crate::ast::{Expr, Qail};
 use std::collections::HashMap;
 use strsim::levenshtein;
 
@@ -206,8 +206,8 @@ impl Validator {
         }
     }
 
-    /// Validate an entire QailCmd against the schema.
-    pub fn validate_command(&self, cmd: &QailCmd) -> ValidationResult {
+    /// Validate an entire Qail against the schema.
+    pub fn validate_command(&self, cmd: &Qail) -> ValidationResult {
         let mut errors = Vec::new();
 
         if let Err(e) = self.validate_table(&cmd.table) {
@@ -387,10 +387,10 @@ mod tests {
         let mut v = Validator::new();
         v.add_table("users", &["id", "email", "name"]);
 
-        let cmd = QailCmd::get("users").columns(["id", "email"]);
+        let cmd = Qail::get("users").columns(["id", "email"]);
         assert!(v.validate_command(&cmd).is_ok());
 
-        let cmd = QailCmd::get("users").columns(["id", "emial"]); // typo
+        let cmd = Qail::get("users").columns(["id", "emial"]); // typo
         let errors = v.validate_command(&cmd).unwrap_err();
         assert_eq!(errors.len(), 1);
         assert!(

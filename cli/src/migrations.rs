@@ -63,9 +63,9 @@ pub async fn migrate_status(url: &str) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to create migration table: {}", e))?;
 
     // Query migration history (AST-native)
-    use qail_core::ast::QailCmd;
+    use qail_core::ast::Qail;
 
-    let status_cmd = QailCmd::get("_qail_migrations");
+    let status_cmd = Qail::get("_qail_migrations");
 
     // Status check: attempt to fetch from migration table
     // For now, show that the table exists
@@ -793,9 +793,9 @@ pub async fn migrate_up(schema_diff_path: &str, url: &str, codebase: Option<&str
     let checksum = format!("{:x}", md5::compute(&sql_up_all));
 
     // Record migration in history (AST-native)
-    use qail_core::ast::QailCmd;
+    use qail_core::ast::Qail;
 
-    let record_cmd = QailCmd::add("_qail_migrations")
+    let record_cmd = Qail::add("_qail_migrations")
         .columns(["version", "name", "checksum", "sql_up"])
         .values([
             version.clone(),

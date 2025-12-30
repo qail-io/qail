@@ -4,7 +4,7 @@ pub trait ToDynamo {
     fn to_dynamo(&self) -> String;
 }
 
-impl ToDynamo for QailCmd {
+impl ToDynamo for Qail {
     fn to_dynamo(&self) -> String {
         match self.action {
             Action::Get => build_get_item(self),
@@ -21,7 +21,7 @@ impl ToDynamo for QailCmd {
     }
 }
 
-fn build_get_item(cmd: &QailCmd) -> String {
+fn build_get_item(cmd: &Qail) -> String {
 
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": \"{}\"", cmd.table));
@@ -79,7 +79,7 @@ fn build_get_item(cmd: &QailCmd) -> String {
     format!("{{ {} }}", parts.join(", "))
 }
 
-fn build_put_item(cmd: &QailCmd) -> String {
+fn build_put_item(cmd: &Qail) -> String {
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": \"{}\"", cmd.table));
 
@@ -89,7 +89,7 @@ fn build_put_item(cmd: &QailCmd) -> String {
     format!("{{ {} }}", parts.join(", "))
 }
 
-fn build_update_item(cmd: &QailCmd) -> String {
+fn build_update_item(cmd: &Qail) -> String {
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": \"{}\"", cmd.table));
 
@@ -103,7 +103,7 @@ fn build_update_item(cmd: &QailCmd) -> String {
     format!("{{ {} }}", parts.join(", "))
 }
 
-fn build_delete_item(cmd: &QailCmd) -> String {
+fn build_delete_item(cmd: &Qail) -> String {
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": \"{}\"", cmd.table));
 
@@ -114,7 +114,7 @@ fn build_delete_item(cmd: &QailCmd) -> String {
     format!("{{ {} }}", parts.join(", "))
 }
 
-fn build_expression(cmd: &QailCmd) -> (String, String) {
+fn build_expression(cmd: &Qail) -> (String, String) {
     let mut expr_parts = Vec::new();
     let mut values_parts = Vec::new();
     let mut counter = 0;
@@ -157,7 +157,7 @@ fn build_expression(cmd: &QailCmd) -> (String, String) {
     (expr_parts.join(" AND "), values_parts.join(", "))
 }
 
-fn build_item_json(cmd: &QailCmd) -> String {
+fn build_item_json(cmd: &Qail) -> String {
     let mut parts = Vec::new();
     for cage in &cmd.cages {
         match cage.kind {
@@ -177,7 +177,7 @@ fn build_item_json(cmd: &QailCmd) -> String {
     parts.join(", ")
 }
 
-fn build_key_from_filter(cmd: &QailCmd) -> String {
+fn build_key_from_filter(cmd: &Qail) -> String {
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind
             && let Some(cond) = cage.conditions.first()
@@ -193,7 +193,7 @@ fn build_key_from_filter(cmd: &QailCmd) -> String {
     "\"pk\": { \"S\": \"unknown\" }".to_string()
 }
 
-fn build_update_expression(cmd: &QailCmd) -> (String, String) {
+fn build_update_expression(cmd: &Qail) -> (String, String) {
     let mut sets = Vec::new();
     let mut vals = Vec::new();
     let mut counter = 100; // Offset to avoid collision with filters
@@ -218,7 +218,7 @@ fn build_update_expression(cmd: &QailCmd) -> (String, String) {
     (format!("SET {}", sets.join(", ")), vals.join(", "))
 }
 
-fn get_limit(cmd: &QailCmd) -> Option<usize> {
+fn get_limit(cmd: &Qail) -> Option<usize> {
     for cage in &cmd.cages {
         if let CageKind::Limit(n) = cage.kind {
             return Some(n);
@@ -227,7 +227,7 @@ fn get_limit(cmd: &QailCmd) -> Option<usize> {
     None
 }
 
-fn build_create_table(cmd: &QailCmd) -> String {
+fn build_create_table(cmd: &Qail) -> String {
     let mut attr_defs = Vec::new();
     let mut key_schema = Vec::new();
 

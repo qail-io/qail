@@ -123,10 +123,28 @@ fn transform_qail_code(
     return_type: Option<&str>,
     driver_method: &str,
 ) -> String {
-    // Replace param placeholders with actual bind values
+    // Replace param placeholders with actual bind values (for SELECT/WHERE)
     for (i, bind) in binds.iter().enumerate() {
         let placeholder = format!("param_{} /* replace with actual value */", i + 1);
         code = code.replace(&placeholder, bind);
+    }
+
+    // For INSERT statements: replace {col}_value placeholders with bind values
+    // Extract column names from .set_value("col_name", col_name_value) patterns using simple string parsing
+    let columns: Vec<String> = code
+        .match_indices(".set_value(\"")
+        .filter_map(|(idx, _)| {
+            let rest = &code[idx + 12..];  // Skip `.set_value("`
+            rest.find('"').map(|end| rest[..end].to_string())
+        })
+        .collect();
+    
+    // Replace each {col}_value placeholder with corresponding bind value
+    for (i, col) in columns.iter().enumerate() {
+        if let Some(bind) = binds.get(i) {
+            let placeholder = format!("{}_value", col);
+            code = code.replace(&placeholder, bind);
+        }
     }
 
     // Replace return type

@@ -4,7 +4,7 @@ use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
-pub fn build_update(cmd: &QailCmd, dialect: Dialect) -> String {
+pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let mut sql = if cmd.only_table {
         String::from("UPDATE ONLY ")

@@ -216,7 +216,7 @@ enum MigrateAction {
 }
 
 /// Parse schema diff string (old.qail:new.qail) into migration commands
-fn parse_schema_diff(schema_diff: &str) -> Result<Vec<qail_core::ast::QailCmd>> {
+fn parse_schema_diff(schema_diff: &str) -> Result<Vec<qail_core::ast::Qail>> {
     use qail_core::migrate::{diff_schemas, parse_qail};
 
     if schema_diff.contains(':') && !schema_diff.starts_with("postgres") {
