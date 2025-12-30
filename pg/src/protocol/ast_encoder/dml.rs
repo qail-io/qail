@@ -190,15 +190,32 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     buf.extend_from_slice(cmd.table.as_bytes());
     buf.extend_from_slice(b" SET ");
 
-    // SET clause
+    // SET clause - pair columns with payload values
     if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Payload) {
-        for (i, cond) in cage.conditions.iter().enumerate() {
-            if i > 0 {
-                buf.extend_from_slice(b", ");
+        // Use cmd.columns if available (from .columns([...]).values([...]) pattern)
+        // Otherwise use cage.conditions.left (from .set("col", value) pattern)
+        if !cmd.columns.is_empty() {
+            // Zip columns with values
+            for (i, (col, cond)) in cmd.columns.iter().zip(cage.conditions.iter()).enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                // Column name from cmd.columns
+                encode_expr(col, buf);
+                buf.extend_from_slice(b" = ");
+                // Value from payload condition
+                encode_value(&cond.value, buf, params);
             }
-            encode_expr(&cond.left, buf);
-            buf.extend_from_slice(b" = ");
-            encode_value(&cond.value, buf, params);
+        } else {
+            // Fallback to old behavior (direct set)
+            for (i, cond) in cage.conditions.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                encode_expr(&cond.left, buf);
+                buf.extend_from_slice(b" = ");
+                encode_value(&cond.value, buf, params);
+            }
         }
     }
 
