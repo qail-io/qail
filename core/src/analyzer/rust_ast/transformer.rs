@@ -51,7 +51,23 @@ fn transform_statement(stmt: &Statement) -> String {
             };
             transform_delete(&table_name)
         }
-        _ => "// TODO: Unsupported SQL statement type".to_string(),
+        Statement::CreateTable(create) => {
+            transform_create_table(&create.name.to_string())
+        }
+        Statement::Drop { object_type, names, .. } => {
+            transform_drop(object_type, names)
+        }
+        Statement::Truncate(truncate) => {
+            let table = truncate.table.to_string();
+            transform_truncate(&table)
+        }
+        Statement::Explain { statement, analyze, .. } => {
+            transform_explain(statement, *analyze)
+        }
+        _ => {
+            let stmt_type = format!("{:?}", stmt).split('(').next().unwrap_or("Unknown").to_string();
+            format!("// SQL statement type '{}' not yet mapped to QAIL", stmt_type)
+        }
     }
 }
 
@@ -226,6 +242,72 @@ fn expr_to_string(expr: &Expr) -> String {
         }
         Expr::CompoundIdentifier(parts) => parts.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join("."),
         _ => format!("{}", expr),
+    }
+}
+
+/// Transform CREATE TABLE to QAIL.
+fn transform_create_table(table_name: &str) -> String {
+    format!(
+        "use qail_core::ast::QailCmd;\n\n\
+         let cmd = QailCmd::make(\"{}\")\n    \
+         // Add column definitions with .column_def(name, type, constraints)\n;\n\n\
+         let result = driver.execute(&cmd).await?;",
+        table_name
+    )
+}
+
+/// Transform DROP to QAIL.
+fn transform_drop(object_type: &sqlparser::ast::ObjectType, names: &[sqlparser::ast::ObjectName]) -> String {
+    use sqlparser::ast::ObjectType;
+    
+    let table = names.first()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "table".to_string());
+    
+    match object_type {
+        ObjectType::Table => format!(
+            "use qail_core::ast::{{QailCmd, Action}};\n\n\
+             let cmd = QailCmd {{ action: Action::Drop, table: \"{}\".into(), ..Default::default() }};\n\n\
+             let result = driver.execute(&cmd).await?;",
+            table
+        ),
+        ObjectType::Index => format!(
+            "use qail_core::ast::{{QailCmd, Action}};\n\n\
+             let cmd = QailCmd {{ action: Action::DropIndex, table: \"{}\".into(), ..Default::default() }};\n\n\
+             let result = driver.execute(&cmd).await?;",
+            table
+        ),
+        _ => format!("// DROP {:?} not yet mapped to QAIL", object_type),
+    }
+}
+
+/// Transform TRUNCATE to QAIL.
+fn transform_truncate(table_name: &str) -> String {
+    format!(
+        "use qail_core::ast::QailCmd;\n\n\
+         let cmd = QailCmd::truncate(\"{}\");\n\n\
+         let result = driver.execute(&cmd).await?;",
+        table_name
+    )
+}
+
+/// Transform EXPLAIN to QAIL.
+fn transform_explain(statement: &Statement, analyze: bool) -> String {
+    // Recursively transform the inner statement and wrap it
+    let inner = transform_statement(statement);
+    
+    if analyze {
+        format!(
+            "// EXPLAIN ANALYZE wrapper:\n\
+             // Use QailCmd::explain_analyze(table) instead of QailCmd::get(table)\n\n\
+             {}", inner
+        )
+    } else {
+        format!(
+            "// EXPLAIN wrapper:\n\
+             // Use QailCmd::explain(table) instead of QailCmd::get(table)\n\n\
+             {}", inner
+        )
     }
 }
 
