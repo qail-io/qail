@@ -3,7 +3,7 @@
 //! Tests native TLS driver against pg.qail.rs (PostgreSQL 18 with SSL).
 //! Run: `cargo test --test tls_integration -- --nocapture --ignored`
 
-use qail_core::ast::{Operator, QailCmd};
+use qail_core::ast::{Operator, Qail};
 use qail_pg::{PgConnection, PgDriver, PgResult};
 
 const HOST: &str = "pg.qail.rs";
@@ -36,8 +36,8 @@ async fn test_tls_simple_query() -> PgResult<()> {
 
     println!("✅ Connected! Running query...");
 
-    // Test query using QailCmd builder
-    let cmd = QailCmd::get("pg_stat_activity").columns(["pid", "state"]);
+    // Test query using Qail builder
+    let cmd = Qail::get("pg_stat_activity").columns(["pid", "state"]);
     let rows = driver.fetch_all(&cmd).await?;
 
     println!("📊 Got {} rows from pg_stat_activity", rows.len());
@@ -55,7 +55,7 @@ async fn test_tls_list_tables() -> PgResult<()> {
         PgDriver::new(PgConnection::connect_tls(HOST, PORT, USER, DATABASE, Some(PASSWORD)).await?);
 
     // Query information_schema using builder API
-    let cmd = QailCmd::get("information_schema.tables")
+    let cmd = Qail::get("information_schema.tables")
         .columns(["table_name"])
         .filter("table_schema", Operator::Eq, "public");
 
@@ -82,8 +82,8 @@ async fn test_tls_ast_query() -> PgResult<()> {
     let mut driver =
         PgDriver::new(PgConnection::connect_tls(HOST, PORT, USER, DATABASE, Some(PASSWORD)).await?);
 
-    // Build query with QailCmd builder API
-    let cmd = QailCmd::get("pg_stat_activity")
+    // Build query with Qail builder API
+    let cmd = Qail::get("pg_stat_activity")
         .columns(["pid", "state", "query"])
         .filter("state", Operator::IsNotNull, "ignored");
 
@@ -118,7 +118,7 @@ async fn test_tls_execute() -> PgResult<()> {
     }
 
     // Query users table to verify connection works
-    let cmd = QailCmd::get("users").columns(["id", "email"]);
+    let cmd = Qail::get("users").columns(["id", "email"]);
 
     let rows = driver.fetch_all(&cmd).await?;
     println!("✅ Got {} users", rows.len());
@@ -146,7 +146,7 @@ async fn test_tls_stress() -> PgResult<()> {
     let start = std::time::Instant::now();
 
     for i in 0..100 {
-        let cmd = QailCmd::get("pg_stat_activity").columns(["pid", "state"]);
+        let cmd = Qail::get("pg_stat_activity").columns(["pid", "state"]);
         let rows = driver.fetch_all(&cmd).await?;
 
         if i % 20 == 0 {
