@@ -12,7 +12,6 @@ pub mod validator;
 pub use parser::parse;
 
 /// Ergonomic alias for QailCmd - the primary query builder type.
-
 pub type Qail = ast::QailCmd;
 
 pub mod prelude {
