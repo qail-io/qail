@@ -62,7 +62,7 @@ jobs:
 
       - name: Build WASM package
         run: |
-          cd qail-wasm
+          cd wasm
           wasm-pack build --target web --release
 
       - name: Update package.json for npm
