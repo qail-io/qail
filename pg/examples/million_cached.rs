@@ -5,7 +5,7 @@
 //!
 //! Run: cargo run --release --example million_cached
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use qail_pg::PgConnection;
 use std::time::Instant;
 
@@ -24,13 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Batches:          {:>12}", BATCHES);
     println!("\n⚠️  PARSE ONCE, BIND+EXECUTE MANY!\n");
 
-    // Build batch of QailCmd ASTs ONCE (outside timing!)
+    // Build batch of Qail ASTs ONCE (outside timing!)
     // Note: All queries have same structure, just different LIMIT value
     // This means ONE prepared statement, 1000 Bind+Execute per batch
-    let cmds: Vec<QailCmd> = (1..=QUERIES_PER_BATCH)
+    let cmds: Vec<Qail> = (1..=QUERIES_PER_BATCH)
         .map(|i| {
             let limit = (i % 10) + 1;
-            QailCmd::get("harbors")
+            Qail::get("harbors")
                 .columns(["id", "name"])
                 .limit(limit as i64)
         })

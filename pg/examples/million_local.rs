@@ -5,7 +5,7 @@
 //!
 //! Run: cargo run --release --example million_local
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use qail_pg::PgConnection;
 use std::time::Instant;
 
@@ -31,11 +31,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Batches:          {:>12}", BATCHES);
     println!("\n⚠️  LOCAL PostgreSQL - NO NETWORK LATENCY!\n");
 
-    // Build batch of QailCmd ASTs ONCE (outside timing!)
-    let cmds: Vec<QailCmd> = (1..=QUERIES_PER_BATCH)
+    // Build batch of Qail ASTs ONCE (outside timing!)
+    let cmds: Vec<Qail> = (1..=QUERIES_PER_BATCH)
         .map(|i| {
             let limit = (i % 10) + 1;
-            QailCmd::get("harbors")
+            Qail::get("harbors")
                 .columns(["id", "name"])
                 .limit(limit as i64)
         })

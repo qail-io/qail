@@ -7,7 +7,7 @@
 //!
 //! Run: cargo run -p qail-pg --example db_benchmark --release
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use qail_pg::{PgDriver, PgResult};
 use std::time::Instant;
 
@@ -44,7 +44,7 @@ async fn bench_single_query(driver: &mut PgDriver) -> PgResult<()> {
     println!("📊 Single Query Latency (10,000 SELECT queries)");
 
     // Use an existing table
-    let cmd = QailCmd::get("harbors").columns(["id", "name"]).limit(1);
+    let cmd = Qail::get("harbors").columns(["id", "name"]).limit(1);
 
     let iterations = 10_000;
     let mut latencies = Vec::with_capacity(iterations);
@@ -89,7 +89,7 @@ async fn bench_single_query(driver: &mut PgDriver) -> PgResult<()> {
 async fn bench_1k_batch(driver: &mut PgDriver) -> PgResult<()> {
     println!("📊 1K Batch Throughput (1,000 sequential SELECT queries)");
 
-    let cmd = QailCmd::get("harbors").columns(["id", "name"]).limit(10);
+    let cmd = Qail::get("harbors").columns(["id", "name"]).limit(10);
 
     let iterations = 1_000;
 
@@ -127,7 +127,7 @@ async fn bench_1m_copy(driver: &mut PgDriver) -> PgResult<()> {
         })
         .collect();
 
-    let cmd = QailCmd::add("bench_test").columns(["id", "name", "value"]);
+    let cmd = Qail::add("bench_test").columns(["id", "name", "value"]);
 
     let start = Instant::now();
     let count = driver.copy_bulk(&cmd, &rows).await?;

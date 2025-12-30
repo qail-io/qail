@@ -5,7 +5,7 @@
 //!
 //! Run: cargo run --release --example million_blocking
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use qail_pg::protocol::AstEncoder;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -46,10 +46,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n⚠️  PURE BLOCKING I/O - NO ASYNC OVERHEAD!\n");
 
     // Build commands once
-    let cmds: Vec<QailCmd> = (1..=QUERIES_PER_BATCH)
+    let cmds: Vec<Qail> = (1..=QUERIES_PER_BATCH)
         .map(|i| {
             let limit = (i % 10) + 1;
-            QailCmd::get("harbors")
+            Qail::get("harbors")
                 .columns(["id", "name"])
                 .limit(limit as i64)
         })

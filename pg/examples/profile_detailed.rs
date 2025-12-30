@@ -8,7 +8,7 @@
 //!
 //! Run: cargo run --release --example profile_detailed
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use qail_pg::PgConnection;
 use std::time::Instant;
 
@@ -26,10 +26,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Total: {}\n", QUERIES_PER_BATCH * BATCHES);
 
     // Build commands once
-    let cmds: Vec<QailCmd> = (1..=QUERIES_PER_BATCH)
+    let cmds: Vec<Qail> = (1..=QUERIES_PER_BATCH)
         .map(|i| {
             let limit = (i % 10) + 1;
-            QailCmd::get("harbors")
+            Qail::get("harbors")
                 .columns(["id", "name"])
                 .limit(limit as i64)
         })

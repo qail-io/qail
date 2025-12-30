@@ -4,7 +4,7 @@
 //!
 //! Run: cargo run --release --example million_giant
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use qail_pg::PgConnection;
 use std::time::Instant;
 
@@ -22,10 +22,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n⚠️  ONE GIANT BATCH - ZERO SYNC OVERHEAD!\n");
 
     // Build ALL commands
-    let cmds: Vec<QailCmd> = (1..=TOTAL_QUERIES)
+    let cmds: Vec<Qail> = (1..=TOTAL_QUERIES)
         .map(|i| {
             let limit = (i % 10) + 1;
-            QailCmd::get("harbors")
+            Qail::get("harbors")
                 .columns(["id", "name"])
                 .limit(limit as i64)
         })

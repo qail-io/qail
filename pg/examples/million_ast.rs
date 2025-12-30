@@ -5,7 +5,7 @@
 //!
 //! Run: cargo run --release --example million_ast
 
-use qail_core::ast::QailCmd;
+use qail_core::ast::Qail;
 use qail_pg::PgConnection;
 use std::env;
 use std::time::Instant;
@@ -63,11 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("   Batch {}/{}", batch, BATCHES);
         }
 
-        // Build batch of QailCmd ASTs (NO SQL STRINGS!)
-        let cmds: Vec<QailCmd> = (1..=QUERIES_PER_BATCH)
+        // Build batch of Qail ASTs (NO SQL STRINGS!)
+        let cmds: Vec<Qail> = (1..=QUERIES_PER_BATCH)
             .map(|i| {
                 let limit = (i % 10) + 1;
-                QailCmd::get("harbors")
+                Qail::get("harbors")
                     .columns(["id", "name"])
                     .limit(limit as i64)
             })
