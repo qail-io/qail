@@ -20,5 +20,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Core:** Added `impl Default` for `Qail` struct.
 - **Go:** Updated Go bindings to support new `Qail` struct name and FFI symbols.
 
-### Removed
-- **Core:** Removed redundant doc comments in `ast/cmd` module to clean up codebase.
