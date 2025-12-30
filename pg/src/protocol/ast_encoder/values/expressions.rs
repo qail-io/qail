@@ -5,7 +5,7 @@
 use bytes::BytesMut;
 use qail_core::ast::{Action, CageKind, Condition, Expr, Operator, SortOrder, Value};
 
-use super::helpers::{i64_to_bytes, write_param_placeholder, NUMERIC_VALUES};
+use super::super::helpers::{i64_to_bytes, write_param_placeholder, NUMERIC_VALUES};
 
 /// Encode column list to buffer.
 pub fn encode_columns(columns: &[Expr], buf: &mut BytesMut) {
@@ -439,7 +439,7 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
             let mut sub_buf = BytesMut::with_capacity(128);
             let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
             match q.action {
-                Action::Get => super::dml::encode_select(q, &mut sub_buf, &mut sub_params),
+                Action::Get => super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params),
                 _ => panic!("Unsupported subquery action {:?}", q.action),
             }
             buf.extend_from_slice(b"(");
@@ -473,7 +473,7 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
 }
 
 /// Write a Value as a literal into an array buffer.
-fn write_value_to_array(buf: &mut Vec<u8>, value: &Value) {
+pub fn write_value_to_array(buf: &mut Vec<u8>, value: &Value) {
     match value {
         Value::Int(n) => {
             if (0..100).contains(n) {
