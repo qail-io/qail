@@ -12,15 +12,7 @@ pub mod validator;
 pub use parser::parse;
 
 /// Ergonomic alias for QailCmd - the primary query builder type.
-/// 
-/// # Example
-/// ```rust
-/// use qail_core::Qail;
-/// 
-/// let query = Qail::get("users")
-///     .columns(["id", "name"])
-///     .filter("active", Operator::Eq, true);
-/// ```
+
 pub type Qail = ast::QailCmd;
 
 pub mod prelude {
