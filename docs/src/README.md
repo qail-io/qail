@@ -24,10 +24,10 @@ QAIL compiles typed query ASTs directly to database wire protocols. No SQL strin
 ## Quick Example
 
 ```rust
-use qail_core::ast::{QailCmd, Operator, SortOrder};
+use qail_core::{Qail, Operator, SortOrder};
 
 // Build a query with the AST builder
-let cmd = QailCmd::get("users")
+let cmd = Qail::get("users")
     .columns(["id", "email", "name"])
     .filter("active", Operator::Eq, true)
     .order_by("created_at", SortOrder::Desc)
@@ -94,7 +94,7 @@ QAIL speaks **AST**, not SQL strings. Many traditional SQL "security features" a
 let sql = format!("SELECT * FROM users WHERE id = {}", user_input);
 
 // QAIL AST (impossible to inject):
-QailCmd::get("users").filter("id", Operator::Eq, user_input)
+Qail::get("users").filter("id", Operator::Eq, user_input)
 // user_input becomes Value::Int(123) or Value::Text("...") 
 // — never interpolated into a string
 ```

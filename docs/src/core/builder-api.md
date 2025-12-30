@@ -6,17 +6,17 @@ The recommended way to use QAIL. Build queries as typed Rust structs.
 
 | Method | SQL Equivalent |
 |--------|----------------|
-| `QailCmd::get()` | SELECT |
-| `QailCmd::add()` | INSERT |
-| `QailCmd::set()` | UPDATE |
-| `QailCmd::del()` | DELETE |
+| `Qail::get()` | SELECT |
+| `Qail::add()` | INSERT |
+| `Qail::set()` | UPDATE |
+| `Qail::del()` | DELETE |
 
 ## SELECT Queries
 
 ```rust
-use qail_core::ast::{QailCmd, Operator, SortOrder};
+use qail_core::{Qail, Operator, SortOrder};
 
-let cmd = QailCmd::get("users")
+let cmd = Qail::get("users")
     .columns(["id", "email", "name"])
     .filter("active", Operator::Eq, true)
     .order_by("created_at", SortOrder::Desc)
@@ -27,7 +27,7 @@ let cmd = QailCmd::get("users")
 ## INSERT Queries
 
 ```rust
-let cmd = QailCmd::add("users")
+let cmd = Qail::add("users")
     .columns(["email", "name"])
     .values(["alice@example.com", "Alice"])
     .returning(["id", "created_at"]);
@@ -36,7 +36,7 @@ let cmd = QailCmd::add("users")
 ## UPDATE Queries
 
 ```rust
-let cmd = QailCmd::set("users")
+let cmd = Qail::set("users")
     .set_value("status", "active")
     .set_value("verified_at", "now()")
     .where_eq("id", 42);
@@ -45,7 +45,7 @@ let cmd = QailCmd::set("users")
 ## DELETE Queries
 
 ```rust
-let cmd = QailCmd::del("users")
+let cmd = Qail::del("users")
     .where_eq("id", 42);
 ```
 

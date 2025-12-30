@@ -134,7 +134,7 @@ Order::find()
 ## QAIL (AST-Native)
 
 ```rust
-use qail_core::ast::{QailCmd, Operator, builders::*};
+use qail_core::{Qail, Operator, builders::*};
 
 let route = coalesce([
     concat([
@@ -145,7 +145,7 @@ let route = coalesce([
     text("Route"),
 ]).alias("route");
 
-let cmd = QailCmd::get("orders")
+let cmd = Qail::get("orders")
     .table_alias("o")
     // SELECT columns
     .column_expr(col("o.id"))

@@ -56,7 +56,7 @@ let conn = PgConnection::connect_mtls("localhost", 5432, "user", "db", config).a
 ## AST-Native Queries
 
 ```rust
-let cmd = QailCmd::get("users").select_all().limit(10);
+let cmd = Qail::get("users").select_all().limit(10);
 
 // Fetch all rows
 let rows = driver.fetch_all(&cmd).await?;
@@ -116,7 +116,7 @@ High-performance bulk insert using PostgreSQL's COPY protocol:
 ```rust
 use qail_core::ast::Value;
 
-let cmd = QailCmd::add("users").columns(&["name", "email"]);
+let cmd = Qail::add("users").columns(&["name", "email"]);
 
 let rows = vec![
     vec![Value::Text("Alice".into()), Value::Text("a@x.com".into())],
@@ -134,7 +134,7 @@ let count = driver.copy_bulk(&cmd, &rows).await?;
 Stream large result sets in batches:
 
 ```rust
-let cmd = QailCmd::get("logs").select_all();
+let cmd = Qail::get("logs").select_all();
 
 let batches = driver.stream_cmd(&cmd, 1000).await?;
 for batch in batches {
