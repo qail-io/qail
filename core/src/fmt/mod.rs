@@ -386,8 +386,22 @@ impl Formatter {
                 }
                 write!(self.buffer, "]")?;
             }
-            // TODO: Handle others
-            _ => write!(self.buffer, "{:?}", val)?,
+            Value::NamedParam(name) => write!(self.buffer, ":{}", name)?,
+            Value::Uuid(u) => write!(self.buffer, "'{}'", u)?,
+            Value::NullUuid => write!(self.buffer, "null")?,
+            Value::Interval { amount, unit } => write!(self.buffer, "interval '{} {}'", amount, unit)?,
+            Value::Timestamp(ts) => write!(self.buffer, "'{}'", ts)?,
+            Value::Bytes(bytes) => {
+                write!(self.buffer, "'\\x")?;
+                for byte in bytes { write!(self.buffer, "{:02x}", byte)?; }
+                write!(self.buffer, "'")?;
+            }
+            Value::Subquery(cmd) => {
+                write!(self.buffer, "(")?;
+                self.visit_cmd(cmd)?;
+                write!(self.buffer, ")")?;
+            }
+            Value::Expr(expr) => write!(self.buffer, "{}", expr)?,
         }
         Ok(())
     }
