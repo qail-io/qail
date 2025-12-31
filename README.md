@@ -140,7 +140,6 @@ driver.send(&bytes).await?;
 QAIL's AST-native architecture delivers **146% faster** query execution than SQLx:
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#4ade80'}}}%%
 xychart-beta
     title "Queries Per Second (Higher is Better)"
     x-axis ["SQLx", "SeaORM", "QAIL"]
