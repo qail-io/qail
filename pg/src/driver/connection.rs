@@ -406,6 +406,44 @@ impl PgConnection {
             }
         }
     }
+
+    /// Gracefully close the connection by sending a Terminate message.
+    /// This tells the server we're done and allows proper cleanup.
+    pub async fn close(mut self) -> PgResult<()> {
+        use crate::protocol::PgEncoder;
+        
+        // Send Terminate packet ('X')
+        let terminate = PgEncoder::encode_terminate();
+        self.stream.write_all(&terminate).await?;
+        self.stream.flush().await?;
+        
+        Ok(())
+    }
+}
+
+/// Drop implementation sends Terminate packet if possible.
+/// This ensures proper cleanup even without explicit close() call.
+impl Drop for PgConnection {
+    fn drop(&mut self) {
+        // Try to send Terminate packet synchronously using try_write
+        // This is best-effort - if it fails, TCP RST will handle cleanup
+        let terminate: [u8; 5] = [b'X', 0, 0, 0, 4];
+        
+        match &mut self.stream {
+            PgStream::Tcp(tcp) => {
+                // try_write is non-blocking
+                let _ = tcp.try_write(&terminate);
+            }
+            PgStream::Tls(_tls) => {
+                // TLS requires async, can't do sync write
+                // TCP close will still notify server
+            }
+            #[cfg(unix)]
+            PgStream::Unix(unix) => {
+                let _ = unix.try_write(&terminate);
+            }
+        }
+    }
 }
 
 pub(crate) fn parse_affected_rows(tag: &str) -> u64 {
