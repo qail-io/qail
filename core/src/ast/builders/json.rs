@@ -3,7 +3,6 @@
 use crate::ast::Expr;
 
 /// JSON text access (column->>'key')
-///
 /// # Example
 /// ```ignore
 /// json("contact_info", "phone")  // contact_info->>'phone'
@@ -18,7 +17,6 @@ pub fn json(column: &str, key: &str) -> JsonBuilder {
 
 /// JSON path access with multiple keys (column->'a'->'b'->>'c')
 /// The last key extracts as text.
-///
 /// # Example
 /// ```ignore
 /// json_path("metadata", ["vessel_bookings", "0", "departure"])

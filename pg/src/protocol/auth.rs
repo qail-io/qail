@@ -12,9 +12,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// SCRAM-SHA-256 client state machine.
 pub struct ScramClient {
-    /// Username (normalized)
     username: String,
-    /// Password
     password: String,
     /// Client nonce (random)
     client_nonce: String,
@@ -54,7 +52,6 @@ impl ScramClient {
         }
     }
 
-    ///
     /// Format: `n,,n=<user>,r=<nonce>`
     pub fn client_first_message(&self) -> Vec<u8> {
         // GS2 header: n,, (no channel binding)
@@ -69,7 +66,6 @@ impl ScramClient {
     }
 
     /// Process the server-first-message and generate client-final-message.
-    ///
     /// Server-first-message format: `r=<nonce>,s=<salt>,i=<iterations>`
     pub fn process_server_first(&mut self, server_msg: &[u8]) -> Result<Vec<u8>, String> {
         let server_str =

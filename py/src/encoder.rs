@@ -11,7 +11,6 @@ use pyo3::types::PyBytes;
 use qail_pg::protocol::AstEncoder;
 
 /// Encode a single Qail to PostgreSQL wire protocol bytes.
-///
 /// Returns bytes ready to send directly to PostgreSQL TCP socket.
 #[pyfunction]
 pub fn encode_cmd<'py>(py: Python<'py>, cmd: &PyQail) -> Bound<'py, PyBytes> {
@@ -20,7 +19,6 @@ pub fn encode_cmd<'py>(py: Python<'py>, cmd: &PyQail) -> Bound<'py, PyBytes> {
 }
 
 /// Encode multiple Qails to wire bytes for pipeline execution.
-///
 /// All commands in one buffer for single network round-trip.
 #[pyfunction]
 pub fn encode_batch<'py>(py: Python<'py>, cmds: Vec<PyQail>) -> Bound<'py, PyBytes> {

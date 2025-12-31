@@ -6,13 +6,11 @@ use tokio::net::TcpStream;
 
 impl PgConnection {
     /// Get the cancel key for this connection.
-    ///
     pub fn get_cancel_key(&self) -> (i32, i32) {
         (self.process_id, self.secret_key)
     }
 
     /// Cancel a running query on a PostgreSQL backend.
-    ///
     /// This opens a new TCP connection and sends a CancelRequest message.
     /// The original connection continues running but the query is interrupted.
     pub async fn cancel_query(

@@ -9,7 +9,6 @@ use tokio::io::AsyncWriteExt;
 
 impl PgConnection {
     /// Execute a query with binary parameters (crate-internal).
-    ///
     /// This uses the Extended Query Protocol (Parse/Bind/Execute/Sync):
     /// - Parameters are sent as binary bytes, skipping the string layer
     /// - No SQL injection possible - parameters are never interpolated
@@ -19,7 +18,6 @@ impl PgConnection {
         sql: &str,
         params: &[Option<Vec<u8>>],
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        // Send Parse + Bind + Execute + Sync as one pipeline
         let bytes = PgEncoder::encode_extended_query(sql, params);
         self.stream.write_all(&bytes).await?;
 
@@ -48,10 +46,8 @@ impl PgConnection {
     }
 
     /// Execute a query with cached prepared statement.
-    ///
     /// Like `query()`, but reuses prepared statements across calls.
     /// The statement name is derived from a hash of the SQL text.
-    ///
     /// OPTIMIZED: Pre-allocated buffer + ultra-fast encoders.
     pub async fn query_cached(
         &mut self,
@@ -146,12 +142,10 @@ impl PgConnection {
     }
 
     /// ZERO-HASH sequential query using pre-computed PreparedStatement.
-    ///
     /// This is the FASTEST sequential path because it skips:
     /// - SQL generation from AST (done once outside loop)
     /// - Hash computation for statement name (pre-computed in PreparedStatement)
     /// - HashMap lookup for is_new check (statement already prepared)
-    ///
     /// # Example
     /// ```ignore
     /// let stmt = conn.prepare("SELECT * FROM users WHERE id = $1").await?;

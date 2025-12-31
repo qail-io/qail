@@ -9,7 +9,6 @@ use tokio::io::AsyncWriteExt;
 
 impl PgConnection {
     /// **Fast** bulk insert using COPY protocol with zero-allocation encoding.
-    ///
     /// Encodes all rows into a single buffer and writes with one syscall.
     /// ~2x faster than `copy_in_internal` due to batched I/O.
     pub(crate) async fn copy_in_fast(
@@ -68,10 +67,8 @@ impl PgConnection {
     }
 
     /// **Fastest** bulk insert using COPY protocol with pre-encoded data.
-    ///
     /// Accepts raw COPY text format bytes, no encoding needed.
     /// Use when caller has already encoded rows to COPY format.
-    ///
     /// # Format
     /// Data should be tab-separated rows with newlines:
     /// `1\thello\t3.14\n2\tworld\t2.71\n`
@@ -144,19 +141,16 @@ impl PgConnection {
     }
 
     /// Export data using COPY TO STDOUT (AST-native).
-    ///
     /// Takes a Qail::Export and returns rows as Vec<Vec<String>>.
-    ///
     /// # Example
     /// ```ignore
     /// let cmd = Qail::export("users")
     ///     .columns(["id", "name"])
     ///     .filter("active", true);
-    ///
     /// let rows = conn.copy_export(&cmd).await?;
     /// ```
     pub async fn copy_export(&mut self, cmd: &Qail) -> PgResult<Vec<Vec<String>>> {
-        // Validate action
+
         if cmd.action != Action::Export {
             return Err(PgError::Query(
                 "copy_export requires Qail::Export action".to_string(),

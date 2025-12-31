@@ -4,9 +4,7 @@ use anyhow::Result;
 use colored::*;
 
 /// Create a new named migration file pair (up + down) with timestamp prefix.
-/// 
 /// ## Generated Files
-/// 
 /// ```text
 /// migrations/
 /// ├── 20251231093400_add_users.up.qail

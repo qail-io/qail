@@ -216,7 +216,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n⚠️  Some tests failed - review output above");
     }
 
-    // Cleanup
     let _ = driver.execute_raw("DROP TABLE IF EXISTS battle_posts CASCADE").await;
     let _ = driver.execute_raw("DROP TABLE IF EXISTS battle_users CASCADE").await;
     let _ = driver.execute_raw("DROP TYPE IF EXISTS order_status CASCADE").await;

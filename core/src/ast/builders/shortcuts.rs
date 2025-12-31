@@ -8,7 +8,6 @@ use super::{count_filter, case_when, col, binary, cast, now_minus};
 use crate::ast::BinaryOp;
 
 /// Combine multiple conditions with AND logic
-///
 /// # Example
 /// ```ignore
 /// all([eq("direction", "outbound"), recent("24 hours")])
@@ -21,7 +20,6 @@ where
 }
 
 /// Combine two conditions with AND logic
-///
 /// # Example
 /// ```ignore
 /// and(eq("direction", "outbound"), recent("24 hours"))
@@ -36,7 +34,6 @@ pub fn and3(a: Condition, b: Condition, c: Condition) -> Vec<Condition> {
 }
 
 /// COUNT(*) with single WHERE condition - shorthand for count_filter
-///
 /// # Example
 /// ```ignore
 /// count_where(eq("direction", "outbound"))
@@ -47,7 +44,6 @@ pub fn count_where(condition: Condition) -> super::AggregateBuilder {
 }
 
 /// COUNT(*) with multiple WHERE conditions (AND) - shorthand for count_filter
-///
 /// # Example
 /// ```ignore
 /// count_where_all([eq("direction", "outbound"), recent("24 hours")])
@@ -62,7 +58,6 @@ where
 
 /// Filter for recent records (created_at > NOW() - INTERVAL)
 /// AST-native: uses proper Expr nodes, not raw SQL strings!
-///
 /// # Example
 /// ```ignore
 /// // created_at > NOW() - INTERVAL '24 hours'
@@ -74,7 +69,6 @@ pub fn recent(duration: &str) -> Condition {
 
 /// Filter for recent records on a custom column
 /// AST-native: uses proper Expr nodes!
-///
 /// # Example
 /// ```ignore
 /// // updated_at > NOW() - INTERVAL '7 days'
@@ -91,7 +85,6 @@ pub fn recent_col(column: &str, duration: &str) -> Condition {
 }
 
 /// IN list condition - shorthand for is_in
-///
 /// # Example
 /// ```ignore
 /// in_list("status", ["delivered", "read"])
@@ -116,7 +109,6 @@ where
 
 /// Calculate percentage with safe division (returns 0 if denominator is 0)
 /// AST-native: produces CASE WHEN, Binary, and Cast AST nodes!
-///
 /// # Example
 /// ```ignore
 /// percentage("delivered", "sent").alias("delivery_rate")

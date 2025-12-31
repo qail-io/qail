@@ -7,7 +7,6 @@ use bytes::BytesMut;
 use qail_core::ast::Value;
 
 /// Encode a Value directly into COPY text format (no SQL quoting).
-///
 /// COPY text format rules:
 /// - NULL: `\N`
 /// - Boolean: `t` or `f`
@@ -117,7 +116,6 @@ pub fn encode_copy_value(buf: &mut BytesMut, value: &Value) {
 }
 
 /// Encode a batch of rows into a single COPY data buffer.
-///
 /// Returns a BytesMut containing all rows in tab-separated format,
 /// ready to be sent as a single CopyData message.
 #[inline]

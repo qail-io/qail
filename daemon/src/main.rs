@@ -199,7 +199,6 @@ async fn handle_client(mut stream: UnixStream) {
         send_response(&mut stream, &response).await;
     }
 
-    // Cleanup
     let mut state = state.write().await;
     state.driver = None;
     info!("🔌 Client cleanup complete");

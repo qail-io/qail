@@ -34,8 +34,6 @@ impl PgConnection {
                 }
             }
 
-            // Need more data - read directly into BytesMut (no temp buffer)
-            // Reserve space if needed
             if self.buffer.capacity() - self.buffer.len() < 65536 {
                 self.buffer.reserve(131072); // 128KB buffer - reserve once, use many
             }
@@ -99,13 +97,11 @@ impl PgConnection {
                         }
                     }
 
-                    // Skip the message (no parsing!)
                     let _ = self.buffer.split_to(msg_len + 1);
                     return Ok(msg_type);
                 }
             }
 
-            // Need more data - use large buffer to reduce syscalls
             if self.buffer.capacity() - self.buffer.len() < 65536 {
                 self.buffer.reserve(131072); // 128KB buffer - reserve once, use many
             }
@@ -119,7 +115,6 @@ impl PgConnection {
 
     /// FAST receive for result consumption - inline DataRow parsing.
     /// Returns: (msg_type, Option<row_data>)
-    ///
     /// For 'D' (DataRow): returns parsed columns
     /// For other types: returns None
     /// This avoids BackendMessage enum allocation for non-DataRow messages.
@@ -193,7 +188,6 @@ impl PgConnection {
                 }
             }
 
-            // Need more data
             if self.buffer.capacity() - self.buffer.len() < 65536 {
                 self.buffer.reserve(131072);
             }
@@ -207,7 +201,6 @@ impl PgConnection {
 
     /// ZERO-COPY receive for DataRow.
     /// Uses bytes::Bytes for reference-counted slicing instead of Vec copy.
-    ///
     /// Returns: (msg_type, Option<row_data>)
     /// For 'D' (DataRow): returns Bytes slices (no copy!)
     /// For other types: returns None
@@ -262,7 +255,6 @@ impl PgConnection {
                                 } else {
                                     let len = len as usize;
                                     if msg_bytes.remaining() >= len {
-                                        // ZERO-COPY: freeze the BytesMut slice as Bytes
                                         let col_data = msg_bytes.split_to(len).freeze();
                                         columns.push(Some(col_data));
                                     }
@@ -280,7 +272,6 @@ impl PgConnection {
                 }
             }
 
-            // Need more data
             if self.buffer.capacity() - self.buffer.len() < 65536 {
                 self.buffer.reserve(131072);
             }
@@ -293,9 +284,7 @@ impl PgConnection {
     }
 
     /// ULTRA-FAST receive for 2-column DataRow (id, name pattern).
-    /// Optimized for the common case of SELECT id, name queries.
     /// Uses fixed-size array instead of Vec allocation.
-    ///
     /// Returns: (msg_type, Option<(col0, col1)>)
     #[inline(always)]
     pub(crate) async fn recv_data_ultra(
@@ -325,7 +314,6 @@ impl PgConnection {
                         }
                     }
 
-                    // ULTRA-FAST path: DataRow with 2 columns
                     if msg_type == b'D' {
                         let mut msg_bytes = self.buffer.split_to(msg_len + 1);
                         msg_bytes.advance(5); // Skip type + length
@@ -356,7 +344,6 @@ impl PgConnection {
                 }
             }
 
-            // Need more data
             if self.buffer.capacity() - self.buffer.len() < 65536 {
                 self.buffer.reserve(131072);
             }
