@@ -7,7 +7,7 @@ use colored::*;
 /// 
 /// ## Generated Files
 /// 
-/// ```
+/// ```text
 /// migrations/
 /// ├── 20251231093400_add_users.up.qail
 /// └── 20251231093400_add_users.down.qail
