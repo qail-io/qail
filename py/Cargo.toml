@@ -1,6 +1,6 @@
 [package]
 name = "qail-py"
-version = "0.14.4"
+version = "0.14.5"
 edition = "2021"
 description = "Python bindings for QAIL - The fastest PostgreSQL driver"
 license = "MIT"
@@ -12,8 +12,8 @@ name = "qail"
 crate-type = ["cdylib"]
 
 [dependencies]
-qail-core = { path = "../core", version = "0.14.4" }
-qail-pg = { path = "../pg", version = "0.14.4" }
+qail-core = { path = "../core", version = "0.14.5" }
+qail-pg = { path = "../pg", version = "0.14.5" }
 
 pyo3 = { version = "0.27", features = ["extension-module"] }
 tokio = { version = "1", features = ["full"] }
