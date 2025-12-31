@@ -568,6 +568,12 @@ impl PgDriver {
     /// Use for bootstrap DDL only (e.g., migration table creation).
     /// For transactions, use `begin()`, `commit()`, `rollback()`.
     pub async fn execute_raw(&mut self, sql: &str) -> PgResult<()> {
+        // Reject NULL bytes - they corrupt PostgreSQL connection state
+        if sql.as_bytes().contains(&0) {
+            return Err(crate::PgError::Protocol(
+                "SQL contains NULL byte (0x00) which is invalid in PostgreSQL".to_string(),
+            ));
+        }
         self.connection.execute_simple(sql).await
     }
 

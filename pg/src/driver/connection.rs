@@ -434,9 +434,10 @@ impl Drop for PgConnection {
                 // try_write is non-blocking
                 let _ = tcp.try_write(&terminate);
             }
-            PgStream::Tls(_tls) => {
-                // TLS requires async, can't do sync write
-                // TCP close will still notify server
+            PgStream::Tls(_) => {
+                // TLS requires async write which we can't do in Drop.
+                // The TCP connection close will still notify the server.
+                // For graceful TLS shutdown, use connection.close() explicitly.
             }
             #[cfg(unix)]
             PgStream::Unix(unix) => {
