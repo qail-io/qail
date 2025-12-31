@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.4] - 2025-12-31
+
+### Performance (Zero-Alloc Encoding)
+- **PG:** Added reusable `sql_buf` and `params_buf` to `PgConnection` - eliminates heap allocations on repeated queries
+- **PG:** New `encode_cmd_reuse()` function for zero-allocation AST-to-wire encoding
+- **PG:** `fetch_all()` now uses prepared statement caching by default
+- **PG:** LIMIT/OFFSET now use parameterized values ($N) instead of embedded text - dramatically improves cache hit rate
+
+### Enterprise Memory Management (LRU Cache)
+- **PG:** Bounded LRU cache for prepared statements (default: 1000 statements)
+- **PG:** Auto-evicts least recently used statements when cache is full
+- **PG:** New `clear_cache()` method to manually free statement cache
+- **PG:** New `cache_stats()` method returns (current_size, max_capacity)
+
+### Benchmark Results (50K iterations, CTE with JOIN)
+| Driver | Queries/Sec | Latency |
+|--------|-------------|---------|
+| **qail-pg (cached)** | **4,534 q/s** | 221μs |
+| SeaORM | 4,032 q/s | 248μs |
+| SQLx | 3,573 q/s | 280μs |
+
+- **27% faster than SQLx** (+961 q/s)
+- **12% faster than SeaORM** (+502 q/s)
+
 ## [0.14.3] - 2025-12-31
 
 ### Added

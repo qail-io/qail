@@ -4,6 +4,8 @@ The `qail-pg` crate provides a native PostgreSQL driver with AST-native wire pro
 
 ## Features
 - **AST-Native** — Direct AST to wire protocol, no SQL strings
+- **Zero-Alloc** — Reusable buffers, no heap allocation per query
+- **LRU Statement Cache** — Bounded cache (1000 max), auto-evicts
 - **SSL/TLS** — Full TLS with mutual TLS (mTLS) support
 - **SCRAM-SHA-256** — Secure password authentication
 - **Connection Pooling** — Efficient resource management
@@ -12,6 +14,27 @@ The `qail-pg` crate provides a native PostgreSQL driver with AST-native wire pro
 - **Transactions** — BEGIN/COMMIT/ROLLBACK
 
 ---
+
+## Statement Cache (LRU)
+
+Prepared statements are cached automatically for best performance.
+
+```rust
+// Cache is bounded (default: 1000 statements)
+// Auto-evicts least recently used when full
+
+let (size, capacity) = driver.cache_stats();  // (42, 1000)
+
+// Manual clear if needed
+driver.clear_cache();
+```
+
+| Method | Description |
+|--------|-------------|
+| `fetch_all()` | Uses cache (4,500+ q/s) |
+| `fetch_all_uncached()` | Skips cache |
+| `cache_stats()` | Returns (current, max) |
+| `clear_cache()` | Frees all cached statements |
 
 ## Connection
 

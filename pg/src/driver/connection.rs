@@ -16,7 +16,9 @@ use super::stream::PgStream;
 use super::{PgError, PgResult};
 use crate::protocol::{BackendMessage, FrontendMessage, ScramClient, TransactionStatus};
 use bytes::BytesMut;
+use lru::LruCache;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -56,14 +58,23 @@ impl TlsConfig {
     }
 }
 
+/// Default max prepared statements in cache
+pub const DEFAULT_CACHE_SIZE: usize = 1000;
+
 /// A raw PostgreSQL connection.
 pub struct PgConnection {
     pub(crate) stream: PgStream,
     pub(crate) buffer: BytesMut,
     /// Write buffer for batching outgoing messages (reduces syscalls)
     pub(crate) write_buf: BytesMut,
-    /// Cache of prepared statements: stmt_name -> SQL text
+    /// Reusable SQL encoding buffer (ZERO-ALLOC serialization)
+    pub(crate) sql_buf: BytesMut,
+    /// Reusable params buffer (ZERO-ALLOC)
+    pub(crate) params_buf: Vec<Option<Vec<u8>>>,
+    /// Cache of prepared statements: stmt_name -> SQL text (for debugging)
     pub(crate) prepared_statements: HashMap<String, String>,
+    /// LRU cache: SQL hash -> stmt_name (bounded, auto-evicts old statements)
+    pub(crate) stmt_cache: LruCache<u64, String>,
     /// Backend process ID (for query cancellation)  
     pub(crate) process_id: i32,
     /// Backend secret key (for query cancellation)
@@ -94,7 +105,10 @@ impl PgConnection {
             stream: PgStream::Tcp(tcp_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
             write_buf: BytesMut::with_capacity(BUFFER_CAPACITY), // 64KB write buffer
+            sql_buf: BytesMut::with_capacity(512),
+            params_buf: Vec::with_capacity(16), // SQL encoding buffer
             prepared_statements: HashMap::new(),
+            stmt_cache: LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
@@ -162,8 +176,11 @@ impl PgConnection {
         let mut conn = Self {
             stream: PgStream::Tls(tls_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
-            write_buf: BytesMut::with_capacity(BUFFER_CAPACITY), // 64KB write buffer
+            write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),
+            sql_buf: BytesMut::with_capacity(512),
+            params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
+            stmt_cache: LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
@@ -272,7 +289,10 @@ impl PgConnection {
             stream: PgStream::Tls(tls_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
             write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),
+            sql_buf: BytesMut::with_capacity(512),
+            params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
+            stmt_cache: LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
@@ -304,8 +324,11 @@ impl PgConnection {
         let mut conn = Self {
             stream: PgStream::Unix(unix_stream),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
-            write_buf: BytesMut::with_capacity(BUFFER_CAPACITY), // 64KB write buffer
+            write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),
+            sql_buf: BytesMut::with_capacity(512),
+            params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
+            stmt_cache: LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
