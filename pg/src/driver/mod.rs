@@ -185,7 +185,6 @@ impl PgDriver {
         .await
         .map_err(|_| PgError::Connection(format!("Connection timeout after {:?}", timeout)))?
     }
-
     /// Clear the prepared statement cache.
     ///
     /// Frees memory by removing all cached statements.
@@ -202,70 +201,22 @@ impl PgDriver {
         (self.connection.stmt_cache.len(), self.connection.stmt_cache.cap().get())
     }
 
-    /// Execute a QAIL command and fetch all rows.
+    /// Execute a QAIL command and fetch all rows (CACHED + ZERO-ALLOC).
     ///
-    /// Uses prepared statement caching for best performance (~4,500 q/s).
+    /// **Default method** - uses prepared statement caching for best performance.
+    /// On first call: sends Parse + Bind + Execute + Sync
+    /// On subsequent calls with same SQL: sends only Bind + Execute (SKIPS Parse!)
+    ///
+    /// Uses LRU cache with max 1000 statements (auto-evicts oldest).
     pub async fn fetch_all(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
-        use crate::protocol::{ast_encoder::dml, PgEncoder, BackendMessage};
-        use std::hash::{Hash, Hasher};
-        use tokio::io::AsyncWriteExt;
-
-        // Encode to reusable buffers
-        self.connection.sql_buf.clear();
-        self.connection.params_buf.clear();
-        
-        match cmd.action {
-            qail_core::ast::Action::Get | qail_core::ast::Action::With => 
-                dml::encode_select(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf),
-            qail_core::ast::Action::Add => 
-                dml::encode_insert(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf),
-            qail_core::ast::Action::Set => 
-                dml::encode_update(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf),
-            qail_core::ast::Action::Del => 
-                dml::encode_delete(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf),
-            _ => return self.fetch_all_uncached(cmd).await,
-        }
-
-        // Get or create cached statement
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.connection.sql_buf.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        let name = match self.connection.stmt_cache.get(&hash) {
-            Some(n) => n.clone(),
-            None => {
-                let n = format!("qail_{:x}", hash);
-                let sql = std::str::from_utf8(&self.connection.sql_buf).unwrap_or("");
-                self.connection.stream.write_all(&PgEncoder::encode_parse(&n, sql, &[])).await?;
-                self.connection.stmt_cache.put(hash, n.clone());
-                self.connection.prepared_statements.insert(n.clone(), sql.to_string());
-                n
-            }
-        };
-
-        // Send Bind + Execute + Sync
-        let mut buf = bytes::BytesMut::with_capacity(128);
-        PgEncoder::encode_bind_to(&mut buf, &name, &self.connection.params_buf);
-        PgEncoder::encode_execute_to(&mut buf);
-        PgEncoder::encode_sync_to(&mut buf);
-        self.connection.stream.write_all(&buf).await?;
-
-        // Collect rows
-        let mut rows = Vec::new();
-        loop {
-            match self.connection.recv().await? {
-                BackendMessage::DataRow(d) => rows.push(PgRow { columns: d, column_info: None }),
-                BackendMessage::ReadyForQuery(_) => return Ok(rows),
-                BackendMessage::ErrorResponse(e) => return Err(PgError::Query(e.message)),
-                _ => {}
-            }
-        }
+        // Delegate to fetch_all_cached for cached-by-default behavior
+        self.fetch_all_cached(cmd).await
     }
 
-    /// Execute a QAIL command WITHOUT caching (legacy).
+    /// Execute a QAIL command and fetch all rows (UNCACHED).
     ///
     /// Sends Parse + Bind + Execute on every call.
-    /// Use `fetch_all()` instead for better performance.
+    /// Use for one-off queries or when caching is not desired.
     pub async fn fetch_all_uncached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         use crate::protocol::AstEncoder;
 
@@ -309,10 +260,152 @@ impl PgDriver {
         }
     }
 
+    /// Execute a QAIL command and fetch all rows (FAST VERSION).
+    ///
+    /// Uses optimized recv_with_data_fast for faster response parsing.
+    /// Skips column metadata collection for maximum speed.
+    pub async fn fetch_all_fast(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
+        use crate::protocol::AstEncoder;
+
+        // ZERO-ALLOC: Use connection's reusable buffers
+        let wire_bytes = AstEncoder::encode_cmd_reuse(
+            cmd,
+            &mut self.connection.sql_buf,
+            &mut self.connection.params_buf,
+        );
+
+        // Send wire bytes
+        self.connection.send_bytes(&wire_bytes).await?;
+
+        // Collect results using FAST receiver
+        let mut rows: Vec<PgRow> = Vec::new();
+
+        loop {
+            let (msg_type, data) = self.connection.recv_with_data_fast().await?;
+            match msg_type {
+                b'D' => {
+                    // DataRow
+                    if let Some(columns) = data {
+                        rows.push(PgRow {
+                            columns,
+                            column_info: None, // Skip metadata for speed
+                        });
+                    }
+                }
+                b'Z' => {
+                    // ReadyForQuery
+                    return Ok(rows);
+                }
+                _ => {} // 1, 2, C, T - skip Parse/Bind/CommandComplete/RowDescription
+            }
+        }
+    }
+
     /// Execute a QAIL command and fetch one row.
     pub async fn fetch_one(&mut self, cmd: &Qail) -> PgResult<PgRow> {
         let rows = self.fetch_all(cmd).await?;
         rows.into_iter().next().ok_or(PgError::NoRows)
+    }
+
+    /// Execute a QAIL command with PREPARED STATEMENT CACHING (ZERO-ALLOC).
+    ///
+    /// Like fetch_all(), but caches the prepared statement on the server.
+    /// On first call: sends Parse + Bind + Execute + Sync
+    /// On subsequent calls: sends only Bind + Execute + Sync (SKIPS Parse!)
+    ///
+    /// Uses connection's reusable buffers for zero-allocation encoding.
+    pub async fn fetch_all_cached(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
+        use crate::protocol::AstEncoder;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // ZERO-ALLOC: Use connection's reusable buffers  
+        self.connection.sql_buf.clear();
+        self.connection.params_buf.clear();
+        
+        // Encode SQL to reusable buffer
+        match cmd.action {
+            qail_core::ast::Action::Get | qail_core::ast::Action::With => {
+                crate::protocol::ast_encoder::dml::encode_select(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf);
+            }
+            qail_core::ast::Action::Add => {
+                crate::protocol::ast_encoder::dml::encode_insert(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf);
+            }
+            qail_core::ast::Action::Set => {
+                crate::protocol::ast_encoder::dml::encode_update(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf);
+            }
+            qail_core::ast::Action::Del => {
+                crate::protocol::ast_encoder::dml::encode_delete(cmd, &mut self.connection.sql_buf, &mut self.connection.params_buf);
+            }
+            _ => {
+                // Fallback for unsupported actions
+                let (sql, params) = AstEncoder::encode_cmd_sql(cmd);
+                let raw_rows = self.connection.query_cached(&sql, &params).await?;
+                return Ok(raw_rows.into_iter().map(|data| PgRow { columns: data, column_info: None }).collect());
+            }
+        }
+
+        // Hash the SQL bytes to get cache key
+        let mut hasher = DefaultHasher::new();
+        self.connection.sql_buf.hash(&mut hasher);
+        let sql_hash = hasher.finish();
+
+        // Check if we have a cached prepared statement (LRU)
+        let stmt_name = if let Some(name) = self.connection.stmt_cache.get(&sql_hash) {
+            name.clone()
+        } else {
+            // Generate new statement name
+            let name = format!("qail_{:x}", sql_hash);
+            
+            // Send Parse message (only on first call)
+            use crate::protocol::PgEncoder;
+            use tokio::io::AsyncWriteExt;
+            
+            let sql_str = std::str::from_utf8(&self.connection.sql_buf).unwrap_or("");
+            let parse_msg = PgEncoder::encode_parse(&name, sql_str, &[]);
+            self.connection.stream.write_all(&parse_msg).await?;
+            
+            // Cache the statement name (LRU auto-evicts if full)
+            self.connection.stmt_cache.put(sql_hash, name.clone());
+            self.connection.prepared_statements.insert(name.clone(), sql_str.to_string());
+            
+            name
+        };
+
+        // Send Bind + Execute + Sync (always)
+        use crate::protocol::PgEncoder;
+        use tokio::io::AsyncWriteExt;
+        
+        let mut buf = bytes::BytesMut::with_capacity(128);
+        PgEncoder::encode_bind_to(&mut buf, &stmt_name, &self.connection.params_buf);
+        PgEncoder::encode_execute_to(&mut buf);
+        PgEncoder::encode_sync_to(&mut buf);
+        self.connection.stream.write_all(&buf).await?;
+
+        // Collect results
+        let mut rows: Vec<PgRow> = Vec::new();
+        loop {
+            let msg = self.connection.recv().await?;
+            match msg {
+                crate::protocol::BackendMessage::ParseComplete
+                | crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::RowDescription(_) => {}
+                crate::protocol::BackendMessage::DataRow(data) => {
+                    rows.push(PgRow {
+                        columns: data,
+                        column_info: None,
+                    });
+                }
+                crate::protocol::BackendMessage::CommandComplete(_) => {}
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    return Ok(rows);
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    return Err(PgError::Query(err.message));
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Execute a QAIL command (for mutations) - ZERO-ALLOC.

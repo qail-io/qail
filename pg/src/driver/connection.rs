@@ -58,9 +58,6 @@ impl TlsConfig {
     }
 }
 
-/// Default max prepared statements in cache
-pub const DEFAULT_CACHE_SIZE: usize = 1000;
-
 /// A raw PostgreSQL connection.
 pub struct PgConnection {
     pub(crate) stream: PgStream,
@@ -71,7 +68,7 @@ pub struct PgConnection {
     pub(crate) sql_buf: BytesMut,
     /// Reusable params buffer (ZERO-ALLOC)
     pub(crate) params_buf: Vec<Option<Vec<u8>>>,
-    /// Cache of prepared statements: stmt_name -> SQL text (for debugging)
+    /// Cache of prepared statements: stmt_name -> SQL text
     pub(crate) prepared_statements: HashMap<String, String>,
     /// LRU cache: SQL hash -> stmt_name (bounded, auto-evicts old statements)
     pub(crate) stmt_cache: LruCache<u64, String>,
@@ -108,7 +105,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16), // SQL encoding buffer
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap()),
+            stmt_cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
@@ -180,7 +177,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap()),
+            stmt_cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
@@ -292,7 +289,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap()),
+            stmt_cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
@@ -328,7 +325,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap()),
+            stmt_cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
             process_id: 0,
             secret_key: 0,
         };
