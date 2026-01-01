@@ -362,12 +362,25 @@ fn parse_postgres_url(url: &str) -> Result<(String, u16, String, String, Option<
 }
 
 async fn fetch_pending_items(pg: &mut qail_pg::PgDriver, limit: u32) -> Result<Vec<QueueItem>> {
+    // ATOMIC FETCH: Skip Locked pattern for concurrency-safe multi-worker deployments.
+    // This UPDATE atomically:
+    // 1. Selects pending items with FOR UPDATE SKIP LOCKED (prevents race conditions)
+    // 2. Sets status to 'processing' and timestamps
+    // 3. Returns the claimed items in one round-trip
     let sql = format!(
-        "SELECT id, ref_table, ref_id, operation, payload \
-         FROM _qail_queue \
-         WHERE status = 'pending' \
-         ORDER BY id ASC \
-         LIMIT {}",
+        r#"
+        UPDATE _qail_queue
+        SET status = 'processing', processed_at = NOW()
+        WHERE id IN (
+            SELECT id
+            FROM _qail_queue
+            WHERE status = 'pending'
+            ORDER BY id ASC
+            LIMIT {}
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, ref_table, ref_id, operation, payload
+        "#,
         limit
     );
     

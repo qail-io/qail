@@ -9,7 +9,7 @@ use super::helpers::write_usize;
 use super::values::{encode_columns, encode_conditions, encode_expr, encode_join_value, encode_value};
 
 /// Encode SELECT statement directly to bytes.
-pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
+pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     // CTE prefix
     encode_cte_prefix(cmd, buf, params);
 
@@ -234,7 +234,7 @@ fn encode_single_cte(cte: &CTEDef, buf: &mut BytesMut, params: &mut Vec<Option<V
 }
 
 /// Encode INSERT statement.
-pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
+pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"INSERT INTO ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
@@ -259,7 +259,7 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 }
 
 /// Encode UPDATE statement.
-pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
+pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"UPDATE ");
     buf.extend_from_slice(cmd.table.as_bytes());
     buf.extend_from_slice(b" SET ");
@@ -304,7 +304,7 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 }
 
 /// Encode DELETE statement.
-pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
+pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"DELETE FROM ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
@@ -319,7 +319,7 @@ pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 }
 
 /// Encode EXPORT command as COPY (SELECT ...) TO STDOUT.
-pub fn encode_export(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::error::EncodeError> {
+pub fn encode_export(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"COPY (");
     encode_select(cmd, buf, params)?;
     buf.extend_from_slice(b") TO STDOUT");

@@ -4,6 +4,29 @@ use super::{CANCEL_REQUEST_CODE, PgConnection, PgResult};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+/// A token that can be used to cancel a running query.
+/// This token is safe to send across threads and does not borrow the connection.
+#[derive(Debug, Clone)]
+pub struct CancelToken {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) process_id: i32,
+    pub(crate) secret_key: i32,
+}
+
+impl CancelToken {
+    /// Attempt to cancel the ongoing query.
+    /// This opens a new TCP connection and sends a CancelRequest message.
+    pub async fn cancel_query(&self) -> PgResult<()> {
+        PgConnection::cancel_query(
+            &self.host,
+            self.port,
+            self.process_id,
+            self.secret_key
+        ).await
+    }
+}
+
 impl PgConnection {
     /// Get the cancel key for this connection.
     pub fn get_cancel_key(&self) -> (i32, i32) {

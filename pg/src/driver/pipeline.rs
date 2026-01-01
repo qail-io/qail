@@ -24,7 +24,8 @@ impl PgConnection {
         // Encode all queries into a single buffer
         let mut buf = BytesMut::new();
         for (sql, params) in queries {
-            buf.extend(PgEncoder::encode_extended_query(sql, params));
+            buf.extend_from_slice(&PgEncoder::encode_extended_query(sql, params)
+                .map_err(|e| PgError::Encode(e.to_string()))?);
         }
 
         // Send all queries in ONE write
@@ -231,7 +232,8 @@ impl PgConnection {
                 self.prepared_statements.insert(stmt_name.clone(), sql);
             }
 
-            buf.extend(PgEncoder::encode_bind("", &stmt_name, &params));
+            buf.extend_from_slice(&PgEncoder::encode_bind("", &stmt_name, &params)
+                .map_err(|e| PgError::Encode(e.to_string()))?);
             buf.extend(PgEncoder::encode_execute("", 0));
         }
 
@@ -293,7 +295,8 @@ impl PgConnection {
 
         // ZERO ALLOCATION: write directly to local buffer
         for params in params_batch {
-            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
+            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+                .map_err(|e| PgError::Encode(e.to_string()))?;
             PgEncoder::encode_execute_to(&mut buf);
         }
 
@@ -373,7 +376,8 @@ impl PgConnection {
         let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
 
         for params in params_batch {
-            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
+            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+                .map_err(|e| PgError::Encode(e.to_string()))?;
             PgEncoder::encode_execute_to(&mut buf);
         }
 
@@ -437,7 +441,8 @@ impl PgConnection {
         let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
 
         for params in params_batch {
-            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
+            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+                .map_err(|e| PgError::Encode(e.to_string()))?;
             PgEncoder::encode_execute_to(&mut buf);
         }
 
@@ -501,7 +506,8 @@ impl PgConnection {
         let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
 
         for params in params_batch {
-            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
+            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+                .map_err(|e| PgError::Encode(e.to_string()))?;
             PgEncoder::encode_execute_to(&mut buf);
         }
 

@@ -18,10 +18,13 @@ impl PgConnection {
         sql: &str,
         params: &[Option<Vec<u8>>],
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        let bytes = PgEncoder::encode_extended_query(sql, params);
+        let bytes = PgEncoder::encode_extended_query(sql, params)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
         self.stream.write_all(&bytes).await?;
 
         let mut rows = Vec::new();
+
+        let mut error: Option<PgError> = None;
 
         loop {
             let msg = self.recv().await?;
@@ -30,15 +33,23 @@ impl PgConnection {
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
                 BackendMessage::DataRow(data) => {
-                    rows.push(data);
+                    // Only collect rows if no error occurred
+                    if error.is_none() {
+                        rows.push(data);
+                    }
                 }
                 BackendMessage::CommandComplete(_) => {}
                 BackendMessage::NoData => {}
                 BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
                     return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
                 }
                 _ => {}
             }
@@ -78,13 +89,16 @@ impl PgConnection {
         }
 
         // Use ULTRA-OPTIMIZED encoders - write directly to buffer
-        PgEncoder::encode_bind_to(&mut buf, &stmt_name, params);
+        PgEncoder::encode_bind_to(&mut buf, &stmt_name, params)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
 
         self.stream.write_all(&buf).await?;
 
         let mut rows = Vec::new();
+
+        let mut error: Option<PgError> = None;
 
         loop {
             let msg = self.recv().await?;
@@ -95,15 +109,25 @@ impl PgConnection {
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
                 BackendMessage::DataRow(data) => {
-                    rows.push(data);
+                    if error.is_none() {
+                        rows.push(data);
+                    }
                 }
                 BackendMessage::CommandComplete(_) => {}
                 BackendMessage::NoData => {}
                 BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
                     return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                        // Invalidate cache to prevent "prepared statement does not exist"
+                        // on next retry.
+                        self.prepared_statements.remove(&stmt_name);
+                    }
                 }
                 _ => {}
             }
@@ -126,15 +150,22 @@ impl PgConnection {
         let bytes = PgEncoder::encode_query_string(sql);
         self.stream.write_all(&bytes).await?;
 
+        let mut error: Option<PgError> = None;
+
         loop {
             let msg = self.recv().await?;
             match msg {
                 BackendMessage::CommandComplete(_) => {}
                 BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
                     return Ok(());
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
                 }
                 _ => {}
             }
@@ -169,7 +200,8 @@ impl PgConnection {
         let mut buf = BytesMut::with_capacity(30 + stmt.name.len() + params_size);
 
         // ZERO HASH, ZERO LOOKUP - just encode and send!
-        PgEncoder::encode_bind_to(&mut buf, &stmt.name, params);
+        PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
 
@@ -177,21 +209,30 @@ impl PgConnection {
 
         let mut rows = Vec::new();
 
+        let mut error: Option<PgError> = None;
+
         loop {
             let msg = self.recv().await?;
             match msg {
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
                 BackendMessage::DataRow(data) => {
-                    rows.push(data);
+                    if error.is_none() {
+                        rows.push(data);
+                    }
                 }
                 BackendMessage::CommandComplete(_) => {}
                 BackendMessage::NoData => {}
                 BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
                     return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
                 }
                 _ => {}
             }
