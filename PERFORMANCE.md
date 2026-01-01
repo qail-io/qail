@@ -62,6 +62,48 @@ AST hash + LRU cache optimization.
 
 ---
 
+## Qdrant Driver (v0.14.10)
+
+**Hardware:** MacBook Pro M-series, Qdrant 1.12.1  
+**Vector Size:** 1536 dimensions (OpenAI embeddings)
+
+### Single Query Performance
+
+QAIL vs Official qdrant-client (1000 queries):
+
+| Driver | μs/query | QPS | vs Official |
+|--------|----------|-----|-------------|
+| **QAIL gRPC** | **140.3** | **7,126** | **1.17x faster** |
+| Official client | 164.0 | 6,096 | baseline |
+
+**Optimizations:**
+- Zero-copy buffer pooling (`.split()` vs `.clone()`)
+- Direct h2 transport (no Tonic overhead)
+- Pre-computed protobuf tags
+- `unsafe` memcpy for vector floats (1536 floats → 1 memcpy)
+
+### Connection Pool Performance
+
+100 concurrent searches with pool size 10:
+
+| Approach | Total Time | vs Sequential |
+|----------|------------|---------------|
+| **Pool (10 conns)** | **16.2ms** | **1.46x faster** |
+| Single sequential | 23.6ms | baseline |
+
+### Batch Performance (HTTP/2 Pipelining)
+
+50 queries with HTTP/2 multiplexing:
+
+| Approach | Total Time | Per Query | Speedup |
+|----------|------------|-----------|---------|
+| **HTTP/2 batch** | **4.8ms** | **95μs** | **4.00x faster** |
+| Sequential | 19.0ms | 380μs | baseline |
+
+**Key technique:** `search_batch()` sends all requests concurrently over a single h2 connection using `futures::join_all()`.
+
+---
+
 ## Notes
 
 - All benchmarks use parameterized queries with statement caching
