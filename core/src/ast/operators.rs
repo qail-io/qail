@@ -69,6 +69,19 @@ pub enum Action {
     Upsert,
     /// Paginated iteration over points (Qdrant)
     Scroll,
+    /// Create new collection (Qdrant)
+    CreateCollection,
+    /// Delete collection (Qdrant)
+    DeleteCollection,
+    // PostgreSQL Functions and Triggers
+    /// CREATE FUNCTION name() RETURNS type AS $$ body $$ LANGUAGE plpgsql
+    CreateFunction,
+    /// DROP FUNCTION name
+    DropFunction,
+    /// CREATE TRIGGER name AFTER INSERT OR UPDATE ON table
+    CreateTrigger,
+    /// DROP TRIGGER name ON table
+    DropTrigger,
 }
 
 impl std::fmt::Display for Action {
@@ -115,6 +128,12 @@ impl std::fmt::Display for Action {
             Action::Search => write!(f, "SEARCH"),
             Action::Upsert => write!(f, "UPSERT"),
             Action::Scroll => write!(f, "SCROLL"),
+            Action::CreateCollection => write!(f, "CREATE_COLLECTION"),
+            Action::DeleteCollection => write!(f, "DELETE_COLLECTION"),
+            Action::CreateFunction => write!(f, "CREATE_FUNCTION"),
+            Action::DropFunction => write!(f, "DROP_FUNCTION"),
+            Action::CreateTrigger => write!(f, "CREATE_TRIGGER"),
+            Action::DropTrigger => write!(f, "DROP_TRIGGER"),
         }
     }
 }
@@ -355,4 +374,13 @@ pub enum SampleMethod {
     Bernoulli,
     /// SYSTEM - faster but less random (block-level sampling)
     System,
+}
+
+/// Distance metric for vector similarity
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Distance {
+    #[default]
+    Cosine,
+    Euclid,
+    Dot,
 }
