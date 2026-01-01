@@ -112,6 +112,43 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
     serde_json::to_vec(&request).unwrap_or_default()
 }
 
+/// Encode an upsert request for multi-vector points (named vectors).
+///
+/// For collections with multiple vector fields (e.g., "title", "content").
+pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoint]) -> Vec<u8> {
+    use crate::point::MultiVectorPoint;
+    
+    let points_json: Vec<JsonValue> = points
+        .iter()
+        .map(|p: &MultiVectorPoint| {
+            let id = match &p.id {
+                PointId::Uuid(s) => json!(s),
+                PointId::Num(n) => json!(n),
+            };
+            
+            let payload: JsonValue = p.payload
+                .iter()
+                .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
+                .collect();
+            
+            // Named vectors as object
+            let vectors: JsonValue = p.vectors
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect();
+            
+            json!({
+                "id": id,
+                "vector": vectors,
+                "payload": payload,
+            })
+        })
+        .collect();
+    
+    let request = json!({ "points": points_json });
+    serde_json::to_vec(&request).unwrap_or_default()
+}
+
 /// Encode a delete request to JSON.
 ///
 /// Generates JSON for POST /collections/{collection}/points/delete
