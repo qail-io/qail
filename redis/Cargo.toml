@@ -2,11 +2,13 @@
 name = "qail-redis"
 version = "0.14.13"
 edition = "2024"
-description = "QAIL driver for Redis - ephemeral state and caching"
-license = "MIT"
+description = "QAIL driver for Redis - ephemeral state and caching. Part of the QAIL decision layer."
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/qail-io/qail"
-keywords = ["qail", "redis", "cache", "database"]
-categories = ["database"]
+homepage = "https://qail.io"
+readme = "README.md"
+keywords = ["qail", "redis", "cache", "database", "async"]
+categories = ["database", "caching"]
 
 [dependencies]
 qail-core = { path = "../core", version = "0.14.13" }
