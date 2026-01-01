@@ -350,7 +350,7 @@ pub fn encode_conditions(
     conditions: &[Condition],
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
-) {
+) -> Result<(), super::super::error::EncodeError> {
     for (i, cond) in conditions.iter().enumerate() {
         if i > 0 {
             buf.extend_from_slice(b" AND ");
@@ -375,7 +375,7 @@ pub fn encode_conditions(
                         if j > 0 {
                             buf.extend_from_slice(b", ");
                         }
-                        encode_value(v, buf, params);
+                        encode_value(v, buf, params)?;
                     }
                     buf.extend_from_slice(b")");
                     continue;
@@ -389,7 +389,7 @@ pub fn encode_conditions(
                         if j > 0 {
                             buf.extend_from_slice(b", ");
                         }
-                        encode_value(v, buf, params);
+                        encode_value(v, buf, params)?;
                     }
                     buf.extend_from_slice(b")");
                     continue;
@@ -409,9 +409,9 @@ pub fn encode_conditions(
                     && vals.len() >= 2
                 {
                     buf.extend_from_slice(b" BETWEEN ");
-                    encode_value(&vals[0], buf, params);
+                    encode_value(&vals[0], buf, params)?;
                     buf.extend_from_slice(b" AND ");
-                    encode_value(&vals[1], buf, params);
+                    encode_value(&vals[1], buf, params)?;
                     continue;
                 }
                 buf.extend_from_slice(b" = ");
@@ -421,9 +421,9 @@ pub fn encode_conditions(
                     && vals.len() >= 2
                 {
                     buf.extend_from_slice(b" NOT BETWEEN ");
-                    encode_value(&vals[0], buf, params);
+                    encode_value(&vals[0], buf, params)?;
                     buf.extend_from_slice(b" AND ");
-                    encode_value(&vals[1], buf, params);
+                    encode_value(&vals[1], buf, params)?;
                     continue;
                 }
                 buf.extend_from_slice(b" = ");
@@ -444,18 +444,26 @@ pub fn encode_conditions(
             }
         }
 
-        encode_value(&cond.value, buf, params);
+        encode_value(&cond.value, buf, params)?;
     }
+    Ok(())
 }
 
 /// Encode value - extract to parameter or inline.
-pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+/// Returns Err if the value contains invalid data (e.g., NULL byte in string).
+pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), super::super::error::EncodeError> {
+    use super::super::error::EncodeError;
+    
     match value {
         Value::Null => {
             params.push(None);
             write_param_placeholder(buf, params.len());
         }
         Value::String(s) => {
+            // Reject literal NULL bytes - they corrupt PostgreSQL connection state
+            if s.as_bytes().contains(&0) {
+                return Err(EncodeError::NullByte);
+            }
             params.push(Some(s.as_bytes().to_vec()));
             write_param_placeholder(buf, params.len());
         }
@@ -517,7 +525,7 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
             let mut sub_buf = BytesMut::with_capacity(128);
             let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
             match q.action {
-                Action::Get => super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params),
+                Action::Get => super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params)?,
                 _ => panic!("Unsupported subquery action {:?}", q.action),
             }
             buf.extend_from_slice(b"(");
@@ -548,6 +556,7 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
             encode_column_expr(expr, buf);
         }
     }
+    Ok(())
 }
 
 /// Write a Value as a literal into an array buffer.

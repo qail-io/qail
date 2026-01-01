@@ -17,6 +17,7 @@
 mod batch;
 mod ddl;
 pub(crate) mod dml;  // pub(crate) for internal use in driver
+pub mod error;
 mod helpers;
 mod values;
 
@@ -34,11 +35,11 @@ impl AstEncoder {
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
 
         match cmd.action {
-            Action::Get | Action::With => dml::encode_select(cmd, &mut sql_buf, &mut params),
-            Action::Add => dml::encode_insert(cmd, &mut sql_buf, &mut params),
-            Action::Set => dml::encode_update(cmd, &mut sql_buf, &mut params),
-            Action::Del => dml::encode_delete(cmd, &mut sql_buf, &mut params),
-            Action::Export => dml::encode_export(cmd, &mut sql_buf, &mut params),
+            Action::Get | Action::With => { dml::encode_select(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Add => { dml::encode_insert(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Set => { dml::encode_update(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Del => { dml::encode_delete(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Export => { dml::encode_export(cmd, &mut sql_buf, &mut params).ok(); }
             Action::Make => ddl::encode_make(cmd, &mut sql_buf),
             Action::Index => ddl::encode_index(cmd, &mut sql_buf),
             Action::Drop => ddl::encode_drop_table(cmd, &mut sql_buf),
@@ -74,11 +75,11 @@ impl AstEncoder {
         params.clear();
 
         match cmd.action {
-            Action::Get | Action::With => dml::encode_select(cmd, sql_buf, params),
-            Action::Add => dml::encode_insert(cmd, sql_buf, params),
-            Action::Set => dml::encode_update(cmd, sql_buf, params),
-            Action::Del => dml::encode_delete(cmd, sql_buf, params),
-            Action::Export => dml::encode_export(cmd, sql_buf, params),
+            Action::Get | Action::With => { dml::encode_select(cmd, sql_buf, params).ok(); }
+            Action::Add => { dml::encode_insert(cmd, sql_buf, params).ok(); }
+            Action::Set => { dml::encode_update(cmd, sql_buf, params).ok(); }
+            Action::Del => { dml::encode_delete(cmd, sql_buf, params).ok(); }
+            Action::Export => { dml::encode_export(cmd, sql_buf, params).ok(); }
             Action::Make => ddl::encode_make(cmd, sql_buf),
             Action::Index => ddl::encode_index(cmd, sql_buf),
             Action::Drop => ddl::encode_drop_table(cmd, sql_buf),
@@ -104,11 +105,11 @@ impl AstEncoder {
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
 
         match cmd.action {
-            Action::Get | Action::With => dml::encode_select(cmd, &mut sql_buf, &mut params),
-            Action::Add => dml::encode_insert(cmd, &mut sql_buf, &mut params),
-            Action::Set => dml::encode_update(cmd, &mut sql_buf, &mut params),
-            Action::Del => dml::encode_delete(cmd, &mut sql_buf, &mut params),
-            Action::Export => dml::encode_export(cmd, &mut sql_buf, &mut params),
+            Action::Get | Action::With => { dml::encode_select(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Add => { dml::encode_insert(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Set => { dml::encode_update(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Del => { dml::encode_delete(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Export => { dml::encode_export(cmd, &mut sql_buf, &mut params).ok(); }
             Action::Make => ddl::encode_make(cmd, &mut sql_buf),
             Action::Index => ddl::encode_index(cmd, &mut sql_buf),
             _ => panic!("Unsupported action {:?} in AST-native encoder.", cmd.action),
@@ -125,10 +126,10 @@ impl AstEncoder {
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
 
         match cmd.action {
-            Action::Get => dml::encode_select(cmd, &mut sql_buf, &mut params),
-            Action::Add => dml::encode_insert(cmd, &mut sql_buf, &mut params),
-            Action::Set => dml::encode_update(cmd, &mut sql_buf, &mut params),
-            Action::Del => dml::encode_delete(cmd, &mut sql_buf, &mut params),
+            Action::Get => { dml::encode_select(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Add => { dml::encode_insert(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Set => { dml::encode_update(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Del => { dml::encode_delete(cmd, &mut sql_buf, &mut params).ok(); }
             _ => {}
         }
 
@@ -141,7 +142,7 @@ impl AstEncoder {
         buf: &mut BytesMut,
         params: &mut Vec<Option<Vec<u8>>>,
     ) {
-        dml::encode_select(cmd, buf, params);
+        dml::encode_select(cmd, buf, params).ok();
     }
 
     /// Encode multiple Qails as a pipeline batch.

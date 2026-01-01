@@ -71,7 +71,7 @@ pub fn encode_batch(cmds: &[Qail]) -> BytesMut {
             Action::Set => encode_update(cmd, &mut sql_buf, &mut params),
             Action::Del => encode_delete(cmd, &mut sql_buf, &mut params),
             _ => panic!("Unsupported action {:?} in AST-native batch encoder.", cmd.action),
-        }
+        }.ok();
 
         let sql_bytes = sql_buf.freeze();
         let params_size: usize = params
@@ -138,7 +138,7 @@ pub fn encode_batch_simple(cmds: &[Qail]) -> BytesMut {
             Action::Set => encode_update(cmd, &mut total_buf, &mut params),
             Action::Del => encode_delete(cmd, &mut total_buf, &mut params),
             _ => panic!("Unsupported action {:?}", cmd.action),
-        }
+        }.ok();
         total_buf.extend_from_slice(b";");
     }
 
