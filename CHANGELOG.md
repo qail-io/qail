@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.11] - 2026-01-01
+
+### Qdrant Performance (4x Speedup)
+- **HTTP/2 Batch Pipelining:** `search_batch()` multiplexes requests over single connection (4.00x faster than sequential)
+- **Connection Pooling:** `QdrantPool` with semaphore concurrency (1.46x faster)
+- **Zero-Allocation Buffer:** Removed `BytesMut::clone()` in favor of `split()` for true zero-copy
+- **Documentation:** Added `PERFORMANCE.md` Qdrant section and new benchmark web page
+
 ## [0.14.10] - 2026-01-01
 
 ### New Crate: qail-qdrant
