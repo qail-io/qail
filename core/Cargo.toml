@@ -1,6 +1,6 @@
 [package]
 name = "qail-core"
-version = "0.14.9"
+version = "0.14.10"
 edition = "2024"
 description = "AST-native query builder - type-safe expressions, zero SQL strings"
 license = "MIT"
