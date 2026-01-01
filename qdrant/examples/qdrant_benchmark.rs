@@ -39,30 +39,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("   ✓ Collection '{}' created ({} dimensions)", COLLECTION_NAME, VECTOR_DIM);
 
-    // Generate test data
-    println!("   ✓ Generating {} test points with {}D vectors...", NUM_POINTS, VECTOR_DIM);
+    // Generate realistic test data with complex payloads
+    println!("   ✓ Generating {} realistic points with metadata...", NUM_POINTS);
+    
+    let categories = vec!["electronics", "books", "clothing", "home", "sports"];
+    let brands = vec!["Apple", "Samsung", "Sony", "Amazon", "Nike"];
+    
     let points: Vec<Point> = (0..NUM_POINTS)
         .map(|i| {
-            let vector: Vec<f32> = (0..VECTOR_DIM)
-                .map(|j| ((i + j) as f32 / VECTOR_DIM as f32).sin())
+            // Generate realistic normalized embeddings (simulating sentence transformers)
+            let mut vector: Vec<f32> = (0..VECTOR_DIM)
+                .map(|j| {
+                    let seed = (i * 31 + j * 17) as f32;
+                    (seed.sin() * 0.5 + (seed / 100.0).cos() * 0.3 + (seed / 1000.0).sin() * 0.2)
+                })
                 .collect();
+            
+            // Normalize vector (L2 norm) for realistic cosine similarity
+            let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                vector.iter_mut().for_each(|x| *x /= norm);
+            }
+            
             Point::new_num(i as u64, vector)
-                .with_payload("index", i as i64)
+                .with_payload("product_id", i as i64)
+                .with_payload("category", categories[i % categories.len()].to_string())
+                .with_payload("brand", brands[i % brands.len()].to_string())
+                .with_payload("price", (i % 100 + 10) as i64)
+                .with_payload("rating", ((i % 50) as f64 / 10.0))
+                .with_payload("in_stock", (i % 3 != 0))
         })
         .collect();
 
     // Insert via REST
     rest_driver.upsert(COLLECTION_NAME, &points).await?;
-    println!("   ✓ Points inserted\n");
+    println!("   ✓ Points inserted with complex metadata\n");
 
-    // Generate query vectors
+    // Generate query vectors that are similar to existing points (ensure hits)
     let query_vectors: Vec<Vec<f32>> = (0..NUM_SEARCHES)
         .map(|i| {
-            (0..VECTOR_DIM)
-                .map(|j| ((i * 7 + j) as f32 / VECTOR_DIM as f32).cos())
-                .collect()
+            // Query vectors based on existing points with small perturbation
+            let base_idx = (i * 13) % NUM_POINTS;
+            let mut vector: Vec<f32> = (0..VECTOR_DIM)
+                .map(|j| {
+                    let seed = (base_idx * 31 + j * 17) as f32;
+                    let base = seed.sin() * 0.5 + (seed / 100.0).cos() * 0.3 + (seed / 1000.0).sin() * 0.2;
+                    // Add small noise to ensure it's not exact match
+                    base + ((i + j) as f32 / 10000.0).sin() * 0.01
+                })
+                .collect();
+            
+            // Normalize
+            let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                vector.iter_mut().for_each(|x| *x /= norm);
+            }
+            vector
         })
         .collect();
+
 
     // ═══════════════════════════════════════════════════════════════
     // Benchmark 1: Encoding Speed (proto_encoder only)
