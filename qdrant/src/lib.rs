@@ -1,5 +1,7 @@
 //! QAIL driver for Qdrant vector database.
 //!
+//! ⚠️ **ALPHA** - This crate is under active development. API may change.
+//!
 //! Native Rust driver with AST-based query building for vector similarity search.
 //!
 //! # Example
@@ -7,7 +9,7 @@
 //! use qail_core::prelude::*;
 //! use qail_qdrant::QdrantDriver;
 //!
-//! let driver = QdrantDriver::connect("localhost:6334").await?;
+//! let driver = QdrantDriver::connect("localhost", 6333).await?;
 //!
 //! // Vector similarity search
 //! let results = driver.search(
