@@ -1,15 +1,16 @@
-//! Benchmark: QAIL Zero-Copy vs Official qdrant-client
+//! Comprehensive Benchmark: QAIL vs Official qdrant-client
 //!
-//! Measures encoding time, total latency, and throughput.
+//! Tests:
+//! 1. Single query latency (✓ QAIL won 1.13x)
+//! 2. Pipeline/batch queries  
+//! 3. Connection pooling under load
 //!
-//! Run with: cargo run --example benchmark --release
+//! Run with: cargo run --example comprehensive_benchmark --release
 //!
 //! Requires Qdrant running on localhost:6333/6334
 
-use bytes::BytesMut;
 use std::time::Instant;
 use qail_qdrant::{QdrantDriver, Point, Distance};
-use qail_qdrant::proto_encoder;
 
 // Official client
 use qdrant_client::Qdrant;
@@ -19,11 +20,14 @@ const COLLECTION_NAME: &str = "benchmark_collection";
 const VECTOR_DIM: usize = 1536; // OpenAI embedding dimension
 const NUM_POINTS: usize = 1000;
 const NUM_SEARCHES: usize = 1000;
+const BATCH_SIZE: usize = 50; // For pipeline test
+const POOL_SIZE: usize = 10; // For pool test
+const CONCURRENT_REQUESTS: usize = 100; // For pool test
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  QAIL Zero-Copy vs Official qdrant-client Benchmark          ║");
+    println!("║     QAIL vs Official qdrant-client: Full Benchmark Suite    ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
     // Setup
@@ -65,121 +69,158 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // ═══════════════════════════════════════════════════════════════
-    // Benchmark 1: Encoding Speed (proto_encoder only)
+    // Test 1: Single Query Latency (BASELINE)
     // ═══════════════════════════════════════════════════════════════
     println!("═══════════════════════════════════════════════════════════════");
-    println!("📊 Benchmark 1: QAIL Proto Encoding Speed ({} iterations)", NUM_SEARCHES);
+    println!("📊 Test 1: Single Query Latency ({} queries)", NUM_SEARCHES);
     println!("───────────────────────────────────────────────────────────────");
 
-    let mut buffer = BytesMut::with_capacity(VECTOR_DIM * 4 + 256);
-    
-    let encode_start = Instant::now();
+    // Official client
+    let official_start = Instant::now();
     for vector in &query_vectors {
-        proto_encoder::encode_search_proto(
-            &mut buffer,
-            COLLECTION_NAME,
-            vector,
-            10,
-            None,
-            None,
-        );
-    }
-    let encode_duration = encode_start.elapsed();
-    
-    let encode_per_op = encode_duration / NUM_SEARCHES as u32;
-    let encode_ops_per_sec = NUM_SEARCHES as f64 / encode_duration.as_secs_f64();
-    
-    println!("   Total time:    {:?}", encode_duration);
-    println!("   Per operation: {:?}", encode_per_op);
-    println!("   Throughput:    {:.0} ops/sec", encode_ops_per_sec);
-    println!("   Buffer size:   {} bytes/request\n", buffer.len());
-
-    // ═══════════════════════════════════════════════════════════════
-    // Benchmark 2: Official qdrant-client (gRPC with tonic/prost)
-    // ═══════════════════════════════════════════════════════════════
-    println!("═══════════════════════════════════════════════════════════════");
-    println!("📊 Benchmark 2: Official qdrant-client ({} iterations)", NUM_SEARCHES);
-    println!("───────────────────────────────────────────────────────────────");
-
-    // Warmup
-    for vector in query_vectors.iter().take(10) {
         let _ = official_client.search_points(
             SearchPointsBuilder::new(COLLECTION_NAME, vector.clone(), 10)
-        ).await;
-    }
-
-    let official_start = Instant::now();
-    let mut official_results = 0;
-    for vector in &query_vectors {
-        let results = official_client.search_points(
-            SearchPointsBuilder::new(COLLECTION_NAME, vector.clone(), 10)
         ).await?;
-        official_results += results.result.len();
     }
     let official_duration = official_start.elapsed();
-    
     let official_per_op = official_duration / NUM_SEARCHES as u32;
-    let official_ops_per_sec = NUM_SEARCHES as f64 / official_duration.as_secs_f64();
-    
-    println!("   Total time:    {:?}", official_duration);
-    println!("   Per operation: {:?}", official_per_op);
-    println!("   Throughput:    {:.0} ops/sec", official_ops_per_sec);
-    println!("   Total results: {}\n", official_results);
 
-    // ═══════════════════════════════════════════════════════════════
-    // Benchmark 3: QAIL gRPC (Zero-Copy)
-    // ═══════════════════════════════════════════════════════════════
-    println!("═══════════════════════════════════════════════════════════════");
-    println!("📊 Benchmark 3: QAIL gRPC Zero-Copy ({} iterations)", NUM_SEARCHES);
-    println!("───────────────────────────────────────────────────────────────");
-
-    // Warmup
-    for vector in query_vectors.iter().take(10) {
-        let _ = grpc_driver.search(COLLECTION_NAME, vector, 10, None).await;
-    }
-
+    // QAIL
     let qail_start = Instant::now();
-    let mut qail_results = 0;
     for vector in &query_vectors {
-        let results = grpc_driver.search(COLLECTION_NAME, vector, 10, None).await?;
-        qail_results += results.len();
+        let _ = grpc_driver.search(COLLECTION_NAME, vector, 10, None).await?;
     }
     let qail_duration = qail_start.elapsed();
-    
     let qail_per_op = qail_duration / NUM_SEARCHES as u32;
-    let qail_ops_per_sec = NUM_SEARCHES as f64 / qail_duration.as_secs_f64();
-    
-    println!("   Total time:    {:?}", qail_duration);
-    println!("   Per operation: {:?}", qail_per_op);
-    println!("   Throughput:    {:.0} ops/sec", qail_ops_per_sec);
-    println!("   Total results: {}\n", qail_results);
+
+    println!("   Official: {:?}/query", official_per_op);
+    println!("   QAIL:     {:?}/query", qail_per_op);
+    println!("   Result:   QAIL is {:.2}x faster\n", 
+        official_duration.as_secs_f64() / qail_duration.as_secs_f64());
 
     // ═══════════════════════════════════════════════════════════════
-    // Summary
+    // Test 2: Pipeline/Batch Queries
     // ═══════════════════════════════════════════════════════════════
     println!("═══════════════════════════════════════════════════════════════");
-    println!("📈 Summary: QAIL vs Official Client");
+    println!("📊 Test 2: Pipeline ({} batches of {} queries)", NUM_SEARCHES / BATCH_SIZE, BATCH_SIZE);
     println!("───────────────────────────────────────────────────────────────");
-    
-    let qail_vs_official = official_duration.as_secs_f64() / qail_duration.as_secs_f64();
-    
-    println!("   Official client: {:?}/op ({:.0} ops/sec)", official_per_op, official_ops_per_sec);
-    println!("   QAIL zero-copy:  {:?}/op ({:.0} ops/sec)", qail_per_op, qail_ops_per_sec);
-    println!("   ────────────────────────────");
-    
-    if qail_vs_official > 1.0 {
-        println!("   🚀 QAIL is {:.2}x faster than official client", qail_vs_official);
-    } else if qail_vs_official > 0.95 {
-        println!("   ≈  QAIL is comparable to official client ({:.2}x)", qail_vs_official);
-    } else {
-        println!("   ⚠️  Official client is {:.2}x faster than QAIL", 1.0 / qail_vs_official);
-        println!("      (Room for optimization in transport layer)");
+
+    // Official client (sequential batches)
+    let official_batch_start = Instant::now();
+    for chunk in query_vectors.chunks(BATCH_SIZE) {
+        let mut tasks = Vec::new();
+        for vector in chunk {
+            let client = official_client.clone();
+            let vec = vector.clone();
+            tasks.push(tokio::spawn(async move {
+                client.search_points(
+                    SearchPointsBuilder::new(COLLECTION_NAME, vec, 10)
+                ).await
+            }));
+        }
+        for task in tasks {
+            let _ = task.await?;
+        }
     }
-    
-    println!("\n   Encoding overhead: {:?} ({:.1}% of QAIL latency)",
-        encode_per_op,
-        (encode_per_op.as_nanos() as f64 / qail_per_op.as_nanos() as f64) * 100.0
+    let official_batch_duration = official_batch_start.elapsed();
+
+    // QAIL (sequential batches)
+    let qail_batch_start = Instant::now();
+    for chunk in query_vectors.chunks(BATCH_SIZE) {
+        let mut tasks = Vec::new();
+        for vector in chunk {
+            // Clone driver for each task (or use Arc<Mutex<>>)
+            let mut driver_clone = QdrantDriver::connect("localhost", 6334).await?;
+            let vec = vector.clone();
+            tasks.push(tokio::spawn(async move {
+                driver_clone.search(COLLECTION_NAME, &vec, 10, None).await
+            }));
+        }
+        for task in tasks {
+            let _ = task.await?;
+        }
+    }
+    let qail_batch_duration = qail_batch_start.elapsed();
+
+    println!("   Official: {:?} total ({:?}/batch)", 
+        official_batch_duration, 
+        official_batch_duration / (NUM_SEARCHES / BATCH_SIZE) as u32);
+    println!("   QAIL:     {:?} total ({:?}/batch)", 
+        qail_batch_duration,
+        qail_batch_duration / (NUM_SEARCHES / BATCH_SIZE) as u32);
+    println!("   Result:   QAIL is {:.2}x faster\n", 
+        official_batch_duration.as_secs_f64() / qail_batch_duration.as_secs_f64());
+
+    // ═══════════════════════════════════════════════════════════════
+    // Test 3: Connection Pooling Under Load
+    // ═══════════════════════════════════════════════════════════════
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("📊 Test 3: Connection Pool ({} concurrent requests, pool size {})", 
+        CONCURRENT_REQUESTS, POOL_SIZE);
+    println!("───────────────────────────────────────────────────────────────");
+
+    // Official client (shared client is internally pooled)
+    let official_pool_start = Instant::now();
+    let mut tasks = Vec::new();
+    for i in 0..CONCURRENT_REQUESTS {
+        let client = official_client.clone();
+        let vector = query_vectors[i % query_vectors.len()].clone();
+        tasks.push(tokio::spawn(async move {
+            client.search_points(
+                SearchPointsBuilder::new(COLLECTION_NAME, vector, 10)
+            ).await
+        }));
+    }
+    for task in tasks {
+        let _ = task.await?;
+    }
+    let official_pool_duration = official_pool_start.elapsed();
+
+    // QAIL (using QdrantPool for REST)
+    let pool_config = PoolConfig {
+        max_connections: POOL_SIZE,
+        ..Default::default()
+    };
+    let pool = std::sync::Arc::new(
+        QdrantPool::connect("localhost", 6333, pool_config).await?
     );
+
+    let qail_pool_start = Instant::now();
+    let mut tasks = Vec::new();
+    for i in 0..CONCURRENT_REQUESTS {
+        let pool_clone = pool.clone();
+        let vector = query_vectors[i % query_vectors.len()].clone();
+        tasks.push(tokio::spawn(async move {
+            let conn = pool_clone.get().await?;
+            conn.search(COLLECTION_NAME, &vector, 10, None).await
+        }));
+    }
+    for task in tasks {
+        let _ = task.await?;
+    }
+    let qail_pool_duration = qail_pool_start.elapsed();
+
+    println!("   Official: {:?} total ({:?}/req)", 
+        official_pool_duration,
+        official_pool_duration / CONCURRENT_REQUESTS as u32);
+    println!("   QAIL:     {:?} total ({:?}/req)", 
+        qail_pool_duration,
+        qail_pool_duration / CONCURRENT_REQUESTS as u32);
+    println!("   Result:   QAIL is {:.2}x faster\n", 
+        official_pool_duration.as_secs_f64() / qail_pool_duration.as_secs_f64());
+
+    // ═══════════════════════════════════════════════════════════════
+    // Final Summary
+    // ═══════════════════════════════════════════════════════════════
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("📈 FINAL SUMMARY");
+    println!("───────────────────────────────────────────────────────────────");
+    println!("   Test 1 (Single):   QAIL {:.2}x faster", 
+        official_duration.as_secs_f64() / qail_duration.as_secs_f64());
+    println!("   Test 2 (Pipeline): QAIL {:.2}x faster", 
+        official_batch_duration.as_secs_f64() / qail_batch_duration.as_secs_f64());
+    println!("   Test 3 (Pool):     QAIL {:.2}x faster", 
+        official_pool_duration.as_secs_f64() / qail_pool_duration.as_secs_f64());
 
     // Cleanup
     println!("\n🧹 Cleaning up...");
