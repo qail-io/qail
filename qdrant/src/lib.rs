@@ -25,7 +25,7 @@ pub mod error;
 pub mod point;
 pub mod protocol;
 
-pub use driver::QdrantDriver;
+pub use driver::{QdrantDriver, Distance};
 pub use error::{QdrantError, QdrantResult};
 pub use point::{Point, PointId, Payload};
 
