@@ -2700,6 +2700,7 @@ name = "qail-qdrant"
 version = "0.14.10"
 dependencies = [
  "bytes",
+ "futures-util",
  "h2",
  "http",
  "qail-core",

@@ -20,6 +20,7 @@ thiserror = "2"
 # gRPC transport
 h2 = "0.4"
 http = "1"
+futures-util = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
