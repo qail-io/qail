@@ -43,11 +43,20 @@ AST hash + LRU cache optimization.
 
 ## Bulk Operations
 
-### COPY Protocol (v0.14.6)
+### COPY Protocol (v0.14.9)
+
+100 million rows benchmark:
+
+| Metric | Value |
+|--------|-------|
+| **Rows/sec** | **1,633,220** |
+| Per row | 612ns |
+| Total time | 61.2s |
+| Batch size | 10,000 rows |
 
 | Operation | Rows/sec | Notes |
 |-----------|----------|-------|
-| COPY bulk insert | 1.2M | Native COPY |
+| COPY bulk insert | 1.63M | Native COPY |
 | Pipelined INSERT | 180K | Extended Query |
 | Single INSERT | 22K | Per-statement |
 
