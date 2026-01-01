@@ -82,6 +82,9 @@ impl QdrantDriver {
         limit: u64,
         score_threshold: Option<f32>,
     ) -> QdrantResult<Vec<ScoredPoint>> {
+        // Clear buffer for reuse
+        self.buffer.clear();
+        
         // Encode request using zero-copy encoder
         encoder::encode_search_proto(
             &mut self.buffer,
@@ -92,8 +95,9 @@ impl QdrantDriver {
             None,
         );
 
-        // Send via gRPC
-        let response = self.client.search(self.buffer.clone().freeze()).await?;
+        // Send via gRPC (split to avoid clone - zero allocation!)
+        let request_bytes = self.buffer.split().freeze();
+        let response = self.client.search(request_bytes).await?;
 
         // Decode response using zero-copy decoder
         decoder::decode_search_response(&response)
@@ -133,11 +137,15 @@ impl QdrantDriver {
         points: &[Point],
         wait: bool,
     ) -> QdrantResult<()> {
+        // Clear buffer for reuse
+        self.buffer.clear();
+        
         // Encode request using zero-copy encoder
         encoder::encode_upsert_proto(&mut self.buffer, collection, points, wait);
 
-        // Send via gRPC
-        let _response = self.client.upsert(self.buffer.clone().freeze()).await?;
+        // Send via gRPC (split to avoid clone)
+        let request_bytes = self.buffer.split().freeze();
+        let _response = self.client.upsert(request_bytes).await?;
 
         Ok(())
     }
