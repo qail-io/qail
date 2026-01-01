@@ -40,16 +40,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Upsert points ---
     println!("\n📤 Upserting points...");
     let points = vec![
-        Point::new("p1", vec![0.9, 0.1, 0.0, 0.0])
+        Point::new_num(1, vec![0.9, 0.1, 0.0, 0.0])
             .with_payload("category", "electronics")
             .with_payload("price", 999),
-        Point::new("p2", vec![0.8, 0.2, 0.0, 0.0])
+        Point::new_num(2, vec![0.8, 0.2, 0.0, 0.0])
             .with_payload("category", "electronics")
             .with_payload("price", 499),
-        Point::new("p3", vec![0.1, 0.9, 0.0, 0.0])
+        Point::new_num(3, vec![0.1, 0.9, 0.0, 0.0])
             .with_payload("category", "clothing")
             .with_payload("price", 79),
-        Point::new("p4", vec![0.0, 0.1, 0.9, 0.0])
+        Point::new_num(4, vec![0.0, 0.1, 0.9, 0.0])
             .with_payload("category", "food")
             .with_payload("price", 15),
     ];

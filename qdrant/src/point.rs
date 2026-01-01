@@ -54,10 +54,19 @@ pub struct Point {
 }
 
 impl Point {
-    /// Create a new point with a vector.
+    /// Create a new point with a string/UUID ID.
     pub fn new(id: impl Into<PointId>, vector: Vec<f32>) -> Self {
         Self {
             id: id.into(),
+            vector,
+            payload: HashMap::new(),
+        }
+    }
+
+    /// Create a new point with a numeric ID.
+    pub fn new_num(id: u64, vector: Vec<f32>) -> Self {
+        Self {
+            id: PointId::Num(id),
             vector,
             payload: HashMap::new(),
         }
