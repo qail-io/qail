@@ -8,10 +8,10 @@ use bytes::BytesMut;
 use qail_core::ast::Qail;
 
 use crate::error::{QdrantError, QdrantResult};
-use crate::grpc_transport::GrpcClient;
+use crate::transport::GrpcClient;
 use crate::point::{Point, ScoredPoint};
-use crate::proto_decoder;
-use crate::proto_encoder;
+use crate::decoder;
+use crate::encoder;
 
 /// High-performance gRPC driver for Qdrant.
 ///
@@ -83,7 +83,7 @@ impl QdrantDriver {
         score_threshold: Option<f32>,
     ) -> QdrantResult<Vec<ScoredPoint>> {
         // Encode request using zero-copy encoder
-        proto_encoder::encode_search_proto(
+        encoder::encode_search_proto(
             &mut self.buffer,
             collection,
             vector,
@@ -96,7 +96,7 @@ impl QdrantDriver {
         let response = self.client.search(self.buffer.clone().freeze()).await?;
 
         // Decode response using zero-copy decoder
-        proto_decoder::decode_search_response(&response)
+        decoder::decode_search_response(&response)
     }
 
     /// Search using QAIL AST.
@@ -134,7 +134,7 @@ impl QdrantDriver {
         wait: bool,
     ) -> QdrantResult<()> {
         // Encode request using zero-copy encoder
-        proto_encoder::encode_upsert_proto(&mut self.buffer, collection, points, wait);
+        encoder::encode_upsert_proto(&mut self.buffer, collection, points, wait);
 
         // Send via gRPC
         let _response = self.client.upsert(self.buffer.clone().freeze()).await?;

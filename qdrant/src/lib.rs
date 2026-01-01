@@ -17,10 +17,10 @@
 
 pub mod driver;
 pub mod error;
-pub mod grpc_transport;
+pub mod transport;
 pub mod point;
-pub mod proto_decoder;
-pub mod proto_encoder;
+pub mod decoder;
+pub mod encoder;
 pub mod protocol;
 
 pub use driver::QdrantDriver;

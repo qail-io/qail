@@ -9,7 +9,7 @@
 use bytes::BytesMut;
 use std::time::Instant;
 use qail_qdrant::{QdrantDriver, Point, Distance};
-use qail_qdrant::proto_encoder;
+use qail_qdrant::encoder;
 
 // Official client
 use qdrant_client::Qdrant;
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let encode_start = Instant::now();
     for vector in &query_vectors {
-        proto_encoder::encode_search_proto(
+        encoder::encode_search_proto(
             &mut buffer,
             COLLECTION_NAME,
             vector,

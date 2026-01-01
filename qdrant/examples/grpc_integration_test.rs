@@ -7,7 +7,7 @@
 
 use bytes::BytesMut;
 use qail_qdrant::{QdrantDriver, QdrantResult, Distance};
-use qail_qdrant::proto_encoder;
+use qail_qdrant::encoder;
 
 const COLLECTION_NAME: &str = "grpc_test_collection";
 
@@ -63,7 +63,7 @@ async fn main() -> QdrantResult<()> {
     
     // Encode with zero-copy proto encoder
     let mut buf = BytesMut::with_capacity(1024);
-    proto_encoder::encode_search_proto(
+    encoder::encode_search_proto(
         &mut buf,
         COLLECTION_NAME,
         &query_vector,
