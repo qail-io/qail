@@ -140,20 +140,19 @@ impl GrpcClient {
         let trailers = body.trailers().await
             .map_err(|e| QdrantError::Grpc(format!("Trailers failed: {}", e)))?;
         
-        if let Some(trailers) = trailers {
-            if let Some(status) = trailers.get("grpc-status") {
-                if status != "0" {
-                    let message = trailers
-                        .get("grpc-message")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("Unknown error");
-                    return Err(QdrantError::Grpc(format!(
-                        "gRPC status {}: {}",
-                        status.to_str().unwrap_or("?"),
-                        message
-                    )));
-                }
-            }
+        if let Some(trailers) = trailers
+            && let Some(status) = trailers.get("grpc-status")
+            && status != "0"
+        {
+            let message = trailers
+                .get("grpc-message")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("Unknown error");
+            return Err(QdrantError::Grpc(format!(
+                "gRPC status {}: {}",
+                status.to_str().unwrap_or("?"),
+                message
+            )));
         }
 
         // Remove gRPC frame header (5 bytes: 1 compress flag + 4 length)

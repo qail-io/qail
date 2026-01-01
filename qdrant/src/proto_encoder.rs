@@ -283,7 +283,7 @@ fn varint_len(value: u64) -> usize {
         1
     } else {
         let bits = 64 - value.leading_zeros() as usize;
-        (bits + 6) / 7
+        bits.div_ceil(7)
     }
 }
 
