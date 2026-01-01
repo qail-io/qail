@@ -232,6 +232,235 @@ impl QdrantDriver {
         Ok(collections)
     }
 
+    /// Scroll through all points in a collection (paginated).
+    ///
+    /// Returns points with optional filter, for iterating large datasets.
+    pub async fn scroll(
+        &self,
+        collection: &str,
+        limit: u64,
+        offset: Option<PointId>,
+        filter: Option<serde_json::Value>,
+    ) -> QdrantResult<(Vec<ScoredPoint>, Option<PointId>)> {
+        let mut request = serde_json::json!({
+            "limit": limit,
+            "with_payload": true,
+            "with_vector": false,
+        });
+        
+        if let Some(off) = offset {
+            request["offset"] = match off {
+                PointId::Uuid(s) => serde_json::json!(s),
+                PointId::Num(n) => serde_json::json!(n),
+            };
+        }
+        
+        if let Some(f) = filter {
+            request["filter"] = f;
+        }
+        
+        let url = format!("{}/collections/{}/points/scroll", self.base_url, collection);
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| QdrantError::Grpc(e.to_string()))?;
+        
+        let bytes = response.bytes().await
+            .map_err(|e| QdrantError::Decode(e.to_string()))?;
+        
+        let json: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| QdrantError::Decode(e.to_string()))?;
+        
+        let points = json["result"]["points"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        let id = protocol::parse_point_id(&p["id"])?;
+                        let payload = protocol::parse_payload(&p["payload"]);
+                        Some(ScoredPoint {
+                            id,
+                            score: 0.0, // scroll doesn't return scores
+                            payload,
+                            vector: None,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        
+        let next_offset = json["result"]["next_page_offset"]
+            .as_str()
+            .map(|s| PointId::Uuid(s.to_string()))
+            .or_else(|| json["result"]["next_page_offset"].as_u64().map(PointId::Num));
+        
+        Ok((points, next_offset))
+    }
+
+    /// Recommend similar points based on existing point IDs.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Find products similar to items the user liked
+    /// let similar = driver.recommend(
+    ///     "products",
+    ///     &[PointId::Num(1), PointId::Num(2)],  // positive examples
+    ///     &[PointId::Num(5)],                    // negative examples
+    ///     10,
+    /// ).await?;
+    /// ```
+    pub async fn recommend(
+        &self,
+        collection: &str,
+        positive: &[PointId],
+        negative: &[PointId],
+        limit: u64,
+    ) -> QdrantResult<Vec<ScoredPoint>> {
+        let positive_json: Vec<serde_json::Value> = positive.iter().map(|id| {
+            match id {
+                PointId::Uuid(s) => serde_json::json!(s),
+                PointId::Num(n) => serde_json::json!(n),
+            }
+        }).collect();
+        
+        let negative_json: Vec<serde_json::Value> = negative.iter().map(|id| {
+            match id {
+                PointId::Uuid(s) => serde_json::json!(s),
+                PointId::Num(n) => serde_json::json!(n),
+            }
+        }).collect();
+        
+        let request = serde_json::json!({
+            "positive": positive_json,
+            "negative": negative_json,
+            "limit": limit,
+            "with_payload": true,
+        });
+        
+        let url = format!("{}/collections/{}/points/recommend", self.base_url, collection);
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| QdrantError::Grpc(e.to_string()))?;
+        
+        let bytes = response.bytes().await
+            .map_err(|e| QdrantError::Decode(e.to_string()))?;
+        
+        protocol::decode_search_response(&bytes)
+    }
+
+    /// Get specific points by ID.
+    pub async fn get_points(
+        &self,
+        collection: &str,
+        ids: &[PointId],
+    ) -> QdrantResult<Vec<ScoredPoint>> {
+        let ids_json: Vec<serde_json::Value> = ids.iter().map(|id| {
+            match id {
+                PointId::Uuid(s) => serde_json::json!(s),
+                PointId::Num(n) => serde_json::json!(n),
+            }
+        }).collect();
+        
+        let request = serde_json::json!({
+            "ids": ids_json,
+            "with_payload": true,
+            "with_vector": false,
+        });
+        
+        let url = format!("{}/collections/{}/points", self.base_url, collection);
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| QdrantError::Grpc(e.to_string()))?;
+        
+        let bytes = response.bytes().await
+            .map_err(|e| QdrantError::Decode(e.to_string()))?;
+        
+        let json: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| QdrantError::Decode(e.to_string()))?;
+        
+        let points = json["result"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        let id = protocol::parse_point_id(&p["id"])?;
+                        let payload = protocol::parse_payload(&p["payload"]);
+                        Some(ScoredPoint {
+                            id,
+                            score: 0.0,
+                            payload,
+                            vector: None,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        
+        Ok(points)
+    }
+
+    /// Count points in a collection (with optional filter).
+    pub async fn count(
+        &self,
+        collection: &str,
+        filter: Option<serde_json::Value>,
+        exact: bool,
+    ) -> QdrantResult<u64> {
+        let mut request = serde_json::json!({
+            "exact": exact,
+        });
+        
+        if let Some(f) = filter {
+            request["filter"] = f;
+        }
+        
+        let url = format!("{}/collections/{}/points/count", self.base_url, collection);
+        let response = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| QdrantError::Grpc(e.to_string()))?;
+        
+        let bytes = response.bytes().await
+            .map_err(|e| QdrantError::Decode(e.to_string()))?;
+        
+        let json: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| QdrantError::Decode(e.to_string()))?;
+        
+        json["result"]["count"]
+            .as_u64()
+            .ok_or_else(|| QdrantError::Decode("Missing count".to_string()))
+    }
+
+    /// Collection info (vector count, config, etc.).
+    pub async fn collection_info(&self, name: &str) -> QdrantResult<serde_json::Value> {
+        let url = format!("{}/collections/{}", self.base_url, name);
+        let response = self.client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| QdrantError::Grpc(e.to_string()))?;
+        
+        let bytes = response.bytes().await
+            .map_err(|e| QdrantError::Decode(e.to_string()))?;
+        
+        serde_json::from_slice(&bytes)
+            .map_err(|e| QdrantError::Decode(e.to_string()))
+    }
+
     /// Extract vector from Qail cages (fallback for backward compatibility).
     fn extract_vector_from_cages(&self, cmd: &Qail) -> QdrantResult<Vec<f32>> {
         // Look for Value::Vector in cages conditions

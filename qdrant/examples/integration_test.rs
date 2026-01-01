@@ -101,6 +101,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let collections = driver.list_collections().await?;
     println!("   Collections: {:?}", collections);
 
+    // --- Count points ---
+    println!("\n🔢 Counting points...");
+    let total = driver.count(collection, None, true).await?;
+    println!("   Total points: {}", total);
+
+    // Filter count
+    let filter = qail_qdrant::protocol::encode_conditions_to_filter(
+        &[qail_core::ast::Condition {
+            left: qail_core::ast::Expr::Named("category".to_string()),
+            op: qail_core::ast::Operator::Eq,
+            value: qail_core::ast::Value::String("electronics".to_string()),
+            is_array_unnest: false,
+        }],
+        false,
+    );
+    let electronics_count = driver.count(collection, Some(filter), true).await?;
+    println!("   Electronics count: {}", electronics_count);
+
+    // --- Get specific points ---
+    println!("\n📍 Getting points by ID...");
+    let fetched = driver.get_points(collection, &[
+        qail_qdrant::PointId::Num(1),
+        qail_qdrant::PointId::Num(3),
+    ]).await?;
+    println!("   Fetched {} points:", fetched.len());
+    for p in &fetched {
+        println!("   - {:?}", p.id);
+    }
+
+    // --- Scroll through all points ---
+    println!("\n🔄 Scrolling through points...");
+    let (scroll_points, next) = driver.scroll(collection, 2, None, None).await?;
+    println!("   First page: {} points, next: {:?}", scroll_points.len(), next);
+
+    // --- Recommend based on existing points ---
+    println!("\n💡 Recommend similar to point 1...");
+    let recs = driver.recommend(
+        collection,
+        &[qail_qdrant::PointId::Num(1)], // like point 1
+        &[],                               // no negatives
+        3,
+    ).await?;
+    println!("   Recommended {} points:", recs.len());
+    for r in &recs {
+        println!("   - {:?} (score: {:.3})", r.id, r.score);
+    }
+
     // --- Cleanup ---
     println!("\n🧹 Cleaning up...");
     driver.delete_collection(collection).await?;
