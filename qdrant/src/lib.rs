@@ -24,6 +24,7 @@ pub mod driver;
 pub mod error;
 pub mod point;
 pub mod pool;
+pub mod proto_encoder;
 pub mod protocol;
 
 pub use driver::{QdrantDriver, Distance};
