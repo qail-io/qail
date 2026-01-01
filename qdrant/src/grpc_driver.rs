@@ -10,6 +10,7 @@ use qail_core::ast::Qail;
 use crate::error::{QdrantError, QdrantResult};
 use crate::grpc_transport::GrpcClient;
 use crate::point::{Point, ScoredPoint};
+use crate::proto_decoder;
 use crate::proto_encoder;
 
 /// High-performance gRPC driver for Qdrant.
@@ -95,8 +96,8 @@ impl GrpcDriver {
         // Send via gRPC
         let response = self.client.search(self.buffer.clone().freeze()).await?;
 
-        // Decode response (TODO: implement zero-copy response decoder)
-        decode_search_response(&response)
+        // Decode response using zero-copy decoder
+        proto_decoder::decode_search_response(&response)
     }
 
     /// Search using QAIL AST.
@@ -141,33 +142,6 @@ impl GrpcDriver {
 
         Ok(())
     }
-}
-
-/// Decode SearchResponse protobuf to ScoredPoint.
-///
-/// TODO: Implement zero-copy decoder matching proto_encoder pattern.
-fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
-    // For now, return empty - will implement proper decoder
-    // The response format is:
-    // message SearchResponse {
-    //   repeated ScoredPoint result = 1;
-    //   double time = 2;
-    // }
-    //
-    // message ScoredPoint {
-    //   PointId id = 1;
-    //   map<string, Value> payload = 2;
-    //   float score = 3;
-    //   Vectors vectors = 4;
-    // }
-    
-    if data.is_empty() {
-        return Ok(vec![]);
-    }
-    
-    // Placeholder - proper implementation will parse protobuf
-    // For now, this allows the driver to compile and be tested
-    Ok(vec![])
 }
 
 #[cfg(test)]
