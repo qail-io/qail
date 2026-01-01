@@ -22,6 +22,7 @@
 
 pub mod driver;
 pub mod error;
+pub mod grpc_driver;
 pub mod grpc_transport;
 pub mod point;
 pub mod pool;
@@ -30,6 +31,7 @@ pub mod protocol;
 
 pub use driver::{QdrantDriver, Distance};
 pub use error::{QdrantError, QdrantResult};
+pub use grpc_driver::GrpcDriver;
 pub use point::{Point, PointId, Payload, SparseVector, VectorData, MultiVectorPoint};
 pub use pool::{QdrantPool, PoolConfig, PooledConnection};
 
