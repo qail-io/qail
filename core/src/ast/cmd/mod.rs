@@ -56,6 +56,19 @@ pub struct Qail {
     pub sample: Option<(SampleMethod, f64, Option<u64>)>,
     #[serde(default)]
     pub only_table: bool,
+    // Vector database fields (Qdrant)
+    /// Vector embedding for similarity search
+    #[serde(default)]
+    pub vector: Option<Vec<f32>>,
+    /// Minimum similarity score threshold
+    #[serde(default)]
+    pub score_threshold: Option<f32>,
+    /// Named vector field (for collections with multiple vectors)
+    #[serde(default)]
+    pub vector_name: Option<String>,
+    /// Whether to return vectors in search results
+    #[serde(default)]
+    pub with_vector: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,6 +134,11 @@ impl Default for Qail {
             overriding: None,
             sample: None,
             only_table: false,
+            // Vector database fields
+            vector: None,
+            score_threshold: None,
+            vector_name: None,
+            with_vector: false,
         }
     }
 }
@@ -130,6 +148,7 @@ mod advanced;
 mod constructors;
 mod cte;
 mod query;
+mod vector;
 
 // Deprecated methods kept in main module for backward compatibility
 impl Qail {
