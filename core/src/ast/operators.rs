@@ -82,6 +82,29 @@ pub enum Action {
     CreateTrigger,
     /// DROP TRIGGER name ON table
     DropTrigger,
+    // Redis operations (key-value store)
+    /// Redis GET key
+    RedisGet,
+    /// Redis SET key value [EX seconds]
+    RedisSet,
+    /// Redis DEL key [key ...]
+    RedisDel,
+    /// Redis INCR/INCRBY key
+    RedisIncr,
+    /// Redis DECR/DECRBY key
+    RedisDecr,
+    /// Redis TTL/PTTL key
+    RedisTtl,
+    /// Redis EXPIRE/PEXPIRE key seconds
+    RedisExpire,
+    /// Redis EXISTS key
+    RedisExists,
+    /// Redis MGET keys
+    RedisMGet,
+    /// Redis MSET key value [key value ...]
+    RedisMSet,
+    /// Redis PING
+    RedisPing,
 }
 
 impl std::fmt::Display for Action {
@@ -134,6 +157,18 @@ impl std::fmt::Display for Action {
             Action::DropFunction => write!(f, "DROP_FUNCTION"),
             Action::CreateTrigger => write!(f, "CREATE_TRIGGER"),
             Action::DropTrigger => write!(f, "DROP_TRIGGER"),
+            // Redis
+            Action::RedisGet => write!(f, "REDIS_GET"),
+            Action::RedisSet => write!(f, "REDIS_SET"),
+            Action::RedisDel => write!(f, "REDIS_DEL"),
+            Action::RedisIncr => write!(f, "REDIS_INCR"),
+            Action::RedisDecr => write!(f, "REDIS_DECR"),
+            Action::RedisTtl => write!(f, "REDIS_TTL"),
+            Action::RedisExpire => write!(f, "REDIS_EXPIRE"),
+            Action::RedisExists => write!(f, "REDIS_EXISTS"),
+            Action::RedisMGet => write!(f, "REDIS_MGET"),
+            Action::RedisMSet => write!(f, "REDIS_MSET"),
+            Action::RedisPing => write!(f, "REDIS_PING"),
         }
     }
 }

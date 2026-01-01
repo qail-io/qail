@@ -1,0 +1,25 @@
+[package]
+name = "qail-redis"
+version = "0.14.13"
+edition = "2024"
+description = "QAIL driver for Redis - ephemeral state and caching"
+license = "MIT"
+repository = "https://github.com/qail-io/qail"
+keywords = ["qail", "redis", "cache", "database"]
+categories = ["database"]
+
+[dependencies]
+qail-core = { path = "../core", version = "0.14.13" }
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "rt-multi-thread", "macros"] }
+bytes = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[lints.rust]
+warnings = "deny"
+unused = "deny"
+dead_code = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
