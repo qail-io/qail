@@ -198,6 +198,10 @@ impl ToSql for Qail {
                 }
             }
             Action::DropView => format!("DROP VIEW IF EXISTS {}", self.table),
+            // Vector database operations - use qail-qdrant driver instead
+            Action::Search | Action::Upsert | Action::Scroll => {
+                format!("-- Vector operation {:?} not supported in SQL. Use qail-qdrant driver.", self.action)
+            }
         }
     }
 }
