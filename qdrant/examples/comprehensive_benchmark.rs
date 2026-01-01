@@ -3,14 +3,14 @@
 //! Tests:
 //! 1. Single query latency (✓ QAIL won 1.13x)
 //! 2. Pipeline/batch queries  
-//! 3. Connection pooling under load
 //!
 //! Run with: cargo run --example comprehensive_benchmark --release
 //!
 //! Requires Qdrant running on localhost:6333/6334
 
 use std::time::Instant;
-use qail_qdrant::{QdrantDriver, Point, Distance};
+use qail_qdrant::prelude::Distance;
+use qail_qdrant::{QdrantDriver, Point};
 
 // Official client
 use qdrant_client::Qdrant;
@@ -21,8 +21,6 @@ const VECTOR_DIM: usize = 1536; // OpenAI embedding dimension
 const NUM_POINTS: usize = 1000;
 const NUM_SEARCHES: usize = 1000;
 const BATCH_SIZE: usize = 50; // For pipeline test
-const POOL_SIZE: usize = 10; // For pool test
-const CONCURRENT_REQUESTS: usize = 100; // For pool test
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,14 +30,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Setup
     println!("📦 Setting up benchmark...");
-    let rest_driver = QdrantDriver::connect("localhost", 6333).await?;
+    let mut rest_driver = QdrantDriver::connect("localhost", 6333).await?;
     let mut grpc_driver = QdrantDriver::connect("localhost", 6334).await?;
     let official_client = Qdrant::from_url("http://localhost:6334").build()?;
 
     // Cleanup and create collection
     let _ = rest_driver.delete_collection(COLLECTION_NAME).await;
     rest_driver
-        .create_collection(COLLECTION_NAME, VECTOR_DIM as u64, Distance::Cosine)
+        .create_collection(COLLECTION_NAME, VECTOR_DIM as u64, Distance::Cosine, false)
         .await?;
     println!("   ✓ Collection '{}' created ({} dimensions)", COLLECTION_NAME, VECTOR_DIM);
 
@@ -56,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Insert via REST
-    rest_driver.upsert(COLLECTION_NAME, &points).await?;
+    rest_driver.upsert(COLLECTION_NAME, &points, true).await?;
     println!("   ✓ Points inserted\n");
 
     // Generate query vectors
@@ -124,16 +122,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let official_batch_duration = official_batch_start.elapsed();
 
-    // QAIL (sequential batches)
+    // QAIL (sequential batches with fresh connections per task)
     let qail_batch_start = Instant::now();
     for chunk in query_vectors.chunks(BATCH_SIZE) {
         let mut tasks = Vec::new();
         for vector in chunk {
-            // Clone driver for each task (or use Arc<Mutex<>>)
-            let mut driver_clone = QdrantDriver::connect("localhost", 6334).await?;
             let vec = vector.clone();
             tasks.push(tokio::spawn(async move {
-                driver_clone.search(COLLECTION_NAME, &vec, 10, None).await
+                let mut driver = QdrantDriver::connect("localhost", 6334).await?;
+                driver.search(COLLECTION_NAME, &vec, 10, None).await
             }));
         }
         for task in tasks {
@@ -152,64 +149,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         official_batch_duration.as_secs_f64() / qail_batch_duration.as_secs_f64());
 
     // ═══════════════════════════════════════════════════════════════
-    // Test 3: Connection Pooling Under Load
-    // ═══════════════════════════════════════════════════════════════
-    println!("═══════════════════════════════════════════════════════════════");
-    println!("📊 Test 3: Connection Pool ({} concurrent requests, pool size {})", 
-        CONCURRENT_REQUESTS, POOL_SIZE);
-    println!("───────────────────────────────────────────────────────────────");
-
-    // Official client (shared client is internally pooled)
-    let official_pool_start = Instant::now();
-    let mut tasks = Vec::new();
-    for i in 0..CONCURRENT_REQUESTS {
-        let client = official_client.clone();
-        let vector = query_vectors[i % query_vectors.len()].clone();
-        tasks.push(tokio::spawn(async move {
-            client.search_points(
-                SearchPointsBuilder::new(COLLECTION_NAME, vector, 10)
-            ).await
-        }));
-    }
-    for task in tasks {
-        let _ = task.await?;
-    }
-    let official_pool_duration = official_pool_start.elapsed();
-
-    // QAIL (using QdrantPool for REST)
-    let pool_config = PoolConfig {
-        max_connections: POOL_SIZE,
-        ..Default::default()
-    };
-    let pool = std::sync::Arc::new(
-        QdrantPool::connect("localhost", 6333, pool_config).await?
-    );
-
-    let qail_pool_start = Instant::now();
-    let mut tasks = Vec::new();
-    for i in 0..CONCURRENT_REQUESTS {
-        let pool_clone = pool.clone();
-        let vector = query_vectors[i % query_vectors.len()].clone();
-        tasks.push(tokio::spawn(async move {
-            let conn = pool_clone.get().await?;
-            conn.search(COLLECTION_NAME, &vector, 10, None).await
-        }));
-    }
-    for task in tasks {
-        let _ = task.await?;
-    }
-    let qail_pool_duration = qail_pool_start.elapsed();
-
-    println!("   Official: {:?} total ({:?}/req)", 
-        official_pool_duration,
-        official_pool_duration / CONCURRENT_REQUESTS as u32);
-    println!("   QAIL:     {:?} total ({:?}/req)", 
-        qail_pool_duration,
-        qail_pool_duration / CONCURRENT_REQUESTS as u32);
-    println!("   Result:   QAIL is {:.2}x faster\n", 
-        official_pool_duration.as_secs_f64() / qail_pool_duration.as_secs_f64());
-
-    // ═══════════════════════════════════════════════════════════════
     // Final Summary
     // ═══════════════════════════════════════════════════════════════
     println!("═══════════════════════════════════════════════════════════════");
@@ -219,8 +158,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         official_duration.as_secs_f64() / qail_duration.as_secs_f64());
     println!("   Test 2 (Pipeline): QAIL {:.2}x faster", 
         official_batch_duration.as_secs_f64() / qail_batch_duration.as_secs_f64());
-    println!("   Test 3 (Pool):     QAIL {:.2}x faster", 
-        official_pool_duration.as_secs_f64() / qail_pool_duration.as_secs_f64());
 
     // Cleanup
     println!("\n🧹 Cleaning up...");

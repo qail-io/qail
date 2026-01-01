@@ -30,6 +30,8 @@ const METHOD_DELETE: &str = "/qdrant.Points/Delete";
 const METHOD_GET: &str = "/qdrant.Points/Get";
 const METHOD_SCROLL: &str = "/qdrant.Points/Scroll";
 const METHOD_RECOMMEND: &str = "/qdrant.Points/Recommend";
+const METHOD_CREATE_COLLECTION: &str = "/qdrant.Collections/Create";
+const METHOD_DELETE_COLLECTION: &str = "/qdrant.Collections/Delete";
 
 /// gRPC client for Qdrant.
 ///
@@ -190,6 +192,16 @@ impl GrpcClient {
     pub async fn recommend(&self, encoded_request: Bytes) -> QdrantResult<Bytes> {
         self.call(METHOD_RECOMMEND, encoded_request).await
     }
+
+    /// Create collection using pre-encoded protobuf.
+    pub async fn create_collection(&self, encoded_request: Bytes) -> QdrantResult<Bytes> {
+        self.call(METHOD_CREATE_COLLECTION, encoded_request).await
+    }
+
+    /// Delete collection using pre-encoded protobuf.
+    pub async fn delete_collection(&self, encoded_request: Bytes) -> QdrantResult<Bytes> {
+        self.call(METHOD_DELETE_COLLECTION, encoded_request).await
+    }
 }
 
 /// Frame a protobuf message for gRPC transport.
@@ -212,13 +224,24 @@ fn grpc_frame(message: Bytes) -> Bytes {
 }
 
 /// Remove gRPC framing from response.
+/// Returns empty Bytes if response has no body (common for write operations).
 fn grpc_unframe(mut data: Bytes) -> QdrantResult<Bytes> {
+    // Empty response is valid for write operations like upsert
+    if data.is_empty() {
+        return Ok(Bytes::new());
+    }
+    
     if data.len() < 5 {
         return Err(QdrantError::Decode("Response too short for gRPC frame".to_string()));
     }
     
     let _compress = data.get_u8();
     let len = data.get_u32() as usize;
+    
+    // Empty message is valid (e.g., PointsOperationResponse with no errors)
+    if len == 0 {
+        return Ok(Bytes::new());
+    }
     
     if data.len() < len {
         return Err(QdrantError::Decode(format!(

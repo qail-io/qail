@@ -14,11 +14,11 @@ pub use self::cmd::{CTEDef, ConflictAction, OnConflict};
 pub use self::conditions::Condition;
 pub use self::expr::{
     BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, IndexDef, TableConstraint,
-    WindowFrame,
+    WindowFrame, FunctionDef, TriggerDef, TriggerTiming, TriggerEvent,
 };
 pub use self::joins::Join;
 pub use self::operators::{
-    Action, AggregateFunc, GroupByMode, JoinKind, LockMode, LogicalOp, ModKind, Operator,
+    Action, AggregateFunc, Distance, GroupByMode, JoinKind, LockMode, LogicalOp, ModKind, Operator,
     OverridingKind, SampleMethod, SetOp, SortOrder,
 };
 pub use self::values::Value;

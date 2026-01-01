@@ -60,11 +60,11 @@ const UPSERT_POINTS: u8 = 0x1A;
 
 /// Field 1: id (PointId) -> 0x0A
 const POINT_ID: u8 = 0x0A;
-/// Field 3: vectors (Vectors) -> (3 << 3) | 2 = 0x1A
-const POINT_VECTORS: u8 = 0x1A;
-/// Field 4: payload (map) -> (4 << 3) | 2 = 0x22
+/// Field 4: vectors (Vectors) -> (4 << 3) | 2 = 0x22 (field 2 is deprecated)
+const POINT_VECTORS: u8 = 0x22;
+/// Field 3: payload (map) -> (3 << 3) | 2 = 0x1A
 #[allow(dead_code)]
-const POINT_PAYLOAD: u8 = 0x22;
+const POINT_PAYLOAD: u8 = 0x1A;
 
 // ============================================================================
 // PointId Field Tags
@@ -238,42 +238,124 @@ fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) {
         }
     }
     
-    // Field 3: vectors (Vectors -> Vector -> DenseVector)
-    // Vectors { vector: Vector { dense: DenseVector { data: [...] } } }
+    // Field 4: vectors (Vectors -> Vector)
+    // Using the simpler deprecated approach: Vector.data = repeated float (field 1)
+    // This encodes as packed floats
     let vector_bytes_len = point.vector.len() * 4;
     
-    // DenseVector submessage: field 1 = data
-    let dense_len = 1 + varint_len(vector_bytes_len as u64) + vector_bytes_len;
-    // Vector submessage: field 101 = dense (oneof)
-    let vector_len = varint_len((101 << 3 | 2) as u64) + varint_len(dense_len as u64) + dense_len;
-    // Vectors submessage: field 1 = vector
-    let vectors_len = 1 + varint_len(vector_len as u64) + vector_len;
+    // Vector message: field 1 = data (packed floats)
+    // Tag for field 1, wire type 2 (length-delimited) = 0x0A
+    let vector_inner_len = 1 + varint_len(vector_bytes_len as u64) + vector_bytes_len;
     
-    point_buf.put_u8(POINT_VECTORS);
+    // Vectors message: field 1 = vector (Vector message)  
+    // Tag for field 1, wire type 2 (length-delimited) = 0x0A
+    let vectors_len = 1 + varint_len(vector_inner_len as u64) + vector_inner_len;
+    
+    // Write Vectors field (field 4 of PointStruct)
+    point_buf.put_u8(POINT_VECTORS);  // 0x22 = field 4, wire type 2
     encode_varint(&mut point_buf, vectors_len);
     
     // Vectors.vector (field 1)
-    point_buf.put_u8(0x0A);
-    encode_varint(&mut point_buf, vector_len);
+    point_buf.put_u8(0x0A);  // field 1, wire type 2
+    encode_varint(&mut point_buf, vector_inner_len);
     
-    // Vector.dense (field 101) - oneof
-    encode_varint(&mut point_buf, (101 << 3) | 2);
-    encode_varint(&mut point_buf, dense_len);
-    
-    // DenseVector.data (field 1)
-    point_buf.put_u8(0x0A);
+    // Vector.data (field 1, packed floats) - deprecated but still works
+    point_buf.put_u8(0x0A);  // field 1, wire type 2
     encode_varint(&mut point_buf, vector_bytes_len);
     let float_bytes = unsafe {
         std::slice::from_raw_parts(point.vector.as_ptr() as *const u8, vector_bytes_len)
     };
     point_buf.extend_from_slice(float_bytes);
     
-    // TODO: Field 4: payload (map) - skipped for now
+    // TODO: Field 3: payload (map) - skipped for now
     
     // Write to main buffer with length prefix
     buf.put_u8(UPSERT_POINTS);
     encode_varint(buf, point_buf.len());
     buf.extend_from_slice(&point_buf);
+}
+
+// ============================================================================
+// CreateCollection Field Tags
+// ============================================================================
+
+/// Field 1: collection_name (string) -> 0x0A
+const CREATE_COLLECTION_NAME: u8 = 0x0A;
+/// Field 10: vectors_config (VectorsConfig) -> (10 << 3) | 2 = 0x52
+const CREATE_VECTORS_CONFIG: u8 = 0x52;
+/// Field 8: on_disk_payload (bool) -> (8 << 3) | 0 = 0x40
+const CREATE_ON_DISK: u8 = 0x40;
+
+// ============================================================================
+// DeleteCollection Field Tags
+// ============================================================================
+
+/// Field 1: collection_name (string) -> 0x0A
+const DELETE_COLLECTION_NAME: u8 = 0x0A;
+
+/// Encode CreateCollection request to protobuf wire format.
+pub fn encode_create_collection_proto(
+    buf: &mut BytesMut,
+    collection_name: &str,
+    vector_size: u64,
+    distance: qail_core::ast::Distance,
+    on_disk: bool,
+) {
+    buf.clear();
+
+    // Field 1: collection_name
+    buf.put_u8(CREATE_COLLECTION_NAME);
+    encode_varint(buf, collection_name.len());
+    buf.extend_from_slice(collection_name.as_bytes());
+
+    // Field 2: vectors_config (VectorsConfig -> VectorParams)
+    // Need to construct nested messages for VectorParams
+    let mut params_buf = BytesMut::with_capacity(32);
+    
+    // VectorParams.size (field 1, uint64)
+    params_buf.put_u8(0x08);
+    encode_varint_u64(&mut params_buf, vector_size);
+
+    // VectorParams.distance (field 2, enum)
+    // Per Qdrant proto: UnknownDistance=0, Cosine=1, Euclid=2, Dot=3
+    params_buf.put_u8(0x10);
+    let distance_val = match distance {
+        qail_core::ast::Distance::Cosine => 1,
+        qail_core::ast::Distance::Euclid => 2,
+        qail_core::ast::Distance::Dot => 3,
+    };
+    encode_varint(&mut params_buf, distance_val);
+
+    // VectorParams.on_disk (field 5, bool) - optional but useful
+    if on_disk {
+        params_buf.put_u8(0x28); // field 5
+        params_buf.put_u8(0x01);
+    }
+
+    // VectorsConfig.params (field 1) wraps VectorParams
+    let mut config_buf = BytesMut::with_capacity(params_buf.len() + 4);
+    config_buf.put_u8(0x0A); // field 1
+    encode_varint(&mut config_buf, params_buf.len());
+    config_buf.extend_from_slice(&params_buf);
+
+    // Write to main buffer
+    buf.put_u8(CREATE_VECTORS_CONFIG);
+    encode_varint(buf, config_buf.len());
+    buf.extend_from_slice(&config_buf);
+
+    // Field 5: on_disk_payload (bool) - optional
+    if on_disk {
+        buf.put_u8(CREATE_ON_DISK);
+        buf.put_u8(0x01);
+    }
+}
+
+/// Encode DeleteCollection request.
+pub fn encode_delete_collection_proto(buf: &mut BytesMut, collection_name: &str) {
+    buf.clear();
+    buf.put_u8(DELETE_COLLECTION_NAME);
+    encode_varint(buf, collection_name.len());
+    buf.extend_from_slice(collection_name.as_bytes());
 }
 
 /// Calculate the byte length of a varint.
@@ -361,3 +443,78 @@ mod tests {
         assert_eq!(varint_len(16384), 3);
     }
 }
+
+// ============================================================================
+// DeletePoints Encoder
+// ============================================================================
+
+/// Encode a DeletePoints request.
+/// 
+/// DeletePoints message:
+/// - Field 1: collection_name (string)
+/// - Field 2: wait (bool)
+/// - Field 4: points (PointsSelector message)
+///
+/// PointsSelector (oneof):
+/// - Field 1: points (PointsIdsList message)
+///
+/// PointsIdsList:
+/// - Field 1: ids (repeated PointId)
+pub fn encode_delete_points_proto(
+    buf: &mut BytesMut,
+    collection_name: &str,
+    point_ids: &[u64],
+) {
+    // Pre-calculate sizes for efficient allocation
+    
+    // Calculate PointsIdsList size (field 1 repeated PointId)
+    let mut ids_list_size = 0usize;
+    for &id in point_ids {
+        // Each PointId is a message with field 2 (num) as varint
+        // Tag for field 2 (varint): 0x10, then varint value
+        let point_id_inner_size = 1 + varint_len(id);
+        // PointId message: tag 0x0A (field 1, len-delimited) + len + content
+        ids_list_size += 1 + varint_len(point_id_inner_size as u64) + point_id_inner_size;
+    }
+    
+    // PointsSelector size: field 1 (points) = tag + len + ids_list_size
+    let selector_inner_size = 1 + varint_len(ids_list_size as u64) + ids_list_size;
+    
+    // DeletePoints fields:
+    // Field 1: collection_name
+    let collection_size = 1 + varint_len(collection_name.len() as u64) + collection_name.len();
+    // Field 2: wait = true (tag 0x10, value 1)
+    let wait_size = 2;
+    // Field 4: points (PointsSelector) tag 0x22 + len + content
+    let points_field_size = 1 + varint_len(selector_inner_size as u64) + selector_inner_size;
+    
+    let total_size = collection_size + wait_size + points_field_size;
+    buf.reserve(total_size);
+    
+    // Field 1: collection_name
+    buf.put_u8(0x0A);
+    encode_varint(buf, collection_name.len());
+    buf.put_slice(collection_name.as_bytes());
+    
+    // Field 2: wait = true
+    buf.put_u8(0x10);
+    buf.put_u8(1);
+    
+    // Field 4: points (PointsSelector message)
+    buf.put_u8(0x22);
+    encode_varint(buf, selector_inner_size);
+    
+    // PointsSelector.points (field 1): PointsIdsList
+    buf.put_u8(0x0A);
+    encode_varint(buf, ids_list_size);
+    
+    // PointsIdsList.ids (field 1): repeated PointId
+    for &id in point_ids {
+        let point_id_inner_size = 1 + varint_len(id);
+        buf.put_u8(0x0A);  // PointId message tag
+        encode_varint(buf, point_id_inner_size);
+        buf.put_u8(0x10);  // PointId.num field tag (field 2, varint)
+        encode_varint(buf, id as usize);
+    }
+}
+

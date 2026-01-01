@@ -576,6 +576,7 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
                 table: idx.table.clone(),
                 columns: idx.columns.clone(),
                 unique: idx.unique,
+                index_type: None,
             }),
             ..Default::default()
         });

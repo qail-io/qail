@@ -1,5 +1,5 @@
 use crate::ast::{
-    Action, Cage, CageKind, Condition, Expr, GroupByMode, IndexDef, Join, LockMode,
+    Action, Cage, CageKind, Condition, Distance, Expr, GroupByMode, IndexDef, Join, LockMode,
     LogicalOp, Operator, OverridingKind, SampleMethod, SetOp, TableConstraint, Value,
 };
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,22 @@ pub struct Qail {
     /// Whether to return vectors in search results
     #[serde(default)]
     pub with_vector: bool,
+    /// Vector dimensions (e.g., 1536)
+    #[serde(default)]
+    pub vector_size: Option<u64>,
+    /// Distance metric (Cosine, Euclid, Dot)
+    #[serde(default)]
+    pub distance: Option<Distance>,
+    /// Storage optimized for disk (mmap)
+    #[serde(default)]
+    pub on_disk: Option<bool>,
+    // PostgreSQL procedural objects
+    /// Function definition (CREATE FUNCTION)
+    #[serde(default)]
+    pub function_def: Option<crate::ast::FunctionDef>,
+    /// Trigger definition (CREATE TRIGGER)
+    #[serde(default)]
+    pub trigger_def: Option<crate::ast::TriggerDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,6 +155,12 @@ impl Default for Qail {
             score_threshold: None,
             vector_name: None,
             with_vector: false,
+            vector_size: None,
+            distance: None,
+            on_disk: None,
+            // Procedural objects
+            function_def: None,
+            trigger_def: None,
         }
     }
 }

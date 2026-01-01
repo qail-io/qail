@@ -55,6 +55,11 @@ pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Q
             score_threshold: None,
             vector_name: None,
             with_vector: false,
+            vector_size: None,
+            distance: None,
+            on_disk: None,
+            function_def: None,
+            trigger_def: None,
         },
     ))
 }
@@ -185,6 +190,7 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
                 table: table_name.to_string(),
                 columns: columns.iter().map(|s| s.to_string()).collect(),
                 unique: unique.is_some(),
+                index_type: None,
             }),
             table_constraints: vec![],
             set_ops: vec![],
@@ -209,6 +215,11 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
             score_threshold: None,
             vector_name: None,
             with_vector: false,
+            vector_size: None,
+            distance: None,
+            on_disk: None,
+            function_def: None,
+            trigger_def: None,
         },
     ))
 }
