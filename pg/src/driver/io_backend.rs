@@ -1,9 +1,8 @@
 //! I/O Backend Auto-detection
 //!
 //! Automatically selects the best I/O backend:
-//! - Linux 5.1+: io_uring (fastest)
-//! - Linux < 5.1: tokio (fallback)
-//! - macOS/Windows: tokio
+//! - Linux with io_uring feature: io_uring (fastest)
+//! - Otherwise: tokio (universal fallback)
 
 use std::sync::OnceLock;
 
@@ -11,8 +10,8 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoBackend {
     Tokio,
-    /// Linux io_uring (kernel 5.1+)
-    #[cfg(target_os = "linux")]
+    /// Linux io_uring (kernel 5.1+, requires `io_uring` feature)
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
     IoUring,
 }
 
@@ -20,7 +19,7 @@ impl std::fmt::Display for IoBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IoBackend::Tokio => write!(f, "tokio"),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
             IoBackend::IoUring => write!(f, "io_uring"),
         }
     }
@@ -31,7 +30,7 @@ static DETECTED_BACKEND: OnceLock<IoBackend> = OnceLock::new();
 /// Detect the best available I/O backend for this system
 pub fn detect() -> IoBackend {
     *DETECTED_BACKEND.get_or_init(|| {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
             // Try to create an io_uring instance to check kernel support
             match io_uring::IoUring::new(32) {
@@ -46,7 +45,7 @@ pub fn detect() -> IoBackend {
             }
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
         {
             IoBackend::Tokio
         }
@@ -56,11 +55,11 @@ pub fn detect() -> IoBackend {
 /// Check if io_uring is available on this system
 #[inline]
 pub fn is_uring_available() -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
     {
         matches!(detect(), IoBackend::IoUring)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
     {
         false
     }
@@ -71,7 +70,7 @@ pub fn is_uring_available() -> bool {
 pub fn backend_name() -> &'static str {
     match detect() {
         IoBackend::Tokio => "tokio",
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
         IoBackend::IoUring => "io_uring",
     }
 }

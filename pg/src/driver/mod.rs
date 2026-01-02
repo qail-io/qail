@@ -160,6 +160,89 @@ impl PgDriver {
         Ok(Self::new(connection))
     }
 
+    /// Connect using DATABASE_URL environment variable.
+    /// 
+    /// Parses the URL format: `postgresql://user:password@host:port/database`
+    /// or `postgres://user:password@host:port/database`
+    /// 
+    /// # Example
+    /// ```ignore
+    /// // Set DATABASE_URL=postgresql://user:pass@localhost:5432/mydb
+    /// let driver = PgDriver::connect_env().await?;
+    /// ```
+    pub async fn connect_env() -> PgResult<Self> {
+        let url = std::env::var("DATABASE_URL")
+            .map_err(|_| PgError::Connection("DATABASE_URL environment variable not set".to_string()))?;
+        Self::connect_url(&url).await
+    }
+
+    /// Connect using a PostgreSQL connection URL.
+    /// 
+    /// Parses the URL format: `postgresql://user:password@host:port/database`
+    /// or `postgres://user:password@host:port/database`
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let driver = PgDriver::connect_url("postgresql://user:pass@localhost:5432/mydb").await?;
+    /// ```
+    pub async fn connect_url(url: &str) -> PgResult<Self> {
+        let (host, port, user, database, password) = Self::parse_database_url(url)?;
+        
+        if let Some(pwd) = password {
+            Self::connect_with_password(&host, port, &user, &database, &pwd).await
+        } else {
+            Self::connect(&host, port, &user, &database).await
+        }
+    }
+
+    /// Parse a PostgreSQL connection URL into components.
+    /// 
+    /// Format: `postgresql://user:password@host:port/database`
+    /// or `postgres://user:password@host:port/database`
+    fn parse_database_url(url: &str) -> PgResult<(String, u16, String, String, Option<String>)> {
+        // Remove scheme (postgresql:// or postgres://)
+        let after_scheme = url.split("://").nth(1)
+            .ok_or_else(|| PgError::Connection("Invalid DATABASE_URL: missing scheme".to_string()))?;
+        
+        // Split into auth@host parts
+        let (auth_part, host_db_part) = if let Some(at_pos) = after_scheme.rfind('@') {
+            (Some(&after_scheme[..at_pos]), &after_scheme[at_pos + 1..])
+        } else {
+            (None, after_scheme)
+        };
+        
+        // Parse auth (user:password)
+        let (user, password) = if let Some(auth) = auth_part {
+            let parts: Vec<&str> = auth.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                (parts[0].to_string(), Some(parts[1].to_string()))
+            } else {
+                (parts[0].to_string(), None)
+            }
+        } else {
+            return Err(PgError::Connection("Invalid DATABASE_URL: missing user".to_string()));
+        };
+        
+        // Parse host:port/database
+        let (host_port, database) = if let Some(slash_pos) = host_db_part.find('/') {
+            (&host_db_part[..slash_pos], host_db_part[slash_pos + 1..].to_string())
+        } else {
+            return Err(PgError::Connection("Invalid DATABASE_URL: missing database name".to_string()));
+        };
+        
+        // Parse host:port
+        let (host, port) = if let Some(colon_pos) = host_port.rfind(':') {
+            let port_str = &host_port[colon_pos + 1..];
+            let port = port_str.parse::<u16>()
+                .map_err(|_| PgError::Connection(format!("Invalid port: {}", port_str)))?;
+            (host_port[..colon_pos].to_string(), port)
+        } else {
+            (host_port.to_string(), 5432) // Default PostgreSQL port
+        };
+        
+        Ok((host, port, user, database, password))
+    }
+
     /// Connect to PostgreSQL with a connection timeout.
     /// If the connection cannot be established within the timeout, returns an error.
     /// # Example

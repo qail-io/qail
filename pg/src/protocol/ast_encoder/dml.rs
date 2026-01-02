@@ -238,14 +238,28 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     buf.extend_from_slice(b"INSERT INTO ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
+    // Find payload cage
+    let payload_cage = cmd.cages.iter().find(|c| c.kind == CageKind::Payload);
+    
+    // Column list - prefer cmd.columns, but extract from conditions if empty (set_value pattern)
     if !cmd.columns.is_empty() {
         buf.extend_from_slice(b" (");
         encode_columns(&cmd.columns, buf);
         buf.extend_from_slice(b")");
+    } else if let Some(cage) = payload_cage {
+        // Extract column names from condition.left (set_value pattern)
+        buf.extend_from_slice(b" (");
+        for (i, cond) in cage.conditions.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b", ");
+            }
+            encode_expr(&cond.left, buf);
+        }
+        buf.extend_from_slice(b")");
     }
 
     // VALUES
-    if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Payload) {
+    if let Some(cage) = payload_cage {
         buf.extend_from_slice(b" VALUES (");
         for (i, cond) in cage.conditions.iter().enumerate() {
             if i > 0 {
@@ -255,6 +269,13 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         }
         buf.extend_from_slice(b")");
     }
+    
+    // RETURNING clause
+    if let Some(ref ret_cols) = cmd.returning {
+        buf.extend_from_slice(b" RETURNING ");
+        encode_columns(ret_cols, buf);
+    }
+    
     Ok(())
 }
 
