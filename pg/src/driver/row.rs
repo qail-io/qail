@@ -116,6 +116,60 @@ impl PgRow {
         crate::protocol::types::decode_int_array(s).ok()
     }
 
+    // ==================== ERGONOMIC SHORTCUTS ====================
+    // These methods reduce boilerplate by providing sensible defaults
+
+    /// Get string, defaulting to empty string if NULL.
+    /// Ergonomic shortcut: `row.text(0)` instead of `row.get_string(0).unwrap_or_default()`
+    pub fn text(&self, idx: usize) -> String {
+        self.get_string(idx).unwrap_or_default()
+    }
+
+    /// Get string with custom default if NULL.
+    /// Example: `row.text_or(1, "Unknown")`
+    pub fn text_or(&self, idx: usize, default: &str) -> String {
+        self.get_string(idx).unwrap_or_else(|| default.to_string())
+    }
+
+    /// Get i64, defaulting to 0 if NULL.
+    /// Ergonomic shortcut: `row.int(4)` instead of `row.get_i64(4).unwrap_or(0)`
+    pub fn int(&self, idx: usize) -> i64 {
+        self.get_i64(idx).unwrap_or(0)
+    }
+
+    /// Get f64, defaulting to 0.0 if NULL.
+    pub fn float(&self, idx: usize) -> f64 {
+        self.get_f64(idx).unwrap_or(0.0)
+    }
+
+    /// Get bool, defaulting to false if NULL.
+    pub fn boolean(&self, idx: usize) -> bool {
+        self.get_bool(idx).unwrap_or(false)
+    }
+
+    /// Parse timestamp as DateTime<Utc>.
+    /// Handles PostgreSQL timestamp formats automatically.
+    #[cfg(feature = "chrono")]
+    pub fn datetime(&self, idx: usize) -> Option<chrono::DateTime<chrono::Utc>> {
+        let s = self.get_timestamp(idx)?;
+        // Try parsing various PostgreSQL timestamp formats
+        chrono::DateTime::parse_from_rfc3339(&s.replace(' ', "T"))
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .or_else(|| {
+                // Try PostgreSQL format: "2024-01-01 12:00:00.123456+00"
+                chrono::DateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S%.f%#z")
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            })
+    }
+
+    /// Parse UUID column as uuid::Uuid type.
+    #[cfg(feature = "uuid")]
+    pub fn uuid_typed(&self, idx: usize) -> Option<uuid::Uuid> {
+        self.get_uuid(idx).and_then(|s| uuid::Uuid::parse_str(&s).ok())
+    }
+
     // ==================== GET BY COLUMN NAME ====================
 
     /// Get column index by name.
