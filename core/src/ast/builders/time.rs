@@ -13,9 +13,11 @@ pub fn now() -> Expr {
 
 /// INTERVAL 'duration' expression
 pub fn interval(duration: &str) -> Expr {
+    use crate::ast::Value;
     Expr::SpecialFunction {
         name: "INTERVAL".to_string(),
-        args: vec![(None, Box::new(Expr::Named(format!("'{}'", duration))))],
+        // Use Expr::Literal so the encoder wraps in quotes properly
+        args: vec![(None, Box::new(Expr::Literal(Value::String(duration.to_string()))))],
         alias: None,
     }
 }

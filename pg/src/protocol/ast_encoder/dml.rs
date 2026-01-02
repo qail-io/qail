@@ -74,87 +74,111 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         encode_conditions(&cage.conditions, buf, params)?;
     }
 
-    // GROUP BY with ROLLUP/CUBE/GROUPING SETS
-    let group_cols: Vec<&str> = cmd.columns.iter()
-        .filter_map(|e| match e {
-            Expr::Named(name) => Some(name.as_str()),
-            Expr::Aliased { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
+    // GROUP BY - prefer explicit Partition cage, fall back to auto-extraction from columns
+    let partition_cage = cmd.cages.iter().find(|c| c.kind == CageKind::Partition);
     
-    // Only output GROUP BY if we have aggregates and non-aggregate columns
-    let has_aggregates = cmd.columns.iter().any(|e| matches!(e, Expr::Aggregate { .. }));
-    if has_aggregates && !group_cols.is_empty() {
-        buf.extend_from_slice(b" GROUP BY ");
-        match &cmd.group_by_mode {
-            GroupByMode::Simple => {
-                for (i, col) in group_cols.iter().enumerate() {
-                    if i > 0 {
-                        buf.extend_from_slice(b", ");
-                    }
-                    buf.extend_from_slice(col.as_bytes());
+    if let Some(cage) = partition_cage {
+        // Explicit GROUP BY from .group_by() or .group_by_expr()
+        if !cage.conditions.is_empty() {
+            buf.extend_from_slice(b" GROUP BY ");
+            for (i, cond) in cage.conditions.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
                 }
+                encode_expr(&cond.left, buf);
             }
-            GroupByMode::Rollup => {
-                buf.extend_from_slice(b"ROLLUP(");
-                for (i, col) in group_cols.iter().enumerate() {
-                    if i > 0 {
-                        buf.extend_from_slice(b", ");
+        }
+    } else {
+        // Auto-generate GROUP BY from columns when aggregates are present
+        let group_cols: Vec<&str> = cmd.columns.iter()
+            .filter_map(|e| match e {
+                Expr::Named(name) => Some(name.as_str()),
+                Expr::Aliased { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        
+        let has_aggregates = cmd.columns.iter().any(|e| matches!(e, Expr::Aggregate { .. }));
+        if has_aggregates && !group_cols.is_empty() {
+            buf.extend_from_slice(b" GROUP BY ");
+            match &cmd.group_by_mode {
+                GroupByMode::Simple => {
+                    for (i, col) in group_cols.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        buf.extend_from_slice(col.as_bytes());
                     }
-                    buf.extend_from_slice(col.as_bytes());
                 }
-                buf.extend_from_slice(b")");
-            }
-            GroupByMode::Cube => {
-                buf.extend_from_slice(b"CUBE(");
-                for (i, col) in group_cols.iter().enumerate() {
-                    if i > 0 {
-                        buf.extend_from_slice(b", ");
-                    }
-                    buf.extend_from_slice(col.as_bytes());
-                }
-                buf.extend_from_slice(b")");
-            }
-            GroupByMode::GroupingSets(sets) => {
-                buf.extend_from_slice(b"GROUPING SETS (");
-                for (i, set) in sets.iter().enumerate() {
-                    if i > 0 {
-                        buf.extend_from_slice(b", ");
-                    }
-                    buf.extend_from_slice(b"(");
-                    for (j, col) in set.iter().enumerate() {
-                        if j > 0 {
+                GroupByMode::Rollup => {
+                    buf.extend_from_slice(b"ROLLUP(");
+                    for (i, col) in group_cols.iter().enumerate() {
+                        if i > 0 {
                             buf.extend_from_slice(b", ");
                         }
                         buf.extend_from_slice(col.as_bytes());
                     }
                     buf.extend_from_slice(b")");
                 }
-                buf.extend_from_slice(b")");
+                GroupByMode::Cube => {
+                    buf.extend_from_slice(b"CUBE(");
+                    for (i, col) in group_cols.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        buf.extend_from_slice(col.as_bytes());
+                    }
+                    buf.extend_from_slice(b")");
+                }
+                GroupByMode::GroupingSets(sets) => {
+                    buf.extend_from_slice(b"GROUPING SETS (");
+                    for (i, set) in sets.iter().enumerate() {
+                        if i > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        buf.extend_from_slice(b"(");
+                        for (j, col) in set.iter().enumerate() {
+                            if j > 0 {
+                                buf.extend_from_slice(b", ");
+                            }
+                            buf.extend_from_slice(col.as_bytes());
+                        }
+                        buf.extend_from_slice(b")");
+                    }
+                    buf.extend_from_slice(b")");
+                }
             }
         }
     }
 
-    // ORDER BY
-    for cage in &cmd.cages {
-        if let CageKind::Sort(order) = &cage.kind {
-            if !cage.conditions.is_empty() {
-                buf.extend_from_slice(b" ORDER BY ");
-                for (i, cond) in cage.conditions.iter().enumerate() {
-                    if i > 0 {
-                        buf.extend_from_slice(b", ");
+    // ORDER BY - collect ALL sort cages and output them together
+    let sort_cages: Vec<_> = cmd.cages.iter()
+        .filter_map(|cage| {
+            if let CageKind::Sort(order) = &cage.kind {
+                Some((cage, order.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    
+    if !sort_cages.is_empty() {
+        buf.extend_from_slice(b" ORDER BY ");
+        let mut first = true;
+        for (cage, order) in &sort_cages {
+            for cond in &cage.conditions {
+                if !first {
+                    buf.extend_from_slice(b", ");
+                }
+                first = false;
+                encode_expr(&cond.left, buf);
+                match order {
+                    SortOrder::Desc | SortOrder::DescNullsFirst | SortOrder::DescNullsLast => {
+                        buf.extend_from_slice(b" DESC");
                     }
-                    encode_expr(&cond.left, buf);
-                    match order {
-                        SortOrder::Desc | SortOrder::DescNullsFirst | SortOrder::DescNullsLast => {
-                            buf.extend_from_slice(b" DESC");
-                        }
-                        SortOrder::Asc | SortOrder::AscNullsFirst | SortOrder::AscNullsLast => {}
-                    }
+                    SortOrder::Asc | SortOrder::AscNullsFirst | SortOrder::AscNullsLast => {}
                 }
             }
-            break;
         }
     }
 

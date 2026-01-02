@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.16] - 2026-01-02
+
+### Critical Bug Fixes
+
+- **Fixed ORDER BY Multi-Cage Encoding:** Critical bug where encoder only processed the FIRST `.order_by()` call and ignored subsequent ones due to `break;` statement. This caused `DISTINCT ON` queries with multiple ORDER BY columns to return random rows instead of the most recent.
+- **Fixed `encode_expr` Fallback:** Unhandled Expr variants (JsonAccess, FunctionCall, etc.) now delegate to full encoder instead of outputting `*`.
+- **Fixed Partition Cage Encoding:** `.group_by_expr()` now properly encodes explicit GROUP BY expressions.
+
+### New Features
+
+- **Ergonomic Row Extraction:** Added unwrap-free helper methods to `PgRow`:
+  - `text(idx)` - Returns String, defaults to empty
+  - `text_or(idx, default)` - Returns String with custom default
+  - `int(idx)` - Returns i64, defaults to 0
+  - `float(idx)` - Returns f64, defaults to 0.0
+  - `boolean(idx)` - Returns bool, defaults to false
+  - `datetime(idx)` - Returns `Option<DateTime<Utc>>` (feature: `chrono`)
+  - `uuid_typed(idx)` - Returns `Option<Uuid>` (feature: `uuid`)
+
 ## [0.14.15] - 2026-01-02
 
 ### Critical Bug Fixes

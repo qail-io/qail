@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.14.15"
+version = "0.14.16"
 edition = "2024"
 description = "Fastest async PostgreSQL driver - AST to wire protocol, optional io_uring on Linux"
 license = "MIT"
@@ -11,9 +11,13 @@ readme = "README.md"
 default = []
 # Enable io_uring for maximum performance (Linux native builds only, NOT cross-compilation)
 io_uring = ["tokio-uring", "io-uring"]
+# Enable chrono DateTime parsing in PgRow::datetime()
+chrono = ["dep:chrono"]
+# Enable uuid::Uuid parsing in PgRow::uuid_typed()
+uuid = ["dep:uuid"]
 
 [dependencies]
-qail-core = { version = "0.14.15", path = "../core" }
+qail-core = { version = "0.14.16", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 async-trait = "0.1"
@@ -37,6 +41,10 @@ lru = "0.16"
 tokio-rustls = "0.26"
 rustls-native-certs = "0.8"
 rustls-pemfile = "2.2.0"
+
+# Optional: Ergonomic row extraction
+chrono = { version = "0.4", optional = true }
+uuid = { version = "1.9", optional = true }
 
 # io_uring support (Linux only, opt-in via feature flag)
 # Use `--features io_uring` for native Linux builds
