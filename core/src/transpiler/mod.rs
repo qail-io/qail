@@ -355,6 +355,7 @@ impl ToSqlParameterized for Qail {
             {
                 if next == ':' {
                     result.push(':');
+                    // SAFETY: peek() above confirmed a char exists, so next() is infallible
                     result.push(chars.next().unwrap());
                     continue;
                 }
@@ -362,6 +363,7 @@ impl ToSqlParameterized for Qail {
                     let mut param_name = String::new();
                     while let Some(&ch) = chars.peek() {
                         if ch.is_ascii_alphanumeric() || ch == '_' {
+                            // SAFETY: peek() above confirmed a char exists, so next() is infallible
                             param_name.push(chars.next().unwrap());
                         } else {
                             break;

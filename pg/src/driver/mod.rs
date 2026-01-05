@@ -90,10 +90,16 @@ pub enum PgError {
     Auth(String),
     Query(String),
     NoRows,
-    /// I/O error
+    /// I/O error (preserves inner error for chaining)
     Io(std::io::Error),
     /// Encoding error (parameter limit, etc.)
     Encode(String),
+    /// Operation timed out (connection, acquire, query)
+    Timeout(String),
+    /// Pool exhausted — all connections are in use
+    PoolExhausted { max: usize },
+    /// Pool is closed and no longer accepting requests
+    PoolClosed,
 }
 
 impl std::fmt::Display for PgError {
@@ -106,11 +112,21 @@ impl std::fmt::Display for PgError {
             PgError::NoRows => write!(f, "No rows returned"),
             PgError::Io(e) => write!(f, "I/O error: {}", e),
             PgError::Encode(e) => write!(f, "Encode error: {}", e),
+            PgError::Timeout(ctx) => write!(f, "Timeout: {}", ctx),
+            PgError::PoolExhausted { max } => write!(f, "Pool exhausted ({} max connections)", max),
+            PgError::PoolClosed => write!(f, "Connection pool is closed"),
         }
     }
 }
 
-impl std::error::Error for PgError {}
+impl std::error::Error for PgError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PgError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for PgError {
     fn from(e: std::io::Error) -> Self {
@@ -322,7 +338,7 @@ impl PgDriver {
             Self::connect_with_password(host, port, user, database, password),
         )
         .await
-        .map_err(|_| PgError::Connection(format!("Connection timeout after {:?}", timeout)))?
+        .map_err(|_| PgError::Timeout(format!("connection after {:?}", timeout)))?
     }
     /// Clear the prepared statement cache.
     /// Frees memory by removing all cached statements.
@@ -1249,7 +1265,7 @@ impl PgDriverBuilder {
                     PgDriver::connect(host, port, user, database),
                 )
                 .await
-                .map_err(|_| PgError::Connection(format!("Connection timeout after {:?}", timeout)))?
+                .map_err(|_| PgError::Timeout(format!("connection after {:?}", timeout)))?
             }
             (None, None) => {
                 PgDriver::connect(host, port, user, database).await
