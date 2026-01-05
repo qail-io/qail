@@ -4,6 +4,7 @@ use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
+/// Generate SELECT SQL from a QAIL command, including CTEs, joins, filtering, grouping, and ordering.
 pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
 

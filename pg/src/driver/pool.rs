@@ -9,24 +9,55 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 
+/// Configuration for a PostgreSQL connection pool.
+///
+/// Use the builder pattern to customise settings:
+///
+/// ```ignore
+/// use std::time::Duration;
+/// use qail_pg::driver::pool::PoolConfig;
+/// let config = PoolConfig::new("localhost", 5432, "app", "mydb")
+///     .password("secret")
+///     .max_connections(20)
+///     .acquire_timeout(Duration::from_secs(5));
+/// ```
 #[derive(Clone)]
 pub struct PoolConfig {
+    /// PostgreSQL server hostname or IP address.
     pub host: String,
+    /// PostgreSQL server port (default: 5432).
     pub port: u16,
+    /// Database role / user name.
     pub user: String,
+    /// Target database name.
     pub database: String,
+    /// Optional password for authentication.
     pub password: Option<String>,
+    /// Hard upper limit on simultaneous connections (default: 10).
     pub max_connections: usize,
+    /// Minimum idle connections kept warm in the pool (default: 1).
     pub min_connections: usize,
+    /// Close idle connections after this duration (default: 10 min).
     pub idle_timeout: Duration,
+    /// Maximum time to wait when acquiring a connection (default: 30s).
     pub acquire_timeout: Duration,
+    /// TCP connect timeout for new connections (default: 10s).
     pub connect_timeout: Duration,
+    /// Optional maximum lifetime of any connection in the pool.
     pub max_lifetime: Option<Duration>,
+    /// When `true`, run a health check (`SELECT 1`) before handing out a connection.
     pub test_on_acquire: bool,
 }
 
 impl PoolConfig {
     /// Create a new pool configuration with sensible defaults.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` — PostgreSQL server hostname or IP.
+    /// * `port` — TCP port (typically 5432).
+    /// * `user` — PostgreSQL role name.
+    /// * `database` — Target database name.
     pub fn new(host: &str, port: u16, user: &str, database: &str) -> Self {
         Self {
             host: host.to_string(),
@@ -50,6 +81,7 @@ impl PoolConfig {
         self
     }
 
+    /// Set maximum simultaneous connections.
     pub fn max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
         self
@@ -163,11 +195,15 @@ fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, Option<Stri
 /// Pool statistics for monitoring.
 #[derive(Debug, Clone, Default)]
 pub struct PoolStats {
+    /// Connections currently checked out by callers.
     pub active: usize,
+    /// Connections idle in the pool, ready for reuse.
     pub idle: usize,
+    /// Callers waiting for a connection.
     pub pending: usize,
     /// Maximum connections configured
     pub max_size: usize,
+    /// Cumulative connections created since pool startup.
     pub total_created: usize,
 }
 
@@ -190,22 +226,42 @@ pub struct PooledConnection {
 }
 
 impl PooledConnection {
+    /// Get a reference to the underlying connection, returning an error
+    /// if the connection has already been released.
+    fn conn_ref(&self) -> PgResult<&PgConnection> {
+        self.conn.as_ref().ok_or_else(|| PgError::Connection(
+            "Connection already released back to pool".into()
+        ))
+    }
+
+    /// Get a mutable reference to the underlying connection, returning an error
+    /// if the connection has already been released.
+    fn conn_mut(&mut self) -> PgResult<&mut PgConnection> {
+        self.conn.as_mut().ok_or_else(|| PgError::Connection(
+            "Connection already released back to pool".into()
+        ))
+    }
+
     /// Get a mutable reference to the underlying connection.
+    /// Panics if the connection has been released (use `conn_mut()` for fallible access).
     pub fn get_mut(&mut self) -> &mut PgConnection {
+        // SAFETY: Connection is always Some while PooledConnection is in use.
+        // Only becomes None after release() or Drop, after which no methods should be called.
         self.conn
             .as_mut()
             .expect("Connection should always be present")
     }
 
     /// Get a token to cancel the currently running query.
-    pub fn cancel_token(&self) -> crate::driver::CancelToken {
-        let (process_id, secret_key) = self.conn.as_ref().expect("Connection missing").get_cancel_key();
-        crate::driver::CancelToken {
+    pub fn cancel_token(&self) -> PgResult<crate::driver::CancelToken> {
+        let conn = self.conn_ref()?;
+        let (process_id, secret_key) = conn.get_cancel_key();
+        Ok(crate::driver::CancelToken {
             host: self.pool.config.host.clone(),
             port: self.pool.config.port,
             process_id,
             secret_key,
-        }
+        })
     }
 
     /// Deterministic connection cleanup and pool return.
@@ -249,7 +305,7 @@ impl PooledConnection {
         use crate::protocol::AstEncoder;
         use super::ColumnInfo;
 
-        let conn = self.conn.as_mut().expect("Connection should always be present");
+        let conn = self.conn_mut()?;
 
         let wire_bytes = AstEncoder::encode_cmd_reuse(
             cmd,
@@ -303,7 +359,7 @@ impl PooledConnection {
     pub async fn fetch_all_fast(&mut self, cmd: &qail_core::ast::Qail) -> PgResult<Vec<super::PgRow>> {
         use crate::protocol::AstEncoder;
 
-        let conn = self.conn.as_mut().expect("Connection should always be present");
+        let conn = self.conn_mut()?;
 
         AstEncoder::encode_cmd_reuse_into(
             cmd,
@@ -358,7 +414,9 @@ impl PooledConnection {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let conn = self.conn.as_mut().expect("Connection should always be present");
+        let conn = self.conn.as_mut().ok_or_else(|| PgError::Connection(
+            "Connection already released back to pool".into()
+        ))?;
 
         conn.sql_buf.clear();
         conn.params_buf.clear();
@@ -498,7 +556,9 @@ impl PooledConnection {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let conn = self.conn.as_mut().expect("Connection should always be present");
+        let conn = self.conn.as_mut().ok_or_else(|| PgError::Connection(
+            "Connection already released back to pool".into()
+        ))?;
 
         conn.sql_buf.clear();
         conn.params_buf.clear();
@@ -659,7 +719,7 @@ impl PooledConnection {
         &mut self,
         cmds: &[qail_core::ast::Qail],
     ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
-        let conn = self.conn.as_mut().expect("Connection should always be present");
+        let conn = self.conn_mut()?;
         conn.pipeline_ast(cmds).await
     }
 
@@ -723,17 +783,21 @@ impl std::ops::Deref for PooledConnection {
     type Target = PgConnection;
 
     fn deref(&self) -> &Self::Target {
+        // SAFETY: Connection is always Some while PooledConnection is alive and in use.
+        // Only becomes None after release() consumes self, or during Drop.
         self.conn
             .as_ref()
-            .expect("Connection should always be present")
+            .expect("PooledConnection::deref called after release — this is a bug")
     }
 }
 
 impl std::ops::DerefMut for PooledConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: Connection is always Some while PooledConnection is alive and in use.
+        // Only becomes None after release() consumes self, or during Drop.
         self.conn
             .as_mut()
-            .expect("Connection should always be present")
+            .expect("PooledConnection::deref_mut called after release — this is a bug")
     }
 }
 
@@ -875,7 +939,7 @@ impl PgPool {
     /// comment explaining why raw acquisition is justified.
     pub async fn acquire_raw(&self) -> PgResult<PooledConnection> {
         if self.inner.closed.load(Ordering::Relaxed) {
-            return Err(PgError::Connection("Pool is closed".to_string()));
+            return Err(PgError::PoolClosed);
         }
 
         // Wait for available slot with timeout
@@ -883,12 +947,13 @@ impl PgPool {
         let permit = tokio::time::timeout(acquire_timeout, self.inner.semaphore.acquire())
             .await
             .map_err(|_| {
-                PgError::Connection(format!(
-                    "Timed out waiting for connection ({}s)",
-                    acquire_timeout.as_secs()
+                PgError::Timeout(format!(
+                    "pool acquire after {}s ({} max connections)",
+                    acquire_timeout.as_secs(),
+                    self.inner.config.max_connections
                 ))
             })?
-            .map_err(|_| PgError::Connection("Pool closed".to_string()))?;
+            .map_err(|_| PgError::PoolClosed)?;
         permit.forget();
 
         // Try to get existing healthy connection
@@ -1129,4 +1194,112 @@ mod tests {
         assert_eq!(config.max_connections, 20);
         assert_eq!(config.min_connections, 5);
     }
+
+    #[test]
+    fn test_pool_config_defaults() {
+        let config = PoolConfig::new("localhost", 5432, "user", "testdb");
+        assert_eq!(config.max_connections, 10);
+        assert_eq!(config.min_connections, 1);
+        assert_eq!(config.idle_timeout, Duration::from_secs(600));
+        assert_eq!(config.acquire_timeout, Duration::from_secs(30));
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert!(config.password.is_none());
+    }
+
+    #[test]
+    fn test_pool_config_builder_chaining() {
+        let config = PoolConfig::new("db.example.com", 5433, "admin", "prod")
+            .password("p@ss")
+            .max_connections(50)
+            .min_connections(10)
+            .idle_timeout(Duration::from_secs(300))
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(3))
+            .max_lifetime(Duration::from_secs(3600))
+            .test_on_acquire(false);
+
+        assert_eq!(config.host, "db.example.com");
+        assert_eq!(config.port, 5433);
+        assert_eq!(config.max_connections, 50);
+        assert_eq!(config.min_connections, 10);
+        assert_eq!(config.idle_timeout, Duration::from_secs(300));
+        assert_eq!(config.acquire_timeout, Duration::from_secs(5));
+        assert_eq!(config.connect_timeout, Duration::from_secs(3));
+        assert_eq!(config.max_lifetime, Some(Duration::from_secs(3600)));
+        assert!(!config.test_on_acquire);
+    }
+
+    #[test]
+    fn test_timeout_error_display() {
+        let err = PgError::Timeout("pool acquire after 30s (10 max connections)".to_string());
+        let msg = err.to_string();
+        assert!(msg.contains("Timeout"));
+        assert!(msg.contains("30s"));
+        assert!(msg.contains("10 max connections"));
+    }
+
+    #[test]
+    fn test_pool_closed_error_display() {
+        let err = PgError::PoolClosed;
+        assert_eq!(err.to_string(), "Connection pool is closed");
+    }
+
+    #[test]
+    fn test_pool_exhausted_error_display() {
+        let err = PgError::PoolExhausted { max: 20 };
+        let msg = err.to_string();
+        assert!(msg.contains("exhausted"));
+        assert!(msg.contains("20"));
+    }
+
+    #[test]
+    fn test_io_error_source_chaining() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "peer reset");
+        let pg_err = PgError::Io(io_err);
+        // source() should return the inner io::Error
+        let source = pg_err.source().expect("Io variant should have source");
+        assert!(source.to_string().contains("peer reset"));
+    }
+
+    #[test]
+    fn test_non_io_errors_have_no_source() {
+        use std::error::Error;
+        assert!(PgError::Connection("test".into()).source().is_none());
+        assert!(PgError::Query("test".into()).source().is_none());
+        assert!(PgError::Timeout("test".into()).source().is_none());
+        assert!(PgError::PoolClosed.source().is_none());
+        assert!(PgError::NoRows.source().is_none());
+    }
+
+    #[test]
+    fn test_io_error_from_conversion() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken");
+        let pg_err: PgError = io_err.into();
+        assert!(matches!(pg_err, PgError::Io(_)));
+        assert!(pg_err.to_string().contains("broken"));
+    }
+
+    #[test]
+    fn test_error_variants_are_distinct() {
+        // Ensure we can match on each variant for programmatic error handling
+        let errors: Vec<PgError> = vec![
+            PgError::Connection("conn".into()),
+            PgError::Protocol("proto".into()),
+            PgError::Auth("auth".into()),
+            PgError::Query("query".into()),
+            PgError::NoRows,
+            PgError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io")),
+            PgError::Encode("enc".into()),
+            PgError::Timeout("timeout".into()),
+            PgError::PoolExhausted { max: 10 },
+            PgError::PoolClosed,
+        ];
+        // All 10 variants produce non-empty display strings
+        for err in &errors {
+            assert!(!err.to_string().is_empty());
+        }
+        assert_eq!(errors.len(), 10);
+    }
 }
+

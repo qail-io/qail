@@ -163,6 +163,7 @@ fn is_leap_year(year: i32) -> bool {
 /// Date type (days since 2000-01-01)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Date {
+    /// Days since PostgreSQL epoch (2000-01-01). Negative values represent dates before the epoch.
     pub days: i32,
 }
 
@@ -213,7 +214,14 @@ pub struct Time {
 }
 
 impl Time {
-    /// Create from hours, minutes, seconds, microseconds
+    /// Create from hours, minutes, seconds, microseconds.
+    ///
+    /// # Arguments
+    ///
+    /// * `hour` — Hour component (0–23).
+    /// * `minute` — Minute component (0–59).
+    /// * `second` — Second component (0–59).
+    /// * `usec` — Microseconds within the current second.
     pub fn new(hour: u8, minute: u8, second: u8, usec: u32) -> Self {
         Self {
             usec: hour as i64 * 3_600_000_000

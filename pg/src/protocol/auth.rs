@@ -186,7 +186,8 @@ impl ScramClient {
     }
 
     fn hmac(&self, key: &[u8], data: &[u8]) -> Vec<u8> {
-        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key size");
+        // SAFETY: HMAC-SHA256 accepts any key length — new_from_slice cannot fail.
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key size");
         mac.update(data);
         mac.finalize().into_bytes().to_vec()
     }

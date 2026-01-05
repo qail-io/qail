@@ -9,9 +9,13 @@ use serde::{Deserialize, Serialize};
 /// Supported notification channel types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelKind {
+    /// WhatsApp Business API (WABA).
     WhatsApp,
+    /// Email via SMTP or transactional provider.
     Email,
+    /// SMS via provider gateway.
     Sms,
+    /// Push notification (mobile/web).
     Push,
 }
 
@@ -36,7 +40,10 @@ pub enum ChannelError {
     /// Provider API error
     ProviderError(String),
     /// Rate limited
-    RateLimited { retry_after_secs: u64 },
+    RateLimited {
+        /// Seconds to wait before retrying.
+        retry_after_secs: u64,
+    },
 }
 
 impl std::fmt::Display for ChannelError {

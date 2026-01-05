@@ -51,7 +51,12 @@ impl PatternRegistry {
         None
     }
 
-    /// Transform SQL to QAIL
+    /// Transform a raw SQL string into QAIL Rust code.
+    ///
+    /// # Arguments
+    ///
+    /// * `sql` — Raw SQL string to transform.
+    /// * `ctx` — Transformation context (e.g., whether to include imports).
     pub fn transform_sql(&self, sql: &str, ctx: &TransformContext) -> Result<String, String> {
         let dialect = PostgreSqlDialect {};
         let ast = Parser::parse_sql(&dialect, sql)

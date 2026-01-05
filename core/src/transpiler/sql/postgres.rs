@@ -1,6 +1,7 @@
 use crate::transpiler::escape_identifier;
 use crate::transpiler::traits::SqlGenerator;
 
+/// PostgreSQL-specific SQL generator.
 pub struct PostgresGenerator;
 
 impl Default for PostgresGenerator {
@@ -10,6 +11,7 @@ impl Default for PostgresGenerator {
 }
 
 impl PostgresGenerator {
+    /// Create a new PostgreSQL generator.
     pub fn new() -> Self {
         Self
     }

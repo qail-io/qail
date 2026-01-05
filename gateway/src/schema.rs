@@ -17,27 +17,39 @@ use std::fs;
 /// Column metadata exposed to the gateway router
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayColumn {
+    /// Column name.
     pub name: String,
+    /// Qail-level type (e.g. `"string"`, `"int"`).
     pub col_type: String,
+    /// PostgreSQL native type (e.g. `"text"`, `"int4"`).
     pub pg_type: String,
+    /// Whether the column accepts NULL values.
     pub nullable: bool,
+    /// Whether this column is (part of) the primary key.
     pub primary_key: bool,
+    /// Whether the column has a UNIQUE constraint.
     pub unique: bool,
+    /// Whether the column has a server-side DEFAULT.
     pub has_default: bool,
+    /// Foreign key reference, if any.
     pub foreign_key: Option<GatewayForeignKey>,
 }
 
 /// Foreign key reference
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayForeignKey {
+    /// Referenced table name.
     pub ref_table: String,
+    /// Referenced column name.
     pub ref_column: String,
 }
 
 /// Table metadata for auto-REST generation
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayTable {
+    /// Table name.
     pub name: String,
+    /// Ordered list of column definitions.
     pub columns: Vec<GatewayColumn>,
     /// Name of the primary key column (if single-column PK)
     pub primary_key: Option<String>,
@@ -94,6 +106,7 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
+    /// Create an empty schema registry.
     pub fn new() -> Self {
         Self::default()
     }
@@ -187,18 +200,22 @@ impl SchemaRegistry {
 
     // -- Accessors --
 
+    /// Look up a table by name.
     pub fn table(&self, name: &str) -> Option<&GatewayTable> {
         self.tables.get(name)
     }
 
+    /// Return all registered table names.
     pub fn table_names(&self) -> Vec<&str> {
         self.tables.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Return a reference to all tables.
     pub fn tables(&self) -> &HashMap<String, GatewayTable> {
         &self.tables
     }
 
+    /// Returns `true` if a table with the given name is registered.
     pub fn table_exists(&self, name: &str) -> bool {
         self.tables.contains_key(name)
     }
@@ -207,7 +224,11 @@ impl SchemaRegistry {
 
     /// Discover one-to-many: which tables have FKs pointing to `parent_table`?
     ///
-    /// Returns `Vec<(child_table, child_fk_column, parent_pk_column)>`
+    /// Returns `Vec<(child_table, child_fk_column, parent_pk_column)>`.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_table` — Name of the parent table to find children of.
     pub fn children_of(&self, parent_table: &str) -> Vec<(&str, &str, &str)> {
         let mut children = Vec::new();
         for (table_name, table) in &self.tables {
@@ -226,9 +247,14 @@ impl SchemaRegistry {
         children
     }
 
-    /// Get the FK relation from `child_table` → `parent_table`
+    /// Get the FK relation from `child_table` → `parent_table`.
     ///
-    /// Returns `Some((child_fk_col, parent_pk_col))`
+    /// Returns `Some((child_fk_col, parent_pk_col))`.
+    ///
+    /// # Arguments
+    ///
+    /// * `child_table` — Table holding the foreign key.
+    /// * `parent_table` — Table being referenced.
     pub fn relation_for(&self, child_table: &str, parent_table: &str) -> Option<(&str, &str)> {
         let table = self.tables.get(child_table)?;
         for col in &table.columns {
@@ -243,7 +269,11 @@ impl SchemaRegistry {
 
     /// Discover parents: which tables does `child_table` reference via FK?
     ///
-    /// Returns `Vec<(parent_table, child_fk_col, parent_pk_col)>`
+    /// Returns `Vec<(parent_table, child_fk_col, parent_pk_col)>`.
+    ///
+    /// # Arguments
+    ///
+    /// * `child_table` — Name of the child table to find parents of.
     pub fn parents_of(&self, child_table: &str) -> Vec<(&str, &str, &str)> {
         let table = match self.tables.get(child_table) {
             Some(t) => t,

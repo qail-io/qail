@@ -25,7 +25,7 @@ use qail_pg::PgDriver;
 use std::time::{Duration, Instant};
 use std::collections::HashSet;
 
-const ITERATIONS: usize = 100;
+const ITERATIONS: usize = 1000;
 const WARMUP: usize = 5;
 
 /// Build the canonical 3×JOIN query used by both Qail and REST+expand.
@@ -133,7 +133,7 @@ async fn run_graphql_naive(driver: &mut PgDriver) -> Result<(usize, Duration, us
         for conn in &connections {
             let origin_id = conn.text(2);
             let dest_id = conn.text(3);
-            let op_id = conn.get_string(11);
+            let op_id = conn.get_string(8);
             let _ = driver.fetch_all_uncached(&Qail::get("harbors").filter("id", Operator::Eq, Value::String(origin_id)).limit(1)).await?;
             let _ = driver.fetch_all_uncached(&Qail::get("harbors").filter("id", Operator::Eq, Value::String(dest_id)).limit(1)).await?;
             if let Some(oid) = op_id {
@@ -156,7 +156,7 @@ async fn run_graphql_naive(driver: &mut PgDriver) -> Result<(usize, Duration, us
         for conn in &connections {
             let origin_id = conn.text(2);
             let dest_id = conn.text(3);
-            let op_id = conn.get_string(11);
+            let op_id = conn.get_string(8);
 
             let _ = driver.fetch_all_uncached(&Qail::get("harbors").filter("id", Operator::Eq, Value::String(origin_id)).limit(1)).await?;
             total_queries += 1;
@@ -192,7 +192,7 @@ async fn run_graphql_dataloader(driver: &mut PgDriver) -> Result<(usize, Duratio
         for conn in &connections {
             harbor_ids.insert(conn.text(2));
             harbor_ids.insert(conn.text(3));
-            if let Some(oid) = conn.get_string(11) {
+            if let Some(oid) = conn.get_string(8) {
                 operator_ids.insert(oid);
             }
         }
@@ -224,7 +224,7 @@ async fn run_graphql_dataloader(driver: &mut PgDriver) -> Result<(usize, Duratio
         for conn in &connections {
             harbor_ids.insert(conn.text(2));
             harbor_ids.insert(conn.text(3));
-            if let Some(oid) = conn.get_string(11) {
+            if let Some(oid) = conn.get_string(8) {
                 operator_ids.insert(oid);
             }
         }
@@ -288,7 +288,7 @@ async fn run_rest_naive(driver: &mut PgDriver) -> Result<(usize, Duration, usize
         for conn in &connections {
             let origin_id = conn.text(2);
             let dest_id = conn.text(3);
-            let op_id = conn.get_string(11);
+            let op_id = conn.get_string(8);
 
             let origin_rows = driver.fetch_all_uncached(
                 &Qail::get("harbors").filter("id", Operator::Eq, Value::String(origin_id)).limit(1)

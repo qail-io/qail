@@ -18,17 +18,30 @@ use tokio::sync::mpsc;
 use crate::auth::extract_auth_from_headers;
 use crate::GatewayState;
 
+/// Messages sent from the WebSocket client to the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsClientMessage {
+    /// Subscribe to a PostgreSQL NOTIFY channel.
     #[serde(rename = "subscribe")]
-    Subscribe { channel: String },
+    Subscribe {
+        /// Channel name to subscribe to (scoped per tenant).
+        channel: String,
+    },
     
+    /// Unsubscribe from a previously subscribed channel.
     #[serde(rename = "unsubscribe")]
-    Unsubscribe { channel: String },
+    Unsubscribe {
+        /// Channel name to unsubscribe from.
+        channel: String,
+    },
     
+    /// Execute a one-shot Qail query over the WebSocket.
     #[serde(rename = "query")]
-    Query { qail: String },
+    Query {
+        /// Qail query string (e.g., `"get orders"`).
+        qail: String,
+    },
     
     /// Live query: execute query now, then re-execute on table changes
     #[serde(rename = "live_query")]
@@ -44,50 +57,78 @@ pub enum WsClientMessage {
     
     /// Stop a live query
     #[serde(rename = "stop_live_query")]
-    StopLiveQuery { table: String },
+    StopLiveQuery {
+        /// Table whose live query should be stopped.
+        table: String,
+    },
     
+    /// Keep-alive ping.
     #[serde(rename = "ping")]
     Ping,
 }
 
+/// Messages sent from the server to the WebSocket client.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum WsServerMessage {
+    /// Acknowledgement that a channel subscription was created.
     #[serde(rename = "subscribed")]
-    Subscribed { channel: String },
+    Subscribed {
+        /// The subscribed channel name.
+        channel: String,
+    },
     
+    /// Acknowledgement that a channel subscription was removed.
     #[serde(rename = "unsubscribed")]
-    Unsubscribed { channel: String },
+    Unsubscribed {
+        /// The unsubscribed channel name.
+        channel: String,
+    },
     
+    /// A PostgreSQL NOTIFY event on a subscribed channel.
     #[serde(rename = "notification")]
     Notification {
+        /// Channel that triggered the notification.
         channel: String,
+        /// Notification payload string.
         payload: String,
     },
     
+    /// Query result returned in response to a `Query` message.
     #[serde(rename = "result")]
     Result {
+        /// Rows returned by the query.
         rows: Vec<serde_json::Value>,
+        /// Number of rows returned.
         count: usize,
     },
     
+    /// Error message sent to the client.
     #[serde(rename = "error")]
-    Error { message: String },
+    Error {
+        /// Human-readable error description.
+        message: String,
+    },
     
     /// Live query update — pushed when subscribed query data changes
     #[serde(rename = "live_query_update")]
     LiveQueryUpdate {
+        /// Table being watched.
         table: String,
+        /// Current result set.
         rows: Vec<serde_json::Value>,
+        /// Number of rows in this snapshot.
         count: usize,
         /// Monotonically increasing sequence number
         seq: u64,
     },
     
+    /// Keep-alive pong response.
     #[serde(rename = "pong")]
     Pong,
 }
 
+/// Axum handler that upgrades an HTTP request to a WebSocket connection.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,

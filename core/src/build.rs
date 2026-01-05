@@ -37,10 +37,11 @@ pub struct ForeignKey {
 /// Table schema information with column types and relations
 #[derive(Debug, Clone)]
 pub struct TableSchema {
+    /// Table name.
     pub name: String,
-    /// Column name -> Column type (strongly-typed AST enum)
+    /// Column name → Column type (strongly-typed AST enum)
     pub columns: HashMap<String, ColumnType>,
-    /// Column name -> Access Policy (Default: "Public", can be "Protected")
+    /// Column name → Access Policy (Default: "Public", can be "Protected")
     pub policies: HashMap<String, String>,
     /// Foreign key relationships to other tables
     pub foreign_keys: Vec<ForeignKey>,
@@ -52,6 +53,7 @@ pub struct TableSchema {
 /// Parsed schema from schema.qail file
 #[derive(Debug, Default)]
 pub struct Schema {
+    /// Table schemas keyed by table name.
     pub tables: HashMap<String, TableSchema>,
     /// Infrastructure resources (bucket, queue, topic)
     pub resources: HashMap<String, ResourceSchema>,
@@ -60,9 +62,13 @@ pub struct Schema {
 /// Infrastructure resource schema (bucket, queue, topic)
 #[derive(Debug, Clone)]
 pub struct ResourceSchema {
+    /// Resource name.
     pub name: String,
+    /// Resource kind (bucket, queue, topic).
     pub kind: String,
+    /// Cloud provider (e.g. "aws").
     pub provider: Option<String>,
+    /// Provider-specific properties.
     pub properties: HashMap<String, String>,
 }
 
@@ -598,11 +604,17 @@ impl TableSchema {
 /// Extracted QAIL usage from source code
 #[derive(Debug)]
 pub struct QailUsage {
+    /// Source file path.
     pub file: String,
+    /// Line number (1-indexed).
     pub line: usize,
+    /// Table name referenced.
     pub table: String,
+    /// Column names referenced.
     pub columns: Vec<String>,
+    /// CRUD action (GET, SET, ADD, DEL, PUT).
     pub action: String,
+    /// Whether this references a CTE rather than a real table.
     pub is_cte_ref: bool,
     /// Whether this query chain includes `.with_rls(` call
     pub has_rls: bool,

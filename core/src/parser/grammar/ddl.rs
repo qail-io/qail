@@ -106,7 +106,7 @@ pub fn parse_table_constraint(input: &str) -> IResult<&str, TableConstraint> {
     .parse(input)
 }
 
-/// Parse column definition: name:type[:constraint1[:constraint2]]
+/// Parse column definition: `name:type[:constraint1[:constraint2]]`
 pub fn parse_column_definition(input: &str) -> IResult<&str, Expr> {
     let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '_').parse(input)?;
     let (input, _) = char(':').parse(input)?;
@@ -159,7 +159,7 @@ pub fn parse_constraint(input: &str) -> IResult<&str, Constraint> {
     .parse(input)
 }
 
-/// Parse CREATE INDEX: index idx_name on table_name col1, col2 [unique]
+/// Parse CREATE INDEX: `index idx_name on table_name col1, col2 [unique]`
 pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
     let (input, _) = tag_no_case("index").parse(input)?;
     let (input, _) = multispace1(input)?;

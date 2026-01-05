@@ -41,7 +41,9 @@ impl TenantVerified {
 pub struct TenantViolation {
     /// Number of rows with mismatched tenant column
     pub violation_count: u64,
+    /// Table where the violation was detected.
     pub table: String,
+    /// Endpoint / call site that triggered the check.
     pub endpoint: String,
 }
 
@@ -68,6 +70,7 @@ pub struct TenantGuardMetrics {
 }
 
 impl TenantGuardMetrics {
+    /// Create a new, zeroed metrics instance.
     pub const fn new() -> Self {
         Self {
             rows_checked: AtomicU64::new(0),
@@ -181,10 +184,14 @@ pub fn metrics_snapshot() -> TenantGuardSnapshot {
     }
 }
 
+/// Serializable snapshot of tenant guard metrics.
 #[derive(Debug, serde::Serialize)]
 pub struct TenantGuardSnapshot {
+    /// Total rows checked across all requests.
     pub rows_checked: u64,
+    /// Total requests where at least one violation was found.
     pub violation_requests: u64,
+    /// Total individual row violations.
     pub violation_rows: u64,
 }
 

@@ -1,0 +1,151 @@
+{
+  "timestamp": "2026-02-18T17:43:31.509561",
+  "crates": {
+    "pg": {
+      "total": 137,
+      "by_file": {
+        "pg/src/driver/mod.rs": 13,
+        "pg/src/driver/io_backend.rs": 1,
+        "pg/src/driver/pool.rs": 18,
+        "pg/src/driver/explain.rs": 9,
+        "pg/src/protocol/encoder.rs": 2,
+        "pg/src/protocol/types.rs": 32,
+        "pg/src/protocol/wire.rs": 59,
+        "pg/src/types/mod.rs": 2,
+        "pg/src/types/temporal.rs": 1
+      },
+      "by_type": {
+        "struct": 2,
+        "struct field": 71,
+        "associated function": 1,
+        "variant": 30,
+        "method": 1,
+        "constant": 32
+      }
+    },
+    "core": {
+      "total": 869,
+      "by_file": {
+        "core/src/lib.rs": 3,
+        "core/src/ast/mod.rs": 7,
+        "core/src/ast/builders/conditions.rs": 19,
+        "core/src/ast/cages.rs": 11,
+        "core/src/ast/cmd/mod.rs": 53,
+        "core/src/ast/cmd/advanced.rs": 28,
+        "core/src/ast/cmd/constructors.rs": 15,
+        "core/src/ast/cmd/cte.rs": 7,
+        "core/src/ast/cmd/query.rs": 31,
+        "core/src/ast/conditions.rs": 4,
+        "core/src/ast/expr.rs": 98,
+        "core/src/ast/joins.rs": 4,
+        "core/src/ast/operators.rs": 150,
+        "core/src/ast/values.rs": 23,
+        "core/src/build.rs": 12,
+        "core/src/config.rs": 30,
+        "core/src/error.rs": 14,
+        "core/src/fmt/mod.rs": 3,
+        "core/src/migrate/alter.rs": 50,
+        "core/src/migrate/named_migration.rs": 2,
+        "core/src/migrate/policy.rs": 5,
+        "core/src/migrate/schema.rs": 188,
+        "core/src/migrate/types.rs": 20,
+        "core/src/parser/mod.rs": 1,
+        "core/src/parser/grammar/mod.rs": 6,
+        "core/src/parser/query_file.rs": 5,
+        "core/src/parser/schema.rs": 16,
+        "core/src/rls/mod.rs": 1,
+        "core/src/schema.rs": 11,
+        "core/src/transpiler/mod.rs": 5,
+        "core/src/transpiler/conditions.rs": 5,
+        "core/src/transpiler/ddl.rs": 1,
+        "core/src/transpiler/dialect.rs": 4,
+        "core/src/transpiler/dml/delete.rs": 1,
+        "core/src/transpiler/dml/insert.rs": 1,
+        "core/src/transpiler/dml/select.rs": 1,
+        "core/src/transpiler/dml/update.rs": 1,
+        "core/src/transpiler/sql/mod.rs": 2,
+        "core/src/transpiler/sql/postgres.rs": 2,
+        "core/src/transpiler/sql/sqlite.rs": 1,
+        "core/src/transpiler/traits.rs": 1,
+        "core/src/transpiler/nosql/mod.rs": 3,
+        "core/src/transpiler/nosql/dynamo.rs": 2,
+        "core/src/transpiler/nosql/mongo.rs": 2,
+        "core/src/transpiler/nosql/qdrant.rs": 2,
+        "core/src/typed.rs": 4,
+        "core/src/validator.rs": 14
+      },
+      "by_type": {
+        "module": 27,
+        "function": 25,
+        "struct field": 314,
+        "variant": 308,
+        "struct": 16,
+        "enum": 13,
+        "method": 126,
+        "associated function": 35,
+        "type alias": 1,
+        "trait": 4
+      }
+    },
+    "gateway": {
+      "total": 187,
+      "by_file": {
+        "gateway/src/auth.rs": 18,
+        "gateway/src/cache.rs": 12,
+        "gateway/src/config.rs": 10,
+        "gateway/src/event.rs": 13,
+        "gateway/src/handler/mod.rs": 20,
+        "gateway/src/handler/admin.rs": 1,
+        "gateway/src/handler/query.rs": 2,
+        "gateway/src/metrics.rs": 2,
+        "gateway/src/middleware.rs": 17,
+        "gateway/src/policy.rs": 15,
+        "gateway/src/rest/types.rs": 16,
+        "gateway/src/schema.rs": 17,
+        "gateway/src/server.rs": 10,
+        "gateway/src/tenant_guard.rs": 7,
+        "gateway/src/ws.rs": 27
+      },
+      "by_type": {
+        "struct field": 118,
+        "associated function": 18,
+        "method": 18,
+        "struct": 8,
+        "function": 5,
+        "enum": 3,
+        "variant": 17
+      }
+    },
+    "qdrant": {
+      "total": 32,
+      "by_file": {
+        "qdrant/src/lib.rs": 3,
+        "qdrant/src/error.rs": 2,
+        "qdrant/src/point.rs": 20,
+        "qdrant/src/encoder.rs": 7
+      },
+      "by_type": {
+        "variant": 19,
+        "struct field": 13
+      }
+    },
+    "workflow": {
+      "total": 24,
+      "by_file": {
+        "workflow/src/channel.rs": 5,
+        "workflow/src/context.rs": 4,
+        "workflow/src/engine.rs": 3,
+        "workflow/src/payment.rs": 12
+      },
+      "by_type": {
+        "variant": 15,
+        "struct field": 9
+      }
+    },
+    "cli": {
+      "total": 0,
+      "by_file": {},
+      "by_type": {}
+    }
+  }
+}

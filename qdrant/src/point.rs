@@ -6,7 +6,9 @@ use std::collections::HashMap;
 /// Point ID - either UUID string or integer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PointId {
+    /// UUID string identifier.
     Uuid(String),
+    /// Numeric identifier.
     Num(u64),
 }
 
@@ -32,12 +34,19 @@ impl From<u64> for PointId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PayloadValue {
+    /// UTF-8 string value.
     String(String),
+    /// Signed 64-bit integer.
     Integer(i64),
+    /// 64-bit floating-point number.
     Float(f64),
+    /// Boolean value.
     Bool(bool),
+    /// Ordered list of nested payload values.
     List(Vec<PayloadValue>),
+    /// Nested key-value object.
     Object(HashMap<String, PayloadValue>),
+    /// Explicit null / absent value.
     Null,
 }
 
@@ -47,8 +56,11 @@ pub type Payload = HashMap<String, PayloadValue>;
 /// A point in Qdrant - vector + payload + id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Point {
+    /// Unique point identifier (UUID string or integer).
     pub id: PointId,
+    /// Dense embedding vector.
     pub vector: Vec<f32>,
+    /// Key-value metadata payload.
     #[serde(default)]
     pub payload: Payload,
 }
@@ -117,15 +129,22 @@ pub enum VectorData {
     /// Named vectors (for multi-vector collections).
     Named(HashMap<String, Vec<f32>>),
     /// Sparse vector.
-    Sparse { indices: Vec<u32>, values: Vec<f32> },
+    Sparse {
+        /// Indices of non-zero elements.
+        indices: Vec<u32>,
+        /// Values at those indices.
+        values: Vec<f32>,
+    },
 }
 
 /// A point with named vector support (for multi-vector collections).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiVectorPoint {
+    /// Unique point identifier.
     pub id: PointId,
-    /// Named vectors - key is vector name, value is the embedding.
+    /// Named vectors — key is vector name, value is the embedding.
     pub vectors: HashMap<String, Vec<f32>>,
+    /// Key-value metadata payload.
     #[serde(default)]
     pub payload: Payload,
 }
@@ -156,10 +175,14 @@ impl MultiVectorPoint {
 /// Search result - point with similarity score.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScoredPoint {
+    /// Point identifier.
     pub id: PointId,
+    /// Similarity score (higher = more similar for cosine/dot, lower for euclid).
     pub score: f32,
+    /// Key-value metadata payload.
     #[serde(default)]
     pub payload: Payload,
+    /// Optional dense vector (returned when `with_vectors = true`).
     #[serde(default)]
     pub vector: Option<Vec<f32>>,
 }

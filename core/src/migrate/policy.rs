@@ -36,10 +36,15 @@ use serde::{Serialize, Deserialize};
 /// What the policy applies to (SELECT, INSERT, UPDATE, DELETE, or ALL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicyTarget {
+    /// Applies to all operations.
     All,
+    /// Applies to SELECT queries.
     Select,
+    /// Applies to INSERT operations.
     Insert,
+    /// Applies to UPDATE operations.
     Update,
+    /// Applies to DELETE operations.
     Delete,
 }
 

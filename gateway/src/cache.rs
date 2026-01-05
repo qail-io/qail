@@ -19,8 +19,11 @@ use std::time::Duration;
 /// Cache configuration
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
+    /// Maximum number of cached entries.
     pub max_entries: usize,
+    /// Time-to-live for each cache entry.
     pub ttl: Duration,
+    /// Toggle cache on/off.
     pub enabled: bool,
 }
 
@@ -46,6 +49,7 @@ pub struct QueryCache {
 }
 
 impl QueryCache {
+    /// Create a new cache from configuration.
     pub fn new(config: CacheConfig) -> Self {
         let entries = Cache::builder()
             .max_capacity(config.max_entries as u64)
@@ -66,10 +70,12 @@ impl QueryCache {
         }
     }
 
+    /// Returns whether the cache is enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
+    /// Look up a cached query result. Returns `None` on miss.
     pub fn get(&self, query: &str) -> Option<String> {
         if !self.enabled {
             return None;
@@ -94,6 +100,13 @@ impl QueryCache {
         result
     }
 
+    /// Insert a query result into the cache, associated with a table.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` — SQL query string used as cache key.
+    /// * `table` — Table name for invalidation tracking.
+    /// * `result` — Serialized query result to cache.
     pub fn set(&self, query: &str, table: &str, result: String) {
         if !self.enabled {
             return;
@@ -123,6 +136,7 @@ impl QueryCache {
         }
     }
 
+    /// Return a snapshot of cache statistics.
     pub fn stats(&self) -> CacheStats {
         CacheStats {
             entries: self.entries.entry_count() as usize,
@@ -133,10 +147,14 @@ impl QueryCache {
     }
 }
 
+/// Snapshot of cache statistics.
 #[derive(Debug, Clone)]
 pub struct CacheStats {
+    /// Number of live entries.
     pub entries: usize,
+    /// Total cache hits.
     pub hits: u64,
+    /// Total cache misses.
     pub misses: u64,
     /// Total weighted size of all entries (bytes of key + value)
     pub weighted_size: u64,
