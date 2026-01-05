@@ -17,7 +17,12 @@ pub enum QdrantError {
     /// Point not found.
     PointNotFound(String),
     /// Invalid vector dimension.
-    DimensionMismatch { expected: usize, got: usize },
+    DimensionMismatch {
+        /// Expected dimension from the collection config.
+        expected: usize,
+        /// Actual dimension of the provided vector.
+        got: usize,
+    },
     /// Encoding error.
     Encode(String),
     /// Decode error.

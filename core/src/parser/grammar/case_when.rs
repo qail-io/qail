@@ -12,7 +12,7 @@ use nom::{
     sequence::preceded,
 };
 
-/// Parse CASE WHEN ... END
+/// Parse a `CASE WHEN ... THEN ... [ELSE ...] END` expression into an AST `Expr::Case`.
 pub fn parse_case(input: &str) -> IResult<&str, Expr> {
     let (input, _) = tag_no_case("case").parse(input)?;
     let (input, _) = multispace1(input)?;

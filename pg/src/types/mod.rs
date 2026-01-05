@@ -14,7 +14,12 @@ use crate::protocol::types::{decode_json, decode_jsonb, decode_text_array, decod
 #[derive(Debug, Clone)]
 pub enum TypeError {
     /// Wrong OID for expected type
-    UnexpectedOid { expected: &'static str, got: u32 },
+    UnexpectedOid {
+        /// Human-readable name of the expected type (e.g. `"uuid"`).
+        expected: &'static str,
+        /// Actual OID received from the server.
+        got: u32,
+    },
     /// Invalid binary data
     InvalidData(String),
     /// Null value where non-null expected

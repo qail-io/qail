@@ -198,9 +198,13 @@ pub enum ExplainDecision {
     Allow,
     /// Query is rejected with an explanation.
     Reject {
+        /// PostgreSQL's estimated total cost for the query.
         total_cost: f64,
+        /// PostgreSQL's estimated row count.
         plan_rows: u64,
+        /// Configured maximum cost threshold.
         max_cost: f64,
+        /// Configured maximum row threshold.
         max_rows: u64,
     },
     /// EXPLAIN was skipped (mode=Off or below depth threshold).
@@ -256,10 +260,15 @@ impl ExplainDecision {
 /// Structured rejection detail for EXPLAIN cost guard violations.
 #[derive(Debug, Clone)]
 pub struct ExplainRejectionDetail {
+    /// PostgreSQL's estimated total cost for the query.
     pub estimated_cost: f64,
+    /// Configured maximum cost threshold.
     pub cost_limit: f64,
+    /// PostgreSQL's estimated row count.
     pub estimated_rows: u64,
+    /// Configured maximum row threshold.
     pub row_limit: u64,
+    /// Actionable suggestions to bring the query under limits.
     pub suggestions: Vec<String>,
 }
 

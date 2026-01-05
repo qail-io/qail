@@ -8,7 +8,13 @@ use qail_core::ast::{CTEDef, CageKind, Expr, GroupByMode, JoinKind, Qail, SortOr
 use super::helpers::write_usize;
 use super::values::{encode_columns, encode_conditions, encode_expr, encode_join_value, encode_value};
 
-/// Encode SELECT statement directly to bytes.
+/// Encode a SELECT statement directly to bytes.
+///
+/// # Arguments
+///
+/// * `cmd` — Qail AST command with `Action::Get`.
+/// * `buf` — Output buffer to append the SQL bytes to.
+/// * `params` — Accumulator for parameterized bind values.
 pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     // CTE prefix
     encode_cte_prefix(cmd, buf, params);
@@ -202,7 +208,13 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     Ok(())
 }
 
-/// Encode CTE prefix: WITH [RECURSIVE] cte1 AS (...), cte2 AS (...)
+/// Encode the CTE prefix (`WITH [RECURSIVE] cte1 AS (...), cte2 AS (...)`).
+///
+/// # Arguments
+///
+/// * `cmd` — Qail AST command containing CTE definitions.
+/// * `buf` — Output buffer to append the WITH clause to.
+/// * `params` — Accumulator for parameterized bind values.
 pub fn encode_cte_prefix(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
     if cmd.ctes.is_empty() {
         return;
@@ -257,7 +269,13 @@ fn encode_single_cte(cte: &CTEDef, buf: &mut BytesMut, params: &mut Vec<Option<V
     buf.extend_from_slice(b")");
 }
 
-/// Encode INSERT statement.
+/// Encode an INSERT statement.
+///
+/// # Arguments
+///
+/// * `cmd` — Qail AST command with `Action::Add`.
+/// * `buf` — Output buffer to append the SQL bytes to.
+/// * `params` — Accumulator for parameterized bind values.
 pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"INSERT INTO ");
     buf.extend_from_slice(cmd.table.as_bytes());
@@ -340,7 +358,13 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     Ok(())
 }
 
-/// Encode UPDATE statement.
+/// Encode an UPDATE statement.
+///
+/// # Arguments
+///
+/// * `cmd` — Qail AST command with `Action::Set`.
+/// * `buf` — Output buffer to append the SQL bytes to.
+/// * `params` — Accumulator for parameterized bind values.
 pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"UPDATE ");
     buf.extend_from_slice(cmd.table.as_bytes());
@@ -392,7 +416,13 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     Ok(())
 }
 
-/// Encode DELETE statement.
+/// Encode a DELETE statement.
+///
+/// # Arguments
+///
+/// * `cmd` — Qail AST command with `Action::Del`.
+/// * `buf` — Output buffer to append the SQL bytes to.
+/// * `params` — Accumulator for parameterized bind values.
 pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"DELETE FROM ");
     buf.extend_from_slice(cmd.table.as_bytes());
@@ -414,7 +444,13 @@ pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     Ok(())
 }
 
-/// Encode EXPORT command as COPY (SELECT ...) TO STDOUT.
+/// Encode an EXPORT command as `COPY (SELECT ...) TO STDOUT`.
+///
+/// # Arguments
+///
+/// * `cmd` — Qail AST command with `Action::Export`.
+/// * `buf` — Output buffer to append the SQL bytes to.
+/// * `params` — Accumulator for parameterized bind values.
 pub fn encode_export(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"COPY (");
     encode_select(cmd, buf, params)?;

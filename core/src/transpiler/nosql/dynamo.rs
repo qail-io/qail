@@ -1,6 +1,8 @@
 use crate::ast::*;
 
+/// Trait for converting QAIL AST to DynamoDB JSON.
 pub trait ToDynamo {
+    /// Convert a QAIL query into a DynamoDB request JSON body.
     fn to_dynamo(&self) -> String;
 }
 

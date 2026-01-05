@@ -5,12 +5,19 @@ use uuid::Uuid;
 /// Time interval unit for duration expressions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IntervalUnit {
+    /// Seconds.
     Second,
+    /// Minutes.
     Minute,
+    /// Hours.
     Hour,
+    /// Days.
     Day,
+    /// Weeks.
     Week,
+    /// Months.
     Month,
+    /// Years.
     Year,
 }
 
@@ -31,22 +38,37 @@ impl std::fmt::Display for IntervalUnit {
 /// A value in a condition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
+    /// SQL NULL.
     Null,
+    /// Boolean.
     Bool(bool),
+    /// 64-bit integer.
     Int(i64),
+    /// 64-bit float.
     Float(f64),
+    /// Text string.
     String(String),
+    /// Positional parameter ($n).
     Param(usize),
     /// Named parameter reference (:name, :id, etc.)
     NamedParam(String),
+    /// SQL function call.
     Function(String),
+    /// Array of values.
     Array(Vec<Value>),
+    /// Subquery.
     Subquery(Box<Qail>),
+    /// Column reference.
     Column(String),
+    /// UUID.
     Uuid(Uuid),
+    /// NULL-typed UUID.
     NullUuid,
     /// Time interval (e.g., 24 hours, 7 days)
-    Interval { amount: i64, unit: IntervalUnit },
+    Interval { /// Numeric amount.
+        amount: i64, /// Unit of time.
+        unit: IntervalUnit },
+    /// Timestamp literal.
     Timestamp(String),
     /// Binary data (bytea)
     Bytes(Vec<u8>),
@@ -54,6 +76,7 @@ pub enum Value {
     Expr(Box<crate::ast::Expr>),
     /// Vector embedding for similarity search (Qdrant)
     Vector(Vec<f32>),
+    /// JSON data.
     Json(String),
 }
 

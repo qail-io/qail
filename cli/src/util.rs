@@ -5,6 +5,10 @@ use anyhow::Result;
 /// Parse a PostgreSQL URL into (host, port, user, password, database).
 ///
 /// Handles: `postgres://user:pass@host:port/database`
+///
+/// # Arguments
+///
+/// * `url` — Full connection string starting with `postgres://` or `postgresql://`.
 pub fn parse_pg_url(url: &str) -> Result<(String, u16, String, Option<String>, String)> {
     // Strip scheme
     let rest = url
@@ -51,7 +55,12 @@ pub fn parse_pg_url(url: &str) -> Result<(String, u16, String, Option<String>, S
 }
 
 /// Parse a generic URL into (scheme, host, port, path).
-/// Used by exec.rs for SSH tunnel URL rewriting.
+///
+/// Used by `exec.rs` for SSH tunnel URL rewriting.
+///
+/// # Arguments
+///
+/// * `url` — URL string containing `scheme://[userinfo@]host[:port]/path`.
 pub fn parse_url_parts(url: &str) -> Result<(String, String, u16, String)> {
     let (scheme, rest) = url
         .split_once("://")

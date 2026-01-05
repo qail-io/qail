@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Supported payment provider types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaymentKind {
+    /// Xendit payment provider.
     Xendit,
 }
 
@@ -29,11 +30,16 @@ impl std::fmt::Display for PaymentKind {
 /// Currency for payment amounts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Currency {
+    /// Indonesian Rupiah.
     #[default]
     IDR,
+    /// US Dollar.
     USD,
+    /// Philippine Peso.
     PHP,
+    /// Thai Baht.
     THB,
+    /// Malaysian Ringgit.
     MYR,
 }
 
@@ -81,10 +87,15 @@ pub struct ChargeResponse {
 /// Status of a payment charge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChargeStatus {
+    /// Charge created, awaiting payment.
     Pending,
+    /// Payment confirmed.
     Paid,
+    /// Payment failed (declined, insufficient funds, etc.).
     Failed,
+    /// Charge expired before payment.
     Expired,
+    /// Payment was refunded after completion.
     Refunded,
 }
 
@@ -135,7 +146,10 @@ pub enum PaymentError {
     /// Webhook signature verification failed.
     WebhookVerificationFailed(String),
     /// Rate limited by provider.
-    RateLimited { retry_after_secs: u64 },
+    RateLimited {
+        /// Seconds to wait before retrying.
+        retry_after_secs: u64,
+    },
     /// Generic error.
     Other(String),
 }

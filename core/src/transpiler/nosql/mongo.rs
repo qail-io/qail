@@ -1,6 +1,8 @@
 use crate::ast::*;
 
+/// Trait for converting QAIL AST to MongoDB shell commands.
 pub trait ToMongo {
+    /// Convert a QAIL query into a MongoDB shell command string.
     fn to_mongo(&self) -> String;
 }
 

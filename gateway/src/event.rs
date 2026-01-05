@@ -34,7 +34,9 @@ pub struct EventTrigger {
     pub enabled: bool,
 }
 
+/// Serde default for retry count (returns 3).
 fn default_retry_count() -> u32 { 3 }
+/// Serde default that returns `true`.
 fn default_true() -> bool { true }
 
 /// Payload sent to the webhook
@@ -66,20 +68,32 @@ pub struct WebhookData {
 /// Delivery attempt result for logging
 #[derive(Debug, Serialize)]
 pub struct DeliveryLog {
+    /// Name of the trigger that fired.
     pub trigger: String,
+    /// Table that was mutated.
     pub table: String,
+    /// Operation type ("INSERT", "UPDATE", "DELETE").
     pub operation: String,
+    /// Target webhook URL.
     pub webhook_url: String,
+    /// Final delivery status.
     pub status: DeliveryStatus,
+    /// Total delivery attempts made.
     pub attempts: u32,
+    /// HTTP status code received (if any).
     pub response_status: Option<u16>,
+    /// Error message (if delivery failed).
     pub error: Option<String>,
 }
 
+/// Outcome of a webhook delivery attempt.
 #[derive(Debug, Serialize)]
 pub enum DeliveryStatus {
+    /// Webhook was delivered and acknowledged.
     Success,
+    /// All retry attempts exhausted without success.
     Failed,
+    /// Delivery is being retried.
     Retrying,
 }
 
@@ -93,6 +107,7 @@ pub struct EventTriggerEngine {
 }
 
 impl EventTriggerEngine {
+    /// Create a new event trigger engine with a shared HTTP client.
     pub fn new() -> Self {
         Self {
             triggers: Vec::new(),

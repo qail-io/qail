@@ -2,43 +2,60 @@
 
 use thiserror::Error;
 
+/// Error types for QAIL operations.
 #[derive(Debug, Error)]
 pub enum QailError {
     /// Failed to parse the QAIL query string.
     #[error("Parse error at position {position}: {message}")]
-    Parse { position: usize, message: String },
+    Parse {
+        /// Byte offset of the error.
+        position: usize,
+        /// Human-readable error message.
+        message: String,
+    },
 
     /// Invalid action (must be get, set, del, or add).
     #[error("Invalid action: '{0}'. Expected: get, set, del, or add")]
     InvalidAction(String),
 
+    /// Required syntax symbol is missing.
     #[error("Missing required symbol: {symbol} ({description})")]
     MissingSymbol {
+        /// The missing symbol.
         symbol: &'static str,
+        /// Description of the expected symbol.
         description: &'static str,
     },
 
+    /// Invalid operator in expression.
     #[error("Invalid operator: '{0}'")]
     InvalidOperator(String),
 
+    /// Invalid value in expression.
     #[error("Invalid value: {0}")]
     InvalidValue(String),
 
+    /// Database-layer error.
     #[error("Database error: {0}")]
     Database(String),
 
+    /// Connection-layer error.
     #[error("Connection error: {0}")]
     Connection(String),
 
+    /// Execution-layer error.
     #[error("Execution error: {0}")]
     Execution(String),
 
+    /// Validation error.
     #[error("Validation error: {0}")]
     Validation(String),
 
+    /// Configuration error.
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// I/O error.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

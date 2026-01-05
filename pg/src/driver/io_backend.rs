@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 /// The detected I/O backend
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoBackend {
+    /// Tokio-based async I/O (cross-platform default).
     Tokio,
     /// Linux io_uring (kernel 5.1+, requires `io_uring` feature)
     #[cfg(all(target_os = "linux", feature = "io_uring"))]

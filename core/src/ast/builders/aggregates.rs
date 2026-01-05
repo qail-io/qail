@@ -151,7 +151,7 @@ impl AggregateBuilder {
         self
     }
 
-    /// Add FILTER (WHERE ...) clause
+    /// Add a `FILTER (WHERE ...)` clause to restrict which rows feed the aggregate.
     pub fn filter(mut self, conditions: Vec<Condition>) -> Self {
         self.filter = Some(conditions);
         self

@@ -147,7 +147,7 @@ impl PgConnection {
     }
 
     /// Export data using COPY TO STDOUT (AST-native).
-    /// Takes a Qail::Export and returns rows as Vec<Vec<String>>.
+    /// Takes a `Qail::Export` and returns rows as `Vec<Vec<String>>`.
     /// # Example
     /// ```ignore
     /// let cmd = Qail::export("users")

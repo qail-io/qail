@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::{HealthCheckPublic, HealthResponse};
 use crate::GatewayState;
 
+/// Public health check endpoint — returns status and version.
 pub async fn health_check() -> Json<HealthCheckPublic> {
     Json(HealthCheckPublic {
         status: "ok".to_string(),

@@ -73,6 +73,8 @@ impl Default for CodebaseScanner {
 impl CodebaseScanner {
     /// Create a new scanner with default patterns.
     pub fn new() -> Self {
+        // SAFETY: All regex patterns below are compile-time constant strings.
+        // They have been validated and will never fail to compile, so .expect() is infallible.
         Self {
             qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)").expect("valid qail action regex"),
             qail_column_pattern: Regex::new(r"'(\w+)").expect("valid qail column regex"),

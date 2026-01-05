@@ -1,64 +1,87 @@
 //! PostgreSQL Type OID Constants
 //!
-//! Reference: https://github.com/postgres/postgres/blob/master/src/include/catalog/pg_type.dat
+//! Reference: <https://github.com/postgres/postgres/blob/master/src/include/catalog/pg_type.dat>
 
 /// PostgreSQL Type OIDs
+///
+/// Constants matching [`pg_type.dat`](https://github.com/postgres/postgres/blob/master/src/include/catalog/pg_type.dat).
+/// Use these with [`oid_to_name`] and [`is_array_oid`] for type introspection.
 #[allow(dead_code)]
 pub mod oid {
-    // Boolean
+    /// Boolean (`bool`) — OID 16.
     pub const BOOL: u32 = 16;
 
-    // Bytes
+    /// Variable-length byte string (`bytea`) — OID 17.
     pub const BYTEA: u32 = 17;
 
-    // Characters
+    /// Single character (`"char"`) — OID 18.
     pub const CHAR: u32 = 18;
+    /// 63-byte internal name type — OID 19.
     pub const NAME: u32 = 19;
 
-    // Integers
-    pub const INT8: u32 = 20; // bigint
-    pub const INT2: u32 = 21; // smallint
-    pub const INT4: u32 = 23; // integer
+    /// 8-byte signed integer (`bigint`) — OID 20.
+    pub const INT8: u32 = 20;
+    /// 2-byte signed integer (`smallint`) — OID 21.
+    pub const INT2: u32 = 21;
+    /// 4-byte signed integer (`integer`) — OID 23.
+    pub const INT4: u32 = 23;
 
-    // Text
+    /// Variable-length text (`text`) — OID 25.
     pub const TEXT: u32 = 25;
+    /// Variable-length text with limit (`varchar`) — OID 1043.
     pub const VARCHAR: u32 = 1043;
-    pub const BPCHAR: u32 = 1042; // blank-padded char
+    /// Blank-padded fixed-length character (`char(n)`) — OID 1042.
+    pub const BPCHAR: u32 = 1042;
 
-    // OID
+    /// Object identifier — OID 26.
     pub const OID: u32 = 26;
 
-    // JSON
+    /// JSON text (`json`) — OID 114.
     pub const JSON: u32 = 114;
+    /// Binary JSON (`jsonb`) — OID 3802.
     pub const JSONB: u32 = 3802;
 
-    // Float
+    /// 4-byte IEEE 754 float (`real`) — OID 700.
     pub const FLOAT4: u32 = 700;
+    /// 8-byte IEEE 754 float (`double precision`) — OID 701.
     pub const FLOAT8: u32 = 701;
 
-    // Numeric
+    /// Arbitrary-precision numeric (`numeric`) — OID 1700.
     pub const NUMERIC: u32 = 1700;
 
-    // Date/Time
+    /// Calendar date (`date`) — OID 1082.
     pub const DATE: u32 = 1082;
+    /// Time of day without timezone (`time`) — OID 1083.
     pub const TIME: u32 = 1083;
+    /// Date and time without timezone (`timestamp`) — OID 1114.
     pub const TIMESTAMP: u32 = 1114;
+    /// Date and time with timezone (`timestamptz`) — OID 1184.
     pub const TIMESTAMPTZ: u32 = 1184;
+    /// Time interval (`interval`) — OID 1186.
     pub const INTERVAL: u32 = 1186;
 
-    // UUID
+    /// UUID (`uuid`) — OID 2950.
     pub const UUID: u32 = 2950;
 
-    // Arrays (OID of element type + 1 in most cases, but actually defined separately)
+    /// `bool[]` array — OID 1000.
     pub const BOOL_ARRAY: u32 = 1000;
+    /// `int2[]` array — OID 1005.
     pub const INT2_ARRAY: u32 = 1005;
+    /// `int4[]` array — OID 1007.
     pub const INT4_ARRAY: u32 = 1007;
+    /// `int8[]` array — OID 1016.
     pub const INT8_ARRAY: u32 = 1016;
+    /// `text[]` array — OID 1009.
     pub const TEXT_ARRAY: u32 = 1009;
+    /// `varchar[]` array — OID 1015.
     pub const VARCHAR_ARRAY: u32 = 1015;
+    /// `float4[]` array — OID 1021.
     pub const FLOAT4_ARRAY: u32 = 1021;
+    /// `float8[]` array — OID 1022.
     pub const FLOAT8_ARRAY: u32 = 1022;
+    /// `uuid[]` array — OID 2951.
     pub const UUID_ARRAY: u32 = 2951;
+    /// `jsonb[]` array — OID 3807.
     pub const JSONB_ARRAY: u32 = 3807;
 }
 
@@ -215,7 +238,7 @@ pub fn decode_json(bytes: &[u8]) -> Result<String, String> {
 
 // ==================== Array Encoding/Decoding ====================
 
-/// Decode a PostgreSQL text-format array like {a,b,c} to Vec<String>.
+/// Decode a PostgreSQL text-format array like `{a,b,c}` to `Vec<String>`.
 /// This handles the common text-format arrays returned by PostgreSQL.
 pub fn decode_text_array(s: &str) -> Vec<String> {
     if s.is_empty() || s == "{}" {
@@ -259,7 +282,7 @@ pub fn decode_text_array(s: &str) -> Vec<String> {
     result
 }
 
-/// Encode a Vec<String> to PostgreSQL text-format array {a,b,c}.
+/// Encode a `Vec<String>` to PostgreSQL text-format array `{a,b,c}`.
 pub fn encode_text_array(items: &[String]) -> String {
     if items.is_empty() {
         return "{}".to_string();
@@ -284,7 +307,7 @@ pub fn encode_text_array(items: &[String]) -> String {
     format!("{{{}}}", escaped.join(","))
 }
 
-/// Decode a PostgreSQL text-format integer array to Vec<i64>.
+/// Decode a PostgreSQL text-format integer array to `Vec<i64>`.
 pub fn decode_int_array(s: &str) -> Result<Vec<i64>, String> {
     decode_text_array(s)
         .into_iter()

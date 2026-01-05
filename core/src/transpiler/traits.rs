@@ -94,6 +94,7 @@ pub trait SqlGenerator {
     fn bool_literal(&self, val: bool) -> String;
     /// Generate string concatenation expression (e.g. 'a' || 'b' vs CONCAT('a', 'b')).
     fn string_concat(&self, parts: &[&str]) -> String;
+    /// Generate LIMIT/OFFSET clause.
     fn limit_offset(&self, limit: Option<usize>, offset: Option<usize>) -> String;
     /// Generate JSON access syntax.
     /// path components are the keys to traverse.

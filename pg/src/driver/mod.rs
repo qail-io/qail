@@ -49,14 +49,23 @@ use qail_core::ast::Qail;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Metadata about the columns returned by a query.
+///
+/// Maps column names to positional indices and stores OID / format
+/// information so that [`PgRow`] values can be decoded correctly.
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
+    /// Lookup table from column name to zero-based index.
     pub name_to_index: HashMap<String, usize>,
+    /// PostgreSQL type OIDs, one per column.
     pub oids: Vec<u32>,
+    /// Wire format codes (0 = text, 1 = binary), one per column.
     pub formats: Vec<i16>,
 }
 
 impl ColumnInfo {
+    /// Build column metadata from the `RowDescription` field list
+    /// returned by the backend after a query.
     pub fn from_fields(fields: &[crate::protocol::FieldDescription]) -> Self {
         let mut name_to_index = HashMap::with_capacity(fields.len());
         let mut oids = Vec::with_capacity(fields.len());
@@ -78,22 +87,38 @@ impl ColumnInfo {
 
 /// PostgreSQL row with column data and metadata.
 pub struct PgRow {
+    /// Raw column values — `None` represents SQL `NULL`.
     pub columns: Vec<Option<Vec<u8>>>,
+    /// Shared column metadata for decoding values by name or type.
     pub column_info: Option<Arc<ColumnInfo>>,
 }
 
 /// Error type for PostgreSQL driver operations.
 #[derive(Debug)]
 pub enum PgError {
+    /// TCP / TLS connection failure with the PostgreSQL server.
     Connection(String),
+    /// Wire-protocol framing or decoding error.
     Protocol(String),
+    /// Authentication failure (bad password, unsupported mechanism, etc.).
     Auth(String),
+    /// Query execution error returned by the backend (e.g. constraint violation).
     Query(String),
+    /// The query returned zero rows when at least one was expected.
     NoRows,
-    /// I/O error
+    /// I/O error (preserves inner error for chaining)
     Io(std::io::Error),
     /// Encoding error (parameter limit, etc.)
     Encode(String),
+    /// Operation timed out (connection, acquire, query)
+    Timeout(String),
+    /// Pool exhausted — all connections are in use
+    PoolExhausted {
+        /// Maximum pool size that was reached.
+        max: usize,
+    },
+    /// Pool is closed and no longer accepting requests
+    PoolClosed,
 }
 
 impl std::fmt::Display for PgError {
@@ -106,11 +131,21 @@ impl std::fmt::Display for PgError {
             PgError::NoRows => write!(f, "No rows returned"),
             PgError::Io(e) => write!(f, "I/O error: {}", e),
             PgError::Encode(e) => write!(f, "Encode error: {}", e),
+            PgError::Timeout(ctx) => write!(f, "Timeout: {}", ctx),
+            PgError::PoolExhausted { max } => write!(f, "Pool exhausted ({} max connections)", max),
+            PgError::PoolClosed => write!(f, "Connection pool is closed"),
         }
     }
 }
 
-impl std::error::Error for PgError {}
+impl std::error::Error for PgError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PgError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for PgError {
     fn from(e: std::io::Error) -> Self {
@@ -161,6 +196,13 @@ impl PgDriver {
     }
 
     /// Connect to PostgreSQL and create a driver (trust mode, no password).
+    ///
+    /// # Arguments
+    ///
+    /// * `host` — PostgreSQL server hostname or IP.
+    /// * `port` — TCP port (typically 5432).
+    /// * `user` — PostgreSQL role name.
+    /// * `database` — Target database name.
     pub async fn connect(host: &str, port: u16, user: &str, database: &str) -> PgResult<Self> {
         let connection = PgConnection::connect(host, port, user, database).await?;
         Ok(Self::new(connection))
@@ -322,7 +364,7 @@ impl PgDriver {
             Self::connect_with_password(host, port, user, database, password),
         )
         .await
-        .map_err(|_| PgError::Connection(format!("Connection timeout after {:?}", timeout)))?
+        .map_err(|_| PgError::Timeout(format!("connection after {:?}", timeout)))?
     }
     /// Clear the prepared statement cache.
     /// Frees memory by removing all cached statements.
@@ -1249,7 +1291,7 @@ impl PgDriverBuilder {
                     PgDriver::connect(host, port, user, database),
                 )
                 .await
-                .map_err(|_| PgError::Connection(format!("Connection timeout after {:?}", timeout)))?
+                .map_err(|_| PgError::Timeout(format!("connection after {:?}", timeout)))?
             }
             (None, None) => {
                 PgDriver::connect(host, port, user, database).await

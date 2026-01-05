@@ -20,7 +20,12 @@ pub enum WorkflowError {
     /// Notification delivery failed
     NotifyFailed(String),
     /// No transition found for current state
-    NoTransition { state: String, workflow: String },
+    NoTransition {
+        /// Current state that has no outgoing transition.
+        state: String,
+        /// Workflow definition name.
+        workflow: String,
+    },
     /// Context key not found
     MissingContextKey(String),
     /// Workflow has reached a terminal state
@@ -28,7 +33,10 @@ pub enum WorkflowError {
     /// State persistence failed
     PersistenceFailed(String),
     /// Timeout reached while waiting
-    Timeout { event: String },
+    Timeout {
+        /// Name of the event that timed out.
+        event: String,
+    },
     /// Payment charge creation failed
     ChargeFailed(String),
     /// Generic error
