@@ -10,35 +10,55 @@ use std::fmt;
 /// - Zero runtime parsing overhead
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
+    /// UUID.
     Uuid,
+    /// TEXT.
     Text,
+    /// VARCHAR with optional length.
     Varchar(Option<u16>),
+    /// INTEGER (32-bit).
     Int,
     /// BIGINT (64-bit)
     BigInt,
+    /// SERIAL (auto-incrementing 32-bit).
     Serial,
     /// BIGSERIAL (auto-incrementing 64-bit)
     BigSerial,
+    /// BOOLEAN.
     Bool,
+    /// DOUBLE PRECISION.
     Float,
-    Decimal(Option<(u8, u8)>), // (precision, scale)
+    /// DECIMAL with optional (precision, scale).
+    Decimal(Option<(u8, u8)>),
+    /// JSONB.
     Jsonb,
+    /// TIMESTAMP without timezone.
     Timestamp,
     /// TIMESTAMP with timezone
     Timestamptz,
+    /// DATE.
     Date,
+    /// TIME.
     Time,
+    /// BYTEA.
     Bytea,
     // ==================== Phase 6: ARRAY/ENUM ====================
+    /// ARRAY of inner type.
     Array(Box<ColumnType>),
     /// Custom ENUM type
     Enum {
+        /// Enum type name.
         name: String,
+        /// Allowed values.
         values: Vec<String>,
     },
+    /// Range type.
     Range(String),
+    /// INTERVAL.
     Interval,
+    /// CIDR.
     Cidr,
+    /// INET.
     Inet,
     /// MACADDR
     MacAddr,

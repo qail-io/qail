@@ -36,6 +36,7 @@ pub struct Schema {
     /// Schema format version (extracted from `-- qail: version=N` directive)
     #[serde(default)]
     pub version: Option<u32>,
+    /// Table definitions.
     pub tables: Vec<TableDef>,
     /// RLS policies declared in the schema
     #[serde(default)]
@@ -48,9 +49,13 @@ pub struct Schema {
 /// Index definition parsed from `index <name> on <table> (<columns>) [unique]`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexDef {
+    /// Index name.
     pub name: String,
+    /// Table this index belongs to.
     pub table: String,
+    /// Columns included in the index.
     pub columns: Vec<String>,
+    /// Whether this is a UNIQUE index.
     #[serde(default)]
     pub unique: bool,
 }
@@ -69,34 +74,45 @@ impl IndexDef {
     }
 }
 
+/// Table definition parsed from a `.qail` schema file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableDef {
+    /// Table name.
     pub name: String,
+    /// Column definitions.
     pub columns: Vec<ColumnDef>,
-    /// Whether this table has RLS enabled
+    /// Whether this table has RLS enabled.
     #[serde(default)]
     pub enable_rls: bool,
 }
 
+/// Column definition parsed from a `.qail` schema file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnDef {
+    /// Column name.
     pub name: String,
+    /// SQL data type (lowercased).
     #[serde(rename = "type", alias = "typ")]
     pub typ: String,
-    /// Type is an array (e.g., text[], uuid[])
+    /// Type is an array (e.g., text[], uuid[]).
     #[serde(default)]
     pub is_array: bool,
-    /// Type parameters (e.g., varchar(255) -> Some(vec!["255"]), decimal(10,2) -> Some(vec!["10", "2"]))
+    /// Type parameters (e.g., varchar(255) → Some(vec!["255"]), decimal(10,2) → Some(vec!["10", "2"])).
     #[serde(default)]
     pub type_params: Option<Vec<String>>,
+    /// Whether the column accepts NULL.
     #[serde(default)]
     pub nullable: bool,
+    /// Whether the column is a primary key.
     #[serde(default)]
     pub primary_key: bool,
+    /// Whether the column has a UNIQUE constraint.
     #[serde(default)]
     pub unique: bool,
     #[serde(default)]
+    /// Foreign key reference (e.g. "users(id)").
     pub references: Option<String>,
+    /// Default value expression.
     #[serde(default)]
     pub default_value: Option<String>,
     /// Check constraint expression

@@ -12,7 +12,7 @@ pub fn func(name: &str, args: Vec<Expr>) -> FunctionBuilder {
     }
 }
 
-/// COALESCE(args...) function
+/// Build a `COALESCE(args...)` expression that returns the first non-NULL argument.
 pub fn coalesce<E: Into<Expr>>(args: impl IntoIterator<Item = E>) -> FunctionBuilder {
     func("COALESCE", args.into_iter().map(|e| e.into()).collect())
 }

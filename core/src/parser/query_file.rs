@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 /// Collection of named queries from a queries.qail file
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct QueryFile {
+    /// Named query definitions.
     pub queries: Vec<QueryDef>,
 }
 
@@ -35,16 +36,20 @@ pub struct QueryDef {
     pub name: String,
     /// Parameters with types
     pub params: Vec<QueryParam>,
+    /// Return type (None for execute-only queries).
     pub return_type: Option<ReturnType>,
-    /// The QAIL query body
+    /// The QAIL query body.
     pub body: String,
+    /// Whether this is an `execute` (write) rather than `query` (read).
     pub is_execute: bool,
 }
 
 /// Query parameter
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryParam {
+    /// Parameter name.
     pub name: String,
+    /// Parameter type (e.g., "Uuid", "String").
     pub typ: String,
 }
 
@@ -53,9 +58,9 @@ pub struct QueryParam {
 pub enum ReturnType {
     /// Single result: -> User
     Single(String),
-    /// Multiple results: -> Vec<User>
+    /// Multiple results: -> `Vec<User>`
     Vec(String),
-    /// Optional result: -> Option<User>
+    /// Optional result: -> `Option<User>`
     Option(String),
 }
 

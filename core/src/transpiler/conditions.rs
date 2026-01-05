@@ -5,6 +5,7 @@ use crate::ast::*;
 /// Context for parameterized query building.
 #[derive(Debug, Default)]
 pub struct ParamContext {
+    /// Current parameter index (1-based).
     pub index: usize,
     /// Collected parameter values in order
     pub params: Vec<Value>,
@@ -13,6 +14,7 @@ pub struct ParamContext {
 }
 
 impl ParamContext {
+    /// Create a new empty parameter context.
     pub fn new() -> Self {
         Self {
             index: 0,
@@ -81,8 +83,11 @@ fn resolve_col_syntax(col: &str, cmd: &Qail, generator: &dyn SqlGenerator) -> St
 }
 
 #[allow(clippy::borrowed_box)]
+/// Trait for converting AST conditions to SQL strings.
 pub trait ConditionToSql {
+    /// Render this condition as a SQL string.
     fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&Qail>) -> String;
+    /// Render the right-hand value of this condition as a SQL string.
     fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String;
 
     /// Convert condition to SQL with parameterized values.

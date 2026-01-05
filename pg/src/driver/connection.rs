@@ -88,6 +88,13 @@ pub struct PgConnection {
 
 impl PgConnection {
     /// Connect to PostgreSQL server without authentication (trust mode).
+    ///
+    /// # Arguments
+    ///
+    /// * `host` — PostgreSQL server hostname or IP.
+    /// * `port` — TCP port (typically 5432).
+    /// * `user` — PostgreSQL role name.
+    /// * `database` — Target database name.
     pub async fn connect(host: &str, port: u16, user: &str, database: &str) -> PgResult<Self> {
         Self::connect_with_password(host, port, user, database, None).await
     }

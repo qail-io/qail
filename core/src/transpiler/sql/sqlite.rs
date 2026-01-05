@@ -1,5 +1,6 @@
 use super::super::traits::SqlGenerator;
 
+/// SQLite-specific SQL generator.
 pub struct SqliteGenerator;
 
 impl SqlGenerator for SqliteGenerator {

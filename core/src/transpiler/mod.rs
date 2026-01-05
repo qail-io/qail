@@ -1,15 +1,22 @@
 //! SQL Transpiler for QAIL AST.
 //!
 
+/// Condition-to-SQL conversion.
 pub mod conditions;
+/// DDL statement transpilation (CREATE TABLE, ALTER TABLE, etc.).
 pub mod ddl;
+/// SQL dialect selection (PostgreSQL, MySQL, SQLite).
 pub mod dialect;
+/// DML statement transpilation (INSERT, UPDATE, DELETE).
 pub mod dml;
+/// RLS policy transpilation (CREATE POLICY).
 pub mod policy;
+/// Core SQL generation utilities.
 pub mod sql;
+/// Transpiler traits (SqlGenerator, escape_identifier).
 pub mod traits;
 
-// NoSQL transpilers (organized in nosql/ subdirectory)
+/// NoSQL transpilers (DynamoDB, MongoDB, Qdrant).
 pub mod nosql;
 pub use nosql::dynamo::ToDynamo;
 pub use nosql::mongo::ToMongo;

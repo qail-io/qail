@@ -23,24 +23,34 @@
 use crate::validator::Validator;
 use serde::{Deserialize, Serialize};
 
+/// A database schema comprising one or more table definitions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schema {
+    /// Table definitions.
     pub tables: Vec<TableDef>,
 }
 
+/// Definition of a single table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableDef {
+    /// Table name.
     pub name: String,
+    /// Column definitions.
     pub columns: Vec<ColumnDef>,
 }
 
+/// Definition of a single column.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnDef {
+    /// Column name.
     pub name: String,
+    /// SQL data type.
     #[serde(rename = "type", alias = "typ")]
     pub typ: String,
+    /// Whether the column accepts NULL.
     #[serde(default)]
     pub nullable: bool,
+    /// Whether the column is a primary key.
     #[serde(default)]
     pub primary_key: bool,
 }
@@ -382,6 +392,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::sync::LazyLock;
 
+/// Registry of table foreign-key relationships for auto-join inference.
 #[derive(Debug, Default)]
 pub struct RelationRegistry {
     /// Forward lookups: (from_table, to_table) -> (from_col, to_col)
@@ -396,7 +407,14 @@ impl RelationRegistry {
         Self::default()
     }
     
-    /// Register a relation from schema.
+    /// Register a foreign-key relation from schema.
+    ///
+    /// # Arguments
+    ///
+    /// * `from_table` — Source (referencing) table.
+    /// * `from_col` — Foreign-key column in the source table.
+    /// * `to_table` — Target (referenced) table.
+    /// * `to_col` — Primary-key column in the target table.
     pub fn register(&mut self, from_table: &str, from_col: &str, to_table: &str, to_col: &str) {
         self.forward.insert(
             (from_table.to_string(), to_table.to_string()),
@@ -410,7 +428,13 @@ impl RelationRegistry {
     }
     
     /// Lookup join columns for a relation.
-    /// Returns (from_col, to_col) if relation exists.
+    ///
+    /// Returns `(from_col, to_col)` if the relation exists.
+    ///
+    /// # Arguments
+    ///
+    /// * `from_table` — Source table name.
+    /// * `to_table` — Target table name.
     pub fn get(&self, from_table: &str, to_table: &str) -> Option<(&str, &str)> {
         self.forward
             .get(&(from_table.to_string(), to_table.to_string()))

@@ -1,6 +1,6 @@
 //! Type-safe builder methods for compile-time type checking.
 //!
-//! These methods use TypedColumn<T> and ColumnValue<C> to enforce
+//! These methods use `TypedColumn<T>` and `ColumnValue<C>` to enforce
 //! that values match column types at compile time.
 //!
 //! # Example
@@ -19,8 +19,13 @@ use crate::typed::{ColumnValue, TypedColumn};
 
 impl Qail {
     /// Type-safe equality condition.
-    /// 
+    ///
     /// Enforces at compile time that the value type matches the column type.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_eq<T, V>(mut self, col: TypedColumn<T>, value: V) -> Self
     where
         V: Into<Value> + ColumnValue<T>,
@@ -36,6 +41,11 @@ impl Qail {
     }
     
     /// Type-safe not-equal condition.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_ne<T, V>(mut self, col: TypedColumn<T>, value: V) -> Self
     where
         V: Into<Value> + ColumnValue<T>,
@@ -51,6 +61,11 @@ impl Qail {
     }
     
     /// Type-safe greater-than condition.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_gt<T, V>(mut self, col: TypedColumn<T>, value: V) -> Self
     where
         V: Into<Value> + ColumnValue<T>,
@@ -66,6 +81,11 @@ impl Qail {
     }
     
     /// Type-safe less-than condition.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_lt<T, V>(mut self, col: TypedColumn<T>, value: V) -> Self
     where
         V: Into<Value> + ColumnValue<T>,
@@ -81,6 +101,11 @@ impl Qail {
     }
     
     /// Type-safe greater-than-or-equal condition.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_gte<T, V>(mut self, col: TypedColumn<T>, value: V) -> Self
     where
         V: Into<Value> + ColumnValue<T>,
@@ -96,6 +121,11 @@ impl Qail {
     }
     
     /// Type-safe less-than-or-equal condition.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_lte<T, V>(mut self, col: TypedColumn<T>, value: V) -> Self
     where
         V: Into<Value> + ColumnValue<T>,
@@ -117,6 +147,12 @@ impl Qail {
     }
     
     /// Type-safe filter with custom operator.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `op` — Comparison operator.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_filter<T, V>(mut self, col: TypedColumn<T>, op: Operator, value: V) -> Self
     where
         V: Into<Value> + ColumnValue<T>,

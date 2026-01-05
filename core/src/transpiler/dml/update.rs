@@ -4,6 +4,7 @@ use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
+/// Generate UPDATE SQL with SET, FROM, and WHERE clauses.
 pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let mut sql = if cmd.only_table {

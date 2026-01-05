@@ -5,6 +5,7 @@
 use crate::ast::{Action, Qail};
 
 impl Qail {
+    /// SELECT — query rows.
     pub fn get(table: impl Into<String>) -> Self {
         Self {
             action: Action::Get,
@@ -13,6 +14,7 @@ impl Qail {
         }
     }
 
+    /// Raw SQL pass-through.
     pub fn raw_sql(sql: impl Into<String>) -> Self {
         Self {
             action: Action::Get,
@@ -21,6 +23,7 @@ impl Qail {
         }
     }
 
+    /// UPDATE — modify rows.
     pub fn set(table: impl Into<String>) -> Self {
         Self {
             action: Action::Set,
@@ -29,6 +32,7 @@ impl Qail {
         }
     }
 
+    /// DELETE — remove rows.
     pub fn del(table: impl Into<String>) -> Self {
         Self {
             action: Action::Del,
@@ -37,6 +41,7 @@ impl Qail {
         }
     }
 
+    /// INSERT — add rows.
     pub fn add(table: impl Into<String>) -> Self {
         Self {
             action: Action::Add,
@@ -45,6 +50,7 @@ impl Qail {
         }
     }
 
+    /// UPSERT — insert or update.
     pub fn put(table: impl Into<String>) -> Self {
         Self {
             action: Action::Put,
@@ -53,6 +59,7 @@ impl Qail {
         }
     }
 
+    /// COPY … TO — export data.
     pub fn export(table: impl Into<String>) -> Self {
         Self {
             action: Action::Export,
@@ -61,6 +68,7 @@ impl Qail {
         }
     }
 
+    /// CREATE TABLE.
     pub fn make(table: impl Into<String>) -> Self {
         Self {
             action: Action::Make,
@@ -69,6 +77,7 @@ impl Qail {
         }
     }
 
+    /// TRUNCATE — empty a table.
     pub fn truncate(table: impl Into<String>) -> Self {
         Self {
             action: Action::Truncate,
@@ -77,6 +86,7 @@ impl Qail {
         }
     }
 
+    /// EXPLAIN — show query plan.
     pub fn explain(table: impl Into<String>) -> Self {
         Self {
             action: Action::Explain,
@@ -85,6 +95,7 @@ impl Qail {
         }
     }
 
+    /// EXPLAIN ANALYZE — show query plan with execution stats.
     pub fn explain_analyze(table: impl Into<String>) -> Self {
         Self {
             action: Action::ExplainAnalyze,
@@ -93,6 +104,7 @@ impl Qail {
         }
     }
 
+    /// LOCK TABLE.
     pub fn lock(table: impl Into<String>) -> Self {
         Self {
             action: Action::Lock,
@@ -101,6 +113,7 @@ impl Qail {
         }
     }
 
+    /// CREATE MATERIALIZED VIEW.
     pub fn create_materialized_view(name: impl Into<String>, query: Qail) -> Self {
         Self {
             action: Action::CreateMaterializedView,
@@ -110,6 +123,7 @@ impl Qail {
         }
     }
 
+    /// REFRESH MATERIALIZED VIEW.
     pub fn refresh_materialized_view(name: impl Into<String>) -> Self {
         Self {
             action: Action::RefreshMaterializedView,
@@ -118,6 +132,7 @@ impl Qail {
         }
     }
 
+    /// DROP MATERIALIZED VIEW.
     pub fn drop_materialized_view(name: impl Into<String>) -> Self {
         Self {
             action: Action::DropMaterializedView,

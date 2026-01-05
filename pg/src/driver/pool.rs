@@ -9,24 +9,55 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 
+/// Configuration for a PostgreSQL connection pool.
+///
+/// Use the builder pattern to customise settings:
+///
+/// ```ignore
+/// use std::time::Duration;
+/// use qail_pg::driver::pool::PoolConfig;
+/// let config = PoolConfig::new("localhost", 5432, "app", "mydb")
+///     .password("secret")
+///     .max_connections(20)
+///     .acquire_timeout(Duration::from_secs(5));
+/// ```
 #[derive(Clone)]
 pub struct PoolConfig {
+    /// PostgreSQL server hostname or IP address.
     pub host: String,
+    /// PostgreSQL server port (default: 5432).
     pub port: u16,
+    /// Database role / user name.
     pub user: String,
+    /// Target database name.
     pub database: String,
+    /// Optional password for authentication.
     pub password: Option<String>,
+    /// Hard upper limit on simultaneous connections (default: 10).
     pub max_connections: usize,
+    /// Minimum idle connections kept warm in the pool (default: 1).
     pub min_connections: usize,
+    /// Close idle connections after this duration (default: 10 min).
     pub idle_timeout: Duration,
+    /// Maximum time to wait when acquiring a connection (default: 30s).
     pub acquire_timeout: Duration,
+    /// TCP connect timeout for new connections (default: 10s).
     pub connect_timeout: Duration,
+    /// Optional maximum lifetime of any connection in the pool.
     pub max_lifetime: Option<Duration>,
+    /// When `true`, run a health check (`SELECT 1`) before handing out a connection.
     pub test_on_acquire: bool,
 }
 
 impl PoolConfig {
     /// Create a new pool configuration with sensible defaults.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` — PostgreSQL server hostname or IP.
+    /// * `port` — TCP port (typically 5432).
+    /// * `user` — PostgreSQL role name.
+    /// * `database` — Target database name.
     pub fn new(host: &str, port: u16, user: &str, database: &str) -> Self {
         Self {
             host: host.to_string(),
@@ -50,6 +81,7 @@ impl PoolConfig {
         self
     }
 
+    /// Set maximum simultaneous connections.
     pub fn max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
         self
@@ -163,11 +195,15 @@ fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, Option<Stri
 /// Pool statistics for monitoring.
 #[derive(Debug, Clone, Default)]
 pub struct PoolStats {
+    /// Connections currently checked out by callers.
     pub active: usize,
+    /// Connections idle in the pool, ready for reuse.
     pub idle: usize,
+    /// Callers waiting for a connection.
     pub pending: usize,
     /// Maximum connections configured
     pub max_size: usize,
+    /// Cumulative connections created since pool startup.
     pub total_created: usize,
 }
 

@@ -31,6 +31,12 @@ pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<By
 /// Build Extended Query protocol into a CALLER-PROVIDED buffer (ZERO-ALLOC).
 /// Clears the buffer first but keeps capacity for reuse.
 /// Includes Describe to get RowDescription (column metadata).
+///
+/// # Arguments
+///
+/// * `buf` — Caller-owned buffer to write protocol messages into.
+/// * `sql` — SQL query bytes.
+/// * `params` — Bind parameter values; `None` entries encode as SQL NULL.
 pub fn build_extended_query_into(buf: &mut BytesMut, sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<(), EncodeError> {
     if params.len() > i16::MAX as usize {
         return Err(EncodeError::TooManyParameters(params.len()));

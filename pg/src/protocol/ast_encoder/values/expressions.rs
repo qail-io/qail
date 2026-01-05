@@ -644,8 +644,15 @@ pub fn encode_conditions(
     Ok(())
 }
 
-/// Encode value - extract to parameter or inline.
-/// Returns Err if the value contains invalid data (e.g., NULL byte in string).
+/// Encode a value — extract to a bind parameter or inline as a literal.
+///
+/// Returns `Err` if the value contains invalid data (e.g., NULL byte in string).
+///
+/// # Arguments
+///
+/// * `value` — AST value to encode.
+/// * `buf` — Output buffer to append the SQL fragment to.
+/// * `params` — Accumulator for parameterized bind values.
 pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
     use crate::protocol::EncodeError;
     

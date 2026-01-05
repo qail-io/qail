@@ -4,9 +4,13 @@ use serde::{Deserialize, Serialize};
 /// A single condition within a cage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Condition {
+    /// Left-hand expression.
     pub left: Expr,
+    /// Comparison operator.
     pub op: Operator,
+    /// Right-hand value.
     pub value: Value,
+    /// Whether to unnest array values.
     #[serde(default)]
     pub is_array_unnest: bool,
 }

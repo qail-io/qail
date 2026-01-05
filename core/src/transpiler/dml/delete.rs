@@ -4,6 +4,7 @@ use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
+/// Generate DELETE FROM SQL with optional USING and WHERE clauses.
 pub fn build_delete(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let mut sql = if cmd.only_table {
