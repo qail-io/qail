@@ -58,6 +58,7 @@ impl SuperAdminToken {
     }
 }
 
+/// RLS context carrying tenant identity for data isolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RlsContext {
     /// The operator (vendor) this context is scoped to.

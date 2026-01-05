@@ -31,11 +31,13 @@ impl MigrationMeta {
         }
     }
 
+    /// Set migration dependencies.
     pub fn with_depends(mut self, deps: Vec<String>) -> Self {
         self.depends = deps;
         self
     }
 
+    /// Set migration author.
     pub fn with_author(mut self, author: &str) -> Self {
         self.author = Some(author.to_string());
         self

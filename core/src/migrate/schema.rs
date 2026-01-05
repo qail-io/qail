@@ -21,8 +21,11 @@ use std::collections::HashMap;
 /// A complete database schema.
 #[derive(Debug, Clone, Default)]
 pub struct Schema {
+    /// Declared tables.
     pub tables: HashMap<String, Table>,
+    /// Declared indexes.
     pub indexes: Vec<Index>,
+    /// Migration hints (renames, transforms, drops).
     pub migrations: Vec<MigrationHint>,
     /// PostgreSQL extensions (e.g. uuid-ossp, pgcrypto, PostGIS)
     pub extensions: Vec<Extension>,
@@ -32,11 +35,11 @@ pub struct Schema {
     pub sequences: Vec<Sequence>,
     /// Standalone ENUM types
     pub enums: Vec<EnumType>,
-    /// Views
+    /// SQL views (CREATE VIEW / CREATE MATERIALIZED VIEW).
     pub views: Vec<ViewDef>,
     /// PL/pgSQL functions
     pub functions: Vec<SchemaFunctionDef>,
-    /// Triggers
+    /// Database triggers (CREATE TRIGGER).
     pub triggers: Vec<SchemaTriggerDef>,
     /// GRANT/REVOKE permissions
     pub grants: Vec<Grant>,
@@ -53,8 +56,11 @@ pub struct Schema {
 /// Kind of infrastructure resource declared in schema.qail.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResourceKind {
+    /// Object storage bucket.
     Bucket,
+    /// Message queue.
     Queue,
+    /// Pub/sub topic.
     Topic,
 }
 
@@ -78,15 +84,22 @@ impl std::fmt::Display for ResourceKind {
 /// ```
 #[derive(Debug, Clone)]
 pub struct ResourceDef {
+    /// Resource name (e.g. `"avatars"`).
     pub name: String,
+    /// Kind of resource.
     pub kind: ResourceKind,
+    /// Cloud provider (e.g. `"s3"`, `"gcs"`).
     pub provider: Option<String>,
+    /// Arbitrary key-value properties.
     pub properties: HashMap<String, String>,
 }
 
+/// A table definition in the schema.
 #[derive(Debug, Clone)]
 pub struct Table {
+    /// Table name.
     pub name: String,
+    /// Column definitions.
     pub columns: Vec<Column>,
     /// Table-level multi-column foreign keys
     pub multi_column_fks: Vec<MultiColumnForeignKey>,
@@ -99,12 +112,19 @@ pub struct Table {
 /// A column definition with compile-time type safety.
 #[derive(Debug, Clone)]
 pub struct Column {
+    /// Column name.
     pub name: String,
+    /// Compile-time validated data type.
     pub data_type: ColumnType,
+    /// Whether the column accepts NULL.
     pub nullable: bool,
+    /// Whether this column is a primary key.
     pub primary_key: bool,
+    /// Whether this column has a UNIQUE constraint.
     pub unique: bool,
+    /// Default value expression.
     pub default: Option<String>,
+    /// Foreign key reference.
     pub foreign_key: Option<ForeignKey>,
     /// CHECK constraint (Phase 1)
     pub check: Option<CheckConstraint>,
@@ -115,9 +135,13 @@ pub struct Column {
 /// Foreign key reference definition.
 #[derive(Debug, Clone)]
 pub struct ForeignKey {
+    /// Referenced table name.
     pub table: String,
+    /// Referenced column name.
     pub column: String,
+    /// Action taken when the referenced row is deleted.
     pub on_delete: FkAction,
+    /// Action taken when the referenced row is updated.
     pub on_update: FkAction,
     /// DEFERRABLE clause (Phase 2)
     pub deferrable: Deferrable,
@@ -127,18 +151,28 @@ pub struct ForeignKey {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum FkAction {
     #[default]
+    /// No action on referenced row change.
     NoAction,
+    /// Cascade the delete/update to referencing rows.
     Cascade,
+    /// Set referencing column to NULL.
     SetNull,
+    /// Set referencing column to its DEFAULT.
     SetDefault,
+    /// Prevent the action (raises error).
     Restrict,
 }
 
+/// An index definition.
 #[derive(Debug, Clone)]
 pub struct Index {
+    /// Index name.
     pub name: String,
+    /// Table the index belongs to.
     pub table: String,
+    /// Columns covered by the index.
     pub columns: Vec<String>,
+    /// Whether the index enforces uniqueness.
     pub unique: bool,
     /// Index method (Phase 4): btree, hash, gin, gist, brin
     pub method: IndexMethod,
@@ -152,14 +186,30 @@ pub struct Index {
     pub expressions: Vec<String>,
 }
 
+/// Hints for the migration diff engine to improve migration quality.
 #[derive(Debug, Clone)]
 pub enum MigrationHint {
     /// Rename a column (not delete + add)
-    Rename { from: String, to: String },
+    Rename {
+        /// Original column name.
+        from: String,
+        /// New column name.
+        to: String,
+    },
     /// Transform data with expression
-    Transform { expression: String, target: String },
+    Transform {
+        /// SQL expression for data transformation.
+        expression: String,
+        /// Target column name.
+        target: String,
+    },
     /// Drop with confirmation
-    Drop { target: String, confirmed: bool },
+    Drop {
+        /// Target name to drop.
+        target: String,
+        /// Whether the drop has been confirmed.
+        confirmed: bool,
+    },
 }
 
 // ============================================================================
@@ -170,31 +220,89 @@ pub enum MigrationHint {
 #[derive(Debug, Clone)]
 pub enum CheckExpr {
     /// column > value
-    GreaterThan { column: String, value: i64 },
+    GreaterThan {
+        /// Column name.
+        column: String,
+        /// Comparison value.
+        value: i64,
+    },
     /// column >= value
-    GreaterOrEqual { column: String, value: i64 },
+    GreaterOrEqual {
+        /// Column name.
+        column: String,
+        /// Comparison value.
+        value: i64,
+    },
     /// column < value
-    LessThan { column: String, value: i64 },
+    LessThan {
+        /// Column name.
+        column: String,
+        /// Comparison value.
+        value: i64,
+    },
     /// column <= value
-    LessOrEqual { column: String, value: i64 },
-    Between { column: String, low: i64, high: i64 },
-    In { column: String, values: Vec<String> },
+    LessOrEqual {
+        /// Column name.
+        column: String,
+        /// Comparison value.
+        value: i64,
+    },
+    /// value BETWEEN low AND high
+    Between {
+        /// Column name.
+        column: String,
+        /// Lower bound.
+        low: i64,
+        /// Upper bound.
+        high: i64,
+    },
+    /// column IN (values)
+    In {
+        /// Column name.
+        column: String,
+        /// Allowed values.
+        values: Vec<String>,
+    },
     /// column ~ pattern (regex)
-    Regex { column: String, pattern: String },
+    Regex {
+        /// Column name.
+        column: String,
+        /// Regex pattern.
+        pattern: String,
+    },
     /// LENGTH(column) <= max
-    MaxLength { column: String, max: usize },
+    MaxLength {
+        /// Column name.
+        column: String,
+        /// Maximum allowed length.
+        max: usize,
+    },
     /// LENGTH(column) >= min
-    MinLength { column: String, min: usize },
-    NotNull { column: String },
+    MinLength {
+        /// Column name.
+        column: String,
+        /// Minimum required length.
+        min: usize,
+    },
+    /// column IS NOT NULL
+    NotNull {
+        /// Column name.
+        column: String,
+    },
+    /// Logical AND of two expressions.
     And(Box<CheckExpr>, Box<CheckExpr>),
+    /// Logical OR of two expressions.
     Or(Box<CheckExpr>, Box<CheckExpr>),
+    /// Logical NOT of an expression.
     Not(Box<CheckExpr>),
 }
 
 /// CHECK constraint with optional name
 #[derive(Debug, Clone)]
 pub struct CheckConstraint {
+    /// The constraint expression.
     pub expr: CheckExpr,
+    /// Optional constraint name.
     pub name: Option<String>,
 }
 
@@ -206,9 +314,13 @@ pub struct CheckConstraint {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum Deferrable {
     #[default]
+    /// Not deferrable (default).
     NotDeferrable,
+    /// DEFERRABLE (initially immediate).
     Deferrable,
+    /// DEFERRABLE INITIALLY DEFERRED.
     InitiallyDeferred,
+    /// DEFERRABLE INITIALLY IMMEDIATE.
     InitiallyImmediate,
 }
 
@@ -235,11 +347,17 @@ pub enum Generated {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum IndexMethod {
     #[default]
+    /// B-tree (default for most columns).
     BTree,
+    /// Hash (equality-only lookups).
     Hash,
+    /// GIN (full-text search, JSONB).
     Gin,
+    /// GiST (geometric, range types).
     Gist,
+    /// BRIN (large, naturally-ordered tables).
     Brin,
+    /// SP-GiST (space-partitioned).
     SpGist,
 }
 
@@ -250,12 +368,16 @@ pub enum IndexMethod {
 /// PostgreSQL extension (e.g. `CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Extension {
+    /// Extension name (e.g. `"uuid-ossp"`).
     pub name: String,
+    /// Target schema.
     pub schema: Option<String>,
+    /// Pinned version.
     pub version: Option<String>,
 }
 
 impl Extension {
+    /// Create a new extension declaration.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -264,11 +386,13 @@ impl Extension {
         }
     }
 
+    /// Set the target schema.
     pub fn schema(mut self, schema: impl Into<String>) -> Self {
         self.schema = Some(schema.into());
         self
     }
 
+    /// Pin to a specific version.
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
         self
@@ -278,17 +402,28 @@ impl Extension {
 /// COMMENT ON TABLE/COLUMN
 #[derive(Debug, Clone, PartialEq)]
 pub struct Comment {
+    /// What the comment is attached to.
     pub target: CommentTarget,
+    /// Comment text.
     pub text: String,
 }
 
+/// Target of a COMMENT ON statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommentTarget {
+    /// COMMENT ON TABLE.
     Table(String),
-    Column { table: String, column: String },
+    /// COMMENT ON COLUMN.
+    Column {
+        /// Table name.
+        table: String,
+        /// Column name.
+        column: String,
+    },
 }
 
 impl Comment {
+    /// Create a comment on a table.
     pub fn on_table(table: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             target: CommentTarget::Table(table.into()),
@@ -296,6 +431,7 @@ impl Comment {
         }
     }
 
+    /// Create a comment on a column.
     pub fn on_column(
         table: impl Into<String>,
         column: impl Into<String>,
@@ -314,18 +450,28 @@ impl Comment {
 /// Standalone sequence (CREATE SEQUENCE)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sequence {
+    /// Sequence name.
     pub name: String,
+    /// Data type (e.g. `"bigint"`).
     pub data_type: Option<String>,
+    /// START WITH value.
     pub start: Option<i64>,
+    /// INCREMENT BY value.
     pub increment: Option<i64>,
+    /// Minimum value for the sequence (MINVALUE clause).
     pub min_value: Option<i64>,
+    /// Maximum value for the sequence (MAXVALUE clause).
     pub max_value: Option<i64>,
+    /// CACHE size.
     pub cache: Option<i64>,
+    /// Whether the sequence wraps around.
     pub cycle: bool,
+    /// OWNED BY column reference.
     pub owned_by: Option<String>,
 }
 
 impl Sequence {
+    /// Create a new sequence.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -340,36 +486,43 @@ impl Sequence {
         }
     }
 
+    /// Set the START WITH value.
     pub fn start(mut self, v: i64) -> Self {
         self.start = Some(v);
         self
     }
 
+    /// Set the INCREMENT BY value.
     pub fn increment(mut self, v: i64) -> Self {
         self.increment = Some(v);
         self
     }
 
+    /// Set the MINVALUE.
     pub fn min_value(mut self, v: i64) -> Self {
         self.min_value = Some(v);
         self
     }
 
+    /// Set the MAXVALUE.
     pub fn max_value(mut self, v: i64) -> Self {
         self.max_value = Some(v);
         self
     }
 
+    /// Set the CACHE size.
     pub fn cache(mut self, v: i64) -> Self {
         self.cache = Some(v);
         self
     }
 
+    /// Enable CYCLE (wrap around at limit).
     pub fn cycle(mut self) -> Self {
         self.cycle = true;
         self
     }
 
+    /// Set the OWNED BY column reference.
     pub fn owned_by(mut self, col: impl Into<String>) -> Self {
         self.owned_by = Some(col.into());
         self
@@ -383,11 +536,14 @@ impl Sequence {
 /// Standalone ENUM type (CREATE TYPE ... AS ENUM)
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumType {
+    /// Type name.
     pub name: String,
+    /// Allowed values.
     pub values: Vec<String>,
 }
 
 impl EnumType {
+    /// Create a new enum type.
     pub fn new(name: impl Into<String>, values: Vec<String>) -> Self {
         Self {
             name: name.into(),
@@ -405,16 +561,24 @@ impl EnumType {
 /// Table-level multi-column foreign key
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiColumnForeignKey {
+    /// Source columns.
     pub columns: Vec<String>,
+    /// Referenced table.
     pub ref_table: String,
+    /// Referenced columns.
     pub ref_columns: Vec<String>,
+    /// ON DELETE action.
     pub on_delete: FkAction,
+    /// ON UPDATE action.
     pub on_update: FkAction,
+    /// Deferral mode.
     pub deferrable: Deferrable,
+    /// Optional constraint name.
     pub name: Option<String>,
 }
 
 impl MultiColumnForeignKey {
+    /// Create a new multi-column foreign key.
     pub fn new(
         columns: Vec<String>,
         ref_table: impl Into<String>,
@@ -431,16 +595,19 @@ impl MultiColumnForeignKey {
         }
     }
 
+    /// Set the ON DELETE action.
     pub fn on_delete(mut self, action: FkAction) -> Self {
         self.on_delete = action;
         self
     }
 
+    /// Set the ON UPDATE action.
     pub fn on_update(mut self, action: FkAction) -> Self {
         self.on_update = action;
         self
     }
 
+    /// Set an explicit constraint name.
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -454,12 +621,16 @@ impl MultiColumnForeignKey {
 /// A SQL view definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewDef {
+    /// View name.
     pub name: String,
+    /// Underlying SQL query.
     pub query: String,
+    /// Whether this is a MATERIALIZED VIEW.
     pub materialized: bool,
 }
 
 impl ViewDef {
+    /// Create a standard (non-materialized) view.
     pub fn new(name: impl Into<String>, query: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -468,6 +639,7 @@ impl ViewDef {
         }
     }
 
+    /// Mark as MATERIALIZED VIEW.
     pub fn materialized(mut self) -> Self {
         self.materialized = true;
         self
@@ -477,15 +649,22 @@ impl ViewDef {
 /// A PL/pgSQL function definition for the schema model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchemaFunctionDef {
+    /// Function name.
     pub name: String,
+    /// Function arguments (e.g. `"p_id uuid"`).
     pub args: Vec<String>,
+    /// Return type.
     pub returns: String,
+    /// Function body.
     pub body: String,
+    /// Language (default `"plpgsql"`).
     pub language: String,
+    /// Volatility category (VOLATILE, STABLE, IMMUTABLE).
     pub volatility: Option<String>,
 }
 
 impl SchemaFunctionDef {
+    /// Create a new function definition.
     pub fn new(
         name: impl Into<String>,
         returns: impl Into<String>,
@@ -501,16 +680,19 @@ impl SchemaFunctionDef {
         }
     }
 
+    /// Set the function language.
     pub fn language(mut self, lang: impl Into<String>) -> Self {
         self.language = lang.into();
         self
     }
 
+    /// Add a function argument.
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into());
         self
     }
 
+    /// Set the volatility category.
     pub fn volatility(mut self, v: impl Into<String>) -> Self {
         self.volatility = Some(v.into());
         self
@@ -520,16 +702,24 @@ impl SchemaFunctionDef {
 /// A trigger definition for the schema model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchemaTriggerDef {
+    /// Trigger name.
     pub name: String,
+    /// Target table.
     pub table: String,
+    /// Timing (BEFORE, AFTER, INSTEAD OF).
     pub timing: String,
+    /// Events that fire the trigger (INSERT, UPDATE, DELETE).
     pub events: Vec<String>,
+    /// Whether the trigger fires FOR EACH ROW (vs. FOR EACH STATEMENT).
     pub for_each_row: bool,
+    /// Function to execute.
     pub execute_function: String,
+    /// Optional WHEN condition.
     pub condition: Option<String>,
 }
 
 impl SchemaTriggerDef {
+    /// Create a new trigger definition.
     pub fn new(
         name: impl Into<String>,
         table: impl Into<String>,
@@ -546,21 +736,25 @@ impl SchemaTriggerDef {
         }
     }
 
+    /// Set the trigger timing.
     pub fn timing(mut self, t: impl Into<String>) -> Self {
         self.timing = t.into();
         self
     }
 
+    /// Set the trigger events.
     pub fn events(mut self, evts: Vec<String>) -> Self {
         self.events = evts;
         self
     }
 
+    /// Fire FOR EACH STATEMENT instead of FOR EACH ROW.
     pub fn for_each_statement(mut self) -> Self {
         self.for_each_row = false;
         self
     }
 
+    /// Set an optional WHEN condition.
     pub fn condition(mut self, cond: impl Into<String>) -> Self {
         self.condition = Some(cond.into());
         self
@@ -570,27 +764,42 @@ impl SchemaTriggerDef {
 /// GRANT or REVOKE permission.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Grant {
+    /// GRANT or REVOKE.
     pub action: GrantAction,
+    /// Privileges being granted/revoked.
     pub privileges: Vec<Privilege>,
+    /// Target object (table, schema, sequence).
     pub on_object: String,
+    /// Role receiving (or losing) the privileges.
     pub to_role: String,
 }
 
+/// Whether a permission statement is a GRANT or REVOKE.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum GrantAction {
     #[default]
+    /// Grant privileges.
     Grant,
+    /// Revoke privileges.
     Revoke,
 }
 
+/// SQL privilege type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Privilege {
+    /// ALL PRIVILEGES.
     All,
+    /// SELECT.
     Select,
+    /// INSERT.
     Insert,
+    /// UPDATE.
     Update,
+    /// DELETE.
     Delete,
+    /// USAGE (on schemas, sequences).
     Usage,
+    /// EXECUTE (on functions).
     Execute,
 }
 
@@ -609,6 +818,7 @@ impl std::fmt::Display for Privilege {
 }
 
 impl Grant {
+    /// Create a GRANT statement.
     pub fn new(
         privileges: Vec<Privilege>,
         on_object: impl Into<String>,
@@ -622,6 +832,7 @@ impl Grant {
         }
     }
 
+    /// Create a REVOKE statement.
     pub fn revoke(
         privileges: Vec<Privilege>,
         on_object: impl Into<String>,
@@ -637,50 +848,62 @@ impl Grant {
 }
 
 impl Schema {
+    /// Create an empty schema.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Add a table definition.
     pub fn add_table(&mut self, table: Table) {
         self.tables.insert(table.name.clone(), table);
     }
 
+    /// Add an index definition.
     pub fn add_index(&mut self, index: Index) {
         self.indexes.push(index);
     }
 
+    /// Add a migration hint.
     pub fn add_hint(&mut self, hint: MigrationHint) {
         self.migrations.push(hint);
     }
 
+    /// Add a PostgreSQL extension.
     pub fn add_extension(&mut self, ext: Extension) {
         self.extensions.push(ext);
     }
 
+    /// Add a schema comment.
     pub fn add_comment(&mut self, comment: Comment) {
         self.comments.push(comment);
     }
 
+    /// Add a standalone sequence.
     pub fn add_sequence(&mut self, seq: Sequence) {
         self.sequences.push(seq);
     }
 
+    /// Add a standalone ENUM type.
     pub fn add_enum(&mut self, enum_type: EnumType) {
         self.enums.push(enum_type);
     }
 
+    /// Add a view definition.
     pub fn add_view(&mut self, view: ViewDef) {
         self.views.push(view);
     }
 
+    /// Add a function definition.
     pub fn add_function(&mut self, func: SchemaFunctionDef) {
         self.functions.push(func);
     }
 
+    /// Add a trigger definition.
     pub fn add_trigger(&mut self, trigger: SchemaTriggerDef) {
         self.triggers.push(trigger);
     }
 
+    /// Add a GRANT or REVOKE.
     pub fn add_grant(&mut self, grant: Grant) {
         self.grants.push(grant);
     }
@@ -729,6 +952,7 @@ impl Schema {
 }
 
 impl Table {
+    /// Create a new empty table.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -739,6 +963,7 @@ impl Table {
         }
     }
 
+    /// Add a column (builder pattern).
     pub fn column(mut self, col: Column) -> Self {
         self.columns.push(col);
         self
@@ -767,6 +992,7 @@ impl Column {
         }
     }
 
+    /// Mark as NOT NULL.
     pub fn not_null(mut self) -> Self {
         self.nullable = false;
         self
@@ -804,6 +1030,7 @@ impl Column {
         self
     }
 
+    /// Set a DEFAULT value expression.
     pub fn default(mut self, val: impl Into<String>) -> Self {
         self.default = Some(val.into());
         self
@@ -908,6 +1135,7 @@ impl Column {
 }
 
 impl Index {
+    /// Create a new index on the given columns.
     pub fn new(name: impl Into<String>, table: impl Into<String>, columns: Vec<String>) -> Self {
         Self {
             name: name.into(),
@@ -941,6 +1169,7 @@ impl Index {
         }
     }
 
+    /// Mark this index as UNIQUE.
     pub fn unique(mut self) -> Self {
         self.unique = true;
         self
@@ -1005,6 +1234,7 @@ fn check_expr_str(expr: &CheckExpr) -> String {
 }
 
 
+/// Serialize a `Schema` back to a QAIL-format string.
 pub fn to_qail_string(schema: &Schema) -> String {
     let mut output = String::new();
     output.push_str("# QAIL Schema\n\n");

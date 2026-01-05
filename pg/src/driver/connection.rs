@@ -24,6 +24,9 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+/// Statement cache capacity per connection.
+const STMT_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(100).unwrap();
+
 /// Initial buffer capacity (64KB for pipeline performance)
 pub(crate) const BUFFER_CAPACITY: usize = 65536;
 
@@ -85,6 +88,13 @@ pub struct PgConnection {
 
 impl PgConnection {
     /// Connect to PostgreSQL server without authentication (trust mode).
+    ///
+    /// # Arguments
+    ///
+    /// * `host` — PostgreSQL server hostname or IP.
+    /// * `port` — TCP port (typically 5432).
+    /// * `user` — PostgreSQL role name.
+    /// * `database` — Target database name.
     pub async fn connect(host: &str, port: u16, user: &str, database: &str) -> PgResult<Self> {
         Self::connect_with_password(host, port, user, database, None).await
     }
@@ -130,7 +140,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16), // SQL encoding buffer
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
@@ -224,7 +234,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
@@ -335,7 +345,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
@@ -373,7 +383,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,

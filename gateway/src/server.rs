@@ -23,15 +23,25 @@ use qail_pg::{PgPool, PoolConfig};
 
 /// Shared state for the gateway
 pub struct GatewayState {
+    /// PostgreSQL connection pool.
     pub pool: PgPool,
+    /// Row-level security policy engine.
     pub policy_engine: PolicyEngine,
+    /// Webhook event trigger engine.
     pub event_engine: EventTriggerEngine,
+    /// Loaded table schema registry.
     pub schema: SchemaRegistry,
+    /// In-memory query cache.
     pub cache: QueryCache,
+    /// Gateway configuration.
     pub config: GatewayConfig,
+    /// Per-IP rate limiter.
     pub rate_limiter: Arc<RateLimiter>,
+    /// EXPLAIN cost estimate cache.
     pub explain_cache: qail_pg::explain::ExplainCache,
+    /// EXPLAIN pre-check configuration.
     pub explain_config: qail_pg::explain::ExplainConfig,
+    /// Per-tenant concurrency semaphore.
     pub tenant_semaphore: Arc<crate::concurrency::TenantSemaphore>,
     /// Cache mapping user_id → operator_id for JWT tokens that lack operator_id.
     /// Loaded at startup from the users table.

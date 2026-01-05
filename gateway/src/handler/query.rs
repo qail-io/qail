@@ -22,6 +22,7 @@ use crate::auth::extract_auth_from_headers;
 use crate::middleware::ApiError;
 use crate::GatewayState;
 
+/// Execute a single Qail query (POST /qail).
 pub async fn execute_query(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -370,6 +371,7 @@ async fn execute_qail_cmd(
     Ok(Json(response))
 }
 
+/// Execute a batch of Qail queries (POST /qail/batch).
 pub async fn execute_batch(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,

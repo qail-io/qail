@@ -15,19 +15,24 @@ use std::path::Path;
 /// Error type for configuration loading.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// Config file not found.
     #[error("Config file not found: {0}")]
     NotFound(String),
 
+    /// I/O error reading config.
     #[error("Failed to read config: {0}")]
     Read(#[from] std::io::Error),
 
+    /// TOML parse error.
     #[error("Failed to parse TOML: {0}")]
     Parse(#[from] toml::de::Error),
 
+    /// Required env var not set.
     #[error("Missing required environment variable: {0}")]
     MissingEnvVar(String),
 }
 
+/// Result alias for config operations.
 pub type ConfigResult<T> = Result<T, ConfigError>;
 
 // ────────────────────────────────────────────────────────────
@@ -39,18 +44,23 @@ pub type ConfigResult<T> = Result<T, ConfigError>;
 /// All sections are optional for backward compatibility.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct QailConfig {
+    /// `[project]` section.
     #[serde(default)]
     pub project: ProjectConfig,
 
+    /// `[postgres]` section.
     #[serde(default)]
     pub postgres: PostgresConfig,
 
+    /// `[qdrant]` section (optional).
     #[serde(default)]
     pub qdrant: Option<QdrantConfig>,
 
+    /// `[gateway]` section (optional).
     #[serde(default)]
     pub gateway: Option<GatewayConfig>,
 
+    /// `[[sync]]` rules.
     #[serde(default)]
     pub sync: Vec<SyncRule>,
 }
@@ -62,9 +72,11 @@ pub struct QailConfig {
 /// `[project]` — project metadata.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectConfig {
+    /// Project name.
     #[serde(default = "default_project_name")]
     pub name: String,
 
+    /// Database mode (`postgres`, `hybrid`).
     #[serde(default = "default_mode")]
     pub mode: String,
 
@@ -96,21 +108,27 @@ pub struct PostgresConfig {
     #[serde(default = "default_pg_url")]
     pub url: String,
 
+    /// Maximum pool connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 
+    /// Minimum idle connections.
     #[serde(default = "default_min_connections")]
     pub min_connections: usize,
 
+    /// Idle connection timeout in seconds.
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
 
+    /// Connection acquire timeout in seconds.
     #[serde(default = "default_acquire_timeout")]
     pub acquire_timeout_secs: u64,
 
+    /// TCP connect timeout in seconds.
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_secs: u64,
 
+    /// Whether to test connections on acquire.
     #[serde(default)]
     pub test_on_acquire: bool,
 
@@ -159,12 +177,14 @@ pub struct RlsConfig {
 /// `[qdrant]` — Qdrant connection settings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QdrantConfig {
+    /// Qdrant HTTP URL.
     #[serde(default = "default_qdrant_url")]
     pub url: String,
 
     /// gRPC endpoint (defaults to port 6334).
     pub grpc: Option<String>,
 
+    /// Max connections.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 
@@ -181,9 +201,11 @@ fn default_qdrant_url() -> String { "http://localhost:6333".to_string() }
 /// `[gateway]` — Gateway server settings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayConfig {
+    /// Bind address.
     #[serde(default = "default_bind")]
     pub bind: String,
 
+    /// Enable CORS.
     #[serde(default = "default_true")]
     pub cors: bool,
 
@@ -194,6 +216,7 @@ pub struct GatewayConfig {
     /// Path to policy file.
     pub policy: Option<String>,
 
+    /// Query cache settings.
     #[serde(default)]
     pub cache: Option<CacheConfig>,
 
@@ -210,12 +233,15 @@ fn default_max_expand_depth() -> usize { 4 }
 /// `[gateway.cache]` — query cache settings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheConfig {
+    /// Whether caching is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Maximum cache entries.
     #[serde(default = "default_cache_max")]
     pub max_entries: usize,
 
+    /// Default TTL in seconds.
     #[serde(default = "default_cache_ttl")]
     pub ttl_secs: u64,
 }
@@ -226,12 +252,16 @@ fn default_cache_ttl() -> u64 { 60 }
 /// `[[sync]]` — Qdrant sync rule (unchanged from existing CLI).
 #[derive(Debug, Clone, Deserialize)]
 pub struct SyncRule {
+    /// PostgreSQL source table.
     pub source_table: String,
+    /// Qdrant target collection.
     pub target_collection: String,
 
+    /// Column that triggers re-sync.
     #[serde(default)]
     pub trigger_column: Option<String>,
 
+    /// Embedding model for sync.
     #[serde(default)]
     pub embedding_model: Option<String>,
 }

@@ -120,7 +120,7 @@ fn parse_table<'a, I>(
 where
     I: Iterator<Item = &'a str>,
 {
-    let rest = first_line.strip_prefix("table ").unwrap();
+    let rest = first_line.strip_prefix("table ").ok_or("Expected 'table' prefix")?;
     let name = rest.trim_end_matches('{').trim().to_string();
 
     if name.is_empty() {
@@ -293,9 +293,9 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
 fn parse_index(line: &str) -> Result<Index, String> {
     let is_unique = line.starts_with("unique ");
     let rest = if is_unique {
-        line.strip_prefix("unique index ").unwrap()
+        line.strip_prefix("unique index ").ok_or("Expected 'unique index' prefix")?
     } else {
-        line.strip_prefix("index ").unwrap()
+        line.strip_prefix("index ").ok_or("Expected 'index' prefix")?
     };
 
     let parts: Vec<&str> = rest.splitn(2, " on ").collect();
@@ -331,7 +331,7 @@ fn parse_index(line: &str) -> Result<Index, String> {
 /// Parse a rename hint.
 fn parse_rename(line: &str) -> Result<MigrationHint, String> {
     // rename users.username -> users.name
-    let rest = line.strip_prefix("rename ").unwrap();
+    let rest = line.strip_prefix("rename ").ok_or("Expected 'rename' prefix")?;
     let parts: Vec<&str> = rest.split(" -> ").collect();
 
     if parts.len() != 2 {
@@ -347,7 +347,7 @@ fn parse_rename(line: &str) -> Result<MigrationHint, String> {
 /// Parse a transform hint.
 fn parse_transform(line: &str) -> Result<MigrationHint, String> {
     // transform age * 12 -> age_months
-    let rest = line.strip_prefix("transform ").unwrap();
+    let rest = line.strip_prefix("transform ").ok_or("Expected 'transform' prefix")?;
     let parts: Vec<&str> = rest.split(" -> ").collect();
 
     if parts.len() != 2 {
@@ -363,10 +363,10 @@ fn parse_transform(line: &str) -> Result<MigrationHint, String> {
 /// Parse a drop hint.
 fn parse_drop(line: &str) -> Result<MigrationHint, String> {
     // drop temp_table confirm
-    let rest = line.strip_prefix("drop ").unwrap();
+    let rest = line.strip_prefix("drop ").ok_or("Expected 'drop' prefix")?;
     let confirmed = rest.ends_with(" confirm");
     let target = if confirmed {
-        rest.strip_suffix(" confirm").unwrap().trim().to_string()
+        rest.strip_suffix(" confirm").ok_or("Expected 'confirm' suffix")?.trim().to_string()
     } else {
         rest.trim().to_string()
     };
@@ -378,7 +378,7 @@ fn parse_drop(line: &str) -> Result<MigrationHint, String> {
 /// Syntax: `extension "uuid-ossp"` or `extension pgcrypto`
 ///         `extension "uuid-ossp" schema public version "1.1"`
 fn parse_extension(line: &str) -> Result<Extension, String> {
-    let rest = line.strip_prefix("extension ").unwrap().trim();
+    let rest = line.strip_prefix("extension ").ok_or("Expected 'extension' prefix")?.trim();
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
@@ -457,9 +457,10 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
     first_line: &str,
     lines: &mut std::iter::Peekable<I>,
 ) -> Result<Sequence, String> {
-    let rest = first_line.strip_prefix("sequence ").unwrap().trim();
+    let rest = first_line.strip_prefix("sequence ").ok_or("Expected 'sequence' prefix")?.trim();
 
     if rest.contains('{') {
+        // SAFETY: split() always yields at least one element
         let name = rest.split('{').next().unwrap().trim();
         let mut seq = Sequence::new(name);
 
@@ -534,9 +535,10 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
     first_line: &str,
     lines: &mut std::iter::Peekable<I>,
 ) -> Result<EnumType, String> {
-    let rest = first_line.strip_prefix("enum ").unwrap().trim();
+    let rest = first_line.strip_prefix("enum ").ok_or("Expected 'enum' prefix")?.trim();
 
     if rest.contains('{') {
+        // SAFETY: split() always yields at least one element
         let name = rest.split('{').next().unwrap().trim();
 
         let mut values_str = rest.split('{').nth(1).unwrap_or("").to_string();
@@ -615,9 +617,9 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
 ) -> Result<ViewDef, String> {
     let materialized = first_line.starts_with("materialized ");
     let rest = if materialized {
-        first_line.strip_prefix("materialized view ").unwrap().trim()
+        first_line.strip_prefix("materialized view ").ok_or("Expected 'materialized view' prefix")?.trim()
     } else {
-        first_line.strip_prefix("view ").unwrap().trim()
+        first_line.strip_prefix("view ").ok_or("Expected 'view' prefix")?.trim()
     };
 
     // Split name from body at $$
@@ -658,7 +660,7 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     first_line: &str,
     lines: &mut std::iter::Peekable<I>,
 ) -> Result<SchemaFunctionDef, String> {
-    let rest = first_line.strip_prefix("function ").unwrap().trim();
+    let rest = first_line.strip_prefix("function ").ok_or("Expected 'function' prefix")?.trim();
 
     // Extract name and args
     let paren_start = rest.find('(').ok_or("function missing (")?;
@@ -731,7 +733,7 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
 /// Parse a trigger definition.
 /// Syntax: `trigger name on table before|after insert|update|delete execute function_name`
 fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
-    let rest = line.strip_prefix("trigger ").unwrap().trim();
+    let rest = line.strip_prefix("trigger ").ok_or("Expected 'trigger' prefix")?.trim();
     let parts: Vec<&str> = rest.split_whitespace().collect();
 
     if parts.len() < 6 {
@@ -781,9 +783,9 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
 fn parse_grant(line: &str) -> Result<Grant, String> {
     let is_revoke = line.starts_with("revoke ");
     let rest = if is_revoke {
-        line.strip_prefix("revoke ").unwrap()
+        line.strip_prefix("revoke ").ok_or("Expected 'revoke' prefix")?
     } else {
-        line.strip_prefix("grant ").unwrap()
+        line.strip_prefix("grant ").ok_or("Expected 'grant' prefix")?
     }
     .trim();
 
@@ -1009,7 +1011,7 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
     lines: &mut std::iter::Peekable<I>,
 ) -> Result<RlsPolicy, String> {
     // Parse header: "policy NAME on TABLE for TARGET"
-    let rest = first_line.strip_prefix("policy ").unwrap().trim();
+    let rest = first_line.strip_prefix("policy ").ok_or("Expected 'policy' prefix")?.trim();
     let parts: Vec<&str> = rest.split_whitespace().collect();
 
     // Minimum: NAME on TABLE for TARGET  (4 tokens)

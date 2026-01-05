@@ -12,18 +12,24 @@ use std::fs;
 /// Policy configuration loaded from YAML
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
+    /// List of security policy definitions.
     pub policies: Vec<PolicyDef>,
 }
 
 /// A security policy definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyDef {
+    /// Human-readable policy name.
     pub name: String,
+    /// Table this policy applies to (`"*"` for all tables).
     pub table: String,
+    /// Filter template with `$user_id`, `$tenant_id`, etc. placeholders.
     #[serde(default)]
     pub filter: Option<String>,
+    /// If set, the policy only applies when the user has this role.
     #[serde(default)]
     pub role: Option<String>,
+    /// Operations this policy governs (empty = all).
     #[serde(default)]
     pub operations: Vec<OperationType>,
     /// Column-level permissions: only these columns are visible (whitelist).
@@ -40,13 +46,18 @@ pub struct PolicyDef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OperationType {
+    /// SELECT / GET.
     Read,
+    /// INSERT / ADD.
     Create,
+    /// UPDATE / SET.
     Update,
+    /// DELETE / DEL.
     Delete,
 }
 
 impl OperationType {
+    /// Map a Qail AST [`Action`] to the corresponding operation type.
     pub fn from_action(action: Action) -> Option<Self> {
         match action {
             Action::Get => Some(OperationType::Read),
@@ -65,10 +76,12 @@ pub struct PolicyEngine {
 }
 
 impl PolicyEngine {
+    /// Create an empty policy engine.
     pub fn new() -> Self {
         Self::default()
     }
     
+    /// Load policies from a YAML configuration file.
     pub fn load_from_file(&mut self, path: &str) -> Result<(), GatewayError> {
         let content = fs::read_to_string(path)
             .map_err(|e| GatewayError::Config(format!("Failed to read policy file: {}", e)))?;
@@ -89,10 +102,18 @@ impl PolicyEngine {
         Ok(())
     }
     
+    /// Register an additional policy definition.
     pub fn add_policy(&mut self, policy: PolicyDef) {
         self.policies.push(policy);
     }
     
+    /// Evaluate all matching policies for a given auth context and command,
+    /// injecting filters and column restrictions into the AST.
+    ///
+    /// # Arguments
+    ///
+    /// * `auth` — Authenticated user context (role, operator, agent).
+    /// * `cmd` — Mutable Qail AST command to inject policy filters into.
     pub fn apply_policies(&self, auth: &AuthContext, cmd: &mut Qail) -> Result<(), GatewayError> {
         let op = OperationType::from_action(cmd.action);
         
@@ -277,7 +298,13 @@ impl PolicyEngine {
         });
     }
     
-    /// Check if any policy denies access (before filter injection)
+    /// Check if any policy denies access (before filter injection).
+    ///
+    /// # Arguments
+    ///
+    /// * `auth` — Authenticated user context.
+    /// * `table` — Target table name.
+    /// * `action` — The CRUD action being performed.
     pub fn check_access(&self, auth: &AuthContext, table: &str, action: Action) -> Result<(), GatewayError> {
         let op = OperationType::from_action(action);
         

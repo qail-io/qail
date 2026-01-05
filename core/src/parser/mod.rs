@@ -12,6 +12,7 @@
 //! limit 10
 //! ```
 
+/// Grammar rules and parsing combinators.
 pub mod grammar;
 pub mod query_file;
 pub mod schema;

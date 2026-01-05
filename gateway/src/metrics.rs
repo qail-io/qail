@@ -94,7 +94,14 @@ pub async fn metrics_handler(
 
 // Metric recording helpers
 
-/// Record a query execution
+/// Record a query execution.
+///
+/// # Arguments
+///
+/// * `table` — Target table name.
+/// * `action` — CRUD action (`get`, `put`, `mod`, `del`).
+/// * `duration_ms` — Query execution time in milliseconds.
+/// * `success` — Whether the query succeeded.
 pub fn record_query(table: &str, action: &str, duration_ms: f64, success: bool) {
     let labels = [
         ("table", table.to_string()),
@@ -130,7 +137,14 @@ pub fn record_batch(query_count: usize, success_count: usize, duration_ms: f64) 
     histogram!("qail_batch_duration_ms").record(duration_ms);
 }
 
-/// Record cache statistics (call periodically or on each cache access)
+/// Record cache statistics (call periodically or on each cache access).
+///
+/// # Arguments
+///
+/// * `hits` — Total cache hit count.
+/// * `misses` — Total cache miss count.
+/// * `entries` — Current number of cached entries.
+/// * `weighted_bytes` — Estimated memory used by cache entries.
 pub fn record_cache_stats(hits: u64, misses: u64, entries: usize, weighted_bytes: u64) {
     counter!("qail_cache_hits_total").absolute(hits);
     counter!("qail_cache_misses_total").absolute(misses);
@@ -173,6 +187,7 @@ pub struct QueryTimer {
 }
 
 impl QueryTimer {
+    /// Start a new query timer for the given table and action.
     pub fn new(table: &str, action: &str) -> Self {
         Self {
             start: Instant::now(),
@@ -181,6 +196,7 @@ impl QueryTimer {
         }
     }
     
+    /// Stop the timer and record the query duration metric.
     pub fn finish(self, success: bool) {
         let duration_ms = self.start.elapsed().as_secs_f64() * 1000.0;
         record_query(&self.table, &self.action, duration_ms, success);

@@ -935,12 +935,19 @@ pub fn encode_create_field_index_proto(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FieldType {
+    /// Keyword (exact-match string) index.
     Keyword = 0,
+    /// Integer index.
     Integer = 1,
+    /// Float index.
     Float = 2,
+    /// Geolocation index.
     Geo = 3,
+    /// Full-text search index.
     Text = 4,
+    /// Boolean index.
     Bool = 5,
+    /// Datetime index.
     Datetime = 6,
 }
 

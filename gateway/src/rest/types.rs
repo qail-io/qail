@@ -61,34 +61,50 @@ pub struct AggregateParams {
 // Response types
 // ============================================================================
 
+/// Response for paginated list endpoints.
 #[derive(Debug, Serialize)]
 pub struct ListResponse {
+    /// Result rows.
     pub data: Vec<Value>,
+    /// Number of rows in this page.
     pub count: usize,
+    /// Total rows matching the query (if counted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<i64>,
+    /// Page size used.
     pub limit: i64,
+    /// Row offset used.
     pub offset: i64,
 }
 
+/// Response for single-row endpoints (get by ID).
 #[derive(Debug, Serialize)]
 pub struct SingleResponse {
+    /// The row as a JSON value.
     pub data: Value,
 }
 
+/// Response for delete endpoints.
 #[derive(Debug, Serialize)]
 pub struct DeleteResponse {
+    /// Whether the delete operation succeeded.
     pub deleted: bool,
 }
 
+/// Response for aggregation endpoints.
 #[derive(Debug, Serialize)]
 pub struct AggregateResponse {
+    /// Aggregation result rows.
     pub data: Vec<Value>,
+    /// Number of result groups.
     pub count: usize,
 }
 
+/// Response for batch create (bulk insert) endpoints.
 #[derive(Debug, Serialize)]
 pub struct BatchCreateResponse {
+    /// Inserted rows.
     pub data: Vec<Value>,
+    /// Number of rows inserted.
     pub count: usize,
 }

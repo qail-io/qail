@@ -5,25 +5,40 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
     // Arithmetic
+    /// String concatenation `||`.
     Concat,
+    /// Addition `+`.
     Add,
+    /// Subtraction `-`.
     Sub,
+    /// Multiplication `*`.
     Mul,
+    /// Division `/`.
     Div,
     /// Modulo (%)
     Rem,
     // Logical
+    /// Logical AND.
     And,
+    /// Logical OR.
     Or,
     // Comparison
+    /// Equals `=`.
     Eq,
+    /// Not equals `<>`.
     Ne,
+    /// Greater than `>`.
     Gt,
+    /// Greater than or equal `>=`.
     Gte,
+    /// Less than `<`.
     Lt,
+    /// Less than or equal `<=`.
     Lte,
     // Null checks (unary but represented as binary with null right)
+    /// IS NULL.
     IsNull,
+    /// IS NOT NULL.
     IsNotNull,
 }
 
@@ -49,42 +64,69 @@ impl std::fmt::Display for BinaryOp {
         }
     }
 }
+
+/// An expression node in the AST.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     /// All columns (*)
     Star,
+    /// A named column or identifier.
     Named(String),
     /// An aliased expression (expr AS alias)
-    Aliased { name: String, alias: String },
+    Aliased {
+        /// Expression name.
+        name: String,
+        /// Alias.
+        alias: String,
+    },
     /// An aggregate function (COUNT(col)) with optional FILTER and DISTINCT
     Aggregate {
+        /// Column to aggregate.
         col: String,
+        /// Aggregate function.
         func: AggregateFunc,
+        /// Whether DISTINCT is applied.
         distinct: bool,
         /// PostgreSQL FILTER (WHERE ...) clause for aggregates
         filter: Option<Vec<Condition>>,
+        /// Optional alias.
         alias: Option<String>,
     },
     /// Type cast expression (expr::type)
     Cast {
+        /// Expression to cast.
         expr: Box<Expr>,
+        /// Target SQL type.
         target_type: String,
+        /// Optional alias.
         alias: Option<String>,
     },
+    /// Column definition (name, type, constraints).
     Def {
+        /// Column name.
         name: String,
+        /// SQL data type.
         data_type: String,
+        /// Column constraints.
         constraints: Vec<Constraint>,
     },
-    Mod { kind: ModKind, col: Box<Expr> },
+    /// ALTER TABLE modify (ADD/DROP column).
+    Mod { /// Modification kind.
+        kind: ModKind, /// Column expression.
+        col: Box<Expr> },
     /// Window Function Definition
     Window {
+        /// Window name/alias.
         name: String,
+        /// Window function name.
         func: String,
         /// Function arguments as expressions (e.g., for SUM(amount), use Expr::Named("amount"))
         params: Vec<Expr>,
+        /// PARTITION BY columns.
         partition: Vec<String>,
+        /// ORDER BY clauses.
         order: Vec<Cage>,
+        /// Frame specification.
         frame: Option<WindowFrame>,
     },
     /// CASE WHEN expression
@@ -129,9 +171,13 @@ pub enum Expr {
     },
     /// Binary expression (left op right)
     Binary {
+        /// Left operand.
         left: Box<Expr>,
+        /// Binary operator.
         op: BinaryOp,
+        /// Right operand.
         right: Box<Expr>,
+        /// Optional alias.
         alias: Option<String>,
     },
     /// Literal value (string, number) for use in expressions
@@ -139,42 +185,60 @@ pub enum Expr {
     Literal(Value),
     /// Array constructor: ARRAY[expr1, expr2, ...]
     ArrayConstructor {
+        /// Array elements.
         elements: Vec<Expr>,
+        /// Optional alias.
         alias: Option<String>,
     },
     /// Row constructor: ROW(expr1, expr2, ...) or (expr1, expr2, ...)
     RowConstructor {
+        /// Row elements.
         elements: Vec<Expr>,
+        /// Optional alias.
         alias: Option<String>,
     },
-    /// Array/string subscript: arr[index]
+    /// Array/string subscript: `arr[index]`.
     Subscript {
+        /// Base expression.
         expr: Box<Expr>,
+        /// Index expression.
         index: Box<Expr>,
+        /// Optional alias.
         alias: Option<String>,
     },
     /// Collation: expr COLLATE "collation_name"
     Collate {
+        /// Expression.
         expr: Box<Expr>,
+        /// Collation name.
         collation: String,
+        /// Optional alias.
         alias: Option<String>,
     },
     /// Field selection from composite: (row).field
     FieldAccess {
+        /// Composite expression.
         expr: Box<Expr>,
+        /// Field name.
         field: String,
+        /// Optional alias.
         alias: Option<String>,
     },
     /// Scalar subquery: (SELECT ... LIMIT 1)
     /// Used in COALESCE, comparisons, etc.
     Subquery {
+        /// Inner query.
         query: Box<super::Qail>,
+        /// Optional alias.
         alias: Option<String>,
     },
     /// EXISTS subquery: EXISTS(SELECT ...)
     Exists {
+        /// Inner query.
         query: Box<super::Qail>,
-        negated: bool, // NOT EXISTS
+        /// Whether this is NOT EXISTS.
+        negated: bool,
+        /// Optional alias.
         alias: Option<String>,
     },
     /// Raw SQL expression — escape hatch for expressions that cannot be
@@ -431,15 +495,24 @@ impl std::fmt::Display for Expr {
     }
 }
 
+/// Column constraint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Constraint {
+    /// PRIMARY KEY.
     PrimaryKey,
+    /// UNIQUE.
     Unique,
+    /// NULL / nullable.
     Nullable,
+    /// DEFAULT value.
     Default(String),
+    /// CHECK constraint.
     Check(Vec<String>),
+    /// COMMENT ON COLUMN.
     Comment(String),
+    /// REFERENCES foreign key.
     References(String),
+    /// GENERATED column.
     Generated(ColumnGeneration),
 }
 
@@ -456,18 +529,33 @@ pub enum ColumnGeneration {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WindowFrame {
     /// ROWS BETWEEN start AND end
-    Rows { start: FrameBound, end: FrameBound },
+    Rows {
+        /// Frame start bound.
+        start: FrameBound,
+        /// Frame end bound.
+        end: FrameBound,
+    },
     /// RANGE BETWEEN start AND end
-    Range { start: FrameBound, end: FrameBound },
+    Range {
+        /// Frame start bound.
+        start: FrameBound,
+        /// Frame end bound.
+        end: FrameBound,
+    },
 }
 
 /// Window frame boundary
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameBound {
+    /// UNBOUNDED PRECEDING.
     UnboundedPreceding,
+    /// n PRECEDING.
     Preceding(i32),
+    /// CURRENT ROW.
     CurrentRow,
+    /// n FOLLOWING.
     Following(i32),
+    /// UNBOUNDED FOLLOWING.
     UnboundedFollowing,
 }
 
@@ -498,6 +586,7 @@ pub struct IndexDef {
     pub table: String,
     /// Columns to index (ordered)
     pub columns: Vec<String>,
+    /// Whether the index is unique.
     pub unique: bool,
     /// Index type (e.g., "keyword", "integer", "float", "geo", "text")
     #[serde(default)]
@@ -507,7 +596,9 @@ pub struct IndexDef {
 /// Table-level constraints for composite keys
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TableConstraint {
+    /// Composite UNIQUE constraint.
     Unique(Vec<String>),
+    /// Composite PRIMARY KEY.
     PrimaryKey(Vec<String>),
 }
 
@@ -538,37 +629,54 @@ impl From<&String> for Expr {
 /// PostgreSQL function definition
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionDef {
+    /// Function name.
     pub name: String,
-    pub returns: String,  // e.g., "trigger", "integer", "void"
-    pub body: String,     // The function body (PL/pgSQL code)
-    pub language: Option<String>,  // Default: plpgsql
+    /// Return type (e.g., "trigger", "integer", "void").
+    pub returns: String,
+    /// Function body (PL/pgSQL code).
+    pub body: String,
+    /// Language (default: plpgsql).
+    pub language: Option<String>,
 }
 
 /// Trigger timing (BEFORE or AFTER)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TriggerTiming {
+    /// BEFORE.
     Before,
+    /// AFTER.
     After,
+    /// INSTEAD OF.
     InsteadOf,
 }
 
 /// Trigger event types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TriggerEvent {
+    /// INSERT.
     Insert,
+    /// UPDATE.
     Update,
+    /// DELETE.
     Delete,
+    /// TRUNCATE.
     Truncate,
 }
 
 /// PostgreSQL trigger definition
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerDef {
+    /// Trigger name.
     pub name: String,
+    /// Target table.
     pub table: String,
+    /// Timing (BEFORE, AFTER, INSTEAD OF).
     pub timing: TriggerTiming,
+    /// Events that fire the trigger.
     pub events: Vec<TriggerEvent>,
+    /// Whether the trigger fires FOR EACH ROW.
     pub for_each_row: bool,
+    /// Function to execute.
     pub execute_function: String,
 }
 

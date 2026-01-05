@@ -8,11 +8,13 @@ use crate::ast::{
 };
 
 impl Qail {
+    /// Add a column expression.
     pub fn column_expr(mut self, expr: Expr) -> Self {
         self.columns.push(expr);
         self
     }
 
+    /// Add multiple column expressions.
     pub fn columns_expr<I>(mut self, exprs: I) -> Self
     where
         I: IntoIterator<Item = Expr>,
@@ -21,6 +23,7 @@ impl Qail {
         self
     }
 
+    /// DISTINCT ON named columns.
     pub fn distinct_on<I, S>(mut self, cols: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -33,6 +36,7 @@ impl Qail {
         self
     }
 
+    /// DISTINCT ON expressions.
     pub fn distinct_on_expr<I>(mut self, exprs: I) -> Self
     where
         I: IntoIterator<Item = Expr>,
@@ -41,6 +45,7 @@ impl Qail {
         self
     }
 
+    /// Add a raw Condition to the WHERE clause.
     pub fn filter_cond(mut self, condition: Condition) -> Self {
         let filter_cage = self
             .cages
@@ -59,21 +64,25 @@ impl Qail {
         self
     }
 
+    /// Add a HAVING condition.
     pub fn having_cond(mut self, condition: Condition) -> Self {
         self.having.push(condition);
         self
     }
 
+    /// Add multiple HAVING conditions.
     pub fn having_conds(mut self, conditions: impl IntoIterator<Item = Condition>) -> Self {
         self.having.extend(conditions);
         self
     }
 
+    /// Set CTEs (WITH clause).
     pub fn with_ctes(mut self, ctes: Vec<CTEDef>) -> Self {
         self.ctes = ctes;
         self
     }
 
+    /// UPDATE … FROM additional tables.
     pub fn update_from<I, S>(mut self, tables: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -83,6 +92,7 @@ impl Qail {
         self
     }
 
+    /// DELETE … USING additional tables.
     pub fn delete_using<I, S>(mut self, tables: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -92,61 +102,73 @@ impl Qail {
         self
     }
 
+    /// FOR UPDATE row lock.
     pub fn for_update(mut self) -> Self {
         self.lock_mode = Some(LockMode::Update);
         self
     }
 
+    /// FOR NO KEY UPDATE row lock.
     pub fn for_no_key_update(mut self) -> Self {
         self.lock_mode = Some(LockMode::NoKeyUpdate);
         self
     }
 
+    /// FOR SHARE row lock.
     pub fn for_share(mut self) -> Self {
         self.lock_mode = Some(LockMode::Share);
         self
     }
 
+    /// FOR KEY SHARE row lock.
     pub fn for_key_share(mut self) -> Self {
         self.lock_mode = Some(LockMode::KeyShare);
         self
     }
 
+    /// FETCH FIRST n ROWS ONLY.
     pub fn fetch_first(mut self, count: u64) -> Self {
         self.fetch = Some((count, false));
         self
     }
 
+    /// FETCH FIRST n ROWS WITH TIES.
     pub fn fetch_with_ties(mut self, count: u64) -> Self {
         self.fetch = Some((count, true));
         self
     }
 
+    /// INSERT with DEFAULT VALUES.
     pub fn default_values(mut self) -> Self {
         self.default_values = true;
         self
     }
 
+    /// OVERRIDING SYSTEM VALUE.
     pub fn overriding_system_value(mut self) -> Self {
         self.overriding = Some(OverridingKind::SystemValue);
         self
     }
 
+    /// OVERRIDING USER VALUE.
     pub fn overriding_user_value(mut self) -> Self {
         self.overriding = Some(OverridingKind::UserValue);
         self
     }
 
+    /// TABLESAMPLE BERNOULLI(percent).
     pub fn tablesample_bernoulli(mut self, percent: f64) -> Self {
         self.sample = Some((SampleMethod::Bernoulli, percent, None));
         self
     }
 
+    /// TABLESAMPLE SYSTEM(percent).
     pub fn tablesample_system(mut self, percent: f64) -> Self {
         self.sample = Some((SampleMethod::System, percent, None));
         self
     }
 
+    /// REPEATABLE(seed) for TABLESAMPLE.
     pub fn repeatable(mut self, seed: u64) -> Self {
         if let Some((method, percent, _)) = self.sample {
             self.sample = Some((method, percent, Some(seed)));
@@ -154,11 +176,13 @@ impl Qail {
         self
     }
 
+    /// SELECT FROM ONLY (exclude child tables).
     pub fn only(mut self) -> Self {
         self.only_table = true;
         self
     }
 
+    /// LEFT JOIN with alias.
     pub fn left_join_as(
         mut self,
         table: impl AsRef<str>,
@@ -180,6 +204,7 @@ impl Qail {
         self
     }
 
+    /// INNER JOIN with alias.
     pub fn inner_join_as(
         mut self,
         table: impl AsRef<str>,
@@ -201,11 +226,13 @@ impl Qail {
         self
     }
 
+    /// Set an alias for the FROM table.
     pub fn table_alias(mut self, alias: impl AsRef<str>) -> Self {
         self.table = format!("{} {}", self.table, alias.as_ref());
         self
     }
 
+    /// ORDER BY an expression.
     pub fn order_by_expr(mut self, expr: Expr, order: SortOrder) -> Self {
         self.cages.push(Cage {
             kind: CageKind::Sort(order),
@@ -220,6 +247,7 @@ impl Qail {
         self
     }
 
+    /// GROUP BY expressions.
     pub fn group_by_expr<I>(mut self, exprs: I) -> Self
     where
         I: IntoIterator<Item = Expr>,
