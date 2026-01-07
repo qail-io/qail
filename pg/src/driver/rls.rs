@@ -60,7 +60,7 @@ pub(crate) fn context_to_sql_with_timeout(ctx: &RlsContext, timeout_ms: u32) -> 
 /// - Newlines/CR — log injection, multi-line confusion
 /// - All control characters — unpredictable behavior
 /// - Dollar signs — prevents `$$`-style quoting attempts
-fn sanitize_guc_value(val: &str) -> String {
+pub fn sanitize_guc_value(val: &str) -> String {
     val.chars()
         .filter(|c| {
             // Allowlist: printable ASCII only (space through tilde)
