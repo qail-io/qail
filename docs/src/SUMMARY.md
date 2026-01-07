@@ -28,7 +28,7 @@
 - [QAIL vs Others](./core/comparison.md)
 - [Text Syntax](./core/text-syntax.md)
 - [PostgreSQL Driver](./core/pg-driver.md)
-- [Redis Driver](./core/redis-driver.md)
+- [API Decision Guide](./core/api-decision-guide.md)
 
 # Features
 
