@@ -1,0 +1,15 @@
+[package]
+name = "qail-codegen"
+version = "0.1.0"
+edition = "2024"
+description = "Rust AST → Zig type definition generator"
+publish = false
+
+[[bin]]
+name = "codegen"
+path = "src/main.rs"
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"

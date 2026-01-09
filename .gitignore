@@ -15,6 +15,7 @@ zig-out/
 # Rust
 **/*.rs.bk
 Cargo.lock
+codegen/target/
 
 # Python
 __pycache__/

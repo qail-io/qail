@@ -235,7 +235,9 @@ impl Gateway {
         // Load user → operator_id mapping for JWT resolution
         let user_operator_map = Arc::new(RwLock::new(HashMap::new()));
         {
-            let mut conn = pool.acquire_system().await
+            let token = qail_core::rls::SuperAdminToken::issue();
+            let rls = qail_core::rls::RlsContext::super_admin(token);
+            let mut conn = pool.acquire_with_rls(rls).await
                 .map_err(|e| GatewayError::Database(format!("User lookup connection failed: {}", e)))?;
             let cmd = qail_core::ast::Qail::get("users")
                 .columns(["id", "operator_id"])
