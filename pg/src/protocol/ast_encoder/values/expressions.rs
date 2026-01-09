@@ -140,8 +140,10 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
                 buf.extend_from_slice(cond.left.to_string().as_bytes());
                 buf.extend_from_slice(b" ");
                 encode_operator(&cond.op, buf);
-                buf.extend_from_slice(b" ");
-                buf.extend_from_slice(cond.value.to_string().as_bytes());
+                if !matches!(cond.op, Operator::IsNull | Operator::IsNotNull) {
+                    buf.extend_from_slice(b" ");
+                    buf.extend_from_slice(cond.value.to_string().as_bytes());
+                }
                 buf.extend_from_slice(b" THEN ");
                 encode_column_expr(then_expr, buf);
             }
