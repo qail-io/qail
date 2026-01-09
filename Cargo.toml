@@ -12,6 +12,7 @@ members = [
 ]
 exclude = [
     "pg/fuzz",
+    "codegen",
 ]
 
 [workspace.lints.rust]
