@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.18] - 2026-01-09
+
+### New Features
+
+- **`qail exec` Command:** Type-safe QAIL AST execution for seeding and admin tasks
+  - `qail exec "get::users" --url postgres://...` — execute QAIL query
+  - `qail exec -f seed.qail --url postgres://...` — execute from file
+  - `--tx` flag wraps all statements in a transaction with auto-rollback on error
+  - `--dry-run` previews generated SQL without executing
+  - Batch execution: one QAIL statement per line in `.qail` files
+  - Comments supported (`#` and `--`)
+
+### Documentation
+
+- Updated CLI doc comments to v2 QAIL syntax examples
+- Added `qail exec` to CLI reference documentation
+
+## [0.14.17] - 2026-01-02
+
+### New Features
+
+- **`QailRow` Trait:** Native struct mapping without proc macros
+  - Implement `columns()` and `from_row()` for automatic struct mapping
+  - No external dependencies - pure trait-based approach
+- **`fetch_typed::<T>()` Method:** Automatic struct conversion
+  - `let users: Vec<User> = driver.fetch_typed::<User>(&query).await?`
+  - Supports any type implementing `QailRow`
+- **`fetch_one_typed::<T>()` Method:** Single-row typed fetch
+  - Returns `Option<T>` for zero-or-one row queries
+
+### Bug Fixes
+
+- **Fixed JSON Array Index Encoding:** Integer keys now output `->0` instead of `->'0'`
+  - Before: `metadata->'vessel_bookings'->'0'->>'field'` ❌
+  - After: `metadata->'vessel_bookings'->0->>'field'` ✅
+- **Fixed JSON Operator Precedence:** Added parentheses around `JsonAccess` expressions
+  - Prevents `A || B || C->'d'` from being parsed as `((A||B)||C)->'d'`
+
+
 ## [0.14.16] - 2026-01-02
 
 ### Critical Bug Fixes

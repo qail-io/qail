@@ -1,6 +1,6 @@
 [package]
 name = "qail-mysql"
-version = "0.14.13"
+version = "0.14.18"
 edition = "2024"
 description = "QAIL MySQL read-only driver for high-speed data migration"
 license = "MIT"
