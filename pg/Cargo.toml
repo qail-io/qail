@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.14.18"
+version = "0.14.19"
 edition = "2024"
 description = "Fastest async PostgreSQL driver - AST to wire protocol, optional io_uring on Linux"
 license = "MIT"
@@ -17,7 +17,7 @@ chrono = ["dep:chrono"]
 uuid = ["dep:uuid"]
 
 [dependencies]
-qail-core = { version = "0.14.18", path = "../core" }
+qail-core = { version = "0.14.19", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 async-trait = "0.1"

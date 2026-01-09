@@ -1,6 +1,6 @@
 [package]
 name = "qail-lsp"
-version = "0.14.18"
+version = "0.14.19"
 edition = "2024"
 description = "Language Server Protocol implementation for QAIL"
 license = "MIT"
@@ -14,7 +14,7 @@ name = "qail-lsp"
 path = "src/main.rs"
 
 [dependencies]
-qail-core = { path = "../core", version = "0.14.18" }
+qail-core = { path = "../core", version = "0.14.19" }
 tower-lsp = { version = "0.20", features = ["proposed"] }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
