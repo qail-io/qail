@@ -1,6 +1,6 @@
 [package]
 name = "qail-php"
-version = "0.14.13"
+version = "0.14.18"
 edition = "2024"
 description = "QAIL PHP bindings - Rust FFI for PHP FFI"
 license = "MIT"
@@ -9,9 +9,9 @@ license = "MIT"
 crate-type = ["cdylib", "staticlib"]  # cdylib for FFI, staticlib for extension
 
 [dependencies]
-qail-core = { path = "../core", version = "0.14.13" }
-qail-pg = { path = "../pg", version = "0.14.13" }
-qail-mysql = { path = "../mysql", version = "0.14.13" }
+qail-core = { path = "../core", version = "0.14.18" }
+qail-pg = { path = "../pg", version = "0.14.18" }
+qail-mysql = { path = "../mysql", version = "0.14.18" }
 libc = "0.2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync"] }
 once_cell = "1.19"

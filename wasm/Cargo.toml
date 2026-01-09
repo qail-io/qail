@@ -1,6 +1,6 @@
 [package]
 name = "qail-wasm"
-version = "0.14.13"
+version = "0.14.18"
 edition = "2024"
 description = "QAIL parser and transpiler for JavaScript/TypeScript via WebAssembly"
 license = "MIT"

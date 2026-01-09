@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.14.15"
+version = "0.14.17"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2563,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.14.15"
+version = "0.14.17"
 dependencies = [
  "chrono",
  "colored 3.0.0",
@@ -2648,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "qail-pg"
-version = "0.14.15"
+version = "0.14.17"
 dependencies = [
  "async-trait",
  "base64",
@@ -2701,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "qail-qdrant"
-version = "0.14.15"
+version = "0.14.17"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "qail-redis"
-version = "0.14.15"
+version = "0.14.17"
 dependencies = [
  "bytes",
  "qail-core",

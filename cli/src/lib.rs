@@ -4,6 +4,7 @@ pub use qail_core::{ast, error, parser, transpiler};
 
 // CLI modules
 pub mod backup;
+pub mod exec;
 pub mod introspection;
 pub mod lint;
 pub mod migrations;
@@ -17,3 +18,4 @@ pub mod snapshot;
 pub mod init;
 pub mod sync;
 pub mod worker;
+
