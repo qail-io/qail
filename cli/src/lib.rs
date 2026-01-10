@@ -12,6 +12,7 @@ pub mod repl;
 pub mod schema;
 pub mod shadow;
 pub mod sql_gen;
+pub mod types;
 pub mod util;
 pub mod vector;
 pub mod snapshot;

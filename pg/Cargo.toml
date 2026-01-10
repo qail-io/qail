@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.14.19"
+version = "0.14.20"
 edition = "2024"
 description = "Fastest async PostgreSQL driver - AST to wire protocol, optional io_uring on Linux"
 license = "MIT"
@@ -17,7 +17,7 @@ chrono = ["dep:chrono"]
 uuid = ["dep:uuid"]
 
 [dependencies]
-qail-core = { version = "0.14.19", path = "../core" }
+qail-core = { version = "0.14.20", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 async-trait = "0.1"
@@ -61,3 +61,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid"] }
 uuid = { version = "1.9", features = ["v4"] }
 sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-native-tls"] }
 pq-sys = "0.6"
+chrono = { version = "0.4" }
+
+[[example]]
+name = "battle_qail_row"
+required-features = ["chrono", "uuid"]

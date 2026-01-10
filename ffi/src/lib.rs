@@ -6,7 +6,7 @@
 //! ```c
 //! #include "qail.h"
 //!
-//! char* sql = qail_transpile("get::users:'_");
+//! char* sql = qail_transpile("get users fields *");
 //! printf("%s\n", sql);  // SELECT * FROM users
 //! qail_free(sql);
 //! ```

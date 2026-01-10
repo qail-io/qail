@@ -283,7 +283,7 @@ mod tests {
             table: "users".to_string(),
             columns: vec!["name".to_string()],
             query_type: super::super::scanner::QueryType::Qail,
-            snippet: "get::users".to_string(),
+            snippet: "get users fields *".to_string(),
         };
 
         let old_schema = Schema::new();

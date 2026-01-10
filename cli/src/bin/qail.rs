@@ -5,9 +5,8 @@
 //! # Usage
 //!
 //! ```bash
-//! # Parse and transpile a query (v2 syntax)
+//! # Parse and transpile a query (v2 keyword syntax)
 //! qail "get users fields id, email where active = true limit 10"
-//! qail "get::users"
 //!
 //! # Interactive REPL mode
 //! qail repl
@@ -99,7 +98,7 @@ enum Commands {
     Symbols,
     /// Generate a migration file
     Mig {
-        /// The QAIL migration command (e.g., make::users...)
+        /// The QAIL migration command (e.g., make users fields id UUID, email VARCHAR)
         query: String,
         /// Optional name for the migration
         #[arg(short, long)]
@@ -172,7 +171,7 @@ enum Commands {
     },
     /// Execute type-safe QAIL statements
     Exec {
-        /// QAIL query string (e.g., "add::users")
+        /// QAIL query string (e.g., "add users fields name, email values 'test', 'a@b.com'")
         query: Option<String>,
         /// Path to .qail file
         #[arg(short, long)]
@@ -186,6 +185,15 @@ enum Commands {
         /// Dry-run: print generated SQL without executing
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Generate typed Rust schema from schema.qail
+    Types {
+        /// Path to schema.qail file
+        #[arg(default_value = "schema.qail")]
+        schema: String,
+        /// Output file path (prints to stdout if not specified)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 
@@ -510,6 +518,9 @@ async fn main() -> Result<()> {
                 tx: *tx,
                 dry_run: *dry_run,
             }).await?;
+        },
+        Some(Commands::Types { schema, output }) => {
+            qail::types::generate_types(&schema, output.as_deref())?;
         },
         None => {
             if let Some(query) = &cli.query {

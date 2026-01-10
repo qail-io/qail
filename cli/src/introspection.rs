@@ -69,10 +69,11 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         std::collections::HashMap::new();
 
     for row in rows {
-        let table_name = row.get_string_by_name("table_name").unwrap_or_default();
-        let col_name = row.get_string_by_name("column_name").unwrap_or_default();
-        let udt_name = row.get_string_by_name("udt_name").unwrap_or_default();
-        let is_nullable_str = row.get_string_by_name("is_nullable").unwrap_or_default();
+        // Use positional access (fetch_all_cached skips column_info for speed)
+        let table_name = row.text(0);
+        let col_name = row.text(1);
+        let udt_name = row.text(2);
+        let is_nullable_str = row.text(3);
         let is_nullable = is_nullable_str == "YES";
 
         // Map PostgreSQL type to QAIL ColumnType
@@ -100,7 +101,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     let pk_tables: std::collections::HashSet<String> = pk_rows
         .iter()
-        .filter_map(|r| r.get_string_by_name("table_name"))
+        .map(|r| r.text(0)) // table_name (positional access)
         .collect();
 
     // Query key column usage for primary key columns (AST-native)
@@ -116,11 +117,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     let mut pk_columns: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
     for row in kcu_rows {
-        let table = row.get_string_by_name("table_name").unwrap_or_default();
-        let column = row.get_string_by_name("column_name").unwrap_or_default();
-        let constraint = row
-            .get_string_by_name("constraint_name")
-            .unwrap_or_default();
+        // Positional access for table_name, column_name, constraint_name
+        let table = row.text(0);
+        let column = row.text(1);
+        let constraint = row.text(2);
 
         // Primary key constraints typically end with _pkey
         if constraint.ends_with("_pkey") || pk_tables.contains(&table) {
@@ -156,9 +156,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     }
 
     for row in index_rows {
-        let name = row.get_string_by_name("indexname").unwrap_or_default();
-        let table = row.get_string_by_name("tablename").unwrap_or_default();
-        let def = row.get_string_by_name("indexdef").unwrap_or_default();
+        // Positional access: indexname, tablename, indexdef
+        let name = row.text(0);
+        let table = row.text(1);
+        let def = row.text(2);
 
         // Skip primary key indexes
         if name.ends_with("_pkey") {

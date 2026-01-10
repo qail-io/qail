@@ -9,6 +9,8 @@
 
 pub mod analyzer;
 pub mod ast;
+pub mod build;
+pub mod codegen;
 pub mod error;
 pub mod fmt;
 pub mod migrate;
@@ -16,6 +18,7 @@ pub mod parser;
 pub mod schema;
 pub mod transformer;
 pub mod transpiler;
+pub mod typed;
 pub mod validator;
 
 pub use parser::parse;
