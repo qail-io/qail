@@ -24,7 +24,7 @@ pub struct HealthResponse {
 }
 
 /// Query response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub rows: Vec<serde_json::Value>,
     pub count: usize,
@@ -190,6 +190,25 @@ async fn execute_qail_cmd(
     state: &Arc<GatewayState>,
     cmd: &qail_core::ast::Qail,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use qail_core::ast::Action;
+    
+    let table = &cmd.table;
+    let is_read_query = matches!(cmd.action, Action::Get);
+    
+    // Generate cache key from command
+    let cache_key = format!("{:?}", cmd);
+    
+    // Check cache for read queries
+    if is_read_query {
+        if let Some(cached) = state.cache.get(&cache_key) {
+            tracing::debug!("Cache HIT for table '{}'", table);
+            // Parse cached JSON back to response
+            if let Ok(response) = serde_json::from_str::<QueryResponse>(&cached) {
+                return Ok(Json(response));
+            }
+        }
+    }
+    
     // Acquire pooled connection and execute query
     let mut conn = state.pool.acquire().await.map_err(|e| {
         tracing::error!("Pool error: {}", e);
@@ -221,10 +240,24 @@ async fn execute_qail_cmd(
     
     let count = json_rows.len();
     
-    Ok(Json(QueryResponse {
+    let response = QueryResponse {
         rows: json_rows,
         count,
-    }))
+    };
+    
+    // Cache read query results
+    if is_read_query {
+        if let Ok(json) = serde_json::to_string(&response) {
+            state.cache.set(&cache_key, table, json);
+            tracing::debug!("Cache STORE for table '{}' ({} rows)", table, count);
+        }
+    } else {
+        // Mutation - invalidate cache for this table
+        state.cache.invalidate_table(table);
+        tracing::debug!("Cache INVALIDATE for table '{}'", table);
+    }
+    
+    Ok(Json(response))
 }
 
 pub fn row_to_json(row: &qail_pg::PgRow) -> serde_json::Value {

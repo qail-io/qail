@@ -32,6 +32,7 @@
 #![deny(dead_code)]
 
 pub mod auth;
+pub mod cache;
 pub mod config;
 pub mod error;
 pub mod handler;
