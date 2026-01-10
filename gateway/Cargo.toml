@@ -1,0 +1,59 @@
+[package]
+name = "qail-gateway"
+version = "0.2.0"
+edition = "2021"
+description = "QAIL Gateway - Native data layer replacing REST/GraphQL"
+license = "MIT"
+repository = "https://github.com/qail-io/qail"
+keywords = ["database", "gateway", "api", "binary-protocol"]
+categories = ["database", "web-programming"]
+
+[dependencies]
+# Core QAIL
+qail-core = { path = "../core", version = "0.14" }
+qail-pg = { path = "../pg", version = "0.14" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP Server
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "timeout", "trace"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Error handling
+anyhow = "1.0"
+
+# YAML parsing for policies
+serde_yaml = "0.9"
+
+# JWT validation
+jsonwebtoken = "9"
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+
+# URL parsing
+url = "2.5"
+
+# WebSocket streams
+futures = "0.3"
+
+# Prometheus metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+[features]
+default = []
+
+[dev-dependencies]
+tokio-test = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["rustls-tls"] }
+chrono = "0.4"

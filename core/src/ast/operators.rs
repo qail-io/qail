@@ -3,12 +3,9 @@ use serde::{Deserialize, Serialize};
 /// The action type (SQL operation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
-    /// SELECT query
     Get,
-    /// UPDATE query  
     Set,
     Del,
-    /// INSERT query
     Add,
     Gen,
     Make,
@@ -19,91 +16,50 @@ pub enum Action {
     Index,
     DropIndex,
     Alter,
-    /// ALTER TABLE DROP COLUMN
     AlterDrop,
-    /// ALTER TABLE ALTER COLUMN TYPE
     AlterType,
-    // Transactions
     TxnStart,
     TxnCommit,
     TxnRollback,
     Put,
     DropCol,
     RenameCol,
-    // Additional clauses
-    /// JSON_TABLE - convert JSON to relational rows
     JsonTable,
-    /// COPY TO STDOUT - bulk export data (AST-native)
     Export,
-    /// TRUNCATE TABLE - fast delete all rows
     Truncate,
-    /// EXPLAIN - query plan analysis
     Explain,
-    /// EXPLAIN ANALYZE - execute and analyze query plan
     ExplainAnalyze,
-    /// LOCK TABLE - explicit table locking
     Lock,
     CreateMaterializedView,
     RefreshMaterializedView,
     DropMaterializedView,
-    // Pub/Sub (LISTEN/NOTIFY)
-    /// LISTEN channel - subscribe to notifications
     Listen,
-    /// NOTIFY channel, 'payload' - send notification
     Notify,
-    /// UNLISTEN channel - unsubscribe from notifications
     Unlisten,
-    // Savepoints
     Savepoint,
     ReleaseSavepoint,
     RollbackToSavepoint,
-    // Views
-    /// CREATE VIEW name AS SELECT ...
     CreateView,
-    /// DROP VIEW name
     DropView,
-    // Vector database operations
-    /// Vector similarity search (Qdrant)
     Search,
-    /// Insert or update points (Qdrant)
     Upsert,
-    /// Paginated iteration over points (Qdrant)
     Scroll,
-    /// Create new collection (Qdrant)
     CreateCollection,
-    /// Delete collection (Qdrant)
     DeleteCollection,
-    // PostgreSQL Functions and Triggers
-    /// CREATE FUNCTION name() RETURNS type AS $$ body $$ LANGUAGE plpgsql
     CreateFunction,
-    /// DROP FUNCTION name
     DropFunction,
-    /// CREATE TRIGGER name AFTER INSERT OR UPDATE ON table
     CreateTrigger,
-    /// DROP TRIGGER name ON table
     DropTrigger,
-    // Redis operations (key-value store)
-    /// Redis GET key
     RedisGet,
-    /// Redis SET key value [EX seconds]
     RedisSet,
-    /// Redis DEL key [key ...]
     RedisDel,
-    /// Redis INCR/INCRBY key
     RedisIncr,
-    /// Redis DECR/DECRBY key
     RedisDecr,
-    /// Redis TTL/PTTL key
     RedisTtl,
-    /// Redis EXPIRE/PEXPIRE key seconds
     RedisExpire,
-    /// Redis EXISTS key
     RedisExists,
-    /// Redis MGET keys
     RedisMGet,
-    /// Redis MSET key value [key value ...]
     RedisMSet,
-    /// Redis PING
     RedisPing,
 }
 
@@ -157,7 +113,6 @@ impl std::fmt::Display for Action {
             Action::DropFunction => write!(f, "DROP_FUNCTION"),
             Action::CreateTrigger => write!(f, "CREATE_TRIGGER"),
             Action::DropTrigger => write!(f, "DROP_TRIGGER"),
-            // Redis
             Action::RedisGet => write!(f, "REDIS_GET"),
             Action::RedisSet => write!(f, "REDIS_SET"),
             Action::RedisDel => write!(f, "REDIS_DEL"),
@@ -194,15 +149,10 @@ pub enum SortOrder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operator {
     Eq,
-    /// Not equal (!=, <>)
     Ne,
-    /// Greater than (>)
     Gt,
-    /// Greater than or equal (>=)
     Gte,
-    /// Less than (<)
     Lt,
-    /// Less than or equal (<=)  
     Lte,
     Fuzzy,
     In,
@@ -211,31 +161,21 @@ pub enum Operator {
     IsNotNull,
     Contains,
     KeyExists,
-    /// JSON_EXISTS - check if path exists (Postgres 17+)
     JsonExists,
-    /// JSON_QUERY - extract JSON object/array at path (Postgres 17+)
     JsonQuery,
-    /// JSON_VALUE - extract scalar value at path (Postgres 17+)
     JsonValue,
     Like,
     NotLike,
-    /// ILIKE case-insensitive pattern match (Postgres)
     ILike,
-    /// NOT ILIKE case-insensitive pattern match (Postgres)
     NotILike,
-    /// BETWEEN x AND y - range check (value stored as Value::Array with 2 elements)
     Between,
     NotBetween,
-    /// EXISTS (subquery) - check if subquery returns any rows
     Exists,
     NotExists,
-    /// Regular expression match (~ in Postgres)
     Regex,
-    /// Case-insensitive regex (~* in Postgres)
     RegexI,
     SimilarTo,
     ContainedBy,
-    /// Array overlap (&&)
     Overlaps,
 }
 
@@ -308,17 +248,11 @@ pub enum AggregateFunc {
     Avg,
     Min,
     Max,
-    /// ARRAY_AGG - collect values into array
     ArrayAgg,
-    /// STRING_AGG - concatenate strings with delimiter
     StringAgg,
-    /// JSON_AGG - aggregate values as JSON array
     JsonAgg,
-    /// JSONB_AGG - aggregate values as JSONB array
     JsonbAgg,
-    /// BOOL_AND - logical AND of all values
     BoolAnd,
-    /// BOOL_OR - logical OR of all values
     BoolOr,
 }
 
@@ -369,45 +303,40 @@ pub enum ModKind {
 /// GROUP BY mode for advanced aggregations
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum GroupByMode {
-    /// Standard GROUP BY
     #[default]
     Simple,
-    /// ROLLUP - hierarchical subtotals
     Rollup,
-    /// CUBE - all combinations of subtotals
     Cube,
-    /// GROUPING SETS - explicit grouping sets: GROUPING SETS ((a, b), (c))
     GroupingSets(Vec<Vec<String>>),
+}
+
+impl GroupByMode {
+    /// Check if this is the default Simple mode (for serde skip)
+    pub fn is_simple(&self) -> bool {
+        matches!(self, GroupByMode::Simple)
+    }
 }
 
 /// Row locking mode for SELECT...FOR UPDATE/SHARE
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LockMode {
-    /// FOR UPDATE - exclusive lock
     Update,
-    /// FOR NO KEY UPDATE - weaker exclusive lock
     NoKeyUpdate,
-    /// FOR SHARE - shared lock
     Share,
-    /// FOR KEY SHARE - weakest shared lock
     KeyShare,
 }
 
 /// OVERRIDING clause for INSERT with GENERATED columns
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverridingKind {
-    /// OVERRIDING SYSTEM VALUE - override GENERATED ALWAYS columns
     SystemValue,
-    /// OVERRIDING USER VALUE - override GENERATED BY DEFAULT columns
     UserValue,
 }
 
 /// TABLESAMPLE sampling method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SampleMethod {
-    /// BERNOULLI - each row has independent probability
     Bernoulli,
-    /// SYSTEM - faster but less random (block-level sampling)
     System,
 }
 

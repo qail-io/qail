@@ -1,0 +1,44 @@
+# QAIL Gateway Schema Definition
+#
+# Validates queries against known tables and columns.
+# If a query references an unknown table or column, it will be rejected.
+
+tables:
+  - name: users
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: email
+        type: text
+      - name: name
+        type: text
+        nullable: true
+      - name: created_at
+        type: timestamptz
+
+  - name: orders
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: user_id
+        type: uuid
+      - name: total
+        type: numeric
+      - name: status
+        type: text
+      - name: created_at
+        type: timestamptz
+
+  - name: products
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: name
+        type: text
+      - name: price
+        type: numeric
+      - name: is_public
+        type: boolean

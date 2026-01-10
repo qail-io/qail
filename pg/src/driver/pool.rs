@@ -134,6 +134,59 @@ impl PooledConnection {
             secret_key,
         }
     }
+
+    /// Execute a QAIL command and fetch all rows (UNCACHED).
+    /// Returns rows with column metadata for JSON serialization.
+    pub async fn fetch_all_uncached(&mut self, cmd: &qail_core::ast::Qail) -> PgResult<Vec<super::PgRow>> {
+        use crate::protocol::AstEncoder;
+        use super::ColumnInfo;
+
+        let conn = self.conn.as_mut().expect("Connection should always be present");
+
+        let wire_bytes = AstEncoder::encode_cmd_reuse(
+            cmd,
+            &mut conn.sql_buf,
+            &mut conn.params_buf,
+        );
+
+        conn.send_bytes(&wire_bytes).await?;
+
+        let mut rows: Vec<super::PgRow> = Vec::new();
+        let mut column_info: Option<Arc<ColumnInfo>> = None;
+        let mut error: Option<PgError> = None;
+
+        loop {
+            let msg = conn.recv().await?;
+            match msg {
+                crate::protocol::BackendMessage::ParseComplete
+                | crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::RowDescription(fields) => {
+                    column_info = Some(Arc::new(ColumnInfo::from_fields(&fields)));
+                }
+                crate::protocol::BackendMessage::DataRow(data) => {
+                    if error.is_none() {
+                        rows.push(super::PgRow {
+                            columns: data,
+                            column_info: column_info.clone(),
+                        });
+                    }
+                }
+                crate::protocol::BackendMessage::CommandComplete(_) => {}
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    return Ok(rows);
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 impl Drop for PooledConnection {
