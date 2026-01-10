@@ -12,13 +12,17 @@ use qail_pg::{PgDriver, PgResult};
 use std::time::Instant;
 
 const DB_HOST: &str = "127.0.0.1";
-const DB_PORT: u16 = 5444; // SSH tunnel to staging
-const DB_USER: &str = "sailtix";
-const DB_PASS: &str = "rGp5CuDhUa2tQcK4ao5uyA55";
-const DB_NAME: &str = "swb-staging";
+const DB_PORT: u16 = 5432;
+const DB_USER: &str = "postgres";
+const DB_NAME: &str = "your_database";
+// ⚠️ CHANGE THIS: Use your own password or set DB_PASSWORD env var
+const DB_PASS: &str = "your_password_here";
 
 #[tokio::main]
 async fn main() -> PgResult<()> {
+    // Use env var if set, otherwise use placeholder (change DB_PASS constant above)
+    let db_pass = std::env::var("DB_PASSWORD").unwrap_or_else(|_| DB_PASS.to_string());
+
     println!("🏎️  QAIL-PG Database Roundtrip Benchmark");
     println!("==========================================");
     println!("Host: {}:{}", DB_HOST, DB_PORT);
@@ -26,7 +30,7 @@ async fn main() -> PgResult<()> {
 
     // Connect to database
     let mut driver =
-        PgDriver::connect_with_password(DB_HOST, DB_PORT, DB_USER, DB_NAME, DB_PASS).await?;
+        PgDriver::connect_with_password(DB_HOST, DB_PORT, DB_USER, DB_NAME, &db_pass).await?;
 
     println!("✅ Connected to PostgreSQL\n");
 
