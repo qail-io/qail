@@ -62,7 +62,3 @@ uuid = { version = "1.9", features = ["v4"] }
 sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-native-tls"] }
 pq-sys = "0.6"
 chrono = { version = "0.4" }
-
-[[example]]
-name = "battle_qail_row"
-required-features = ["chrono", "uuid"]
