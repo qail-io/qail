@@ -88,7 +88,7 @@ pub use binary::{BinaryBuilder, binary};
 pub use ext::ExprExt;
 
 // Shortcuts (ergonomic helpers)
-pub use shortcuts::{all, and, and3, count_where, count_where_all, in_list, percentage, recent, recent_col};
+pub use shortcuts::{all, and, and3, count_where, count_where_all, exists, in_list, not_exists, percentage, recent, recent_col, subquery};
 
 #[cfg(test)]
 mod tests {

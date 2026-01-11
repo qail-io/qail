@@ -329,6 +329,37 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
                 buf.extend_from_slice(a.as_bytes());
             }
         }
+        Expr::Subquery { query, alias } => {
+            // Encode scalar subquery: (SELECT ... LIMIT 1)
+            buf.extend_from_slice(b"(");
+            let mut sub_buf = BytesMut::with_capacity(128);
+            let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
+            if let Ok(()) = super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params) {
+                buf.extend_from_slice(&sub_buf);
+            }
+            buf.extend_from_slice(b")");
+            if let Some(a) = alias {
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(a.as_bytes());
+            }
+        }
+        Expr::Exists { query, negated, alias } => {
+            // Encode EXISTS or NOT EXISTS subquery
+            if *negated {
+                buf.extend_from_slice(b"NOT ");
+            }
+            buf.extend_from_slice(b"EXISTS (");
+            let mut sub_buf = BytesMut::with_capacity(128);
+            let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
+            if let Ok(()) = super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params) {
+                buf.extend_from_slice(&sub_buf);
+            }
+            buf.extend_from_slice(b")");
+            if let Some(a) = alias {
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(a.as_bytes());
+            }
+        }
         _ => buf.extend_from_slice(b"*"),
     }
 }

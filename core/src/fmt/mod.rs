@@ -336,6 +336,19 @@ impl Formatter {
                 write!(self.buffer, ").{}", field)?;
                 if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
             }
+            Expr::Subquery { query, alias } => {
+                write!(self.buffer, "(")?;
+                self.visit_cmd(query)?;
+                write!(self.buffer, ")")?;
+                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+            }
+            Expr::Exists { query, negated, alias } => {
+                if *negated { write!(self.buffer, "not ")?; }
+                write!(self.buffer, "exists (")?;
+                self.visit_cmd(query)?;
+                write!(self.buffer, ")")?;
+                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+            }
         }
         Ok(())
     }

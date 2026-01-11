@@ -162,3 +162,42 @@ mod tests {
         assert!(matches!(expr, Expr::Case { alias: Some(a), .. } if a == "rate"));
     }
 }
+
+/// Create an EXISTS subquery expression
+/// 
+/// # Example
+/// ```ignore
+/// // EXISTS(SELECT 1 FROM harbor_images WHERE harbor_id = h.id)
+/// exists(Qail::get("harbor_images").eq("harbor_id", col_ref).limit(1))
+/// ```
+pub fn exists(query: crate::ast::Qail) -> Expr {
+    Expr::Exists {
+        query: Box::new(query),
+        negated: false,
+        alias: None,
+    }
+}
+
+/// Create a NOT EXISTS subquery expression
+pub fn not_exists(query: crate::ast::Qail) -> Expr {
+    Expr::Exists {
+        query: Box::new(query),
+        negated: true,
+        alias: None,
+    }
+}
+
+/// Create a scalar subquery expression
+/// 
+/// # Example
+/// ```ignore
+/// // (SELECT image_url FROM harbor_images WHERE ... ORDER BY ... LIMIT 1)
+/// subquery(Qail::get("harbor_images").column("image_url").eq("harbor_id", id).limit(1))
+/// ```
+pub fn subquery(query: crate::ast::Qail) -> Expr {
+    Expr::Subquery {
+        query: Box::new(query),
+        alias: None,
+    }
+}
+
