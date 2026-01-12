@@ -54,6 +54,7 @@ pub enum Value {
     Expr(Box<crate::ast::Expr>),
     /// Vector embedding for similarity search (Qdrant)
     Vector(Vec<f32>),
+    Json(String),
 }
 
 impl std::fmt::Display for Value {
@@ -99,6 +100,7 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            Value::Json(json) => write!(f, "'{}'::jsonb", json.replace('\'', "''")),
         }
     }
 }

@@ -179,6 +179,9 @@ enum Commands {
         /// Database URL
         #[arg(short, long)]
         url: Option<String>,
+        /// SSH host for tunneling (e.g., "sailtix" or "user@host")
+        #[arg(long)]
+        ssh: Option<String>,
         /// Wrap all statements in a transaction
         #[arg(long)]
         tx: bool,
@@ -510,11 +513,12 @@ async fn main() -> Result<()> {
         Some(Commands::Worker { interval, batch }) => {
             qail::worker::run_worker(*interval, *batch).await?;
         },
-        Some(Commands::Exec { query, file, url, tx, dry_run }) => {
+        Some(Commands::Exec { query, file, url, ssh, tx, dry_run }) => {
             qail::exec::run_exec(qail::exec::ExecConfig {
                 query: query.clone(),
                 file: file.clone(),
                 url: url.clone(),
+                ssh: ssh.clone(),
                 tx: *tx,
                 dry_run: *dry_run,
             }).await?;
