@@ -2,11 +2,45 @@
 //!
 //! Type-safe execution using native QAIL AST - no raw SQL.
 //!
-//! # Example
+//! # Syntax
+//!
+//! ```text
+//! add <table> fields <col1>, <col2> values <val1>, <val2>
+//! ```
+//!
+//! # Multi-line Content
+//!
+//! Use triple quotes (`'''` or `"""`) for multi-line values:
+//!
+//! ```text
+//! add articles fields title, content values 'My Title', '''
+//! <article>
+//!   <p>Multi-line HTML content here.</p>
+//!   <p>Newlines are preserved inside triple quotes.</p>
+//! </article>
+//! '''
+//! ```
+//!
+//! # File Format (.qail)
+//!
+//! - Each line is a separate statement (unless inside triple quotes)
+//! - Comments start with `#` or `--`
+//! - Blank lines are ignored
+//!
+//! # Examples
+//!
 //! ```bash
+//! # Inline query
 //! qail exec "add users fields name, email values 'Alice', 'a@test.com'" --url postgres://...
-//! qail exec -f seed.qail --url postgres://... --tx
-//! qail exec "get users" --dry-run
+//!
+//! # From file with SSH tunnel
+//! qail exec -f seed.qail --ssh sailtix --url postgres://...
+//!
+//! # Dry-run (preview SQL only)
+//! qail exec -f data.qail --dry-run
+//!
+//! # Wrap in transaction
+//! qail exec -f batch.qail --url postgres://... --tx
 //! ```
 
 use anyhow::Result;
