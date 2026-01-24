@@ -200,7 +200,7 @@ mod tests {
     fn test_with_rls_noop_for_super_admin() {
         register_tenant_table("_rls_admin_orders", "operator_id");
 
-        let token = crate::rls::SuperAdminToken::issue();
+        let token = crate::rls::SuperAdminToken::for_system_process("test_super_admin_noop");
         let ctx = RlsContext::super_admin(token);
         let query = Qail::get("_rls_admin_orders").with_rls(&ctx);
 

@@ -23,6 +23,30 @@ impl Qail {
         }
     }
 
+    /// Returns `true` if this command is a raw SQL pass-through.
+    ///
+    /// Raw SQL commands are created by [`Qail::raw_sql()`] and store the
+    /// SQL string in the `table` field with `Action::Get`. The encoder
+    /// must write this SQL verbatim instead of generating a SELECT.
+    pub fn is_raw_sql(&self) -> bool {
+        if self.action != Action::Get {
+            return false;
+        }
+        // Must have no columns (default) or only Star
+        let cols_empty_or_star = self.columns.is_empty()
+            || self.columns.iter().all(|c| matches!(c, crate::ast::Expr::Star));
+        if !cols_empty_or_star {
+            return false;
+        }
+        // Table field contains actual SQL (starts with a keyword or contains FROM)
+        let lower = self.table.to_lowercase();
+        lower.starts_with("select ")
+            || lower.starts_with("with ")
+            || lower.starts_with("insert ")
+            || lower.starts_with("update ")
+            || lower.starts_with("delete ")
+    }
+
     /// UPDATE — modify rows.
     pub fn set(table: impl Into<String>) -> Self {
         Self {
