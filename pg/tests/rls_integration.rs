@@ -124,7 +124,7 @@ async fn test_super_admin_bypass() {
 
     // Super admin should see ALL vessels across all operators
     driver
-        .set_rls_context(RlsContext::super_admin(qail_core::rls::SuperAdminToken::issue()))
+        .set_rls_context(RlsContext::super_admin(qail_core::rls::SuperAdminToken::for_system_process("test_super_admin")))
         .await
         .unwrap();
 

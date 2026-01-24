@@ -1043,7 +1043,7 @@ mod tests {
         use crate::rls::RlsContext;
         
         // Super admin — RLS injection is a no-op but proof still required
-        let token = crate::rls::SuperAdminToken::issue();
+        let token = crate::rls::SuperAdminToken::for_system_process("test_super_admin_bypass");
         let ctx = RlsContext::super_admin(token);
         let query = Qail::typed(Orders)
             .column("id")

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-02-20
+
+### Breaking Changes ⚠️
+
+- **Core:** Removed `SuperAdminToken::issue()` — all call sites must migrate to named constructors:
+  - `SuperAdminToken::for_system_process(reason)` — cron jobs, startup, reference-data endpoints
+  - `SuperAdminToken::for_webhook(source)` — inbound callbacks (WhatsApp, Xendit, Midtrans)
+  - `SuperAdminToken::for_auth(operation)` — login, register, token refresh
+  - **Compile-time enforcement:** any remaining `issue()` call is now a hard compiler error (`E0599`)
+
+### Added
+
+- **Core:** `Qail::is_raw_sql()` — detects raw SQL commands for gateway pass-through
+- **Core:** Named `SuperAdminToken` constructors with mandatory reason/source parameters for audit trails
+- **PG:** Raw SQL pass-through in AST encoder — `Qail::raw_sql()` queries bypass AST-to-SQL translation and execute verbatim while preserving RLS context
+- **PG:** `PgPool::acquire_for_tenant(tenant_id)` — convenience method for tenant-scoped connections
+- **PG:** 5 new tests for raw SQL encoding (simple SELECT, WITH/CTE, multi-line, mixed case, whitespace)
+- **PG:** DDL session action encoders — `CALL`, `DO`, `SET`, `SHOW`, `RESET` (`pg/src/protocol/ast_encoder/ddl.rs`)
+
+### Fixed
+
+- **PG:** Raw SQL queries routed through gateway no longer produce `syntax error at or near "SELECT"` — encoder now writes raw SQL verbatim instead of attempting AST re-encoding
+- **Core:** `rls_proof_demo` and `spark_safety_demo` examples updated to use named constructors
+- **Core:** All RLS integration tests updated to use named constructors
+
 ## [0.20.6] - 2026-02-18
 
 ### Changed

@@ -105,7 +105,7 @@ impl AuthContext {
                 event = "super_admin_rls_bypass",
                 "SUPER_ADMIN access activated — RLS bypass enabled"
             );
-            let token = qail_core::rls::SuperAdminToken::issue();
+            let token = qail_core::rls::SuperAdminToken::for_auth("admin_rls_bypass");
             return qail_core::rls::RlsContext::super_admin(token);
         }
 
