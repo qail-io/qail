@@ -16,13 +16,16 @@ pub use qail_core::rls::RlsContext;
 /// **Security**: GUC values are sanitized to prevent SQL injection via
 /// crafted JWT claims (e.g., `operator_id: "'; DROP TABLE users; --"`).
 pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
+    let t_id = sanitize_guc_value(&ctx.tenant_id);
     let op_id = sanitize_guc_value(&ctx.operator_id);
     let ag_id = sanitize_guc_value(&ctx.agent_id);
     format!(
         "BEGIN; \
-         SELECT set_config('app.current_operator_id', '{}', true), \
+         SELECT set_config('app.current_tenant_id', '{}', true), \
+                set_config('app.current_operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
+        t_id,
         op_id,
         ag_id,
         ctx.bypasses_rls(),
@@ -34,15 +37,18 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
 /// Batches the RLS context and timeout into a single SQL to minimize
 /// round-trips. The timeout (in milliseconds) prevents runaway queries.
 pub(crate) fn context_to_sql_with_timeout(ctx: &RlsContext, timeout_ms: u32) -> String {
+    let t_id = sanitize_guc_value(&ctx.tenant_id);
     let op_id = sanitize_guc_value(&ctx.operator_id);
     let ag_id = sanitize_guc_value(&ctx.agent_id);
     format!(
         "BEGIN; \
          SET LOCAL statement_timeout = {}; \
-         SELECT set_config('app.current_operator_id', '{}', true), \
+         SELECT set_config('app.current_tenant_id', '{}', true), \
+                set_config('app.current_operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         timeout_ms,
+        t_id,
         op_id,
         ag_id,
         ctx.bypasses_rls(),
@@ -91,13 +97,14 @@ mod tests {
         let ctx = RlsContext::operator("abc-123");
         let sql = context_to_sql(&ctx);
         assert!(sql.contains("'abc-123'"));
+        assert!(sql.contains("app.current_tenant_id"));
         assert!(sql.contains("app.current_operator_id"));
         assert!(sql.contains("'false'")); // is_super_admin
     }
 
     #[test]
     fn test_context_to_sql_super_admin() {
-        let token = SuperAdminToken::issue();
+        let token = SuperAdminToken::for_system_process("test_super_admin_sql");
         let ctx = RlsContext::super_admin(token);
         let sql = context_to_sql(&ctx);
         assert!(sql.contains("'true'")); // is_super_admin

@@ -564,6 +564,12 @@ impl PooledConnection {
         conn.params_buf.clear();
 
         // Encode SQL + params to reusable buffers
+        if cmd.is_raw_sql() {
+            // Raw SQL pass-through: write verbatim, RLS context already set above
+            conn.sql_buf.clear();
+            conn.params_buf.clear();
+            conn.sql_buf.extend_from_slice(cmd.table.as_bytes());
+        } else {
         match cmd.action {
             qail_core::ast::Action::Get | qail_core::ast::Action::With => {
                 crate::protocol::ast_encoder::dml::encode_select(cmd, &mut conn.sql_buf, &mut conn.params_buf).ok();
@@ -583,6 +589,7 @@ impl PooledConnection {
                 self.rls_dirty = true;
                 return self.fetch_all_uncached(cmd).await;
             }
+        }
         }
 
         let mut hasher = DefaultHasher::new();
@@ -1080,6 +1087,21 @@ impl PgPool {
     pub async fn acquire_system(&self) -> PgResult<PooledConnection> {
         let ctx = qail_core::rls::RlsContext::empty();
         self.acquire_with_rls(ctx).await
+    }
+
+    /// Acquire a connection scoped to a specific tenant.
+    ///
+    /// Shorthand for `acquire_with_rls(RlsContext::tenant(tenant_id))`.
+    /// Use this when you already know the tenant UUID and want a
+    /// tenant-scoped connection in a single call.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut conn = pool.acquire_for_tenant("550e8400-...").await?;
+    /// // All queries through `conn` are now scoped to this tenant
+    /// ```
+    pub async fn acquire_for_tenant(&self, tenant_id: &str) -> PgResult<PooledConnection> {
+        self.acquire_with_rls(qail_core::rls::RlsContext::tenant(tenant_id)).await
     }
 
     /// Acquire a connection with branch context pre-configured.
