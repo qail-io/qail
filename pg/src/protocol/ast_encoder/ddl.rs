@@ -374,3 +374,35 @@ pub fn encode_session_reset(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"RESET ");
     buf.extend_from_slice(cmd.table.as_bytes());
 }
+
+// ── Pub/Sub commands ───────────────────────────────────────────────
+
+/// Encode LISTEN "channel".
+pub fn encode_listen(cmd: &Qail, buf: &mut BytesMut) {
+    let channel = cmd.channel.as_deref().unwrap_or("");
+    buf.extend_from_slice(b"LISTEN \"");
+    // Escape double-quotes in channel name
+    buf.extend_from_slice(channel.replace('"', "\"\"").as_bytes());
+    buf.extend_from_slice(b"\"");
+}
+
+/// Encode UNLISTEN "channel".
+pub fn encode_unlisten(cmd: &Qail, buf: &mut BytesMut) {
+    let channel = cmd.channel.as_deref().unwrap_or("");
+    buf.extend_from_slice(b"UNLISTEN \"");
+    buf.extend_from_slice(channel.replace('"', "\"\"").as_bytes());
+    buf.extend_from_slice(b"\"");
+}
+
+/// Encode NOTIFY "channel", 'payload'.
+pub fn encode_notify(cmd: &Qail, buf: &mut BytesMut) {
+    let channel = cmd.channel.as_deref().unwrap_or("");
+    buf.extend_from_slice(b"NOTIFY \"");
+    buf.extend_from_slice(channel.replace('"', "\"\"").as_bytes());
+    buf.extend_from_slice(b"\"");
+    if let Some(ref payload) = cmd.payload {
+        buf.extend_from_slice(b", '");
+        buf.extend_from_slice(payload.replace('\'', "''").as_bytes());
+        buf.extend_from_slice(b"'");
+    }
+}
