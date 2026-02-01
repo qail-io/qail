@@ -94,8 +94,7 @@ enum Commands {
     /// Parse and explain a QAIL query
     Explain { query: String },
     Repl,
-    /// Show the symbol reference
-    Symbols,
+
     /// Generate a migration file
     Mig {
         /// The QAIL migration command (e.g., make users fields id UUID, email VARCHAR)
@@ -576,7 +575,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Explain { query }) => explain_query(query),
         Some(Commands::Repl) => run_repl(),
-        Some(Commands::Symbols) => show_symbols(),
+
         Some(Commands::Mig { query, name }) => {
             generate_migration(query, name.clone())?;
         }
@@ -719,7 +718,7 @@ async fn main() -> Result<()> {
             }).await?;
         },
         Some(Commands::Types { schema, output }) => {
-            qail::types::generate_types(&schema, output.as_deref())?;
+            qail::types::generate_types(schema, output.as_deref())?;
         },
         None => {
             if let Some(query) = &cli.query {
@@ -827,41 +826,4 @@ fn explain_query(query: &str) {
     }
 }
 
-pub fn show_symbols() {
-    println!("{}", "🪝 QAIL Symbol Reference (v2.0)".cyan().bold());
-    println!();
 
-    let symbols = [
-        ("::", "separator", "Table delimiter", "FROM"),
-        ("'", "field", "Column selector", "SELECT col"),
-        ("'_", "all", "All columns", "SELECT *"),
-        ("[", "filter", "WHERE condition", "WHERE ..."),
-        ("]", "close", "End filter/modifier", ""),
-        ("[]", "values", "Insert values", "VALUES (...)"),
-        ("$", "param", "Placeholder", "$1, $2"),
-        ("<-", "left", "LEFT JOIN", "LEFT JOIN"),
-        ("->", "inner", "INNER JOIN", "JOIN"),
-        ("<>", "full", "FULL OUTER JOIN", "FULL JOIN"),
-        ("!", "distinct", "DISTINCT modifier", "SELECT DISTINCT"),
-    ];
-
-    println!(
-        "{:10} {:15} {:30} {}",
-        "Symbol".white().bold(),
-        "Name".white().bold(),
-        "Function".white().bold(),
-        "SQL Equivalent".white().bold()
-    );
-    println!("{}", "─".repeat(80).dimmed());
-
-    for (symbol, name, function, sql) in symbols {
-        println!(
-            "{:10} {:15} {:30} {}",
-            symbol.cyan().bold(),
-            name.yellow(),
-            function.white(),
-            sql.dimmed()
-        );
-    }
-    println!();
-}

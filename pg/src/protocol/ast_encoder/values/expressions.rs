@@ -200,15 +200,13 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
                         buf.extend_from_slice(key.as_bytes());
                         buf.extend_from_slice(b"'");
                     }
+                } else if is_integer {
+                    buf.extend_from_slice(b"->");
+                    buf.extend_from_slice(key.as_bytes());
                 } else {
-                    if is_integer {
-                        buf.extend_from_slice(b"->");
-                        buf.extend_from_slice(key.as_bytes());
-                    } else {
-                        buf.extend_from_slice(b"->'");
-                        buf.extend_from_slice(key.as_bytes());
-                        buf.extend_from_slice(b"'");
-                    }
+                    buf.extend_from_slice(b"->'");
+                    buf.extend_from_slice(key.as_bytes());
+                    buf.extend_from_slice(b"'");
                 }
             }
             buf.extend_from_slice(b")");

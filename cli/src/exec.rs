@@ -135,18 +135,18 @@ fn split_qail_statements(content: &str) -> Vec<String> {
                     continue;
                 }
             }
-        } else if c == '"' && !in_triple_single {
+        } else if c == '"' && !in_triple_single
+            && chars.peek() == Some(&'"')
+        {
+            chars.next();
             if chars.peek() == Some(&'"') {
                 chars.next();
-                if chars.peek() == Some(&'"') {
-                    chars.next();
-                    current.push_str("\"\"\"");
-                    in_triple_double = !in_triple_double;
-                    continue;
-                } else {
-                    current.push_str("\"\"");
-                    continue;
-                }
+                current.push_str("\"\"\"");
+                in_triple_double = !in_triple_double;
+                continue;
+            } else {
+                current.push_str("\"\"");
+                continue;
             }
         }
         

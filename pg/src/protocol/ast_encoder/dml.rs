@@ -155,7 +155,7 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     let sort_cages: Vec<_> = cmd.cages.iter()
         .filter_map(|cage| {
             if let CageKind::Sort(order) = &cage.kind {
-                Some((cage, order.clone()))
+                Some((cage, *order))
             } else {
                 None
             }

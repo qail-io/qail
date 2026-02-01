@@ -275,22 +275,20 @@ pub fn row_to_json(row: &qail_pg::PgRow) -> serde_json::Value {
         let value = if let Some(s) = row.get_string(i) {
             if (s.starts_with('{') && s.ends_with('}')) || (s.starts_with('[') && s.ends_with(']')) {
                 serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s))
-            } else {
-                if let Ok(n) = s.parse::<i64>() {
-                    serde_json::Value::Number(n.into())
-                } else if let Ok(f) = s.parse::<f64>() {
-                    if let Some(n) = serde_json::Number::from_f64(f) {
-                        serde_json::Value::Number(n)
-                    } else {
-                        serde_json::Value::String(s)
-                    }
-                } else if s == "t" || s == "true" {
-                    serde_json::Value::Bool(true)
-                } else if s == "f" || s == "false" {
-                    serde_json::Value::Bool(false)
+            } else if let Ok(n) = s.parse::<i64>() {
+                serde_json::Value::Number(n.into())
+            } else if let Ok(f) = s.parse::<f64>() {
+                if let Some(n) = serde_json::Number::from_f64(f) {
+                    serde_json::Value::Number(n)
                 } else {
                     serde_json::Value::String(s)
                 }
+            } else if s == "t" || s == "true" {
+                serde_json::Value::Bool(true)
+            } else if s == "f" || s == "false" {
+                serde_json::Value::Bool(false)
+            } else {
+                serde_json::Value::String(s)
             }
         } else {
             serde_json::Value::Null

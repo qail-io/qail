@@ -2733,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.14.22"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2756,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.14.22"
+version = "0.15.0"
 dependencies = [
  "chrono",
  "colored 3.0.0",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "qail-daemon"
-version = "0.1.0"
+version = "0.15.0"
 dependencies = [
  "qail-core",
  "qail-pg",
@@ -2789,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "qail-encoder"
-version = "0.14.22"
+version = "0.15.0"
 dependencies = [
  "qail-core",
  "qail-pg",
@@ -2797,7 +2797,7 @@ dependencies = [
 
 [[package]]
 name = "qail-ffi"
-version = "0.14.22"
+version = "0.15.0"
 dependencies = [
  "qail-core",
  "qail-pg",
@@ -2806,7 +2806,7 @@ dependencies = [
 
 [[package]]
 name = "qail-gateway"
-version = "0.2.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "qail-go"
-version = "0.14.21"
+version = "0.15.0"
 dependencies = [
  "libc",
  "once_cell",
@@ -2846,7 +2846,7 @@ dependencies = [
 
 [[package]]
 name = "qail-lsp"
-version = "0.14.22"
+version = "0.15.0"
 dependencies = [
  "qail-core",
  "serde",
@@ -2857,7 +2857,7 @@ dependencies = [
 
 [[package]]
 name = "qail-mysql"
-version = "0.14.22"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "rustls",
@@ -2870,7 +2870,7 @@ dependencies = [
 
 [[package]]
 name = "qail-pg"
-version = "0.14.22"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "qail-php"
-version = "0.14.21"
+version = "0.15.0"
 dependencies = [
  "libc",
  "once_cell",
@@ -2911,7 +2911,7 @@ dependencies = [
 
 [[package]]
 name = "qail-py"
-version = "0.14.21"
+version = "0.15.0"
 dependencies = [
  "once_cell",
  "pyo3",
@@ -2923,7 +2923,7 @@ dependencies = [
 
 [[package]]
 name = "qail-qdrant"
-version = "0.14.22"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2944,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "qail-redis"
-version = "0.14.22"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "qail-core",
@@ -2955,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "qail-wasm"
-version = "0.14.18"
+version = "0.15.0"
 dependencies = [
  "js-sys",
  "qail-core",

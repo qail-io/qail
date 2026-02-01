@@ -159,17 +159,15 @@ impl Schema {
         for line in sql.lines() {
             let line_upper = line.trim().to_uppercase();
             
-            if line_upper.starts_with("CREATE TABLE") {
-                if let Some(table_name) = extract_create_table_name(line) {
-                    // Add table with empty columns (will be filled by column defs)
-                    if !self.tables.contains_key(&table_name) {
-                        self.tables.insert(table_name.clone(), TableSchema {
-                            name: table_name,
-                            columns: HashMap::new(),
-                        });
-                        changes += 1;
-                    }
-                }
+            if line_upper.starts_with("CREATE TABLE")
+                && let Some(table_name) = extract_create_table_name(line)
+                && !self.tables.contains_key(&table_name)
+            {
+                self.tables.insert(table_name.clone(), TableSchema {
+                    name: table_name,
+                    columns: HashMap::new(),
+                });
+                changes += 1;
             }
         }
         
@@ -182,12 +180,12 @@ impl Schema {
             let line = line.trim();
             let line_upper = line.to_uppercase();
             
-            if line_upper.starts_with("CREATE TABLE") {
-                if let Some(name) = extract_create_table_name(line) {
-                    current_table = Some(name);
-                    in_create_block = true;
-                    paren_depth = 0;
-                }
+            if line_upper.starts_with("CREATE TABLE")
+                && let Some(name) = extract_create_table_name(line)
+            {
+                current_table = Some(name);
+                in_create_block = true;
+                paren_depth = 0;
             }
             
             if in_create_block {
@@ -195,14 +193,12 @@ impl Schema {
                 paren_depth = paren_depth.saturating_sub(line.chars().filter(|c| *c == ')').count());
                 
                 // Extract column name (first identifier after opening paren)
-                if let Some(col) = extract_column_from_create(line) {
-                    if let Some(ref table) = current_table {
-                        if let Some(t) = self.tables.get_mut(table) {
-                            if t.columns.insert(col.clone(), "TEXT".to_string()).is_none() {
-                                changes += 1;
-                            }
-                        }
-                    }
+                if let Some(col) = extract_column_from_create(line)
+                    && let Some(ref table) = current_table
+                    && let Some(t) = self.tables.get_mut(table)
+                    && t.columns.insert(col.clone(), "TEXT".to_string()).is_none()
+                {
+                    changes += 1;
                 }
                 
                 if paren_depth == 0 && line.contains(')') {
@@ -212,69 +208,61 @@ impl Schema {
             }
             
             // ALTER TABLE ... ADD COLUMN
-            if line_upper.contains("ALTER TABLE") && line_upper.contains("ADD COLUMN") {
-                if let Some((table, col)) = extract_alter_add_column(line) {
-                    if let Some(t) = self.tables.get_mut(&table) {
-                        if t.columns.insert(col.clone(), "TEXT".to_string()).is_none() {
-                            changes += 1;
-                        }
-                    } else {
-                        // Table might be new from this migration
-                        let mut cols = HashMap::new();
-                        cols.insert(col, "TEXT".to_string());
-                        self.tables.insert(table.clone(), TableSchema {
-                            name: table,
-                            columns: cols,
-                        });
+            if line_upper.contains("ALTER TABLE") && line_upper.contains("ADD COLUMN")
+                && let Some((table, col)) = extract_alter_add_column(line)
+            {
+                if let Some(t) = self.tables.get_mut(&table) {
+                    if t.columns.insert(col.clone(), "TEXT".to_string()).is_none() {
                         changes += 1;
                     }
+                } else {
+                    // Table might be new from this migration
+                    let mut cols = HashMap::new();
+                    cols.insert(col, "TEXT".to_string());
+                    self.tables.insert(table.clone(), TableSchema {
+                        name: table,
+                        columns: cols,
+                    });
+                    changes += 1;
                 }
             }
             
             // ALTER TABLE ... ADD (without COLUMN keyword)
-            if line_upper.contains("ALTER TABLE") && line_upper.contains(" ADD ") && !line_upper.contains("ADD COLUMN") {
-                if let Some((table, col)) = extract_alter_add(line) {
-                    if let Some(t) = self.tables.get_mut(&table) {
-                        if t.columns.insert(col.clone(), "TEXT".to_string()).is_none() {
-                            changes += 1;
-                        }
-                    }
-                }
+            if line_upper.contains("ALTER TABLE") && line_upper.contains(" ADD ") && !line_upper.contains("ADD COLUMN")
+                && let Some((table, col)) = extract_alter_add(line)
+                && let Some(t) = self.tables.get_mut(&table)
+                && t.columns.insert(col.clone(), "TEXT".to_string()).is_none()
+            {
+                changes += 1;
             }
             
             // DROP TABLE
-            if line_upper.starts_with("DROP TABLE") {
-                if let Some(table_name) = extract_drop_table_name(line) {
-                    if self.tables.remove(&table_name).is_some() {
-                        changes += 1;
-                    }
-                }
+            if line_upper.starts_with("DROP TABLE")
+                && let Some(table_name) = extract_drop_table_name(line)
+                && self.tables.remove(&table_name).is_some()
+            {
+                changes += 1;
             }
             
             // ALTER TABLE ... DROP COLUMN
-            if line_upper.contains("ALTER TABLE") && line_upper.contains("DROP COLUMN") {
-                if let Some((table, col)) = extract_alter_drop_column(line) {
-                    if let Some(t) = self.tables.get_mut(&table) {
-                        if t.columns.remove(&col).is_some() {
-                            changes += 1;
-                        }
-                    }
-                }
+            if line_upper.contains("ALTER TABLE") && line_upper.contains("DROP COLUMN")
+                && let Some((table, col)) = extract_alter_drop_column(line)
+                && let Some(t) = self.tables.get_mut(&table)
+                && t.columns.remove(&col).is_some()
+            {
+                changes += 1;
             }
             
             // ALTER TABLE ... DROP (without COLUMN keyword - PostgreSQL style)
             if line_upper.contains("ALTER TABLE") && line_upper.contains(" DROP ") 
                 && !line_upper.contains("DROP COLUMN") 
                 && !line_upper.contains("DROP CONSTRAINT")
-                && !line_upper.contains("DROP INDEX") 
+                && !line_upper.contains("DROP INDEX")
+                && let Some((table, col)) = extract_alter_drop(line)
+                && let Some(t) = self.tables.get_mut(&table)
+                && t.columns.remove(&col).is_some()
             {
-                if let Some((table, col)) = extract_alter_drop(line) {
-                    if let Some(t) = self.tables.get_mut(&table) {
-                        if t.columns.remove(&col).is_some() {
-                            changes += 1;
-                        }
-                    }
-                }
+                changes += 1;
             }
         }
         
@@ -491,10 +479,10 @@ fn scan_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
             let path = entry.path();
             if path.is_dir() {
                 scan_directory(&path, usages);
-            } else if path.extension().map_or(false, |e| e == "rs") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    scan_file(&path.display().to_string(), &content, usages);
-                }
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(content) = fs::read_to_string(&path)
+            {
+                scan_file(&path.display().to_string(), &content, usages);
             }
         }
     }
@@ -585,9 +573,9 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
 fn extract_string_arg(s: &str) -> Option<String> {
     // Find "string" pattern
     let s = s.trim();
-    if s.starts_with('"') {
-        let end = s[1..].find('"')?;
-        Some(s[1..end + 1].to_string())
+    if let Some(stripped) = s.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        Some(stripped[..end].to_string())
     } else {
         None
     }
@@ -612,11 +600,9 @@ fn extract_columns(line: &str) -> Vec<String> {
     // .filter("col", ...)
     while let Some(pos) = remaining.find(".filter(") {
         let after = &remaining[pos + 8..];
-        if let Some(col) = extract_string_arg(after) {
-            // Don't add qualified columns (CTE refs)
-            if !col.contains('.') {
-                columns.push(col);
-            }
+        if let Some(col) = extract_string_arg(after)
+            && !col.contains('.') {
+            columns.push(col);
         }
         remaining = after;
     }
@@ -626,10 +612,9 @@ fn extract_columns(line: &str) -> Vec<String> {
         let mut temp = line;
         while let Some(pos) = temp.find(method) {
             let after = &temp[pos + method.len()..];
-            if let Some(col) = extract_string_arg(after) {
-                if !col.contains('.') {
-                    columns.push(col);
-                }
+            if let Some(col) = extract_string_arg(after)
+                && !col.contains('.') {
+                columns.push(col);
             }
             temp = after;
         }
@@ -639,10 +624,9 @@ fn extract_columns(line: &str) -> Vec<String> {
     let mut remaining = line;
     while let Some(pos) = remaining.find(".order_by(") {
         let after = &remaining[pos + 10..];
-        if let Some(col) = extract_string_arg(after) {
-            if !col.contains('.') {
-                columns.push(col);
-            }
+        if let Some(col) = extract_string_arg(after)
+            && !col.contains('.') {
+            columns.push(col);
         }
         remaining = after;
     }
