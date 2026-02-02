@@ -75,10 +75,13 @@ pub(crate) async fn list_handler(
     }
 
     // Expand FK relations via LEFT JOIN
+    let mut has_joins = false;
     if let Some(ref expand) = params.expand {
         let relations: Vec<&str> = {
             let mut seen = std::collections::HashSet::new();
-            expand.split(',').map(|s| s.trim()).filter(|s| !s.is_empty() && seen.insert(*s)).collect()
+            expand.split(',').map(|s| s.trim())
+                .filter(|s| !s.is_empty() && !s.starts_with("nested:") && seen.insert(*s))
+                .collect()
         };
         if relations.len() > state.config.max_expand_depth {
             return Err(ApiError::parse_error(format!(
@@ -92,6 +95,7 @@ pub(crate) async fn list_handler(
                 let left = format!("{}.{}", table_name, fk_col);
                 let right = format!("{}.{}", rel, ref_col);
                 cmd = cmd.join(JoinKind::Left, rel, &left, &right);
+                has_joins = true;
                 continue;
             }
             // Try: `rel` references this table (reverse: users?expand=orders)
@@ -99,12 +103,32 @@ pub(crate) async fn list_handler(
                 let left = format!("{}.{}", table_name, ref_col);
                 let right = format!("{}.{}", rel, fk_col);
                 cmd = cmd.join(JoinKind::Left, rel, &left, &right);
+                has_joins = true;
                 continue;
             }
             return Err(ApiError::parse_error(format!(
                 "No relation between '{}' and '{}'",
                 table_name, rel
             )));
+        }
+    }
+
+    // When JOINs are present, table-qualify base table columns in SELECT
+    // to avoid ambiguous column errors (e.g., both tables have `tenant_id`)
+    if has_joins {
+        if cmd.columns.is_empty() || cmd.columns == vec![Expr::Named("*".into())] {
+            // SELECT * → qualify with table name: SELECT base_table.*
+            cmd.columns = vec![Expr::Named(format!("{}.*", table_name))];
+        } else {
+            // Qualify each unqualified column: col → base_table.col
+            cmd.columns = cmd.columns.into_iter().map(|expr| {
+                match expr {
+                    Expr::Named(ref name) if !name.contains('.') => {
+                        Expr::Named(format!("{}.{}", table_name, name))
+                    }
+                    other => other,
+                }
+            }).collect();
         }
     }
 
@@ -144,6 +168,20 @@ pub(crate) async fn list_handler(
         .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
+
+    // When JOINs are present, table-qualify unqualified filter columns
+    // to avoid ambiguous column errors (e.g., RLS `tenant_id` → `base_table.tenant_id`)
+    if has_joins {
+        for cage in &mut cmd.cages {
+            for cond in &mut cage.conditions {
+                if let Expr::Named(ref name) = cond.left {
+                    if !name.contains('.') {
+                        cond.left = Expr::Named(format!("{}.{}", table_name, name));
+                    }
+                }
+            }
+        }
+    }
 
     // Build cache key from full URI + user identity
     let is_streaming = params.stream.unwrap_or(false);
