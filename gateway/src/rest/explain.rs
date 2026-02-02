@@ -67,6 +67,7 @@ pub(crate) async fn explain_handler(
     }
 
     // Apply expand (flat JOIN only) — enforce depth limit
+    let mut has_joins = false;
     if let Some(ref expand) = params.expand {
         let relations: Vec<&str> = {
             let mut seen = std::collections::HashSet::new();
@@ -85,11 +86,30 @@ pub(crate) async fn explain_handler(
                 let left = format!("{}.{}", table_name, fk_col);
                 let right = format!("{}.{}", rel, ref_col);
                 cmd = cmd.join(JoinKind::Left, rel, &left, &right);
+                has_joins = true;
             } else if let Some((fk_col, ref_col)) = state.schema.relation_for(rel, &table_name) {
                 let left = format!("{}.{}", table_name, ref_col);
                 let right = format!("{}.{}", rel, fk_col);
                 cmd = cmd.join(JoinKind::Left, rel, &left, &right);
+                has_joins = true;
             }
+        }
+    }
+
+    // When JOINs are present, table-qualify base table columns
+    if has_joins {
+        use qail_core::ast::Expr;
+        if cmd.columns.is_empty() || cmd.columns == vec![Expr::Named("*".into())] {
+            cmd.columns = vec![Expr::Named(format!("{}.*", table_name))];
+        } else {
+            cmd.columns = cmd.columns.into_iter().map(|expr| {
+                match expr {
+                    Expr::Named(ref name) if !name.contains('.') => {
+                        Expr::Named(format!("{}.{}", table_name, name))
+                    }
+                    other => other,
+                }
+            }).collect();
         }
     }
 
@@ -112,6 +132,20 @@ pub(crate) async fn explain_handler(
         .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
+
+    // When JOINs are present, table-qualify unqualified filter columns
+    if has_joins {
+        use qail_core::ast::Expr;
+        for cage in &mut cmd.cages {
+            for cond in &mut cage.conditions {
+                if let Expr::Named(ref name) = cond.left {
+                    if !name.contains('.') {
+                        cond.left = Expr::Named(format!("{}.{}", table_name, name));
+                    }
+                }
+            }
+        }
+    }
 
     // Generate SQL from AST
     use qail_pg::protocol::AstEncoder;
