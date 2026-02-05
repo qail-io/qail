@@ -112,8 +112,12 @@ pub(crate) async fn nested_list_handler(
     let rows = conn
         .fetch_all_uncached(&cmd)
         .await
-        .map_err(|e| ApiError::query_error(e.to_string()))?;
+        .map_err(|e| ApiError::query_error(e.to_string()));
 
+    // Release connection back to pool before processing results
+    conn.release().await;
+
+    let rows = rows?;
     let data: Vec<Value> = rows.iter().map(row_to_json).collect();
     let count = data.len();
 
@@ -270,11 +274,16 @@ pub(crate) async fn expand_nested(
             continue;
         }
 
+        // Release connection before returning error
+        conn.release().await;
         return Err(ApiError::parse_error(format!(
             "No relation between '{}' and '{}' for nested expansion",
             table_name, rel
         )));
     }
+
+    // Release connection back to pool
+    conn.release().await;
 
     Ok(())
 }

@@ -720,6 +720,8 @@ pub(crate) async fn create_handler(
             all_results.push(row_data);
         }
 
+        conn.release().await;
+
         if is_batch {
             return Ok((
                 StatusCode::CREATED,
@@ -893,6 +895,7 @@ pub(crate) async fn update_handler(
     if let Some(branch_name) = branch_ctx.branch_name() {
         let row_data: Value = Value::Object(obj.clone());
         redirect_to_overlay(&mut conn, branch_name, &table_name, &id, "update", &row_data).await?;
+        conn.release().await;
         return Ok(Json(SingleResponse { data: json!({"updated": true, "branch": branch_name}) }));
     }
 
@@ -971,6 +974,7 @@ pub(crate) async fn delete_handler(
     let branch_ctx = extract_branch_from_headers(&headers);
     if let Some(branch_name) = branch_ctx.branch_name() {
         redirect_to_overlay(&mut conn, branch_name, &table_name, &id, "delete", &Value::Null).await?;
+        conn.release().await;
         return Ok(Json(DeleteResponse { deleted: true }));
     }
 
