@@ -67,6 +67,10 @@ pub struct PgConnection {
     pub(crate) params_buf: Vec<Option<Vec<u8>>>,
     pub(crate) prepared_statements: HashMap<String, String>,
     pub(crate) stmt_cache: LruCache<u64, String>,
+    /// Cache of column metadata (RowDescription) per statement hash.
+    /// PostgreSQL only sends RowDescription after Parse, not on subsequent Bind+Execute.
+    /// This cache ensures by-name column access works even for cached prepared statements.
+    pub(crate) column_info_cache: HashMap<u64, Arc<super::ColumnInfo>>,
     pub(crate) process_id: i32,
     pub(crate) secret_key: i32,
 }
@@ -99,6 +103,7 @@ impl PgConnection {
             params_buf: Vec::with_capacity(16), // SQL encoding buffer
             prepared_statements: HashMap::new(),
             stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
         };
@@ -171,6 +176,7 @@ impl PgConnection {
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
             stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
         };
@@ -280,6 +286,7 @@ impl PgConnection {
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
             stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
         };
@@ -316,6 +323,7 @@ impl PgConnection {
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
             stmt_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
         };
