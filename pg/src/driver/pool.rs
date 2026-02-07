@@ -111,9 +111,14 @@ struct PooledConn {
 }
 
 /// A pooled connection that returns to the pool when dropped.
+///
+/// When `rls_dirty` is true (set by `acquire_with_rls`), the connection
+/// will automatically reset RLS session variables before returning to
+/// the pool. This prevents cross-tenant data leakage.
 pub struct PooledConnection {
     conn: Option<PgConnection>,
     pool: Arc<PgPoolInner>,
+    rls_dirty: bool,
 }
 
 impl PooledConnection {
@@ -193,8 +198,18 @@ impl Drop for PooledConnection {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
             let pool = self.pool.clone();
+            let rls_dirty = self.rls_dirty;
             tokio::spawn(async move {
-                pool.return_connection(conn).await;
+                if rls_dirty {
+                    // Reset RLS session variables before returning to pool.
+                    // This prevents the next acquire() from inheriting
+                    // a stale tenant context from a different request.
+                    let mut conn = conn;
+                    let _ = conn.execute_simple(super::rls::reset_sql()).await;
+                    pool.return_connection(conn).await;
+                } else {
+                    pool.return_connection(conn).await;
+                }
             });
         }
     }
@@ -353,6 +368,7 @@ impl PgPool {
         Ok(PooledConnection {
             conn: Some(conn),
             pool: self.inner.clone(),
+            rls_dirty: false,
         })
     }
 
@@ -381,6 +397,9 @@ impl PgPool {
         let sql = super::rls::context_to_sql(&ctx);
         let pg_conn = conn.get_mut();
         pg_conn.execute_simple(&sql).await?;
+
+        // Mark dirty so Drop resets context before pool return
+        conn.rls_dirty = true;
 
         Ok(conn)
     }

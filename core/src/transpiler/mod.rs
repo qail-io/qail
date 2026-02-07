@@ -5,6 +5,7 @@ pub mod conditions;
 pub mod ddl;
 pub mod dialect;
 pub mod dml;
+pub mod policy;
 pub mod sql;
 pub mod traits;
 
