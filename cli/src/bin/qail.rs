@@ -136,10 +136,16 @@ EXAMPLES:
     },
     /// Format a QAIL query to canonical v2 syntax
     Fmt { query: String },
-    /// Validate a QAIL schema file
+    /// Validate a QAIL schema file (and optionally audit source for RLS coverage)
     Check {
         /// Schema file path (or old:new for migration validation)
         schema: String,
+        /// Source directory to scan for RLS audit (e.g., ./src)
+        #[arg(long)]
+        src: Option<String>,
+        /// Migrations directory to merge before validation
+        #[arg(long, default_value = "migrations")]
+        migrations: String,
     },
     /// Diff two schema files and show migration AST
     Diff {
@@ -585,8 +591,8 @@ async fn main() -> Result<()> {
         Some(Commands::Fmt { query }) => {
             format_query(query)?;
         }
-        Some(Commands::Check { schema }) => {
-            check_schema(schema)?;
+        Some(Commands::Check { schema, src, migrations }) => {
+            check_schema(schema, src.as_deref(), migrations)?;
         }
         Some(Commands::Diff { old, new, format }) => {
             let schema_fmt = match format {
