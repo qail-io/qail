@@ -25,6 +25,7 @@ async fn connect() -> PgDriver {
 }
 
 #[tokio::test]
+#[ignore = "Requires local PostgreSQL with RLS policies"]
 async fn test_no_context_sees_nothing() {
     let mut driver = connect().await;
 
@@ -39,6 +40,7 @@ async fn test_no_context_sees_nothing() {
 }
 
 #[tokio::test]
+#[ignore = "Requires local PostgreSQL with RLS policies"]
 async fn test_operator_isolation() {
     let mut driver = connect().await;
 
@@ -83,6 +85,7 @@ async fn test_operator_isolation() {
 }
 
 #[tokio::test]
+#[ignore = "Requires local PostgreSQL with RLS policies"]
 async fn test_clear_context_revokes_access() {
     let mut driver = connect().await;
 
@@ -115,6 +118,7 @@ async fn test_clear_context_revokes_access() {
 }
 
 #[tokio::test]
+#[ignore = "Requires local PostgreSQL with RLS policies"]
 async fn test_super_admin_bypass() {
     let mut driver = connect().await;
 
@@ -140,6 +144,7 @@ async fn test_super_admin_bypass() {
 }
 
 #[tokio::test]
+#[ignore = "Requires local PostgreSQL with RLS policies"]
 async fn test_context_getter() {
     let mut driver = connect().await;
 
@@ -162,6 +167,7 @@ async fn test_context_getter() {
 }
 
 #[tokio::test]
+#[ignore = "Requires local PostgreSQL with RLS policies"]
 async fn test_rls_across_multiple_tables() {
     let mut driver = connect().await;
 
