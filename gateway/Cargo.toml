@@ -1,6 +1,6 @@
 [package]
 name = "qail-gateway"
-version = "0.15.4"
+version = "0.15.5"
 edition = "2021"
 description = "QAIL Gateway - Native data layer replacing REST/GraphQL"
 license = "MIT"
@@ -10,8 +10,8 @@ categories = ["database", "web-programming"]
 
 [dependencies]
 # Core QAIL
-qail-core = { path = "../core", version = "0.15.4" }
-qail-pg = { path = "../pg", version = "0.15.4" }
+qail-core = { path = "../core", version = "0.15.5" }
+qail-pg = { path = "../pg", version = "0.15.5" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
