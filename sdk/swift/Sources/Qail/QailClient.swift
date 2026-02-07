@@ -14,19 +14,23 @@ public struct QailConfig: Sendable {
     public let timeout: TimeInterval
     /// Custom URLSession (defaults to `.shared`).
     public let session: URLSession
+    /// Use snake_case ↔ camelCase key conversion (default: true).
+    public let snakeCaseKeys: Bool
 
     public init(
         url: String,
         token: TokenSource? = nil,
         headers: [String: String] = [:],
         timeout: TimeInterval = 30,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        snakeCaseKeys: Bool = true
     ) {
         self.url = url
         self.token = token
         self.headers = headers
         self.timeout = timeout
         self.session = session
+        self.snakeCaseKeys = snakeCaseKeys
     }
 }
 
@@ -71,6 +75,8 @@ public final class QailClient: Sendable {
     private let timeout: TimeInterval
     private let tokenSource: TokenSource?
     private let session: URLSession
+    internal let decoder: JSONDecoder
+    internal let encoder: JSONEncoder
 
     public init(config: QailConfig) {
         // Strip trailing slashes
@@ -81,6 +87,17 @@ public final class QailClient: Sendable {
         self.timeout = config.timeout
         self.tokenSource = config.token
         self.session = config.session
+
+        let dec = JSONDecoder()
+        let enc = JSONEncoder()
+        if config.snakeCaseKeys {
+            dec.keyDecodingStrategy = .convertFromSnakeCase
+            enc.keyEncodingStrategy = .convertToSnakeCase
+        }
+        dec.dateDecodingStrategy = .iso8601
+        enc.dateEncodingStrategy = .iso8601
+        self.decoder = dec
+        self.encoder = enc
     }
 
     // MARK: - Query builder entry points
@@ -174,6 +191,32 @@ public final class QailClient: Sendable {
         return subscription
     }
 
+    // MARK: - Raw HTTP (for Workers endpoints)
+
+    /// Make a typed request to any path (e.g. Workers endpoints).
+    ///
+    /// ```swift
+    /// struct LoginResponse: Decodable { let token: String }
+    /// let res: LoginResponse = try await qail.post("/public/auth/login", body: creds)
+    /// ```
+    public func get<T: Decodable>(_ path: String) async throws -> T {
+        try await request(method: "GET", path: path)
+    }
+
+    public func post<T: Decodable, B: Encodable>(_ path: String, body: B) async throws -> T {
+        let data = try encoder.encode(body)
+        return try await request(method: "POST", path: path, body: data)
+    }
+
+    public func patch<T: Decodable, B: Encodable>(_ path: String, body: B) async throws -> T {
+        let data = try encoder.encode(body)
+        return try await request(method: "PATCH", path: path, body: data)
+    }
+
+    public func post<T: Decodable>(_ path: String) async throws -> T {
+        try await request(method: "POST", path: path)
+    }
+
     // MARK: - Internal HTTP
 
     /// Internal JSON request that returns a Decodable type.
@@ -184,7 +227,6 @@ public final class QailClient: Sendable {
         contentType: String = "application/json"
     ) async throws -> T {
         let data = try await performRequest(method: method, path: path, body: body, contentType: contentType)
-        let decoder = JSONDecoder()
         return try decoder.decode(T.self, from: data)
     }
 
