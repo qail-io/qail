@@ -573,15 +573,11 @@ fn scan_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
 }
 
 fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
-    // Patterns to match:
-    // Qail::get("table")
-    // Qail::add("table")
-    // Qail::del("table")
-    // Qail::put("table")
-    
+    // All CRUD patterns: GET=SELECT, ADD=INSERT, SET=UPDATE, DEL=DELETE, PUT=UPSERT
     let patterns = [
         ("Qail::get(", "GET"),
         ("Qail::add(", "ADD"),
+        ("Qail::set(", "SET"),
         ("Qail::del(", "DEL"),
         ("Qail::put(", "PUT"),
     ];
