@@ -15,11 +15,15 @@ pub mod error;
 pub mod fmt;
 pub mod migrate;
 pub mod parser;
+pub mod rls;
 pub mod schema;
 pub mod transformer;
 pub mod transpiler;
 pub mod typed;
 pub mod validator;
+
+#[cfg(test)]
+mod proptest;
 
 pub use parser::parse;
 
