@@ -121,6 +121,29 @@ public final class SelectBuilder<T: Decodable> {
         return res.data
     }
 
+    /// Get the first matching row, or nil.
+    public func first() async throws -> T? {
+        let saved = _limit
+        _limit = 1
+        let res = try await exec()
+        _limit = saved
+        return res.data.first
+    }
+
+    /// Get exactly one row (throws if none found).
+    public func single() async throws -> T {
+        guard let row = try await first() else {
+            throw QailError(code: "NOT_FOUND", message: "No rows found in \(table)", details: nil, requestId: nil, hint: nil, table: table, column: nil)
+        }
+        return row
+    }
+
+    /// Get the total count of matching rows.
+    public func count() async throws -> Int {
+        let res = try await exec()
+        return res.total ?? res.count
+    }
+
     /// Get a single row by primary key.
     public func get(id: CustomStringConvertible) async throws -> T {
         let res: SingleResponse<T> = try await client.request(
