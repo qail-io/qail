@@ -3,6 +3,7 @@
 //! Main entry point for running the QAIL Gateway.
 
 use std::sync::Arc;
+use axum::routing::MethodRouter;
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -11,7 +12,7 @@ use crate::config::GatewayConfig;
 use crate::error::GatewayError;
 use crate::policy::PolicyEngine;
 use crate::router::create_router;
-use crate::schema::SchemaValidator;
+use crate::schema::SchemaRegistry;
 
 use qail_pg::{PgPool, PoolConfig};
 
@@ -19,7 +20,7 @@ use qail_pg::{PgPool, PoolConfig};
 pub struct GatewayState {
     pub pool: PgPool,
     pub policy_engine: PolicyEngine,
-    pub schema_validator: SchemaValidator,
+    pub schema: SchemaRegistry,
     pub cache: QueryCache,
     pub config: GatewayConfig,
 }
@@ -28,6 +29,7 @@ pub struct GatewayState {
 pub struct Gateway {
     config: GatewayConfig,
     state: Option<Arc<GatewayState>>,
+    custom_routes: Vec<(String, MethodRouter<Arc<GatewayState>>)>,
 }
 
 impl Gateway {
@@ -36,6 +38,7 @@ impl Gateway {
         Self {
             config,
             state: None,
+            custom_routes: Vec::new(),
         }
     }
     
@@ -56,10 +59,10 @@ impl Gateway {
         }
         
         // Load schema
-        let mut schema_validator = SchemaValidator::new();
+        let mut schema = SchemaRegistry::new();
         if let Some(ref schema_path) = self.config.schema_path {
             tracing::info!("Loading schema from: {}", schema_path);
-            schema_validator.load_from_file(schema_path)?;
+            schema.load_from_file(schema_path)?;
         }
         
         // Initialize cache
@@ -85,7 +88,7 @@ impl Gateway {
         self.state = Some(Arc::new(GatewayState {
             pool,
             policy_engine,
-            schema_validator,
+            schema,
             cache,
             config: self.config.clone(),
         }));
@@ -102,12 +105,16 @@ impl Gateway {
         let state = self.state.as_ref()
             .ok_or_else(|| GatewayError::Config("Gateway not initialized. Call init() first.".to_string()))?;
         
-        let router = create_router(Arc::clone(state));
+        let router = create_router(Arc::clone(state), &self.custom_routes);
         
         let addr = &self.config.bind_address;
         tracing::info!("🚀 QAIL Gateway starting on {}", addr);
         tracing::info!("   POST /qail     - Execute QAIL queries");
         tracing::info!("   GET  /health   - Health check");
+        tracing::info!("   GET  /api/*    - Auto-REST endpoints");
+        if !self.custom_routes.is_empty() {
+            tracing::info!("   {} custom handler(s)", self.custom_routes.len());
+        }
         
         let listener = TcpListener::bind(addr)
             .await
@@ -169,12 +176,20 @@ fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
 }
 
 /// Builder for the Gateway
-#[derive(Debug, Default)]
 pub struct GatewayBuilder {
     config: GatewayConfig,
+    custom_routes: Vec<(String, MethodRouter<Arc<GatewayState>>)>,
 }
 
 impl GatewayBuilder {
+    /// Create a new builder with default config
+    pub fn new() -> Self {
+        Self {
+            config: GatewayConfig::default(),
+            custom_routes: Vec::new(),
+        }
+    }
+
     /// Set the database URL
     pub fn database(mut self, url: impl Into<String>) -> Self {
         self.config.database_url = url.into();
@@ -199,9 +214,36 @@ impl GatewayBuilder {
         self
     }
     
+    /// Register a custom handler that overrides or extends auto-REST routes.
+    ///
+    /// Custom handlers merge AFTER auto-REST, so they take precedence.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use axum::routing::post;
+    ///
+    /// let gateway = Gateway::builder()
+    ///     .database("postgres://...")
+    ///     .schema("schema.qail")
+    ///     .extend("/api/orders/:id/pay", post(custom_payment_handler))
+    ///     .extend("/api/reports/daily", get(daily_report_handler))
+    ///     .build_and_init()
+    ///     .await?;
+    /// ```
+    pub fn extend(
+        mut self,
+        path: impl Into<String>,
+        handler: MethodRouter<Arc<GatewayState>>,
+    ) -> Self {
+        self.custom_routes.push((path.into(), handler));
+        self
+    }
+
     /// Build the gateway
     pub fn build(self) -> Gateway {
-        Gateway::new(self.config)
+        let mut gw = Gateway::new(self.config);
+        gw.custom_routes = self.custom_routes;
+        gw
     }
     
     /// Build and initialize the gateway
@@ -212,5 +254,11 @@ impl GatewayBuilder {
         let mut gateway = self.build();
         gateway.init().await?;
         Ok(gateway)
+    }
+}
+
+impl Default for GatewayBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }

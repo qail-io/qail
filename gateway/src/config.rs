@@ -63,6 +63,34 @@ impl GatewayConfig {
             ttl: Duration::from_secs(self.cache_ttl_seconds),
         }
     }
+
+    /// Create gateway config from centralized `QailConfig`.
+    ///
+    /// Maps `[postgres]`, `[gateway]`, and `[project]` sections.
+    pub fn from_qail_config(qail: &qail_core::config::QailConfig) -> Self {
+        let (bind_address, cors_enabled, policy_path, cache_enabled, cache_max_entries, cache_ttl_seconds) =
+            if let Some(ref gw) = qail.gateway {
+                let (ce, cme, cts) = if let Some(ref cache) = gw.cache {
+                    (cache.enabled, cache.max_entries, cache.ttl_secs)
+                } else {
+                    (true, 1000, 60)
+                };
+                (gw.bind.clone(), gw.cors, gw.policy.clone(), ce, cme, cts)
+            } else {
+                ("0.0.0.0:8080".to_string(), true, None, true, 1000, 60)
+            };
+
+        Self {
+            database_url: qail.postgres.url.clone(),
+            schema_path: qail.project.schema.clone(),
+            policy_path,
+            bind_address,
+            cors_enabled,
+            cache_enabled,
+            cache_max_entries,
+            cache_ttl_seconds,
+        }
+    }
 }
 
 impl GatewayConfig {

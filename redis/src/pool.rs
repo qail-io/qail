@@ -47,6 +47,18 @@ impl PoolConfig {
         self.max_connections = n;
         self
     }
+
+    /// Create config from centralized `QailConfig`.
+    ///
+    /// Reads `[redis]` section; returns `None` if section is absent.
+    pub fn from_qail_config(qail: &qail_core::config::QailConfig) -> Option<Self> {
+        let redis = qail.redis.as_ref()?;
+        Some(Self {
+            max_connections: redis.max_connections,
+            host: redis.host.clone(),
+            port: redis.port,
+        })
+    }
 }
 
 /// Redis connection pool.

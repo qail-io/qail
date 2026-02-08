@@ -31,6 +31,7 @@
 - [Type System](./features/types.md)
 - [Type Safety](./features/type-safety.md)
 - [Row-Level Security (RLS)](./features/rls.md)
+- [Configuration](./features/configuration.md)
 # Reference
 
 - [CLI Commands](./reference/cli.md)

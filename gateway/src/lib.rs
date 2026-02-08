@@ -39,6 +39,7 @@ pub mod handler;
 pub mod metrics;
 pub mod middleware;
 pub mod policy;
+pub mod rest;
 pub mod router;
 pub mod schema;
 pub mod server;
