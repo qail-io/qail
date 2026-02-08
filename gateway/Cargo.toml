@@ -52,6 +52,9 @@ metrics-exporter-prometheus = "0.16"
 # Cache
 dashmap = "6"
 
+# UUID validation
+uuid = "1"
+
 [features]
 default = []
 
