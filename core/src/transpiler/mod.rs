@@ -278,6 +278,15 @@ impl ToSql for Qail {
                     self.action
                 )
             }
+            // Phase 7: Extensions, Comments, Sequences
+            Action::CreateExtension => ddl::build_create_extension(self, dialect),
+            Action::DropExtension => ddl::build_drop_extension(self, dialect),
+            Action::CommentOn => ddl::build_comment_on(self, dialect),
+            Action::CreateSequence => ddl::build_create_sequence(self, dialect),
+            Action::DropSequence => ddl::build_drop_sequence(self, dialect),
+            Action::CreateEnum => ddl::build_create_enum(self, dialect),
+            Action::DropEnum => ddl::build_drop_enum(self, dialect),
+            Action::AlterEnumAddValue => ddl::build_alter_enum_add_value(self, dialect),
         }
     }
 }

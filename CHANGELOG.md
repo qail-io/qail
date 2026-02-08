@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.9] - 2026-02-08
+
+### Added
+
+- **Core:** CREATE/DROP EXTENSION support — `extension "uuid-ossp" schema public version "1.1"`
+- **Core:** COMMENT ON TABLE/COLUMN — `comment on users.email "Primary contact"`
+- **Core:** CREATE/ALTER/DROP SEQUENCE — `sequence order_seq { start 1000 increment 1 cache 10 cycle }`
+- **Core:** CREATE TYPE ... AS ENUM / ALTER TYPE ADD VALUE / DROP TYPE — `enum status { active, inactive }`
+- **Core:** Expression indexes — `index idx on users ((lower(email)))`
+- **Core:** Multi-column foreign keys — `foreign_key (a, b) references t(x, y)`
+- **Core:** CREATE/DROP VIEW + MATERIALIZED VIEW — `view name $$ SELECT ... $$`
+- **Core:** CREATE/DROP FUNCTION (PL/pgSQL with `$$` body)
+- **Core:** CREATE/DROP TRIGGER — `trigger trg on users before update execute func`
+- **Core:** GRANT/REVOKE — `grant select, insert on users to app_role`
+- **Core:** `ViewDef`, `SchemaFunctionDef`, `SchemaTriggerDef`, `Grant`, `GrantAction`, `Privilege` schema model types
+- **Core:** `to_qail_string` serializer for views, functions, triggers, and grants
+- **CLI:** Subdirectory migration discovery — supports `deltas/YYYYMMDDHHMMSS_name/up.qail` layout
+- **CLI:** `.sql` file rejection with warning — enforces type-safe `.qail` barrier
+- **CLI:** Configurable `deltas/` directory — reads `migrations_dir` from `qail.toml`, defaults to `deltas/`, falls back to `migrations/`
+- **CLI:** `resolve_deltas_dir()` — centralized directory resolution for all migration commands
+
+### Fixed
+
+- **CLI:** Missing `multi_column_fks` field in shadow introspection
+- **CLI:** Missing `expressions` field in shadow index introspection
+
 ## [0.15.7] - 2026-02-08
 
 ### Added

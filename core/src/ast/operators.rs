@@ -62,6 +62,14 @@ pub enum Action {
     RedisMGet,
     RedisMSet,
     RedisPing,
+    CreateExtension,
+    DropExtension,
+    CommentOn,
+    CreateSequence,
+    DropSequence,
+    CreateEnum,
+    DropEnum,
+    AlterEnumAddValue,
 }
 
 impl std::fmt::Display for Action {
@@ -126,6 +134,14 @@ impl std::fmt::Display for Action {
             Action::RedisMGet => write!(f, "REDIS_MGET"),
             Action::RedisMSet => write!(f, "REDIS_MSET"),
             Action::RedisPing => write!(f, "REDIS_PING"),
+            Action::CreateExtension => write!(f, "CREATE_EXTENSION"),
+            Action::DropExtension => write!(f, "DROP_EXTENSION"),
+            Action::CommentOn => write!(f, "COMMENT_ON"),
+            Action::CreateSequence => write!(f, "CREATE_SEQUENCE"),
+            Action::DropSequence => write!(f, "DROP_SEQUENCE"),
+            Action::CreateEnum => write!(f, "CREATE_ENUM"),
+            Action::DropEnum => write!(f, "DROP_ENUM"),
+            Action::AlterEnumAddValue => write!(f, "ALTER_ENUM_ADD_VALUE"),
         }
     }
 }
