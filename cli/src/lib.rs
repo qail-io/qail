@@ -15,9 +15,12 @@ pub mod sql_gen;
 pub mod types;
 pub mod util;
 pub mod resolve;
+#[cfg(feature = "vector")]
 pub mod vector;
+#[cfg(feature = "vector")]
 pub mod snapshot;
 pub mod init;
 pub mod sync;
+#[cfg(feature = "vector")]
 pub mod worker;
 
