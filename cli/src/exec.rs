@@ -221,24 +221,8 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
         return Ok(());
     }
 
-    // Get database URL
-    let db_url = if let Some(url) = &config.url {
-        url.clone()
-    } else {
-        let config_path = std::path::Path::new("qail.toml");
-        if config_path.exists() {
-            let content = std::fs::read_to_string(config_path)?;
-            let toml_config: toml::Value = toml::from_str(&content)?;
-            toml_config
-                .get("postgres")
-                .and_then(|p| p.get("url"))
-                .and_then(|u| u.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| anyhow::anyhow!("No postgres.url in qail.toml"))?
-        } else {
-            anyhow::bail!("No URL provided and qail.toml not found. Use --url or create qail.toml");
-        }
-    };
+    // Get database URL (priority: --url > DATABASE_URL > qail.toml)
+    let db_url = crate::resolve::resolve_db_url(config.url.as_deref())?;
 
     // Set up SSH tunnel if requested
     let _tunnel: Option<SshTunnel>;

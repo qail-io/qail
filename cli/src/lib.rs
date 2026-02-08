@@ -14,6 +14,7 @@ pub mod shadow;
 pub mod sql_gen;
 pub mod types;
 pub mod util;
+pub mod resolve;
 pub mod vector;
 pub mod snapshot;
 pub mod init;
