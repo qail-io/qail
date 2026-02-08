@@ -16,15 +16,11 @@ qail-qdrant = { path = "../qdrant", version = "0.18.1", optional = true }
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-colored = "2.0"
 anyhow = "1.0"
-chrono = "0.4"
 rustyline = "14.0"
-dirs = "5.0"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "fs"] }
 url = "2.5"
 notify-debouncer-full = "0.4"
-md5 = "0.7"
 reqwest = { version = "0.12", features = ["json"], optional = true }
 toml = "0.8"
 

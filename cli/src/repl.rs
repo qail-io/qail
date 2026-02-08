@@ -1,6 +1,6 @@
 //! REPL mode for interactive QAIL queries
 
-use colored::*;
+use crate::colors::*;
 use qail_core::transpiler::ToSql;
 
 /// Run the interactive REPL mode.
@@ -26,8 +26,8 @@ pub fn run_repl() {
     };
 
     // Load history if available
-    let history_path = dirs::home_dir()
-        .map(|p| p.join(".qail_history"))
+    let history_path = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".qail_history"))
         .unwrap_or_default();
     let _ = rl.load_history(&history_path);
 

@@ -9,7 +9,7 @@
 //! This is Phase 3 of the data-safe migration system.
 
 use anyhow::{Result, anyhow};
-use colored::*;
+use crate::colors::*;
 use qail_core::ast::Qail;
 use qail_pg::driver::PgDriver;
 

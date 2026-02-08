@@ -4,7 +4,7 @@
 //! Uses pure AST-native queries via Qail (no raw SQL).
 
 use anyhow::{Result, anyhow};
-use colored::*;
+use crate::colors::*;
 use qail_core::ast::{Operator, Qail};
 use qail_core::migrate::{Column, Schema, Table, to_qail_string};
 use qail_pg::driver::PgDriver;

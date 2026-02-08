@@ -5,7 +5,7 @@
 //! - `qail vector drop` - Delete collection
 
 use anyhow::Result;
-use colored::*;
+use crate::colors::*;
 
 /// Create a vector collection in Qdrant.
 pub async fn vector_create(

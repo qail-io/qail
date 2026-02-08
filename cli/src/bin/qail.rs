@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use colored::*;
+use qail::colors::*;
 use qail_core::fmt::Formatter;
 use qail_core::prelude::*;
 use qail_core::transpiler::{Dialect, ToSql};
@@ -918,7 +918,7 @@ fn generate_migration(query: &str, name_override: Option<String>) -> Result<()> 
     let down_sql = qail::sql_gen::generate_down_sql(&cmd);
 
     let name = name_override.unwrap_or_else(|| format!("{}_{}", cmd.action, cmd.table));
-    let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S");
+    let timestamp = qail::time::timestamp_version();
 
     println!("{}", "Generated Migration:".green().bold());
     println!();
