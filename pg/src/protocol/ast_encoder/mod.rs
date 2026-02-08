@@ -36,6 +36,18 @@ impl AstEncoder {
 
         match cmd.action {
             Action::Get | Action::With => { dml::encode_select(cmd, &mut sql_buf, &mut params).ok(); }
+            Action::Cnt => {
+                let mut count_cmd = cmd.clone();
+                count_cmd.action = Action::Get;
+                count_cmd.columns = vec![qail_core::ast::Expr::Aggregate {
+                    col: "*".to_string(),
+                    func: qail_core::ast::AggregateFunc::Count,
+                    distinct: false,
+                    filter: None,
+                    alias: None,
+                }];
+                dml::encode_select(&count_cmd, &mut sql_buf, &mut params).ok();
+            }
             Action::Add => { dml::encode_insert(cmd, &mut sql_buf, &mut params).ok(); }
             Action::Set => { dml::encode_update(cmd, &mut sql_buf, &mut params).ok(); }
             Action::Del => { dml::encode_delete(cmd, &mut sql_buf, &mut params).ok(); }
