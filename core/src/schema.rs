@@ -379,7 +379,8 @@ table comments {
 }
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, RwLock};
+use std::sync::RwLock;
+use std::sync::LazyLock;
 
 #[derive(Debug, Default)]
 pub struct RelationRegistry {
