@@ -10,6 +10,190 @@ use colored::*;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::process::Command;
+
+/// A detected database instance.
+#[derive(Debug, Clone)]
+struct DetectedDb {
+    source: String,    // "host", "docker", "podman"
+    name: String,      // container name or "local"
+    host: String,      // hostname
+    port: u16,         // mapped port
+}
+
+impl std::fmt::Display for DetectedDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{} ({})", self.host, self.port, self.source)?;
+        if self.name != "local" {
+            write!(f, " — {}", self.name)?;
+        }
+        Ok(())
+    }
+}
+
+/// Detect running PostgreSQL instances across host, Docker, and Podman.
+fn detect_databases() -> Vec<DetectedDb> {
+    let mut found: Vec<DetectedDb> = Vec::new();
+
+    // 1. Host: scan for postgres processes listening on any port via lsof
+    if let Ok(output) = Command::new("lsof")
+        .args(["-iTCP", "-sTCP:LISTEN", "-nP"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let lower = line.to_lowercase();
+                if lower.contains("postgres") || lower.contains("postmaster") {
+                    // Parse port from lsof output: "... *:5432 (LISTEN)" or "... 127.0.0.1:5433 (LISTEN)"
+                    if let Some(port) = parse_lsof_port(line) {
+                        if !found.iter().any(|d| d.port == port && d.source == "host") {
+                            found.push(DetectedDb {
+                                source: "host".into(),
+                                name: "local".into(),
+                                host: "localhost".into(),
+                                port,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Docker: scan for containers with postgres image or exposed 5432
+    detect_container_dbs("docker", &mut found);
+
+    // 3. Podman: same approach
+    detect_container_dbs("podman", &mut found);
+
+    found
+}
+
+/// Parse port number from an lsof output line like:
+/// `postgres  1234 user   5u  IPv4 ...  TCP *:5432 (LISTEN)`
+/// `postgres  1234 user   5u  IPv6 ...  TCP [::1]:5433 (LISTEN)`
+fn parse_lsof_port(line: &str) -> Option<u16> {
+    // Find the TCP address:port part — typically the 9th field or contains ":"
+    for token in line.split_whitespace() {
+        if token.contains("(LISTEN)") {
+            continue;
+        }
+        // Look for patterns like *:5432, localhost:5432, [::1]:5432, 127.0.0.1:5432
+        if let Some(colon_pos) = token.rfind(':') {
+            let port_str = &token[colon_pos + 1..];
+            if let Ok(port) = port_str.parse::<u16>() {
+                // Sanity check: valid port range
+                if port > 0 {
+                    return Some(port);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect PostgreSQL in Docker or Podman containers.
+fn detect_container_dbs(runtime: &str, found: &mut Vec<DetectedDb>) {
+    // Use --format to get structured output: name, image, ports
+    let output = Command::new(runtime)
+        .args(["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}"])
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return, // runtime not installed or not running
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let name = parts[0];
+        let image = parts[1].to_lowercase();
+        let ports = parts[2];
+
+        // Check if the image is postgres-related
+        let is_pg = image.contains("postgres") || image.contains("postgis")
+            || image.contains("timescale") || image.contains("supabase");
+        if !is_pg {
+            continue;
+        }
+
+        // Parse port mappings like "0.0.0.0:5433->5432/tcp, :::5433->5432/tcp"
+        for mapping in ports.split(',') {
+            let mapping = mapping.trim();
+            if let Some(host_port) = parse_container_port(mapping) {
+                if !found.iter().any(|d| d.port == host_port && d.source == runtime) {
+                    found.push(DetectedDb {
+                        source: runtime.into(),
+                        name: name.into(),
+                        host: "localhost".into(),
+                        port: host_port,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Parse host port from container port mapping like "0.0.0.0:5433->5432/tcp"
+fn parse_container_port(mapping: &str) -> Option<u16> {
+    // Format: "host_ip:host_port->container_port/proto"
+    let arrow = mapping.find("->")?;
+    let before_arrow = &mapping[..arrow];
+    // host_port is after the last ":"
+    let colon = before_arrow.rfind(':')?;
+    let port_str = &before_arrow[colon + 1..];
+    port_str.parse::<u16>().ok()
+}
+
+/// Prompt user to select a detected database or enter URL manually.
+fn prompt_db_url(mode_label: &str, default: &str) -> Result<String> {
+    println!("\n{}", format!("Scanning for {} instances...", mode_label).dimmed());
+
+    let detected = detect_databases();
+
+    if detected.is_empty() {
+        println!("  {} No running instances detected", "⚠".yellow());
+        return prompt(&format!("{} URL", mode_label), default);
+    }
+
+    println!("  {} Found {} instance(s):\n", "✓".green(), detected.len());
+
+    for (i, db) in detected.iter().enumerate() {
+        let label = match db.source.as_str() {
+            "host" => "🖥  host".to_string(),
+            "docker" => "🐳 docker".to_string(),
+            "podman" => "🦭 podman".to_string(),
+            _ => db.source.clone(),
+        };
+        println!("    {}  {} {}", format!("{}.", i + 1).cyan(), label, db);
+    }
+    println!("    {}  Enter URL manually", format!("{}.", detected.len() + 1).cyan());
+    println!();
+
+    let choice = prompt(
+        &format!("Select [1-{}]", detected.len() + 1),
+        "1",
+    )?;
+
+    let idx: usize = choice.parse().unwrap_or(1);
+    if idx >= 1 && idx <= detected.len() {
+        let db = &detected[idx - 1];
+        // Build a URL template for them to fill in user/db
+        let url = format!("postgres://postgres@{}:{}/postgres", db.host, db.port);
+        println!("  {} {}", "→".dimmed(), url.yellow());
+
+        // Let them optionally customize the detected URL
+        let final_url = prompt("Customize URL (or press Enter)", &url)?;
+        Ok(final_url)
+    } else {
+        prompt(&format!("{} URL", mode_label), default)
+    }
+}
 
 /// Database mode for the project.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,7 +243,13 @@ pub struct InitConfig {
 }
 
 /// Run the interactive init process.
-pub fn run_init(name: Option<String>, mode_arg: Option<String>) -> Result<()> {
+/// When all args are provided, runs non-interactively (CI/scripting friendly).
+pub fn run_init(
+    name: Option<String>,
+    mode_arg: Option<String>,
+    url_arg: Option<String>,
+    deployment_arg: Option<String>,
+) -> Result<()> {
     println!("{}", "🪝 QAIL Project Initialization".cyan().bold());
     println!();
 
@@ -83,16 +273,24 @@ pub fn run_init(name: Option<String>, mode_arg: Option<String>) -> Result<()> {
     };
 
     // 3. Deployment type
-    println!("\n{}", "Select deployment type:".white().bold());
-    println!("  {} Host (local install)", "1.".dimmed());
-    println!("  {} Docker", "2.".dimmed());
-    println!("  {} Podman", "3.".dimmed());
-    let deployment_choice = prompt("Deployment [1/2/3]", "1")?;
-    let deployment = Deployment::from_str(&deployment_choice).unwrap_or(Deployment::Host);
+    let deployment = match deployment_arg.and_then(|d| Deployment::from_str(&d)) {
+        Some(d) => d,
+        None => {
+            println!("\n{}", "Select deployment type:".white().bold());
+            println!("  {} Host (local install)", "1.".dimmed());
+            println!("  {} Docker", "2.".dimmed());
+            println!("  {} Podman", "3.".dimmed());
+            let deployment_choice = prompt("Deployment [1/2/3]", "1")?;
+            Deployment::from_str(&deployment_choice).unwrap_or(Deployment::Host)
+        }
+    };
 
     // 4. Database URLs
     let postgres_url = if mode == Mode::Postgres || mode == Mode::Hybrid {
-        Some(prompt("PostgreSQL URL", "postgres://localhost/mydb")?)
+        Some(match &url_arg {
+            Some(u) => u.clone(),
+            None => prompt_db_url("PostgreSQL", "postgres://localhost/mydb")?,
+        })
     } else {
         None
     };

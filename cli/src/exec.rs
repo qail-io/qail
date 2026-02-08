@@ -57,6 +57,7 @@ pub struct ExecConfig {
     pub ssh: Option<String>,
     pub tx: bool,
     pub dry_run: bool,
+    pub json: bool,
 }
 
 /// SSH tunnel wrapper - kills tunnel on drop
@@ -200,11 +201,13 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
         statements.push(ast);
     }
 
-    println!(
-        "{} Parsed {} QAIL statement(s)",
-        "📋".cyan(),
-        statements.len().to_string().green()
-    );
+    if !config.json {
+        println!(
+            "{} Parsed {} QAIL statement(s)",
+            "📋".cyan(),
+            statements.len().to_string().green()
+        );
+    }
 
     // Dry-run mode: show generated SQL
     if config.dry_run {
@@ -269,7 +272,9 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
     };
 
     // Connect to database
-    println!("{} Connecting to database...", "🔌".cyan());
+    if !config.json {
+        println!("{} Connecting to database...", "🔌".cyan());
+    }
     let mut driver = PgDriver::connect_url(&connect_url).await
         .map_err(|e| anyhow::anyhow!("Connection failed: {}", e))?;
 
@@ -284,21 +289,112 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
 
     for (i, ast) in statements.iter().enumerate() {
         let stmt_num = i + 1;
-        print!("  {} Executing statement {}... ", "→".dimmed(), stmt_num);
+        if !config.json {
+            print!("  {} Executing statement {}... ", "→".dimmed(), stmt_num);
+        }
 
-        match driver.execute(ast).await {
-            Ok(_) => {
-                println!("{}", "✓".green());
-                success_count += 1;
+        if matches!(ast.action, Action::Get) {
+            // SELECT query — use query_ast to get rows back
+            match driver.query_ast(ast).await {
+                Ok(result) => {
+                    if config.json {
+                        // JSON output mode — clean, pipe-friendly
+                        let mut json_rows: Vec<String> = Vec::new();
+                        for row in &result.rows {
+                            let fields: Vec<String> = result.columns.iter().enumerate()
+                                .map(|(j, col)| {
+                                    let val = row.get(j)
+                                        .and_then(|v| v.as_ref())
+                                        .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
+                                        .unwrap_or_else(|| "null".to_string());
+                                    format!("\"{}\":{}", col, val)
+                                })
+                                .collect();
+                            json_rows.push(format!("{{{}}}", fields.join(",")));
+                        }
+                        println!("[{}]", json_rows.join(","));
+                        success_count += 1;
+                    } else {
+                    println!("{}", "✓".green());
+                    success_count += 1;
+
+                    if result.columns.is_empty() {
+                        println!("  {}", "(no columns)".dimmed());
+                    } else {
+                        // Calculate column widths
+                        let mut widths: Vec<usize> = result.columns.iter().map(|c| c.len()).collect();
+                        for row in &result.rows {
+                            for (j, col) in row.iter().enumerate() {
+                                if j < widths.len() {
+                                    let len = col.as_ref().map(|s| s.len()).unwrap_or(1); // "∅"
+                                    if len > widths[j] {
+                                        widths[j] = len;
+                                    }
+                                }
+                            }
+                        }
+                        // Cap column widths at 40 chars for readability
+                        for w in widths.iter_mut() {
+                            if *w > 40 { *w = 40; }
+                        }
+
+                        // Print header
+                        println!();
+                        let header: Vec<String> = result.columns.iter().enumerate()
+                            .map(|(j, c)| format!("{:<width$}", c, width = widths[j]))
+                            .collect();
+                        println!("  {}", header.join(" │ ").cyan().bold());
+
+                        // Print separator
+                        let sep: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+                        println!("  {}", sep.join("─┼─").dimmed());
+
+                        // Print rows
+                        for row in &result.rows {
+                            let cells: Vec<String> = row.iter().enumerate()
+                                .map(|(j, col)| {
+                                    let val = col.as_ref()
+                                        .map(|s| if s.len() > 40 { format!("{}…", &s[..39]) } else { s.clone() })
+                                        .unwrap_or_else(|| "∅".to_string());
+                                    let w = if j < widths.len() { widths[j] } else { val.len() };
+                                    format!("{:<width$}", val, width = w)
+                                })
+                                .collect();
+                            println!("  {}", cells.join(" │ "));
+                        }
+
+                        // Row count
+                        println!("\n  {} {} row(s)", "→".dimmed(), result.rows.len().to_string().green());
+                    }
+                    }
+                }
+                Err(e) => {
+                    println!("{} {}", "✗".red(), e.to_string().red());
+                    error_count += 1;
+
+                    if config.tx {
+                        println!("{} Rolling back transaction...", "⚠️".yellow());
+                        let _ = driver.rollback().await;
+                        anyhow::bail!("Execution failed at statement {}: {}", stmt_num, e);
+                    }
+                }
             }
-            Err(e) => {
-                println!("{} {}", "✗".red(), e.to_string().red());
-                error_count += 1;
+        } else {
+            // Mutation query — use execute
+            match driver.execute(ast).await {
+                Ok(_) => {
+                    println!("{}", "✓".green());
+                    success_count += 1;
+                }
+                Err(e) => {
+                    println!("{} {}", "✗".red(), e.to_string().red());
+                    error_count += 1;
 
-                if config.tx {
-                    println!("{} Rolling back transaction...", "⚠️".yellow());
-                    let _ = driver.rollback().await;
-                    anyhow::bail!("Execution failed at statement {}: {}", stmt_num, e);
+                    if config.tx {
+                        println!("{} Rolling back transaction...", "⚠️".yellow());
+                        let _ = driver.rollback().await;
+                        anyhow::bail!("Execution failed at statement {}: {}", stmt_num, e);
+                    }
                 }
             }
         }
@@ -309,21 +405,22 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
         driver.commit().await.map_err(|e| anyhow::anyhow!("COMMIT failed: {}", e))?;
     }
 
-    // Summary
-    println!();
-    if error_count == 0 {
-        println!(
-            "{} All {} statement(s) executed successfully!",
-            "✅".green(),
-            success_count.to_string().green()
-        );
-    } else {
-        println!(
-            "{} {} succeeded, {} failed",
-            "⚠️".yellow(),
-            success_count.to_string().green(),
-            error_count.to_string().red()
-        );
+    if !config.json {
+        println!();
+        if error_count == 0 {
+            println!(
+                "{} All {} statement(s) executed successfully!",
+                "✅".green(),
+                success_count.to_string().green()
+            );
+        } else {
+            println!(
+                "{} {} succeeded, {} failed",
+                "⚠️".yellow(),
+                success_count.to_string().green(),
+                error_count.to_string().red()
+            );
+        }
     }
 
     Ok(())

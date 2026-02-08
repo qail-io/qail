@@ -47,6 +47,7 @@ impl AstEncoder {
             Action::Alter => ddl::encode_alter_add_column(cmd, &mut sql_buf),
             Action::AlterDrop => ddl::encode_alter_drop_column(cmd, &mut sql_buf),
             Action::AlterType => ddl::encode_alter_column_type(cmd, &mut sql_buf),
+            Action::Mod => ddl::encode_rename_column(cmd, &mut sql_buf),
             Action::CreateView => ddl::encode_create_view(cmd, &mut sql_buf, &mut params),
             Action::DropView => ddl::encode_drop_view(cmd, &mut sql_buf),
             _ => panic!(
@@ -88,6 +89,7 @@ impl AstEncoder {
             Action::Alter => ddl::encode_alter_add_column(cmd, sql_buf),
             Action::AlterDrop => ddl::encode_alter_drop_column(cmd, sql_buf),
             Action::AlterType => ddl::encode_alter_column_type(cmd, sql_buf),
+            Action::Mod => ddl::encode_rename_column(cmd, sql_buf),
             Action::CreateView => ddl::encode_create_view(cmd, sql_buf, params),
             Action::DropView => ddl::encode_drop_view(cmd, sql_buf),
             _ => panic!(

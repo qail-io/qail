@@ -24,15 +24,13 @@ use crate::error::{QailError, QailResult};
 
 /// Parse a complete QAIL query string (v2 syntax only).
 /// Uses keyword-based syntax: `get table fields * where col = value`
+/// Also supports shorthand: `get table[filter]` desugars to `get table where filter`
 pub fn parse(input: &str) -> QailResult<Qail> {
     let input = input.trim();
 
-    match grammar::parse_root(input) {
-        Ok(("", cmd)) => Ok(cmd),
-        Ok((remaining, _)) => Err(QailError::parse(
-            input.len() - remaining.len(),
-            format!("Unexpected trailing content: '{}'", remaining),
-        )),
-        Err(e) => Err(QailError::parse(0, format!("Parse failed: {:?}", e))),
+    // Use grammar::parse which handles comment stripping + [filter] desugaring
+    match grammar::parse(input) {
+        Ok(cmd) => Ok(cmd),
+        Err(e) => Err(QailError::parse(0, e)),
     }
 }
