@@ -111,7 +111,7 @@ pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
         router = router.route(&path, get(list_handler).post(create_handler));
 
         if has_pk {
-            let id_path = format!("/api/{}/:id", table_name);
+            let id_path = format!("/api/{}/{{id}}", table_name);
 
             // GET /api/{table}/:id — get by PK
             // PATCH /api/{table}/:id — update
@@ -126,7 +126,7 @@ pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
             // Nested routes: GET /api/{parent}/:id/{child}
             let children = state.schema.children_of(table_name);
             for (child_table, _fk_col, _pk_col) in &children {
-                let nested_path = format!("/api/{}/:id/{}", table_name, child_table);
+                let nested_path = format!("/api/{}/{{id}}/{}", table_name, child_table);
                 tracing::info!("  AUTO-REST nested: {} → GET", nested_path);
                 router = router.route(&nested_path, get(nested_list_handler));
             }
