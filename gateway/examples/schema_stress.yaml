@@ -1,0 +1,151 @@
+# QAIL Gateway Schema — Real swb-api-local tables
+#
+# Matches actual production schema for stress testing with real data.
+
+tables:
+  - name: harbors
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: name
+        type: text
+      - name: slug
+        type: text
+      - name: region
+        type: text
+        nullable: true
+      - name: is_active
+        type: boolean
+      - name: latitude
+        type: numeric
+        nullable: true
+      - name: longitude
+        type: numeric
+        nullable: true
+      - name: created_at
+        type: timestamptz
+      - name: updated_at
+        type: timestamptz
+
+  - name: operators
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: name
+        type: text
+      - name: slug
+        type: text
+      - name: is_active
+        type: boolean
+      - name: created_at
+        type: timestamptz
+      - name: updated_at
+        type: timestamptz
+    relations:
+      - target_table: vessels
+        foreign_key: operator_id
+        type: one_to_many
+      - target_table: odysseys
+        foreign_key: operator_id
+        type: one_to_many
+
+  - name: vessels
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: operator_id
+        type: uuid
+      - name: name
+        type: text
+      - name: slug
+        type: text
+      - name: vessel_type
+        type: text
+      - name: vessel_class
+        type: text
+      - name: seat_capacity
+        type: integer
+      - name: is_active
+        type: boolean
+      - name: created_at
+        type: timestamptz
+      - name: updated_at
+        type: timestamptz
+
+  - name: destinations
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: name
+        type: text
+      - name: slug
+        type: text
+      - name: is_active
+        type: boolean
+        nullable: true
+      - name: created_at
+        type: timestamptz
+      - name: updated_at
+        type: timestamptz
+
+  - name: odysseys
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: operator_id
+        type: uuid
+      - name: vessel_id
+        type: uuid
+      - name: status
+        type: text
+      - name: created_at
+        type: timestamptz
+      - name: updated_at
+        type: timestamptz
+
+  - name: users
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: email
+        type: text
+      - name: first_name
+        type: text
+      - name: last_name
+        type: text
+      - name: role
+        type: text
+      - name: is_active
+        type: boolean
+      - name: created_at
+        type: timestamptz
+      - name: updated_at
+        type: timestamptz
+
+  - name: orders
+    columns:
+      - name: id
+        type: uuid
+        primary_key: true
+      - name: user_id
+        type: uuid
+        nullable: true
+      - name: vendor_id
+        type: uuid
+        nullable: true
+      - name: status
+        type: text
+      - name: total_fare
+        type: bigint
+      - name: currency
+        type: text
+      - name: created_at
+        type: timestamptz
+      - name: updated_at
+        type: timestamptz
