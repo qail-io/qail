@@ -554,15 +554,11 @@ impl<T: Table> TypedQail<T> {
         self.inner.with_cap(cap)
     }
     
-    /// Apply RLS context (tenant scoping).
-    pub fn with_rls(mut self, ctx: &crate::rls::RlsContext) -> Self {
+    /// Apply RLS context (tenant scoping) — available on all typed queries.
+    /// For tables that `impl RequiresRls`, prefer the dedicated `.with_rls()` → `RlsQuery<T>` path.
+    pub fn rls(mut self, ctx: &crate::rls::RlsContext) -> Self {
         self.inner = self.inner.with_rls(ctx);
         self
-    }
-    
-    /// Finish building and return the inner Qail.
-    pub fn build(self) -> Qail {
-        self.inner
     }
     
     /// Get a reference to the inner Qail.
@@ -571,6 +567,151 @@ impl<T: Table> TypedQail<T> {
     }
 }
 
+// =============================================================================
+// DirectBuild: Non-RLS tables can .build() directly
+// =============================================================================
+
+/// Marker trait for tables that do NOT require RLS.
+/// 
+/// Tables without `operator_id` get this trait from codegen,
+/// allowing `TypedQail<T>.build()` directly.
+pub trait DirectBuild: Table {}
+
+impl<T: Table + DirectBuild> TypedQail<T> {
+    /// Finish building and return the inner Qail.
+    /// 
+    /// Only available for tables that do NOT require RLS.
+    /// RLS-protected tables must go through `.with_rls(ctx).build()` instead.
+    pub fn build(self) -> Qail {
+        self.inner
+    }
+}
+
+// =============================================================================
+// RLS Proof Witness (Compile-Time Tenant Enforcement)
+// =============================================================================
+
+/// Marker trait for tables that require tenant isolation.
+/// 
+/// Tables with `operator_id` column get this from codegen.
+/// When a table implements `RequiresRls`, its `TypedQail<T>` can only
+/// produce a `Qail` via `.with_rls(ctx)` → `RlsQuery<T>` → `.build()`.
+/// 
+/// This makes data leakage a **compile error**, not a runtime bug.
+/// 
+/// # Example
+/// ```ignore
+/// // Codegen for a table with operator_id:
+/// pub struct Orders;
+/// impl Table for Orders { ... }
+/// impl RequiresRls for Orders {}
+/// 
+/// // ✗ Compile error — Orders does not impl DirectBuild
+/// Qail::typed(Orders).build()
+/// 
+/// // ✓ Compiles — RLS proof provided
+/// let ctx = RlsContext::operator("op-uuid");
+/// Qail::typed(Orders).with_rls(&ctx).build()
+/// ```
+pub trait RequiresRls: Table {}
+
+/// Proof that RLS context has been applied to a query.
+/// 
+/// Sealed constructor — only created internally by `TypedQail::with_rls()`.
+#[derive(Debug, Clone)]
+pub struct RlsProof(());
+
+/// A query builder that carries proof of tenant isolation.
+/// 
+/// This is the ONLY way to `.build()` a query on an RLS-protected table.
+/// Created by `TypedQail<T: RequiresRls>::with_rls(ctx)`.
+#[derive(Debug, Clone)]
+pub struct RlsQuery<T: Table> {
+    inner: Qail,
+    _proof: RlsProof,
+    _table: PhantomData<T>,
+}
+
+impl<T: Table + RequiresRls> TypedQail<T> {
+    /// Apply RLS context and produce a proven query.
+    /// 
+    /// This is *required* for tables with `RequiresRls` — without it,
+    /// there's no `.build()` method available.
+    /// 
+    /// ```ignore
+    /// let ctx = RlsContext::operator("op-uuid");
+    /// let query = Qail::typed(Orders)
+    ///     .column("id")
+    ///     .with_rls(&ctx)   // returns RlsQuery<Orders>
+    ///     .build();         // now .build() is available
+    /// ```
+    pub fn with_rls(mut self, ctx: &crate::rls::RlsContext) -> RlsQuery<T> {
+        self.inner = self.inner.with_rls(ctx);
+        RlsQuery {
+            inner: self.inner,
+            _proof: RlsProof(()),
+            _table: PhantomData,
+        }
+    }
+}
+
+impl<T: Table> RlsQuery<T> {
+    /// Finish building and return the inner Qail (RLS already applied).
+    pub fn build(self) -> Qail {
+        self.inner
+    }
+    
+    /// Get a reference to the inner Qail.
+    pub fn inner(&self) -> &Qail {
+        &self.inner
+    }
+    
+    /// Add a column to the query.
+    pub fn column(mut self, name: impl AsRef<str>) -> Self {
+        self.inner = self.inner.column(name);
+        self
+    }
+    
+    /// Add a typed column.
+    pub fn typed_column<C>(mut self, col: TypedColumn<C>) -> Self {
+        use crate::ast::Expr;
+        self.inner.columns.push(Expr::Named(col.name().to_string()));
+        self
+    }
+    
+    /// Type-safe equality filter.
+    pub fn typed_eq<C, V>(mut self, col: TypedColumn<C>, value: V) -> Self
+    where
+        V: Into<crate::ast::Value> + ColumnValue<C>,
+    {
+        self.inner = self.inner.typed_eq(col, value);
+        self
+    }
+    
+    /// String-based filter.
+    pub fn filter(mut self, column: impl AsRef<str>, op: crate::ast::Operator, value: impl Into<crate::ast::Value>) -> Self {
+        self.inner = self.inner.filter(column, op, value);
+        self
+    }
+    
+    /// Set limit.
+    pub fn limit(mut self, n: i64) -> Self {
+        self.inner = self.inner.limit(n);
+        self
+    }
+    
+    /// Set offset.
+    pub fn offset(mut self, n: i64) -> Self {
+        self.inner = self.inner.offset(n);
+        self
+    }
+    
+    /// Add ordering.
+    pub fn order_by(mut self, column: impl AsRef<str>, order: crate::ast::SortOrder) -> Self {
+        self.inner = self.inner.order_by(column, order);
+        self
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -657,20 +798,31 @@ mod tests {
     // TypedQail + join_related tests
     // =========================================================================
     
+    // Non-RLS tables
     struct Users;
     impl Table for Users { fn table_name() -> &'static str { "users" } }
     impl AsRef<str> for Users { fn as_ref(&self) -> &str { "users" } }
     impl From<Users> for String { fn from(_: Users) -> String { "users".into() } }
+    impl DirectBuild for Users {}
     
     struct Posts;
     impl Table for Posts { fn table_name() -> &'static str { "posts" } }
     impl AsRef<str> for Posts { fn as_ref(&self) -> &str { "posts" } }
     impl From<Posts> for String { fn from(_: Posts) -> String { "posts".into() } }
+    impl DirectBuild for Posts {}
     
     struct Products;
     impl Table for Products { fn table_name() -> &'static str { "products" } }
     impl AsRef<str> for Products { fn as_ref(&self) -> &str { "products" } }
     impl From<Products> for String { fn from(_: Products) -> String { "products".into() } }
+    impl DirectBuild for Products {}
+    
+    // RLS-protected table (has operator_id)
+    struct Orders;
+    impl Table for Orders { fn table_name() -> &'static str { "orders" } }
+    impl AsRef<str> for Orders { fn as_ref(&self) -> &str { "orders" } }
+    impl From<Orders> for String { fn from(_: Orders) -> String { "orders".into() } }
+    impl RequiresRls for Orders {}
     
     // Users has many Posts (users.id -> posts.user_id)
     impl RelatedTo<Posts> for Users {
@@ -767,8 +919,84 @@ mod tests {
         assert!(sql.contains("LIMIT 10"), "limit");
     }
     
+    // =========================================================================
+    // RLS Proof Witness Tests
+    // =========================================================================
+    
+    #[test]
+    fn test_rls_query_with_proof() {
+        use crate::transpiler::ToSql;
+        use crate::rls::RlsContext;
+        
+        let ctx = RlsContext::operator("op-123");
+        // The real test is that this COMPILES — Orders requires RLS proof
+        let query = Qail::typed(Orders)
+            .column("id")
+            .column("total")
+            .with_rls(&ctx)
+            .build();
+        
+        let sql = query.to_sql();
+        assert!(sql.contains("orders"), "Should query orders table");
+        assert!(sql.contains("id"), "Should have id column");
+    }
+    
+    #[test]
+    fn test_rls_query_chaining_after_proof() {
+        use crate::transpiler::ToSql;
+        use crate::rls::RlsContext;
+        use crate::ast::SortOrder;
+        
+        let ctx = RlsContext::operator("op-456");
+        // The real test: chaining after .with_rls() still works
+        let query = Qail::typed(Orders)
+            .column("id")
+            .with_rls(&ctx)
+            .column("status")
+            .filter("status", crate::ast::Operator::Eq, "active")
+            .order_by("created_at", SortOrder::Desc)
+            .limit(10)
+            .build();
+        
+        let sql = query.to_sql();
+        assert!(sql.contains("orders"), "table");
+        assert!(sql.contains("status"), "filter");
+        assert!(sql.contains("LIMIT 10"), "limit");
+    }
+    
+    #[test]
+    fn test_non_rls_table_builds_directly() {
+        use crate::transpiler::ToSql;
+        
+        // Users has DirectBuild — .build() works without RLS
+        let query = Qail::typed(Users)
+            .column("email")
+            .build();
+        
+        let sql = query.to_sql();
+        assert!(sql.contains("users"), "Should build directly");
+    }
+    
+    #[test]
+    fn test_super_admin_bypasses_rls() {
+        use crate::transpiler::ToSql;
+        use crate::rls::RlsContext;
+        
+        // Super admin — RLS injection is a no-op but proof still required
+        let ctx = RlsContext::super_admin();
+        let query = Qail::typed(Orders)
+            .column("id")
+            .with_rls(&ctx)
+            .build();
+        
+        let sql = query.to_sql();
+        assert!(sql.contains("orders"), "Should query orders");
+        // Super admin should NOT inject operator_id filter
+    }
+    
     // NOTE: The following should NOT compile — proving compile-time safety:
     // Qail::typed(Users).join_related(Products)  // ERROR: Users: RelatedTo<Products> not satisfied
+    // Qail::typed(Orders).build()                // ERROR: Orders does not impl DirectBuild
 }
 
 
