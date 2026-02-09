@@ -132,6 +132,16 @@ where
             continue;
         }
 
+        // Table-level RLS directives
+        if line == "enable_rls" {
+            table.enable_rls = true;
+            continue;
+        }
+        if line == "force_rls" {
+            table.force_rls = true;
+            continue;
+        }
+
         let col = parse_column(line)?;
         table.columns.push(col);
     }

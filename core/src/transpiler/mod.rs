@@ -287,6 +287,48 @@ impl ToSql for Qail {
             Action::CreateEnum => ddl::build_create_enum(self, dialect),
             Action::DropEnum => ddl::build_drop_enum(self, dialect),
             Action::AlterEnumAddValue => ddl::build_alter_enum_add_value(self, dialect),
+            // ALTER TABLE property operations (from diff engine)
+            Action::AlterSetNotNull => {
+                if let Some(Expr::Named(col)) = self.columns.first() {
+                    format!("ALTER TABLE {} ALTER COLUMN {} SET NOT NULL", self.table, col)
+                } else {
+                    format!("ALTER TABLE {} ALTER COLUMN ... SET NOT NULL", self.table)
+                }
+            }
+            Action::AlterDropNotNull => {
+                if let Some(Expr::Named(col)) = self.columns.first() {
+                    format!("ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL", self.table, col)
+                } else {
+                    format!("ALTER TABLE {} ALTER COLUMN ... DROP NOT NULL", self.table)
+                }
+            }
+            Action::AlterSetDefault => {
+                if let Some(Expr::Named(col)) = self.columns.first() {
+                    let default_expr = self.payload.as_deref().unwrap_or("NULL");
+                    format!("ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}", self.table, col, default_expr)
+                } else {
+                    format!("ALTER TABLE {} ALTER COLUMN ... SET DEFAULT ...", self.table)
+                }
+            }
+            Action::AlterDropDefault => {
+                if let Some(Expr::Named(col)) = self.columns.first() {
+                    format!("ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT", self.table, col)
+                } else {
+                    format!("ALTER TABLE {} ALTER COLUMN ... DROP DEFAULT", self.table)
+                }
+            }
+            Action::AlterEnableRls => {
+                format!("ALTER TABLE {} ENABLE ROW LEVEL SECURITY", self.table)
+            }
+            Action::AlterDisableRls => {
+                format!("ALTER TABLE {} DISABLE ROW LEVEL SECURITY", self.table)
+            }
+            Action::AlterForceRls => {
+                format!("ALTER TABLE {} FORCE ROW LEVEL SECURITY", self.table)
+            }
+            Action::AlterNoForceRls => {
+                format!("ALTER TABLE {} NO FORCE ROW LEVEL SECURITY", self.table)
+            }
         }
     }
 }
