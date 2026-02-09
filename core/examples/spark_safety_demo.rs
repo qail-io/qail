@@ -171,7 +171,8 @@ fn main() {
         .build();
 
     println!("✅ Column types verified at compile time");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // The following would NOT compile (type mismatch):
     // .typed_eq(users::email, 42i64)    // ✗ String column vs i64 value
@@ -192,7 +193,8 @@ fn main() {
         .build();
 
     println!("✅ Users → Orders join proven valid via RelatedTo<Orders>");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // The following would NOT compile (no relationship defined):
     // Qail::typed(Users).join_related(AuditLogs)
@@ -221,7 +223,8 @@ fn main() {
         .build();
 
     println!("✅ Users → Orders with typed columns, filters, ordering");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // ======================================================================
     // PROOF 4: Data Governance (Capability Witnesses)
@@ -238,7 +241,8 @@ fn main() {
         .build();
 
     println!("✅ Public column accessed without capability");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // 4b. Protected column — requires AdminCap
     let admin_cap = CapabilityProvider::mint_admin();
@@ -250,7 +254,8 @@ fn main() {
         .build();
 
     println!("✅ Protected column (password_hash) unlocked with AdminCap");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // The following would NOT compile (insufficient capability):
     // CapQuery::new(Qail::get("users"))
@@ -268,7 +273,8 @@ fn main() {
         .build();
 
     println!("✅ Restricted column (raw_payload) unlocked with SystemCap");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // The following would NOT compile:
     // CapQuery::new(...).with_cap(&admin_cap).column_protected(audit_logs::raw_payload)
@@ -295,7 +301,8 @@ fn main() {
         .build();                          // ✅ .build() now available
 
     println!("✅ Orders query proven isolated to tenant 550e8400...");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // 5b. Chaining AFTER proof — still type-safe
     let q = Qail::typed(Bookings)
@@ -309,7 +316,8 @@ fn main() {
         .build();
 
     println!("✅ Bookings query — chaining after proof works");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // 5c. Super admin — proof still REQUIRED (type-level), but no filter injected
     let admin_ctx = RlsContext::super_admin();
@@ -321,7 +329,8 @@ fn main() {
         .build();
 
     println!("✅ Super admin — proof required (type-level), no filter injected");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // The following would NOT compile:
     // let _leak = Qail::typed(Orders).typed_column(orders::id).build();
@@ -347,7 +356,8 @@ fn main() {
         .build();
 
     println!("✅ Combined: typed columns + typed filter + RLS proof");
-    println!("   {}\n", q.to_sql());
+    println!("   Qail:  {}", q);
+    println!("   SQL:   {}\n", q.to_sql());
 
     // ======================================================================
     // SUMMARY: What the compiler proves for you
