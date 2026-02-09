@@ -15,6 +15,7 @@
 //! ```
 
 use super::types::ColumnType;
+use super::policy::{RlsPolicy, PolicyTarget, PolicyPermissiveness};
 use std::collections::HashMap;
 
 /// A complete database schema.
@@ -39,6 +40,8 @@ pub struct Schema {
     pub triggers: Vec<SchemaTriggerDef>,
     /// GRANT/REVOKE permissions
     pub grants: Vec<Grant>,
+    /// RLS policies
+    pub policies: Vec<RlsPolicy>,
 }
 
 #[derive(Debug, Clone)]
@@ -921,6 +924,37 @@ impl Index {
 }
 
 /// Format a Schema to .qail format string.
+/// Convert FkAction to its QAIL string representation
+fn fk_action_str(action: &FkAction) -> &'static str {
+    match action {
+        FkAction::NoAction => "no_action",
+        FkAction::Cascade => "cascade",
+        FkAction::SetNull => "set_null",
+        FkAction::SetDefault => "set_default",
+        FkAction::Restrict => "restrict",
+    }
+}
+
+/// Serialize CheckExpr to QAIL check syntax
+fn check_expr_str(expr: &CheckExpr) -> String {
+    match expr {
+        CheckExpr::GreaterThan { column, value } => format!("{} > {}", column, value),
+        CheckExpr::GreaterOrEqual { column, value } => format!("{} >= {}", column, value),
+        CheckExpr::LessThan { column, value } => format!("{} < {}", column, value),
+        CheckExpr::LessOrEqual { column, value } => format!("{} <= {}", column, value),
+        CheckExpr::Between { column, low, high } => format!("{} between {} {}", column, low, high),
+        CheckExpr::In { column, values } => format!("{} in [{}]", column, values.join(", ")),
+        CheckExpr::Regex { column, pattern } => format!("{} ~ '{}'", column, pattern),
+        CheckExpr::MaxLength { column, max } => format!("length({}) <= {}", column, max),
+        CheckExpr::MinLength { column, min } => format!("length({}) >= {}", column, min),
+        CheckExpr::NotNull { column } => format!("{} not_null", column),
+        CheckExpr::And(l, r) => format!("{} and {}", check_expr_str(l), check_expr_str(r)),
+        CheckExpr::Or(l, r) => format!("{} or {}", check_expr_str(l), check_expr_str(r)),
+        CheckExpr::Not(e) => format!("not {}", check_expr_str(e)),
+    }
+}
+
+
 pub fn to_qail_string(schema: &Schema) -> String {
     let mut output = String::new();
     output.push_str("# QAIL Schema\n\n");
@@ -1013,7 +1047,23 @@ pub fn to_qail_string(schema: &Schema) -> String {
                 constraints.push(format!("default {}", def));
             }
             if let Some(ref fk) = col.foreign_key {
-                constraints.push(format!("references {}({})", fk.table, fk.column));
+                let mut fk_str = format!("references {}({})", fk.table, fk.column);
+                if fk.on_delete != FkAction::NoAction {
+                    fk_str.push_str(&format!(" on_delete {}", fk_action_str(&fk.on_delete)));
+                }
+                if fk.on_update != FkAction::NoAction {
+                    fk_str.push_str(&format!(" on_update {}", fk_action_str(&fk.on_update)));
+                }
+                match &fk.deferrable {
+                    Deferrable::Deferrable => fk_str.push_str(" deferrable"),
+                    Deferrable::InitiallyDeferred => fk_str.push_str(" initially_deferred"),
+                    Deferrable::InitiallyImmediate => fk_str.push_str(" initially_immediate"),
+                    Deferrable::NotDeferrable => {} // default, omit
+                }
+                constraints.push(fk_str);
+            }
+            if let Some(ref check) = col.check {
+                constraints.push(format!("check({})", check_expr_str(&check.expr)));
             }
 
             let constraint_str = if constraints.is_empty() {
@@ -1037,6 +1087,13 @@ pub fn to_qail_string(schema: &Schema) -> String {
                 fk.ref_table,
                 fk.ref_columns.join(", ")
             ));
+        }
+        // RLS directives
+        if table.enable_rls {
+            output.push_str("  enable_rls\n");
+        }
+        if table.force_rls {
+            output.push_str("  force_rls\n");
         }
         output.push_str("}\n\n");
     }
@@ -1099,6 +1156,36 @@ pub fn to_qail_string(schema: &Schema) -> String {
     }
     if !schema.triggers.is_empty() {
         output.push('\n');
+    }
+
+    // Policies
+    for policy in &schema.policies {
+        let cmd = match policy.target {
+            PolicyTarget::All => "all",
+            PolicyTarget::Select => "select",
+            PolicyTarget::Insert => "insert",
+            PolicyTarget::Update => "update",
+            PolicyTarget::Delete => "delete",
+        };
+        let perm = match policy.permissiveness {
+            PolicyPermissiveness::Permissive => "",
+            PolicyPermissiveness::Restrictive => " restrictive",
+        };
+        let role_str = match &policy.role {
+            Some(r) => format!(" to {}", r),
+            None => String::new(),
+        };
+        output.push_str(&format!(
+            "policy {} on {} for {}{}{}",
+            policy.name, policy.table, cmd, role_str, perm
+        ));
+        if let Some(ref using) = policy.using {
+            output.push_str(&format!("\n  using $$ {} $$", using));
+        }
+        if let Some(ref wc) = policy.with_check {
+            output.push_str(&format!("\n  with_check $$ {} $$", wc));
+        }
+        output.push_str("\n\n");
     }
 
     // Grants
