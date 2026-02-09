@@ -8,18 +8,27 @@
 //!   name text,
 //!   created_at timestamp
 //! )
+//!
+//! policy users_isolation on users
+//!     for all
+//!     using (operator_id = current_setting('app.operator_id')::uuid)
 //! ```
 
 use nom::{
     IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while1},
-    character::complete::{char, multispace1, not_line_ending},
+    character::complete::{char, multispace0 as nom_ws0, multispace1, not_line_ending},
     combinator::{map, opt},
     multi::{many0, separated_list0},
     sequence::preceded,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::ast::{Expr, BinaryOp, Value as AstValue};
+use crate::migrate::policy::{RlsPolicy, PolicyTarget, PolicyPermissiveness};
+use crate::transpiler::policy::{create_policy_sql, alter_table_sql};
+use crate::migrate::alter::AlterTable;
 
 /// Schema containing all table definitions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -28,12 +37,18 @@ pub struct Schema {
     #[serde(default)]
     pub version: Option<u32>,
     pub tables: Vec<TableDef>,
+    /// RLS policies declared in the schema
+    #[serde(default)]
+    pub policies: Vec<RlsPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableDef {
     pub name: String,
     pub columns: Vec<ColumnDef>,
+    /// Whether this table has RLS enabled
+    #[serde(default)]
+    pub enable_rls: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +113,28 @@ impl Schema {
         self.tables
             .iter()
             .find(|t| t.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Generate complete SQL for this schema: tables + RLS + policies.
+    pub fn to_sql(&self) -> String {
+        let mut parts = Vec::new();
+
+        for table in &self.tables {
+            parts.push(table.to_ddl());
+
+            if table.enable_rls {
+                let alter = AlterTable::new(&table.name).enable_rls().force_rls();
+                for stmt in alter_table_sql(&alter) {
+                    parts.push(stmt);
+                }
+            }
+        }
+
+        for policy in &self.policies {
+            parts.push(create_policy_sql(policy));
+        }
+
+        parts.join(";\n\n") + ";"
     }
 
     /// Export schema to JSON string (for qail-macros compatibility)
@@ -384,25 +421,396 @@ fn parse_table(input: &str) -> IResult<&str, TableDef> {
     let (input, name) = identifier(input)?;
     let (input, columns) = parse_column_list(input)?;
 
+    // Optional enable_rls annotation after closing paren
+    let (input, _) = ws_and_comments(input)?;
+    let enable_rls = if let Ok((rest, _)) =
+        tag_no_case::<_, _, nom::error::Error<&str>>("enable_rls").parse(input)
+    {
+        return Ok((
+            rest,
+            TableDef {
+                name: name.to_string(),
+                columns,
+                enable_rls: true,
+            },
+        ));
+    } else {
+        false
+    };
+
     Ok((
         input,
         TableDef {
             name: name.to_string(),
             columns,
+            enable_rls,
         },
     ))
+}
+
+// =============================================================================
+// Policy Parsing
+// =============================================================================
+
+/// A schema item is either a table or a policy.
+enum SchemaItem {
+    Table(TableDef),
+    Policy(RlsPolicy),
+}
+
+/// Parse a policy definition.
+///
+/// Syntax:
+/// ```text
+/// policy <name> on <table>
+///     [for all|select|insert|update|delete]
+///     [restrictive]
+///     [to <role>]
+///     [using (<expr>)]
+///     [with check (<expr>)]
+/// ```
+fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
+    let (input, _) = ws_and_comments(input)?;
+    let (input, _) = tag_no_case("policy").parse(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, name) = identifier(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, _) = tag_no_case("on").parse(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, table) = identifier(input)?;
+
+    let mut policy = RlsPolicy::create(name, table);
+
+    // Parse optional clauses in any order
+    let mut remaining = input;
+    loop {
+        let (input, _) = ws_and_comments(remaining)?;
+
+        // for all|select|insert|update|delete
+        if let Ok((rest, _)) =
+            tag_no_case::<_, _, nom::error::Error<&str>>("for").parse(input)
+        {
+            let (rest, _) = multispace1(rest)?;
+            let (rest, target) = alt((
+                map(tag_no_case("all"), |_| PolicyTarget::All),
+                map(tag_no_case("select"), |_| PolicyTarget::Select),
+                map(tag_no_case("insert"), |_| PolicyTarget::Insert),
+                map(tag_no_case("update"), |_| PolicyTarget::Update),
+                map(tag_no_case("delete"), |_| PolicyTarget::Delete),
+            ))
+            .parse(rest)?;
+            policy.target = target;
+            remaining = rest;
+            continue;
+        }
+
+        // restrictive
+        if let Ok((rest, _)) =
+            tag_no_case::<_, _, nom::error::Error<&str>>("restrictive").parse(input)
+        {
+            policy.permissiveness = PolicyPermissiveness::Restrictive;
+            remaining = rest;
+            continue;
+        }
+
+        // to <role>
+        if let Ok((rest, _)) =
+            tag_no_case::<_, _, nom::error::Error<&str>>("to").parse(input)
+        {
+            // Make sure it's not "to_sql" or similar — needs whitespace after
+            if let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
+                let (rest, role) = identifier(rest)?;
+                policy.role = Some(role.to_string());
+                remaining = rest;
+                continue;
+            }
+        }
+
+        // with check (<expr>)
+        if let Ok((rest, _)) =
+            tag_no_case::<_, _, nom::error::Error<&str>>("with").parse(input)
+        {
+            let (rest, _) = multispace1(rest)?;
+            if let Ok((rest, _)) =
+                tag_no_case::<_, _, nom::error::Error<&str>>("check").parse(rest)
+            {
+                let (rest, _) = nom_ws0(rest)?;
+                let (rest, _) = char('(').parse(rest)?;
+                let (rest, _) = nom_ws0(rest)?;
+                let (rest, expr) = parse_policy_expr(rest)?;
+                let (rest, _) = nom_ws0(rest)?;
+                let (rest, _) = char(')').parse(rest)?;
+                policy.with_check = Some(expr);
+                remaining = rest;
+                continue;
+            }
+        }
+
+        // using (<expr>)
+        if let Ok((rest, _)) =
+            tag_no_case::<_, _, nom::error::Error<&str>>("using").parse(input)
+        {
+            let (rest, _) = nom_ws0(rest)?;
+            let (rest, _) = char('(').parse(rest)?;
+            let (rest, _) = nom_ws0(rest)?;
+            let (rest, expr) = parse_policy_expr(rest)?;
+            let (rest, _) = nom_ws0(rest)?;
+            let (rest, _) = char(')').parse(rest)?;
+            policy.using = Some(expr);
+            remaining = rest;
+            continue;
+        }
+
+        // No more clauses matched
+        remaining = input;
+        break;
+    }
+
+    Ok((remaining, policy))
+}
+
+/// Parse a policy expression: `left op right [AND/OR left op right ...]`
+///
+/// Produces typed `Expr::Binary` AST nodes — no raw SQL.
+///
+/// Handles:
+/// - `column = value`
+/// - `column = function('arg')::type`   (function call + cast)
+/// - `expr AND expr`, `expr OR expr`
+fn parse_policy_expr(input: &str) -> IResult<&str, Expr> {
+    let (input, first) = parse_policy_comparison(input)?;
+
+    // Check for AND/OR chaining
+    let mut result = first;
+    let mut remaining = input;
+    loop {
+        let (input, _) = nom_ws0(remaining)?;
+
+        if let Ok((rest, _)) =
+            tag_no_case::<_, _, nom::error::Error<&str>>("or").parse(input)
+        {
+            if let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
+                let (rest, right) = parse_policy_comparison(rest)?;
+                result = Expr::Binary {
+                    left: Box::new(result),
+                    op: BinaryOp::Or,
+                    right: Box::new(right),
+                    alias: None,
+                };
+                remaining = rest;
+                continue;
+            }
+        }
+
+        if let Ok((rest, _)) =
+            tag_no_case::<_, _, nom::error::Error<&str>>("and").parse(input)
+        {
+            if let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
+                let (rest, right) = parse_policy_comparison(rest)?;
+                result = Expr::Binary {
+                    left: Box::new(result),
+                    op: BinaryOp::And,
+                    right: Box::new(right),
+                    alias: None,
+                };
+                remaining = rest;
+                continue;
+            }
+        }
+
+        remaining = input;
+        break;
+    }
+
+    Ok((remaining, result))
+}
+
+/// Parse a single comparison: `atom op atom`
+fn parse_policy_comparison(input: &str) -> IResult<&str, Expr> {
+    let (input, left) = parse_policy_atom(input)?;
+    let (input, _) = nom_ws0(input)?;
+
+    // Try to parse comparison operator
+    if let Ok((rest, op)) = parse_cmp_op(input) {
+        let (rest, _) = nom_ws0(rest)?;
+        let (rest, right) = parse_policy_atom(rest)?;
+        return Ok((
+            rest,
+            Expr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+                alias: None,
+            },
+        ));
+    }
+
+    // No operator — just an atom
+    Ok((input, left))
+}
+
+/// Parse comparison operators: =, !=, <>, >=, <=, >, <
+fn parse_cmp_op(input: &str) -> IResult<&str, BinaryOp> {
+    alt((
+        map(tag(">="), |_| BinaryOp::Gte),
+        map(tag("<="), |_| BinaryOp::Lte),
+        map(tag("<>"), |_| BinaryOp::Ne),
+        map(tag("!="), |_| BinaryOp::Ne),
+        map(tag("="), |_| BinaryOp::Eq),
+        map(tag(">"), |_| BinaryOp::Gt),
+        map(tag("<"), |_| BinaryOp::Lt),
+    ))
+    .parse(input)
+}
+
+/// Parse a policy expression atom:
+/// - identifier  (column name)
+/// - function_call(args)  with optional ::cast
+/// - 'string literal'
+/// - numeric literal
+/// - true/false
+/// - (sub_expr)  grouped
+fn parse_policy_atom(input: &str) -> IResult<&str, Expr> {
+    alt((
+        parse_policy_grouped,
+        parse_policy_bool,
+        parse_policy_string,
+        parse_policy_number,
+        parse_policy_func_or_ident, // function call or plain identifier, with optional ::cast
+    ))
+    .parse(input)
+}
+
+/// Parse grouped expression in parens
+fn parse_policy_grouped(input: &str) -> IResult<&str, Expr> {
+    let (input, _) = char('(').parse(input)?;
+    let (input, _) = nom_ws0(input)?;
+    let (input, expr) = parse_policy_expr(input)?;
+    let (input, _) = nom_ws0(input)?;
+    let (input, _) = char(')').parse(input)?;
+    Ok((input, expr))
+}
+
+/// Parse true / false
+fn parse_policy_bool(input: &str) -> IResult<&str, Expr> {
+    alt((
+        map(tag_no_case("true"), |_| {
+            Expr::Literal(AstValue::Bool(true))
+        }),
+        map(tag_no_case("false"), |_| {
+            Expr::Literal(AstValue::Bool(false))
+        }),
+    ))
+    .parse(input)
+}
+
+/// Parse a 'string literal'
+fn parse_policy_string(input: &str) -> IResult<&str, Expr> {
+    let (input, _) = char('\'').parse(input)?;
+    let mut end = 0;
+    for (i, c) in input.char_indices() {
+        if c == '\'' {
+            end = i;
+            break;
+        }
+    }
+    let content = &input[..end];
+    let rest = &input[end + 1..];
+    Ok((rest, Expr::Literal(AstValue::String(content.to_string()))))
+}
+
+/// Parse numeric literal
+fn parse_policy_number(input: &str) -> IResult<&str, Expr> {
+    let (input, digits) = take_while1(|c: char| c.is_ascii_digit() || c == '.')(input)?;
+    // Make sure it starts with digit (not just '.')
+    if digits.starts_with('.') || digits.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Digit,
+        )));
+    }
+    if let Ok(n) = digits.parse::<i64>() {
+        Ok((input, Expr::Literal(AstValue::Int(n))))
+    } else if let Ok(f) = digits.parse::<f64>() {
+        Ok((input, Expr::Literal(AstValue::Float(f))))
+    } else {
+        Ok((input, Expr::Named(digits.to_string())))
+    }
+}
+
+/// Parse function call or identifier, with optional ::cast
+fn parse_policy_func_or_ident(input: &str) -> IResult<&str, Expr> {
+    let (input, name) = identifier(input)?;
+
+    // Check for function call: name(
+    let mut expr = if let Ok((rest, _)) = char::<_, nom::error::Error<&str>>('(').parse(input) {
+        // Parse args
+        let (rest, _) = nom_ws0(rest)?;
+        let (rest, args) = separated_list0(
+            (nom_ws0, char(','), nom_ws0),
+            parse_policy_atom,
+        )
+        .parse(rest)?;
+        let (rest, _) = nom_ws0(rest)?;
+        let (rest, _) = char(')').parse(rest)?;
+        let input = rest;
+        (input, Expr::FunctionCall {
+            name: name.to_string(),
+            args,
+            alias: None,
+        })
+    } else {
+        (input, Expr::Named(name.to_string()))
+    };
+
+    // Check for ::cast
+    if let Ok((rest, _)) = tag::<_, _, nom::error::Error<&str>>("::").parse(expr.0) {
+        let (rest, cast_type) = identifier(rest)?;
+        expr = (
+            rest,
+            Expr::Cast {
+                expr: Box::new(expr.1),
+                target_type: cast_type.to_string(),
+                alias: None,
+            },
+        );
+    }
+
+    Ok(expr)
+}
+
+/// Parse a single schema item: either a table or a policy
+fn parse_schema_item(input: &str) -> IResult<&str, SchemaItem> {
+    let (input, _) = ws_and_comments(input)?;
+
+    // Try policy first (since "policy" is a distinct keyword)
+    if let Ok((rest, policy)) = parse_policy(input) {
+        return Ok((rest, SchemaItem::Policy(policy)));
+    }
+
+    // Otherwise parse table
+    let (rest, table) = parse_table(input)?;
+    Ok((rest, SchemaItem::Table(table)))
 }
 
 /// Parse complete schema file
 fn parse_schema(input: &str) -> IResult<&str, Schema> {
     // Extract version directive before parsing
     let version = extract_version_directive(input);
-    
-    let (input, _) = ws_and_comments(input)?;
-    let (input, tables) = many0(parse_table).parse(input)?;
+
+    let (input, items) = many0(parse_schema_item).parse(input)?;
     let (input, _) = ws_and_comments(input)?;
 
-    Ok((input, Schema { version, tables }))
+    let mut tables = Vec::new();
+    let mut policies = Vec::new();
+    for item in items {
+        match item {
+            SchemaItem::Table(t) => tables.push(t),
+            SchemaItem::Policy(p) => policies.push(p),
+        }
+    }
+
+    Ok((input, Schema { version, tables, policies }))
 }
 
 /// Extract version from `-- qail: version=N` directive
@@ -589,5 +997,182 @@ mod tests {
         "#;
         let schema2 = Schema::parse(input_no_version).expect("parse failed");
         assert_eq!(schema2.version, None);
+    }
+
+    // =========================================================================
+    // Policy + enable_rls tests
+    // =========================================================================
+
+    #[test]
+    fn test_enable_rls_table() {
+        let input = r#"
+            table orders (
+                id uuid primary_key,
+                operator_id uuid not null
+            ) enable_rls
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        assert_eq!(schema.tables.len(), 1);
+        assert!(schema.tables[0].enable_rls);
+    }
+
+    #[test]
+    fn test_parse_policy_basic() {
+        let input = r#"
+            table orders (
+                id uuid primary_key,
+                operator_id uuid not null
+            ) enable_rls
+
+            policy orders_isolation on orders
+                for all
+                using (operator_id = current_setting('app.current_operator_id')::uuid)
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        assert_eq!(schema.tables.len(), 1);
+        assert_eq!(schema.policies.len(), 1);
+
+        let policy = &schema.policies[0];
+        assert_eq!(policy.name, "orders_isolation");
+        assert_eq!(policy.table, "orders");
+        assert_eq!(policy.target, PolicyTarget::All);
+        assert!(policy.using.is_some());
+
+        // Verify the expression is a typed Binary, not raw SQL
+        match policy.using.as_ref().unwrap() {
+            Expr::Binary { left, op, right, .. } => {
+                assert_eq!(*op, BinaryOp::Eq);
+                match left.as_ref() {
+                    Expr::Named(n) => assert_eq!(n, "operator_id"),
+                    _ => panic!("Expected Named, got {:?}", left),
+                }
+                match right.as_ref() {
+                    Expr::Cast { target_type, expr, .. } => {
+                        assert_eq!(target_type, "uuid");
+                        match expr.as_ref() {
+                            Expr::FunctionCall { name, args, .. } => {
+                                assert_eq!(name, "current_setting");
+                                assert_eq!(args.len(), 1);
+                            }
+                            _ => panic!("Expected FunctionCall"),
+                        }
+                    }
+                    _ => panic!("Expected Cast, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected Binary"),
+        }
+    }
+
+    #[test]
+    fn test_parse_policy_with_check() {
+        let input = r#"
+            table orders (
+                id uuid primary_key
+            )
+
+            policy orders_write on orders
+                for insert
+                with check (operator_id = current_setting('app.current_operator_id')::uuid)
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        let policy = &schema.policies[0];
+        assert_eq!(policy.target, PolicyTarget::Insert);
+        assert!(policy.with_check.is_some());
+        assert!(policy.using.is_none());
+    }
+
+    #[test]
+    fn test_parse_policy_restrictive_with_role() {
+        let input = r#"
+            table secrets (
+                id uuid primary_key
+            )
+
+            policy admin_only on secrets
+                for select
+                restrictive
+                to app_user
+                using (current_setting('app.is_super_admin')::boolean = true)
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        let policy = &schema.policies[0];
+        assert_eq!(policy.target, PolicyTarget::Select);
+        assert_eq!(policy.permissiveness, PolicyPermissiveness::Restrictive);
+        assert_eq!(policy.role.as_deref(), Some("app_user"));
+        assert!(policy.using.is_some());
+    }
+
+    #[test]
+    fn test_parse_policy_or_expr() {
+        let input = r#"
+            table orders (
+                id uuid primary_key
+            )
+
+            policy tenant_or_admin on orders
+                for all
+                using (operator_id = current_setting('app.current_operator_id')::uuid or current_setting('app.is_super_admin')::boolean = true)
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        let policy = &schema.policies[0];
+
+        match policy.using.as_ref().unwrap() {
+            Expr::Binary { op: BinaryOp::Or, .. } => {}
+            e => panic!("Expected Binary OR, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_schema_to_sql() {
+        let input = r#"
+            table orders (
+                id uuid primary_key,
+                operator_id uuid not null
+            ) enable_rls
+
+            policy orders_isolation on orders
+                for all
+                using (operator_id = current_setting('app.current_operator_id')::uuid)
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        let sql = schema.to_sql();
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS"));
+        assert!(sql.contains("ENABLE ROW LEVEL SECURITY"));
+        assert!(sql.contains("FORCE ROW LEVEL SECURITY"));
+        assert!(sql.contains("CREATE POLICY"));
+        assert!(sql.contains("orders_isolation"));
+        assert!(sql.contains("FOR ALL"));
+    }
+
+    #[test]
+    fn test_multiple_policies() {
+        let input = r#"
+            table orders (
+                id uuid primary_key,
+                operator_id uuid not null
+            ) enable_rls
+
+            policy orders_read on orders
+                for select
+                using (operator_id = current_setting('app.current_operator_id')::uuid)
+
+            policy orders_write on orders
+                for insert
+                with check (operator_id = current_setting('app.current_operator_id')::uuid)
+        "#;
+
+        let schema = Schema::parse(input).expect("parse failed");
+        assert_eq!(schema.policies.len(), 2);
+        assert_eq!(schema.policies[0].name, "orders_read");
+        assert_eq!(schema.policies[0].target, PolicyTarget::Select);
+        assert_eq!(schema.policies[1].name, "orders_write");
+        assert_eq!(schema.policies[1].target, PolicyTarget::Insert);
     }
 }
