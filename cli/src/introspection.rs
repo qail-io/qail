@@ -275,19 +275,17 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             continue;
         }
 
-        if let Some((table_name, col_name)) = check_column_map.get(&constraint_name) {
-            if let Some(columns) = tables.get_mut(table_name.as_str()) {
-                if let Some(expr) = parse_check_expr(&check_clause, col_name) {
-                    for col in columns.iter_mut() {
-                        if col.name == *col_name {
-                            col.check = Some(qail_core::migrate::CheckConstraint {
-                                expr: expr.clone(),
-                                name: Some(constraint_name.clone()),
-                            });
-                        }
+        if let Some((table_name, col_name)) = check_column_map.get(&constraint_name)
+            && let Some(columns) = tables.get_mut(table_name.as_str())
+            && let Some(expr) = parse_check_expr(&check_clause, col_name) {
+                for col in columns.iter_mut() {
+                    if col.name == *col_name {
+                        col.check = Some(qail_core::migrate::CheckConstraint {
+                            expr: expr.clone(),
+                            name: Some(constraint_name.clone()),
+                        });
                     }
                 }
-            }
         }
     }
 
@@ -343,8 +341,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let fk_cols = constraint_columns.get(fk_constraint.as_str());
         let ref_cols = constraint_columns.get(ref_constraint.as_str());
 
-        if let (Some(fk_list), Some(ref_list)) = (fk_cols, ref_cols) {
-            if fk_list.len() == 1 && ref_list.len() == 1 {
+        if let (Some(fk_list), Some(ref_list)) = (fk_cols, ref_cols)
+            && fk_list.len() == 1 && ref_list.len() == 1 {
                 let (fk_table, fk_col) = &fk_list[0];
                 let (ref_table, ref_col) = &ref_list[0];
 
@@ -366,7 +364,6 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
                     }
                 }
             }
-        }
     }
 
     // ── 6. RLS Status (AST-native) ──────────────────────────────────────
@@ -786,7 +783,7 @@ fn parse_check_expr(
     use qail_core::migrate::schema::CheckExpr;
 
     // Strip outer parens and whitespace
-    let s = clause.replace('(', "").replace(')', "").trim().to_string();
+    let s = clause.replace(['(', ')'], "").trim().to_string();
 
     // Try BETWEEN-style: "col >= low AND col <= high"
     if let Some(and_pos) = s.find(" AND ") {

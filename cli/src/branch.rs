@@ -43,7 +43,7 @@ pub async fn branch_list(db_url: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<36}  {:<20}  {:<10}  {}", "ID", "NAME", "STATUS", "CREATED");
+    println!("{:<36}  {:<20}  {:<10}  CREATED", "ID", "NAME", "STATUS");
     println!("{}", "-".repeat(80));
 
     for row in &rows {
@@ -77,8 +77,8 @@ pub async fn branch_merge(name: &str, db_url: &str) -> Result<()> {
 
     // Show stats first
     let stats_sql = branch_sql::branch_stats_sql(name);
-    if let Ok(rows) = conn.simple_query(&stats_sql).await {
-        if !rows.is_empty() {
+    if let Ok(rows) = conn.simple_query(&stats_sql).await
+        && !rows.is_empty() {
             println!("📊 Overlay stats for '{}':", name);
             for row in &rows {
                 let table = row.get_string(0).unwrap_or_default();
@@ -86,7 +86,6 @@ pub async fn branch_merge(name: &str, db_url: &str) -> Result<()> {
                 let count = row.get_string(2).unwrap_or_default();
                 println!("   {} {} → {} rows", table, op, count);
             }
-        }
     }
 
     let sql = branch_sql::mark_merged_sql(name);

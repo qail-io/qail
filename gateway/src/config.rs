@@ -36,11 +36,21 @@ pub struct GatewayConfig {
     
     /// Path to event triggers config file (optional)
     pub events_path: Option<String>,
+
+    /// Rate limiter: requests per second per IP
+    #[serde(default = "default_rate_limit_rate")]
+    pub rate_limit_rate: f64,
+
+    /// Rate limiter: maximum burst capacity
+    #[serde(default = "default_rate_limit_burst")]
+    pub rate_limit_burst: u32,
 }
 
 fn default_true() -> bool { true }
 fn default_cache_max() -> usize { 1000 }
 fn default_cache_ttl() -> u64 { 60 }
+fn default_rate_limit_rate() -> f64 { 100.0 }
+fn default_rate_limit_burst() -> u32 { 200 }
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -54,6 +64,8 @@ impl Default for GatewayConfig {
             cache_max_entries: 1000,
             cache_ttl_seconds: 60,
             events_path: None,
+            rate_limit_rate: 100.0,
+            rate_limit_burst: 200,
         }
     }
 }
@@ -94,6 +106,8 @@ impl GatewayConfig {
             cache_max_entries,
             cache_ttl_seconds,
             events_path: None,
+            rate_limit_rate: 100.0,
+            rate_limit_burst: 200,
         }
     }
 }

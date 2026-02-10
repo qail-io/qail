@@ -84,7 +84,7 @@ impl RateLimiter {
 
 /// Rate limiting middleware
 pub async fn rate_limit_middleware(
-    State(limiter): State<Arc<RateLimiter>>,
+    State(state): State<Arc<crate::GatewayState>>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -96,7 +96,7 @@ pub async fn rate_limit_middleware(
         .map(|s| s.split(',').next().unwrap_or("unknown").trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     
-    match limiter.check(&key).await {
+    match state.rate_limiter.check(&key).await {
         Ok(remaining) => {
             let mut response = next.run(request).await;
             response.headers_mut().insert(

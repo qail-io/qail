@@ -269,10 +269,9 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     .strip_prefix("check(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("");
-                if !inner.is_empty() {
-                    if let Some(expr) = parse_check_expr_from_qail(inner) {
+                if !inner.is_empty()
+                    && let Some(expr) = parse_check_expr_from_qail(inner) {
                         col.check = Some(CheckConstraint { expr, name: None });
-                    }
                 }
             }
             _ => {
@@ -872,6 +871,7 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     }
 
     // Try simple comparisons: "col >= val", "col > val", etc.
+    #[allow(clippy::type_complexity)]
     let ops: &[(&str, fn(String, i64) -> CheckExpr)] = &[
         (">=", |col, val| CheckExpr::GreaterOrEqual { column: col, value: val }),
         ("<=", |col, val| CheckExpr::LessOrEqual { column: col, value: val }),
@@ -946,7 +946,7 @@ fn parse_resource<'a, I: Iterator<Item = &'a str>>(
 
         // If no closing brace on same line, read until we find it
         if !block_content.contains('}') {
-            while let Some(next_line) = lines.next() {
+            for next_line in lines.by_ref() {
                 let next_line = next_line.trim();
                 if next_line == "}" || next_line.ends_with('}') {
                     let trimmed = next_line.trim_end_matches('}').trim();

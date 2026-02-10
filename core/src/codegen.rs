@@ -177,7 +177,7 @@ fn generate_table_module(table_name: &str, table: &crate::build::TableSchema) ->
     
     // RLS trait: RequiresRls for tables with operator_id, DirectBuild for others
     if table.rls_enabled {
-        code.push_str(&format!("    /// This table has `operator_id` — queries require `.with_rls()` proof\n"));
+        code.push_str("    /// This table has `operator_id` — queries require `.with_rls()` proof\n");
         code.push_str(&format!("    impl RequiresRls for {} {{}}\n\n", struct_name));
     } else {
         code.push_str(&format!("    impl DirectBuild for {} {{}}\n\n", struct_name));
