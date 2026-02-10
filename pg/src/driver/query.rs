@@ -146,7 +146,7 @@ impl PgConnection {
     }
 
     /// Execute a simple SQL statement (no parameters).
-    pub(crate) async fn execute_simple(&mut self, sql: &str) -> PgResult<()> {
+    pub async fn execute_simple(&mut self, sql: &str) -> PgResult<()> {
         let bytes = PgEncoder::encode_query_string(sql);
         self.stream.write_all(&bytes).await?;
 
@@ -161,6 +161,50 @@ impl PgConnection {
                         return Err(err);
                     }
                     return Ok(());
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Execute a simple SQL query and return rows (Simple Query Protocol).
+    ///
+    /// Unlike `execute_simple`, this collects and returns data rows.
+    /// Used for branch management and other administrative queries.
+    pub async fn simple_query(&mut self, sql: &str) -> PgResult<Vec<super::PgRow>> {
+        use std::sync::Arc;
+        let bytes = PgEncoder::encode_query_string(sql);
+        self.stream.write_all(&bytes).await?;
+
+        let mut rows: Vec<super::PgRow> = Vec::new();
+        let mut column_info: Option<Arc<super::ColumnInfo>> = None;
+        let mut error: Option<PgError> = None;
+
+        loop {
+            let msg = self.recv().await?;
+            match msg {
+                BackendMessage::RowDescription(fields) => {
+                    column_info = Some(Arc::new(super::ColumnInfo::from_fields(&fields)));
+                }
+                BackendMessage::DataRow(data) => {
+                    if error.is_none() {
+                        rows.push(super::PgRow {
+                            columns: data,
+                            column_info: column_info.clone(),
+                        });
+                    }
+                }
+                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {

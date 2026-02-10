@@ -1,34 +1,74 @@
-# 🪝 QAIL — AST-Native PostgreSQL Driver with Built-in RLS
+# Qail — The Database Driver That Makes Bad Queries Impossible
 
-> **Rust gives you memory safety. QAIL gives you correctness safety.**
+> **Rust gives you memory safety. Qail gives you query safety.**
 
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-qail.rs-blue)](https://qail.rs/docs)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.15.8-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.18.6-green)](CHANGELOG.md)
 
 ---
 
-## What is QAIL?
+## The Problem
 
-QAIL is a **native AST PostgreSQL driver** with **built-in Row-Level Security**. Instead of passing SQL strings through your stack, you work directly with a typed AST (Abstract Syntax Tree). This AST compiles directly to PostgreSQL wire protocol bytes — no string interpolation, no SQL injection, no parsing at runtime.
+Every SaaS backend has the same three bugs waiting to happen:
 
-The only Rust PostgreSQL driver with AST-level tenant injection for multi-tenant SaaS.
+1. **N+1 queries** — Your ORM fires 151 queries where 1 would do. You find out in production.
+2. **SQL injection** — One string interpolation mistake. That's all it takes.
+3. **Broken tenant isolation** — A missing `WHERE operator_id = ?` leaks another customer's data.
+
+These aren't edge cases. They're the *default* outcome of string-based SQL.
+
+## The Fix
+
+Qail is a **native AST PostgreSQL driver**. Instead of passing SQL strings, you work with a typed Abstract Syntax Tree that compiles directly to PostgreSQL wire protocol bytes.
 
 ```rust
-// Traditional: String → Parse → Execute
+// String-based (every other driver): parse → plan → execute
 sqlx::query!("SELECT id, email FROM users WHERE active = $1", true)
 
-// QAIL: AST → Binary → Execute (no parsing, no injection surface)
+// Qail: AST → binary wire bytes → execute (no parsing, no injection surface)
 Qail::get("users").columns(["id", "email"]).eq("active", true)
 ```
+
+**N+1 is structurally impossible.** The AST guides you to `.join()` — there's no "lazy loading" to accidentally trigger. Security is compiled in, not bolted on.
+
+---
+
+## Benchmark: Proof, Not Marketing
+
+We ran the same complex query — 3×LEFT JOIN across 4 tables, filtered, sorted, 50 rows — using five approaches against a real PostgreSQL database. 100 iterations, `--release` mode.
+
+| # | Approach | Avg Latency | DB Queries | vs Qail |
+|---|----------|------------|------------|---------|
+| 1 | **Qail AST** | **449µs** | **1** | baseline |
+| 2 | REST + `?expand=` | 635µs | 1 | 1.4× slower |
+| 3 | GraphQL + DataLoader | 1.52ms | 3 | **3.4×** |
+| 4 | GraphQL naive | 18.2ms | 151 | **40×** |
+| 5 | REST naive | 22.5ms | 151 | **50×** |
+
+> **The headline isn't 0.4ms vs 0.6ms.** It's that 90% of developers ship Approach 4 or 5 — the one that's **40-50× slower** — because their tools let them.
+>
+> Qail makes it impossible to write the slow version. The AST naturally guides you to `.join()`. That's the product.
+
+<details>
+<summary><strong>Methodology notes (click to expand)</strong></summary>
+
+- **Cache equalization:** A 10-iteration global warmup loads all data pages into Postgres buffer cache *before* any timed approach runs. All approaches start from identical cache state.
+- **Fair protocol:** All five approaches use Qail's binary driver internally, isolating the architectural difference (1 query vs N+1) from protocol overhead.
+- **DataLoader:** Realistically batches N lookups into `WHERE id IN (...)` queries — the standard GraphQL optimization.
+- **REST + expand:** Server-side JOIN (same query as Qail) + JSON serialization overhead. The 1.4× gap is pure JSON ser/de cost.
+- **Network latency:** Local benchmark = 0ms latency. In production (app → RDS), each extra round trip adds 1-2ms. The gap between Qail (1 trip) and DataLoader (3 trips) widens significantly.
+- Run it yourself: `DATABASE_URL=... cargo run --example battle_comparison --features chrono,uuid --release`
+
+</details>
 
 ---
 
 ## Quick Start
 
 ```rust
-use qail_core::{Qail, rls::RlsContext};
+use qail_core::prelude::*;
 use qail_pg::PgDriver;
 
 // Connect
@@ -37,70 +77,59 @@ let mut driver = PgDriver::connect("localhost", 5432, "user", "mydb").await?;
 // Multi-tenant: scope every query to this operator
 let ctx = RlsContext::operator(operator_id);
 
-// Build query as AST with RLS
-let query = Qail::get("users")
-    .columns(["id", "email", "name"])
-    .eq("active", true)
-    .order_by("created_at", Desc)
-    .limit(10)
+// Build & execute
+let orders = Qail::get("orders")
+    .columns(["id", "total", "status"])
+    .join(JoinKind::Left, "users", "orders.user_id", "users.id")
+    .column("users.email AS customer_email")
+    .eq("orders.status", "paid")
+    .order_by("orders.created_at", Desc)
+    .limit(25)
     .with_rls(&ctx);  // ← tenant-scoped automatically
 
-// Execute (AST → binary wire protocol → Postgres)
-let rows = driver.fetch_all(&query).await?;
+let rows = driver.fetch_all(&orders).await?;
 ```
 
 ### CLI
 
 ```bash
-# Install
 cargo install qail
 
-# Initialize a project
 qail init --name myapp --mode postgres --url postgres://localhost/mydb
-
-# Execute queries
 qail exec "get users'id'email[active=true]" --url postgres://localhost/mydb
-qail exec "cnt orders[status = 'paid']" --url postgres://...  # COUNT(*)
-qail exec "get users" --url postgres://... --json | jq '.[].email'
-
-# Schema management
-qail pull postgres://localhost/mydb           # Introspect → schema.qail
-qail diff old.qail new.qail                   # Compare schemas
-qail diff _ schema.qail --live --url pg://... # Drift detection vs live DB
-
-# Migrations
-qail migrate up v1:v2 postgres://...
-qail migrate reset schema.qail postgres://... # Nuclear: drop + recreate
-qail migrate status postgres://...            # Rich tabular status
-
-# Generate typed Rust schema
-qail types schema.qail > src/generated/schema.rs
+qail pull postgres://localhost/mydb              # Introspect → schema.qail
+qail diff _ schema.qail --live --url pg://...    # Drift detection
+qail migrate up v1:v2 postgres://...             # Apply migrations
+qail types schema.qail > src/generated/schema.rs # Typed codegen
 ```
 
 ---
 
-## Features
+## Why Qail > String SQL
 
-### 🔐 Built-in Row-Level Security
+### 🔐 Security Is Compiled In
 
-The first Rust PG driver with native multi-tenant isolation:
+| Threat | String SQL | Qail |
+|--------|-----------|------|
+| SQL injection | Possible (one mistake) | **Impossible** (binary AST, no strings) |
+| Tenant data leak | Missing WHERE clause | **RLS injected automatically** |
+| Query abuse | Unbounded depth/joins | **AST validates at compile time** |
+| IDOR | Must check per endpoint | **Tenant isolation built into protocol** |
 
 ```rust
-use qail_core::rls::RlsContext;
-
-// Four scope constructors for real-world SaaS
+// RLS: four scope constructors for real-world SaaS
 let ctx = RlsContext::operator(op_id);              // Single operator
 let ctx = RlsContext::agent(agent_id);              // Single agent
 let ctx = RlsContext::operator_and_agent(op, ag);   // Agent within operator
-let ctx = RlsContext::super_admin();                // Bypasses RLS
+let ctx = RlsContext::super_admin();                // Full access
 
-// Every query is automatically scoped — no manual WHERE clauses
-Qail::get("bookings").with_rls(&ctx)
+// Every query is automatically scoped
+Qail::get("bookings").with_rls(&ctx)  // ← no manual WHERE needed
 ```
 
-### 🔗 Compile-Time Relation Safety (v0.15.8)
+### 🔗 Compile-Time Relation Safety
 
-`TypedQail<T>` carries table types through the builder chain. Invalid joins fail at compile time:
+Invalid joins fail at compile time, not at 3am in production:
 
 ```rust
 use schema::{users, posts};
@@ -117,55 +146,46 @@ Qail::typed(users::table).join_related(products::table)
 
 ### 🛡️ Protected Columns
 
-Compile-time data governance with capability witnesses:
+Compile-time data governance — sensitive columns require capability proof:
 
 ```rust
-// Protected columns require capability proof
 let admin_cap = CapabilityProvider::mint_admin();  // After JWT verification
 
 Qail::get(users::table)
     .with_cap(&admin_cap)
     .column(users::email)                    // Public — always allowed
-    .column_protected(users::password_hash)  // Protected — now allowed!
-```
-
-### 🎯 Type-Safe Schema Codegen
-
-```bash
-qail types schema.qail > src/schema.rs
-```
-
-```rust
-// Generated: compile-time checked columns
-Qail::get(users::TABLE)
-    .typed_column(users::id())
-    .typed_eq(users::active(), true)   // ← must be bool
-    .typed_eq(users::age(), "wrong")   // ❌ Compile Error: &str ≠ i32
-```
-
-### ⚡ AST-Native Migrations
-
-```bash
-qail migrate plan old.qail new.qail       # Preview with impact analysis
-qail migrate up v1:v2 postgres://... -c ./src  # Apply with codebase check
-qail migrate reset schema.qail postgres://...  # Atomic drop + recreate
-qail diff _ schema.qail --live --url pg://...  # Drift detection
-qail migrate status postgres://...            # Rich tabular history
+    .column_protected(users::password_hash)  // Protected — requires cap
 ```
 
 ---
 
-## Performance
+## Qail Gateway
 
-QAIL's AST-native architecture delivers **146% faster** query execution than SQLx:
+Auto-REST API server with zero backend code. Point it at a Postgres database, get a full API:
 
-| Driver | Latency | QPS | vs QAIL |
-|--------|---------|-----|---------|
-| SQLx | 93µs | 10,718 | 141% slower |
-| SeaORM | 75µs | 13,405 | 93% slower |
-| **QAIL** | **39µs** | **25,825** | baseline |
+```
+GET    /api/{table}?expand=users&sort=-created_at&limit=10
+GET    /api/{table}/:id
+POST   /api/{table}
+PATCH  /api/{table}/:id
+DELETE /api/{table}/:id
+GET    /api/{table}/_explain    # EXPLAIN ANALYZE
+GET    /api/{table}/_aggregate  # count, sum, avg, min, max
+```
 
-**Why:** Pre-computed wire bytes, zero-alloc hot path, no SQL parsing.
+**90% Hasura feature parity** — without GraphQL complexity:
+
+- ✅ Auto-REST CRUD for all tables
+- ✅ FK-based JOIN expansion (`?expand=`) + nested expansion
+- ✅ Full-text search (`?search=`)
+- ✅ WebSocket subscriptions + live queries
+- ✅ Event triggers (mutation → webhook with retry)
+- ✅ JWT auth (HS256/RS256) + webhook auth
+- ✅ YAML policy engine + column permissions
+- ✅ Query allow-listing + complexity limits
+- ✅ Prometheus metrics + request tracing
+- ✅ NDJSON streaming + cursor pagination
+- ✅ OpenAPI spec generation
 
 ---
 
@@ -173,74 +193,59 @@ QAIL's AST-native architecture delivers **146% faster** query execution than SQL
 
 ```
 qail.rs/
-├── core/          # AST + Parser + Validator + Typed System + RLS
-├── pg/            # PostgreSQL Driver (binary protocol + pool)
-├── cli/           # qail exec, pull, types, migrate
-├── lsp/           # Language server for IDEs
-├── daemon/        # IPC daemon (any language via socket)
-├── gateway/       # QAIL Gateway (binary protocol proxy)
-├── wasm/          # Browser/Node.js via WASM
-├── ffi/           # C-API for FFI
-├── go/            # Go bindings (via daemon IPC)
-├── py/            # Python bindings (via PyO3)
-├── php/           # PHP bindings
-├── qdrant/        # Qdrant vector database driver
-├── redis/         # Redis driver
-├── mysql/         # MySQL driver (planned)
-└── encoder/       # Wire protocol encoder
+├── core/       AST engine, parser, validator, typed system, RLS, migrations
+├── pg/         PostgreSQL driver (binary wire protocol, connection pool)
+├── gateway/    Auto-REST API server (Actix-web)
+├── cli/        qail exec, pull, diff, migrate, types
+├── lsp/        Language server for .qail files
+├── encoder/    Wire protocol encoder
+├── qdrant/     Qdrant vector DB driver
+├── redis/      Redis driver
+├── workflow/   Workflow engine
+├── wasm/       Browser/Node.js WASM bindings (planned)
+├── ffi/        C-API for FFI (planned)
+├── go/         Go bindings via daemon IPC (planned)
+├── py/         Python bindings via PyO3 (planned)
+└── php/        PHP bindings (planned)
 ```
 
 ---
 
-## Status (v0.15.8)
+## Feature Status (v0.18.6)
 
-| Feature | Status |
-|---------|--------|
-| SSL/TLS, SCRAM-SHA-256 | ✅ |
-| Connection Pooling | ✅ |
-| Row-Level Security (RLS) | ✅ |
-| Multi-Tenant Isolation | ✅ |
-| TypedQail<T> Relations | ✅ |
-| Protected Columns | ✅ |
-| Query Plan Caching | ✅ |
-| Transactions + Savepoints | ✅ |
-| CTEs, Subqueries, EXISTS | ✅ |
-| Window Functions (OVER) | ✅ |
-| JSON/JSONB, Arrays | ✅ |
-| COPY Protocol | ✅ |
-| UPSERT, RETURNING | ✅ |
-| LATERAL JOIN | ✅ |
-| UNION/INTERSECT/EXCEPT | ✅ |
-| Materialized Views | ✅ |
-| EXPLAIN / EXPLAIN ANALYZE | ✅ |
-| LOCK TABLE | ✅ |
-| Batch Transactions | ✅ |
-| Statement Timeout | ✅ |
-| Unix Socket & mTLS | ✅ |
-| SSH Tunneling | ✅ |
+| Category | Features |
+|----------|----------|
+| **Core SQL** | SELECT, INSERT, UPDATE, DELETE, UPSERT, RETURNING, COPY |
+| **Joins** | INNER, LEFT, RIGHT, FULL, CROSS, LATERAL, self-joins |
+| **Advanced** | CTEs, Subqueries, EXISTS, Window Functions, UNION/INTERSECT/EXCEPT |
+| **Types** | JSON/JSONB, Arrays, UUID, Timestamps, Enums, Composite |
+| **Security** | RLS, TypedQail, Protected Columns, Capability Witnesses |
+| **Migrations** | AST-native diffing, drift detection, impact analysis |
+| **Schema** | Views, Materialized Views, Functions, Triggers, Extensions, Sequences, Grants |
+| **Performance** | Connection Pool, Query Cache (LRU+TTL), Prepared Statements, Binary Protocol |
+| **Connection** | SSL/TLS, SCRAM-SHA-256, Unix Socket, mTLS, SSH Tunnel |
+| **Operations** | EXPLAIN ANALYZE, Statement Timeout, LOCK TABLE, Batch Transactions |
 
 ---
 
-## Production Use
+## Production
 
-QAIL powers [Sailtix](https://sailtix.com) — a multi-operator maritime booking platform with full RLS tenant isolation across 27+ tables.
+Qail powers [Sailtix](https://sailtix.com) — a multi-operator maritime booking platform with full RLS tenant isolation across 27+ tables, serving real customers in production.
 
 ---
 
 ## Documentation
 
 - 📖 [Full Documentation](https://qail.rs/docs)
-- 📝 [Blog: Why Every Rust PG Driver Ignores RLS](https://qail.rs/blog/why-every-rust-pg-driver-ignores-rls)
-- 🎮 [Playground](https://qail.rs/playground)
 - 📊 [Benchmarks](https://qail.rs/benchmarks)
-- 📋 [Changelog](https://qail.rs/changelog)
+- 📋 [Changelog](CHANGELOG.md)
 - 💡 [The Manifesto](https://qail.rs/philosophy)
 
 ---
 
 ## License
 
-MIT © 2025-2026 QAIL Contributors
+MIT © 2025-2026 Qail Contributors
 
 <p align="center">
   <strong>Built with 🦀 Rust</strong><br>

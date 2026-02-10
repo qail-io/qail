@@ -30,6 +30,22 @@ pub enum WsClientMessage {
     #[serde(rename = "query")]
     Query { qail: String },
     
+    /// Live query: execute query now, then re-execute on table changes
+    #[serde(rename = "live_query")]
+    LiveQuery {
+        /// Qail query string (e.g., "get orders")
+        qail: String,
+        /// Table to watch for changes (auto-subscribes to PG NOTIFY)
+        table: String,
+        /// Fallback polling interval in ms (0 = NOTIFY only)
+        #[serde(default)]
+        interval_ms: u64,
+    },
+    
+    /// Stop a live query
+    #[serde(rename = "stop_live_query")]
+    StopLiveQuery { table: String },
+    
     #[serde(rename = "ping")]
     Ping,
 }
@@ -57,6 +73,16 @@ pub enum WsServerMessage {
     
     #[serde(rename = "error")]
     Error { message: String },
+    
+    /// Live query update — pushed when subscribed query data changes
+    #[serde(rename = "live_query_update")]
+    LiveQueryUpdate {
+        table: String,
+        rows: Vec<serde_json::Value>,
+        count: usize,
+        /// Monotonically increasing sequence number
+        seq: u64,
+    },
     
     #[serde(rename = "pong")]
     Pong,
@@ -220,6 +246,104 @@ async fn handle_client_message(
         
         WsClientMessage::Ping => {
             let _ = tx.send(WsServerMessage::Pong).await;
+        }
+        
+        WsClientMessage::LiveQuery { qail, table, interval_ms } => {
+            tracing::info!("User {} starting live query on table: {}", user_id, table);
+            
+            // Parse the query
+            let cmd = match qail_core::parser::parse(&qail) {
+                Ok(cmd) => cmd,
+                Err(e) => {
+                    let _ = tx.send(WsServerMessage::Error {
+                        message: format!("Parse error: {}", e),
+                    }).await;
+                    return;
+                }
+            };
+            
+            // Execute immediately and send initial snapshot
+            if let Ok(mut conn) = state.pool.acquire().await {
+                match conn.fetch_all_uncached(&cmd).await {
+                    Ok(rows) => {
+                        let json_rows: Vec<serde_json::Value> = rows
+                            .iter()
+                            .map(crate::handler::row_to_json)
+                            .collect();
+                        let count = json_rows.len();
+                        let _ = tx.send(WsServerMessage::LiveQueryUpdate {
+                            table: table.clone(),
+                            rows: json_rows,
+                            count,
+                            seq: 1,
+                        }).await;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(WsServerMessage::Error {
+                            message: format!("Live query initial exec failed: {}", e),
+                        }).await;
+                        return;
+                    }
+                }
+            }
+            
+            // Subscribe to table's NOTIFY channel for change detection
+            let notify_channel = format!("qail_table_{}", table);
+            if let Ok(mut conn) = state.pool.acquire().await {
+                let listen_cmd = qail_core::ast::Qail::listen(&notify_channel);
+                if conn.fetch_all_uncached(&listen_cmd).await.is_ok() {
+                    subscribed_channels.push(notify_channel.clone());
+                }
+            }
+            
+            // Spawn polling task if interval > 0
+            if interval_ms > 0 {
+                let tx_clone = tx.clone();
+                let state_clone = Arc::clone(state);
+                let table_clone = table.clone();
+                
+                tokio::spawn(async move {
+                    let mut seq = 2u64;
+                    let interval = std::time::Duration::from_millis(interval_ms);
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        
+                        if let Ok(mut conn) = state_clone.pool.acquire().await {
+                            match conn.fetch_all_uncached(&cmd).await {
+                                Ok(rows) => {
+                                    let json_rows: Vec<serde_json::Value> = rows
+                                        .iter()
+                                        .map(crate::handler::row_to_json)
+                                        .collect();
+                                    let count = json_rows.len();
+                                    if tx_clone.send(WsServerMessage::LiveQueryUpdate {
+                                        table: table_clone.clone(),
+                                        rows: json_rows,
+                                        count,
+                                        seq,
+                                    }).await.is_err() {
+                                        break; // Client disconnected
+                                    }
+                                    seq += 1;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Live query poll failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+        
+        WsClientMessage::StopLiveQuery { table } => {
+            let notify_channel = format!("qail_table_{}", table);
+            if let Ok(mut conn) = state.pool.acquire().await {
+                let cmd = qail_core::ast::Qail::unlisten(&notify_channel);
+                let _ = conn.fetch_all_uncached(&cmd).await;
+                subscribed_channels.retain(|c| c != &notify_channel);
+            }
+            let _ = tx.send(WsServerMessage::Unsubscribed { channel: notify_channel }).await;
         }
     }
 }

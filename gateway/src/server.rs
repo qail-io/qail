@@ -10,6 +10,7 @@ use url::Url;
 use crate::cache::QueryCache;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
+use crate::event::EventTriggerEngine;
 use crate::policy::PolicyEngine;
 use crate::router::create_router;
 use crate::schema::SchemaRegistry;
@@ -20,6 +21,7 @@ use qail_pg::{PgPool, PoolConfig};
 pub struct GatewayState {
     pub pool: PgPool,
     pub policy_engine: PolicyEngine,
+    pub event_engine: EventTriggerEngine,
     pub schema: SchemaRegistry,
     pub cache: QueryCache,
     pub config: GatewayConfig,
@@ -85,9 +87,18 @@ impl Gateway {
         let stats = pool.stats().await;
         tracing::info!("Connection pool: {} idle, {} max", stats.idle, stats.max_size);
         
+        // Load event triggers
+        let mut event_engine = EventTriggerEngine::new();
+        if let Some(ref events_path) = self.config.events_path {
+            tracing::info!("Loading event triggers from: {}", events_path);
+            event_engine.load_from_file(events_path)
+                .map_err(|e| GatewayError::Config(e))?;
+        }
+        
         self.state = Some(Arc::new(GatewayState {
             pool,
             policy_engine,
+            event_engine,
             schema,
             cache,
             config: self.config.clone(),
