@@ -3,7 +3,7 @@ name = "qail-gateway"
 version = "0.19.1"
 edition = "2021"
 description = "QAIL Gateway - Native data layer replacing REST/GraphQL"
-license = "MIT"
+license = "BSL-1.1"
 repository = "https://github.com/qail-io/qail"
 keywords = ["database", "gateway", "api", "binary-protocol"]
 categories = ["database", "web-programming"]
@@ -74,3 +74,4 @@ default = []
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hdrhistogram = "7"
+proptest = "1.9.0"

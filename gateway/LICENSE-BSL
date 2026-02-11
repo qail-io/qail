@@ -1,0 +1,21 @@
+Business Source License 1.1
+
+Parameters
+
+Licensor: QAIL Contributors
+Licensed Work: The `qail-gateway` crate and its associated documentation files.
+Additional Use Grant: You may use the Licensed Work for any purpose except operating a commercial database-access-as-a-service or API gateway-as-a-service that competes with Qail Cloud.
+Change Date: 2029-02-11
+Change License: Apache License, Version 2.0
+
+Terms
+
+The Licensor hereby grants you the right to copy, modify, create derivative works, redistribute, and make non-production use of the Licensed Work. The Licensor also grants you the right to make production use of the Licensed Work, other than for offering a competing commercial service as described in the Additional Use Grant.
+
+If your use of the Licensed Work does not comply with the Additional Use Grant, you may not use it in production without a separate commercial license from the Licensor.
+
+On the Change Date, or the fourth anniversary of the first publicly available distribution of a specific version of the Licensed Work, whichever comes first, the Licensor hereby grants you rights under the terms of the Change License, and the rights granted under this Agreement terminate.
+
+This license applies to the source code and other files associated with the Licensed Work that contain a notice referencing this Business Source License 1.1.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
