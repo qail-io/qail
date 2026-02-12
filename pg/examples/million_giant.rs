@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Pre-encode ONCE
-    let wire_bytes = qail_pg::protocol::AstEncoder::encode_batch_simple(&cmds);
+    let wire_bytes = qail_pg::protocol::AstEncoder::encode_batch_simple(&cmds).unwrap();
     println!("Wire bytes size: {} KB", wire_bytes.len() / 1024);
 
     println!("\n📊 Sending {} queries in ONE batch...", TOTAL_QUERIES);

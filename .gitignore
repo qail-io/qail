@@ -65,3 +65,7 @@ pg/examples/*.go
 qail.toml
 multi_ops_agent_plan.md
 GAP.md
+
+# Sensitive files
+soak/traefik/certs/*.pem
+log

@@ -30,57 +30,16 @@ pub struct AstEncoder;
 impl AstEncoder {
     /// Encode a Qail directly to Extended Query protocol bytes.
     /// Returns (wire_bytes, extracted_params_as_bytes)
-    pub fn encode_cmd(cmd: &Qail) -> (BytesMut, Vec<Option<Vec<u8>>>) {
+    pub fn encode_cmd(cmd: &Qail) -> Result<(BytesMut, Vec<Option<Vec<u8>>>), EncodeError> {
         let mut sql_buf = BytesMut::with_capacity(256);
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
 
-        match cmd.action {
-            Action::Get | Action::With => { dml::encode_select(cmd, &mut sql_buf, &mut params).ok(); }
-            Action::Cnt => {
-                let mut count_cmd = cmd.clone();
-                count_cmd.action = Action::Get;
-                count_cmd.columns = vec![qail_core::ast::Expr::Aggregate {
-                    col: "*".to_string(),
-                    func: qail_core::ast::AggregateFunc::Count,
-                    distinct: false,
-                    filter: None,
-                    alias: None,
-                }];
-                dml::encode_select(&count_cmd, &mut sql_buf, &mut params).ok();
-            }
-            Action::Add => { dml::encode_insert(cmd, &mut sql_buf, &mut params).ok(); }
-            Action::Set => { dml::encode_update(cmd, &mut sql_buf, &mut params).ok(); }
-            Action::Del => { dml::encode_delete(cmd, &mut sql_buf, &mut params).ok(); }
-            Action::Export => { dml::encode_export(cmd, &mut sql_buf, &mut params).ok(); }
-            Action::Make => ddl::encode_make(cmd, &mut sql_buf),
-            Action::Index => ddl::encode_index(cmd, &mut sql_buf),
-            Action::Drop => ddl::encode_drop_table(cmd, &mut sql_buf),
-            Action::DropIndex => ddl::encode_drop_index(cmd, &mut sql_buf),
-            Action::Alter => ddl::encode_alter_add_column(cmd, &mut sql_buf),
-            Action::AlterDrop => ddl::encode_alter_drop_column(cmd, &mut sql_buf),
-            Action::AlterType => ddl::encode_alter_column_type(cmd, &mut sql_buf),
-            Action::Mod => ddl::encode_rename_column(cmd, &mut sql_buf),
-            Action::CreateView => ddl::encode_create_view(cmd, &mut sql_buf, &mut params),
-            Action::DropView => ddl::encode_drop_view(cmd, &mut sql_buf),
-            Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, &mut sql_buf),
-            Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, &mut sql_buf),
-            Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, &mut sql_buf),
-            Action::AlterDropDefault => ddl::encode_alter_drop_default(cmd, &mut sql_buf),
-            Action::AlterEnableRls => ddl::encode_alter_enable_rls(cmd, &mut sql_buf),
-            Action::AlterDisableRls => ddl::encode_alter_disable_rls(cmd, &mut sql_buf),
-            Action::AlterForceRls => ddl::encode_alter_force_rls(cmd, &mut sql_buf),
-            Action::AlterNoForceRls => ddl::encode_alter_no_force_rls(cmd, &mut sql_buf),
-            _ => panic!(
-                "Unsupported action {:?} in AST-native encoder. Use legacy encoder for DDL.",
-                cmd.action
-            ),
-        }
+        Self::encode_cmd_sql_to(cmd, &mut sql_buf, &mut params)?;
 
         let sql_bytes = sql_buf.freeze();
-        let wire = batch::build_extended_query(&sql_bytes, &params)
-            .expect("Parameter limit exceeded in AST encoder");
+        let wire = batch::build_extended_query(&sql_bytes, &params)?;
 
-        (wire, params)
+        Ok((wire, params))
     }
 
     /// Encode a Qail using CALLER'S BUFFERS (ZERO-ALLOC).
@@ -91,12 +50,11 @@ impl AstEncoder {
         cmd: &Qail,
         sql_buf: &mut BytesMut,
         params: &mut Vec<Option<Vec<u8>>>,
-    ) -> BytesMut {
-        Self::encode_cmd_sql_to(cmd, sql_buf, params);
+    ) -> Result<BytesMut, EncodeError> {
+        Self::encode_cmd_sql_to(cmd, sql_buf, params)?;
 
         // Build wire protocol (allocates a new BytesMut)
-        batch::build_extended_query(sql_buf, params)
-            .expect("Parameter limit exceeded in AST encoder")
+        batch::build_extended_query(sql_buf, params).map_err(Into::into)
     }
 
     /// Encode a Qail using CALLER'S BUFFERS — writes wire bytes into `wire_buf` (ZERO-ALLOC).
@@ -108,12 +66,12 @@ impl AstEncoder {
         sql_buf: &mut BytesMut,
         params: &mut Vec<Option<Vec<u8>>>,
         wire_buf: &mut BytesMut,
-    ) {
-        Self::encode_cmd_sql_to(cmd, sql_buf, params);
+    ) -> Result<(), EncodeError> {
+        Self::encode_cmd_sql_to(cmd, sql_buf, params)?;
 
         // Build wire protocol into caller's buffer (zero-alloc)
-        batch::build_extended_query_into(wire_buf, sql_buf, params)
-            .expect("Parameter limit exceeded in AST encoder");
+        batch::build_extended_query_into(wire_buf, sql_buf, params)?;
+        Ok(())
     }
 
     /// Internal helper: encode AST to SQL bytes + params (shared by both reuse variants).
@@ -122,7 +80,7 @@ impl AstEncoder {
         cmd: &Qail,
         sql_buf: &mut BytesMut,
         params: &mut Vec<Option<Vec<u8>>>,
-    ) {
+    ) -> Result<(), EncodeError> {
         // Clear buffers (but keep capacity!)
         sql_buf.clear();
         params.clear();
@@ -164,15 +122,18 @@ impl AstEncoder {
             Action::AlterDisableRls => ddl::encode_alter_disable_rls(cmd, sql_buf),
             Action::AlterForceRls => ddl::encode_alter_force_rls(cmd, sql_buf),
             Action::AlterNoForceRls => ddl::encode_alter_no_force_rls(cmd, sql_buf),
-            _ => panic!(
-                "Unsupported action {:?} in AST-native encoder.",
-                cmd.action
-            ),
+        Action::Call => ddl::encode_call(cmd, sql_buf),
+        Action::Do => ddl::encode_do(cmd, sql_buf),
+        Action::SessionSet => ddl::encode_session_set(cmd, sql_buf),
+        Action::SessionShow => ddl::encode_session_show(cmd, sql_buf),
+        Action::SessionReset => ddl::encode_session_reset(cmd, sql_buf),
+            _ => return Err(EncodeError::UnsupportedAction(cmd.action.clone())),
         }
+        Ok(())
     }
 
     /// Encode a Qail to SQL string + params (for prepared statement caching).
-    pub fn encode_cmd_sql(cmd: &Qail) -> (String, Vec<Option<Vec<u8>>>) {
+    pub fn encode_cmd_sql(cmd: &Qail) -> Result<(String, Vec<Option<Vec<u8>>>), EncodeError> {
         let mut sql_buf = BytesMut::with_capacity(256);
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
 
@@ -196,11 +157,33 @@ impl AstEncoder {
             Action::Export => { dml::encode_export(cmd, &mut sql_buf, &mut params).ok(); }
             Action::Make => ddl::encode_make(cmd, &mut sql_buf),
             Action::Index => ddl::encode_index(cmd, &mut sql_buf),
-            _ => panic!("Unsupported action {:?} in AST-native encoder.", cmd.action),
+            Action::Drop => ddl::encode_drop_table(cmd, &mut sql_buf),
+            Action::DropIndex => ddl::encode_drop_index(cmd, &mut sql_buf),
+            Action::Alter => ddl::encode_alter_add_column(cmd, &mut sql_buf),
+            Action::AlterDrop => ddl::encode_alter_drop_column(cmd, &mut sql_buf),
+            Action::AlterType => ddl::encode_alter_column_type(cmd, &mut sql_buf),
+            Action::Mod => ddl::encode_rename_column(cmd, &mut sql_buf),
+            Action::CreateView => ddl::encode_create_view(cmd, &mut sql_buf, &mut params),
+            Action::DropView => ddl::encode_drop_view(cmd, &mut sql_buf),
+            Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, &mut sql_buf),
+            Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, &mut sql_buf),
+            Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, &mut sql_buf),
+            Action::AlterDropDefault => ddl::encode_alter_drop_default(cmd, &mut sql_buf),
+            Action::AlterEnableRls => ddl::encode_alter_enable_rls(cmd, &mut sql_buf),
+            Action::AlterDisableRls => ddl::encode_alter_disable_rls(cmd, &mut sql_buf),
+            Action::AlterForceRls => ddl::encode_alter_force_rls(cmd, &mut sql_buf),
+            Action::AlterNoForceRls => ddl::encode_alter_no_force_rls(cmd, &mut sql_buf),
+            Action::Call => ddl::encode_call(cmd, &mut sql_buf),
+            Action::Do => ddl::encode_do(cmd, &mut sql_buf),
+            Action::SessionSet => ddl::encode_session_set(cmd, &mut sql_buf),
+            Action::SessionShow => ddl::encode_session_show(cmd, &mut sql_buf),
+            Action::SessionReset => ddl::encode_session_reset(cmd, &mut sql_buf),
+            _ => return Err(EncodeError::UnsupportedAction(cmd.action.clone())),
         }
 
+
         let sql = String::from_utf8_lossy(&sql_buf).to_string();
-        (sql, params)
+        Ok((sql, params))
     }
 
     /// Extract ONLY params from a Qail (for reusing cached SQL template).
@@ -230,13 +213,13 @@ impl AstEncoder {
     }
 
     /// Encode multiple Qails as a pipeline batch.
-    pub fn encode_batch(cmds: &[Qail]) -> BytesMut {
+    pub fn encode_batch(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
         batch::encode_batch(cmds)
     }
 
     /// Encode multiple Qails using Simple Query Protocol.
     #[inline]
-    pub fn encode_batch_simple(cmds: &[Qail]) -> BytesMut {
+    pub fn encode_batch_simple(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
         batch::encode_batch_simple(cmds)
     }
 }
@@ -249,7 +232,7 @@ mod tests {
     fn test_encode_select() {
         let cmd = Qail::get("users").columns(["id", "name"]);
 
-        let (wire, params) = AstEncoder::encode_cmd(&cmd);
+        let (wire, params) = AstEncoder::encode_cmd(&cmd).unwrap();
 
         let wire_str = String::from_utf8_lossy(&wire);
         assert!(wire_str.contains("SELECT"));
@@ -265,7 +248,7 @@ mod tests {
             .columns(["id", "name"])
             .filter("active", Operator::Eq, true);
 
-        let (wire, params) = AstEncoder::encode_cmd(&cmd);
+        let (wire, params) = AstEncoder::encode_cmd(&cmd).unwrap();
 
         let wire_str = String::from_utf8_lossy(&wire);
         assert!(wire_str.contains("WHERE"));
@@ -277,7 +260,7 @@ mod tests {
     fn test_encode_export() {
         let cmd = Qail::export("users").columns(["id", "name"]);
 
-        let (sql, _params) = AstEncoder::encode_cmd_sql(&cmd);
+        let (sql, _params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
 
         assert!(sql.starts_with("COPY (SELECT"));
         assert!(sql.contains("FROM users"));
@@ -292,7 +275,7 @@ mod tests {
             .columns(["id", "name"])
             .filter("active", Operator::Eq, true);
 
-        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd);
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
 
         assert!(sql.contains("COPY (SELECT"));
         assert!(sql.contains("WHERE"));
@@ -311,7 +294,7 @@ mod tests {
 
         let cmd = Qail::get("active_users").with("active_users", users_query);
 
-        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd);
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
 
         assert!(sql.starts_with("WITH active_users"), "SQL should start with WITH: {}", sql);
         assert!(sql.contains("AS (SELECT id, name FROM users"), "CTE should have subquery: {}", sql);
@@ -328,7 +311,7 @@ mod tests {
             .with("active_users", users)
             .with("recent_orders", orders);
 
-        let (sql, _) = AstEncoder::encode_cmd_sql(&cmd);
+        let (sql, _) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
 
         assert!(sql.contains("active_users"), "SQL should have first CTE: {}", sql);
         assert!(sql.contains("recent_orders"), "SQL should have second CTE: {}", sql);
@@ -346,7 +329,7 @@ mod tests {
         let cmd = Qail::get("users")
             .filter("deleted_at", Operator::IsNull, true);
 
-        let (wire, params) = AstEncoder::encode_cmd(&cmd);
+        let (wire, params) = AstEncoder::encode_cmd(&cmd).unwrap();
         let wire_str = String::from_utf8_lossy(&wire);
         // IS NULL should not create a parameter — it's a keyword
         assert!(wire_str.contains("IS NULL") || wire_str.contains("$1"));
@@ -364,7 +347,7 @@ mod tests {
             .filter("name", Operator::Eq, malicious);
 
         // Use SQL output (not wire bytes which include Bind params)
-        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd);
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
 
         // The injection string must NOT appear in the SQL —
         // it must be in a parameter slot ($1)
@@ -380,7 +363,7 @@ mod tests {
         let cmd = Qail::get("products")
             .filter("name", Operator::Eq, "日本語テスト 🚀");
 
-        let (wire, params) = AstEncoder::encode_cmd(&cmd);
+        let (wire, params) = AstEncoder::encode_cmd(&cmd).unwrap();
         let wire_str = String::from_utf8_lossy(&wire);
 
         assert!(wire_str.contains("$1"));
@@ -394,7 +377,7 @@ mod tests {
         let cmd = Qail::get("users")
             .filter("email", Operator::Eq, "");
 
-        let (_wire, params) = AstEncoder::encode_cmd(&cmd);
+        let (_wire, params) = AstEncoder::encode_cmd(&cmd).unwrap();
         assert_eq!(params.len(), 1, "Empty string should still produce a param");
     }
 
@@ -404,7 +387,7 @@ mod tests {
             .limit(100_000)
             .offset(999_999);
 
-        let (sql, _) = AstEncoder::encode_cmd_sql(&cmd);
+        let (sql, _) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
         assert!(sql.contains("LIMIT 100000"), "Large limit should appear: {}", sql);
         assert!(sql.contains("OFFSET 999999"), "Large offset should appear: {}", sql);
     }
@@ -418,7 +401,7 @@ mod tests {
             .filter("total", Operator::Gte, 100)
             .filter("created_at", Operator::Lte, "2026-01-01");
 
-        let (wire, params) = AstEncoder::encode_cmd(&cmd);
+        let (wire, params) = AstEncoder::encode_cmd(&cmd).unwrap();
         let wire_str = String::from_utf8_lossy(&wire);
 
         // Should have 3 parameters: $1, $2, $3
@@ -436,9 +419,160 @@ mod tests {
             .set_value("active", true)
             .set_value("bio", "");
 
-        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd);
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
 
         assert!(sql.contains("UPDATE"), "Should be UPDATE: {}", sql);
         assert_eq!(params.len(), 4, "Should have 4 params for 4 values");
+    }
+
+    // ================================================================
+    // Gap analysis fix tests
+    // ================================================================
+
+    #[test]
+    fn test_encode_raw_expr() {
+        let cmd = Qail::get("users").columns_expr(vec![
+            qail_core::ast::Expr::Raw("NOW()".to_string()),
+        ]);
+
+        let (sql, _) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(sql.contains("NOW()"), "Raw expr should emit NOW(), got: {}", sql);
+        assert!(!sql.contains("SELECT *"), "Raw expr should NOT emit *, got: {}", sql);
+    }
+
+    #[test]
+    fn test_encode_def_expr() {
+        use qail_core::ast::{Expr, Constraint};
+
+        let def = Expr::Def {
+            name: "email".to_string(),
+            data_type: "text".to_string(),
+            constraints: vec![Constraint::Unique],
+        };
+
+        let mut buf = bytes::BytesMut::with_capacity(128);
+        super::values::encode_column_expr(&def, &mut buf);
+        let result = String::from_utf8_lossy(&buf).to_string();
+
+        assert!(result.contains("email"), "Should have column name: {}", result);
+        assert!(result.contains("TEXT"), "Should have type: {}", result);
+        assert!(result.contains("UNIQUE"), "Should have constraint: {}", result);
+    }
+
+    #[test]
+    fn test_encode_mod_expr() {
+        use qail_core::ast::{Expr, ModKind};
+
+        let mod_add = Expr::Mod {
+            kind: ModKind::Add,
+            col: Box::new(Expr::Named("email".to_string())),
+        };
+
+        let mut buf = bytes::BytesMut::with_capacity(128);
+        super::values::encode_column_expr(&mod_add, &mut buf);
+        let result = String::from_utf8_lossy(&buf).to_string();
+
+        assert!(result.contains("ADD COLUMN"), "Should have ADD COLUMN: {}", result);
+        assert!(result.contains("email"), "Should have column name: {}", result);
+    }
+
+    #[test]
+    fn test_encode_batch_cnt() {
+        let cmd = Qail {
+            action: qail_core::ast::Action::Cnt,
+            table: "users".to_string(),
+            ..Default::default()
+        };
+
+        let result = AstEncoder::encode_batch(&[cmd]);
+        assert!(result.is_ok(), "Cnt should be supported in batch: {:?}", result.err());
+
+        let buf = result.unwrap();
+        let wire_str = String::from_utf8_lossy(&buf);
+        assert!(wire_str.contains("COUNT"), "Batch Cnt should produce COUNT: {}", wire_str);
+    }
+
+    #[test]
+    fn test_encode_batch_export() {
+        let cmd = Qail::export("users").columns(["id", "name"]);
+
+        let result = AstEncoder::encode_batch(&[cmd]);
+        assert!(result.is_ok(), "Export should be supported in batch: {:?}", result.err());
+
+        let buf = result.unwrap();
+        let wire_str = String::from_utf8_lossy(&buf);
+        assert!(wire_str.contains("COPY"), "Batch Export should produce COPY: {}", wire_str);
+    }
+
+    #[test]
+    fn test_encode_batch_ddl_make() {
+        use qail_core::ast::{Expr, Constraint};
+
+        let cmd = Qail {
+            action: qail_core::ast::Action::Make,
+            table: "test_table".to_string(),
+            columns: vec![
+                Expr::Def {
+                    name: "id".to_string(),
+                    data_type: "serial".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+
+        let result = AstEncoder::encode_batch(&[cmd]);
+        assert!(result.is_ok(), "Make (DDL) should be supported in batch: {:?}", result.err());
+
+        let buf = result.unwrap();
+        let wire_str = String::from_utf8_lossy(&buf);
+        assert!(wire_str.contains("CREATE TABLE"), "Batch Make should produce CREATE TABLE: {}", wire_str);
+    }
+
+    #[test]
+    fn test_encode_batch_ddl_drop() {
+        let cmd = Qail {
+            action: qail_core::ast::Action::Drop,
+            table: "test_table".to_string(),
+            ..Default::default()
+        };
+
+        let result = AstEncoder::encode_batch(&[cmd]);
+        assert!(result.is_ok(), "Drop (DDL) should be supported in batch: {:?}", result.err());
+
+        let buf = result.unwrap();
+        let wire_str = String::from_utf8_lossy(&buf);
+        assert!(wire_str.contains("DROP TABLE"), "Batch Drop should produce DROP TABLE: {}", wire_str);
+    }
+
+    #[test]
+    fn test_encode_batch_mixed_dml_ddl() {
+        use qail_core::ast::Expr;
+
+        let ddl = Qail {
+            action: qail_core::ast::Action::Make,
+            table: "new_table".to_string(),
+            columns: vec![Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![],
+            }],
+            ..Default::default()
+        };
+        let dml = Qail::get("new_table").columns(["id"]);
+
+        let result = AstEncoder::encode_batch(&[ddl, dml]);
+        assert!(result.is_ok(), "Mixed DDL+DML batch should work: {:?}", result.err());
+
+        let buf = result.unwrap();
+        let wire_str = String::from_utf8_lossy(&buf);
+        assert!(wire_str.contains("CREATE TABLE"), "Should contain DDL: {}", wire_str);
+        assert!(wire_str.contains("SELECT"), "Should contain DML: {}", wire_str);
     }
 }

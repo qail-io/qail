@@ -205,6 +205,17 @@ async fn deliver_webhook(
     max_retries: u32,
     trigger_name: &str,
 ) {
+    // SECURITY (E4): Validate webhook URL to prevent SSRF.
+    if let Err(reason) = validate_webhook_url(url) {
+        tracing::error!(
+            trigger = %trigger_name,
+            url = %url,
+            reason = %reason,
+            "Webhook URL rejected (SSRF protection)"
+        );
+        return;
+    }
+
     for attempt in 0..=max_retries {
         if attempt > 0 {
             // Exponential backoff: 1s, 2s, 4s, ...
@@ -267,6 +278,56 @@ async fn deliver_webhook(
         payload.table,
         url,
     );
+}
+
+/// SECURITY (E4): Validate webhook URL to prevent SSRF attacks.
+///
+/// Rejects:
+/// - Non-HTTP(S) schemes (e.g., `file://`)
+/// - Localhost and loopback addresses
+/// - Private network ranges (RFC 1918 / link-local)
+fn validate_webhook_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("Invalid URL: {}", e))?;
+
+    // Only allow http and https schemes
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("Disallowed scheme: {}", scheme)),
+    }
+
+    let host = parsed.host_str()
+        .ok_or_else(|| "No host in URL".to_string())?;
+
+    // Reject localhost
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" {
+        return Err("Loopback address rejected".to_string());
+    }
+
+    // Reject private and link-local IPs
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let is_private = match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.octets()[0] == 169 && v4.octets()[1] == 254  // link-local
+                    || v4.octets()[0] == 0  // current network
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                // Note: is_unique_local() and is_unicast_link_local() are nightly-only;
+                // check fd00::/8 and fe80::/10 manually.
+                || (v6.segments()[0] & 0xfe00) == 0xfc00  // unique local
+                || (v6.segments()[0] & 0xffc0) == 0xfe80  // link-local
+            }
+        };
+        if is_private {
+            return Err(format!("Private/link-local IP rejected: {}", ip));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -339,5 +400,38 @@ mod tests {
         assert!(json.contains("order_created"));
         assert!(json.contains("INSERT"));
         assert!(!json.contains("\"old\"")); // skip_serializing_if = None
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // SECURITY: SSRF protection (E4)
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_ssrf_allows_public_url() {
+        assert!(super::validate_webhook_url("https://api.example.com/hook").is_ok());
+        assert!(super::validate_webhook_url("http://webhook.sailtix.com/trigger").is_ok());
+    }
+
+    #[test]
+    fn test_ssrf_rejects_localhost() {
+        assert!(super::validate_webhook_url("http://localhost/hook").is_err());
+        assert!(super::validate_webhook_url("http://127.0.0.1/hook").is_err());
+    }
+
+    #[test]
+    fn test_ssrf_rejects_private_ip() {
+        assert!(super::validate_webhook_url("http://10.0.0.1/hook").is_err());
+        assert!(super::validate_webhook_url("http://192.168.1.1/hook").is_err());
+        assert!(super::validate_webhook_url("http://172.16.0.1/hook").is_err());
+    }
+
+    #[test]
+    fn test_ssrf_rejects_file_scheme() {
+        assert!(super::validate_webhook_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_ssrf_rejects_link_local() {
+        assert!(super::validate_webhook_url("http://169.254.1.1/hook").is_err());
     }
 }

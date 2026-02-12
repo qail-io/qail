@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Pre-encode once
-    let wire_bytes = AstEncoder::encode_batch(&cmds);
+    let wire_bytes = AstEncoder::encode_batch(&cmds).unwrap();
 
     println!("📊 Pipelining 1,000,000 queries via blocking I/O...");
 

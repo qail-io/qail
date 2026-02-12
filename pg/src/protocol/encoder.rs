@@ -292,6 +292,40 @@ impl PgEncoder {
 
         Ok(buf)
     }
+
+    /// Encode a CopyFail message to abort a COPY IN with an error.
+    /// Wire format:
+    /// - 'f' (1 byte) - message type
+    /// - length (4 bytes)
+    /// - error message (null-terminated)
+    pub fn encode_copy_fail(reason: &str) -> BytesMut {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(b"f");
+        let content_len = reason.len() + 1; // +1 for null terminator
+        let len = (content_len + 4) as i32;
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(reason.as_bytes());
+        buf.extend_from_slice(&[0]);
+        buf
+    }
+
+    /// Encode a Close message to release a prepared statement or portal.
+    /// Wire format:
+    /// - 'C' (1 byte) - message type
+    /// - length (4 bytes)
+    /// - 'S' for statement or 'P' for portal
+    /// - name (null-terminated)
+    pub fn encode_close(is_portal: bool, name: &str) -> BytesMut {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(b"C");
+        let content_len = 1 + name.len() + 1; // type + name + null
+        let len = (content_len + 4) as i32;
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&[if is_portal { b'P' } else { b'S' }]);
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(&[0]);
+        buf
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +414,33 @@ mod tests {
         assert!(bytes.windows(1).any(|w| w == [b'B']));
         assert!(bytes.windows(1).any(|w| w == [b'E']));
         assert!(bytes.windows(1).any(|w| w == [b'S']));
+    }
+
+    #[test]
+    fn test_encode_copy_fail() {
+        let bytes = PgEncoder::encode_copy_fail("bad data");
+        assert_eq!(bytes[0], b'f');
+        let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        assert_eq!(len as usize, 4 + "bad data".len() + 1);
+        assert_eq!(&bytes[5..13], b"bad data");
+        assert_eq!(bytes[13], 0);
+    }
+
+    #[test]
+    fn test_encode_close_statement() {
+        let bytes = PgEncoder::encode_close(false, "my_stmt");
+        assert_eq!(bytes[0], b'C');
+        assert_eq!(bytes[5], b'S'); // Statement type
+        assert_eq!(&bytes[6..13], b"my_stmt");
+        assert_eq!(bytes[13], 0);
+    }
+
+    #[test]
+    fn test_encode_close_portal() {
+        let bytes = PgEncoder::encode_close(true, "");
+        assert_eq!(bytes[0], b'C');
+        assert_eq!(bytes[5], b'P'); // Portal type
+        assert_eq!(bytes[6], 0); // Empty name null terminator
     }
 }
 

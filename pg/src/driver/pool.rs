@@ -211,53 +211,33 @@ impl PooledConnection {
     /// Deterministic connection cleanup and pool return.
     ///
     /// This is the **correct** way to return a connection to the pool.
-    /// Performs RLS reset + DISCARD ALL synchronously within the caller's
-    /// async context — no fire-and-forget spawns, no runtime lifecycle risks.
+    /// COMMITs the transaction (which auto-resets transaction-local RLS
+    /// session variables) and returns the connection to the pool with
+    /// prepared statement caches intact.
     ///
     /// If cleanup fails, the connection is destroyed (not returned to pool).
     ///
     /// # Usage
     /// ```ignore
     /// let mut conn = pool.acquire_with_rls(ctx).await?;
-    /// let result = conn.fetch_all_uncached(&cmd).await;
-    /// conn.release().await; // deterministic cleanup
+    /// let result = conn.fetch_all_cached(&cmd).await;
+    /// conn.release().await; // COMMIT + return to pool
     /// result
     /// ```
     pub async fn release(mut self) {
         if let Some(mut conn) = self.conn.take() {
-            // Step 1: Reset RLS if dirty
-            if self.rls_dirty
-                && let Err(e) = conn.execute_simple(super::rls::reset_sql()).await
-            {
+            // COMMIT the transaction opened by acquire_with_rls.
+            // Transaction-local set_config values auto-reset on COMMIT,
+            // so no explicit RLS cleanup is needed.
+            // Prepared statements survive — they are NOT transaction-scoped.
+            if let Err(e) = conn.execute_simple(super::rls::reset_sql()).await {
                 eprintln!(
-                    "[CRITICAL] pool_rls_reset_failed: RLS reset failed — \
-                     dropping connection to prevent cross-tenant leak: {}",
+                    "[CRITICAL] pool_release_failed: COMMIT failed — \
+                     dropping connection to prevent state leak: {}",
                     e
                 );
                 return; // Connection destroyed — not returned to pool
             }
-
-            // Step 2: DISCARD ALL — nuclear reset of all session state.
-            if let Err(e) = conn.execute_simple("DISCARD ALL").await {
-                eprintln!(
-                    "[WARN] pool_discard_failed: DISCARD ALL failed — \
-                     dropping connection: {}",
-                    e
-                );
-                return; // Connection destroyed — not returned to pool
-            }
-
-            // Step 3: Sync client-side caches with server state.
-            // DISCARD ALL destroys all server-side prepared statements,
-            // so we must clear the client-side tracking maps to stay in sync.
-            conn.prepared_statements.clear();
-            conn.stmt_cache.clear();
-            conn.column_info_cache.clear();
-
-            debug_assert!(
-                conn.prepared_statements.is_empty(),
-                "INVARIANT VIOLATED: prepared statements survived DISCARD ALL"
-            );
 
             self.pool.return_connection(conn).await;
         }
@@ -275,7 +255,8 @@ impl PooledConnection {
             cmd,
             &mut conn.sql_buf,
             &mut conn.params_buf,
-        );
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
 
         conn.send_bytes(&wire_bytes).await?;
 
@@ -290,6 +271,175 @@ impl PooledConnection {
                 | crate::protocol::BackendMessage::BindComplete => {}
                 crate::protocol::BackendMessage::RowDescription(fields) => {
                     column_info = Some(Arc::new(ColumnInfo::from_fields(&fields)));
+                }
+                crate::protocol::BackendMessage::DataRow(data) => {
+                    if error.is_none() {
+                        rows.push(super::PgRow {
+                            columns: data,
+                            column_info: column_info.clone(),
+                        });
+                    }
+                }
+                crate::protocol::BackendMessage::CommandComplete(_) => {}
+                crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    return Ok(rows);
+                }
+                crate::protocol::BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::Query(err.message));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Execute a QAIL command and fetch all rows (FAST VERSION).
+    /// Uses native AST-to-wire encoding and optimized recv_with_data_fast.
+    /// Skips column metadata for maximum speed.
+    pub async fn fetch_all_fast(&mut self, cmd: &qail_core::ast::Qail) -> PgResult<Vec<super::PgRow>> {
+        use crate::protocol::AstEncoder;
+
+        let conn = self.conn.as_mut().expect("Connection should always be present");
+
+        AstEncoder::encode_cmd_reuse_into(
+            cmd,
+            &mut conn.sql_buf,
+            &mut conn.params_buf,
+            &mut conn.write_buf,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
+
+        conn.flush_write_buf().await?;
+
+        let mut rows: Vec<super::PgRow> = Vec::with_capacity(32);
+        let mut error: Option<PgError> = None;
+
+        loop {
+            let res = conn.recv_with_data_fast().await;
+            match res {
+                Ok((msg_type, data)) => {
+                    match msg_type {
+                        b'D' => {
+                            if error.is_none() {
+                                if let Some(columns) = data {
+                                    rows.push(super::PgRow {
+                                        columns,
+                                        column_info: None,
+                                    });
+                                }
+                            }
+                        }
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(rows);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(e) => {
+                    if error.is_none() {
+                        error = Some(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Execute a QAIL command and fetch all rows (CACHED).
+    /// Uses prepared statement caching: Parse+Describe on first call,
+    /// then Bind+Execute only on subsequent calls with the same SQL shape.
+    /// This matches PostgREST's behavior for fair benchmarks.
+    pub async fn fetch_all_cached(&mut self, cmd: &qail_core::ast::Qail) -> PgResult<Vec<super::PgRow>> {
+        use super::ColumnInfo;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let conn = self.conn.as_mut().expect("Connection should always be present");
+
+        conn.sql_buf.clear();
+        conn.params_buf.clear();
+
+        // Encode SQL + params to reusable buffers
+        match cmd.action {
+            qail_core::ast::Action::Get | qail_core::ast::Action::With => {
+                crate::protocol::ast_encoder::dml::encode_select(cmd, &mut conn.sql_buf, &mut conn.params_buf).ok();
+            }
+            qail_core::ast::Action::Add => {
+                crate::protocol::ast_encoder::dml::encode_insert(cmd, &mut conn.sql_buf, &mut conn.params_buf).ok();
+            }
+            qail_core::ast::Action::Set => {
+                crate::protocol::ast_encoder::dml::encode_update(cmd, &mut conn.sql_buf, &mut conn.params_buf).ok();
+            }
+            qail_core::ast::Action::Del => {
+                crate::protocol::ast_encoder::dml::encode_delete(cmd, &mut conn.sql_buf, &mut conn.params_buf).ok();
+            }
+            _ => {
+                // Fallback: unsupported actions go through uncached path
+                return self.fetch_all_uncached(cmd).await;
+            }
+        }
+
+        let mut hasher = DefaultHasher::new();
+        conn.sql_buf.hash(&mut hasher);
+        let sql_hash = hasher.finish();
+
+        let is_cache_miss = !conn.stmt_cache.contains(&sql_hash);
+
+        conn.write_buf.clear();
+
+        let stmt_name = if let Some(name) = conn.stmt_cache.get(&sql_hash) {
+            name.clone()
+        } else {
+            let name = format!("qail_{:x}", sql_hash);
+
+            conn.evict_prepared_if_full();
+
+            let sql_str = std::str::from_utf8(&conn.sql_buf).unwrap_or("");
+
+            use crate::protocol::PgEncoder;
+            let parse_msg = PgEncoder::encode_parse(&name, sql_str, &[]);
+            let describe_msg = PgEncoder::encode_describe(false, &name);
+            conn.write_buf.extend_from_slice(&parse_msg);
+            conn.write_buf.extend_from_slice(&describe_msg);
+
+            conn.stmt_cache.put(sql_hash, name.clone());
+            conn.prepared_statements.insert(name.clone(), sql_str.to_string());
+
+            name
+        };
+
+        use crate::protocol::PgEncoder;
+        PgEncoder::encode_bind_to(&mut conn.write_buf, &stmt_name, &conn.params_buf)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_execute_to(&mut conn.write_buf);
+        PgEncoder::encode_sync_to(&mut conn.write_buf);
+
+        conn.flush_write_buf().await?;
+
+        let cached_column_info = conn.column_info_cache.get(&sql_hash).cloned();
+
+        let mut rows: Vec<super::PgRow> = Vec::with_capacity(32);
+        let mut column_info: Option<Arc<ColumnInfo>> = cached_column_info;
+        let mut error: Option<PgError> = None;
+
+        loop {
+            let msg = conn.recv().await?;
+            match msg {
+                crate::protocol::BackendMessage::ParseComplete
+                | crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::ParameterDescription(_) => {}
+                crate::protocol::BackendMessage::RowDescription(fields) => {
+                    let info = Arc::new(ColumnInfo::from_fields(&fields));
+                    if is_cache_miss {
+                        conn.column_info_cache.insert(sql_hash, info.clone());
+                    }
+                    column_info = Some(info);
                 }
                 crate::protocol::BackendMessage::DataRow(data) => {
                     if error.is_none() {

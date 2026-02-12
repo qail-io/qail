@@ -1,0 +1,19 @@
+tls:
+  certificates:
+    - certFile: /etc/traefik/certs/cert.pem
+      keyFile: /etc/traefik/certs/key.pem
+
+http:
+  routers:
+    gateway:
+      rule: "Host(`gateway.qail.io`)"
+      entryPoints:
+        - websecure
+      service: gateway
+      tls: {}
+
+  services:
+    gateway:
+      loadBalancer:
+        servers:
+          - url: "http://host.containers.internal:8080"

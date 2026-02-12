@@ -27,6 +27,22 @@ pub struct GatewayConfig {
     /// Example: ["https://app.qail.io", "https://staging.qail.io"]
     #[serde(default)]
     pub cors_allowed_origins: Vec<String>,
+
+    /// SECURITY (M1): When true, reject startup if `cors_allowed_origins` is empty.
+    /// Forces explicit origin allowlist for production deployments.
+    #[serde(default)]
+    pub cors_strict: bool,
+
+    /// SECURITY (E7): Root directory for config files (schema, policy, events).
+    /// Paths outside this root are rejected. Default: current working directory.
+    #[serde(default)]
+    pub config_root: Option<String>,
+
+    /// SECURITY (M4): Optional bearer token to protect internal endpoints
+    /// (`/metrics`, `/health/internal`). When set, requests must include
+    /// `Authorization: Bearer <admin_token>`.
+    #[serde(default)]
+    pub admin_token: Option<String>,
     
     /// Enable query caching
     #[serde(default = "default_true")]
@@ -101,9 +117,37 @@ pub struct GatewayConfig {
     #[serde(default = "default_tenant_idle_timeout")]
     pub tenant_idle_timeout_secs: u64,
 
+    /// Maximum queries per batch request (default: 100).
+    /// Prevents resource exhaustion from oversized /batch payloads.
+    #[serde(default = "default_max_batch_queries")]
+    pub max_batch_queries: usize,
+
+    /// Query complexity guard: maximum nesting depth (CTEs + set ops + source queries).
+    /// Default: 5.
+    #[serde(default = "default_max_query_depth")]
+    pub max_query_depth: usize,
+
+    /// Query complexity guard: maximum number of filter conditions. Default: 20.
+    #[serde(default = "default_max_query_filters")]
+    pub max_query_filters: usize,
+
+    /// Query complexity guard: maximum number of JOIN operations. Default: 10.
+    #[serde(default = "default_max_query_joins")]
+    pub max_query_joins: usize,
+
     /// Optional Qdrant configuration for vector operations.
     #[serde(default)]
     pub qdrant: Option<qail_core::config::QdrantConfig>,
+
+    /// Tenant boundary column name (default: "operator_id").
+    /// Tables using a different partition key (e.g., "tenant_id") can override this.
+    #[serde(default = "default_tenant_column")]
+    pub tenant_column: String,
+
+    /// Path to query allow-list file (one pattern per line). Optional.
+    /// When set, only pre-approved query patterns are executed.
+    #[serde(default)]
+    pub allow_list_path: Option<String>,
 
     /// Per-role guard overrides. Roles not listed use global defaults.
     ///
@@ -154,6 +198,11 @@ fn default_explain_cache_ttl() -> u64 { 300 }
 fn default_max_concurrent_queries() -> usize { 10 }
 fn default_max_tenants() -> usize { 10_000 }
 fn default_tenant_idle_timeout() -> u64 { 300 }
+fn default_max_batch_queries() -> usize { 100 }
+fn default_max_query_depth() -> usize { 5 }
+fn default_max_query_filters() -> usize { 20 }
+fn default_max_query_joins() -> usize { 10 }
+fn default_tenant_column() -> String { "operator_id".to_string() }
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -164,6 +213,9 @@ impl Default for GatewayConfig {
             bind_address: "0.0.0.0:8080".to_string(),
             cors_enabled: true,
             cors_allowed_origins: Vec::new(),
+            cors_strict: false,
+            config_root: None,
+            admin_token: None,
             cache_enabled: true,
             cache_max_entries: 1000,
             cache_ttl_seconds: 60,
@@ -181,10 +233,46 @@ impl Default for GatewayConfig {
             max_concurrent_queries: 10,
             max_tenants: 10_000,
             tenant_idle_timeout_secs: 300,
+            max_batch_queries: 100,
+            max_query_depth: 5,
+            max_query_filters: 20,
+            max_query_joins: 10,
             qdrant: None,
+            tenant_column: "operator_id".to_string(),
+            allow_list_path: None,
             role_overrides: HashMap::new(),
         }
     }
+}
+
+/// SECURITY (E7): Validate that a config file path does not escape the allowed root.
+///
+/// Canonicalizes the path (resolves `..`, symlinks) and verifies it starts with
+/// the `config_root`. Returns the canonicalized path on success.
+pub fn validate_config_path(
+    path: &str,
+    config_root: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let canonical = std::path::Path::new(path)
+        .canonicalize()
+        .map_err(|e| format!("Config path '{}' cannot be resolved: {}", path, e))?;
+
+    if let Some(root) = config_root {
+        let root_canonical = std::path::Path::new(root)
+            .canonicalize()
+            .map_err(|e| format!("Config root '{}' cannot be resolved: {}", root, e))?;
+
+        if !canonical.starts_with(&root_canonical) {
+            return Err(format!(
+                "Config path '{}' escapes config_root '{}' (resolved to '{}')",
+                path,
+                root,
+                canonical.display()
+            ));
+        }
+    }
+
+    Ok(canonical)
 }
 
 impl GatewayConfig {
@@ -267,6 +355,9 @@ impl GatewayConfig {
             cors_allowed_origins: qail.gateway.as_ref()
                 .and_then(|gw| gw.cors_allowed_origins.clone())
                 .unwrap_or_default(),
+            cors_strict: false,
+            config_root: None,
+            admin_token: None,
             cache_enabled,
             cache_max_entries,
             cache_ttl_seconds,
@@ -286,7 +377,13 @@ impl GatewayConfig {
             max_concurrent_queries: 10,
             max_tenants: 10_000,
             tenant_idle_timeout_secs: 300,
+            max_batch_queries: 100,
+            max_query_depth: 5,
+            max_query_filters: 20,
+            max_query_joins: 10,
             qdrant: qail.qdrant.clone(),
+            tenant_column: "operator_id".to_string(),
+            allow_list_path: None,
             role_overrides: HashMap::new(),
         }
     }

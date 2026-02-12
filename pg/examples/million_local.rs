@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Pre-encode wire bytes ONCE (outside timing!)
-    let wire_bytes = qail_pg::protocol::AstEncoder::encode_batch_simple(&cmds);
+    let wire_bytes = qail_pg::protocol::AstEncoder::encode_batch_simple(&cmds).unwrap();
     let expected = cmds.len();
 
     // ===== AST-NATIVE PIPELINING =====

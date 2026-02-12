@@ -70,7 +70,7 @@ impl PgConnection {
         &mut self,
         cmds: &[qail_core::ast::Qail],
     ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
-        let buf = AstEncoder::encode_batch(cmds);
+        let buf = AstEncoder::encode_batch(cmds).map_err(|e| PgError::Encode(e.to_string()))?;
         self.stream.write_all(&buf).await?;
 
         let mut all_results: Vec<Vec<Vec<Option<Vec<u8>>>>> = Vec::with_capacity(cmds.len());
@@ -108,7 +108,7 @@ impl PgConnection {
 
     /// FAST AST pipeline - returns only query count, no result parsing.
     pub async fn pipeline_ast_fast(&mut self, cmds: &[qail_core::ast::Qail]) -> PgResult<usize> {
-        let buf = AstEncoder::encode_batch(cmds);
+        let buf = AstEncoder::encode_batch(cmds).map_err(|e| PgError::Encode(e.to_string()))?;
 
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
@@ -161,8 +161,7 @@ impl PgConnection {
         &mut self,
         cmds: &[qail_core::ast::Qail],
     ) -> PgResult<usize> {
-        let buf = AstEncoder::encode_batch_simple(cmds);
-
+        let buf = AstEncoder::encode_batch_simple(cmds).map_err(|e| PgError::Encode(e.to_string()))?;
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
 
@@ -224,7 +223,7 @@ impl PgConnection {
         let mut buf = BytesMut::with_capacity(cmds.len() * 64);
 
         for cmd in cmds {
-            let (sql, params) = AstEncoder::encode_cmd_sql(cmd);
+            let (sql, params) = AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
             let stmt_name = Self::sql_to_stmt_name(&sql);
 
             if !self.prepared_statements.contains_key(&stmt_name) {

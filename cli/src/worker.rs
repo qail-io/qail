@@ -117,7 +117,7 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
         qdrant_config.url.replace(":6333", ":6334")
     });
 
-    println!("PostgreSQL: {}", pg_url.dimmed());
+    println!("PostgreSQL: {}", crate::util::redact_url(&pg_url).dimmed());
     println!("Qdrant gRPC: {}", qdrant_grpc.dimmed());
     println!("Poll interval: {}ms", poll_interval_ms);
     println!("Batch size: {}", batch_size);
