@@ -26,6 +26,7 @@ mod pool;
 mod prepared;
 mod query;
 pub mod rls;
+pub mod explain;
 pub mod branch_sql;
 mod row;
 mod stream;
@@ -539,6 +540,9 @@ impl PgDriver {
             name.clone()
         } else {
             let name = format!("qail_{:x}", sql_hash);
+            
+            // Evict LRU before borrowing sql_buf to avoid borrow conflict
+            self.connection.evict_prepared_if_full();
             
             let sql_str = std::str::from_utf8(&self.connection.sql_buf).unwrap_or("");
             

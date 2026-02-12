@@ -1,0 +1,14 @@
+QAIL — Query as AST, Inject to Language
+Copyright 2025 QAIL Contributors
+
+This product includes software developed by the QAIL project
+(https://qail.rs).
+
+QAIL is an AST-native database protocol that encodes queries directly
+to PostgreSQL wire format bytes — skipping SQL string generation,
+preventing injection by construction, and enabling zero-copy execution.
+
+For more information, visit:
+  https://qail.rs        — Protocol documentation
+  https://qail.io        — Managed QAIL platform
+  https://github.com/qail-io/qail — Source code

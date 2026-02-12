@@ -140,7 +140,7 @@ EXAMPLES:
     qail pull --url postgres://localhost/mydb
     
     # Pull from remote via SSH tunnel
-    qail pull --ssh sailtix
+    qail pull --ssh myserver
     
     # Compare with expected
     qail pull > live.qail
@@ -149,7 +149,7 @@ EXAMPLES:
         /// Database connection URL (reads from qail.toml if not provided)
         #[arg(short, long)]
         url: Option<String>,
-        /// SSH host for tunneling (e.g., "sailtix" or "user@host")
+        /// SSH host for tunneling (e.g., "myserver" or "user@host")
         #[arg(long)]
         ssh: Option<String>,
     },
@@ -400,7 +400,7 @@ EXAMPLES:
     qail exec "get users" --url postgres://... --json | jq '.[].email'
     
     # From file with SSH tunnel
-    qail exec -f seed.qail --ssh sailtix --url postgres://...
+    qail exec -f seed.qail --ssh myserver --url postgres://...
     
     # Transactional batch
     qail exec -f migrations.qail --url postgres://... --tx
@@ -416,7 +416,7 @@ EXAMPLES:
         /// Database URL
         #[arg(short, long)]
         url: Option<String>,
-        /// SSH host for tunneling (e.g., "sailtix" or "user@host")
+        /// SSH host for tunneling (e.g., "myserver" or "user@host")
         #[arg(long)]
         ssh: Option<String>,
         /// Wrap all statements in a transaction

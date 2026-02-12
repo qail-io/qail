@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Batches:          {:>15}", BATCHES);
     println!();
 
-    let mut driver = PgDriver::connect("127.0.0.1", 5432, "orion", "sailtix_test").await?;
+    let mut driver = PgDriver::connect("127.0.0.1", 5432, "qail_user", "qail_test").await?;
 
     // Create test table
     println!("📦 Setting up test table...");

@@ -85,7 +85,8 @@ fn main() {
     // ============================================================
     // 4. Super admin: still needs proof (type-level), but filter is no-op
     // ============================================================
-    let admin_ctx = RlsContext::super_admin();
+    let token = qail_core::rls::SuperAdminToken::issue();
+    let admin_ctx = RlsContext::super_admin(token);
     let query = Qail::typed(Orders)
         .column("id")
         .column("operator_id")

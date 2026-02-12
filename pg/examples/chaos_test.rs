@@ -13,7 +13,7 @@
 //! with back-to-back queries, measuring latency under contention.
 //!
 //! Run:
-//!   DATABASE_URL=postgresql://orion@localhost:5432/swb-api-local \
+//!   DATABASE_URL=postgresql://qail_user@localhost:5432/qail_test \
 //!     cargo run --example chaos_test --features chrono,uuid --release
 //!
 //! WARNING: This creates real DB load. Do NOT run against production.

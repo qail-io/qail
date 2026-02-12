@@ -6,7 +6,7 @@
 //! - Recovery after exhaustion
 //!
 //! Run:
-//!   DATABASE_URL=postgresql://orion@localhost:5432/swb-api-local \
+//!   DATABASE_URL=postgresql://qail_user@localhost:5432/qail_test \
 //!     cargo run -p qail-pg --example pool_exhaustion_test --release
 
 use qail_pg::PgDriver;

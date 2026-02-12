@@ -1,6 +1,6 @@
 # Row-Level Security (RLS)
 
-> **New in v0.15.6** — The first Rust PostgreSQL driver with built-in multi-tenant data isolation
+> **New in v0.15** — The first Rust PostgreSQL driver with built-in multi-tenant data isolation
 
 QAIL injects tenant context at the **AST level**, ensuring every query is automatically scoped to the correct operator, agent, or user — without manual `WHERE` clauses.
 
@@ -71,9 +71,9 @@ admin.bypasses_rls(); // true
 │  AST Builder adds RLS context to query            │
 │       ↓                                           │
 │  PgDriver::execute()                              │
-│  ├─ SET app.operator_id = '<uuid>'               │
-│  ├─ SET app.agent_id = '<uuid>'                  │
-│  └─ Execute query on SAME connection             │
+│  ├─ set_config('app.current_operator_id', '<uuid>', false) │
+│  ├─ set_config('app.current_agent_id', '<uuid>', false)    │
+│  └─ Execute query on SAME connection                       │
 │       ↓                                           │
 │  PostgreSQL RLS Policy                            │
 │  CREATE POLICY tenant_isolation ON bookings       │

@@ -11,12 +11,17 @@ use std::collections::HashMap;
 /// JWT claims structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtClaims {
+    /// Accepts both standard JWT "sub" and engine-style "user_id"
+    #[serde(alias = "user_id")]
     pub sub: String,
     pub exp: usize,
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
     pub tenant_id: Option<String>,
+    /// Engine-style: operator_id directly in JWT claims
+    #[serde(default)]
+    pub operator_id: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -47,7 +52,24 @@ impl AuthContext {
     }
     
     pub fn is_authenticated(&self) -> bool {
-        self.user_id != "anonymous"
+        !self.user_id.is_empty() && self.user_id != "anonymous"
+    }
+
+    /// Resolve tenant_id from the user→operator cache when the JWT doesn't include it.
+    ///
+    /// Engine-style JWTs only contain `user_id` and `role` — the `operator_id`
+    /// must be looked up from the database. This method checks the startup-loaded
+    /// cache and fills in `tenant_id` if missing.
+    pub async fn enrich_with_operator_map(
+        &mut self,
+        map: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    ) {
+        if self.tenant_id.is_none() && self.is_authenticated() {
+            let guard = map.read().await;
+            if let Some(operator_id) = guard.get(&self.user_id) {
+                self.tenant_id = Some(operator_id.clone());
+            }
+        }
     }
 
     /// Convert gateway AuthContext to PgDriver's RlsContext for Postgres-native RLS.
@@ -57,6 +79,27 @@ impl AuthContext {
     /// - `claims["agent_id"]` → `agent_id`
     /// - `role == "super_admin"` → `is_super_admin`
     pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {
+        // Only true platform-level roles bypass RLS.
+        // SECURITY: FinanceAdmin intentionally excluded — finance staff need
+        // settlement access, not cross-tenant God Mode. Use database-level
+        // finance RLS policies (e.g., app.role = 'finance') instead.
+        let is_super_admin = matches!(
+            self.role.as_str(),
+            "super_admin" | "Administrator"
+        );
+
+        // Audit log: super_admin activation is a high-privilege event
+        if is_super_admin {
+            tracing::warn!(
+                user_id = %self.user_id,
+                tenant_id = ?self.tenant_id,
+                event = "super_admin_rls_bypass",
+                "SUPER_ADMIN access activated — RLS bypass enabled"
+            );
+            let token = qail_core::rls::SuperAdminToken::issue();
+            return qail_core::rls::RlsContext::super_admin(token);
+        }
+
         let operator_id = self.tenant_id.clone().unwrap_or_default();
         let agent_id = self
             .claims
@@ -64,12 +107,13 @@ impl AuthContext {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let is_super_admin = self.role == "super_admin";
 
-        qail_core::rls::RlsContext {
-            operator_id,
-            agent_id,
-            is_super_admin,
+        if !agent_id.is_empty() && !operator_id.is_empty() {
+            qail_core::rls::RlsContext::operator_and_agent(&operator_id, &agent_id)
+        } else if !agent_id.is_empty() {
+            qail_core::rls::RlsContext::agent(&agent_id)
+        } else {
+            qail_core::rls::RlsContext::operator(&operator_id)
         }
     }
 }
@@ -125,10 +169,20 @@ pub fn validate_jwt(token: &str, config: &JwtConfig) -> Result<AuthContext, Gate
     
     let claims = token_data.claims;
     
+    // Resolve tenant_id: prefer explicit tenant_id, then operator_id from claims,
+    // then check extra claims for operator_id (engine puts it in flattened extra)
+    let tenant_id = claims.tenant_id
+        .or(claims.operator_id)
+        .or_else(|| {
+            claims.extra.get("operator_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
+
     Ok(AuthContext {
         user_id: claims.sub,
         role: claims.role.unwrap_or_else(|| "user".to_string()),
-        tenant_id: claims.tenant_id,
+        tenant_id,
         claims: claims.extra,
     })
 }
@@ -174,7 +228,20 @@ pub fn extract_auth_from_headers(headers: &HeaderMap) -> AuthContext {
         }
     }
     
-    // Header-based auth (for development/testing)
+    // Header-based auth (for development/testing ONLY)
+    // SECURITY: This path allows arbitrary role spoofing via request headers.
+    // In production, QAIL_DEV_MODE must NOT be set.
+    let dev_mode = std::env::var("QAIL_DEV_MODE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if !dev_mode {
+        // Production: unauthenticated requests get anonymous context
+        return AuthContext::anonymous();
+    }
+
+    tracing::warn!("DEV MODE: using header-based auth (X-User-ID/X-User-Role)");
+
     let user_id = headers
         .get("x-user-id")
         .and_then(|v| v.to_str().ok())
@@ -242,6 +309,7 @@ mod tests {
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
             role: Some("admin".to_string()),
             tenant_id: Some("tenant1".to_string()),
+            operator_id: None,
             extra: HashMap::new(),
         };
         
@@ -261,5 +329,198 @@ mod tests {
         assert_eq!(auth.user_id, "user123");
         assert_eq!(auth.role, "admin");
         assert_eq!(auth.tenant_id, Some("tenant1".to_string()));
+    }
+
+    #[test]
+    fn test_engine_style_jwt() {
+        // Engine JWT uses "user_id" instead of "sub" and may not have tenant_id
+        let secret = "test-secret-key-12345";
+        let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
+        
+        // Simulate engine JWT payload: { "user_id": "...", "role": "SuperAdmin", "email": "..." }
+        let payload = serde_json::json!({
+            "user_id": "4fcc89a7-0753-4b8d-8457-71619533dbd8",
+            "email": "scootsuperadmin@qail.io",
+            "role": "SuperAdmin",
+            "exp": exp,
+            "iat": exp - 86400,
+        });
+        
+        let token = encode(
+            &Header::default(),
+            &payload,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+        
+        let config = JwtConfig {
+            secret: Some(secret.to_string()),
+            algorithm: Algorithm::HS256,
+            ..Default::default()
+        };
+        
+        let auth = validate_jwt(&token, &config).unwrap();
+        assert_eq!(auth.user_id, "4fcc89a7-0753-4b8d-8457-71619533dbd8");
+        assert_eq!(auth.role, "SuperAdmin");
+        // No tenant_id in engine JWT — will be resolved via user_operator_map
+        assert_eq!(auth.tenant_id, None);
+    }
+
+    #[test]
+    fn test_administrator_maps_to_super_admin() {
+        let auth = AuthContext {
+            user_id: "master-user".to_string(),
+            role: "Administrator".to_string(),
+            tenant_id: None,
+            claims: HashMap::new(),
+        };
+        let rls = auth.to_rls_context();
+        assert!(rls.bypasses_rls(), "Administrator role should bypass RLS");
+    }
+
+    #[test]
+    fn test_super_admin_does_not_bypass_rls() {
+        let auth = AuthContext {
+            user_id: "scoot-user".to_string(),
+            role: "SuperAdmin".to_string(),
+            tenant_id: Some("operator-123".to_string()),
+            claims: HashMap::new(),
+        };
+        let rls = auth.to_rls_context();
+        assert!(!rls.bypasses_rls(), "SuperAdmin should NOT bypass RLS");
+        assert_eq!(rls.operator_id, "operator-123");
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // RED-TEAM: JWT Edge Cases (#6 from adversarial checklist)
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn redteam_jwt_empty_sub_field() {
+        let secret = "test-secret-key-12345";
+        let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
+        let payload = serde_json::json!({
+            "sub": "",
+            "exp": exp,
+        });
+        let token = encode(&Header::default(), &payload, &EncodingKey::from_secret(secret.as_bytes())).unwrap();
+        let config = JwtConfig { secret: Some(secret.to_string()), algorithm: Algorithm::HS256, ..Default::default() };
+        let auth = validate_jwt(&token, &config).unwrap();
+        assert_eq!(auth.user_id, "");
+        // FIXED: empty sub now correctly fails is_authenticated().
+        // Previously this was a documented finding where "" != "anonymous" passed.
+        assert!(!auth.is_authenticated(), "Empty sub must not pass is_authenticated");
+    }
+
+    #[test]
+    fn redteam_jwt_integer_tenant_id() {
+        // tenant_id: 42 (integer instead of string) — must not silently coerce
+        let secret = "test-secret-key-12345";
+        let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
+        let payload = serde_json::json!({
+            "sub": "user-1",
+            "exp": exp,
+            "tenant_id": 42,
+        });
+        let token = encode(&Header::default(), &payload, &EncodingKey::from_secret(secret.as_bytes())).unwrap();
+        let config = JwtConfig { secret: Some(secret.to_string()), algorithm: Algorithm::HS256, ..Default::default() };
+        let result = validate_jwt(&token, &config);
+        // STRONG: serde rejects the entire JWT — integer tenant_id causes parse error
+        assert!(result.is_err(), "Integer tenant_id must cause JWT parse failure (not silent coercion)");
+    }
+
+    #[test]
+    fn redteam_jwt_is_super_admin_claim_no_rls_bypass() {
+        // Attacker injects is_super_admin=true in JWT extra claims
+        let auth = AuthContext {
+            user_id: "attacker".to_string(),
+            role: "user".to_string(),
+            tenant_id: Some("tenant-x".to_string()),
+            claims: {
+                let mut m = HashMap::new();
+                m.insert("is_super_admin".to_string(), serde_json::json!(true));
+                m
+            },
+        };
+        let rls = auth.to_rls_context();
+        assert!(!rls.bypasses_rls(), "JWT is_super_admin claim must NOT grant RLS bypass");
+    }
+
+    #[test]
+    fn redteam_jwt_operator_id_resolution() {
+        // Engine JWT with operator_id claim
+        let secret = "test-secret-key-12345";
+        let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
+        let payload = serde_json::json!({
+            "sub": "user-abc",
+            "exp": exp,
+            "operator_id": "op-123",
+        });
+        let token = encode(&Header::default(), &payload, &EncodingKey::from_secret(secret.as_bytes())).unwrap();
+        let config = JwtConfig { secret: Some(secret.to_string()), algorithm: Algorithm::HS256, ..Default::default() };
+        let auth = validate_jwt(&token, &config).unwrap();
+        assert_eq!(auth.tenant_id, Some("op-123".to_string()), "operator_id claim must resolve to tenant_id");
+    }
+
+    #[tokio::test]
+    async fn redteam_enrich_fills_missing_tenant() {
+        let mut auth = AuthContext {
+            user_id: "user-abc".to_string(),
+            role: "user".to_string(),
+            tenant_id: None,
+            claims: HashMap::new(),
+        };
+        let map = tokio::sync::RwLock::new({
+            let mut m = std::collections::HashMap::new();
+            m.insert("user-abc".to_string(), "operator-xyz".to_string());
+            m
+        });
+        auth.enrich_with_operator_map(&map).await;
+        assert_eq!(auth.tenant_id, Some("operator-xyz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn redteam_enrich_does_not_overwrite_existing_tenant() {
+        let mut auth = AuthContext {
+            user_id: "user-abc".to_string(),
+            role: "user".to_string(),
+            tenant_id: Some("already-set".to_string()),
+            claims: HashMap::new(),
+        };
+        let map = tokio::sync::RwLock::new({
+            let mut m = std::collections::HashMap::new();
+            m.insert("user-abc".to_string(), "operator-xyz".to_string());
+            m
+        });
+        auth.enrich_with_operator_map(&map).await;
+        assert_eq!(auth.tenant_id, Some("already-set".to_string()), "Must not overwrite existing tenant_id");
+    }
+
+    #[tokio::test]
+    async fn redteam_enrich_skips_anonymous() {
+        let mut auth = AuthContext {
+            user_id: "anonymous".to_string(),
+            role: "anon".to_string(),
+            tenant_id: None,
+            claims: HashMap::new(),
+        };
+        let map = tokio::sync::RwLock::new({
+            let mut m = std::collections::HashMap::new();
+            m.insert("anonymous".to_string(), "should-not-see".to_string());
+            m
+        });
+        auth.enrich_with_operator_map(&map).await;
+        assert_eq!(auth.tenant_id, None, "Anonymous users must not get tenant_id enrichment");
+    }
+
+    #[test]
+    fn redteam_finance_admin_does_not_bypass_rls() {
+        let auth = AuthContext {
+            user_id: "finance-user".to_string(),
+            role: "FinanceAdmin".to_string(),
+            tenant_id: Some("op-123".to_string()),
+            claims: HashMap::new(),
+        };
+        let rls = auth.to_rls_context();
+        assert!(!rls.bypasses_rls(), "FinanceAdmin must NOT bypass RLS");
     }
 }

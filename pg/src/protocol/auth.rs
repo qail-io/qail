@@ -93,6 +93,22 @@ impl ScramClient {
         let salt = salt.ok_or("Missing salt in server message")?;
         let iterations = iterations.ok_or("Missing iterations in server message")?;
 
+        // R9-C: Enforce sane PBKDF2 iteration bounds.
+        // Too low (< 4096): degrades key-stretching security.
+        // Too high (> 100_000): CPU DoS — a rogue server could send i=999999999.
+        if iterations < 4096 {
+            return Err(format!(
+                "SCRAM iteration count too low: {} (minimum 4096)",
+                iterations,
+            ));
+        }
+        if iterations > 100_000 {
+            return Err(format!(
+                "SCRAM iteration count too high: {} (maximum 100000)",
+                iterations,
+            ));
+        }
+
         // Verify nonce starts with our client nonce
         if !nonce.starts_with(&self.client_nonce) {
             return Err("Server nonce doesn't contain client nonce".to_string());

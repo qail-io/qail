@@ -2,9 +2,11 @@
 //!
 //! Main entry point for running the QAIL Gateway.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use axum::routing::MethodRouter;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use url::Url;
 
 use crate::cache::QueryCache;
@@ -27,6 +29,14 @@ pub struct GatewayState {
     pub cache: QueryCache,
     pub config: GatewayConfig,
     pub rate_limiter: Arc<RateLimiter>,
+    pub explain_cache: qail_pg::explain::ExplainCache,
+    pub explain_config: qail_pg::explain::ExplainConfig,
+    pub tenant_semaphore: Arc<crate::concurrency::TenantSemaphore>,
+    /// Cache mapping user_id → operator_id for JWT tokens that lack operator_id.
+    /// Loaded at startup from the users table.
+    pub user_operator_map: Arc<RwLock<HashMap<String, String>>>,
+    /// Optional Qdrant connection pool for vector operations.
+    pub qdrant_pool: Option<qail_qdrant::QdrantPool>,
 }
 
 /// The QAIL Gateway server
@@ -89,6 +99,53 @@ impl Gateway {
         let stats = pool.stats().await;
         tracing::info!("Connection pool: {} idle, {} max", stats.idle, stats.max_size);
         
+        // Schema drift verification: cross-check .qail tables against database
+        if !schema.table_names().is_empty() {
+            tracing::info!("Verifying schema against database...");
+            let mut conn = pool.acquire_system().await
+                .map_err(|e| GatewayError::Database(format!("Schema verification connection failed: {}", e)))?;
+            
+            // Query information_schema for all public tables
+            let cmd = qail_core::ast::Qail::get("information_schema.tables")
+                .columns(["table_name"])
+                .eq("table_schema", qail_core::ast::Value::String("public".into()));
+            
+            match conn.fetch_all_uncached(&cmd).await {
+                Ok(rows) => {
+                    let db_tables: std::collections::HashSet<String> = rows.iter()
+                        .filter_map(|row| row.get_string(0))
+                        .collect();
+                    
+                    let mut missing = Vec::new();
+                    for table in schema.table_names() {
+                        if !db_tables.contains(table) {
+                            missing.push(table.to_string());
+                        }
+                    }
+                    
+                    if !missing.is_empty() {
+                        let msg = format!(
+                            "Schema drift detected! {} table(s) defined in .qail but missing from database: {}",
+                            missing.len(),
+                            missing.join(", ")
+                        );
+                        tracing::error!("{}", msg);
+                        return Err(GatewayError::Config(msg));
+                    }
+                    
+                    tracing::info!(
+                        "Schema verified: {} tables match ({} in DB)",
+                        schema.table_names().len(),
+                        db_tables.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Schema verification skipped (query failed): {}", e);
+                    // Non-fatal: allow startup even if introspection fails
+                }
+            }
+        }
+        
         // Load event triggers
         let mut event_engine = EventTriggerEngine::new();
         if let Some(ref events_path) = self.config.events_path {
@@ -108,6 +165,70 @@ impl Gateway {
             self.config.rate_limit_burst
         );
         
+        let explain_cfg = self.config.explain_config();
+        let explain_cache = qail_pg::explain::ExplainCache::new(explain_cfg.cache_ttl);
+        tracing::info!(
+            "EXPLAIN pre-check: mode={:?}, depth_threshold={}, max_cost={:.0}, max_rows={}",
+            explain_cfg.mode, explain_cfg.depth_threshold,
+            explain_cfg.max_total_cost, explain_cfg.max_plan_rows
+        );
+
+        let tenant_semaphore = Arc::new(crate::concurrency::TenantSemaphore::with_limits(
+            self.config.max_concurrent_queries,
+            self.config.max_tenants,
+            std::time::Duration::from_secs(self.config.tenant_idle_timeout_secs),
+        ));
+        tenant_semaphore.start_sweeper();
+        tracing::info!(
+            "Tenant concurrency: {} queries/tenant, max {} tenants, {}s idle timeout",
+            self.config.max_concurrent_queries,
+            self.config.max_tenants,
+            self.config.tenant_idle_timeout_secs
+        );
+
+        // Load user → operator_id mapping for JWT resolution
+        let user_operator_map = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let mut conn = pool.acquire_system().await
+                .map_err(|e| GatewayError::Database(format!("User lookup connection failed: {}", e)))?;
+            let cmd = qail_core::ast::Qail::get("users")
+                .columns(["id", "operator_id"])
+                .limit(10_000);
+            match conn.fetch_all_uncached(&cmd).await {
+                Ok(rows) => {
+                    let mut map = user_operator_map.write().await;
+                    for row in &rows {
+                        if let (Some(uid), Some(oid)) = (row.get_string(0), row.get_string(1)) {
+                            if !oid.is_empty() {
+                                map.insert(uid, oid);
+                            }
+                        }
+                    }
+                    tracing::info!("Loaded {} user→operator mappings for JWT resolution", map.len());
+                }
+                Err(e) => {
+                    tracing::warn!("Could not load user→operator map (non-fatal): {}", e);
+                }
+            }
+        }
+
+        // Initialize Qdrant pool (optional — only if config has [qdrant])
+        let qdrant_pool = if let Some(ref qdrant_config) = self.config.qdrant {
+            let pool_config = qail_qdrant::PoolConfig::from_qail_config_ref(qdrant_config);
+            let pool = qail_qdrant::QdrantPool::new(pool_config).await
+                .map_err(|e| GatewayError::Database(format!("Qdrant pool init failed: {}", e)))?;
+            tracing::info!(
+                "Qdrant pool: max {} connections, tls={}, host={}",
+                pool.max_connections(),
+                qdrant_config.tls.unwrap_or(false),
+                qdrant_config.grpc.as_deref().unwrap_or(&qdrant_config.url),
+            );
+            Some(pool)
+        } else {
+            tracing::info!("Qdrant: not configured (no [qdrant] section)");
+            None
+        };
+
         self.state = Some(Arc::new(GatewayState {
             pool,
             policy_engine,
@@ -116,6 +237,11 @@ impl Gateway {
             cache,
             config: self.config.clone(),
             rate_limiter,
+            explain_cache,
+            explain_config: explain_cfg,
+            tenant_semaphore,
+            user_operator_map,
+            qdrant_pool,
         }));
         
         tracing::info!("Gateway initialized");
@@ -146,10 +272,47 @@ impl Gateway {
             .map_err(|e| GatewayError::Config(format!("Failed to bind to {}: {}", addr, e)))?;
         
         axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal())
             .await
             .map_err(|e| GatewayError::Internal(e.into()))?;
         
+        // In-flight requests have drained — close pool for deterministic cleanup
+        tracing::info!("In-flight requests drained. Closing connection pool...");
+        state.pool.close().await;
+        tracing::info!("Gateway shutdown complete.");
+        
         Ok(())
+    }
+}
+
+/// Wait for a shutdown signal (SIGTERM or Ctrl+C).
+///
+/// Used with `axum::serve().with_graceful_shutdown()` to implement
+/// the correct shutdown sequence:
+/// 1. Stop accepting new connections
+/// 2. Wait for in-flight requests to complete  
+/// 3. Return control to caller for pool cleanup
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received Ctrl+C, starting graceful shutdown..."),
+        _ = terminate => tracing::info!("Received SIGTERM, starting graceful shutdown..."),
     }
 }
 

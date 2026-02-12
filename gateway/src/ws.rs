@@ -93,13 +93,15 @@ pub async fn ws_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = extract_auth_from_headers(&headers);
+    let mut auth = extract_auth_from_headers(&headers);
+    auth.enrich_with_operator_map(&state.user_operator_map).await;
     tracing::info!("WebSocket connection from user: {}", auth.user_id);
     
-    ws.on_upgrade(move |socket| handle_socket(socket, state, auth.user_id))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, auth))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>, user_id: String) {
+async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>, auth: crate::auth::AuthContext) {
+    let user_id = auth.user_id.clone();
     let (mut sender, mut receiver) = socket.split();
     
     let (tx, mut rx) = mpsc::channel::<WsServerMessage>(32);
@@ -132,7 +134,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>, user_id: Str
                             client_msg, 
                             &state, 
                             &tx, 
-                            &user_id,
+                            &auth,
                             &mut subscribed_channels,
                         ).await;
                     }
@@ -153,7 +155,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<GatewayState>, user_id: Str
     
     // Cleanup: UNLISTEN all channels
     if !subscribed_channels.is_empty() {
-        if let Ok(mut conn) = state.pool.acquire().await {
+        if let Ok(mut conn) = state.pool.acquire_system().await {
             for channel in &subscribed_channels {
                 let cmd = qail_core::ast::Qail::unlisten(channel);
                 let _ = conn.fetch_all_uncached(&cmd).await;
@@ -170,19 +172,51 @@ async fn handle_client_message(
     msg: WsClientMessage,
     state: &Arc<GatewayState>,
     tx: &mpsc::Sender<WsServerMessage>,
-    user_id: &str,
+    auth: &crate::auth::AuthContext,
     subscribed_channels: &mut Vec<String>,
 ) {
+    let user_id = &auth.user_id;
     match msg {
         WsClientMessage::Subscribe { channel } => {
             tracing::debug!("User {} subscribing to channel: {}", user_id, channel);
             
-            // Execute LISTEN command
-            if let Ok(mut conn) = state.pool.acquire().await {
-                let cmd = qail_core::ast::Qail::listen(&channel);
+            // SECURITY: Scope channels to tenant to prevent cross-tenant eavesdropping.
+            // Without this, any user could LISTEN to "qail_table_orders" and receive
+            // ALL tenants' notifications.
+            let tenant_id = match &auth.tenant_id {
+                Some(tid) if !tid.is_empty() => tid,
+                _ => {
+                    let _ = tx.send(WsServerMessage::Error {
+                        message: "Subscribe requires authenticated tenant context".to_string(),
+                    }).await;
+                    return;
+                }
+            };
+
+            // Validate channel name: alphanumeric + underscores only
+            if !channel.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                let _ = tx.send(WsServerMessage::Error {
+                    message: "Invalid channel name — alphanumeric and underscores only".to_string(),
+                }).await;
+                return;
+            }
+
+            // Prefix with tenant_id to isolate notifications per tenant
+            let scoped_channel = format!("{}_{}", tenant_id, channel);
+
+            // R7-C: Cap subscriptions per WebSocket client to prevent LISTEN exhaustion
+            if subscribed_channels.len() >= 50 {
+                let _ = tx.send(WsServerMessage::Error {
+                    message: "Too many subscriptions (max 50)".to_string(),
+                }).await;
+                return;
+            }
+            
+            if let Ok(mut conn) = state.pool.acquire_system().await {
+                let cmd = qail_core::ast::Qail::listen(&scoped_channel);
                 match conn.fetch_all_uncached(&cmd).await {
                     Ok(_) => {
-                        subscribed_channels.push(channel.clone());
+                        subscribed_channels.push(scoped_channel);
                         let _ = tx.send(WsServerMessage::Subscribed { channel }).await;
                     }
                     Err(e) => {
@@ -197,11 +231,22 @@ async fn handle_client_message(
         WsClientMessage::Unsubscribe { channel } => {
             tracing::debug!("User {} unsubscribing from channel: {}", user_id, channel);
             
-            if let Ok(mut conn) = state.pool.acquire().await {
-                let cmd = qail_core::ast::Qail::unlisten(&channel);
+            // Reconstruct the scoped channel name
+            let scoped_channel = match &auth.tenant_id {
+                Some(tid) if !tid.is_empty() => format!("{}_{}", tid, channel),
+                _ => {
+                    let _ = tx.send(WsServerMessage::Error {
+                        message: "Unsubscribe requires authenticated tenant context".to_string(),
+                    }).await;
+                    return;
+                }
+            };
+            
+            if let Ok(mut conn) = state.pool.acquire_system().await {
+                let cmd = qail_core::ast::Qail::unlisten(&scoped_channel);
                 match conn.fetch_all_uncached(&cmd).await {
                     Ok(_) => {
-                        subscribed_channels.retain(|c| c != &channel);
+                        subscribed_channels.retain(|c| c != &scoped_channel);
                         let _ = tx.send(WsServerMessage::Unsubscribed { channel }).await;
                     }
                     Err(e) => {
@@ -217,20 +262,50 @@ async fn handle_client_message(
             tracing::debug!("User {} executing query: {}", user_id, qail);
             
             match qail_core::parser::parse(&qail) {
-                Ok(cmd) => {
-                    if let Ok(mut conn) = state.pool.acquire().await {
+                Ok(mut cmd) => {
+                    // SECURITY (G3): Apply row-level security policies — same as HTTP handler.
+                    // Without this, WS queries bypass all PolicyEngine filters.
+                    if let Err(e) = state.policy_engine.apply_policies(auth, &mut cmd) {
+                        tracing::warn!("WS policy error: {}", e);
+                        let _ = tx.send(WsServerMessage::Error {
+                            message: "Access denied by policy".to_string(),
+                        }).await;
+                        return;
+                    }
+
+                    // WS queries use RLS-scoped connections
+                    if let Ok(mut conn) = state.pool.acquire_with_rls(auth.to_rls_context()).await {
                         match conn.fetch_all_uncached(&cmd).await {
                             Ok(rows) => {
                                 let json_rows: Vec<serde_json::Value> = rows
                                     .iter()
                                     .map(crate::handler::row_to_json)
                                     .collect();
+
+                                // SECURITY (G4): Verify tenant boundary — fail-closed.
+                                if let Some(ref tenant_id) = auth.tenant_id {
+                                    if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+                                        &json_rows,
+                                        tenant_id,
+                                        &cmd.table,
+                                        "ws_query",
+                                    ) {
+                                        tracing::error!("{}", v);
+                                        let _ = tx.send(WsServerMessage::Error {
+                                            message: "Data integrity error".to_string(),
+                                        }).await;
+                                        return;
+                                    }
+                                }
+
                                 let count = json_rows.len();
                                 let _ = tx.send(WsServerMessage::Result { rows: json_rows, count }).await;
                             }
                             Err(e) => {
+                                // SECURITY: Do not leak raw PG error to WS client
+                                tracing::error!("WS query error: {}", e);
                                 let _ = tx.send(WsServerMessage::Error {
-                                    message: format!("Query failed: {}", e),
+                                    message: "Query execution failed".to_string(),
                                 }).await;
                             }
                         }
@@ -252,7 +327,7 @@ async fn handle_client_message(
             tracing::info!("User {} starting live query on table: {}", user_id, table);
             
             // Parse the query
-            let cmd = match qail_core::parser::parse(&qail) {
+            let mut cmd = match qail_core::parser::parse(&qail) {
                 Ok(cmd) => cmd,
                 Err(e) => {
                     let _ = tx.send(WsServerMessage::Error {
@@ -261,15 +336,42 @@ async fn handle_client_message(
                     return;
                 }
             };
+
+            // SECURITY (R1): Apply row-level security policies — same as HTTP handler.
+            // Without this, LiveQuery bypasses all PolicyEngine filters.
+            if let Err(e) = state.policy_engine.apply_policies(auth, &mut cmd) {
+                tracing::warn!("WS LiveQuery policy error: {}", e);
+                let _ = tx.send(WsServerMessage::Error {
+                    message: "Access denied by policy".to_string(),
+                }).await;
+                return;
+            }
             
             // Execute immediately and send initial snapshot
-            if let Ok(mut conn) = state.pool.acquire().await {
+            if let Ok(mut conn) = state.pool.acquire_with_rls(auth.to_rls_context()).await {
                 match conn.fetch_all_uncached(&cmd).await {
                     Ok(rows) => {
                         let json_rows: Vec<serde_json::Value> = rows
                             .iter()
                             .map(crate::handler::row_to_json)
                             .collect();
+
+                        // SECURITY (R2): Verify tenant boundary — fail-closed.
+                        if let Some(ref tenant_id) = auth.tenant_id {
+                            if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+                                &json_rows,
+                                tenant_id,
+                                &cmd.table,
+                                "ws_live_query",
+                            ) {
+                                tracing::error!("{}", v);
+                                let _ = tx.send(WsServerMessage::Error {
+                                    message: "Data integrity error".to_string(),
+                                }).await;
+                                return;
+                            }
+                        }
+
                         let count = json_rows.len();
                         let _ = tx.send(WsServerMessage::LiveQueryUpdate {
                             table: table.clone(),
@@ -279,8 +381,10 @@ async fn handle_client_message(
                         }).await;
                     }
                     Err(e) => {
+                        // SECURITY (R3): Do not leak raw PG error to WS client
+                        tracing::error!("Live query initial exec failed: {}", e);
                         let _ = tx.send(WsServerMessage::Error {
-                            message: format!("Live query initial exec failed: {}", e),
+                            message: "Live query execution failed".to_string(),
                         }).await;
                         return;
                     }
@@ -288,8 +392,12 @@ async fn handle_client_message(
             }
             
             // Subscribe to table's NOTIFY channel for change detection
-            let notify_channel = format!("qail_table_{}", table);
-            if let Ok(mut conn) = state.pool.acquire().await {
+            // SECURITY: prefix with tenant_id to isolate per-tenant
+            let notify_channel = match &auth.tenant_id {
+                Some(tid) if !tid.is_empty() => format!("{}_qail_table_{}", tid, table),
+                _ => format!("qail_table_{}", table),
+            };
+            if let Ok(mut conn) = state.pool.acquire_system().await {
                 let listen_cmd = qail_core::ast::Qail::listen(&notify_channel);
                 if conn.fetch_all_uncached(&listen_cmd).await.is_ok() {
                     subscribed_channels.push(notify_channel.clone());
@@ -298,17 +406,20 @@ async fn handle_client_message(
             
             // Spawn polling task if interval > 0
             if interval_ms > 0 {
+                // R7-D: Floor the poll interval to 1000ms to prevent tight-loop DoS
+                let safe_interval_ms = interval_ms.max(1000);
                 let tx_clone = tx.clone();
                 let state_clone = Arc::clone(state);
                 let table_clone = table.clone();
+                let rls_ctx = auth.to_rls_context();
                 
                 tokio::spawn(async move {
                     let mut seq = 2u64;
-                    let interval = std::time::Duration::from_millis(interval_ms);
+                    let interval = std::time::Duration::from_millis(safe_interval_ms);
                     loop {
                         tokio::time::sleep(interval).await;
                         
-                        if let Ok(mut conn) = state_clone.pool.acquire().await {
+                        if let Ok(mut conn) = state_clone.pool.acquire_with_rls(rls_ctx.clone()).await {
                             match conn.fetch_all_uncached(&cmd).await {
                                 Ok(rows) => {
                                     let json_rows: Vec<serde_json::Value> = rows
@@ -337,8 +448,12 @@ async fn handle_client_message(
         }
         
         WsClientMessage::StopLiveQuery { table } => {
-            let notify_channel = format!("qail_table_{}", table);
-            if let Ok(mut conn) = state.pool.acquire().await {
+            // SECURITY: reconstruct tenant-scoped channel name
+            let notify_channel = match &auth.tenant_id {
+                Some(tid) if !tid.is_empty() => format!("{}_qail_table_{}", tid, table),
+                _ => format!("qail_table_{}", table),
+            };
+            if let Ok(mut conn) = state.pool.acquire_system().await {
                 let cmd = qail_core::ast::Qail::unlisten(&notify_channel);
                 let _ = conn.fetch_all_uncached(&cmd).await;
                 subscribed_channels.retain(|c| c != &notify_channel);

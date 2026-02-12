@@ -6,12 +6,13 @@ use qail_core::transpiler::ToSql;
 use qail_pg::{PgPool, PoolConfig};
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() {
     println!("=== QAIL Real Database Execution Test ===\n");
     
     // Connect to local DB using PoolConfig
-    let config = PoolConfig::new("localhost", 5432, "orion", "swb-api-local");
-    println!("Connecting to: localhost:5432/swb-api-local\n");
+    let config = PoolConfig::new("localhost", 5432, "qail_user", "qail_test");
+    println!("Connecting to: localhost:5432/qail_test\n");
     
     let pool = match PgPool::connect(config).await {
         Ok(p) => {
@@ -35,7 +36,7 @@ async fn main() {
     println!("   SQL: {}", sql);
     
     // Acquire connection and execute
-    let mut conn = match pool.acquire().await {
+    let mut conn = match pool.acquire_system().await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("   ✗ Failed to acquire connection: {}", e);

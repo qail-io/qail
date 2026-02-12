@@ -10,7 +10,7 @@
 //! ## Architecture
 //!
 //! ```text
-//! engine-sailtix (domain states + executor impl)
+//! your-engine (domain states + executor impl)
 //!       ↓
 //! qail-workflow (state machine engine)
 //!       ↓
