@@ -462,6 +462,8 @@ async fn shutdown_signal() {
 
 /// Parse a database URL into PoolConfig
 fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
+    use percent_encoding::percent_decode_str;
+    
     let url = Url::parse(url_str)
         .map_err(|e| GatewayError::Config(format!("Invalid database URL: {}", e)))?;
     
@@ -470,10 +472,14 @@ fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
     
     let port = url.port().unwrap_or(5432);
     
+    // Url::username() returns percent-encoded string — decode it
     let user = if url.username().is_empty() {
-        "postgres"
+        "postgres".to_string()
     } else {
-        url.username()
+        percent_decode_str(url.username())
+            .decode_utf8()
+            .map_err(|e| GatewayError::Config(format!("Invalid UTF-8 in username: {}", e)))?
+            .into_owned()
     };
     
     let database = url.path().trim_start_matches('/');
@@ -481,10 +487,16 @@ fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
         return Err(GatewayError::Config("Missing database name in URL".to_string()));
     }
     
-    let mut config = PoolConfig::new(host, port, user, database);
+    let mut config = PoolConfig::new(host, port, &user, database);
     
+    // Url::password() returns percent-encoded string — decode it
+    // Critical: passwords with '=' get encoded as '%3D' by the url crate,
+    // but SCRAM-SHA-256 needs the raw password bytes for PBKDF2.
     if let Some(password) = url.password() {
-        config = config.password(password);
+        let decoded = percent_decode_str(password)
+            .decode_utf8()
+            .map_err(|e| GatewayError::Config(format!("Invalid UTF-8 in password: {}", e)))?;
+        config = config.password(&decoded);
     }
     
     // Parse query params for pool settings

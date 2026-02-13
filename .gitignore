@@ -1,7 +1,13 @@
 /target
 .DS_Store
+.cargo/
 
-# Zig
+# SDK build caches
+sdk/kotlin/.gradle/
+sdk/kotlin/.kotlin/
+sdk/kotlin/bin/
+sdk/kotlin/build/
+sdk/swift/.build/
 zig-cache/
 zig-out/
 .zig-cache/
@@ -65,7 +71,13 @@ pg/examples/*.go
 qail.toml
 multi_ops_agent_plan.md
 GAP.md
+schema.qail
+policies.yaml
+events.yaml
 
 # Sensitive files
 soak/traefik/certs/*.pem
+*.key
+*.secret
 log
+

@@ -79,13 +79,11 @@ impl AuthContext {
     /// - `claims["agent_id"]` → `agent_id`
     /// - `role == "super_admin"` → `is_super_admin`
     pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {
-        // Only true platform-level roles bypass RLS.
-        // SECURITY: FinanceAdmin intentionally excluded — finance staff need
-        // settlement access, not cross-tenant God Mode. Use database-level
-        // finance RLS policies (e.g., app.role = 'finance') instead.
+        // Only the platform-level "administrator" role bypasses RLS.
+        // Tenant-scoped roles (operator, super_admin) use operator_id filtering.
         let is_super_admin = matches!(
             self.role.as_str(),
-            "super_admin" | "Administrator"
+            "administrator" | "Administrator"
         );
 
         // Audit log: super_admin activation is a high-privilege event
@@ -328,7 +326,20 @@ mod tests {
     }
 
     #[test]
-    fn test_administrator_maps_to_super_admin() {
+    fn test_administrator_bypasses_rls() {
+        // Platform-level "administrator" role bypasses RLS
+        let auth = AuthContext {
+            user_id: "master-user".to_string(),
+            role: "administrator".to_string(),
+            tenant_id: None,
+            claims: HashMap::new(),
+        };
+        let rls = auth.to_rls_context();
+        assert!(rls.bypasses_rls(), "administrator role should bypass RLS");
+    }
+
+    #[test]
+    fn test_administrator_pascal_case_bypasses_rls() {
         let auth = AuthContext {
             user_id: "master-user".to_string(),
             role: "Administrator".to_string(),
@@ -336,20 +347,34 @@ mod tests {
             claims: HashMap::new(),
         };
         let rls = auth.to_rls_context();
-        assert!(rls.bypasses_rls(), "Administrator role should bypass RLS");
+        assert!(rls.bypasses_rls(), "Administrator (PascalCase) role should bypass RLS");
     }
 
     #[test]
     fn test_super_admin_does_not_bypass_rls() {
+        // Tenant-level super_admin should NOT bypass RLS
         let auth = AuthContext {
             user_id: "scoot-user".to_string(),
-            role: "SuperAdmin".to_string(),
+            role: "super_admin".to_string(),
             tenant_id: Some("operator-123".to_string()),
             claims: HashMap::new(),
         };
         let rls = auth.to_rls_context();
-        assert!(!rls.bypasses_rls(), "SuperAdmin should NOT bypass RLS");
+        assert!(!rls.bypasses_rls(), "super_admin should NOT bypass RLS");
         assert_eq!(rls.operator_id, "operator-123");
+    }
+
+    #[test]
+    fn test_operator_role_does_not_bypass_rls() {
+        let auth = AuthContext {
+            user_id: "sailtix-user".to_string(),
+            role: "operator".to_string(),
+            tenant_id: Some("op-sailtix".to_string()),
+            claims: HashMap::new(),
+        };
+        let rls = auth.to_rls_context();
+        assert!(!rls.bypasses_rls(), "operator role should NOT bypass RLS");
+        assert_eq!(rls.operator_id, "op-sailtix");
     }
 
     // ══════════════════════════════════════════════════════════════════
