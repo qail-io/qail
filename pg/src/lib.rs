@@ -18,3 +18,11 @@ pub use driver::{
 pub use protocol::PgEncoder;
 pub use driver::explain;
 pub use types::{Date, FromPg, Json, Numeric, Time, Timestamp, ToPg, TypeError, Uuid};
+
+/// Generate the RLS SQL string for pipelined execution.
+///
+/// Returns the `BEGIN; SET LOCAL statement_timeout = ...; SELECT set_config(...)`
+/// string that can be passed to `PooledConnection::fetch_all_with_rls()`.
+pub fn rls_sql_with_timeout(ctx: &qail_core::rls::RlsContext, timeout_ms: u32) -> String {
+    driver::rls::context_to_sql_with_timeout(ctx, timeout_ms)
+}

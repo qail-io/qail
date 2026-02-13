@@ -41,6 +41,14 @@ pub struct QueryResponse {
     pub count: usize,
 }
 
+/// Fast query response (array-of-arrays, no column names)
+/// Used by /qail/fast for data pipelines and internal services.
+#[derive(Debug, Serialize)]
+pub struct FastQueryResponse {
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub count: usize,
+}
+
 /// Batch query request
 #[derive(Debug, Deserialize)]
 pub struct BatchRequest {
@@ -158,18 +166,33 @@ pub async fn execute_query(
     
     tracing::debug!("Executing text query: {} (user: {})", query_text, auth.user_id);
     
-    // Parse the QAIL text into AST
-    let mut cmd = match qail_core::parser::parse(query_text) {
-        Ok(cmd) => cmd,
-        Err(e) => {
-            tracing::warn!("Parse error: {}", e);
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Parse error: {}", e),
-                    code: "PARSE_ERROR".to_string(),
-                }),
-            ));
+    // Parse the QAIL text into AST (cached — skip re-parse for repeated queries)
+    let mut cmd = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        query_text.hash(&mut h);
+        let key = h.finish();
+
+        if let Some(cached) = state.parse_cache.get(&key) {
+            cached
+        } else {
+            match qail_core::parser::parse(query_text) {
+                Ok(cmd) => {
+                    state.parse_cache.insert(key, cmd.clone());
+                    cmd
+                }
+                Err(e) => {
+                    tracing::warn!("Parse error: {}", e);
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("Parse error: {}", e),
+                            code: "PARSE_ERROR".to_string(),
+                        }),
+                    ));
+                }
+            }
         }
     };
     
@@ -247,6 +270,179 @@ pub async fn execute_query_binary(
     }
     
     execute_qail_cmd(&state, &auth, &cmd).await
+}
+
+/// Execute a QAIL query (FAST — array-of-arrays response)
+///
+/// Returns rows as positional arrays instead of keyed objects.
+/// Skips column metadata for maximum throughput.
+/// Use for data pipelines and internal services that know the schema.
+pub async fn execute_query_fast(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<FastQueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let query_text = body.trim();
+    
+    if query_text.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Empty query".to_string(),
+                code: "EMPTY_QUERY".to_string(),
+            }),
+        ));
+    }
+
+    if !state.allow_list.is_allowed(query_text) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Query not in allow-list".to_string(),
+                code: "QUERY_NOT_ALLOWED".to_string(),
+            }),
+        ));
+    }
+    
+    let mut auth = extract_auth_from_headers(&headers);
+    auth.enrich_with_operator_map(&state.user_operator_map).await;
+    
+    let mut cmd = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        query_text.hash(&mut h);
+        let key = h.finish();
+
+        if let Some(cached) = state.parse_cache.get(&key) {
+            cached
+        } else {
+            match qail_core::parser::parse(query_text) {
+                Ok(cmd) => {
+                    state.parse_cache.insert(key, cmd.clone());
+                    cmd
+                }
+                Err(e) => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("Parse error: {}", e),
+                            code: "PARSE_ERROR".to_string(),
+                        }),
+                    ));
+                }
+            }
+        }
+    };
+    
+    if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
+        return Err((
+            StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::FORBIDDEN),
+            Json(ErrorResponse {
+                error: e.to_string(),
+                code: "POLICY_DENIED".to_string(),
+            }),
+        ));
+    }
+    
+    execute_qail_cmd_fast(&state, &auth, &cmd).await
+}
+
+/// Fast query execution — uses fetch_all_fast (AST-native wire).
+/// Returns array-of-arrays without column names.
+async fn execute_qail_cmd_fast(
+    state: &Arc<GatewayState>,
+    auth: &crate::auth::AuthContext,
+    cmd: &qail_core::ast::Qail,
+) -> Result<Json<FastQueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use qail_core::ast::Action;
+
+    let (depth, filters, joins) = query_complexity(cmd);
+    if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
+        crate::metrics::record_complexity_rejected();
+        return Err((
+            api_err.status_code(),
+            Json(ErrorResponse {
+                error: api_err.message,
+                code: api_err.code,
+            }),
+        ));
+    }
+
+    if matches!(cmd.action, Action::Search | Action::Upsert | Action::Scroll
+        | Action::CreateCollection | Action::DeleteCollection) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Vector operations not supported on /qail/fast".to_string(),
+                code: "UNSUPPORTED_ACTION".to_string(),
+            }),
+        ));
+    }
+
+    let mut conn = state.pool
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .await
+        .map_err(|e| {
+        tracing::error!("Pool error: {}", e);
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Database connection failed".to_string(),
+                code: "CONNECTION_ERROR".to_string(),
+            }),
+        )
+    })?;
+
+    let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
+    let rows = conn.fetch_all_fast(cmd).await.map_err(|e| {
+        tracing::error!("Query error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Query execution failed".to_string(),
+                code: "QUERY_ERROR".to_string(),
+            }),
+        )
+    });
+    timer.finish(rows.is_ok());
+    conn.release().await;
+    let rows = rows?;
+    
+    let json_rows: Vec<Vec<serde_json::Value>> = rows
+        .iter()
+        .map(row_to_array)
+        .collect();
+    
+    let count = json_rows.len();
+    Ok(Json(FastQueryResponse { rows: json_rows, count }))
+}
+
+/// Convert a PgRow to a JSON array (no column names — positional).
+fn row_to_array(row: &qail_pg::PgRow) -> Vec<serde_json::Value> {
+    row.columns.iter().map(|col| {
+        match col {
+            Some(bytes) => {
+                let s = String::from_utf8_lossy(bytes);
+                if (s.starts_with('{') && s.ends_with('}')) || (s.starts_with('[') && s.ends_with(']')) {
+                    serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s.into_owned()))
+                } else if let Ok(n) = s.parse::<i64>() {
+                    serde_json::Value::Number(n.into())
+                } else if let Ok(f) = s.parse::<f64>() {
+                    serde_json::Number::from_f64(f)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::String(s.into_owned()))
+                } else if s == "t" || s == "true" {
+                    serde_json::Value::Bool(true)
+                } else if s == "f" || s == "false" {
+                    serde_json::Value::Bool(false)
+                } else {
+                    serde_json::Value::String(s.into_owned())
+                }
+            }
+            None => serde_json::Value::Null,
+        }
+    }).collect()
 }
 
 /// Extract query complexity metrics from a QAIL AST.
@@ -331,9 +527,9 @@ async fn execute_qail_cmd(
         }
     }
     
-    // Acquire RLS-scoped connection with statement timeout
+    // Acquire raw connection (no RLS setup yet — pipelined below)
     let mut conn = state.pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .acquire_raw()
         .await
         .map_err(|e| {
         tracing::error!("Pool error: {}", e);
@@ -346,10 +542,15 @@ async fn execute_qail_cmd(
         )
     })?;
 
+    // Generate RLS SQL for pipelining (BEGIN + SET LOCAL + set_config)
+    let rls_sql = qail_pg::rls_sql_with_timeout(
+        &auth.to_rls_context(),
+        state.config.statement_timeout_ms,
+    );
     
     // Measure query execution time
     let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
-    let rows = conn.fetch_all_cached(cmd).await.map_err(|e| {
+    let rows = conn.fetch_all_with_rls(cmd, &rls_sql).await.map_err(|e| {
         tracing::error!("Query error: {}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -362,7 +563,7 @@ async fn execute_qail_cmd(
     timer.finish(rows.is_ok());
 
     // Deterministic cleanup — release connection before processing results.
-    // If the query failed, conn is still released cleanly (DISCARD ALL runs).
+    // If the query failed, conn is still released cleanly (COMMIT runs).
     conn.release().await;
 
     let rows = rows?;
@@ -427,25 +628,13 @@ pub fn row_to_json(row: &qail_pg::PgRow) -> serde_json::Value {
     
     let mut obj = serde_json::Map::new();
     
+    // Use OID-typed conversion when ColumnInfo is available (skip text guessing)
+    let oids = row.column_info.as_ref().map(|info| &info.oids);
+    
     for (i, col_name) in column_names.into_iter().enumerate() {
         let value = if let Some(s) = row.get_string(i) {
-            if (s.starts_with('{') && s.ends_with('}')) || (s.starts_with('[') && s.ends_with(']')) {
-                serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s))
-            } else if let Ok(n) = s.parse::<i64>() {
-                serde_json::Value::Number(n.into())
-            } else if let Ok(f) = s.parse::<f64>() {
-                if let Some(n) = serde_json::Number::from_f64(f) {
-                    serde_json::Value::Number(n)
-                } else {
-                    serde_json::Value::String(s)
-                }
-            } else if s == "t" || s == "true" {
-                serde_json::Value::Bool(true)
-            } else if s == "f" || s == "false" {
-                serde_json::Value::Bool(false)
-            } else {
-                serde_json::Value::String(s)
-            }
+            let oid = oids.and_then(|o| o.get(i).copied()).unwrap_or(0);
+            text_to_json_typed(&s, oid)
         } else {
             serde_json::Value::Null
         };
@@ -455,6 +644,122 @@ pub fn row_to_json(row: &qail_pg::PgRow) -> serde_json::Value {
     
     serde_json::Value::Object(obj)
 }
+
+/// Convert a PG text value to JSON using the column's OID for type-directed conversion.
+///
+/// PG OID reference:
+///   16 = bool, 20/21/23/26 = int8/int2/int4/oid, 700/701 = float4/float8
+///   114/3802 = json/jsonb, 1700 = numeric
+///   25/1042/1043 = text/bpchar/varchar, 2950 = uuid
+///   1082/1114/1184 = date/timestamp/timestamptz
+///
+/// When OID is known, this skips the expensive try-parse chain entirely.
+#[inline]
+fn text_to_json_typed(s: &str, oid: u32) -> serde_json::Value {
+    match oid {
+        // ── Boolean (OID 16) ──────────────────────────────────────
+        16 => serde_json::Value::Bool(s == "t" || s == "true"),
+
+        // ── Integer types (OID 20=int8, 21=int2, 23=int4, 26=oid) ──
+        20 | 21 | 23 | 26 => {
+            s.parse::<i64>()
+                .map(|n| serde_json::Value::Number(n.into()))
+                .unwrap_or(serde_json::Value::String(s.to_string()))
+        }
+
+        // ── Float types (OID 700=float4, 701=float8) ──────────────
+        700 | 701 => {
+            s.parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::String(s.to_string()))
+        }
+
+        // ── Numeric/Decimal (OID 1700) — preserve precision as string or number ──
+        1700 => {
+            if let Ok(n) = s.parse::<i64>() {
+                serde_json::Value::Number(n.into())
+            } else if let Ok(f) = s.parse::<f64>() {
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::String(s.to_string()))
+            } else {
+                serde_json::Value::String(s.to_string())
+            }
+        }
+
+        // ── JSON/JSONB (OID 114, 3802) — parse directly ──────────
+        114 | 3802 => {
+            serde_json::from_str(s).unwrap_or(serde_json::Value::String(s.to_string()))
+        }
+
+        // ── Array types (int[], text[], etc.) — parse as JSON array ──
+        1005 | 1007 | 1009 | 1015 | 1016 | 1021 | 1022 | 1000 | 1231 => {
+            pg_array_to_json(s)
+        }
+
+        // ── Text, varchar, uuid, date, timestamp, etc. — return as string ──
+        25 | 1042 | 1043 | 2950 | 1082 | 1114 | 1184 | 17 | 142 | 1186 => {
+            serde_json::Value::String(s.to_string())
+        }
+
+        // ── Unknown OID (0 = no metadata) — fall back to guessing ──
+        _ => text_to_json_guess(s),
+    }
+}
+
+/// Fallback: guess JSON type from text content (used when OID is unknown).
+#[inline]
+fn text_to_json_guess(s: &str) -> serde_json::Value {
+    if (s.starts_with('{') && s.ends_with('}')) || (s.starts_with('[') && s.ends_with(']')) {
+        serde_json::from_str(s).unwrap_or(serde_json::Value::String(s.to_string()))
+    } else if let Ok(n) = s.parse::<i64>() {
+        serde_json::Value::Number(n.into())
+    } else if let Ok(f) = s.parse::<f64>() {
+        serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::String(s.to_string()))
+    } else if s == "t" || s == "true" {
+        serde_json::Value::Bool(true)
+    } else if s == "f" || s == "false" {
+        serde_json::Value::Bool(false)
+    } else {
+        serde_json::Value::String(s.to_string())
+    }
+}
+
+/// Convert PostgreSQL text-format array (e.g., `{1,2,3}`) to JSON array.
+fn pg_array_to_json(s: &str) -> serde_json::Value {
+    if s.starts_with('{') && s.ends_with('}') {
+        let inner = &s[1..s.len()-1];
+        if inner.is_empty() {
+            return serde_json::Value::Array(vec![]);
+        }
+        let elements: Vec<serde_json::Value> = inner.split(',')
+            .map(|elem| {
+                let elem = elem.trim();
+                if elem.eq_ignore_ascii_case("null") {
+                    serde_json::Value::Null
+                } else if let Ok(n) = elem.parse::<i64>() {
+                    serde_json::Value::Number(n.into())
+                } else if let Ok(f) = elem.parse::<f64>() {
+                    serde_json::Number::from_f64(f)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::String(elem.to_string()))
+                } else {
+                    // Strip surrounding quotes if present
+                    let unquoted = elem.trim_matches('"');
+                    serde_json::Value::String(unquoted.to_string())
+                }
+            })
+            .collect();
+        serde_json::Value::Array(elements)
+    } else {
+        serde_json::Value::String(s.to_string())
+    }
+}
+
 
 pub async fn execute_batch(
     State(state): State<Arc<GatewayState>>,
@@ -566,7 +871,7 @@ pub async fn execute_batch(
         }
         
         // Execute query
-        match conn.fetch_all_uncached(&cmd).await {
+        match conn.fetch_all_cached(&cmd).await {
             Ok(rows) => {
                 let json_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
                 let count = json_rows.len();
