@@ -19,7 +19,7 @@ public enum SortDirection: String, Sendable {
 // MARK: - Responses
 
 /// Paginated list response from `GET /api/{table}`.
-public struct ListResponse<T: Decodable>: Decodable {
+public struct ListResponse<T: Decodable>: Decodable, @unchecked Sendable {
     public let data: [T]
     public let count: Int
     public let total: Int?
@@ -28,12 +28,12 @@ public struct ListResponse<T: Decodable>: Decodable {
 }
 
 /// Single-row response from `GET /api/{table}/{id}`.
-public struct SingleResponse<T: Decodable>: Decodable {
+public struct SingleResponse<T: Decodable>: Decodable, @unchecked Sendable {
     public let data: T
 }
 
 /// Mutation response from POST/PATCH operations.
-public struct MutationResponse<T: Decodable>: Decodable {
+public struct MutationResponse<T: Decodable>: Decodable, @unchecked Sendable {
     public let data: T
     public let rowsAffected: Int
 
@@ -44,7 +44,7 @@ public struct MutationResponse<T: Decodable>: Decodable {
 }
 
 /// Raw DSL query response from `POST /qail`.
-public struct QueryResponse<T: Decodable>: Decodable {
+public struct QueryResponse<T: Decodable>: Decodable, @unchecked Sendable {
     public let data: [T]
     public let rowsAffected: Int
     public let columns: [String]
@@ -63,7 +63,7 @@ public struct HealthResponse: Decodable, Sendable {
 }
 
 /// Batch result for multi-query execution.
-public struct BatchResult<T: Decodable>: Decodable {
+public struct BatchResult<T: Decodable>: Decodable, @unchecked Sendable {
     public let index: Int
     public let success: Bool
     public let rows: [T]?
@@ -72,18 +72,18 @@ public struct BatchResult<T: Decodable>: Decodable {
 }
 
 /// Delete confirmation.
-public struct DeleteResponse: Decodable {
+public struct DeleteResponse: Decodable, Sendable {
     public let deleted: Bool
 }
 
 /// Aggregate query response.
-public struct AggregateResponse: Decodable {
+public struct AggregateResponse: Decodable, Sendable {
     public let data: [[String: AnyCodable]]
     public let count: Int
 }
 
 /// Type-erased Codable wrapper for aggregate values.
-public struct AnyCodable: Decodable {
+public struct AnyCodable: Decodable, @unchecked Sendable {
     public let value: Any
 
     public init(from decoder: Decoder) throws {
@@ -109,13 +109,13 @@ public protocol QailSubscription {
 }
 
 /// Concrete WebSocket subscription using URLSessionWebSocketTask.
-public final class WebSocketSubscription: QailSubscription {
+public final class WebSocketSubscription: QailSubscription, @unchecked Sendable {
     private let task: URLSessionWebSocketTask
     private let channel: String
-    private let onMessage: (String) -> Void
+    private let onMessage: @Sendable (String) -> Void
     private var _active = true
 
-    init(task: URLSessionWebSocketTask, channel: String, onMessage: @escaping (String) -> Void) {
+    init(task: URLSessionWebSocketTask, channel: String, onMessage: @escaping @Sendable (String) -> Void) {
         self.task = task
         self.channel = channel
         self.onMessage = onMessage
