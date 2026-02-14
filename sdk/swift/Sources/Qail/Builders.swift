@@ -12,7 +12,7 @@ import Foundation
 ///     .limit(10)
 ///     .all()
 /// ```
-public final class SelectBuilder<T: Decodable> {
+public final class SelectBuilder<T: Decodable>: @unchecked Sendable {
     private let client: QailClient
     private let table: String
     private var columns: String?
@@ -227,7 +227,7 @@ public final class SelectBuilder<T: Decodable> {
 ///     .returning("*")
 ///     .exec()
 /// ```
-public final class InsertBuilder<T: Decodable> {
+public final class InsertBuilder<T: Decodable>: @unchecked Sendable {
     private let client: QailClient
     private let table: String
     private var data: Any = [String: Any]()
@@ -294,7 +294,7 @@ public final class InsertBuilder<T: Decodable> {
 ///     .returning("*")
 ///     .exec(id: 1)
 /// ```
-public final class UpdateBuilder<T: Decodable> {
+public final class UpdateBuilder<T: Decodable>: @unchecked Sendable {
     private let client: QailClient
     private let table: String
     private var data: [String: Any] = [:]
@@ -339,7 +339,7 @@ public final class UpdateBuilder<T: Decodable> {
 /// ```swift
 /// let res = try await qail.delete("users").exec(id: 42)
 /// ```
-public final class DeleteBuilder {
+public final class DeleteBuilder: @unchecked Sendable {
     private let client: QailClient
     private let table: String
 
