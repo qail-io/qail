@@ -175,7 +175,7 @@ public final class QailClient: Sendable {
     /// // Later...
     /// sub.unsubscribe()
     /// ```
-    public func subscribe(channel: String, onMessage: @escaping (String) -> Void) -> QailSubscription {
+    public func subscribe(channel: String, onMessage: @escaping @Sendable (String) -> Void) -> QailSubscription {
         let wsUrl = baseUrl.replacingOccurrences(of: "http", with: "ws") + "/ws"
         let url = URL(string: wsUrl)!
         let task = session.webSocketTask(with: url)
@@ -215,6 +215,40 @@ public final class QailClient: Sendable {
 
     public func post<T: Decodable>(_ path: String) async throws -> T {
         try await request(method: "POST", path: path)
+    }
+
+    public func put<T: Decodable, B: Encodable>(_ path: String, body: B) async throws -> T {
+        let data = try encoder.encode(body)
+        return try await request(method: "PUT", path: path, body: data)
+    }
+
+    public func put<T: Decodable>(_ path: String) async throws -> T {
+        try await request(method: "PUT", path: path)
+    }
+
+    public func delete<T: Decodable>(_ path: String) async throws -> T {
+        try await request(method: "DELETE", path: path)
+    }
+
+    public func delete<T: Decodable, B: Encodable>(_ path: String, body: B) async throws -> T {
+        let data = try encoder.encode(body)
+        return try await request(method: "DELETE", path: path, body: data)
+    }
+
+    /// PUT with no response body expected.
+    public func put(_ path: String) async throws {
+        _ = try await performRequest(method: "PUT", path: path)
+    }
+
+    /// PUT with body, no response body expected.
+    public func put<B: Encodable>(_ path: String, body: B) async throws {
+        let data = try encoder.encode(body)
+        _ = try await performRequest(method: "PUT", path: path, body: data)
+    }
+
+    /// DELETE with no response body expected.
+    public func delete(_ path: String) async throws {
+        _ = try await performRequest(method: "DELETE", path: path)
     }
 
     // MARK: - Internal HTTP
