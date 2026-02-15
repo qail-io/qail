@@ -18,6 +18,15 @@ dead_code = "deny"
 unused_imports = "deny"
 unused_variables = "deny"
 
-# Profiling: enable debug symbols in release builds
 [profile.release]
+strip = true       # Remove debug symbols (~240MB savings)
+lto = true          # Link-time optimization (smaller + faster)
+codegen-units = 1   # Better optimization (slower compile)
+
+# For profiling, use: cargo build --profile release-with-debug
+[profile.release-with-debug]
+inherits = "release"
+strip = false
 debug = true
+lto = false
+

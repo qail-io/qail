@@ -109,8 +109,8 @@ drop _test_to_drop confirm
 
 ```qail
 # Operators
-add _test_operators fields id, name, email values 'a0000000-0000-0000-0000-000000000001', 'SailTix Demo', 'demo@sailtix.com'
-add _test_operators fields id, name, email values 'a0000000-0000-0000-0000-000000000002', 'Qail Test', 'test@qail.io'
+add _test_operators fields id, name, email values 'a0000000-0000-0000-0000-000000000001', 'Demo Operator', 'demo@example.com'
+add _test_operators fields id, name, email values 'a0000000-0000-0000-0000-000000000002', 'Test Operator', 'test@example.com'
 
 # Vessels
 add _test_vessels fields id, operator_id, vessel_name, vessel_type, capacity, old_field values 'b0000000-0000-0000-0000-000000000001', 'a0000000-0000-0000-0000-000000000001', 'KM Tuna Express', 'ferry', 200, 'some old note'

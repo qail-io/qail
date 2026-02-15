@@ -1,12 +1,12 @@
 # Soak Test Infrastructure
 
-Podman-based monitoring stack for the Qail Gateway soak test on `gateway.qail.io`.
+Podman-based monitoring stack for the Qail Gateway soak test on `gateway.example.com`.
 
 ## Architecture
 
 ```
 Internet → Traefik (443) → Qail Gateway (8080)
-                         → Grafana (3000) via gateway.qail.io:3000
+                         → Grafana (3000) via gateway.example.com:3000
          → Prometheus (9090) scrapes Gateway /metrics
 ```
 
@@ -23,6 +23,6 @@ podman-compose ps
 
 ## Access
 
-- **Gateway:** https://gateway.qail.io
-- **Grafana:** http://gateway.qail.io:3000 (admin/qailsoak2026)
-- **Prometheus:** http://gateway.qail.io:9090
+- **Gateway:** https://gateway.example.com
+- **Grafana:** http://gateway.example.com:3000 (admin/changeme)
+- **Prometheus:** http://gateway.example.com:9090

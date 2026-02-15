@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn test_ssrf_allows_public_url() {
         assert!(super::validate_webhook_url("https://api.example.com/hook").is_ok());
-        assert!(super::validate_webhook_url("http://webhook.sailtix.com/trigger").is_ok());
+        assert!(super::validate_webhook_url("http://webhook.example.com/trigger").is_ok());
     }
 
     #[test]
