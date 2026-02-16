@@ -163,7 +163,7 @@
 - [x] `qail types` — `schema.qail` → Rust typed schema module
 - [x] `qail check` — validate `.qail` syntax
 - [x] `qail worker` — hybrid outbox daemon (PG → Qdrant sync)
-- [ ] LSP server (`qail-lsp`) — planned, not yet shipped
+- [/] LSP server (`qail-lsp`) — basic scaffolding built, completion/hover/actions handlers in progress
 
 ---
 
