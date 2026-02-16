@@ -27,7 +27,7 @@ sha2 = "0.10"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 base64 = "0.22"
-rand = "0.9"
+rand = "0.10"
 
 # Zero-allocation formatting for COPY encoder
 itoa = "1"
