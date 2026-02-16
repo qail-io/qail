@@ -1,3 +1,4 @@
+#![cfg(feature = "qdrant")]
 //! Speed benchmark: PG-only vs Qdrant-only vs Hybrid (Qdrant → PG)
 //!
 //! Measures raw driver latency for each path and prints a comparison table.
@@ -55,6 +56,7 @@ fn us(d: Duration) -> f64 {
 }
 
 #[tokio::test]
+#[ignore = "Requires live DATABASE_URL + Qdrant server"]
 async fn bench_pg_vs_qdrant() {
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║   SPEED BENCHMARK: PG vs QDRANT vs HYBRID                 ║");

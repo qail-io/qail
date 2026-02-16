@@ -37,6 +37,7 @@ pub struct GatewayState {
     /// Loaded at startup from the users table.
     pub user_operator_map: Arc<RwLock<HashMap<String, String>>>,
     /// Optional Qdrant connection pool for vector operations.
+    #[cfg(feature = "qdrant")]
     pub qdrant_pool: Option<qail_qdrant::QdrantPool>,
     /// Prometheus metrics handle for rendering /metrics endpoint
     pub prometheus_handle: Arc<PrometheusHandle>,
@@ -248,6 +249,7 @@ impl Gateway {
         }
 
         // Initialize Qdrant pool (optional — only if config has [qdrant])
+        #[cfg(feature = "qdrant")]
         let qdrant_pool = if let Some(ref qdrant_config) = self.config.qdrant {
             let pool_config = qail_qdrant::PoolConfig::from_qail_config_ref(qdrant_config);
             let pool = qail_qdrant::QdrantPool::new(pool_config).await
@@ -303,6 +305,7 @@ impl Gateway {
             explain_config: explain_cfg,
             tenant_semaphore,
             user_operator_map,
+            #[cfg(feature = "qdrant")]
             qdrant_pool,
             prometheus_handle,
             complexity_guard,
