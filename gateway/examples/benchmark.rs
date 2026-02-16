@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create query
     let cmd = Qail::get("harbors").columns(["id", "name"]).limit(3);
     let text_query = "get harbors fields id,name limit 3";
-    let binary_query = bincode::serialize(&cmd)?;
+    let binary_query = postcard::to_allocvec(&cmd).expect("postcard serialize");
     
     println!("═══════════════════════════════════════════════════");
     println!("  QAIL Gateway Benchmark: Text vs Binary");
