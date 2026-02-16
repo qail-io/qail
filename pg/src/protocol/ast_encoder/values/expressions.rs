@@ -735,7 +735,7 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
             let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
             match q.action {
                 Action::Get => super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params)?,
-                _ => return Err(super::super::EncodeError::UnsupportedAction(q.action.clone())),
+                _ => return Err(super::super::EncodeError::UnsupportedAction(q.action)),
             }
             buf.extend_from_slice(b"(");
             buf.extend_from_slice(&sub_buf);

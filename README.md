@@ -4,7 +4,7 @@
 
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-qail.rs-blue)](https://qail.rs/docs)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.18.6-green)](CHANGELOG.md)
 
 ---
@@ -244,7 +244,7 @@ Qail powers [Sailtix](https://sailtix.com) — a multi-operator maritime booking
 
 ## License
 
-MIT © 2025-2026 Qail Contributors
+Apache-2.0 © 2025-2026 Qail Contributors
 
 <p align="center">
   <strong>Built with 🦀 Rust</strong><br>

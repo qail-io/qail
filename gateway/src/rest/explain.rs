@@ -1,0 +1,144 @@
+//! EXPLAIN endpoint for query plan analysis.
+
+use axum::{
+    extract::{Query, State},
+    http::HeaderMap,
+    response::Json,
+};
+use qail_core::ast::{JoinKind, Operator, Value as QailValue};
+use serde_json::{json, Value};
+use std::sync::Arc;
+
+use crate::auth::extract_auth_from_headers;
+use crate::handler::row_to_json;
+use crate::middleware::ApiError;
+use crate::GatewayState;
+
+use super::filters::{apply_filters, parse_filters};
+use super::types::ListParams;
+use super::extract_table_name;
+
+/// GET /api/{table}/_explain — return EXPLAIN ANALYZE for the query
+///
+/// Accepts the same query params as the list handler (filters, sort, expand, etc.)
+/// and returns the PostgreSQL execution plan as JSON.
+pub(crate) async fn explain_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    Query(params): Query<ListParams>,
+    request: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let table_name =
+        extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+
+    let _table = state
+        .schema
+        .table(&table_name)
+        .ok_or_else(|| ApiError::not_found(&table_name))?;
+
+    let auth = extract_auth_from_headers(&headers);
+
+    // Build query (same as list_handler)
+    let max_rows = state.config.max_result_rows.min(1000) as i64;
+    let limit = params.limit.unwrap_or(50).clamp(1, max_rows);
+    let offset = params.offset.unwrap_or(0).clamp(0, 100_000);
+    let mut cmd = qail_core::ast::Qail::get(&table_name);
+
+    // Apply select
+    if let Some(ref select) = params.select {
+        let cols: Vec<&str> = select.split(',').map(|s| s.trim()).collect();
+        cmd = cmd.columns(cols);
+    }
+
+    // Apply sorting — default to `id ASC` for deterministic pagination
+    if let Some(ref sort) = params.sort {
+        for part in sort.split(',') {
+            let mut iter = part.splitn(2, ':');
+            let col = iter.next().unwrap_or("id");
+            let dir = iter.next().unwrap_or("asc");
+            cmd = if dir == "desc" {
+                cmd.order_desc(col)
+            } else {
+                cmd.order_asc(col)
+            };
+        }
+    } else {
+        cmd = cmd.order_asc("id");
+    }
+
+    // Apply expand (flat JOIN only) — enforce depth limit
+    if let Some(ref expand) = params.expand {
+        let relations: Vec<&str> = {
+            let mut seen = std::collections::HashSet::new();
+            expand.split(',').map(|s| s.trim())
+                .filter(|s| !s.is_empty() && !s.starts_with("nested:") && seen.insert(*s))
+                .collect()
+        };
+        if relations.len() > state.config.max_expand_depth {
+            return Err(ApiError::parse_error(format!(
+                "Too many expand relations ({}). Maximum is {}",
+                relations.len(), state.config.max_expand_depth
+            )));
+        }
+        for rel in relations {
+            if let Some((fk_col, ref_col)) = state.schema.relation_for(&table_name, rel) {
+                let left = format!("{}.{}", table_name, fk_col);
+                let right = format!("{}.{}", rel, ref_col);
+                cmd = cmd.join(JoinKind::Left, rel, &left, &right);
+            } else if let Some((fk_col, ref_col)) = state.schema.relation_for(rel, &table_name) {
+                let left = format!("{}.{}", table_name, ref_col);
+                let right = format!("{}.{}", rel, fk_col);
+                cmd = cmd.join(JoinKind::Left, rel, &left, &right);
+            }
+        }
+    }
+
+    // Apply filters
+    let query_string = request.uri().query().unwrap_or("");
+    let filters = parse_filters(query_string);
+    cmd = apply_filters(cmd, &filters);
+
+    // Full-text search
+    if let Some(ref term) = params.search {
+        let cols = params.search_columns.as_deref().unwrap_or("name");
+        cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
+    }
+
+    cmd = cmd.limit(limit);
+    cmd = cmd.offset(offset);
+
+    // Apply RLS
+    state
+        .policy_engine
+        .apply_policies(&auth, &mut cmd)
+        .map_err(|e| ApiError::forbidden(e.to_string()))?;
+
+    // Generate SQL from AST
+    use qail_pg::protocol::AstEncoder;
+    let mut sql_buf = bytes::BytesMut::with_capacity(256);
+    let mut params_buf: Vec<Option<Vec<u8>>> = Vec::new();
+    AstEncoder::encode_select_sql(&cmd, &mut sql_buf, &mut params_buf);
+    let sql = String::from_utf8_lossy(&sql_buf).to_string();
+
+    // Run EXPLAIN ANALYZE
+    let explain_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", sql);
+
+    let mut conn = state
+        .pool
+        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let raw_cmd = qail_core::ast::Qail::raw_sql(&explain_sql);
+    let rows = conn
+        .fetch_all_uncached(&raw_cmd)
+        .await
+        .map_err(|e| ApiError::query_error(e.to_string()))?;
+
+    let plan: Vec<Value> = rows.iter().map(row_to_json).collect();
+
+    Ok(Json(json!({
+        "query": sql,
+        "plan": plan,
+    })))
+}

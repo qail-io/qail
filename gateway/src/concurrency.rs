@@ -77,10 +77,10 @@ impl TenantSemaphore {
                 });
                 let evicted = before - map.len();
                 if evicted > 0 {
-                    eprintln!(
-                        "[INFO] tenant_semaphore_sweep: evicted {} idle tenants ({} remaining)",
-                        evicted,
-                        map.len()
+                    tracing::info!(
+                        evicted = evicted,
+                        remaining = map.len(),
+                        "tenant_semaphore_sweep: evicted idle tenants"
                     );
                 }
             }
@@ -111,9 +111,10 @@ impl TenantSemaphore {
 
         // Reject if at tenant capacity — prevents memory exhaustion
         if map.len() >= self.max_tenants {
-            eprintln!(
-                "[WARN] tenant_semaphore_full: rejecting new tenant '{}' (cap: {})",
-                tenant_id, self.max_tenants
+            tracing::warn!(
+                tenant_id = tenant_id,
+                cap = self.max_tenants,
+                "tenant_semaphore_full: rejecting new tenant"
             );
             return None;
         }
