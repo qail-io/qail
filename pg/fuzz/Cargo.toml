@@ -1,0 +1,43 @@
+[package]
+name = "qail-pg-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.qail-pg]
+path = ".."
+
+[dependencies.qail-core]
+path = "../../core"
+
+# Fuzz target: BackendMessage wire protocol decoder
+[[bin]]
+name = "wire_decode"
+path = "fuzz_targets/wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: GUC sanitizer (RLS injection barrier)
+[[bin]]
+name = "guc_sanitize"
+path = "fuzz_targets/guc_sanitize.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz target: AST → SQL encoder (SQL injection surface)
+[[bin]]
+name = "ast_encode"
+path = "fuzz_targets/ast_encode.rs"
+test = false
+doc = false
+bench = false

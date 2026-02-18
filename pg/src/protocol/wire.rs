@@ -362,6 +362,12 @@ impl BackendMessage {
         let msg_type = buf[0];
         let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
 
+        // PG protocol: length includes itself (4 bytes), so minimum valid length is 4.
+        // Anything less is a malformed message.
+        if len < 4 {
+            return Err(format!("Invalid message length: {} (minimum is 4)", len));
+        }
+
         if buf.len() < len + 1 {
             return Err("Incomplete message".to_string());
         }
@@ -634,11 +640,14 @@ impl BackendMessage {
     }
 
     fn decode_parameter_description(payload: &[u8]) -> Result<Self, String> {
-        let count = if payload.len() >= 2 {
-            i16::from_be_bytes([payload[0], payload[1]]) as usize
-        } else {
-            0
-        };
+        if payload.len() < 2 {
+            return Ok(BackendMessage::ParameterDescription(vec![]));
+        }
+        let raw_count = i16::from_be_bytes([payload[0], payload[1]]);
+        if raw_count < 0 {
+            return Err(format!("ParameterDescription invalid count: {}", raw_count));
+        }
+        let count = raw_count as usize;
         let mut oids = Vec::with_capacity(count);
         let mut pos = 2;
         for _ in 0..count {
@@ -658,7 +667,8 @@ impl BackendMessage {
         }
         let format = payload[0];
         let num_columns = if payload.len() >= 3 {
-            i16::from_be_bytes([payload[1], payload[2]]) as usize
+            let raw = i16::from_be_bytes([payload[1], payload[2]]);
+            if raw < 0 { 0usize } else { raw as usize }
         } else {
             0
         };
@@ -679,7 +689,8 @@ impl BackendMessage {
         }
         let format = payload[0];
         let num_columns = if payload.len() >= 3 {
-            i16::from_be_bytes([payload[1], payload[2]]) as usize
+            let raw = i16::from_be_bytes([payload[1], payload[2]]);
+            if raw < 0 { 0usize } else { raw as usize }
         } else {
             0
         };
@@ -695,20 +706,24 @@ impl BackendMessage {
     }
 
     fn decode_notification_response(payload: &[u8]) -> Result<Self, String> {
-        if payload.len() < 4 {
+        if payload.len() < 6 {
+            // Minimum: 4 (process_id) + 1 (channel NUL) + 1 (payload NUL)
             return Err("NotificationResponse too short".to_string());
         }
         let process_id = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
 
         // Channel name (null-terminated)
         let mut i = 4;
-        let channel_end = payload[i..].iter().position(|&b| b == 0).unwrap_or(0) + i;
-        let channel = String::from_utf8_lossy(&payload[i..channel_end]).to_string();
-        i = channel_end + 1;
+        let remaining = payload.get(i..).unwrap_or(&[]);
+        let channel_end = remaining.iter().position(|&b| b == 0)
+            .ok_or("NotificationResponse: missing channel null terminator")?;
+        let channel = String::from_utf8_lossy(&remaining[..channel_end]).to_string();
+        i += channel_end + 1;
 
         // Payload (null-terminated)
-        let payload_end = payload[i..].iter().position(|&b| b == 0).unwrap_or(0) + i;
-        let notification_payload = String::from_utf8_lossy(&payload[i..payload_end]).to_string();
+        let remaining = payload.get(i..).unwrap_or(&[]);
+        let payload_end = remaining.iter().position(|&b| b == 0).unwrap_or(remaining.len());
+        let notification_payload = String::from_utf8_lossy(&remaining[..payload_end]).to_string();
 
         Ok(BackendMessage::NotificationResponse {
             process_id,
