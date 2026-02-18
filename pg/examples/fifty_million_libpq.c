@@ -33,7 +33,7 @@ int main() {
     printf("\n");
     
     // Connect
-    PGconn *conn = PQconnectdb("host=127.0.0.1 port=5432 user=orion dbname=swb_staging_local");
+    PGconn *conn = PQconnectdb("host=127.0.0.1 port=5432 user=postgres dbname=qail_bench_test");
     
     if (PQstatus(conn) != CONNECTION_OK) {
         fprintf(stderr, "Connection failed: %s\n", PQerrorMessage(conn));

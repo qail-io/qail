@@ -14,7 +14,7 @@ const BATCHES: usize = TOTAL_QUERIES / QUERIES_PER_BATCH;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut conn = PgConnection::connect("127.0.0.1", 5432, "orion", "swb_staging_local").await?;
+    let mut conn = PgConnection::connect("127.0.0.1", 5432, "postgres", "qail_bench_test").await?;
 
     println!("🚀 50 MILLION QUERY STRESS TEST");
     println!("================================");

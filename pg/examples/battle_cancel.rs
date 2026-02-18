@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1️⃣  Acquired Connection (PID: {})", pid);
 
     // Get cancel token BEFORE moving connection to background task
-    let cancel_token = conn.cancel_token();
+    let cancel_token = conn.cancel_token()?;
 
     // Spawn the slow query in background
     println!("2️⃣  Starting 5-second sleep query...");

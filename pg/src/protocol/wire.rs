@@ -334,7 +334,8 @@ impl BackendMessage {
                 if payload.len() < 8 {
                     return Err("MD5 auth payload too short (need salt)".to_string());
                 }
-                let salt: [u8; 4] = payload[4..8].try_into().expect("salt length verified above");
+                // SAFETY: Length is verified on the check above (payload.len() < 8 returns Err).
+                let salt: [u8; 4] = payload[4..8].try_into().expect("salt slice is exactly 4 bytes");
                 Ok(BackendMessage::AuthenticationMD5Password(salt))
             }
             10 => {
@@ -644,3 +645,462 @@ impl BackendMessage {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a raw wire message from type byte + payload.
+    fn wire_msg(msg_type: u8, payload: &[u8]) -> Vec<u8> {
+        let len = (payload.len() + 4) as u32;
+        let mut buf = vec![msg_type];
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    // ========== Buffer boundary tests ==========
+
+    #[test]
+    fn decode_empty_buffer_returns_error() {
+        assert!(BackendMessage::decode(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_too_short_buffer_returns_error() {
+        // 1-4 bytes are all too short for the 5-byte header
+        for len in 1..5 {
+            let buf = vec![b'Z'; len];
+            let result = BackendMessage::decode(&buf);
+            assert!(result.is_err(), "Expected error for {}-byte buffer", len);
+        }
+    }
+
+    #[test]
+    fn decode_incomplete_message_returns_error() {
+        // Header says length=100 but only 10 bytes present
+        let mut buf = vec![b'Z'];
+        buf.extend_from_slice(&100u32.to_be_bytes());
+        buf.extend_from_slice(&[0u8; 5]); // only 5 payload bytes, need 96
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Incomplete"));
+    }
+
+    #[test]
+    fn decode_unknown_message_type_returns_error() {
+        let buf = wire_msg(b'@', &[0]);
+        let result = BackendMessage::decode(&buf);
+        assert!(result.unwrap_err().contains("Unknown message type"));
+    }
+
+    // ========== Auth decode tests ==========
+
+    #[test]
+    fn decode_auth_ok() {
+        let payload = 0i32.to_be_bytes();
+        let buf = wire_msg(b'R', &payload);
+        let (msg, consumed) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::AuthenticationOk));
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn decode_auth_payload_too_short() {
+        // Auth needs at least 4 bytes for type field
+        let buf = wire_msg(b'R', &[0, 0]);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("too short"));
+    }
+
+    #[test]
+    fn decode_auth_md5_missing_salt() {
+        // Auth type 5 (MD5) needs 8 bytes total (4 type + 4 salt)
+        let mut payload = 5i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(&[0, 0, 0]); // only 3 salt bytes, need 4
+        let buf = wire_msg(b'R', &payload);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("MD5"));
+    }
+
+    #[test]
+    fn decode_auth_md5_valid_salt() {
+        let mut payload = 5i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let buf = wire_msg(b'R', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::AuthenticationMD5Password(salt) => {
+                assert_eq!(salt, [0xDE, 0xAD, 0xBE, 0xEF]);
+            }
+            _ => panic!("Expected MD5 auth"),
+        }
+    }
+
+    #[test]
+    fn decode_auth_unknown_type_returns_error() {
+        let payload = 99i32.to_be_bytes();
+        let buf = wire_msg(b'R', &payload);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Unknown auth type"));
+    }
+
+    #[test]
+    fn decode_auth_sasl_mechanisms() {
+        let mut payload = 10i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"SCRAM-SHA-256\0\0"); // one mechanism + double null
+        let buf = wire_msg(b'R', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::AuthenticationSASL(mechs) => {
+                assert_eq!(mechs, vec!["SCRAM-SHA-256"]);
+            }
+            _ => panic!("Expected SASL auth"),
+        }
+    }
+
+    // ========== ReadyForQuery tests ==========
+
+    #[test]
+    fn decode_ready_for_query_idle() {
+        let buf = wire_msg(b'Z', &[b'I']);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::ReadyForQuery(TransactionStatus::Idle)));
+    }
+
+    #[test]
+    fn decode_ready_for_query_in_transaction() {
+        let buf = wire_msg(b'Z', &[b'T']);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::ReadyForQuery(TransactionStatus::InBlock)));
+    }
+
+    #[test]
+    fn decode_ready_for_query_failed() {
+        let buf = wire_msg(b'Z', &[b'E']);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::ReadyForQuery(TransactionStatus::Failed)));
+    }
+
+    #[test]
+    fn decode_ready_for_query_empty_payload() {
+        let buf = wire_msg(b'Z', &[]);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn decode_ready_for_query_unknown_status() {
+        let buf = wire_msg(b'Z', &[b'X']);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Unknown transaction"));
+    }
+
+    // ========== DataRow tests ==========
+
+    #[test]
+    fn decode_data_row_empty_columns() {
+        let payload = 0i16.to_be_bytes();
+        let buf = wire_msg(b'D', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::DataRow(cols) => assert!(cols.is_empty()),
+            _ => panic!("Expected DataRow"),
+        }
+    }
+
+    #[test]
+    fn decode_data_row_with_null() {
+        let mut payload = 1i16.to_be_bytes().to_vec();
+        payload.extend_from_slice(&(-1i32).to_be_bytes()); // NULL
+        let buf = wire_msg(b'D', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::DataRow(cols) => {
+                assert_eq!(cols.len(), 1);
+                assert!(cols[0].is_none());
+            }
+            _ => panic!("Expected DataRow"),
+        }
+    }
+
+    #[test]
+    fn decode_data_row_with_value() {
+        let mut payload = 1i16.to_be_bytes().to_vec();
+        let data = b"hello";
+        payload.extend_from_slice(&(data.len() as i32).to_be_bytes());
+        payload.extend_from_slice(data);
+        let buf = wire_msg(b'D', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::DataRow(cols) => {
+                assert_eq!(cols.len(), 1);
+                assert_eq!(cols[0].as_deref(), Some(b"hello".as_slice()));
+            }
+            _ => panic!("Expected DataRow"),
+        }
+    }
+
+    #[test]
+    fn decode_data_row_negative_count_returns_error() {
+        let payload = (-1i16).to_be_bytes();
+        let buf = wire_msg(b'D', &payload);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("invalid column count"));
+    }
+
+    #[test]
+    fn decode_data_row_truncated_column_data() {
+        let mut payload = 1i16.to_be_bytes().to_vec();
+        // Claims 100 bytes of data but payload ends immediately
+        payload.extend_from_slice(&100i32.to_be_bytes());
+        let buf = wire_msg(b'D', &payload);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("truncated"));
+    }
+
+    #[test]
+    fn decode_data_row_payload_too_short() {
+        let buf = wire_msg(b'D', &[0]); // only 1 byte, need 2
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("too short"));
+    }
+
+    #[test]
+    fn decode_data_row_claims_too_many_columns() {
+        // Claims 1000 columns but only a few bytes of payload
+        let payload = 1000i16.to_be_bytes();
+        let buf = wire_msg(b'D', &payload);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("claims"));
+    }
+
+    // ========== RowDescription tests ==========
+
+    #[test]
+    fn decode_row_description_zero_fields() {
+        let payload = 0i16.to_be_bytes();
+        let buf = wire_msg(b'T', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::RowDescription(fields) => assert!(fields.is_empty()),
+            _ => panic!("Expected RowDescription"),
+        }
+    }
+
+    #[test]
+    fn decode_row_description_negative_count() {
+        let payload = (-1i16).to_be_bytes();
+        let buf = wire_msg(b'T', &payload);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("invalid field count"));
+    }
+
+    #[test]
+    fn decode_row_description_truncated_field() {
+        let mut payload = 1i16.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"id\0"); // field name
+        // Missing 18 bytes of fixed field data
+        let buf = wire_msg(b'T', &payload);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("truncated"));
+    }
+
+    #[test]
+    fn decode_row_description_single_field() {
+        let mut payload = 1i16.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"id\0");         // name
+        payload.extend_from_slice(&0u32.to_be_bytes()); // table_oid
+        payload.extend_from_slice(&0i16.to_be_bytes()); // column_attr
+        payload.extend_from_slice(&23u32.to_be_bytes()); // type_oid (int4)
+        payload.extend_from_slice(&4i16.to_be_bytes()); // type_size
+        payload.extend_from_slice(&(-1i32).to_be_bytes()); // type_modifier
+        payload.extend_from_slice(&0i16.to_be_bytes()); // format (text)
+        let buf = wire_msg(b'T', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::RowDescription(fields) => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].name, "id");
+                assert_eq!(fields[0].type_oid, 23); // int4
+            }
+            _ => panic!("Expected RowDescription"),
+        }
+    }
+
+    // ========== BackendKeyData tests ==========
+
+    #[test]
+    fn decode_backend_key_data() {
+        let mut payload = 42i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(&99i32.to_be_bytes());
+        let buf = wire_msg(b'K', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::BackendKeyData { process_id, secret_key } => {
+                assert_eq!(process_id, 42);
+                assert_eq!(secret_key, 99);
+            }
+            _ => panic!("Expected BackendKeyData"),
+        }
+    }
+
+    #[test]
+    fn decode_backend_key_too_short() {
+        let buf = wire_msg(b'K', &[0, 0, 0, 42]); // only 4 bytes, need 8
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("too short"));
+    }
+
+    // ========== ErrorResponse tests ==========
+
+    #[test]
+    fn decode_error_response_with_fields() {
+        let mut payload = Vec::new();
+        payload.push(b'S'); payload.extend_from_slice(b"ERROR\0");
+        payload.push(b'C'); payload.extend_from_slice(b"42P01\0");
+        payload.push(b'M'); payload.extend_from_slice(b"relation does not exist\0");
+        payload.push(0); // terminator
+        let buf = wire_msg(b'E', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::ErrorResponse(fields) => {
+                assert_eq!(fields.severity, "ERROR");
+                assert_eq!(fields.code, "42P01");
+                assert_eq!(fields.message, "relation does not exist");
+            }
+            _ => panic!("Expected ErrorResponse"),
+        }
+    }
+
+    #[test]
+    fn decode_error_response_empty() {
+        let buf = wire_msg(b'E', &[0]); // just terminator
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::ErrorResponse(fields) => {
+                assert!(fields.message.is_empty());
+            }
+            _ => panic!("Expected ErrorResponse"),
+        }
+    }
+
+    // ========== CommandComplete tests ==========
+
+    #[test]
+    fn decode_command_complete() {
+        let buf = wire_msg(b'C', b"INSERT 0 1\0");
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::CommandComplete(tag) => assert_eq!(tag, "INSERT 0 1"),
+            _ => panic!("Expected CommandComplete"),
+        }
+    }
+
+    // ========== Simple type tests ==========
+
+    #[test]
+    fn decode_parse_complete() {
+        let buf = wire_msg(b'1', &[]);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::ParseComplete));
+    }
+
+    #[test]
+    fn decode_bind_complete() {
+        let buf = wire_msg(b'2', &[]);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::BindComplete));
+    }
+
+    #[test]
+    fn decode_no_data() {
+        let buf = wire_msg(b'n', &[]);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::NoData));
+    }
+
+    #[test]
+    fn decode_empty_query_response() {
+        let buf = wire_msg(b'I', &[]);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::EmptyQueryResponse));
+    }
+
+    // ========== NotificationResponse tests ==========
+
+    #[test]
+    fn decode_notification_response() {
+        let mut payload = 1i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"my_channel\0");
+        payload.extend_from_slice(b"hello world\0");
+        let buf = wire_msg(b'A', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::NotificationResponse { process_id, channel, payload } => {
+                assert_eq!(process_id, 1);
+                assert_eq!(channel, "my_channel");
+                assert_eq!(payload, "hello world");
+            }
+            _ => panic!("Expected NotificationResponse"),
+        }
+    }
+
+    #[test]
+    fn decode_notification_too_short() {
+        let buf = wire_msg(b'A', &[0, 0]); // need at least 4 bytes
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("too short"));
+    }
+
+    // ========== CopyInResponse / CopyOutResponse tests ==========
+
+    #[test]
+    fn decode_copy_in_response_empty_payload() {
+        let buf = wire_msg(b'G', &[]);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Empty"));
+    }
+
+    #[test]
+    fn decode_copy_out_response_empty_payload() {
+        let buf = wire_msg(b'H', &[]);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Empty"));
+    }
+
+    #[test]
+    fn decode_copy_in_response_text_format() {
+        let mut payload = vec![0u8]; // text format
+        payload.extend_from_slice(&1i16.to_be_bytes()); // 1 column
+        payload.push(0); // column format: text
+        let buf = wire_msg(b'G', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::CopyInResponse { format, column_formats } => {
+                assert_eq!(format, 0);
+                assert_eq!(column_formats, vec![0]);
+            }
+            _ => panic!("Expected CopyInResponse"),
+        }
+    }
+
+    // ========== Message consumed length test ==========
+
+    #[test]
+    fn decode_consumed_length_is_correct() {
+        let buf = wire_msg(b'Z', &[b'I']);
+        let (_, consumed) = BackendMessage::decode(&buf).unwrap();
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn decode_with_trailing_data_only_consumes_one_message() {
+        let mut buf = wire_msg(b'Z', &[b'I']);
+        buf.extend_from_slice(&wire_msg(b'Z', &[b'T'])); // second message appended
+        let (msg, consumed) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::ReadyForQuery(TransactionStatus::Idle)));
+        // Should only consume the first message
+        assert_eq!(consumed, 6); // 1 type + 4 length + 1 payload
+    }
+
+    // ========== FrontendMessage encode roundtrip tests ==========
+
+    #[test]
+    fn encode_sync() {
+        let msg = FrontendMessage::Sync;
+        let encoded = msg.encode();
+        assert_eq!(encoded, vec![b'S', 0, 0, 0, 4]);
+    }
+
+    #[test]
+    fn encode_terminate() {
+        let msg = FrontendMessage::Terminate;
+        let encoded = msg.encode();
+        assert_eq!(encoded, vec![b'X', 0, 0, 0, 4]);
+    }
+}
+

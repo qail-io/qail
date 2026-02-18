@@ -17,12 +17,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Setup
     println!("🛠  Setting up benchmark data...");
-    let mut driver = PgDriver::connect("127.0.0.1", 5432, "orion", "qail_test_migration").await?;
+    let mut driver = PgDriver::connect("127.0.0.1", 5432, "postgres", "qail_bench_test").await?;
     setup_benchmark_data(&mut driver).await?;
 
     let sqlx_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect("postgres://orion@127.0.0.1/qail_test_migration")
+        .connect("postgres://postgres@127.0.0.1/qail_bench_test")
         .await?;
 
     println!("📊 Running Benchmarks...\n");
@@ -143,7 +143,7 @@ async fn bench_seaorm() -> Result<f64, Box<dyn std::error::Error>> {
 
     use sea_orm::{Database, DatabaseConnection, Statement, ConnectionTrait};
 
-    let db: DatabaseConnection = Database::connect("postgres://orion@127.0.0.1/qail_test_migration").await?;
+    let db: DatabaseConnection = Database::connect("postgres://postgres@127.0.0.1/qail_bench_test").await?;
 
     let sql = r#"
         WITH high_earners AS (
