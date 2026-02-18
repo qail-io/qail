@@ -6,8 +6,14 @@ use std::fmt::{Result, Write};
 #[cfg(test)]
 mod tests;
 
+/// Pretty-printer for QAIL AST nodes.
+///
+/// Renders a `Qail` command back into human-readable QAIL syntax
+/// with indentation for readability.
 pub struct Formatter {
+    /// Current indentation depth.
     indent_level: usize,
+    /// Output buffer.
     buffer: String,
 }
 
@@ -18,6 +24,7 @@ impl Default for Formatter {
 }
 
 impl Formatter {
+    /// Create a new formatter with default settings.
     pub fn new() -> Self {
         Self {
             indent_level: 0,
@@ -25,6 +32,7 @@ impl Formatter {
         }
     }
 
+    /// Format a query into a readable QAIL string.
     pub fn format(mut self, cmd: &Qail) -> std::result::Result<String, std::fmt::Error> {
         self.visit_cmd(cmd)?;
         Ok(self.buffer)

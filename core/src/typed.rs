@@ -147,8 +147,11 @@ impl PolicyAllowedBy<SystemCap> for Restricted {}
 /// - `P`: Access Policy (default: `Public`)
 #[derive(Debug, Clone, Copy)]
 pub struct TypedColumn<T, P: Policy = Public> {
+    /// Table this column belongs to.
     table: &'static str,
+    /// Column name.
     name: &'static str,
+    /// PhantomData for type and policy params.
     _phantom: PhantomData<(T, P)>,
 }
 
@@ -234,6 +237,7 @@ impl<T, P: Policy> From<&TypedColumn<T, P>> for String {
 
 /// Trait for types that can be used as column references.
 pub trait IntoColumn {
+    /// Get the column name as a string slice.
     fn column_name(&self) -> &str;
 }
 
@@ -502,6 +506,11 @@ impl<T: Table> TypedQail<T> {
     }
     
     /// Type-safe equality filter.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_eq<C, V>(mut self, col: TypedColumn<C>, value: V) -> Self
     where
         V: Into<crate::ast::Value> + ColumnValue<C>,
@@ -511,6 +520,12 @@ impl<T: Table> TypedQail<T> {
     }
     
     /// Type-safe filter with custom operator.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `op` — Comparison operator.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_filter<C, V>(mut self, col: TypedColumn<C>, op: crate::ast::Operator, value: V) -> Self
     where
         V: Into<crate::ast::Value> + ColumnValue<C>,
@@ -520,6 +535,12 @@ impl<T: Table> TypedQail<T> {
     }
     
     /// Add a string-based filter (untyped).
+    ///
+    /// # Arguments
+    ///
+    /// * `column` — Column name.
+    /// * `op` — Comparison operator.
+    /// * `value` — Filter value.
     pub fn filter(mut self, column: impl AsRef<str>, op: crate::ast::Operator, value: impl Into<crate::ast::Value>) -> Self {
         self.inner = self.inner.filter(column, op, value);
         self
@@ -623,6 +644,7 @@ pub trait RequiresRls: Table {}
 ///
 /// Generated bucket structs implement this trait.
 pub trait Bucket {
+    /// The bucket name as a static string.
     fn bucket_name() -> &'static str;
 }
 
@@ -630,6 +652,7 @@ pub trait Bucket {
 ///
 /// Generated queue structs implement this trait.
 pub trait Queue {
+    /// The queue name as a static string.
     fn queue_name() -> &'static str;
 }
 
@@ -637,6 +660,7 @@ pub trait Queue {
 ///
 /// Generated topic structs implement this trait.
 pub trait Topic {
+    /// The topic name as a static string.
     fn topic_name() -> &'static str;
 }
 
@@ -705,6 +729,11 @@ impl<T: Table> RlsQuery<T> {
     }
     
     /// Type-safe equality filter.
+    ///
+    /// # Arguments
+    ///
+    /// * `col` — Typed column descriptor.
+    /// * `value` — Value whose type must match the column's type marker.
     pub fn typed_eq<C, V>(mut self, col: TypedColumn<C>, value: V) -> Self
     where
         V: Into<crate::ast::Value> + ColumnValue<C>,
@@ -713,7 +742,13 @@ impl<T: Table> RlsQuery<T> {
         self
     }
     
-    /// String-based filter.
+    /// String-based filter (untyped).
+    ///
+    /// # Arguments
+    ///
+    /// * `column` — Column name.
+    /// * `op` — Comparison operator.
+    /// * `value` — Filter value.
     pub fn filter(mut self, column: impl AsRef<str>, op: crate::ast::Operator, value: impl Into<crate::ast::Value>) -> Self {
         self.inner = self.inner.filter(column, op, value);
         self

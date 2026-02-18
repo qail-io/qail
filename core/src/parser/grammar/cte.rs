@@ -10,7 +10,7 @@ use nom::{
 };
 
 /// Parse WITH clause including optional RECURSIVE keyword
-/// Syntax: WITH [RECURSIVE] cte_name [(col1, col2)] AS (subquery) [, ...] main_query
+/// Syntax: `WITH [RECURSIVE] cte_name [(col1, col2)] AS (subquery) [, ...] main_query`
 pub fn parse_with_clause(input: &str) -> IResult<&str, (Vec<CTEDef>, bool)> {
     let (input, _) = tag_no_case("with").parse(input)?;
     let (input, _) = multispace1(input)?;

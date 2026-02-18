@@ -14,14 +14,18 @@ pub struct JwtClaims {
     /// Accepts both standard JWT "sub" and engine-style "user_id"
     #[serde(alias = "user_id")]
     pub sub: String,
+    /// Token expiration time (Unix timestamp).
     pub exp: usize,
+    /// User role (e.g. `"admin"`, `"operator"`).
     #[serde(default)]
     pub role: Option<String>,
+    /// Tenant / operator ID embedded in the token.
     #[serde(default)]
     pub tenant_id: Option<String>,
     /// Engine-style: operator_id directly in JWT claims
     #[serde(default)]
     pub operator_id: Option<String>,
+    /// Additional claims not captured by named fields.
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -29,15 +33,20 @@ pub struct JwtClaims {
 /// User context extracted from authentication
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthContext {
+    /// Authenticated user identifier.
     pub user_id: String,
+    /// User role string.
     pub role: String,
+    /// Tenant / operator ID (may be resolved after JWT decode).
     #[serde(default)]
     pub tenant_id: Option<String>,
+    /// Extra JWT claims passed through for downstream use.
     #[serde(default)]
     pub claims: HashMap<String, serde_json::Value>,
 }
 
 impl AuthContext {
+    /// Create an unauthenticated anonymous context.
     pub fn anonymous() -> Self {
         Self {
             user_id: "anonymous".to_string(),
@@ -47,10 +56,12 @@ impl AuthContext {
         }
     }
     
+    /// Check whether the user holds the given role.
     pub fn has_role(&self, role: &str) -> bool {
         self.role == role
     }
     
+    /// Returns `true` if the context represents a real (non-anonymous) user.
     pub fn is_authenticated(&self) -> bool {
         !self.user_id.is_empty() && self.user_id != "anonymous"
     }
@@ -116,12 +127,18 @@ impl AuthContext {
     }
 }
 
+/// JWT validation configuration.
 #[derive(Debug, Clone)]
 pub struct JwtConfig {
+    /// HMAC shared secret (for HS256/HS384/HS512).
     pub secret: Option<String>,
+    /// RSA/EC public key in PEM format (for RS*/ES*).
     pub public_key: Option<String>,
+    /// Signing algorithm (default: HS256).
     pub algorithm: Algorithm,
+    /// Expected `iss` claim (if set, tokens without it are rejected).
     pub issuer: Option<String>,
+    /// Expected `aud` claim.
     pub audience: Option<String>,
 }
 
@@ -137,6 +154,7 @@ impl Default for JwtConfig {
     }
 }
 
+/// Decode and validate a JWT token, returning an [`AuthContext`] on success.
 pub fn validate_jwt(token: &str, config: &JwtConfig) -> Result<AuthContext, GatewayError> {
     let decoding_key = match config.algorithm {
         Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {

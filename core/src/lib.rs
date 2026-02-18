@@ -9,21 +9,35 @@
 
 #[cfg(feature = "analyzer")]
 pub mod analyzer;
+/// Abstract syntax tree types.
 pub mod ast;
+/// Build-time schema validation.
 pub mod build;
+/// Code generation for typed schema modules.
 pub mod codegen;
+/// Configuration types.
 pub mod config;
+/// Error types.
 pub mod error;
+/// SQL formatter.
 pub mod fmt;
+/// Database migration types.
 pub mod migrate;
+/// QAIL query parser.
 pub mod parser;
+/// Row-level security context.
 pub mod rls;
+/// Schema branching.
 pub mod branch;
+/// Schema definitions for validation.
 pub mod schema;
 #[cfg(feature = "analyzer")]
 pub mod transformer;
+/// SQL transpiler (AST to SQL).
 pub mod transpiler;
+/// Typed column and table traits.
 pub mod typed;
+/// Schema validator.
 pub mod validator;
 
 #[cfg(test)]
@@ -34,6 +48,7 @@ pub use parser::parse;
 /// Ergonomic alias for Qail - the primary query builder type.
 pub type Qail = ast::Qail;
 
+/// Common re-exports for convenient wildcard imports.
 pub mod prelude {
     pub use crate::ast::*;
     pub use crate::ast::builders::{

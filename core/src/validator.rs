@@ -10,26 +10,40 @@ use strsim::levenshtein;
 /// Validation error with structured information.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
+    /// Referenced table does not exist in the schema.
     TableNotFound {
+        /// Name of the missing table.
         table: String,
+        /// Closest match from known tables.
         suggestion: Option<String>,
     },
+    /// Referenced column does not exist in the table.
     ColumnNotFound {
+        /// Table the column was looked up in.
         table: String,
+        /// Name of the missing column.
         column: String,
+        /// Closest match from known columns.
         suggestion: Option<String>,
     },
     /// Type mismatch (future: when schema includes types)
     TypeMismatch {
+        /// Table name.
         table: String,
+        /// Column name.
         column: String,
+        /// Expected type.
         expected: String,
+        /// Actual type.
         got: String,
     },
     /// Invalid operator for column type (future)
     InvalidOperator {
+        /// Column name.
         column: String,
+        /// Operator string.
         operator: String,
+        /// Explanation.
         reason: String,
     },
 }
@@ -94,8 +108,11 @@ pub type ValidationResult = Result<(), Vec<ValidationError>>;
 /// Validates query elements against known schema and provides suggestions.
 #[derive(Debug, Clone)]
 pub struct Validator {
+    /// Known table names.
     tables: Vec<String>,
+    /// Columns indexed by table name.
     columns: HashMap<String, Vec<String>>,
+    /// Column types indexed by table.column.
     #[allow(dead_code)]
     column_types: HashMap<String, HashMap<String, String>>,
 }
@@ -126,6 +143,11 @@ impl Validator {
     }
 
     /// Register a table with column types (for future type validation).
+    ///
+    /// # Arguments
+    ///
+    /// * `table` — Table name to register.
+    /// * `cols` — Slice of `(column_name, column_type)` pairs.
     pub fn add_table_with_types(&mut self, table: &str, cols: &[(&str, &str)]) {
         self.tables.push(table.to_string());
         let col_names: Vec<String> = cols.iter().map(|(name, _)| name.to_string()).collect();
@@ -166,7 +188,12 @@ impl Validator {
         }
     }
 
-    /// Check if a column exists in a table. If not, returns structured error.
+    /// Check if a column exists in a table. If not, returns a structured error.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` — Table to look up.
+    /// * `column` — Column name to validate.
     pub fn validate_column(&self, table: &str, column: &str) -> Result<(), ValidationError> {
         // If table doesn't exist, skip column validation (table error takes precedence)
         if !self.tables.contains(&table.to_string()) {

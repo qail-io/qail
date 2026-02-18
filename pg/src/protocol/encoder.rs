@@ -118,6 +118,12 @@ impl PgEncoder {
     /// - parameter count (2 bytes)
     /// - for each parameter: length (4 bytes, -1 for NULL), data
     /// - result format count (2 bytes) - we use 0 (all text)
+    ///
+    /// # Arguments
+    ///
+    /// * `portal` — Destination portal name (empty string for unnamed).
+    /// * `statement` — Source prepared statement name (empty string for unnamed).
+    /// * `params` — Parameter values; `None` entries encode as SQL NULL.
     pub fn encode_bind(portal: &str, statement: &str, params: &[Option<Vec<u8>>]) -> Result<BytesMut, EncodeError> {
         if params.len() > i16::MAX as usize {
             return Err(EncodeError::TooManyParameters(params.len()));
@@ -457,7 +463,9 @@ use bytes::BufMut;
 /// Zero-copy parameter for ultra-fast encoding.
 /// Uses borrowed slices to avoid any allocation or copy.
 pub enum Param<'a> {
+    /// SQL NULL value.
     Null,
+    /// Non-null parameter as a borrowed byte slice.
     Bytes(&'a [u8]),
 }
 

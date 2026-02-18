@@ -118,6 +118,13 @@ pub fn read_overlay_sql(branch_name: &str, table_name: &str) -> String {
 }
 
 /// SQL to insert a CoW write into the overlay.
+///
+/// # Arguments
+///
+/// * `branch_name` — Name of the branch to write to.
+/// * `table_name` — Target table for the overlay row.
+/// * `row_pk` — Primary key of the affected row.
+/// * `operation` — Operation type (`insert`, `update`, `delete`).
 pub fn write_overlay_sql(branch_name: &str, table_name: &str, row_pk: &str, operation: &str) -> String {
     let safe_branch = escape_literal(branch_name);
     let safe_table = escape_literal(table_name);

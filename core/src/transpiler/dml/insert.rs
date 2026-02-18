@@ -5,6 +5,7 @@ use crate::transpiler::SqlGenerator;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
+/// Generate INSERT INTO SQL with VALUES, ON CONFLICT, and RETURNING clauses.
 pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let mut sql = String::from("INSERT INTO ");

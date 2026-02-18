@@ -181,6 +181,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// Create a 429 rate-limited error.
     pub fn rate_limited() -> Self {
         Self {
             code: "RATE_LIMITED".to_string(),
@@ -191,6 +192,7 @@ impl ApiError {
         }
     }
     
+    /// Create a 408 request timeout error.
     pub fn timeout() -> Self {
         Self {
             code: "TIMEOUT".to_string(),
@@ -201,6 +203,7 @@ impl ApiError {
         }
     }
     
+    /// Create a 400 parse error (invalid query syntax).
     pub fn parse_error(msg: impl Into<String>) -> Self {
         Self {
             code: "PARSE_ERROR".to_string(),
@@ -211,6 +214,7 @@ impl ApiError {
         }
     }
     
+    /// Create a 500 query error (raw detail is logged but not sent to client).
     pub fn query_error(msg: impl Into<String>) -> Self {
         // SECURITY: Log the raw error server-side, do NOT send to client.
         // Raw PG errors contain table names, constraint names, column types.
@@ -256,6 +260,7 @@ impl ApiError {
         }
     }
     
+    /// Create a 401 authentication error.
     pub fn auth_error(msg: impl Into<String>) -> Self {
         Self {
             code: "UNAUTHORIZED".to_string(),
@@ -267,6 +272,7 @@ impl ApiError {
         }
     }
     
+    /// Create a 403 forbidden error.
     pub fn forbidden(msg: impl Into<String>) -> Self {
         Self {
             code: "FORBIDDEN".to_string(),
@@ -277,6 +283,7 @@ impl ApiError {
         }
     }
     
+    /// Create a 404 not-found error.
     pub fn not_found(resource: impl Into<String>) -> Self {
         Self {
             code: "NOT_FOUND".to_string(),
@@ -287,6 +294,7 @@ impl ApiError {
         }
     }
     
+    /// Create a 500 internal error (detail is logged but not leaked to client).
     pub fn internal(msg: impl Into<String>) -> Self {
         // SECURITY: Log the raw error server-side, do NOT leak stack traces
         // or PG internals to the client.
@@ -420,21 +428,25 @@ impl ApiError {
 
     // -- Builder methods --
     
+    /// Attach a request ID for tracing.
     pub fn with_request_id(mut self, id: impl Into<String>) -> Self {
         self.request_id = Some(id.into());
         self
     }
     
+    /// Attach a hint for resolving the error.
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
     }
     
+    /// Attach the table that caused the error.
     pub fn with_table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
     
+    /// Attach the column that caused the error.
     pub fn with_column(mut self, column: impl Into<String>) -> Self {
         self.column = Some(column.into());
         self
@@ -596,6 +608,7 @@ pub struct QueryAllowList {
 }
 
 impl QueryAllowList {
+    /// Create a new, disabled allow-list.
     pub fn new() -> Self {
         Self {
             enabled: false,
@@ -657,12 +670,16 @@ impl QueryAllowList {
 /// - `max_joins`: Maximum number of JOIN operations
 #[derive(Debug, Clone)]
 pub struct QueryComplexityGuard {
+    /// Maximum nesting depth (subqueries, CTEs, set operations).
     pub max_depth: usize,
+    /// Maximum number of filter conditions.
     pub max_filters: usize,
+    /// Maximum number of JOIN operations.
     pub max_joins: usize,
 }
 
 impl QueryComplexityGuard {
+    /// Create a complexity guard with custom limits.
     pub fn new(max_depth: usize, max_filters: usize, max_joins: usize) -> Self {
         Self {
             max_depth,

@@ -218,7 +218,7 @@ fn map_type(t: &str) -> &str {
     }
 }
 
-// Stub
+/// Generate ALTER COLUMN SQL (drop or rename column).
 pub fn build_alter_column(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
@@ -456,7 +456,14 @@ pub fn build_drop_sequence(cmd: &Qail, dialect: Dialect) -> String {
     )
 }
 
-/// Generate CREATE TYPE ... AS ENUM SQL.
+/// Generate `CREATE TYPE ... AS ENUM` SQL from an AST command.
+///
+/// Enum values are taken from `cmd.columns` (each as a `Named` expression).
+///
+/// # Arguments
+///
+/// * `cmd` — Qail AST command whose `table` is the type name and `columns` are enum values.
+/// * `dialect` — Target SQL dialect for identifier quoting.
 pub fn build_create_enum(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let values: Vec<String> = cmd
@@ -484,7 +491,14 @@ pub fn build_drop_enum(cmd: &Qail, dialect: Dialect) -> String {
     )
 }
 
-/// Generate ALTER TYPE ... ADD VALUE SQL.
+/// Generate `ALTER TYPE ... ADD VALUE` SQL for one or more new enum values.
+///
+/// Uses `IF NOT EXISTS` to be idempotent.
+///
+/// # Arguments
+///
+/// * `cmd` — Qail AST command whose `table` is the type name and `columns` are the new values.
+/// * `dialect` — Target SQL dialect for identifier quoting.
 pub fn build_alter_enum_add_value(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let mut parts = Vec::new();

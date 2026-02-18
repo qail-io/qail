@@ -8,6 +8,7 @@ use crate::ast::{
 };
 
 impl Qail {
+    /// Set LIMIT.
     pub fn limit(mut self, n: i64) -> Self {
         self.cages.push(Cage {
             kind: CageKind::Limit(n as usize),
@@ -17,6 +18,7 @@ impl Qail {
         self
     }
 
+    /// Sort by column ascending (deprecated, use `.order_asc()`).
     #[deprecated(since = "0.11.0", note = "Use .order_asc(column) instead")]
     pub fn sort_asc(mut self, column: &str) -> Self {
         self.cages.push(Cage {
@@ -32,11 +34,13 @@ impl Qail {
         self
     }
 
+    /// SELECT * (all columns).
     pub fn select_all(mut self) -> Self {
         self.columns.push(Expr::Star);
         self
     }
 
+    /// Add columns by name.
     pub fn columns<I, S>(mut self, cols: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -49,11 +53,13 @@ impl Qail {
         self
     }
 
+    /// Add a single column by name.
     pub fn column(mut self, col: impl AsRef<str>) -> Self {
         self.columns.push(Expr::Named(col.as_ref().to_string()));
         self
     }
 
+    /// Add a WHERE filter with an operator and value.
     pub fn filter(
         mut self,
         column: impl AsRef<str>,
@@ -84,6 +90,7 @@ impl Qail {
         self
     }
 
+    /// Add an OR filter condition.
     pub fn or_filter(
         mut self,
         column: impl AsRef<str>,
@@ -103,22 +110,27 @@ impl Qail {
         self
     }
 
+    /// Filter: column = value.
     pub fn where_eq(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Eq, value)
     }
 
 
+    /// Filter: column = value (alias for `where_eq`).
     pub fn eq(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Eq, value)
     }
 
+    /// Filter: column != value.
     pub fn ne(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Ne, value)
     }
 
+    /// Filter: column > value.
     pub fn gt(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Gt, value)
     }
+    /// Filter: column >= value.
     pub fn gte(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Gte, value)
     }
@@ -128,26 +140,37 @@ impl Qail {
         self.filter(column, Operator::Lt, value)
     }
 
+    /// Filter: column <= value.
     pub fn lte(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Lte, value)
     }
 
+    /// Filter: column IS NULL.
     pub fn is_null(self, column: impl AsRef<str>) -> Self {
         self.filter(column, Operator::IsNull, Value::Null)
     }
 
+    /// Filter: column IS NOT NULL.
     pub fn is_not_null(self, column: impl AsRef<str>) -> Self {
         self.filter(column, Operator::IsNotNull, Value::Null)
     }
 
+    /// Filter: column LIKE pattern.
     pub fn like(self, column: impl AsRef<str>, pattern: impl Into<Value>) -> Self {
         self.filter(column, Operator::Like, pattern)
     }
 
+    /// Filter: column ILIKE pattern.
     pub fn ilike(self, column: impl AsRef<str>, pattern: impl Into<Value>) -> Self {
         self.filter(column, Operator::ILike, pattern)
     }
 
+    /// Filter: column IN (values).
+    ///
+    /// # Arguments
+    ///
+    /// * `column` — Column name to filter on.
+    /// * `values` — Iterable of values for the IN list.
     pub fn in_vals<I, V>(self, column: impl AsRef<str>, values: I) -> Self
     where
         I: IntoIterator<Item = V>,
@@ -157,6 +180,7 @@ impl Qail {
         self.filter(column, Operator::In, Value::Array(arr))
     }
 
+    /// Add ORDER BY clause.
     pub fn order_by(mut self, column: impl AsRef<str>, order: SortOrder) -> Self {
         self.cages.push(Cage {
             kind: CageKind::Sort(order),
@@ -171,14 +195,17 @@ impl Qail {
         self
     }
 
+    /// ORDER BY column DESC.
     pub fn order_desc(self, column: impl AsRef<str>) -> Self {
         self.order_by(column, SortOrder::Desc)
     }
 
+    /// ORDER BY column ASC.
     pub fn order_asc(self, column: impl AsRef<str>) -> Self {
         self.order_by(column, SortOrder::Asc)
     }
 
+    /// Set OFFSET.
     pub fn offset(mut self, n: i64) -> Self {
         self.cages.push(Cage {
             kind: CageKind::Offset(n as usize),
@@ -188,6 +215,7 @@ impl Qail {
         self
     }
 
+    /// GROUP BY columns.
     pub fn group_by<I, S>(mut self, cols: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -211,11 +239,13 @@ impl Qail {
         self
     }
 
+    /// SELECT DISTINCT (all columns).
     pub fn distinct_on_all(mut self) -> Self {
         self.distinct = true;
         self
     }
 
+    /// Add a JOIN clause.
     pub fn join(
         mut self,
         kind: JoinKind,
@@ -237,6 +267,7 @@ impl Qail {
         self
     }
 
+    /// LEFT JOIN.
     pub fn left_join(
         self,
         table: impl AsRef<str>,
@@ -246,6 +277,7 @@ impl Qail {
         self.join(JoinKind::Left, table, left_col, right_col)
     }
 
+    /// INNER JOIN.
     pub fn inner_join(
         self,
         table: impl AsRef<str>,
@@ -315,6 +347,7 @@ impl Qail {
         self
     }
 
+    /// Add RETURNING clause with column names.
     pub fn returning<I, S>(mut self, cols: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -328,11 +361,13 @@ impl Qail {
         self
     }
 
+    /// RETURNING * (all columns).
     pub fn returning_all(mut self) -> Self {
         self.returning = Some(vec![Expr::Star]);
         self
     }
 
+    /// Add payload values (INSERT positional).
     pub fn values<I, V>(mut self, vals: I) -> Self
     where
         I: IntoIterator<Item = V>,
@@ -355,6 +390,7 @@ impl Qail {
         self
     }
 
+    /// Set a column = value pair for UPDATE or INSERT.
     pub fn set_value(mut self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         let payload_cage = self
             .cages

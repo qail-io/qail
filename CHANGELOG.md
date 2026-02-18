@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.6] - 2026-02-18
+
+### Changed
+
+- **Docs:** Comprehensive documentation coverage sweep — all 6 crates now grade A+ (0 missing items)
+  - `qail-core`: 28 items fixed (typed builders, validator, schema registry, transpiler DDL, transformer, migrate schema, AST builders, parser)
+  - `qail-pg`: 14 items fixed (temporal types, driver, pool, connection, encoder, batch, DML encoders, expressions)
+  - `qail-gateway`: 8 items fixed (cache, policy, metrics, schema)
+  - `qail-qdrant`: 32 items fixed (PointId, PayloadValue, Point, ScoredPoint, VectorData, FieldType, Distance, DimensionMismatch)
+  - `qail-workflow`: 24 items fixed (PaymentKind, Currency, ChargeStatus, ChannelKind, StateChange, WorkflowError)
+  - `qail-cli`: 3 items fixed (parse_pg_url, parse_url_parts, snapshot_download)
+- **Docs:** Added `# Arguments` sections to 41 complex functions across all crates
+- **Docs:** Expanded 12 short/placeholder doc comments with full descriptions
+
 ## [0.20.5] - 2026-02-16
 
 ### Changed

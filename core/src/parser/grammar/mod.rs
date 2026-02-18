@@ -1,13 +1,24 @@
+/// Base parsing utilities (identifiers, literals, whitespace).
 pub mod base;
+/// Binary operator parsing (AND, OR, arithmetic).
 pub mod binary_ops;
+/// CASE WHEN expression parsing.
 pub mod case_when;
+/// Clause parsing (WHERE, ORDER BY, LIMIT, etc.).
 pub mod clauses;
+/// Common Table Expression (WITH) parsing.
 pub mod cte;
+/// Data Definition Language parsing (CREATE TABLE, INDEX).
 pub mod ddl;
+/// Data Manipulation Language parsing (INSERT values, ON CONFLICT).
 pub mod dml;
+/// Expression parsing (columns, functions, sub-expressions).
 pub mod expressions;
+/// Function call parsing.
 pub mod functions;
+/// JOIN clause parsing.
 pub mod joins;
+/// Special function parsing (COALESCE, NULLIF, GREATEST, etc.).
 pub mod special_funcs;
 
 use crate::ast::*;

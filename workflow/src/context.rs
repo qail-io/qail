@@ -33,9 +33,13 @@ pub struct WorkflowContext {
 /// Record of a state transition for audit trail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateChange {
+    /// Previous state name.
     pub from: String,
+    /// New state name.
     pub to: String,
+    /// When the transition occurred.
     pub at: DateTime<Utc>,
+    /// Optional human-readable reason for the transition.
     pub reason: Option<String>,
 }
 

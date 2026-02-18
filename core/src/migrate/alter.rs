@@ -18,44 +18,91 @@ use super::types::ColumnType;
 /// ALTER TABLE operation
 #[derive(Debug, Clone)]
 pub enum AlterOp {
+    /// ADD COLUMN.
     AddColumn(Column),
-    DropColumn { name: String, cascade: bool },
-    RenameColumn { from: String, to: String },
+    /// DROP COLUMN \[CASCADE\].
+    DropColumn {
+        /// Column name.
+        name: String,
+        /// Whether to CASCADE.
+        cascade: bool,
+    },
+    /// RENAME COLUMN old TO new.
+    RenameColumn {
+        /// Original column name.
+        from: String,
+        /// New column name.
+        to: String,
+    },
+    /// ALTER COLUMN TYPE [USING expr].
     AlterType {
+        /// Column name.
         column: String,
+        /// New data type.
         new_type: ColumnType,
+        /// Optional USING expression for type conversion.
         using: Option<String>,
     },
+    /// ALTER COLUMN SET NOT NULL.
     SetNotNull(String),
+    /// ALTER COLUMN DROP NOT NULL.
     DropNotNull(String),
-    SetDefault { column: String, expr: String },
+    /// ALTER COLUMN SET DEFAULT expr.
+    SetDefault {
+        /// Column name.
+        column: String,
+        /// Default expression.
+        expr: String,
+    },
+    /// ALTER COLUMN DROP DEFAULT.
     DropDefault(String),
+    /// ADD CONSTRAINT.
     AddConstraint {
+        /// Constraint name.
         name: String,
+        /// Constraint definition.
         constraint: TableConstraint,
     },
-    DropConstraint { name: String, cascade: bool },
+    /// DROP CONSTRAINT \[CASCADE\].
+    DropConstraint {
+        /// Constraint name.
+        name: String,
+        /// Whether to CASCADE.
+        cascade: bool,
+    },
+    /// RENAME TO new_name.
     RenameTable(String),
+    /// SET SCHEMA new_schema.
     SetSchema(String),
+    /// ENABLE / DISABLE ROW LEVEL SECURITY.
     SetRowLevelSecurity(bool),
+    /// FORCE / NO FORCE ROW LEVEL SECURITY.
     ForceRowLevelSecurity(bool),
 }
 
 /// Table-level constraints
 #[derive(Debug, Clone)]
 pub enum TableConstraint {
+    /// PRIMARY KEY (columns).
     PrimaryKey(Vec<String>),
+    /// UNIQUE (columns).
     Unique(Vec<String>),
+    /// CHECK (expr).
     Check(CheckExpr),
     /// FOREIGN KEY (cols) REFERENCES table(ref_cols)
     ForeignKey {
+        /// Source columns.
         columns: Vec<String>,
+        /// Referenced table.
         ref_table: String,
+        /// Referenced columns.
         ref_columns: Vec<String>,
     },
     /// EXCLUDE USING method (...)
     Exclude {
+        /// Index method.
         method: String,
+        /// Exclusion elements.
         elements: Vec<String>,
     },
 }
@@ -63,9 +110,13 @@ pub enum TableConstraint {
 /// Fluent builder for ALTER TABLE statements
 #[derive(Debug, Clone)]
 pub struct AlterTable {
+    /// Target table.
     pub table: String,
+    /// Queued operations.
     pub ops: Vec<AlterOp>,
+    /// ALTER TABLE ONLY.
     pub only: bool,
+    /// IF EXISTS.
     pub if_exists: bool,
 }
 
@@ -125,6 +176,7 @@ impl AlterTable {
         self
     }
 
+    /// ALTER COLUMN TYPE.
     pub fn set_type(mut self, column: impl Into<String>, new_type: ColumnType) -> Self {
         self.ops.push(AlterOp::AlterType {
             column: column.into(),
@@ -134,6 +186,7 @@ impl AlterTable {
         self
     }
 
+    /// ALTER COLUMN TYPE … USING expression.
     pub fn set_type_using(
         mut self,
         column: impl Into<String>,
@@ -160,6 +213,7 @@ impl AlterTable {
         self
     }
 
+    /// ALTER COLUMN SET DEFAULT.
     pub fn set_default(mut self, column: impl Into<String>, expr: impl Into<String>) -> Self {
         self.ops.push(AlterOp::SetDefault {
             column: column.into(),
@@ -168,11 +222,13 @@ impl AlterTable {
         self
     }
 
+    /// ALTER COLUMN DROP DEFAULT.
     pub fn drop_default(mut self, column: impl Into<String>) -> Self {
         self.ops.push(AlterOp::DropDefault(column.into()));
         self
     }
 
+    /// ADD CONSTRAINT.
     pub fn add_constraint(
         mut self,
         name: impl Into<String>,
@@ -185,6 +241,7 @@ impl AlterTable {
         self
     }
 
+    /// DROP CONSTRAINT.
     pub fn drop_constraint(mut self, name: impl Into<String>) -> Self {
         self.ops.push(AlterOp::DropConstraint {
             name: name.into(),
@@ -193,6 +250,7 @@ impl AlterTable {
         self
     }
 
+    /// DROP CONSTRAINT CASCADE.
     pub fn drop_constraint_cascade(mut self, name: impl Into<String>) -> Self {
         self.ops.push(AlterOp::DropConstraint {
             name: name.into(),
@@ -201,21 +259,25 @@ impl AlterTable {
         self
     }
 
+    /// RENAME TABLE TO.
     pub fn rename_to(mut self, name: impl Into<String>) -> Self {
         self.ops.push(AlterOp::RenameTable(name.into()));
         self
     }
 
+    /// SET SCHEMA.
     pub fn set_schema(mut self, schema: impl Into<String>) -> Self {
         self.ops.push(AlterOp::SetSchema(schema.into()));
         self
     }
 
+    /// ENABLE ROW LEVEL SECURITY.
     pub fn enable_rls(mut self) -> Self {
         self.ops.push(AlterOp::SetRowLevelSecurity(true));
         self
     }
 
+    /// DISABLE ROW LEVEL SECURITY.
     pub fn disable_rls(mut self) -> Self {
         self.ops.push(AlterOp::SetRowLevelSecurity(false));
         self

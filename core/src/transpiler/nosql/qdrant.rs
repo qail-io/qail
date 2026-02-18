@@ -1,6 +1,8 @@
 use crate::ast::*;
 
+/// Trait for converting QAIL AST to Qdrant vector-search JSON.
 pub trait ToQdrant {
+    /// Convert a QAIL query into a Qdrant search/upsert/delete JSON body.
     fn to_qdrant_search(&self) -> String;
 }
 

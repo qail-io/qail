@@ -42,7 +42,10 @@ pub mod prelude {
 /// Distance metrics for vector similarity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Distance {
+    /// Cosine similarity (normalised dot product).
     Cosine,
+    /// Euclidean (L2) distance.
     Euclidean,
+    /// Dot product similarity.
     Dot,
 }

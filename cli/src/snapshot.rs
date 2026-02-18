@@ -77,7 +77,14 @@ pub async fn snapshot_list(collection: &str, url: &str) -> Result<Vec<SnapshotIn
     Ok(result.result)
 }
 
-/// Download a snapshot to a file.
+/// Download a snapshot to a local file.
+///
+/// # Arguments
+///
+/// * `collection` — Qdrant collection name.
+/// * `snapshot_name` — Name of the snapshot to download.
+/// * `output_path` — Local file path to write the snapshot archive to.
+/// * `url` — Qdrant REST API base URL.
 pub async fn snapshot_download(collection: &str, snapshot_name: &str, output_path: &str, url: &str) -> Result<()> {
     println!("{} Downloading snapshot to '{}'...", "→".cyan(), output_path.yellow());
 

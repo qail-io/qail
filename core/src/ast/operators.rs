@@ -3,75 +3,144 @@ use serde::{Deserialize, Serialize};
 /// The action type (SQL operation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
+    /// SELECT query.
     Get,
+    /// COUNT query.
     Cnt,
+    /// UPDATE statement.
     Set,
+    /// DELETE statement.
     Del,
+    /// INSERT statement.
     Add,
+    /// Code generation.
     Gen,
+    /// CREATE TABLE.
     Make,
+    /// DROP TABLE.
     Drop,
+    /// ALTER TABLE (add column).
     Mod,
+    /// UPSERT / ON CONFLICT … DO UPDATE.
     Over,
+    /// CTE / WITH clause.
     With,
+    /// CREATE INDEX.
     Index,
+    /// DROP INDEX.
     DropIndex,
+    /// ALTER TABLE (generic).
     Alter,
+    /// ALTER TABLE … DROP COLUMN.
     AlterDrop,
+    /// ALTER TABLE … ALTER COLUMN TYPE.
     AlterType,
+    /// BEGIN TRANSACTION.
     TxnStart,
+    /// COMMIT.
     TxnCommit,
+    /// ROLLBACK.
     TxnRollback,
+    /// Bulk INSERT / COPY.
     Put,
+    /// DROP COLUMN.
     DropCol,
+    /// ALTER TABLE … RENAME COLUMN.
     RenameCol,
+    /// JSONB_TO_RECORDSET.
     JsonTable,
+    /// COPY … TO STDOUT.
     Export,
+    /// TRUNCATE TABLE.
     Truncate,
+    /// EXPLAIN.
     Explain,
+    /// EXPLAIN ANALYZE.
     ExplainAnalyze,
+    /// LOCK TABLE.
     Lock,
+    /// CREATE MATERIALIZED VIEW.
     CreateMaterializedView,
+    /// REFRESH MATERIALIZED VIEW.
     RefreshMaterializedView,
+    /// DROP MATERIALIZED VIEW.
     DropMaterializedView,
+    /// LISTEN (async notifications).
     Listen,
+    /// NOTIFY (async notifications).
     Notify,
+    /// UNLISTEN (async notifications).
     Unlisten,
+    /// SAVEPOINT.
     Savepoint,
+    /// RELEASE SAVEPOINT.
     ReleaseSavepoint,
+    /// ROLLBACK TO SAVEPOINT.
     RollbackToSavepoint,
+    /// CREATE VIEW.
     CreateView,
+    /// DROP VIEW.
     DropView,
+    /// Full-text or vector search.
     Search,
+    /// INSERT … ON CONFLICT DO UPDATE.
     Upsert,
+    /// Cursor-based scrolling.
     Scroll,
+    /// Create vector collection (Qdrant).
     CreateCollection,
+    /// Delete vector collection (Qdrant).
     DeleteCollection,
+    /// CREATE FUNCTION.
     CreateFunction,
+    /// DROP FUNCTION.
     DropFunction,
+    /// CREATE TRIGGER.
     CreateTrigger,
+    /// DROP TRIGGER.
     DropTrigger,
+    /// CREATE EXTENSION.
     CreateExtension,
+    /// DROP EXTENSION.
     DropExtension,
+    /// COMMENT ON.
     CommentOn,
+    /// CREATE SEQUENCE.
     CreateSequence,
+    /// DROP SEQUENCE.
     DropSequence,
+    /// CREATE TYPE … AS ENUM.
     CreateEnum,
+    /// DROP TYPE.
     DropEnum,
+    /// ALTER TYPE … ADD VALUE.
     AlterEnumAddValue,
+    /// ALTER COLUMN SET NOT NULL.
     AlterSetNotNull,
+    /// ALTER COLUMN DROP NOT NULL.
     AlterDropNotNull,
+    /// ALTER COLUMN SET DEFAULT.
     AlterSetDefault,
+    /// ALTER COLUMN DROP DEFAULT.
     AlterDropDefault,
+    /// ALTER TABLE ENABLE ROW LEVEL SECURITY.
     AlterEnableRls,
+    /// ALTER TABLE DISABLE ROW LEVEL SECURITY.
     AlterDisableRls,
+    /// ALTER TABLE FORCE ROW LEVEL SECURITY.
     AlterForceRls,
+    /// ALTER TABLE NO FORCE ROW LEVEL SECURITY.
     AlterNoForceRls,
     // Session & procedural commands
+    /// CALL procedure.
     Call,
+    /// DO anonymous block.
     Do,
+    /// SET session variable.
     SessionSet,
+    /// SHOW session variable.
     SessionShow,
+    /// RESET session variable.
     SessionReset,
 }
 
@@ -155,51 +224,91 @@ impl std::fmt::Display for Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LogicalOp {
     #[default]
+    /// Logical AND.
     And,
+    /// Logical OR.
     Or,
 }
 
+/// Sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortOrder {
+    /// Ascending.
     Asc,
+    /// Descending.
     Desc,
+    /// Ascending, NULLs first.
     AscNullsFirst,
+    /// Ascending, NULLs last.
     AscNullsLast,
+    /// Descending, NULLs first.
     DescNullsFirst,
+    /// Descending, NULLs last.
     DescNullsLast,
 }
 
+/// Comparison / filtering operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operator {
+    /// `=`
     Eq,
+    /// `!=`
     Ne,
+    /// `>`
     Gt,
+    /// `>=`
     Gte,
+    /// `<`
     Lt,
+    /// `<=`
     Lte,
+    /// Case-insensitive LIKE.
     Fuzzy,
+    /// IN (list).
     In,
+    /// NOT IN (list).
     NotIn,
+    /// IS NULL.
     IsNull,
+    /// IS NOT NULL.
     IsNotNull,
+    /// JSONB `@>` containment.
     Contains,
+    /// JSONB `?` key existence.
     KeyExists,
+    /// JSON_EXISTS path check.
     JsonExists,
+    /// JSON_QUERY path extraction.
     JsonQuery,
+    /// JSON_VALUE scalar extraction.
     JsonValue,
+    /// LIKE pattern match.
     Like,
+    /// NOT LIKE.
     NotLike,
+    /// ILIKE (case-insensitive).
     ILike,
+    /// NOT ILIKE.
     NotILike,
+    /// BETWEEN low AND high.
     Between,
+    /// NOT BETWEEN.
     NotBetween,
+    /// EXISTS (subquery).
     Exists,
+    /// NOT EXISTS (subquery).
     NotExists,
+    /// POSIX regex `~`.
     Regex,
+    /// Case-insensitive regex `~*`.
     RegexI,
+    /// SIMILAR TO.
     SimilarTo,
+    /// JSONB `<@` contained-by.
     ContainedBy,
+    /// Array `&&` overlap.
     Overlaps,
+    /// Full-text search `@@`.
     TextSearch,
     /// `?|` — does JSONB contain ANY of the given keys?
     KeyExistsAny,
@@ -261,6 +370,7 @@ impl Operator {
         )
     }
 
+    /// Returns `true` for simple binary operators (=, !=, >, <, LIKE, ILIKE, etc.).
     pub fn is_simple_binary(&self) -> bool {
         matches!(
             self,
@@ -278,18 +388,30 @@ impl Operator {
     }
 }
 
+/// Aggregate function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregateFunc {
+    /// COUNT(*).
     Count,
+    /// SUM.
     Sum,
+    /// AVG.
     Avg,
+    /// MIN.
     Min,
+    /// MAX.
     Max,
+    /// ARRAY_AGG.
     ArrayAgg,
+    /// STRING_AGG.
     StringAgg,
+    /// JSON_AGG.
     JsonAgg,
+    /// JSONB_AGG.
     JsonbAgg,
+    /// BOOL_AND.
     BoolAnd,
+    /// BOOL_OR.
     BoolOr,
 }
 
@@ -314,26 +436,39 @@ impl std::fmt::Display for AggregateFunc {
 /// Join Type
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum JoinKind {
+    /// INNER JOIN.
     Inner,
+    /// LEFT (OUTER) JOIN.
     Left,
+    /// RIGHT (OUTER) JOIN.
     Right,
+    /// LATERAL join.
     Lateral,
+    /// FULL (OUTER) JOIN.
     Full,
+    /// CROSS JOIN.
     Cross,
 }
 
 /// Set operation type for combining queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SetOp {
+    /// UNION (de-duplicated).
     Union,
+    /// UNION ALL.
     UnionAll,
+    /// INTERSECT.
     Intersect,
+    /// EXCEPT.
     Except,
 }
 
+/// ALTER TABLE modification kind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ModKind {
+    /// ADD.
     Add,
+    /// DROP.
     Drop,
 }
 
@@ -341,9 +476,13 @@ pub enum ModKind {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum GroupByMode {
     #[default]
+    /// Standard GROUP BY.
     Simple,
+    /// GROUP BY ROLLUP.
     Rollup,
+    /// GROUP BY CUBE.
     Cube,
+    /// GROUP BY GROUPING SETS.
     GroupingSets(Vec<Vec<String>>),
 }
 
@@ -357,23 +496,31 @@ impl GroupByMode {
 /// Row locking mode for SELECT...FOR UPDATE/SHARE
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LockMode {
+    /// FOR UPDATE.
     Update,
+    /// FOR NO KEY UPDATE.
     NoKeyUpdate,
+    /// FOR SHARE.
     Share,
+    /// FOR KEY SHARE.
     KeyShare,
 }
 
 /// OVERRIDING clause for INSERT with GENERATED columns
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverridingKind {
+    /// OVERRIDING SYSTEM VALUE.
     SystemValue,
+    /// OVERRIDING USER VALUE.
     UserValue,
 }
 
 /// TABLESAMPLE sampling method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SampleMethod {
+    /// Random row sampling (row-level).
     Bernoulli,
+    /// Block-level sampling.
     System,
 }
 
@@ -381,7 +528,10 @@ pub enum SampleMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Distance {
     #[default]
+    /// Cosine similarity.
     Cosine,
+    /// Euclidean distance.
     Euclid,
+    /// Dot product.
     Dot,
 }

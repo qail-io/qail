@@ -165,20 +165,30 @@ pub struct GatewayConfig {
 /// fall back to the global default.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct GuardOverrides {
+    /// Override for `max_result_rows`.
     pub max_result_rows: Option<usize>,
+    /// Override for `statement_timeout_ms`.
     pub statement_timeout_ms: Option<u32>,
+    /// Override for `explain_max_cost`.
     pub explain_max_cost: Option<f64>,
+    /// Override for `explain_max_rows`.
     pub explain_max_rows: Option<u64>,
+    /// Override for `max_expand_depth`.
     pub max_expand_depth: Option<usize>,
 }
 
 /// Resolved limits for a specific request, after applying role overrides.
 #[derive(Debug, Clone)]
 pub struct EffectiveLimits {
+    /// Maximum rows returned per query.
     pub max_result_rows: usize,
+    /// Statement timeout in milliseconds.
     pub statement_timeout_ms: u32,
+    /// EXPLAIN max cost threshold.
     pub explain_max_cost: f64,
+    /// EXPLAIN max row estimate threshold.
     pub explain_max_rows: u64,
+    /// Maximum expand (JOIN) depth.
     pub max_expand_depth: usize,
 }
 
