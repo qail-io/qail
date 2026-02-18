@@ -1,12 +1,22 @@
-//! QAIL Encoder - Lightweight wire protocol encoding
+//! QAIL Encoder — C FFI for QAIL wire protocol encoding
 //!
-//! This crate provides:
-//! - AST to PostgreSQL wire protocol encoding
-//! - QAIL text to SQL transpilation
-//! - C FFI for language bindings
+//! Pure encoding library: **no I/O, no TLS, no async**.
+//! Languages bring their own transport layer (Go, Swift, C, etc.)
 //!
-//! NO I/O, NO TLS, NO async - just pure encoding.
-//! Languages handle their own I/O (Zig, Go, etc.)
+//! ## Features
+//!
+//! - **Transpiler** — QAIL text → SQL string (`qail_transpile`, `qail_validate`)
+//! - **Simple Query** — AST → PostgreSQL `'Q'` message bytes (`qail_encode_get`)
+//! - **Extended Query Protocol** — `Parse`/`Bind`/`Execute`/`Sync` message encoding
+//! - **Pipeline batching** — uniform batch + Bind/Execute batch for prepared statements
+//! - **Response parsing** — decode `DataRow`, `CommandComplete`, `ErrorResponse` (feature-gated: `response`)
+//!
+//! ## Safety
+//!
+//! - All FFI functions are panic-safe via `ffi_catch!` (catches unwind, sets thread-local error)
+//! - Null pointer checks on every public function
+//! - Caller-owned memory with explicit `qail_free` / `qail_free_bytes` deallocation
+//! - Thread-local error reporting via `qail_last_error()`
 
 // FFI functions check pointers before dereferencing, clippy doesn't understand this pattern
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
