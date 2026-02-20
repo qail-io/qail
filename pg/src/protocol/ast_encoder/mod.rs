@@ -91,6 +91,12 @@ impl AstEncoder {
         sql_buf.clear();
         params.clear();
 
+        // Raw SQL pass-through: write the SQL verbatim (no AST encoding)
+        if cmd.is_raw_sql() {
+            sql_buf.extend_from_slice(cmd.table.as_bytes());
+            return Ok(());
+        }
+
         match cmd.action {
             Action::Get | Action::With => { dml::encode_select(cmd, sql_buf, params).ok(); }
             Action::Cnt => {
@@ -133,6 +139,9 @@ impl AstEncoder {
         Action::SessionSet => ddl::encode_session_set(cmd, sql_buf),
         Action::SessionShow => ddl::encode_session_show(cmd, sql_buf),
         Action::SessionReset => ddl::encode_session_reset(cmd, sql_buf),
+        Action::Listen => ddl::encode_listen(cmd, sql_buf),
+        Action::Unlisten => ddl::encode_unlisten(cmd, sql_buf),
+        Action::Notify => ddl::encode_notify(cmd, sql_buf),
             _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
         Ok(())
@@ -142,6 +151,13 @@ impl AstEncoder {
     pub fn encode_cmd_sql(cmd: &Qail) -> EncodeSqlResult {
         let mut sql_buf = BytesMut::with_capacity(256);
         let mut params: Vec<Option<Vec<u8>>> = Vec::new();
+
+        // Raw SQL pass-through: write the SQL verbatim (no AST encoding)
+        if cmd.is_raw_sql() {
+            sql_buf.extend_from_slice(cmd.table.as_bytes());
+            let sql = String::from_utf8_lossy(&sql_buf).to_string();
+            return Ok((sql, params));
+        }
 
         match cmd.action {
             Action::Get | Action::With => { dml::encode_select(cmd, &mut sql_buf, &mut params).ok(); }
@@ -184,6 +200,9 @@ impl AstEncoder {
             Action::SessionSet => ddl::encode_session_set(cmd, &mut sql_buf),
             Action::SessionShow => ddl::encode_session_show(cmd, &mut sql_buf),
             Action::SessionReset => ddl::encode_session_reset(cmd, &mut sql_buf),
+            Action::Listen => ddl::encode_listen(cmd, &mut sql_buf),
+            Action::Unlisten => ddl::encode_unlisten(cmd, &mut sql_buf),
+            Action::Notify => ddl::encode_notify(cmd, &mut sql_buf),
             _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
 
@@ -580,5 +599,59 @@ mod tests {
         let wire_str = String::from_utf8_lossy(&buf);
         assert!(wire_str.contains("CREATE TABLE"), "Should contain DDL: {}", wire_str);
         assert!(wire_str.contains("SELECT"), "Should contain DML: {}", wire_str);
+    }
+
+    // ================================================================
+    // Raw SQL pass-through tests
+    // ================================================================
+
+    #[test]
+    fn test_raw_sql_passes_through_verbatim() {
+        let sql = "SELECT id, name FROM users WHERE name ILIKE '%test%'";
+        let cmd = Qail::raw_sql(sql);
+
+        let (encoded_sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert_eq!(encoded_sql, sql, "Raw SQL must pass through verbatim");
+        assert!(params.is_empty(), "Raw SQL should have no params");
+    }
+
+    #[test]
+    fn test_raw_sql_complex_query() {
+        let sql = "SELECT k.id, k.title FROM ai_knowledge_base k WHERE EXISTS (SELECT 1 FROM unnest(k.keywords) kw WHERE kw ILIKE $1)";
+        let cmd = Qail::raw_sql(sql);
+
+        let (encoded_sql, _) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(encoded_sql, sql);
+    }
+
+    #[test]
+    fn test_raw_sql_with_cte() {
+        let sql = "WITH ranked AS (SELECT *, ROW_NUMBER() OVER () AS rn FROM orders) SELECT * FROM ranked WHERE rn <= 10";
+        let cmd = Qail::raw_sql(sql);
+
+        let (encoded_sql, _) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(encoded_sql, sql);
+    }
+
+    #[test]
+    fn test_regular_get_not_detected_as_raw_sql() {
+        let cmd = Qail::get("users").columns(["id", "name"]);
+        assert!(!cmd.is_raw_sql(), "Normal GET should not be detected as raw SQL");
+
+        let (sql, _) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert!(sql.contains("SELECT"), "Normal GET should produce SELECT");
+        assert!(sql.contains("FROM users"), "Normal GET should have FROM clause");
+    }
+
+    #[test]
+    fn test_raw_sql_wire_encoding() {
+        let sql = "SELECT 1";
+        let cmd = Qail::raw_sql(sql);
+
+        let (wire, params) = AstEncoder::encode_cmd(&cmd).unwrap();
+        let wire_str = String::from_utf8_lossy(&wire);
+        assert!(wire_str.contains("SELECT 1"), "Wire encoding should contain raw SQL: {}", wire_str);
+        assert!(params.is_empty());
     }
 }

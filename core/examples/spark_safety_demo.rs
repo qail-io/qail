@@ -320,7 +320,7 @@ fn main() {
     println!("   SQL:   {}\n", q.to_sql());
 
     // 5c. Super admin — proof still REQUIRED (type-level), but no filter injected
-    let token = qail_core::rls::SuperAdminToken::issue();
+    let token = qail_core::rls::SuperAdminToken::for_system_process("demo_super_admin");
     let admin_ctx = RlsContext::super_admin(token);
     let q = Qail::typed(Orders)
         .typed_column(orders::id)
