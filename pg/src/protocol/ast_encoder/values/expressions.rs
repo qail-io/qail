@@ -9,21 +9,44 @@ use super::super::helpers::{i64_to_bytes, write_param_placeholder, NUMERIC_VALUE
 
 /// Encode column list to buffer.
 pub fn encode_columns(columns: &[Expr], buf: &mut BytesMut) {
+    encode_columns_with_params(columns, buf, None);
+}
+
+/// Encode column list with shared params (for subquery param sharing).
+pub fn encode_columns_with_params(
+    columns: &[Expr],
+    buf: &mut BytesMut,
+    params: Option<&mut Vec<Option<Vec<u8>>>>,
+) {
     if columns.is_empty() {
         buf.extend_from_slice(b"*");
         return;
     }
 
+    // We need to reborrow params for each iteration
+    let mut params_opt = params;
     for (i, col) in columns.iter().enumerate() {
         if i > 0 {
             buf.extend_from_slice(b", ");
         }
-        encode_column_expr(col, buf);
+        encode_column_expr_inner(col, buf, params_opt.as_deref_mut());
     }
 }
 
 /// Encode a single column expression (supports complex expressions).
 pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
+    encode_column_expr_inner(col, buf, None);
+}
+
+/// Encode a single column expression with optional shared params.
+///
+/// When `params` is `Some`, subqueries share the outer query's parameter
+/// buffer so that `$1, $2, ...` numbering is continuous.
+fn encode_column_expr_inner(
+    col: &Expr,
+    buf: &mut BytesMut,
+    mut params: Option<&mut Vec<Option<Vec<u8>>>>,
+) {
     match col {
         Expr::Star => buf.extend_from_slice(b"*"),
         Expr::Named(name) => buf.extend_from_slice(name.as_bytes()),
@@ -329,11 +352,19 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
         }
         Expr::Subquery { query, alias } => {
             // Encode scalar subquery: (SELECT ... LIMIT 1)
+            // When params is available, share it so $N numbering is continuous.
             buf.extend_from_slice(b"(");
-            let mut sub_buf = BytesMut::with_capacity(128);
-            let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
-            if let Ok(()) = super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params) {
-                buf.extend_from_slice(&sub_buf);
+            match params {
+                Some(ref mut p) => {
+                    let _ = super::super::dml::encode_select(query, buf, p);
+                }
+                None => {
+                    let mut sub_buf = BytesMut::with_capacity(128);
+                    let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
+                    if let Ok(()) = super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params) {
+                        buf.extend_from_slice(&sub_buf);
+                    }
+                }
             }
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
@@ -347,10 +378,17 @@ pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
                 buf.extend_from_slice(b"NOT ");
             }
             buf.extend_from_slice(b"EXISTS (");
-            let mut sub_buf = BytesMut::with_capacity(128);
-            let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
-            if let Ok(()) = super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params) {
-                buf.extend_from_slice(&sub_buf);
+            match params {
+                Some(ref mut p) => {
+                    let _ = super::super::dml::encode_select(query, buf, p);
+                }
+                None => {
+                    let mut sub_buf = BytesMut::with_capacity(128);
+                    let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
+                    if let Ok(()) = super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params) {
+                        buf.extend_from_slice(&sub_buf);
+                    }
+                }
             }
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
@@ -483,6 +521,16 @@ pub fn encode_conditions(
         if i > 0 {
             buf.extend_from_slice(b" AND ");
         }
+
+        // raw_where() pattern: Expr::Raw + IsNotNull + Null → emit raw SQL as-is
+        if matches!(&cond.left, Expr::Raw(_))
+            && cond.op == Operator::IsNotNull
+            && matches!(&cond.value, Value::Null)
+        {
+            encode_expr(&cond.left, buf);
+            continue;
+        }
+
         encode_expr(&cond.left, buf);
 
         match cond.op {

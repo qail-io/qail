@@ -223,3 +223,18 @@ impl From<Option<bool>> for Value {
         }
     }
 }
+
+/// Convert an Expr into a Value for use in correlated subquery filters.
+///
+/// # Example
+/// ```ignore
+/// use qail_core::ast::builders::col;
+///
+/// // WHERE session_id = parent_table.id
+/// .eq("session_id", col("parent_table.id"))
+/// ```
+impl From<crate::ast::Expr> for Value {
+    fn from(expr: crate::ast::Expr) -> Self {
+        Value::Expr(Box::new(expr))
+    }
+}

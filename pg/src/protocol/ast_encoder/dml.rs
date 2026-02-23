@@ -6,7 +6,7 @@ use bytes::BytesMut;
 use qail_core::ast::{CTEDef, CageKind, Expr, GroupByMode, JoinKind, Qail, SortOrder};
 
 use super::helpers::write_usize;
-use super::values::{encode_columns, encode_conditions, encode_expr, encode_join_value, encode_value};
+use super::values::{encode_columns, encode_columns_with_params, encode_conditions, encode_expr, encode_join_value, encode_operator, encode_value};
 
 /// Encode a SELECT statement directly to bytes.
 ///
@@ -36,7 +36,7 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         buf.extend_from_slice(b"DISTINCT ");
     }
 
-    encode_columns(&cmd.columns, buf);
+    encode_columns_with_params(&cmd.columns, buf, Some(params));
 
     // FROM
     buf.extend_from_slice(b" FROM ");
@@ -65,7 +65,9 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
                     buf.extend_from_slice(b" AND ");
                 }
                 encode_expr(&cond.left, buf);
-                buf.extend_from_slice(b" = ");
+                buf.extend_from_slice(b" ");
+                encode_operator(&cond.op, buf);
+                buf.extend_from_slice(b" ");
                 encode_join_value(&cond.value, buf);
             }
         }

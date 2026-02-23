@@ -120,6 +120,20 @@ impl ExprExt for Expr {
                 args,
                 alias: Some(alias.to_string()),
             },
+            Expr::Subquery { query, .. } => Expr::Subquery {
+                query,
+                alias: Some(alias.to_string()),
+            },
+            Expr::Exists { query, negated, .. } => Expr::Exists {
+                query,
+                negated,
+                alias: Some(alias.to_string()),
+            },
+            Expr::Collate { expr, collation, .. } => Expr::Collate {
+                expr,
+                collation,
+                alias: Some(alias.to_string()),
+            },
             other => other, // Star, Aliased, Literal, etc. - return as-is
         }
     }
