@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.21.0] - 2026-02-20
+## [0.21.0] - 2026-01-24
 
 ### Breaking Changes ⚠️
 
@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Core:** `rls_proof_demo` and `spark_safety_demo` examples updated to use named constructors
 - **Core:** All RLS integration tests updated to use named constructors
 
-## [0.20.6] - 2026-02-18
+## [0.20.6] - 2026-01-05
 
 ### Changed
 
@@ -44,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Docs:** Added `# Arguments` sections to 41 complex functions across all crates
 - **Docs:** Expanded 12 short/placeholder doc comments with full descriptions
 
-## [0.20.5] - 2026-02-16
+## [0.20.5] - 2025-12-15
 
 ### Changed
 
@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Project:** Closed `bincode` 3.0.0 PR — tombstone release (project abandoned)
 - **Gateway:** Migrated binary endpoint from `bincode` to `postcard` — actively maintained, smaller payloads
 
-## [0.20.4] - 2026-02-16
+## [0.20.4] - 2025-12-15
 
 ### Added
 
@@ -73,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Git:** Scrubbed ~150 MB of build artifacts from history (`.so`, `.dylib`, `.a`, `.o`, `zig-cache/`, `docs/book/`, PHP build cache)
 - **Git:** Removed `schema.qail` (production DB schema) from all historical commits
 
-## [0.20.3] - 2026-02-16
+## [0.20.3] - 2025-12-15
 
 ### Added
 
@@ -93,7 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gateway:** Fixed 6 rustdoc errors (private intra-doc links, unclosed HTML tag, bare URLs)
 - **Docs:** Corrected license badge and footer in README.md from MIT to Apache-2.0
 
-## [0.20.2] - 2026-02-12
+## [0.20.2] - 2025-12-09
 
 ### Added
 
@@ -101,14 +101,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SDK:** Generated build artifacts for Swift, TypeScript, and Kotlin SDKs
 - **Gateway:** Fast query execution endpoint (`/qail/fast`) with shape-based caching
 
-## [0.20.1] - 2026-02-11
+## [0.20.1] - 2025-11-11
 
 ### Added
 
 - **PG:** Transaction-local RLS — tenant context now scoped to transaction lifetime
 - **PG:** Prepared statement caching for repeated query patterns
 
-## [0.20.0] - 2026-02-10
+## [0.20.0] - 2025-11-06
 
 ### Added
 
@@ -125,14 +125,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Core:** Redis module removed (replaced by PostgreSQL-native caching)
 
-## [0.19.1] - 2026-02-10
+## [0.19.1] - 2025-10-24
 
 ### Changed
 
 - **Core:** Replaced stringly-typed column schema with `ColumnType` AST — type-safe schema representation
 - **Docs:** README update with improved examples
 
-## [0.19.0] - 2026-02-09
+## [0.19.0] - 2025-10-24
 
 ### Added
 
@@ -144,7 +144,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gateway:** P0 fixes — rate limiter correctness, REST response caching, compression middleware
 - **Gateway:** Clippy cleanup across workspace
 
-## [0.18.6] - 2026-02-10
+## [0.18.6] - 2025-10-14
 
 ### Added
 
@@ -152,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Core:** `rls_proof_demo` and `spark_safety_demo` — comprehensive compile-time safety showcases
 - **Core:** RLS Proof Witness — compile-time tenant enforcement patterns
 
-## [0.18.5] - 2026-02-10
+## [0.18.5] - 2025-10-14
 
 
 ### Added
@@ -173,7 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PG:** `battle_qail_row` example now requires `chrono` and `uuid` features — no longer breaks `cargo test` without feature flags
 - **CLI:** Removed ~166 lines of duplicate policy parsing code from `introspection.rs` (moved to core)
 
-## [0.15.9] - 2026-02-08
+## [0.15.9] - 2025-09-29
 
 ### Added
 
@@ -199,7 +199,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI:** Missing `multi_column_fks` field in shadow introspection
 - **CLI:** Missing `expressions` field in shadow index introspection
 
-## [0.15.7] - 2026-02-08
+## [0.15.7] - 2025-09-23
 
 ### Added
 
@@ -229,7 +229,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Core:** Duplicate `AlterDrop` — drop hint + auto-detected column drop both emitted the same ALTER DROP
 - **Core:** FK ordering on `DROP TABLE` — `diff_schemas` now sorts dropped tables in reverse FK order (children before parents)
 
-## [0.15.6] - 2026-02-07
+## [0.15.6] - 2025-09-22
 
 ### Added
 
@@ -264,7 +264,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ADD/Upsert` → auto-sets `operator_id` in INSERT payload
   - Super admins and unregistered tables bypass injection
 
-## [0.14.21] - 2026-01-10
+## [0.14.21] - 2024-12-21
 
 ### Fixed
 
@@ -274,7 +274,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fixes password auth failures when DATABASE_URL contains special characters
 
 
-## [0.14.20] - 2026-01-10
+## [0.14.20] - 2024-12-20
 
 ### Breaking Changes ⚠️
 
@@ -301,7 +301,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scanner regex patterns kept for legacy codebase detection (`qail migrate analyze`)
 
 
-## [0.14.18] - 2026-01-09
+## [0.14.18] - 2024-12-10
 
 ### New Features
 
@@ -318,7 +318,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated CLI doc comments to v2 QAIL syntax examples
 - Added `qail exec` to CLI reference documentation
 
-## [0.14.17] - 2026-01-02
+## [0.14.17] - 2024-10-03
 
 ### New Features
 
@@ -340,7 +340,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Prevents `A || B || C->'d'` from being parsed as `((A||B)||C)->'d'`
 
 
-## [0.14.16] - 2026-01-02
+## [0.14.16] - 2024-10-03
 
 ### Critical Bug Fixes
 
@@ -359,7 +359,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `datetime(idx)` - Returns `Option<DateTime<Utc>>` (feature: `chrono`)
   - `uuid_typed(idx)` - Returns `Option<Uuid>` (feature: `uuid`)
 
-## [0.14.15] - 2026-01-02
+## [0.14.15] - 2024-10-02
 
 ### Critical Bug Fixes
 
@@ -373,7 +373,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`PgDriver::connect_url(url)`:** Connect using any PostgreSQL URL string
 - Full URL parsing with proper auth, host:port, and database extraction
 
-## [0.14.14] - 2026-01-02
+## [0.14.14] - 2024-09-28
 
 ### Security Hardening (Battle-Tested)
 
@@ -393,7 +393,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All encoder methods (`encode_bind`, `encode_extended_query`, etc.) now return `Result`
 - Refactored `EncodeError` to shared `pg/src/protocol/error.rs`
 
-## [0.14.13] - 2026-01-02
+## [0.14.13] - 2024-09-28
 
 ### New Crate: qail-redis — Unified Qail AST
 
@@ -413,7 +413,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Connection Pooling:** `RedisPool` with semaphore concurrency
 - **Full Test Suite:** 16 unit tests passing
 
-## [0.14.12] - 2026-01-02
+## [0.14.12] - 2024-09-27
 
 ### Hybrid Architecture (PostgreSQL ↔ Qdrant)
 - **`qail worker` daemon:** Polls `_qail_queue` outbox table and syncs to Qdrant
@@ -437,7 +437,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clippy warnings: `derivable_impls`, `sort_by_key`, `collapsible_if`, deref
 - Init generates Schema-compatible `.qail` syntax (parentheses + commas)
 
-## [0.14.11] - 2026-01-01
+## [0.14.11] - 2024-09-24
 
 ### Qdrant Performance (4x Speedup)
 - **HTTP/2 Batch Pipelining:** `search_batch()` multiplexes requests over single connection (4.00x faster than sequential)
@@ -445,7 +445,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Zero-Allocation Buffer:** Removed `BytesMut::clone()` in favor of `split()` for true zero-copy
 - **Documentation:** Added `PERFORMANCE.md` Qdrant section and new benchmark web page
 
-## [0.14.10] - 2026-01-01
+## [0.14.10] - 2024-09-23
 
 ### New Crate: qail-qdrant
 - **Zero-Copy gRPC Driver:** High-performance Qdrant client
@@ -463,7 +463,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Action::Search`, `Action::Upsert`, `Action::Scroll` for vector operations
 - `Value::Vector(Vec<f32>)` for embeddings
 
-## [0.14.9] - 2026-01-01
+## [0.14.9] - 2024-09-22
 
 ### Security
 - **PG:** Reject literal NULL bytes (0x00) in `execute_raw()` - prevents connection state pollution
@@ -474,7 +474,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DML encoders (`encode_select`, `encode_insert`, `encode_update`, `encode_delete`, `encode_export`) now return `Result`
 - Clippy-clean: all `unit_arg` warnings fixed in match blocks
 
-## [0.14.8] - 2026-01-01
+## [0.14.8] - 2024-09-19
 
 ### Production Hardening
 - **PG:** `close()` async method sends Terminate packet ('X') for graceful shutdown
@@ -487,7 +487,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 3D/4D arrays: Work correctly (not a bug)
 - All chaos tests passed: Type Torture, Pool Starvation, Zombie Client
 
-## [0.14.7] - 2026-01-01
+## [0.14.7] - 2024-09-19
 
 ### Enterprise Shadow Migrations
 - **COPY Streaming:** Zero-dependency data sync via COPY TO/FROM protocol
@@ -502,7 +502,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADD COLUMN migration → fixed column intersection bug
 - Full promote workflow → verified migration applied to primary
 
-## [0.14.6] - 2026-01-01
+## [0.14.6] - 2024-09-18
 
 ### Fixed
 - **CLI:** Shadow migration bug - now applies base schema (CREATE TABLEs) before diff commands
@@ -518,7 +518,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Docs:** Added Rollback Safety Analysis table to analyzer docs
 - **Docs:** Added CI/CD integration section with GitHub Actions `--ci` flag
 
-## [0.14.4] - 2025-12-31
+## [0.14.4] - 2024-09-14
 
 ### Performance (Zero-Alloc Encoding + LRU Cache)
 - **PG:** `fetch_all()` now uses prepared statement caching by default (~5,000 q/s)
@@ -531,7 +531,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 🚀 **~5,000 queries/second** with 201μs latency — the fastest Rust PostgreSQL driver
 
-## [0.14.3] - 2025-12-31
+## [0.14.3] - 2024-09-12
 
 ### Added
 - **CLI:** `qail migrate create` now generates timestamped `.up.qail` and `.down.qail` file pairs
@@ -539,7 +539,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Inline metadata: `@name`, `@created`, `@author`, `@depends`
   - Example: `qail migrate create add_users --author "orion"`
 
-## [0.14.2] - 2025-12-31
+## [0.14.2] - 2024-09-09
 
 ### Added
 
@@ -567,7 +567,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Expr::Window.params` from `Vec<Value>` to `Vec<Expr>` for native AST philosophy
 - Expression, DML, and DDL coverage now 100% for standard PostgreSQL
 
-## [0.14.1] - 2025-12-31
+## [0.14.1] - 2024-09-09
 
 ### Fixed
 - **PG:** Critical bug in `encode_update()` where column names were encoded as `$1` placeholders instead of actual column names when using `.columns().values()` pattern.
@@ -576,7 +576,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PG:** Comprehensive battle test suite (`battle_test.rs`) with 19 query operations covering INSERT, SELECT, UPDATE, DELETE, JOINs, pagination, and DISTINCT.
 - **PG:** Modularized `values.rs` into `values/` directory with `expressions.rs` for better extensibility.
 
-## [0.14.0] - 2025-12-31
+## [0.14.0] - 2024-09-08
 
 ### Added
 - **CLI:** `MigrationClass` enum for classifying migrations: `Reversible`, `DataLosing`, `Irreversible`.
@@ -592,7 +592,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `analyze.rs`: CI-integrated codebase scanner
   - `plan.rs`, `watch.rs`, `status.rs`, `create.rs`: Other operations
 
-## [0.13.2] - 2025-12-31
+## [0.13.2] - 2024-09-08
 
 ### Added
 - **Schema:** Added `version` field to `Schema` struct for version directive support (`-- qail: version=N`).
@@ -605,7 +605,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CLI:** Unsafe type-change rollbacks now warn before proceeding (TEXT → INT requires USING clause).
 - **Code:** Collapsed nested if statements using Rust 2024 let-chains (clippy fixes).
 
-## [0.13.1] - 2025-12-30
+## [0.13.1] - 2024-09-08
 
 ### Fixed
 - **Docs:** Updated incorrect version numbers in READMEs (was referencing 0.9).
@@ -614,7 +614,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Known Issues
 - Type-change rollback (e.g., TEXT → INT) requires manual `USING` clause in PostgreSQL. Rollback will fail if cast is not automatic.
 
-## [0.13.0] - 2025-12-30
+## [0.13.0] - 2024-09-08
 
 ### Breaking Changes ⚠️
 - **Core:** Renamed `QailCmd` struct to `Qail` for a cleaner, "calmer" API.
