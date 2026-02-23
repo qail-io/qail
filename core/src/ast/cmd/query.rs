@@ -59,6 +59,51 @@ impl Qail {
         self
     }
 
+    /// Add a computed expression as a SELECT column.
+    ///
+    /// Use this for subqueries, aggregates, CASE WHEN, COALESCE, etc.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use qail_core::ast::builders::{subquery, coalesce, col, text};
+    /// use qail_core::ast::builders::ExprExt;
+    ///
+    /// Qail::get("orders")
+    ///     .columns(&["id", "status"])
+    ///     .select_expr(
+    ///         subquery(Qail::get("order_items")
+    ///             .column("sum(amount)")
+    ///             .eq("order_id", col("orders.id")))
+    ///         .with_alias("total_amount")
+    ///     )
+    ///     .select_expr(
+    ///         coalesce([col("nickname"), col("first_name"), text("Guest")])
+    ///             .alias("display_name")
+    ///     )
+    /// ```
+    pub fn select_expr(mut self, expr: impl Into<Expr>) -> Self {
+        self.columns.push(expr.into());
+        self
+    }
+
+    /// Add multiple computed expressions as SELECT columns.
+    ///
+    /// # Example
+    /// ```ignore
+    /// .select_exprs([
+    ///     count().alias("total"),
+    ///     sum("amount").alias("grand_total"),
+    /// ])
+    /// ```
+    pub fn select_exprs<I, E>(mut self, exprs: I) -> Self
+    where
+        I: IntoIterator<Item = E>,
+        E: Into<Expr>,
+    {
+        self.columns.extend(exprs.into_iter().map(|e| e.into()));
+        self
+    }
+
     /// Add a WHERE filter with an operator and value.
     pub fn filter(
         mut self,
@@ -163,6 +208,29 @@ impl Qail {
     /// Filter: column ILIKE pattern.
     pub fn ilike(self, column: impl AsRef<str>, pattern: impl Into<Value>) -> Self {
         self.filter(column, Operator::ILike, pattern)
+    }
+
+    /// Add a raw SQL boolean expression to the WHERE clause.
+    ///
+    /// Use this for complex predicates that can't be expressed through the
+    /// standard filter methods (e.g. date arithmetic with `MAKE_INTERVAL`,
+    /// `NOW()`, multi-column comparisons, etc.).
+    ///
+    /// The expression must evaluate to a boolean in PostgreSQL.
+    ///
+    /// # Example
+    /// ```ignore
+    /// Qail::get("orders")
+    ///     .raw_where("created_at > NOW() - INTERVAL '24 hours'")
+    ///     .raw_where("(status = 'active' OR priority > 5)")
+    /// ```
+    pub fn raw_where(self, sql: impl Into<String>) -> Self {
+        self.filter_cond(Condition {
+            left: Expr::Raw(sql.into()),
+            op: Operator::IsNotNull,
+            value: Value::Null,
+            is_array_unnest: false,
+        })
     }
 
     /// Filter: column IN (values).

@@ -226,6 +226,57 @@ impl Qail {
         self
     }
 
+    /// JOIN with multiple ON conditions.
+    ///
+    /// The table string may include an alias (e.g. `"inventory inv"`).
+    ///
+    /// # Example
+    /// ```ignore
+    /// use qail_core::ast::builders::{eq, col};
+    /// use qail_core::ast::{Condition, Operator, Expr, Value};
+    ///
+    /// // LEFT JOIN odyssey_leg_inventory inv
+    /// //   ON inv.leg_id = ol.id AND inv.service_date = '2024-01-15'
+    /// .left_join_conds("odyssey_leg_inventory inv", vec![
+    ///     Condition { left: Expr::Named("inv.leg_id".into()), op: Operator::Eq,
+    ///                 value: Value::Column("ol.id".into()), is_array_unnest: false },
+    ///     Condition { left: Expr::Named("inv.service_date".into()), op: Operator::Eq,
+    ///                 value: Value::String("2024-01-15".into()), is_array_unnest: false },
+    /// ])
+    /// ```
+    pub fn join_conds(
+        mut self,
+        kind: JoinKind,
+        table: impl AsRef<str>,
+        conditions: Vec<Condition>,
+    ) -> Self {
+        self.joins.push(Join {
+            kind,
+            table: table.as_ref().to_string(),
+            on: Some(conditions),
+            on_true: false,
+        });
+        self
+    }
+
+    /// LEFT JOIN with multiple ON conditions.
+    pub fn left_join_conds(
+        self,
+        table: impl AsRef<str>,
+        conditions: Vec<Condition>,
+    ) -> Self {
+        self.join_conds(JoinKind::Left, table, conditions)
+    }
+
+    /// INNER JOIN with multiple ON conditions.
+    pub fn inner_join_conds(
+        self,
+        table: impl AsRef<str>,
+        conditions: Vec<Condition>,
+    ) -> Self {
+        self.join_conds(JoinKind::Inner, table, conditions)
+    }
+
     /// Set an alias for the FROM table.
     pub fn table_alias(mut self, alias: impl AsRef<str>) -> Self {
         self.table = format!("{} {}", self.table, alias.as_ref());
