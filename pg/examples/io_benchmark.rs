@@ -21,8 +21,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔═══════════════════════════════════════════════════════╗");
     println!("║  qail-rs — Real Database Query Benchmark             ║");
     println!("╠═══════════════════════════════════════════════════════╣");
-    println!("║  Read iters: {:>10}                              ║", READ_ITERS);
-    println!("║  Write iters:{:>10}                              ║", WRITE_ITERS);
+    println!(
+        "║  Read iters: {:>10}                              ║",
+        READ_ITERS
+    );
+    println!(
+        "║  Write iters:{:>10}                              ║",
+        WRITE_ITERS
+    );
     println!("║  Host:       127.0.0.1:5432                          ║");
     println!("║  Database:   qail_e2e_test                           ║");
     println!("║  Mode:       Full I/O (TCP round-trip, async)        ║");
@@ -36,7 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Setup: seed tables ───────────────────────────────────
     println!("  Setting up benchmark tables...");
 
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS bench_orders").await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS bench_orders")
+        .await;
     let _ = driver.execute_raw("DROP TABLE IF EXISTS bench_users").await;
     driver
         .execute_raw(
@@ -64,7 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 1..=100 {
         let sql = format!(
             "INSERT INTO bench_users (name, email, active) VALUES ('User {}', 'user{}@test.com', {})",
-            i, i, if i % 3 != 0 { "true" } else { "false" }
+            i,
+            i,
+            if i % 3 != 0 { "true" } else { "false" }
         );
         let _ = driver.execute_raw(&sql).await;
     }
@@ -75,7 +85,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for j in 0..5u32 {
             let sql = format!(
                 "INSERT INTO bench_orders (user_id, product, amount, status) VALUES ({}, 'Product {}-{}', {}.99, '{}')",
-                uid, uid, j, (j + 1) * 10, statuses[j as usize % 5]
+                uid,
+                uid,
+                j,
+                (j + 1) * 10,
+                statuses[j as usize % 5]
             );
             let _ = driver.execute_raw(&sql).await;
         }
@@ -99,9 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── T1: SELECT LIMIT 1 (simplest) ────────────────────────
     {
-        let cmd = Qail::get("bench_users")
-            .columns(["id", "name"])
-            .limit(1);
+        let cmd = Qail::get("bench_users").columns(["id", "name"]).limit(1);
 
         // Warmup
         for _ in 0..WARMUP {
@@ -116,7 +128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let elapsed = start.elapsed();
         let us = elapsed.as_micros() as f64 / READ_ITERS as f64;
         let qps = READ_ITERS as f64 / elapsed.as_secs_f64();
-        println!("  {:<24} {:>7.1} μs/q  {:>10.0} qps", "T1 — SELECT LIMIT 1", us, qps);
+        println!(
+            "  {:<24} {:>7.1} μs/q  {:>10.0} qps",
+            "T1 — SELECT LIMIT 1", us, qps
+        );
         total_ops += READ_ITERS as u64;
     }
 
@@ -139,7 +154,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let elapsed = start.elapsed();
         let us = elapsed.as_micros() as f64 / READ_ITERS as f64;
         let qps = READ_ITERS as f64 / elapsed.as_secs_f64();
-        println!("  {:<24} {:>7.1} μs/q  {:>10.0} qps", "T2 — SELECT WHERE", us, qps);
+        println!(
+            "  {:<24} {:>7.1} μs/q  {:>10.0} qps",
+            "T2 — SELECT WHERE", us, qps
+        );
         total_ops += READ_ITERS as u64;
     }
 
@@ -162,7 +180,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let elapsed = start.elapsed();
         let us = elapsed.as_micros() as f64 / READ_ITERS as f64;
         let qps = READ_ITERS as f64 / elapsed.as_secs_f64();
-        println!("  {:<24} {:>7.1} μs/q  {:>10.0} qps", "T3 — ORDER BY LIMIT", us, qps);
+        println!(
+            "  {:<24} {:>7.1} μs/q  {:>10.0} qps",
+            "T3 — ORDER BY LIMIT", us, qps
+        );
         total_ops += READ_ITERS as u64;
     }
 
@@ -222,16 +243,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let elapsed = start.elapsed();
         let us = elapsed.as_micros() as f64 / WRITE_ITERS as f64;
         let qps = WRITE_ITERS as f64 / elapsed.as_secs_f64();
-        println!("  {:<24} {:>7.1} μs/q  {:>10.0} qps", "T5 — UPDATE WHERE", us, qps);
+        println!(
+            "  {:<24} {:>7.1} μs/q  {:>10.0} qps",
+            "T5 — UPDATE WHERE", us, qps
+        );
         total_ops += WRITE_ITERS as u64;
     }
 
     // ── T6: Complex JOIN ─────────────────────────────────────
     {
         let cmd = Qail::get("bench_orders")
-            .columns(["bench_users.name", "bench_orders.product", "bench_orders.amount"])
-            .join(JoinKind::Inner, "bench_users", "bench_orders.user_id", "bench_users.id")
-            .filter("bench_orders.status", Operator::Eq, Value::String("completed".into()))
+            .columns([
+                "bench_users.name",
+                "bench_orders.product",
+                "bench_orders.amount",
+            ])
+            .join(
+                JoinKind::Inner,
+                "bench_users",
+                "bench_orders.user_id",
+                "bench_users.id",
+            )
+            .filter(
+                "bench_orders.status",
+                Operator::Eq,
+                Value::String("completed".into()),
+            )
             .order_by("bench_orders.amount", SortOrder::Desc)
             .limit(10);
 

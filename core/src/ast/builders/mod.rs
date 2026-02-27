@@ -59,8 +59,8 @@ pub use json::{JsonBuilder, json, json_obj, json_path};
 
 // Functions
 pub use functions::{
-    ConcatBuilder, FunctionBuilder, coalesce, concat, func, nullif, replace, string_agg,
-    substring, substring_for,
+    ConcatBuilder, FunctionBuilder, coalesce, concat, func, nullif, replace, string_agg, substring,
+    substring_for,
 };
 
 // Literals
@@ -89,8 +89,8 @@ pub use ext::ExprExt;
 
 // Shortcuts (ergonomic helpers)
 pub use shortcuts::{
-    all, and, and3, and_expr, count_where, count_where_all, exists, in_list, 
-    is_not_null_expr, is_null_expr, not_exists, or_expr, percentage, recent, recent_col, subquery
+    all, and, and_expr, and3, count_where, count_where_all, exists, in_list, is_not_null_expr,
+    is_null_expr, not_exists, or_expr, percentage, recent, recent_col, subquery,
 };
 
 #[cfg(test)]

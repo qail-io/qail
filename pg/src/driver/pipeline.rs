@@ -24,8 +24,10 @@ impl PgConnection {
         // Encode all queries into a single buffer
         let mut buf = BytesMut::new();
         for (sql, params) in queries {
-            buf.extend_from_slice(&PgEncoder::encode_extended_query(sql, params)
-                .map_err(|e| PgError::Encode(e.to_string()))?);
+            buf.extend_from_slice(
+                &PgEncoder::encode_extended_query(sql, params)
+                    .map_err(|e| PgError::Encode(e.to_string()))?,
+            );
         }
 
         // Send all queries in ONE write
@@ -58,7 +60,7 @@ impl PgConnection {
                     }
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }
@@ -99,7 +101,7 @@ impl PgConnection {
                     }
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }
@@ -157,11 +159,9 @@ impl PgConnection {
 
     /// Simple query protocol pipeline - uses 'Q' message.
     #[inline]
-    pub async fn pipeline_simple_fast(
-        &mut self,
-        cmds: &[qail_core::ast::Qail],
-    ) -> PgResult<usize> {
-        let buf = AstEncoder::encode_batch_simple(cmds).map_err(|e| PgError::Encode(e.to_string()))?;
+    pub async fn pipeline_simple_fast(&mut self, cmds: &[qail_core::ast::Qail]) -> PgResult<usize> {
+        let buf =
+            AstEncoder::encode_batch_simple(cmds).map_err(|e| PgError::Encode(e.to_string()))?;
         self.stream.write_all(&buf).await?;
         self.stream.flush().await?;
 
@@ -212,10 +212,7 @@ impl PgConnection {
     /// 2. Parse template ONCE (cached in PostgreSQL)
     /// 3. Send Bind+Execute for each instance (params differ per query)
     #[inline]
-    pub async fn pipeline_ast_cached(
-        &mut self,
-        cmds: &[qail_core::ast::Qail],
-    ) -> PgResult<usize> {
+    pub async fn pipeline_ast_cached(&mut self, cmds: &[qail_core::ast::Qail]) -> PgResult<usize> {
         if cmds.is_empty() {
             return Ok(0);
         }
@@ -223,7 +220,8 @@ impl PgConnection {
         let mut buf = BytesMut::with_capacity(cmds.len() * 64);
 
         for cmd in cmds {
-            let (sql, params) = AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
+            let (sql, params) =
+                AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
             let stmt_name = Self::sql_to_stmt_name(&sql);
 
             if !self.prepared_statements.contains_key(&stmt_name) {
@@ -232,8 +230,10 @@ impl PgConnection {
                 self.prepared_statements.insert(stmt_name.clone(), sql);
             }
 
-            buf.extend_from_slice(&PgEncoder::encode_bind("", &stmt_name, &params)
-                .map_err(|e| PgError::Encode(e.to_string()))?);
+            buf.extend_from_slice(
+                &PgEncoder::encode_bind("", &stmt_name, &params)
+                    .map_err(|e| PgError::Encode(e.to_string()))?,
+            );
             buf.extend(PgEncoder::encode_execute("", 0));
         }
 

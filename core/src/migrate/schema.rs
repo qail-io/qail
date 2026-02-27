@@ -14,8 +14,8 @@
 //! rename users.username -> users.name
 //! ```
 
+use super::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use super::types::ColumnType;
-use super::policy::{RlsPolicy, PolicyTarget, PolicyPermissiveness};
 use std::collections::HashMap;
 
 /// A complete database schema.
@@ -1233,7 +1233,6 @@ fn check_expr_str(expr: &CheckExpr) -> String {
     }
 }
 
-
 /// Serialize a `Schema` back to a QAIL-format string.
 pub fn to_qail_string(schema: &Schema) -> String {
     let mut output = String::new();
@@ -1310,7 +1309,10 @@ pub fn to_qail_string(schema: &Schema) -> String {
         output.push('\n');
     }
 
-    for table in schema.tables.values() {
+    let mut table_names: Vec<&String> = schema.tables.keys().collect();
+    table_names.sort();
+    for table_name in table_names {
+        let table = &schema.tables[table_name];
         output.push_str(&format!("table {} {{\n", table.name));
         for col in &table.columns {
             let mut constraints: Vec<String> = Vec::new();
@@ -1413,7 +1415,10 @@ pub fn to_qail_string(schema: &Schema) -> String {
         } else {
             "view"
         };
-        output.push_str(&format!("{} {} $$\n{}\n$$\n\n", prefix, view.name, view.query));
+        output.push_str(&format!(
+            "{} {} $$\n{}\n$$\n\n",
+            prefix, view.name, view.query
+        ));
     }
 
     // Functions
@@ -1430,8 +1435,11 @@ pub fn to_qail_string(schema: &Schema) -> String {
         let events = trigger.events.join(" or ");
         output.push_str(&format!(
             "trigger {} on {} {} {} execute {}\n",
-            trigger.name, trigger.table, trigger.timing.to_lowercase(),
-            events.to_lowercase(), trigger.execute_function
+            trigger.name,
+            trigger.table,
+            trigger.timing.to_lowercase(),
+            events.to_lowercase(),
+            trigger.execute_function
         ));
     }
     if !schema.triggers.is_empty() {
@@ -1470,18 +1478,26 @@ pub fn to_qail_string(schema: &Schema) -> String {
 
     // Grants
     for grant in &schema.grants {
-        let privs: Vec<String> = grant.privileges.iter().map(|p| p.to_string().to_lowercase()).collect();
+        let privs: Vec<String> = grant
+            .privileges
+            .iter()
+            .map(|p| p.to_string().to_lowercase())
+            .collect();
         match grant.action {
             GrantAction::Grant => {
                 output.push_str(&format!(
                     "grant {} on {} to {}\n",
-                    privs.join(", "), grant.on_object, grant.to_role
+                    privs.join(", "),
+                    grant.on_object,
+                    grant.to_role
                 ));
             }
             GrantAction::Revoke => {
                 output.push_str(&format!(
                     "revoke {} on {} from {}\n",
-                    privs.join(", "), grant.on_object, grant.to_role
+                    privs.join(", "),
+                    grant.on_object,
+                    grant.to_role
                 ));
             }
         }
@@ -1508,14 +1524,13 @@ pub fn to_qail_string(schema: &Schema) -> String {
     output
 }
 
-
 /// Convert a Schema to a list of Qail commands (CREATE TABLE, CREATE INDEX).
 /// Used by shadow migration to apply the base schema before applying diffs.
 pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
     use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
-    
+
     let mut cmds = Vec::new();
-    
+
     // Sort tables to handle dependencies (tables with FK refs should come after their targets)
     let mut table_order: Vec<&Table> = schema.tables.values().collect();
     table_order.sort_by(|a, b| {
@@ -1523,38 +1538,42 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
         let b_has_fk = b.columns.iter().any(|c| c.foreign_key.is_some());
         a_has_fk.cmp(&b_has_fk)
     });
-    
+
     for table in table_order {
         // Build columns using Expr::Def exactly like diff.rs does
-        let columns: Vec<Expr> = table.columns.iter().map(|col| {
-            let mut constraints = Vec::new();
-            
-            if col.primary_key {
-                constraints.push(Constraint::PrimaryKey);
-            }
-            if col.nullable {
-                constraints.push(Constraint::Nullable);
-            }
-            if col.unique {
-                constraints.push(Constraint::Unique);
-            }
-            if let Some(def) = &col.default {
-                constraints.push(Constraint::Default(def.clone()));
-            }
-            if let Some(ref fk) = col.foreign_key {
-                constraints.push(Constraint::References(format!(
-                    "{}({})",
-                    fk.table, fk.column
-                )));
-            }
-            
-            Expr::Def {
-                name: col.name.clone(),
-                data_type: col.data_type.to_pg_type(),
-                constraints,
-            }
-        }).collect();
-        
+        let columns: Vec<Expr> = table
+            .columns
+            .iter()
+            .map(|col| {
+                let mut constraints = Vec::new();
+
+                if col.primary_key {
+                    constraints.push(Constraint::PrimaryKey);
+                }
+                if col.nullable {
+                    constraints.push(Constraint::Nullable);
+                }
+                if col.unique {
+                    constraints.push(Constraint::Unique);
+                }
+                if let Some(def) = &col.default {
+                    constraints.push(Constraint::Default(def.clone()));
+                }
+                if let Some(ref fk) = col.foreign_key {
+                    constraints.push(Constraint::References(format!(
+                        "{}({})",
+                        fk.table, fk.column
+                    )));
+                }
+
+                Expr::Def {
+                    name: col.name.clone(),
+                    data_type: col.data_type.to_pg_type(),
+                    constraints,
+                }
+            })
+            .collect();
+
         cmds.push(Qail {
             action: Action::Make,
             table: table.name.clone(),
@@ -1562,7 +1581,7 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
             ..Default::default()
         });
     }
-    
+
     // Add indexes using IndexDef like diff.rs
     for idx in &schema.indexes {
         cmds.push(Qail {
@@ -1578,7 +1597,7 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
             ..Default::default()
         });
     }
-    
+
     cmds
 }
 

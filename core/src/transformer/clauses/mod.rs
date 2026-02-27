@@ -94,7 +94,11 @@ pub fn extract_limit(expr: &Expr) -> Option<u64> {
 pub fn expr_to_string(expr: &Expr) -> String {
     match expr {
         Expr::Identifier(ident) => ident.value.clone(),
-        Expr::CompoundIdentifier(parts) => parts.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join("."),
+        Expr::CompoundIdentifier(parts) => parts
+            .iter()
+            .map(|i| i.value.clone())
+            .collect::<Vec<_>>()
+            .join("."),
         _ => expr.to_string(),
     }
 }

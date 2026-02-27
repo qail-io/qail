@@ -318,6 +318,9 @@ pub enum Operator {
     JsonPath,
     /// `#>>` — JSONB path extraction → text
     JsonPathText,
+    /// `LOWER(text) LIKE '%' || LOWER(array_element) || '%'` over `unnest(array_column)`.
+    /// Used for "does input text contain any keyword token?" matching.
+    ArrayElemContainedInText,
 }
 
 impl Operator {
@@ -359,6 +362,7 @@ impl Operator {
             Operator::KeyExistsAll => "?&",
             Operator::JsonPath => "#>",
             Operator::JsonPathText => "#>>",
+            Operator::ArrayElemContainedInText => "CONTAINS_ANY_TOKEN",
         }
     }
 

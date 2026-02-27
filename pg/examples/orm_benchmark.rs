@@ -43,16 +43,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n📈 Results ({} iterations)", ITERATIONS);
     println!("============================================================");
-    println!("qail-pg: {:>8.2}ms | {:.2}μs/query | {:>6.0} q/s ⭐", qail_time, qail_time * 1000.0 / ITERATIONS as f64, qail_qps);
-    println!("SeaORM:  {:>8.2}ms | {:.2}μs/query | {:>6.0} q/s", seaorm_time, seaorm_time * 1000.0 / ITERATIONS as f64, seaorm_qps);
-    println!("SQLx:    {:>8.2}ms | {:.2}μs/query | {:>6.0} q/s", sqlx_time, sqlx_time * 1000.0 / ITERATIONS as f64, sqlx_qps);
+    println!(
+        "qail-pg: {:>8.2}ms | {:.2}μs/query | {:>6.0} q/s ⭐",
+        qail_time,
+        qail_time * 1000.0 / ITERATIONS as f64,
+        qail_qps
+    );
+    println!(
+        "SeaORM:  {:>8.2}ms | {:.2}μs/query | {:>6.0} q/s",
+        seaorm_time,
+        seaorm_time * 1000.0 / ITERATIONS as f64,
+        seaorm_qps
+    );
+    println!(
+        "SQLx:    {:>8.2}ms | {:.2}μs/query | {:>6.0} q/s",
+        sqlx_time,
+        sqlx_time * 1000.0 / ITERATIONS as f64,
+        sqlx_qps
+    );
 
     println!("\n📊 Comparison (vs qail-pg)");
     println!("----------------------------------");
     let seaorm_diff = ((seaorm_time / qail_time) - 1.0) * 100.0;
     let sqlx_diff = ((sqlx_time / qail_time) - 1.0) * 100.0;
-    println!("SeaORM:  {:.0}% slower ({:.0} fewer q/s)", seaorm_diff, qail_qps - seaorm_qps);
-    println!("SQLx:    {:.0}% slower ({:.0} fewer q/s)", sqlx_diff, qail_qps - sqlx_qps);
+    println!(
+        "SeaORM:  {:.0}% slower ({:.0} fewer q/s)",
+        seaorm_diff,
+        qail_qps - seaorm_qps
+    );
+    println!(
+        "SQLx:    {:.0}% slower ({:.0} fewer q/s)",
+        sqlx_diff,
+        qail_qps - sqlx_qps
+    );
 
     cleanup(&mut driver).await?;
     println!("\n🧹 Cleanup complete");
@@ -61,13 +84,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_test_query() -> Qail {
-    let high_earners = Qail::get("employees")
-        .select_all()
-        .filter("salary", Operator::Gt, Value::Int(80000));
+    let high_earners =
+        Qail::get("employees")
+            .select_all()
+            .filter("salary", Operator::Gt, Value::Int(80000));
 
     let mut query = Qail::get("high_earners")
         .columns(["high_earners.*", "departments.name"])
-        .join(JoinKind::Inner, "departments", "high_earners.department_id", "departments.id")
+        .join(
+            JoinKind::Inner,
+            "departments",
+            "high_earners.department_id",
+            "departments.id",
+        )
         .filter("status", Operator::Eq, Value::String("active".into()))
         .order_by("salary", SortOrder::Desc)
         .limit(100);
@@ -141,9 +170,10 @@ async fn bench_seaorm() -> Result<f64, Box<dyn std::error::Error>> {
     print!("  SeaORM:  ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
-    use sea_orm::{Database, DatabaseConnection, Statement, ConnectionTrait};
+    use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 
-    let db: DatabaseConnection = Database::connect("postgres://postgres@127.0.0.1/qail_bench_test").await?;
+    let db: DatabaseConnection =
+        Database::connect("postgres://postgres@127.0.0.1/qail_bench_test").await?;
 
     let sql = r#"
         WITH high_earners AS (
@@ -159,14 +189,24 @@ async fn bench_seaorm() -> Result<f64, Box<dyn std::error::Error>> {
 
     // Warmup
     for _ in 0..WARMUP {
-        let results = db.query_all(Statement::from_string(sea_orm::DatabaseBackend::Postgres, sql.to_string())).await?;
+        let results = db
+            .query_all(Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                sql.to_string(),
+            ))
+            .await?;
         let _ = results.len();
     }
 
     // Benchmark
     let start = Instant::now();
     for _ in 0..ITERATIONS {
-        let results = db.query_all(Statement::from_string(sea_orm::DatabaseBackend::Postgres, sql.to_string())).await?;
+        let results = db
+            .query_all(Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                sql.to_string(),
+            ))
+            .await?;
         let _ = results.len();
     }
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
@@ -177,30 +217,43 @@ async fn bench_seaorm() -> Result<f64, Box<dyn std::error::Error>> {
 
 async fn setup_benchmark_data(driver: &mut PgDriver) -> Result<(), Box<dyn std::error::Error>> {
     // Create tables
-    driver.execute_raw("DROP TABLE IF EXISTS employees CASCADE").await?;
-    driver.execute_raw("DROP TABLE IF EXISTS departments CASCADE").await?;
-    
-    driver.execute_raw("CREATE TABLE departments (id SERIAL PRIMARY KEY, name TEXT NOT NULL)").await?;
+    driver
+        .execute_raw("DROP TABLE IF EXISTS employees CASCADE")
+        .await?;
+    driver
+        .execute_raw("DROP TABLE IF EXISTS departments CASCADE")
+        .await?;
+
+    driver
+        .execute_raw("CREATE TABLE departments (id SERIAL PRIMARY KEY, name TEXT NOT NULL)")
+        .await?;
     driver.execute_raw("CREATE TABLE employees (id SERIAL PRIMARY KEY, name TEXT NOT NULL, salary INT NOT NULL, status TEXT NOT NULL, department_id INT REFERENCES departments(id))").await?;
-    
+
     // Insert departments
     driver.execute_raw("INSERT INTO departments (name) VALUES ('Engineering'), ('Sales'), ('Marketing'), ('HR')").await?;
-    
+
     // Insert 1000 employees
     for i in 0..1000 {
         let dept_id = (i % 4) + 1;
         let salary = 50000 + (i * 50);
         let status = if i % 10 == 0 { "inactive" } else { "active" };
-        let sql = format!("INSERT INTO employees (name, salary, status, department_id) VALUES ('Employee{}', {}, '{}', {})", i, salary, status, dept_id);
+        let sql = format!(
+            "INSERT INTO employees (name, salary, status, department_id) VALUES ('Employee{}', {}, '{}', {})",
+            i, salary, status, dept_id
+        );
         driver.execute_raw(&sql).await?;
     }
-    
+
     println!("  ✓ Created 4 departments, 1000 employees");
     Ok(())
 }
 
 async fn cleanup(driver: &mut PgDriver) -> Result<(), Box<dyn std::error::Error>> {
-    driver.execute_raw("DROP TABLE IF EXISTS employees CASCADE").await?;
-    driver.execute_raw("DROP TABLE IF EXISTS departments CASCADE").await?;
+    driver
+        .execute_raw("DROP TABLE IF EXISTS employees CASCADE")
+        .await?;
+    driver
+        .execute_raw("DROP TABLE IF EXISTS departments CASCADE")
+        .await?;
     Ok(())
 }

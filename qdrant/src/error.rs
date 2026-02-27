@@ -39,7 +39,11 @@ impl fmt::Display for QdrantError {
             QdrantError::CollectionNotFound(name) => write!(f, "Collection not found: {}", name),
             QdrantError::PointNotFound(id) => write!(f, "Point not found: {}", id),
             QdrantError::DimensionMismatch { expected, got } => {
-                write!(f, "Vector dimension mismatch: expected {}, got {}", expected, got)
+                write!(
+                    f,
+                    "Vector dimension mismatch: expected {}, got {}",
+                    expected, got
+                )
             }
             QdrantError::Encode(msg) => write!(f, "Encode error: {}", msg),
             QdrantError::Decode(msg) => write!(f, "Decode error: {}", msg),

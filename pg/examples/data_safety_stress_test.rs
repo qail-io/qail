@@ -28,9 +28,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CLEANUP
     // ========================================================================
     println!("━━━ CLEANUP ━━━");
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS stress_orders CASCADE").await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS stress_users CASCADE").await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS stress_audit CASCADE").await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS stress_orders CASCADE")
+        .await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS stress_users CASCADE")
+        .await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS stress_audit CASCADE")
+        .await;
     println!("✅ Cleaned up existing tables\n");
 
     // ========================================================================
@@ -48,11 +54,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     schema.add_table(
         Table::new("stress_orders")
             .column(Column::new("id", ColumnType::Serial).primary_key())
-            .column(Column::new("user_id", ColumnType::Int)
-                .references("stress_users", "id")
-                .on_delete(FkAction::Cascade)),
+            .column(
+                Column::new("user_id", ColumnType::Int)
+                    .references("stress_users", "id")
+                    .on_delete(FkAction::Cascade),
+            ),
     );
-
 
     match schema.validate() {
         Ok(_) => {
@@ -90,9 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 2: TYPE VALIDATION ━━━");
 
     // Test: TEXT cannot be primary key
-    let result = std::panic::catch_unwind(|| {
-        Column::new("bad_pk", ColumnType::Text).primary_key()
-    });
+    let result = std::panic::catch_unwind(|| Column::new("bad_pk", ColumnType::Text).primary_key());
     match result {
         Err(_) => {
             println!("✅ Rejected TEXT as primary key type");
@@ -105,9 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Test: JSONB cannot have UNIQUE constraint
-    let result = std::panic::catch_unwind(|| {
-        Column::new("bad_unique", ColumnType::Jsonb).unique()
-    });
+    let result = std::panic::catch_unwind(|| Column::new("bad_unique", ColumnType::Jsonb).unique());
     match result {
         Err(_) => {
             println!("✅ Rejected UNIQUE on JSONB type");
@@ -132,28 +135,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 3: RUNTIME FK ENFORCEMENT ━━━");
 
     // Create real tables
-    driver.execute_raw("
+    driver
+        .execute_raw(
+            "
         CREATE TABLE stress_users (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL
         )
-    ").await?;
+    ",
+        )
+        .await?;
 
-    driver.execute_raw("
+    driver
+        .execute_raw(
+            "
         CREATE TABLE stress_orders (
             id SERIAL PRIMARY KEY,
             user_id INT REFERENCES stress_users(id) ON DELETE CASCADE,
             amount INT NOT NULL
         )
-    ").await?;
+    ",
+        )
+        .await?;
 
     // Insert valid data
-    driver.execute_raw("INSERT INTO stress_users (name) VALUES ('Alice')").await?;
+    driver
+        .execute_raw("INSERT INTO stress_users (name) VALUES ('Alice')")
+        .await?;
     println!("✅ Inserted user Alice (id=1)");
     passed += 1;
 
     // Valid FK insert
-    match driver.execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (1, 100)").await {
+    match driver
+        .execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (1, 100)")
+        .await
+    {
         Ok(_) => {
             println!("✅ Valid FK insert succeeded");
             passed += 1;
@@ -165,7 +181,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Invalid FK insert (user_id=999 doesn't exist)
-    match driver.execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (999, 100)").await {
+    match driver
+        .execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (999, 100)")
+        .await
+    {
         Ok(_) => {
             println!("❌ Should have rejected invalid FK!");
             failed += 1;
@@ -181,14 +200,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================================================
     println!("\n━━━ TEST 4: CHECK CONSTRAINT ENFORCEMENT ━━━");
 
-    driver.execute_raw("
+    driver
+        .execute_raw(
+            "
         ALTER TABLE stress_orders ADD CONSTRAINT chk_amount CHECK (amount > 0)
-    ").await?;
+    ",
+        )
+        .await?;
     println!("✅ Added CHECK constraint (amount > 0)");
     passed += 1;
 
     // Valid amount
-    match driver.execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (1, 50)").await {
+    match driver
+        .execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (1, 50)")
+        .await
+    {
         Ok(_) => {
             println!("✅ Valid amount (50) accepted");
             passed += 1;
@@ -200,7 +226,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Invalid amount (violates CHECK)
-    match driver.execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (1, -10)").await {
+    match driver
+        .execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (1, -10)")
+        .await
+    {
         Ok(_) => {
             println!("❌ Should have rejected amount=-10!");
             failed += 1;
@@ -217,12 +246,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 5: TRANSACTION ROLLBACK SAFETY ━━━");
 
     // Transaction that should fail due to invalid FK
-    let result = driver.execute_raw("
+    let result = driver
+        .execute_raw(
+            "
         BEGIN;
         INSERT INTO stress_orders (user_id, amount) VALUES (1, 200);
         INSERT INTO stress_orders (user_id, amount) VALUES (999, 300);
         COMMIT;
-    ").await;
+    ",
+        )
+        .await;
 
     if result.is_err() {
         println!("✅ Transaction failed (invalid FK) - rollback expected");
@@ -238,7 +271,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 6: CASCADE DELETE SAFETY ━━━");
 
     // Delete user should cascade to orders
-    driver.execute_raw("DELETE FROM stress_users WHERE name = 'Alice'").await?;
+    driver
+        .execute_raw("DELETE FROM stress_users WHERE name = 'Alice'")
+        .await?;
     println!("✅ CASCADE DELETE executed (dependent orders removed)");
     passed += 1;
 
@@ -247,13 +282,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================================================
     println!("\n━━━ TEST 7: UNIQUE CONSTRAINT ENFORCEMENT ━━━");
 
-    driver.execute_raw("ALTER TABLE stress_users ADD COLUMN email TEXT UNIQUE").await?;
-    driver.execute_raw("INSERT INTO stress_users (name, email) VALUES ('Bob', 'bob@test.com')").await?;
+    driver
+        .execute_raw("ALTER TABLE stress_users ADD COLUMN email TEXT UNIQUE")
+        .await?;
+    driver
+        .execute_raw("INSERT INTO stress_users (name, email) VALUES ('Bob', 'bob@test.com')")
+        .await?;
     println!("✅ Inserted user with unique email");
     passed += 1;
 
     // Duplicate email should fail
-    match driver.execute_raw("INSERT INTO stress_users (name, email) VALUES ('Carol', 'bob@test.com')").await {
+    match driver
+        .execute_raw("INSERT INTO stress_users (name, email) VALUES ('Carol', 'bob@test.com')")
+        .await
+    {
         Ok(_) => {
             println!("❌ Should have rejected duplicate email!");
             failed += 1;
@@ -274,19 +316,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bob was inserted with id=2 in Test 7, use that
     // First get the user_id properly
-    driver.execute_raw("INSERT INTO stress_users (name) VALUES ('StressUser')").await?;
+    driver
+        .execute_raw("INSERT INTO stress_users (name) VALUES ('StressUser')")
+        .await?;
 
     // Use last insert ID (should be 3)
     for i in 0..100 {
         // user_id 3 is StressUser
-        let sql = format!("INSERT INTO stress_orders (user_id, amount) VALUES (3, {})", i * 10 + 1);
+        let sql = format!(
+            "INSERT INTO stress_orders (user_id, amount) VALUES (3, {})",
+            i * 10 + 1
+        );
         match driver.execute_raw(&sql).await {
             Ok(_) => success_count += 1,
             Err(_) => error_count += 1,
         }
     }
 
-    println!("✅ Stress insert: {} succeeded, {} rejected", success_count, error_count);
+    println!(
+        "✅ Stress insert: {} succeeded, {} rejected",
+        success_count, error_count
+    );
     if success_count == 100 {
         passed += 1;
     } else {
@@ -315,8 +365,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n⚠️  Some tests failed - review output above");
     }
 
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS stress_orders CASCADE").await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS stress_users CASCADE").await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS stress_orders CASCADE")
+        .await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS stress_users CASCADE")
+        .await;
     println!("\n✅ Cleaned up test tables");
 
     Ok(())

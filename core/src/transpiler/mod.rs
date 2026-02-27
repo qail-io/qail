@@ -221,10 +221,16 @@ impl ToSql for Qail {
             Action::DropView => format!("DROP VIEW IF EXISTS {}", self.table),
             // Vector database operations - use qail-qdrant driver instead
             operators::Action::Search | operators::Action::Upsert | operators::Action::Scroll => {
-                format!("-- Vector operation {:?} not supported in SQL. Use qail-qdrant driver.", self.action)
+                format!(
+                    "-- Vector operation {:?} not supported in SQL. Use qail-qdrant driver.",
+                    self.action
+                )
             }
             operators::Action::CreateCollection | operators::Action::DeleteCollection => {
-                format!("-- Vector DDL {:?} not supported in SQL. Use qail-qdrant driver.", self.action)
+                format!(
+                    "-- Vector DDL {:?} not supported in SQL. Use qail-qdrant driver.",
+                    self.action
+                )
             }
             // Function and Trigger operations
             operators::Action::CreateFunction => {
@@ -248,18 +254,32 @@ impl ToSql for Qail {
                         crate::ast::TriggerTiming::After => "AFTER",
                         crate::ast::TriggerTiming::InsteadOf => "INSTEAD OF",
                     };
-                    let events: Vec<&str> = trig.events.iter().map(|e| match e {
-                        crate::ast::TriggerEvent::Insert => "INSERT",
-                        crate::ast::TriggerEvent::Update => "UPDATE",
-                        crate::ast::TriggerEvent::Delete => "DELETE",
-                        crate::ast::TriggerEvent::Truncate => "TRUNCATE",
-                    }).collect();
-                    let for_each = if trig.for_each_row { "FOR EACH ROW" } else { "FOR EACH STATEMENT" };
+                    let events: Vec<&str> = trig
+                        .events
+                        .iter()
+                        .map(|e| match e {
+                            crate::ast::TriggerEvent::Insert => "INSERT",
+                            crate::ast::TriggerEvent::Update => "UPDATE",
+                            crate::ast::TriggerEvent::Delete => "DELETE",
+                            crate::ast::TriggerEvent::Truncate => "TRUNCATE",
+                        })
+                        .collect();
+                    let for_each = if trig.for_each_row {
+                        "FOR EACH ROW"
+                    } else {
+                        "FOR EACH STATEMENT"
+                    };
                     // Prepend DROP for idempotency - PostgreSQL has no CREATE OR REPLACE TRIGGER
                     format!(
                         "DROP TRIGGER IF EXISTS {} ON {};\nCREATE TRIGGER {} {} {} ON {} {} EXECUTE FUNCTION {}()",
-                        trig.name, trig.table,
-                        trig.name, timing, events.join(" OR "), trig.table, for_each, trig.execute_function
+                        trig.name,
+                        trig.table,
+                        trig.name,
+                        timing,
+                        events.join(" OR "),
+                        trig.table,
+                        for_each,
+                        trig.execute_function
                     )
                 } else {
                     "-- CreateTrigger requires trigger_def".to_string()
@@ -280,14 +300,20 @@ impl ToSql for Qail {
             // ALTER TABLE property operations (from diff engine)
             Action::AlterSetNotNull => {
                 if let Some(Expr::Named(col)) = self.columns.first() {
-                    format!("ALTER TABLE {} ALTER COLUMN {} SET NOT NULL", self.table, col)
+                    format!(
+                        "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
+                        self.table, col
+                    )
                 } else {
                     format!("ALTER TABLE {} ALTER COLUMN ... SET NOT NULL", self.table)
                 }
             }
             Action::AlterDropNotNull => {
                 if let Some(Expr::Named(col)) = self.columns.first() {
-                    format!("ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL", self.table, col)
+                    format!(
+                        "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
+                        self.table, col
+                    )
                 } else {
                     format!("ALTER TABLE {} ALTER COLUMN ... DROP NOT NULL", self.table)
                 }
@@ -295,14 +321,23 @@ impl ToSql for Qail {
             Action::AlterSetDefault => {
                 if let Some(Expr::Named(col)) = self.columns.first() {
                     let default_expr = self.payload.as_deref().unwrap_or("NULL");
-                    format!("ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}", self.table, col, default_expr)
+                    format!(
+                        "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                        self.table, col, default_expr
+                    )
                 } else {
-                    format!("ALTER TABLE {} ALTER COLUMN ... SET DEFAULT ...", self.table)
+                    format!(
+                        "ALTER TABLE {} ALTER COLUMN ... SET DEFAULT ...",
+                        self.table
+                    )
                 }
             }
             Action::AlterDropDefault => {
                 if let Some(Expr::Named(col)) = self.columns.first() {
-                    format!("ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT", self.table, col)
+                    format!(
+                        "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                        self.table, col
+                    )
                 } else {
                     format!("ALTER TABLE {} ALTER COLUMN ... DROP DEFAULT", self.table)
                 }
@@ -325,7 +360,11 @@ impl ToSql for Qail {
             }
             Action::Do => {
                 let body = self.payload.as_deref().unwrap_or("");
-                let lang = if self.table.is_empty() { "plpgsql" } else { &self.table };
+                let lang = if self.table.is_empty() {
+                    "plpgsql"
+                } else {
+                    &self.table
+                };
                 format!("DO $$ {} $$ LANGUAGE {}", body, lang)
             }
             Action::SessionSet => {

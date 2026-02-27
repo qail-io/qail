@@ -6,17 +6,16 @@ use axum::{
     response::Json,
 };
 use qail_core::ast::{JoinKind, Operator, Value as QailValue};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::auth::extract_auth_from_headers;
-use crate::handler::row_to_json;
-use crate::middleware::ApiError;
 use crate::GatewayState;
+use crate::auth::extract_auth_from_headers;
+use crate::middleware::ApiError;
 
+use super::extract_table_name;
 use super::filters::{apply_filters, parse_filters};
 use super::types::ListParams;
-use super::extract_table_name;
 
 /// GET /api/{table}/_explain — return EXPLAIN ANALYZE for the query
 ///
@@ -71,14 +70,17 @@ pub(crate) async fn explain_handler(
     if let Some(ref expand) = params.expand {
         let relations: Vec<&str> = {
             let mut seen = std::collections::HashSet::new();
-            expand.split(',').map(|s| s.trim())
+            expand
+                .split(',')
+                .map(|s| s.trim())
                 .filter(|s| !s.is_empty() && !s.starts_with("nested:") && seen.insert(*s))
                 .collect()
         };
         if relations.len() > state.config.max_expand_depth {
             return Err(ApiError::parse_error(format!(
                 "Too many expand relations ({}). Maximum is {}",
-                relations.len(), state.config.max_expand_depth
+                relations.len(),
+                state.config.max_expand_depth
             )));
         }
         for rel in relations {
@@ -87,11 +89,11 @@ pub(crate) async fn explain_handler(
                 let right = format!("{}.{}", rel, ref_col);
                 cmd = cmd.join(JoinKind::Left, rel, &left, &right);
                 has_joins = true;
-            } else if let Some((fk_col, ref_col)) = state.schema.relation_for(rel, &table_name) {
-                let left = format!("{}.{}", table_name, ref_col);
-                let right = format!("{}.{}", rel, fk_col);
-                cmd = cmd.join(JoinKind::Left, rel, &left, &right);
-                has_joins = true;
+            } else if state.schema.relation_for(rel, &table_name).is_some() {
+                return Err(ApiError::parse_error(format!(
+                    "Reverse relation '{}' expands one-to-many and can duplicate parent rows. Use 'nested:{}' instead.",
+                    rel, rel
+                )));
             }
         }
     }
@@ -102,14 +104,16 @@ pub(crate) async fn explain_handler(
         if cmd.columns.is_empty() || cmd.columns == vec![Expr::Named("*".into())] {
             cmd.columns = vec![Expr::Named(format!("{}.*", table_name))];
         } else {
-            cmd.columns = cmd.columns.into_iter().map(|expr| {
-                match expr {
+            cmd.columns = cmd
+                .columns
+                .into_iter()
+                .map(|expr| match expr {
                     Expr::Named(ref name) if !name.contains('.') => {
                         Expr::Named(format!("{}.{}", table_name, name))
                     }
                     other => other,
-                }
-            }).collect();
+                })
+                .collect();
         }
     }
 
@@ -138,10 +142,10 @@ pub(crate) async fn explain_handler(
         use qail_core::ast::Expr;
         for cage in &mut cmd.cages {
             for cond in &mut cage.conditions {
-                if let Expr::Named(ref name) = cond.left {
-                    if !name.contains('.') {
-                        cond.left = Expr::Named(format!("{}.{}", table_name, name));
-                    }
+                if let Expr::Named(ref name) = cond.left
+                    && !name.contains('.')
+                {
+                    cond.left = Expr::Named(format!("{}.{}", table_name, name));
                 }
             }
         }
@@ -151,25 +155,41 @@ pub(crate) async fn explain_handler(
     use qail_pg::protocol::AstEncoder;
     let mut sql_buf = bytes::BytesMut::with_capacity(256);
     let mut params_buf: Vec<Option<Vec<u8>>> = Vec::new();
-    AstEncoder::encode_select_sql(&cmd, &mut sql_buf, &mut params_buf);
+    AstEncoder::encode_select_sql(&cmd, &mut sql_buf, &mut params_buf)
+        .map_err(|e| ApiError::bad_request("ENCODE_ERROR", e.to_string()))?;
     let sql = String::from_utf8_lossy(&sql_buf).to_string();
 
-    // Run EXPLAIN ANALYZE
+    // Run EXPLAIN ANALYZE with bind parameters
+    // SECURITY: `sql` contains $1, $2 placeholders — we MUST pass `params_buf`
+    // alongside so PostgreSQL resolves them. Previously params were discarded,
+    // causing "bind message has 0 parameters but 2 were expected" errors.
     let explain_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", sql);
 
     let mut conn = state
         .pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
-    let raw_cmd = qail_core::ast::Qail::raw_sql(&explain_sql);
-    let rows = conn
-        .fetch_all_uncached(&raw_cmd)
+    let raw_rows = conn
+        .query_raw_with_params(&explain_sql, &params_buf)
         .await
-        .map_err(|e| ApiError::query_error(e.to_string()))?;
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
-    let plan: Vec<Value> = rows.iter().map(row_to_json).collect();
+    // Convert raw row data to JSON
+    let plan: Vec<Value> = raw_rows
+        .iter()
+        .filter_map(|cols| {
+            cols.first()
+                .and_then(|c| c.as_ref())
+                .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+                .and_then(|s| serde_json::from_str(&s).ok())
+        })
+        .collect();
 
     Ok(Json(json!({
         "query": sql,

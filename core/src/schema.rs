@@ -156,13 +156,13 @@ impl Schema {
 
     /// Load schema from file path (auto-detects format).
     pub fn from_file(path: &std::path::Path) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-
         // Detect format: .json -> JSON, else -> QAIL schema
         if path.extension().map(|e| e == "json").unwrap_or(false) {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
             Self::from_json(&content).map_err(|e| e.to_string())
         } else {
+            let content = crate::schema_source::read_qail_schema_source(path)?;
             Self::from_qail_schema(&content)
         }
     }
@@ -259,11 +259,11 @@ mod tests {
         assert_eq!(table.columns.len(), 3);
         assert!(table.columns[0].primary_key);
     }
-    
+
     // =========================================================================
     // First-Class Relations Tests
     // =========================================================================
-    
+
     #[test]
     fn test_build_schema_parses_ref_syntax() {
         let schema_content = r#"
@@ -278,28 +278,28 @@ table posts {
     title TEXT
 }
 "#;
-        
+
         let schema = crate::build::Schema::parse(schema_content).unwrap();
-        
+
         // Check tables exist
         assert!(schema.has_table("users"));
         assert!(schema.has_table("posts"));
-        
+
         // Check foreign key was parsed
         let posts = schema.table("posts").unwrap();
         assert_eq!(posts.foreign_keys.len(), 1);
-        
+
         let fk = &posts.foreign_keys[0];
         assert_eq!(fk.column, "user_id");
         assert_eq!(fk.ref_table, "users");
         assert_eq!(fk.ref_column, "id");
     }
-    
+
     #[test]
     fn test_relation_registry_forward_lookup() {
         let mut registry = RelationRegistry::new();
         registry.register("posts", "user_id", "users", "id");
-        
+
         // Forward lookup: posts -> users
         let result = registry.get("posts", "users");
         assert!(result.is_some());
@@ -307,7 +307,7 @@ table posts {
         assert_eq!(from_col, "user_id");
         assert_eq!(to_col, "id");
     }
-    
+
     #[test]
     fn test_relation_registry_from_build_schema() {
         let schema_content = r#"
@@ -324,64 +324,64 @@ table comments {
     user_id UUID ref:users.id
 }
 "#;
-        
+
         let schema = crate::build::Schema::parse(schema_content).unwrap();
         let registry = RelationRegistry::from_build_schema(&schema);
-        
+
         // Check posts -> users
         assert!(registry.get("posts", "users").is_some());
-        
+
         // Check comments -> posts
         assert!(registry.get("comments", "posts").is_some());
-        
+
         // Check comments -> users
         assert!(registry.get("comments", "users").is_some());
-        
+
         // Check reverse lookups
         let referencing = registry.referencing("users");
         assert!(referencing.contains(&"posts"));
         assert!(referencing.contains(&"comments"));
     }
-    
+
     #[test]
     fn test_join_on_produces_correct_ast() {
         use crate::Qail;
-        
+
         // Setup: Register a relation manually
         {
             let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
             reg.register("posts", "user_id", "users", "id");
         }
-        
+
         // Test forward join: from users, join posts
         // This should find reverse: posts.user_id -> users.id
         let query = Qail::get("users").join_on("posts");
-        
+
         assert_eq!(query.joins.len(), 1);
         let join = &query.joins[0];
         assert_eq!(join.table, "posts");
-        
+
         // Verify join conditions
         let on = join.on.as_ref().expect("Should have ON conditions");
         assert_eq!(on.len(), 1);
-        
+
         // Clean up
         {
             let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
             *reg = RelationRegistry::new();
         }
     }
-    
+
     #[test]
     fn test_join_on_optional_returns_self_when_no_relation() {
         use crate::Qail;
-        
+
         // Clear registry
         {
             let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
             *reg = RelationRegistry::new();
         }
-        
+
         // join_on_optional should not panic, just return self unchanged
         let query = Qail::get("users").join_on_optional("nonexistent");
         assert!(query.joins.is_empty());
@@ -389,8 +389,8 @@ table comments {
 }
 
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::sync::LazyLock;
+use std::sync::RwLock;
 
 /// Registry of table foreign-key relationships for auto-join inference.
 #[derive(Debug, Default)]
@@ -406,7 +406,7 @@ impl RelationRegistry {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Register a foreign-key relation from schema.
     ///
     /// # Arguments
@@ -420,13 +420,13 @@ impl RelationRegistry {
             (from_table.to_string(), to_table.to_string()),
             (from_col.to_string(), to_col.to_string()),
         );
-        
+
         self.reverse
             .entry(to_table.to_string())
             .or_default()
             .push(from_table.to_string());
     }
-    
+
     /// Lookup join columns for a relation.
     ///
     /// Returns `(from_col, to_col)` if the relation exists.
@@ -440,7 +440,7 @@ impl RelationRegistry {
             .get(&(from_table.to_string(), to_table.to_string()))
             .map(|(a, b)| (a.as_str(), b.as_str()))
     }
-    
+
     /// Get all tables that reference this table (for reverse joins).
     pub fn referencing(&self, table: &str) -> Vec<&str> {
         self.reverse
@@ -448,36 +448,33 @@ impl RelationRegistry {
             .map(|v| v.iter().map(|s| s.as_str()).collect())
             .unwrap_or_default()
     }
-    
+
     /// Load relations from a parsed build::Schema.
     pub fn from_build_schema(schema: &crate::build::Schema) -> Self {
         let mut registry = Self::new();
-        
+
         for table in schema.tables.values() {
             for fk in &table.foreign_keys {
-                registry.register(
-                    &table.name,
-                    &fk.column,
-                    &fk.ref_table,
-                    &fk.ref_column,
-                );
+                registry.register(&table.name, &fk.column, &fk.ref_table, &fk.ref_column);
             }
         }
-        
+
         registry
     }
 }
 
 /// Global mutable registry for runtime schema loading.
-pub static RUNTIME_RELATIONS: LazyLock<RwLock<RelationRegistry>> = 
+pub static RUNTIME_RELATIONS: LazyLock<RwLock<RelationRegistry>> =
     LazyLock::new(|| RwLock::new(RelationRegistry::new()));
 
 /// Load relations from a schema.qail file into the runtime registry.
 /// Returns the number of relations loaded.
 pub fn load_schema_relations(path: &str) -> Result<usize, String> {
     let schema = crate::build::Schema::parse_file(path)?;
-    let mut registry = RUNTIME_RELATIONS.write().map_err(|e| format!("Lock error: {}", e))?;
-    
+    let mut registry = RUNTIME_RELATIONS
+        .write()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
     let mut count = 0;
     for table in schema.tables.values() {
         for fk in &table.foreign_keys {
@@ -485,7 +482,7 @@ pub fn load_schema_relations(path: &str) -> Result<usize, String> {
             count += 1;
         }
     }
-    
+
     Ok(count)
 }
 

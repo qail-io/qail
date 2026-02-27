@@ -2,11 +2,13 @@
 //!
 //! Provides pre-migration impact analysis and snapshot creation.
 
-use anyhow::{Result, anyhow};
 use crate::colors::*;
-use qail_core::ast::{Action, Expr, Qail};
+use anyhow::{Result, anyhow};
+use qail_core::ast::{Action, Expr, Operator, Qail};
 use qail_pg::driver::PgDriver;
 use std::path::PathBuf;
+
+use crate::migrations::types::is_safe_cast;
 
 /// Impact analysis result for a migration command
 #[derive(Debug, Default)]
@@ -45,6 +47,28 @@ pub async fn analyze_impact(driver: &mut PgDriver, cmd: &Qail) -> Result<Migrati
                     impact.dropped_columns.push(name.clone());
                     impact.rows_affected += count_column_values(driver, &cmd.table, name).await?;
                 }
+            }
+        }
+        Action::AlterType => {
+            impact.operation = "ALTER TYPE".to_string();
+
+            if let Some((column, target_type)) = alter_type_target(cmd) {
+                if let Some(source_type) = column_data_type(driver, &cmd.table, &column).await?
+                    && is_narrowing_type_change(&source_type, &target_type)
+                {
+                    impact.operation =
+                        format!("ALTER TYPE (narrowing {} -> {})", source_type, target_type);
+                    impact.is_destructive = true;
+                    impact.rows_affected = count_table_rows(driver, &cmd.table).await?;
+                }
+            }
+        }
+        Action::AlterSetNotNull => {
+            impact.operation = "ALTER SET NOT NULL".to_string();
+            let table_rows = count_table_rows(driver, &cmd.table).await?;
+            if table_rows > 0 {
+                impact.is_destructive = true;
+                impact.rows_affected = table_rows;
             }
         }
         Action::Alter => {
@@ -101,6 +125,64 @@ async fn count_column_values(driver: &mut PgDriver, table: &str, column: &str) -
     Ok(0)
 }
 
+fn alter_type_target(cmd: &Qail) -> Option<(String, String)> {
+    match cmd.columns.first() {
+        Some(Expr::Def {
+            name,
+            data_type,
+            constraints: _,
+        }) => Some((name.clone(), normalize_type_for_cast(data_type))),
+        _ => None,
+    }
+}
+
+fn normalize_type_for_cast(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "character varying" => "VARCHAR".to_string(),
+        "character" => "CHAR".to_string(),
+        "timestamp with time zone" => "TIMESTAMPTZ".to_string(),
+        "timestamp without time zone" => "TIMESTAMP".to_string(),
+        "double precision" => "DOUBLE PRECISION".to_string(),
+        "boolean" => "BOOLEAN".to_string(),
+        "integer" => "INT".to_string(),
+        "bigint" => "BIGINT".to_string(),
+        "smallint" => "SMALLINT".to_string(),
+        "numeric" => "NUMERIC".to_string(),
+        "uuid" => "UUID".to_string(),
+        "text" => "TEXT".to_string(),
+        "date" => "DATE".to_string(),
+        "time without time zone" => "TIME".to_string(),
+        "time with time zone" => "TIMETZ".to_string(),
+        other => other.to_ascii_uppercase(),
+    }
+}
+
+fn is_narrowing_type_change(source: &str, target: &str) -> bool {
+    !is_safe_cast(source, target)
+}
+
+async fn column_data_type(
+    driver: &mut PgDriver,
+    table: &str,
+    column: &str,
+) -> Result<Option<String>> {
+    let cmd = Qail::get("information_schema.columns")
+        .column("data_type")
+        .filter("table_schema", Operator::Eq, "public")
+        .filter("table_name", Operator::Eq, table.to_string())
+        .filter("column_name", Operator::Eq, column.to_string())
+        .limit(1);
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to inspect type for {}.{}: {}", table, column, e))?;
+
+    Ok(rows
+        .first()
+        .and_then(|row| row.get_string(0))
+        .map(|raw| normalize_type_for_cast(&raw)))
+}
+
 /// Display impact analysis to user
 pub fn display_impact(impacts: &[MigrationImpact]) {
     let destructive: Vec<_> = impacts.iter().filter(|i| i.is_destructive).collect();
@@ -117,10 +199,18 @@ pub fn display_impact(impacts: &[MigrationImpact]) {
     let mut total_rows = 0u64;
 
     for impact in &destructive {
-        let op_colored = match impact.operation.as_str() {
-            "DROP TABLE" => impact.operation.red().bold(),
-            "DROP COLUMN" => impact.operation.yellow().bold(),
-            _ => Painted { text: impact.operation.clone(), prefix: String::new() },
+        let op_colored = if impact.operation == "DROP TABLE" {
+            impact.operation.red().bold()
+        } else if impact.operation == "DROP COLUMN"
+            || impact.operation == "ALTER SET NOT NULL"
+            || impact.operation.starts_with("ALTER TYPE (narrowing")
+        {
+            impact.operation.yellow().bold()
+        } else {
+            Painted {
+                text: impact.operation.clone(),
+                prefix: String::new(),
+            }
         };
 
         if !impact.dropped_columns.is_empty() {
@@ -620,4 +710,27 @@ pub async fn list_snapshots(
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_narrowing_type_change, normalize_type_for_cast};
+
+    #[test]
+    fn normalize_type_for_cast_maps_information_schema_names() {
+        assert_eq!(normalize_type_for_cast("character varying"), "VARCHAR");
+        assert_eq!(
+            normalize_type_for_cast("timestamp with time zone"),
+            "TIMESTAMPTZ"
+        );
+        assert_eq!(normalize_type_for_cast("integer"), "INT");
+        assert_eq!(normalize_type_for_cast("text"), "TEXT");
+    }
+
+    #[test]
+    fn narrowing_type_change_detection_uses_cast_safety() {
+        assert!(is_narrowing_type_change("TEXT", "INT"));
+        assert!(!is_narrowing_type_change("INT", "BIGINT"));
+        assert!(!is_narrowing_type_change("INT", "TEXT"));
+    }
 }

@@ -6,7 +6,7 @@
 //! - Bind parameters with their expressions
 //! - Return type (from turbofish)
 
-#![allow(dead_code)]  // Module under development, will be used by LSP
+#![allow(dead_code)] // Module under development, will be used by LSP
 
 use proc_macro2::Span;
 use syn::spanned::Spanned;
@@ -71,35 +71,37 @@ impl QueryVisitor {
                     if end_span.is_none() {
                         end_span = Some(method.method.span());
                     }
-                    
+
                     let method_name = method.method.to_string();
-                    
+
                     if method_name == "bind"
                         && let Some(arg) = method.args.first()
                     {
                         let arg_str = self.expr_to_source(arg);
                         binds.insert(0, arg_str);
                     }
-                    
+
                     current = (*method.receiver).clone();
                 }
                 Expr::Call(call) => {
                     if let Expr::Path(path) = &*call.func {
                         let path_str = path_to_string(&path.path);
-                        
-                        if path_str.starts_with("sqlx::query") || path_str == "query" || path_str == "query_as" {
+
+                        if path_str.starts_with("sqlx::query")
+                            || path_str == "query"
+                            || path_str == "query_as"
+                        {
                             // Found the sqlx call!
-                            let query_fn = path_str.split("::").last().unwrap_or("query").to_string();
-                            
-                            let sql = call.args.first().and_then(|arg| {
-                                extract_string_literal(arg)
-                            });
-                            
+                            let query_fn =
+                                path_str.split("::").last().unwrap_or("query").to_string();
+
+                            let sql = call.args.first().and_then(extract_string_literal);
+
                             let return_type = extract_turbofish_type(path);
-                            
+
                             let start = call.func.span().start();
                             let end = end_span.map(|s| s.end()).unwrap_or(start);
-                            
+
                             if let Some(sql) = sql {
                                 return Some(QueryCall {
                                     start_line: start.line,
@@ -119,7 +121,7 @@ impl QueryVisitor {
                 _ => break,
             }
         }
-        
+
         None
     }
 
@@ -166,14 +168,18 @@ fn extract_turbofish_type(path: &ExprPath) -> Option<String> {
     // Look for ::<_, RowType> in the path
     for seg in &path.path.segments {
         if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-            let types: Vec<_> = args.args.iter().filter_map(|arg| {
-                if let syn::GenericArgument::Type(ty) = arg {
-                    Some(format!("{}", quote::ToTokens::to_token_stream(ty)))
-                } else {
-                    None
-                }
-            }).collect();
-            
+            let types: Vec<_> = args
+                .args
+                .iter()
+                .filter_map(|arg| {
+                    if let syn::GenericArgument::Type(ty) = arg {
+                        Some(format!("{}", quote::ToTokens::to_token_stream(ty)))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
             // Return the second type (Row type, after _)
             if types.len() >= 2 {
                 return Some(types[1].clone());
@@ -208,7 +214,7 @@ mod tests {
                     .await;
             }
         "#;
-        
+
         let calls = detect_query_calls(code);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].sql, "SELECT * FROM users");
@@ -225,7 +231,7 @@ mod tests {
                     .await;
             }
         "#;
-        
+
         let calls = detect_query_calls(code);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].binds.len(), 1);
@@ -243,7 +249,7 @@ mod tests {
                     .await;
             }
         "#;
-        
+
         let calls = detect_query_calls(code);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].binds.len(), 2);

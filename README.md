@@ -205,6 +205,66 @@ qail.rs/
 
 ---
 
+## N+1 Detection
+
+Compile-time static analysis catches query-in-loop patterns before they reach production. Powered by `syn::Visit` AST traversal.
+
+### Rules
+
+| Code | Severity | Trigger | Example |
+|------|----------|---------|---------|
+| N1-001 | ⚠ Warning | Query inside `for`/`while`/`loop` | `for x in items { conn.fetch_all(&q) }` |
+| N1-002 | ⚠ Warning | Loop variable used in query args | `for id in ids { Qail::get("t").eq("id", id) }` |
+| N1-003 | ⚠ Warning | Function with query called in loop | `for x in xs { load_user(conn, x) }` |
+| N1-004 | ❌ Error | Query in nested loop (depth ≥ 2) | `for g in groups { for x in g { ... } }` |
+
+### Suppression
+
+```rust
+// Disable on the next line
+// qail-lint:disable-next-line N1-001
+conn.fetch_all(&cmd).await?;
+
+// Disable inline
+conn.fetch_all(&cmd).await?; // qail-lint:disable-line N1-001
+```
+
+### Build Integration (`build.rs`)
+
+Runs automatically via `validate()` when using Qail's build-time checks:
+
+| Env Var | Values | Default |
+|---------|--------|---------|
+| `QAIL_NPLUS1` | `off` \| `warn` \| `deny` | `warn` |
+| `QAIL_NPLUS1_MAX_WARNINGS` | integer | `50` |
+
+### CLI
+
+```bash
+qail check schema.qail --src ./src              # Shows N+1 warnings
+qail check schema.qail --src ./src --nplus1-deny # Fails on any N+1
+```
+
+### LSP
+
+N+1 diagnostics appear automatically in your editor for `.rs` files with diagnostic codes `N1-001`..`N1-004`.
+
+### Remediation
+
+```rust
+// ❌ N+1: one query per item
+for id in &ids {
+    let user = conn.fetch_one(&Qail::get("users").eq("id", id)).await?;
+}
+
+// ✅ Batch: single query
+let users = conn.fetch_all(
+    &Qail::get("users").in_vals("id", &ids)
+).await?;
+```
+
+---
+
 ## Feature Status (v0.20.4)
 
 | Category | Features |

@@ -3,9 +3,7 @@
 //! Adversarial edge cases for the PostgreSQL wire protocol encoder/decoder.
 //! Covers scenarios #8 (wide tables) and #15 (binary protocol edge types).
 
-use qail_pg::protocol::wire::{
-    BackendMessage, FrontendMessage,
-};
+use qail_pg::protocol::wire::{BackendMessage, FrontendMessage};
 
 // ══════════════════════════════════════════════════════════════════════
 // #8: Extremely Wide Table — 200+ columns RowDescription
@@ -16,7 +14,7 @@ fn build_row_description(n_columns: usize) -> Vec<u8> {
     let mut payload = Vec::new();
     // Field count (i16)
     payload.extend_from_slice(&(n_columns as i16).to_be_bytes());
-    
+
     for i in 0..n_columns {
         let name = format!("col_{}\0", i);
         payload.extend_from_slice(name.as_bytes());
@@ -28,7 +26,7 @@ fn build_row_description(n_columns: usize) -> Vec<u8> {
         payload.extend_from_slice(&(-1i32).to_be_bytes()); // type_modifier
         payload.extend_from_slice(&0i16.to_be_bytes()); // format (text)
     }
-    
+
     // Wrap in message envelope: 'T' + length
     let len = (payload.len() + 4) as i32;
     let mut msg = vec![b'T'];
@@ -108,9 +106,8 @@ fn redteam_data_row_all_nulls() {
 #[test]
 fn redteam_data_row_mixed_null_and_data() {
     let data = b"hello";
-    let columns: Vec<Option<&[u8]>> = vec![
-        Some(data), None, Some(b""), None, Some(b"\x00\x01\x02"),
-    ];
+    let columns: Vec<Option<&[u8]>> =
+        vec![Some(data), None, Some(b""), None, Some(b"\x00\x01\x02")];
     let msg = build_data_row(&columns);
     let (decoded, _) = BackendMessage::decode(&msg).expect("Should decode mixed row");
     match decoded {
@@ -140,7 +137,8 @@ fn redteam_data_row_zero_columns() {
 fn redteam_empty_query_response() {
     // EmptyQueryResponse: 'I' + length(4)
     let msg = vec![b'I', 0, 0, 0, 4];
-    let (decoded, consumed) = BackendMessage::decode(&msg).expect("Should decode EmptyQueryResponse");
+    let (decoded, consumed) =
+        BackendMessage::decode(&msg).expect("Should decode EmptyQueryResponse");
     assert_eq!(consumed, 5);
     assert!(matches!(decoded, BackendMessage::EmptyQueryResponse));
 }
@@ -149,25 +147,33 @@ fn redteam_empty_query_response() {
 fn redteam_error_response_with_all_fields() {
     // Build a complete ErrorResponse with all field types
     let mut payload = Vec::new();
-    payload.push(b'S'); payload.extend_from_slice(b"FATAL\0");
-    payload.push(b'C'); payload.extend_from_slice(b"42P01\0");
-    payload.push(b'M'); payload.extend_from_slice(b"relation does not exist\0");
-    payload.push(b'D'); payload.extend_from_slice(b"Table \"orders\" not found\0");
-    payload.push(b'H'); payload.extend_from_slice(b"Check spelling\0");
+    payload.push(b'S');
+    payload.extend_from_slice(b"FATAL\0");
+    payload.push(b'C');
+    payload.extend_from_slice(b"42P01\0");
+    payload.push(b'M');
+    payload.extend_from_slice(b"relation does not exist\0");
+    payload.push(b'D');
+    payload.extend_from_slice(b"Table \"orders\" not found\0");
+    payload.push(b'H');
+    payload.extend_from_slice(b"Check spelling\0");
     payload.push(0); // terminator
-    
+
     let len = (payload.len() + 4) as i32;
     let mut msg = vec![b'E'];
     msg.extend_from_slice(&len.to_be_bytes());
     msg.extend_from_slice(&payload);
-    
+
     let (decoded, _) = BackendMessage::decode(&msg).expect("Should decode error with all fields");
     match decoded {
         BackendMessage::ErrorResponse(fields) => {
             assert_eq!(fields.severity, "FATAL");
             assert_eq!(fields.code, "42P01");
             assert_eq!(fields.message, "relation does not exist");
-            assert_eq!(fields.detail, Some("Table \"orders\" not found".to_string()));
+            assert_eq!(
+                fields.detail,
+                Some("Table \"orders\" not found".to_string())
+            );
             assert_eq!(fields.hint, Some("Check spelling".to_string()));
         }
         _ => panic!("Expected ErrorResponse"),
@@ -182,7 +188,7 @@ fn redteam_error_response_empty_payload() {
     let mut msg = vec![b'E'];
     msg.extend_from_slice(&len.to_be_bytes());
     msg.extend_from_slice(&payload);
-    
+
     let (decoded, _) = BackendMessage::decode(&msg).expect("Should decode empty error");
     match decoded {
         BackendMessage::ErrorResponse(fields) => {
@@ -248,12 +254,12 @@ fn redteam_data_row_declares_more_columns_than_data() {
     payload.extend_from_slice(&4i32.to_be_bytes()); // col 1: 4 bytes
     payload.extend_from_slice(b"data");
     // Missing col 2-4 data
-    
+
     let len = (payload.len() + 4) as i32;
     let mut msg = vec![b'D'];
     msg.extend_from_slice(&len.to_be_bytes());
     msg.extend_from_slice(&payload);
-    
+
     let result = BackendMessage::decode(&msg);
     assert!(result.is_err(), "Truncated DataRow must return error");
 }
@@ -269,14 +275,17 @@ fn redteam_row_description_declares_more_fields_than_data() {
     payload.extend_from_slice(&23u32.to_be_bytes()); // type_oid
     payload.extend_from_slice(&4i16.to_be_bytes()); // type_size
     // Missing type_modifier and format for field 0, and all of fields 1-2
-    
+
     let len = (payload.len() + 4) as i32;
     let mut msg = vec![b'T'];
     msg.extend_from_slice(&len.to_be_bytes());
     msg.extend_from_slice(&payload);
-    
+
     let result = BackendMessage::decode(&msg);
-    assert!(result.is_err(), "Truncated RowDescription must return error");
+    assert!(
+        result.is_err(),
+        "Truncated RowDescription must return error"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -302,11 +311,13 @@ fn tierx_negative_column_count_row_description() {
     let mut msg = vec![b'T'];
     msg.extend_from_slice(&len.to_be_bytes());
     msg.extend_from_slice(&payload);
-    
+
     let result = BackendMessage::decode(&msg);
     // Must not panic. Should return error or parse as 0 columns.
-    assert!(result.is_ok() || result.is_err(),
-            "Negative column count must not panic");
+    assert!(
+        result.is_ok() || result.is_err(),
+        "Negative column count must not panic"
+    );
 }
 
 /// DataRow with maximum i32 column length (claims 2GB column)
@@ -317,14 +328,17 @@ fn tierx_data_row_gigantic_column_length() {
     payload.extend_from_slice(&i32::MAX.to_be_bytes()); // claims 2GB data
     // But we don't provide 2GB of data — only a few bytes
     payload.extend_from_slice(b"tiny");
-    
+
     let len = (payload.len() + 4) as i32;
     let mut msg = vec![b'D'];
     msg.extend_from_slice(&len.to_be_bytes());
     msg.extend_from_slice(&payload);
-    
+
     let result = BackendMessage::decode(&msg);
-    assert!(result.is_err(), "Oversized column length claim must error, not OOM");
+    assert!(
+        result.is_err(),
+        "Oversized column length claim must error, not OOM"
+    );
 }
 
 /// ErrorResponse with extremely long message field (10KB)
@@ -332,18 +346,20 @@ fn tierx_data_row_gigantic_column_length() {
 fn tierx_error_response_huge_message() {
     let huge_msg = "X".repeat(10_000);
     let mut payload = Vec::new();
-    payload.push(b'S'); payload.extend_from_slice(b"ERROR\0");
-    payload.push(b'C'); payload.extend_from_slice(b"99999\0");
-    payload.push(b'M'); 
+    payload.push(b'S');
+    payload.extend_from_slice(b"ERROR\0");
+    payload.push(b'C');
+    payload.extend_from_slice(b"99999\0");
+    payload.push(b'M');
     payload.extend_from_slice(huge_msg.as_bytes());
     payload.push(0); // null terminator for M field
     payload.push(0); // terminator
-    
+
     let len = (payload.len() + 4) as i32;
     let mut msg = vec![b'E'];
     msg.extend_from_slice(&len.to_be_bytes());
     msg.extend_from_slice(&payload);
-    
+
     let (decoded, _) = BackendMessage::decode(&msg).expect("Should handle large error");
     match decoded {
         BackendMessage::ErrorResponse(fields) => {

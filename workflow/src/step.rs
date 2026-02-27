@@ -271,10 +271,7 @@ mod tests {
         let step = WorkflowStep::branch(
             "decline_reason",
             vec![
-                (
-                    "full",
-                    vec![WorkflowStep::log("Boat is full")],
-                ),
+                ("full", vec![WorkflowStep::log("Boat is full")]),
                 (
                     "maintenance",
                     vec![WorkflowStep::log("Boat under maintenance")],

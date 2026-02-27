@@ -2,25 +2,16 @@
 //!
 //! Text, binary, fast, and batch query endpoints.
 
-use axum::{
-    body::Bytes,
-    extract::State,
-    http::HeaderMap,
-    response::Json,
-};
+use axum::{body::Bytes, extract::State, http::HeaderMap, response::Json};
 use std::sync::Arc;
 
-
-use super::{
-    BatchQueryResult, BatchRequest, BatchResponse,
-    FastQueryResponse, QueryResponse,
-};
 use super::convert::{row_to_array, row_to_json};
 #[cfg(feature = "qdrant")]
 use super::qdrant::execute_qdrant_cmd;
+use super::{BatchQueryResult, BatchRequest, BatchResponse, FastQueryResponse, QueryResponse};
+use crate::GatewayState;
 use crate::auth::extract_auth_from_headers;
 use crate::middleware::ApiError;
-use crate::GatewayState;
 
 /// Execute a single Qail query (POST /qail).
 pub async fn execute_query(
@@ -29,23 +20,22 @@ pub async fn execute_query(
     body: String,
 ) -> Result<Json<QueryResponse>, ApiError> {
     let query_text = body.trim();
-    
+
     if query_text.is_empty() {
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
     }
 
-    // SECURITY: Query allow-list check — reject non-whitelisted patterns.
-    if !state.allow_list.is_allowed(query_text) {
-        tracing::warn!("Query rejected by allow-list: {}", query_text);
-        return Err(ApiError::with_code("QUERY_NOT_ALLOWED", "Query not in allow-list"));
-    }
-    
     // Extract auth context from headers
     let mut auth = extract_auth_from_headers(&headers);
-    auth.enrich_with_operator_map(&state.user_operator_map).await;
-    
-    tracing::debug!("Executing text query: {} (user: {})", query_text, auth.user_id);
-    
+    auth.enrich_with_operator_map(&state.user_operator_map)
+        .await;
+
+    tracing::debug!(
+        "Executing text query: {} (user: {})",
+        query_text,
+        auth.user_id
+    );
+
     // Parse the QAIL text into AST (cached — skip re-parse for repeated queries)
     let mut cmd = {
         use std::collections::hash_map::DefaultHasher;
@@ -69,18 +59,30 @@ pub async fn execute_query(
             }
         }
     };
-    
+
+    // SECURITY: Query allow-list check (raw text, canonical QAIL, or SQL).
+    if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
+        tracing::warn!("Query rejected by allow-list: {}", query_text);
+        return Err(ApiError::with_code(
+            "QUERY_NOT_ALLOWED",
+            "Query not in allow-list",
+        ));
+    }
+
     // Apply row-level security policies
     if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
         tracing::warn!("Policy error: {}", e);
         return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
-    
+
+    // SECURITY: Clamp LIMIT at AST level so PostgreSQL stops scanning early.
+    clamp_query_limit(&mut cmd, state.config.max_result_rows);
+
     execute_qail_cmd(&state, &auth, &cmd).await
 }
 
 /// Execute a QAIL query (BINARY format)
-/// 
+///
 /// Accepts postcard-encoded QAIL AST and returns JSON results.
 /// This is faster than text format since it skips parsing.
 pub async fn execute_query_binary(
@@ -91,33 +93,81 @@ pub async fn execute_query_binary(
     if body.is_empty() {
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty binary query"));
     }
-    
+
     // Extract auth context from headers
     let mut auth = extract_auth_from_headers(&headers);
-    auth.enrich_with_operator_map(&state.user_operator_map).await;
-    
-    tracing::debug!("Executing binary query ({} bytes, user: {})", body.len(), auth.user_id);
-    
+    auth.enrich_with_operator_map(&state.user_operator_map)
+        .await;
+
+    tracing::debug!(
+        "Executing binary query ({} bytes, user: {})",
+        body.len(),
+        auth.user_id
+    );
+
     // SECURITY (E3): Limit deserialization to 64 KiB to prevent allocation bombs.
     if body.len() > 64 * 1024 {
-        return Err(ApiError::bad_request("PAYLOAD_TOO_LARGE", "Binary query exceeds 64 KiB limit"));
+        return Err(ApiError::bad_request(
+            "PAYLOAD_TOO_LARGE",
+            "Binary query exceeds 64 KiB limit",
+        ));
     }
-    
+
     // Deserialize the binary QAIL AST (postcard format)
     let mut cmd: qail_core::ast::Qail = match postcard::from_bytes(&body) {
         Ok(cmd) => cmd,
         Err(e) => {
             tracing::warn!("Postcard decode error: {}", e);
-            return Err(ApiError::bad_request("DECODE_ERROR", format!("Invalid binary format: {}", e)));
+            return Err(ApiError::bad_request(
+                "DECODE_ERROR",
+                format!("Invalid binary format: {}", e),
+            ));
         }
     };
-    
+
+    // SECURITY: Validate AST identifiers — reject SQL injection in table/column names,
+    // Expr::Raw nodes, and dangerous procedural actions (Call, Do, SessionSet).
+    if let Err(e) = qail_core::sanitize::validate_ast(&cmd) {
+        tracing::warn!("Binary AST rejected by structural validation: {}", e);
+        return Err(ApiError::bad_request(
+            "AST_VALIDATION_FAILED",
+            format!("Invalid AST: {}", e),
+        ));
+    }
+
+    // SECURITY: When binary_requires_allow_list is true (default), reject binary
+    // queries if no allow-list is loaded. This prevents the binary endpoint from
+    // being a completely unguarded entry point when operators haven't configured
+    // query restrictions.
+    if state.config.binary_requires_allow_list && !state.allow_list.is_enabled() {
+        tracing::warn!(
+            "Binary query rejected: binary_requires_allow_list=true but no allow-list is loaded. \
+             Set QAIL_BINARY_REQUIRES_ALLOW_LIST=false or configure an allow-list file."
+        );
+        return Err(ApiError::with_code(
+            "BINARY_REQUIRES_ALLOW_LIST",
+            "Binary endpoint requires a query allow-list to be configured",
+        ));
+    }
+
+    // SECURITY: Enforce allow-list for binary endpoint too.
+    if !is_query_allowed(&state.allow_list, None, &cmd) {
+        tracing::warn!("Binary query rejected by allow-list");
+        return Err(ApiError::with_code(
+            "QUERY_NOT_ALLOWED",
+            "Query not in allow-list",
+        ));
+    }
+
     // Apply row-level security policies
     if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
         tracing::warn!("Policy error: {}", e);
         return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
-    
+
+    // SECURITY: Clamp LIMIT at AST level so PostgreSQL stops scanning early.
+    clamp_query_limit(&mut cmd, state.config.max_result_rows);
+
     execute_qail_cmd(&state, &auth, &cmd).await
 }
 
@@ -132,18 +182,15 @@ pub async fn execute_query_fast(
     body: String,
 ) -> Result<Json<FastQueryResponse>, ApiError> {
     let query_text = body.trim();
-    
+
     if query_text.is_empty() {
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
     }
 
-    if !state.allow_list.is_allowed(query_text) {
-        return Err(ApiError::with_code("QUERY_NOT_ALLOWED", "Query not in allow-list"));
-    }
-    
     let mut auth = extract_auth_from_headers(&headers);
-    auth.enrich_with_operator_map(&state.user_operator_map).await;
-    
+    auth.enrich_with_operator_map(&state.user_operator_map)
+        .await;
+
     let mut cmd = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -165,11 +212,22 @@ pub async fn execute_query_fast(
             }
         }
     };
-    
+
+    if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
+        tracing::warn!("Fast query rejected by allow-list: {}", query_text);
+        return Err(ApiError::with_code(
+            "QUERY_NOT_ALLOWED",
+            "Query not in allow-list",
+        ));
+    }
+
     if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
         return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
-    
+
+    // SECURITY: Clamp LIMIT at AST level so PostgreSQL stops scanning early.
+    clamp_query_limit(&mut cmd, state.config.max_result_rows);
+
     execute_qail_cmd_fast(&state, &auth, &cmd).await
 }
 
@@ -188,34 +246,46 @@ async fn execute_qail_cmd_fast(
         return Err(api_err);
     }
 
-    if matches!(cmd.action, Action::Search | Action::Upsert | Action::Scroll
-        | Action::CreateCollection | Action::DeleteCollection) {
+    if matches!(
+        cmd.action,
+        Action::Search
+            | Action::Upsert
+            | Action::Scroll
+            | Action::CreateCollection
+            | Action::DeleteCollection
+    ) {
         return Err(ApiError::bad_request(
             "UNSUPPORTED_ACTION",
             "Vector operations not supported on /qail/fast",
         ));
     }
 
-    let mut conn = state.pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+    let mut conn = state
+        .pool
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
         .await
-        .map_err(|e| ApiError::connection_error(e.to_string()))?;
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
 
     let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
-    let rows = conn.fetch_all_fast(cmd).await.map_err(|e| {
-        ApiError::query_error(e.to_string())
-    });
+    let rows = conn
+        .fetch_all_fast(cmd)
+        .await
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
     timer.finish(rows.is_ok());
     conn.release().await;
     let rows = rows?;
-    
-    let json_rows: Vec<Vec<serde_json::Value>> = rows
-        .iter()
-        .map(row_to_array)
-        .collect();
-    
+
+    let json_rows: Vec<Vec<serde_json::Value>> = rows.iter().map(row_to_array).collect();
+
     let count = json_rows.len();
-    Ok(Json(FastQueryResponse { rows: json_rows, count }))
+    Ok(Json(FastQueryResponse {
+        rows: json_rows,
+        count,
+    }))
 }
 
 /// Extract query complexity metrics from a QAIL AST.
@@ -227,11 +297,11 @@ async fn execute_qail_cmd_fast(
 fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usize) {
     use qail_core::ast::CageKind;
 
-    let depth = cmd.ctes.len()
-        + cmd.set_ops.len()
-        + usize::from(cmd.source_query.is_some());
+    let depth = cmd.ctes.len() + cmd.set_ops.len() + usize::from(cmd.source_query.is_some());
 
-    let filter_count: usize = cmd.cages.iter()
+    let filter_count: usize = cmd
+        .cages
+        .iter()
         .filter(|c| matches!(c.kind, CageKind::Filter))
         .map(|c| c.conditions.len())
         .sum();
@@ -265,58 +335,63 @@ async fn execute_qail_cmd(
     // ── Route vector operations to Qdrant ───────────────────────────
     if matches!(
         cmd.action,
-        Action::Search | Action::Upsert | Action::Scroll
-            | Action::CreateCollection | Action::DeleteCollection
+        Action::Search
+            | Action::Upsert
+            | Action::Scroll
+            | Action::CreateCollection
+            | Action::DeleteCollection
     ) {
         #[cfg(feature = "qdrant")]
-        { return execute_qdrant_cmd(state, cmd).await; }
+        {
+            return execute_qdrant_cmd(state, cmd).await;
+        }
         #[cfg(not(feature = "qdrant"))]
-        { return Err(ApiError::bad_request(
-            "QDRANT_DISABLED",
-            "Vector operations require the 'qdrant' feature",
-        )); }
-    }
-    
-    let table = &cmd.table;
-    let is_read_query = matches!(cmd.action, Action::Get);
-    
-    // Generate cache key from AST shape + user identity.
-    // SECURITY (R7-A): The shape key alone hashes filter column names but
-    // NOT filter values. Two tenants with the same query shape but different
-    // RLS-injected operator_id values would share cached results without
-    // the user_id prefix, leaking data across tenants.
-    // SECURITY (E1): Include tenant_id in cache key to prevent cross-tenant cache poisoning.
-    let tenant = auth.tenant_id.as_deref().unwrap_or("_anon");
-    let cache_key = format!("{}:{}:{}", tenant, auth.user_id, shape_cache_key(cmd));
-    
-    // Check cache for read queries
-    if is_read_query {
-        if let Some(cached) = state.cache.get(&cache_key) {
-            tracing::debug!("Cache HIT for table '{}'", table);
-            // Parse cached JSON back to response
-            if let Ok(response) = serde_json::from_str::<QueryResponse>(&cached) {
-                return Ok(Json(response));
-            }
+        {
+            return Err(ApiError::bad_request(
+                "QDRANT_DISABLED",
+                "Vector operations require the 'qdrant' feature",
+            ));
         }
     }
-    
+
+    let table = &cmd.table;
+    let is_read_query = matches!(cmd.action, Action::Get);
+
+    // Generate cache key from full AST payload + identity.
+    // SECURITY: Include tenant/user identity plus value-sensitive AST hash to
+    // prevent stale collisions between different filter values.
+    let tenant = auth.tenant_id.as_deref().unwrap_or("_anon");
+    let cache_key = format!("{}:{}:{}", tenant, auth.user_id, exact_cache_key(cmd));
+
+    // Check cache for read queries
+    if is_read_query && let Some(cached) = state.cache.get(&cache_key) {
+        tracing::debug!("Cache HIT for table '{}'", table);
+        // Parse cached JSON back to response
+        if let Ok(response) = serde_json::from_str::<QueryResponse>(&cached) {
+            return Ok(Json(response));
+        }
+    }
+
     // Acquire raw connection (no RLS setup yet — pipelined below)
-    let mut conn = state.pool
+    let mut conn = state
+        .pool
         .acquire_raw()
         .await
-        .map_err(|e| ApiError::connection_error(e.to_string()))?;
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
 
     // Generate RLS SQL for pipelining (BEGIN + SET LOCAL + set_config)
-    let rls_sql = qail_pg::rls_sql_with_timeout(
+    let rls_sql = qail_pg::rls_sql_with_timeouts(
         &auth.to_rls_context(),
         state.config.statement_timeout_ms,
+        state.config.lock_timeout_ms,
     );
-    
+
     // Measure query execution time
     let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
-    let rows = conn.fetch_all_with_rls(cmd, &rls_sql).await.map_err(|e| {
-        ApiError::query_error(e.to_string())
-    });
+    let rows = conn
+        .fetch_all_with_rls(cmd, &rls_sql)
+        .await
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
     timer.finish(rows.is_ok());
 
     // Deterministic cleanup — release connection before processing results.
@@ -324,12 +399,11 @@ async fn execute_qail_cmd(
     conn.release().await;
 
     let rows = rows?;
-    
+
     // Convert rows to JSON
-    let json_rows: Vec<serde_json::Value> = rows
-        .iter()
-        .map(row_to_json)
-        .collect();
+    // Note: max_result_rows is enforced via AST LIMIT injection (clamp_query_limit)
+    // before execution, so PostgreSQL stops scanning early — no OOM risk.
+    let json_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
     // Verify every returned row belongs to the authenticated tenant.
@@ -341,21 +415,22 @@ async fn execute_qail_cmd(
             &state.config.tenant_column,
             table,
             "qail_cmd",
-        ).map_err(|v| {
+        )
+        .map_err(|v| {
             tracing::error!("{}", v);
             ApiError::with_code("TENANT_BOUNDARY_VIOLATION", "Data integrity error")
         })?
     } else {
         crate::tenant_guard::TenantVerified::unscoped()
     };
-    
+
     let count = json_rows.len();
-    
+
     let response = QueryResponse {
         rows: json_rows,
         count,
     };
-    
+
     // Cache read query results
     if is_read_query {
         if let Ok(json) = serde_json::to_string(&response) {
@@ -367,7 +442,7 @@ async fn execute_qail_cmd(
         state.cache.invalidate_table(table);
         tracing::debug!("Cache INVALIDATED for table '{}' (mutation)", table);
     }
-    
+
     Ok(Json(response))
 }
 
@@ -392,23 +467,31 @@ pub async fn execute_batch(
             ),
         ));
     }
-    
+
     let mut auth = extract_auth_from_headers(&headers);
-    auth.enrich_with_operator_map(&state.user_operator_map).await;
+    auth.enrich_with_operator_map(&state.user_operator_map)
+        .await;
     tracing::info!(
         "Executing batch of {} queries (txn={}, user: {})",
-        request.queries.len(), request.transaction, auth.user_id
+        request.queries.len(),
+        request.transaction,
+        auth.user_id
     );
-    
+
     let mut results = Vec::with_capacity(request.queries.len());
     let mut success_count = 0;
-    
+
     // Acquire RLS-scoped connection with statement timeout
-    let mut conn = state.pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+    let mut conn = state
+        .pool
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
         .await
-        .map_err(|e| ApiError::connection_error(e.to_string()))?;
-    
+        .map_err(|e| ApiError::from_pg_driver_error(&e, None))?;
+
     // Start transaction if requested (default: true)
     if request.transaction {
         conn.get_mut().execute_simple("BEGIN;").await.map_err(|e| {
@@ -416,12 +499,12 @@ pub async fn execute_batch(
             ApiError::with_code("TXN_ERROR", "Transaction start failed")
         })?;
     }
-    
+
     let mut had_error = false;
-    
+
     for (index, query_text) in request.queries.iter().enumerate() {
         let query_text = query_text.trim();
-        
+
         // Parse query
         let mut cmd = match qail_core::parser::parse(query_text) {
             Ok(cmd) => cmd,
@@ -440,7 +523,22 @@ pub async fn execute_batch(
                 continue;
             }
         };
-        
+
+        if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
+            results.push(BatchQueryResult {
+                index,
+                success: false,
+                rows: None,
+                count: None,
+                error: Some("Query not in allow-list".to_string()),
+            });
+            if request.transaction {
+                had_error = true;
+                break;
+            }
+            continue;
+        }
+
         // Apply RLS policies
         if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
             results.push(BatchQueryResult {
@@ -465,7 +563,7 @@ pub async fn execute_batch(
                 success: false,
                 rows: None,
                 count: None,
-                error: Some(api_err.message),
+                error: Some(api_err.message.clone()),
             });
             if request.transaction {
                 had_error = true;
@@ -473,23 +571,23 @@ pub async fn execute_batch(
             }
             continue;
         }
-        
+
+        // SECURITY: Clamp LIMIT at AST level so PostgreSQL stops scanning early.
+        clamp_query_limit(&mut cmd, state.config.max_result_rows);
+
         // Execute query
         let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
         match conn.fetch_all_uncached(&cmd).await {
             Ok(rows) => {
                 timer.finish(true);
-                let json_rows: Vec<serde_json::Value> = rows
-                    .iter()
-                    .map(row_to_json)
-                    .collect();
+                let json_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
                 let count = json_rows.len();
-                
+
                 // Invalidate cache for mutations
                 if !matches!(cmd.action, qail_core::ast::Action::Get) {
                     state.cache.invalidate_table(&cmd.table);
                 }
-                
+
                 results.push(BatchQueryResult {
                     index,
                     success: true,
@@ -515,17 +613,20 @@ pub async fn execute_batch(
             }
         }
     }
-    
+
     // Transaction finalization
     if request.transaction {
         if had_error {
             let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
             tracing::warn!("Batch transaction rolled back due to error");
         } else {
-            conn.get_mut().execute_simple("COMMIT;").await.map_err(|e| {
-                tracing::error!("Transaction commit failed: {}", e);
-                ApiError::with_code("TXN_ERROR", "Transaction commit failed")
-            })?;
+            conn.get_mut()
+                .execute_simple("COMMIT;")
+                .await
+                .map_err(|e| {
+                    tracing::error!("Transaction commit failed: {}", e);
+                    ApiError::with_code("TXN_ERROR", "Transaction commit failed")
+                })?;
         }
     }
 
@@ -533,7 +634,7 @@ pub async fn execute_batch(
     conn.release().await;
 
     let total = results.len();
-    
+
     Ok(Json(BatchResponse {
         results,
         total,
@@ -541,45 +642,122 @@ pub async fn execute_batch(
     }))
 }
 
-/// Generate a cache key from the AST "shape" — structure without param values.
-///
-/// This means `GET users | id ? age > 25` and `GET users | id ? age > 30`
-/// produce the SAME cache key and share the cached result.
-fn shape_cache_key(cmd: &qail_core::ast::Qail) -> String {
-    use std::hash::{Hash, Hasher};
+/// Generate a cache key from the full AST payload (including filter values).
+fn exact_cache_key(cmd: &qail_core::ast::Qail) -> String {
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
+    let payload = serde_json::to_string(cmd).unwrap_or_else(|_| format!("{cmd:?}"));
     let mut hasher = DefaultHasher::new();
+    payload.hash(&mut hasher);
+    format!("full:{:016x}", hasher.finish())
+}
 
-    // Hash structural components (not values)
-    std::mem::discriminant(&cmd.action).hash(&mut hasher);
-    cmd.table.hash(&mut hasher);
+/// Clamp the LIMIT on a Qail command to at most `max_rows`.
+///
+/// SECURITY: This must be called **before** execution so PostgreSQL's planner can
+/// use the LIMIT to cut off scanning. Post-fetch truncation does not prevent
+/// memory exhaustion because all rows are already materialized.
+///
+/// - If the AST has no LIMIT cage, one is injected.
+/// - If the existing LIMIT is higher than `max_rows`, it is lowered.
+/// - If the existing LIMIT is already ≤ `max_rows`, nothing changes.
+///
+/// Only applies to read queries (Get/With/Cnt) — mutations are left untouched.
+pub(crate) fn clamp_query_limit(cmd: &mut qail_core::ast::Qail, max_rows: usize) {
+    use qail_core::ast::{Action, Cage, CageKind, LogicalOp};
 
-    for col in &cmd.columns {
-        std::mem::discriminant(col).hash(&mut hasher);
-        format!("{:?}", col).hash(&mut hasher);
+    // Only clamp read actions — writes have RETURNING which is typically small.
+    if !matches!(cmd.action, Action::Get | Action::With | Action::Cnt) {
+        return;
     }
 
-    for join in &cmd.joins {
-        join.table.hash(&mut hasher);
-        std::mem::discriminant(&join.kind).hash(&mut hasher);
-    }
-
-    // Hash cage structure (filter column names + operators) but NOT values
-    for cage in &cmd.cages {
-        std::mem::discriminant(&cage.kind).hash(&mut hasher);
-        for cond in &cage.conditions {
-            format!("{:?}", cond.left).hash(&mut hasher);
-            std::mem::discriminant(&cond.op).hash(&mut hasher);
-            // Intentionally skip cond.value — that's the parameter
+    // Find existing Limit cage
+    for cage in &mut cmd.cages {
+        if let CageKind::Limit(ref mut n) = cage.kind {
+            if *n > max_rows {
+                *n = max_rows;
+            }
+            return; // Already has a limit, clamped or already fine.
         }
     }
 
-    // Include limit/offset/order structure (but not values)
-    cmd.distinct.hash(&mut hasher);
-    if let Some(ref returning) = cmd.returning {
-        format!("{:?}", returning).hash(&mut hasher);
+    // No limit cage — inject one.
+    cmd.cages.push(Cage {
+        kind: CageKind::Limit(max_rows),
+        conditions: vec![],
+        logical_op: LogicalOp::And,
+    });
+}
+
+/// Check allow-list against multiple canonical forms.
+pub(crate) fn is_query_allowed(
+    allow_list: &crate::middleware::QueryAllowList,
+    raw_query: Option<&str>,
+    cmd: &qail_core::ast::Qail,
+) -> bool {
+    use qail_core::transpiler::ToSql;
+
+    // Fast path: allow-list disabled.
+    if !allow_list.is_enabled() {
+        return true;
     }
 
-    format!("shape:{:016x}", hasher.finish())
+    if let Some(raw) = raw_query
+        && allow_list.is_allowed(raw)
+    {
+        return true;
+    }
+
+    // Canonical QAIL formatter (Display impl).
+    let canonical_qail = cmd.to_string();
+    if allow_list.is_allowed(&canonical_qail) {
+        return true;
+    }
+
+    // SQL fallback for deployments that store SQL patterns.
+    let sql = cmd.to_sql();
+    allow_list.is_allowed(&sql)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exact_cache_key, is_query_allowed};
+    use crate::middleware::QueryAllowList;
+
+    #[test]
+    fn cache_key_includes_filter_values() {
+        let a = qail_core::ast::Qail::get("users").eq("age", 25);
+        let b = qail_core::ast::Qail::get("users").eq("age", 30);
+        assert_ne!(
+            exact_cache_key(&a),
+            exact_cache_key(&b),
+            "cache key must differ when filter values differ"
+        );
+    }
+
+    #[test]
+    fn allow_list_disabled_allows_query() {
+        let allow_list = QueryAllowList::new();
+        let cmd = qail_core::ast::Qail::get("users");
+        assert!(is_query_allowed(&allow_list, None, &cmd));
+    }
+
+    #[test]
+    fn allow_list_accepts_canonical_qail() {
+        let cmd = qail_core::ast::Qail::get("users")
+            .columns(["id"])
+            .eq("active", true);
+        let mut allow_list = QueryAllowList::new();
+        allow_list.allow(&cmd.to_string());
+        assert!(is_query_allowed(&allow_list, None, &cmd));
+    }
+
+    #[test]
+    fn allow_list_rejects_unlisted_query() {
+        let cmd = qail_core::ast::Qail::get("users").columns(["id"]);
+        let mut allow_list = QueryAllowList::new();
+        allow_list.allow("get other_table");
+        assert!(!is_query_allowed(&allow_list, None, &cmd));
+    }
 }

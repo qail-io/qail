@@ -13,7 +13,7 @@ A high-performance PostgreSQL driver that speaks the wire protocol directly. No 
 - **28% Faster** - Benchmarked at 1.36M rows/s COPY (vs asyncpg at 1.06M rows/s)
 - **Query Pipelining** - 24x faster batch operations via `pipeline_batch()`
 - **SSL/TLS** - Production-ready with `tokio-rustls`
-- **SCRAM-SHA-256** - Secure password authentication
+- **Password Auth Modes** - Supports SCRAM-SHA-256, MD5, and cleartext server flows
 - **Connection Pooling** - Built-in `PgPool`
 - **Transactions** - Full `begin`/`commit`/`rollback` support
 

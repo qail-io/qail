@@ -72,21 +72,45 @@ pub fn drop_policy_sql(policy_name: &str, table: &str) -> String {
 /// Convert a `CheckExpr` AST node to SQL.
 fn check_expr_to_sql(expr: &CheckExpr) -> String {
     match expr {
-        CheckExpr::GreaterThan { column, value } => format!("{} > {}", escape_identifier(column), value),
-        CheckExpr::GreaterOrEqual { column, value } => format!("{} >= {}", escape_identifier(column), value),
-        CheckExpr::LessThan { column, value } => format!("{} < {}", escape_identifier(column), value),
-        CheckExpr::LessOrEqual { column, value } => format!("{} <= {}", escape_identifier(column), value),
-        CheckExpr::Between { column, low, high } => format!("{} BETWEEN {} AND {}", escape_identifier(column), low, high),
+        CheckExpr::GreaterThan { column, value } => {
+            format!("{} > {}", escape_identifier(column), value)
+        }
+        CheckExpr::GreaterOrEqual { column, value } => {
+            format!("{} >= {}", escape_identifier(column), value)
+        }
+        CheckExpr::LessThan { column, value } => {
+            format!("{} < {}", escape_identifier(column), value)
+        }
+        CheckExpr::LessOrEqual { column, value } => {
+            format!("{} <= {}", escape_identifier(column), value)
+        }
+        CheckExpr::Between { column, low, high } => {
+            format!("{} BETWEEN {} AND {}", escape_identifier(column), low, high)
+        }
         CheckExpr::In { column, values } => {
             let vals: Vec<String> = values.iter().map(|v| format!("'{}'", v)).collect();
             format!("{} IN ({})", escape_identifier(column), vals.join(", "))
         }
-        CheckExpr::Regex { column, pattern } => format!("{} ~ '{}'", escape_identifier(column), pattern),
-        CheckExpr::MaxLength { column, max } => format!("LENGTH({}) <= {}", escape_identifier(column), max),
-        CheckExpr::MinLength { column, min } => format!("LENGTH({}) >= {}", escape_identifier(column), min),
+        CheckExpr::Regex { column, pattern } => {
+            format!("{} ~ '{}'", escape_identifier(column), pattern)
+        }
+        CheckExpr::MaxLength { column, max } => {
+            format!("LENGTH({}) <= {}", escape_identifier(column), max)
+        }
+        CheckExpr::MinLength { column, min } => {
+            format!("LENGTH({}) >= {}", escape_identifier(column), min)
+        }
         CheckExpr::NotNull { column } => format!("{} IS NOT NULL", escape_identifier(column)),
-        CheckExpr::And(left, right) => format!("({} AND {})", check_expr_to_sql(left), check_expr_to_sql(right)),
-        CheckExpr::Or(left, right) => format!("({} OR {})", check_expr_to_sql(left), check_expr_to_sql(right)),
+        CheckExpr::And(left, right) => format!(
+            "({} AND {})",
+            check_expr_to_sql(left),
+            check_expr_to_sql(right)
+        ),
+        CheckExpr::Or(left, right) => format!(
+            "({} OR {})",
+            check_expr_to_sql(left),
+            check_expr_to_sql(right)
+        ),
         CheckExpr::Not(inner) => format!("NOT ({})", check_expr_to_sql(inner)),
     }
 }
@@ -223,11 +247,7 @@ pub fn alter_table_sql(alter: &AlterTable) -> Vec<String> {
                         )
                     }
                     crate::migrate::alter::TableConstraint::Exclude { method, elements } => {
-                        format!(
-                            "EXCLUDE USING {} ({})",
-                            method,
-                            elements.join(", ")
-                        )
+                        format!("EXCLUDE USING {} ({})", method, elements.join(", "))
                     }
                 };
                 format!(
@@ -269,16 +289,22 @@ pub fn rls_setup_sql(table: &str, policy: &RlsPolicy) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migrate::policy::{
-        tenant_check, session_bool_check, or, RlsPolicy, PolicyTarget,
-    };
+    use crate::migrate::policy::{PolicyTarget, RlsPolicy, or, session_bool_check, tenant_check};
 
     #[test]
     fn test_create_policy_basic() {
         let policy = RlsPolicy::create("orders_isolation", "orders")
             .for_all()
-            .using(tenant_check("operator_id", "app.current_operator_id", "uuid"))
-            .with_check(tenant_check("operator_id", "app.current_operator_id", "uuid"));
+            .using(tenant_check(
+                "operator_id",
+                "app.current_operator_id",
+                "uuid",
+            ))
+            .with_check(tenant_check(
+                "operator_id",
+                "app.current_operator_id",
+                "uuid",
+            ));
 
         let sql = create_policy_sql(&policy);
         assert!(sql.contains("CREATE POLICY"));
@@ -355,8 +381,16 @@ mod tests {
     fn test_rls_setup_sql() {
         let policy = RlsPolicy::create("orders_tenant", "orders")
             .for_all()
-            .using(tenant_check("operator_id", "app.current_operator_id", "uuid"))
-            .with_check(tenant_check("operator_id", "app.current_operator_id", "uuid"));
+            .using(tenant_check(
+                "operator_id",
+                "app.current_operator_id",
+                "uuid",
+            ))
+            .with_check(tenant_check(
+                "operator_id",
+                "app.current_operator_id",
+                "uuid",
+            ));
 
         let stmts = rls_setup_sql("orders", &policy);
         assert_eq!(stmts.len(), 3);
@@ -374,9 +408,7 @@ mod tests {
             (PolicyTarget::Update, "FOR UPDATE"),
             (PolicyTarget::Delete, "FOR DELETE"),
         ] {
-            let policy = RlsPolicy::create("test", "t").using(
-                tenant_check("id", "app.id", "uuid"),
-            );
+            let policy = RlsPolicy::create("test", "t").using(tenant_check("id", "app.id", "uuid"));
             // Apply target
             let policy = match target {
                 PolicyTarget::All => policy.for_all(),
@@ -386,7 +418,12 @@ mod tests {
                 PolicyTarget::Delete => policy.for_delete(),
             };
             let sql = create_policy_sql(&policy);
-            assert!(sql.contains(expected), "Expected '{}' in '{}'", expected, sql);
+            assert!(
+                sql.contains(expected),
+                "Expected '{}' in '{}'",
+                expected,
+                sql
+            );
         }
     }
 }

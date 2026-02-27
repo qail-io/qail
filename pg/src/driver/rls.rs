@@ -37,17 +37,37 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
 /// Batches the RLS context and timeout into a single SQL to minimize
 /// round-trips. The timeout (in milliseconds) prevents runaway queries.
 pub(crate) fn context_to_sql_with_timeout(ctx: &RlsContext, timeout_ms: u32) -> String {
+    context_to_sql_with_timeouts(ctx, timeout_ms, 0)
+}
+
+/// Like `context_to_sql_with_timeout` but also sets `lock_timeout`.
+///
+/// When `lock_timeout_ms` is 0, the `SET LOCAL lock_timeout` clause is omitted
+/// (PostgreSQL default: no timeout).
+pub(crate) fn context_to_sql_with_timeouts(
+    ctx: &RlsContext,
+    statement_timeout_ms: u32,
+    lock_timeout_ms: u32,
+) -> String {
     let t_id = sanitize_guc_value(&ctx.tenant_id);
     let op_id = sanitize_guc_value(&ctx.operator_id);
     let ag_id = sanitize_guc_value(&ctx.agent_id);
+
+    let lock_clause = if lock_timeout_ms > 0 {
+        format!(" SET LOCAL lock_timeout = {};", lock_timeout_ms)
+    } else {
+        String::new()
+    };
+
     format!(
         "BEGIN; \
-         SET LOCAL statement_timeout = {}; \
+         SET LOCAL statement_timeout = {};{} \
          SELECT set_config('app.current_tenant_id', '{}', true), \
                 set_config('app.current_operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
-        timeout_ms,
+        statement_timeout_ms,
+        lock_clause,
         t_id,
         op_id,
         ag_id,
@@ -159,7 +179,10 @@ mod tests {
         let ctx = RlsContext::operator("'; DROP TABLE users; --");
         let sql = context_to_sql_with_timeout(&ctx, 5000);
         // The injected value is sanitized — no quote/semicolon escape
-        assert!(!sql.contains("''; DROP"), "Injection must not escape set_config quotes");
+        assert!(
+            !sql.contains("''; DROP"),
+            "Injection must not escape set_config quotes"
+        );
         assert!(sql.contains("statement_timeout = 5000"));
     }
 
@@ -168,7 +191,10 @@ mod tests {
         let uuid = "4fcc89a7-0753-4b8d-8457-71619533dbd8";
         let ctx = RlsContext::operator(uuid);
         let sql = context_to_sql(&ctx);
-        assert!(sql.contains(uuid), "Normal UUID must pass through unchanged");
+        assert!(
+            sql.contains(uuid),
+            "Normal UUID must pass through unchanged"
+        );
     }
 
     #[test]
@@ -177,7 +203,42 @@ mod tests {
         assert_eq!(sanitize_guc_value("ab'cd"), "abcd");
         assert_eq!(sanitize_guc_value("ab\\cd"), "abcd");
         assert_eq!(sanitize_guc_value("ab;cd"), "abcd");
-        assert_eq!(sanitize_guc_value("'; DROP TABLE x; --"), " DROP TABLE x --");
+        assert_eq!(
+            sanitize_guc_value("'; DROP TABLE x; --"),
+            " DROP TABLE x --"
+        );
         assert_eq!(sanitize_guc_value(""), "");
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // lock_timeout injection
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn lock_timeout_injected_when_nonzero() {
+        let ctx = RlsContext::operator("tenant-1");
+        let sql = context_to_sql_with_timeouts(&ctx, 30_000, 5_000);
+        assert!(
+            sql.contains("statement_timeout = 30000"),
+            "statement_timeout must be set"
+        );
+        assert!(
+            sql.contains("lock_timeout = 5000"),
+            "lock_timeout must be set when > 0"
+        );
+    }
+
+    #[test]
+    fn lock_timeout_omitted_when_zero() {
+        let ctx = RlsContext::operator("tenant-1");
+        let sql = context_to_sql_with_timeouts(&ctx, 30_000, 0);
+        assert!(
+            sql.contains("statement_timeout = 30000"),
+            "statement_timeout must be set"
+        );
+        assert!(
+            !sql.contains("lock_timeout"),
+            "lock_timeout must be omitted when 0"
+        );
     }
 }

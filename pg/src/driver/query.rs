@@ -18,7 +18,18 @@ impl PgConnection {
         sql: &str,
         params: &[Option<Vec<u8>>],
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        let bytes = PgEncoder::encode_extended_query(sql, params)
+        self.query_with_result_format(sql, params, PgEncoder::FORMAT_TEXT)
+            .await
+    }
+
+    /// Execute a query with binary parameters and explicit result-column format.
+    pub(crate) async fn query_with_result_format(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        let bytes = PgEncoder::encode_extended_query_with_result_format(sql, params, result_format)
             .map_err(|e| PgError::Encode(e.to_string()))?;
         self.stream.write_all(&bytes).await?;
 
@@ -48,7 +59,7 @@ impl PgConnection {
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {
-                        error = Some(PgError::Query(err.message));
+                        error = Some(PgError::QueryServer(err.into()));
                     }
                 }
                 _ => {}
@@ -65,6 +76,39 @@ impl PgConnection {
         sql: &str,
         params: &[Option<Vec<u8>>],
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        self.query_cached_with_result_format(sql, params, PgEncoder::FORMAT_TEXT)
+            .await
+    }
+
+    /// Execute a query with cached prepared statement and explicit result-column format.
+    pub async fn query_cached_with_result_format(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        let mut retried = false;
+        loop {
+            match self
+                .query_cached_with_result_format_once(sql, params, result_format)
+                .await
+            {
+                Ok(rows) => return Ok(rows),
+                Err(err) if !retried && err.is_prepared_statement_retryable() => {
+                    retried = true;
+                    self.clear_prepared_statement_state();
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn query_cached_with_result_format_once(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
         let stmt_name = Self::sql_to_stmt_name(sql);
         let is_new = !self.prepared_statements.contains_key(&stmt_name);
 
@@ -73,13 +117,13 @@ impl PgConnection {
             .iter()
             .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
             .sum();
-        
+
         let estimated_size = if is_new {
             50 + sql.len() + stmt_name.len() * 2 + params_size
         } else {
             30 + stmt_name.len() + params_size
         };
-        
+
         let mut buf = BytesMut::with_capacity(estimated_size);
 
         if is_new {
@@ -89,11 +133,12 @@ impl PgConnection {
             self.evict_prepared_if_full();
             buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
             // Cache the SQL for debugging
-            self.prepared_statements.insert(stmt_name.clone(), sql.to_string());
+            self.prepared_statements
+                .insert(stmt_name.clone(), sql.to_string());
         }
 
         // Use ULTRA-OPTIMIZED encoders - write directly to buffer
-        PgEncoder::encode_bind_to(&mut buf, &stmt_name, params)
+        PgEncoder::encode_bind_to_with_result_format(&mut buf, &stmt_name, params, result_format)
             .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
@@ -127,7 +172,7 @@ impl PgConnection {
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {
-                        error = Some(PgError::Query(err.message));
+                        error = Some(PgError::QueryServer(err.into()));
                         // Invalidate cache to prevent "prepared statement does not exist"
                         // on next retry.
                         self.prepared_statements.remove(&stmt_name);
@@ -168,7 +213,7 @@ impl PgConnection {
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {
-                        error = Some(PgError::Query(err.message));
+                        error = Some(PgError::QueryServer(err.into()));
                     }
                 }
                 _ => {}
@@ -229,7 +274,7 @@ impl PgConnection {
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {
-                        error = Some(PgError::Query(err.message));
+                        error = Some(PgError::QueryServer(err.into()));
                     }
                 }
                 _ => {}
@@ -255,17 +300,29 @@ impl PgConnection {
         stmt: &super::PreparedStatement,
         params: &[Option<Vec<u8>>],
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        self.query_prepared_single_with_result_format(stmt, params, PgEncoder::FORMAT_TEXT)
+            .await
+    }
+
+    /// ZERO-HASH sequential query with explicit result-column format.
+    #[inline]
+    pub async fn query_prepared_single_with_result_format(
+        &mut self,
+        stmt: &super::PreparedStatement,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
         // Pre-calculate buffer size for single allocation
         let params_size: usize = params
             .iter()
             .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
             .sum();
-        
+
         // Bind: ~15 + stmt.name.len() + params_size, Execute: 10, Sync: 5
         let mut buf = BytesMut::with_capacity(30 + stmt.name.len() + params_size);
 
         // ZERO HASH, ZERO LOOKUP - just encode and send!
-        PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+        PgEncoder::encode_bind_to_with_result_format(&mut buf, &stmt.name, params, result_format)
             .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
@@ -296,7 +353,7 @@ impl PgConnection {
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {
-                        error = Some(PgError::Query(err.message));
+                        error = Some(PgError::QueryServer(err.into()));
                     }
                 }
                 _ => {}

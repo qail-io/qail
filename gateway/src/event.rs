@@ -35,9 +35,13 @@ pub struct EventTrigger {
 }
 
 /// Serde default for retry count (returns 3).
-fn default_retry_count() -> u32 { 3 }
+fn default_retry_count() -> u32 {
+    3
+}
 /// Serde default that returns `true`.
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// Payload sent to the webhook
 #[derive(Debug, Serialize)]
@@ -204,8 +208,7 @@ impl EventTriggerEngine {
 
             // Fire-and-forget async task
             tokio::spawn(async move {
-                deliver_webhook(client, &url, &headers, &payload, retry_count, &trigger_name)
-                    .await;
+                deliver_webhook(client, &url, &headers, &payload, retry_count, &trigger_name).await;
             });
         }
     }
@@ -244,7 +247,8 @@ async fn deliver_webhook(
             tokio::time::sleep(delay).await;
         }
 
-        let mut req = client.post(url)
+        let mut req = client
+            .post(url)
             .header("content-type", "application/json")
             .header("x-qail-trigger", trigger_name);
 
@@ -298,12 +302,15 @@ async fn deliver_webhook(
 /// SECURITY (E4): Validate webhook URL to prevent SSRF attacks.
 ///
 /// Rejects:
-/// - Non-HTTP(S) schemes (e.g., `file://`)
-/// - Localhost and loopback addresses
+/// - Non-HTTP(S) schemes (e.g., `file://`, `gopher://`)
+/// - Localhost and loopback addresses (127.x.x.x, ::1)
 /// - Private network ranges (RFC 1918 / link-local)
+/// - Cloud metadata endpoints (169.254.169.254)
+/// - Zero/unspecified addresses (0.0.0.0, ::)
+/// - URLs with embedded credentials (user:pass@host)
+/// - Hostnames containing suspicious keywords
 fn validate_webhook_url(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| format!("Invalid URL: {}", e))?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
 
     // Only allow http and https schemes
     match parsed.scheme() {
@@ -311,37 +318,80 @@ fn validate_webhook_url(url: &str) -> Result<(), String> {
         scheme => return Err(format!("Disallowed scheme: {}", scheme)),
     }
 
-    let host = parsed.host_str()
+    // Reject URLs with embedded credentials (user:pass@host SSRF vector)
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err("URL credentials not allowed".to_string());
+    }
+
+    let host = parsed
+        .host_str()
         .ok_or_else(|| "No host in URL".to_string())?;
 
-    // Reject localhost
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" {
-        return Err("Loopback address rejected".to_string());
+    // Reject localhost (case-insensitive)
+    let lower_host = host.to_ascii_lowercase();
+    if lower_host == "localhost"
+        || lower_host == "127.0.0.1"
+        || lower_host == "::1"
+        || lower_host == "[::1]"
+        || lower_host == "0.0.0.0"
+    {
+        return Err("Loopback/unspecified address rejected".to_string());
+    }
+
+    // Reject hostnames that look like internal service discovery
+    // (e.g., metadata.google.internal, instance-data.ec2.internal)
+    for keyword in &["metadata", ".internal", "instance-data"] {
+        if lower_host.contains(keyword) {
+            return Err(format!(
+                "Hostname contains suspicious keyword '{}': {}",
+                keyword, host
+            ));
+        }
     }
 
     // Reject private and link-local IPs
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        let is_private = match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.octets()[0] == 169 && v4.octets()[1] == 254  // link-local
-                    || v4.octets()[0] == 0  // current network
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback()
-                // Note: is_unique_local() and is_unicast_link_local() are nightly-only;
-                // check fd00::/8 and fe80::/10 manually.
-                || (v6.segments()[0] & 0xfe00) == 0xfc00  // unique local
-                || (v6.segments()[0] & 0xffc0) == 0xfe80  // link-local
-            }
-        };
-        if is_private {
-            return Err(format!("Private/link-local IP rejected: {}", ip));
+        reject_private_ip(ip)?;
+    }
+
+    // Also check when url::Url parsed it as a bracketed IPv6 (e.g., [::ffff:127.0.0.1])
+    if let Some(url::Host::Ipv4(v4)) = parsed.host() {
+        reject_private_ip(std::net::IpAddr::V4(v4))?;
+    }
+    if let Some(url::Host::Ipv6(v6)) = parsed.host() {
+        reject_private_ip(std::net::IpAddr::V6(v6))?;
+
+        // Check IPv6-mapped IPv4 (::ffff:127.0.0.1)
+        if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+            reject_private_ip(std::net::IpAddr::V4(mapped_v4))?;
         }
     }
 
+    Ok(())
+}
+
+/// Reject private, loopback, link-local, and cloud metadata IPs.
+fn reject_private_ip(ip: std::net::IpAddr) -> Result<(), String> {
+    let is_bad = match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()                                  // 127.0.0.0/8
+            || v4.is_private()                                // 10/8, 172.16/12, 192.168/16
+            || v4.is_link_local()                             // 169.254.0.0/16
+            || v4.is_unspecified()                            // 0.0.0.0
+            || v4.octets()[0] == 169 && v4.octets()[1] == 254 // link-local (redundant but explicit)
+            || v4.octets()[0] == 0                            // current network (0.x.x.x)
+            || v4.is_broadcast() // 255.255.255.255
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()                                  // ::1
+            || v6.is_unspecified()                            // ::
+            || (v6.segments()[0] & 0xfe00) == 0xfc00          // unique local (fc00::/7)
+            || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
+        }
+    };
+    if is_bad {
+        return Err(format!("Private/reserved IP rejected: {}", ip));
+    }
     Ok(())
 }
 
@@ -364,7 +414,11 @@ mod tests {
         engine.add_trigger(EventTrigger {
             name: "order_any".to_string(),
             table: "orders".to_string(),
-            operations: vec![OperationType::Create, OperationType::Update, OperationType::Delete],
+            operations: vec![
+                OperationType::Create,
+                OperationType::Update,
+                OperationType::Delete,
+            ],
             webhook_url: "https://example.com/hook2".to_string(),
             headers: HashMap::new(),
             retry_count: 1,
@@ -418,35 +472,140 @@ mod tests {
     }
 
     // ══════════════════════════════════════════════════════════════════
-    // SECURITY: SSRF protection (E4)
+    // SECURITY: SSRF protection red-team tests (E4)
     // ══════════════════════════════════════════════════════════════════
 
     #[test]
-    fn test_ssrf_allows_public_url() {
-        assert!(super::validate_webhook_url("https://api.example.com/hook").is_ok());
-        assert!(super::validate_webhook_url("http://webhook.example.com/trigger").is_ok());
+    fn ssrf_allows_public_https() {
+        assert!(validate_webhook_url("https://api.example.com/hook").is_ok());
+        assert!(validate_webhook_url("https://hooks.slack.com/services/T00/B00/xxx").is_ok());
     }
 
     #[test]
-    fn test_ssrf_rejects_localhost() {
-        assert!(super::validate_webhook_url("http://localhost/hook").is_err());
-        assert!(super::validate_webhook_url("http://127.0.0.1/hook").is_err());
+    fn ssrf_allows_public_http() {
+        assert!(validate_webhook_url("http://webhook.example.com/trigger").is_ok());
     }
 
     #[test]
-    fn test_ssrf_rejects_private_ip() {
-        assert!(super::validate_webhook_url("http://10.0.0.1/hook").is_err());
-        assert!(super::validate_webhook_url("http://192.168.1.1/hook").is_err());
-        assert!(super::validate_webhook_url("http://172.16.0.1/hook").is_err());
+    fn ssrf_rejects_localhost_variations() {
+        assert!(validate_webhook_url("http://localhost/hook").is_err());
+        assert!(validate_webhook_url("http://localhost:8080/hook").is_err());
+        assert!(validate_webhook_url("http://LOCALHOST/hook").is_err());
+        assert!(validate_webhook_url("http://127.0.0.1/hook").is_err());
+        assert!(validate_webhook_url("http://127.0.0.1:3000/hook").is_err());
+        assert!(validate_webhook_url("http://[::1]/hook").is_err());
     }
 
     #[test]
-    fn test_ssrf_rejects_file_scheme() {
-        assert!(super::validate_webhook_url("file:///etc/passwd").is_err());
+    fn ssrf_rejects_private_rfc1918() {
+        // 10.0.0.0/8
+        assert!(validate_webhook_url("http://10.0.0.1/hook").is_err());
+        assert!(validate_webhook_url("http://10.255.255.255/hook").is_err());
+        // 172.16.0.0/12
+        assert!(validate_webhook_url("http://172.16.0.1/hook").is_err());
+        assert!(validate_webhook_url("http://172.31.255.255/hook").is_err());
+        // 192.168.0.0/16
+        assert!(validate_webhook_url("http://192.168.1.1/hook").is_err());
+        assert!(validate_webhook_url("http://192.168.0.1:9090/hook").is_err());
     }
 
     #[test]
-    fn test_ssrf_rejects_link_local() {
-        assert!(super::validate_webhook_url("http://169.254.1.1/hook").is_err());
+    fn ssrf_rejects_link_local() {
+        assert!(validate_webhook_url("http://169.254.1.1/hook").is_err());
+        assert!(validate_webhook_url("http://169.254.169.254/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_cloud_metadata() {
+        // AWS/GCP/Azure metadata endpoint
+        assert!(validate_webhook_url("http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(validate_webhook_url("http://169.254.169.254/computeMetadata/v1/").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_zero_address() {
+        assert!(validate_webhook_url("http://0.0.0.0/hook").is_err());
+        assert!(validate_webhook_url("http://0.0.0.0:8080/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_file_scheme() {
+        assert!(validate_webhook_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_gopher_scheme() {
+        assert!(validate_webhook_url("gopher://evil.com").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_ftp_scheme() {
+        assert!(validate_webhook_url("ftp://evil.com/file").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_url_credentials() {
+        // user:pass@host can be used to smuggle requests
+        assert!(validate_webhook_url("http://admin:password@internal.example.com/hook").is_err());
+        assert!(validate_webhook_url("https://user@10.0.0.1/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_ipv6_mapped_ipv4_loopback() {
+        // ::ffff:127.0.0.1 — IPv6-mapped IPv4 bypass attempt
+        assert!(validate_webhook_url("http://[::ffff:127.0.0.1]/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_ipv6_mapped_ipv4_private() {
+        assert!(validate_webhook_url("http://[::ffff:10.0.0.1]/hook").is_err());
+        assert!(validate_webhook_url("http://[::ffff:192.168.1.1]/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_ipv6_unique_local() {
+        // fd00::/8 — IPv6 private range
+        assert!(validate_webhook_url("http://[fd00::1]/hook").is_err());
+        assert!(validate_webhook_url("http://[fc00::1]/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_ipv6_link_local() {
+        assert!(validate_webhook_url("http://[fe80::1]/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_metadata_hostname() {
+        // GCP metadata hostname
+        assert!(
+            validate_webhook_url("http://metadata.google.internal/computeMetadata/v1/").is_err()
+        );
+        // Generic metadata keyword
+        assert!(validate_webhook_url("http://instance-metadata.local/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_internal_hostname() {
+        assert!(validate_webhook_url("http://api.internal/hook").is_err());
+        assert!(validate_webhook_url("http://service.internal:8080/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_current_network() {
+        // 0.x.x.x — current network
+        assert!(validate_webhook_url("http://0.1.2.3/hook").is_err());
+    }
+
+    #[test]
+    fn ssrf_allows_public_ip() {
+        assert!(validate_webhook_url("http://8.8.8.8/hook").is_ok());
+        assert!(validate_webhook_url("https://1.1.1.1/hook").is_ok());
+    }
+
+    #[test]
+    fn ssrf_rejects_empty_and_garbage() {
+        assert!(validate_webhook_url("").is_err());
+        assert!(validate_webhook_url("not-a-url").is_err());
+        assert!(validate_webhook_url("://missing-scheme").is_err());
     }
 }

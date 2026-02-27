@@ -38,6 +38,8 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod handler;
+pub mod idempotency;
+pub mod jwks;
 pub mod metrics;
 pub mod middleware;
 pub mod policy;

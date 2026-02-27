@@ -63,6 +63,13 @@ pub mod oid {
     /// UUID (`uuid`) — OID 2950.
     pub const UUID: u32 = 2950;
 
+    /// IPv4/IPv6 host or network address (`inet`) — OID 869.
+    pub const INET: u32 = 869;
+    /// IPv4/IPv6 network block (`cidr`) — OID 650.
+    pub const CIDR: u32 = 650;
+    /// MAC address (`macaddr`) — OID 829.
+    pub const MACADDR: u32 = 829;
+
     /// `bool[]` array — OID 1000.
     pub const BOOL_ARRAY: u32 = 1000;
     /// `int2[]` array — OID 1005.
@@ -81,6 +88,12 @@ pub mod oid {
     pub const FLOAT8_ARRAY: u32 = 1022;
     /// `uuid[]` array — OID 2951.
     pub const UUID_ARRAY: u32 = 2951;
+    /// `inet[]` array — OID 1041.
+    pub const INET_ARRAY: u32 = 1041;
+    /// `cidr[]` array — OID 651.
+    pub const CIDR_ARRAY: u32 = 651;
+    /// `macaddr[]` array — OID 1040.
+    pub const MACADDR_ARRAY: u32 = 1040;
     /// `jsonb[]` array — OID 3807.
     pub const JSONB_ARRAY: u32 = 3807;
 }
@@ -110,6 +123,9 @@ pub fn oid_to_name(oid: u32) -> &'static str {
         oid::TIMESTAMPTZ => "timestamptz",
         oid::INTERVAL => "interval",
         oid::UUID => "uuid",
+        oid::INET => "inet",
+        oid::CIDR => "cidr",
+        oid::MACADDR => "macaddr",
         oid::BOOL_ARRAY => "bool[]",
         oid::INT2_ARRAY => "int2[]",
         oid::INT4_ARRAY => "int4[]",
@@ -119,6 +135,9 @@ pub fn oid_to_name(oid: u32) -> &'static str {
         oid::FLOAT4_ARRAY => "float4[]",
         oid::FLOAT8_ARRAY => "float8[]",
         oid::UUID_ARRAY => "uuid[]",
+        oid::INET_ARRAY => "inet[]",
+        oid::CIDR_ARRAY => "cidr[]",
+        oid::MACADDR_ARRAY => "macaddr[]",
         oid::JSONB_ARRAY => "jsonb[]",
         _ => "unknown",
     }
@@ -137,6 +156,9 @@ pub fn is_array_oid(oid: u32) -> bool {
             | oid::FLOAT4_ARRAY
             | oid::FLOAT8_ARRAY
             | oid::UUID_ARRAY
+            | oid::INET_ARRAY
+            | oid::CIDR_ARRAY
+            | oid::MACADDR_ARRAY
             | oid::JSONB_ARRAY
     )
 }
@@ -326,6 +348,9 @@ mod tests {
     fn test_oid_to_name() {
         assert_eq!(oid_to_name(oid::INT4), "int4");
         assert_eq!(oid_to_name(oid::UUID), "uuid");
+        assert_eq!(oid_to_name(oid::INET), "inet");
+        assert_eq!(oid_to_name(oid::CIDR), "cidr");
+        assert_eq!(oid_to_name(oid::MACADDR), "macaddr");
         assert_eq!(oid_to_name(oid::JSONB), "jsonb");
         assert_eq!(oid_to_name(12345), "unknown");
     }
@@ -334,8 +359,14 @@ mod tests {
     fn test_is_array_oid() {
         assert!(is_array_oid(oid::INT4_ARRAY));
         assert!(is_array_oid(oid::UUID_ARRAY));
+        assert!(is_array_oid(oid::INET_ARRAY));
+        assert!(is_array_oid(oid::CIDR_ARRAY));
+        assert!(is_array_oid(oid::MACADDR_ARRAY));
         assert!(!is_array_oid(oid::INT4));
         assert!(!is_array_oid(oid::UUID));
+        assert!(!is_array_oid(oid::INET));
+        assert!(!is_array_oid(oid::CIDR));
+        assert!(!is_array_oid(oid::MACADDR));
     }
 
     #[test]

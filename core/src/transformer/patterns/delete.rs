@@ -2,8 +2,8 @@
 
 use sqlparser::ast::Statement;
 
-use crate::transformer::traits::*;
 use crate::transformer::clauses::*;
+use crate::transformer::traits::*;
 
 /// DELETE query pattern
 pub struct DeletePattern;
@@ -29,25 +29,19 @@ impl SqlPattern for DeletePattern {
         };
 
         let table = match &delete.from {
-            sqlparser::ast::FromTable::WithFromKeyword(tables) => {
-                tables.first()
-                    .map(|t| extract_table_from_factor(&t.relation))
-                    .transpose()?
-                    .unwrap_or_else(|| "table".to_string())
-            }
-            sqlparser::ast::FromTable::WithoutKeyword(tables) => {
-                tables.first()
-                    .map(|t| extract_table_from_factor(&t.relation))
-                    .transpose()?
-                    .unwrap_or_else(|| "table".to_string())
-            }
+            sqlparser::ast::FromTable::WithFromKeyword(tables) => tables
+                .first()
+                .map(|t| extract_table_from_factor(&t.relation))
+                .transpose()?
+                .unwrap_or_else(|| "table".to_string()),
+            sqlparser::ast::FromTable::WithoutKeyword(tables) => tables
+                .first()
+                .map(|t| extract_table_from_factor(&t.relation))
+                .transpose()?
+                .unwrap_or_else(|| "table".to_string()),
         };
 
-        let filter = delete
-            .selection
-            .as_ref()
-            .map(extract_filter)
-            .transpose()?;
+        let filter = delete.selection.as_ref().map(extract_filter).transpose()?;
 
         let returning = delete.returning.as_ref().map(|items| {
             items
@@ -67,7 +61,11 @@ impl SqlPattern for DeletePattern {
         })
     }
 
-    fn transform(&self, data: &PatternData, ctx: &TransformContext) -> Result<String, TransformError> {
+    fn transform(
+        &self,
+        data: &PatternData,
+        ctx: &TransformContext,
+    ) -> Result<String, TransformError> {
         let PatternData::Delete {
             table,
             filter,
@@ -90,12 +88,11 @@ impl SqlPattern for DeletePattern {
 
         if let Some(f) = filter {
             let value = match &f.value {
-                ValueData::Param(n) => {
-                    ctx.binds
-                        .get(*n - 1)
-                        .cloned()
-                        .unwrap_or_else(|| format!("param_{}", n))
-                }
+                ValueData::Param(n) => ctx
+                    .binds
+                    .get(*n - 1)
+                    .cloned()
+                    .unwrap_or_else(|| format!("param_{}", n)),
                 ValueData::Literal(s) => s.clone(),
                 ValueData::Column(c) => format!("\"{}\"", c),
                 ValueData::Null => "None".to_string(),

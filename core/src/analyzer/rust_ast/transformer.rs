@@ -3,9 +3,7 @@
 //! This module provides clean AST-to-code transformation by parsing SQL
 //! with `sqlparser-rs` and mapping AST nodes to QAIL builder calls.
 
-use sqlparser::ast::{
-    Expr, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
-};
+use sqlparser::ast::{Expr, Query, Select, SelectItem, SetExpr, Statement, TableFactor};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
@@ -34,7 +32,9 @@ fn transform_statement(stmt: &Statement) -> String {
         }
         Statement::Update(update) => {
             let table_name = extract_table_factor(&update.table.relation);
-            let assignments: Vec<(String, String)> = update.assignments.iter()
+            let assignments: Vec<(String, String)> = update
+                .assignments
+                .iter()
                 .map(|a| {
                     let col = a.target.to_string();
                     let val = format!("{}", a.value);
@@ -45,35 +45,38 @@ fn transform_statement(stmt: &Statement) -> String {
         }
         Statement::Delete(delete) => {
             let table_name = match &delete.from {
-                sqlparser::ast::FromTable::WithFromKeyword(tables) => {
-                    tables.first()
-                        .map(|t| extract_table_factor(&t.relation))
-                        .unwrap_or_else(|| "table".to_string())
-                }
-                sqlparser::ast::FromTable::WithoutKeyword(tables) => {
-                    tables.first()
-                        .map(|t| extract_table_factor(&t.relation))
-                        .unwrap_or_else(|| "table".to_string())
-                }
+                sqlparser::ast::FromTable::WithFromKeyword(tables) => tables
+                    .first()
+                    .map(|t| extract_table_factor(&t.relation))
+                    .unwrap_or_else(|| "table".to_string()),
+                sqlparser::ast::FromTable::WithoutKeyword(tables) => tables
+                    .first()
+                    .map(|t| extract_table_factor(&t.relation))
+                    .unwrap_or_else(|| "table".to_string()),
             };
             transform_delete(&table_name)
         }
-        Statement::CreateTable(create) => {
-            transform_create_table(&create.name.to_string())
-        }
-        Statement::Drop { object_type, names, .. } => {
-            transform_drop(object_type, names)
-        }
+        Statement::CreateTable(create) => transform_create_table(&create.name.to_string()),
+        Statement::Drop {
+            object_type, names, ..
+        } => transform_drop(object_type, names),
         Statement::Truncate(truncate) => {
             let table = truncate.table.to_string();
             transform_truncate(&table)
         }
-        Statement::Explain { statement, analyze, .. } => {
-            transform_explain(statement, *analyze)
-        }
+        Statement::Explain {
+            statement, analyze, ..
+        } => transform_explain(statement, *analyze),
         _ => {
-            let stmt_type = format!("{:?}", stmt).split('(').next().unwrap_or("Unknown").to_string();
-            format!("// SQL statement type '{}' not yet mapped to QAIL", stmt_type)
+            let stmt_type = format!("{:?}", stmt)
+                .split('(')
+                .next()
+                .unwrap_or("Unknown")
+                .to_string();
+            format!(
+                "// SQL statement type '{}' not yet mapped to QAIL",
+                stmt_type
+            )
         }
     }
 }
@@ -93,7 +96,10 @@ fn transform_query(query: &Query) -> String {
             // Transform the inner CTE query
             let inner_code = transform_query(&cte.query)
                 .replace("use qail_core::ast::{Qail, Operator, Order};\n\n", "")
-                .replace("// Execute with qail-pg driver:\n// let rows = driver.fetch(&cmd).await?;", "")
+                .replace(
+                    "// Execute with qail-pg driver:\n// let rows = driver.fetch(&cmd).await?;",
+                    "",
+                )
                 .replace(";\n\n", "")
                 .trim()
                 .to_string();
@@ -120,7 +126,11 @@ fn transform_query(query: &Query) -> String {
             result.push_str(&format!("\n    {}", transform_order_by(order_exprs)));
         }
 
-        if let Some(sqlparser::ast::LimitClause::LimitOffset { limit: Some(limit_expr), .. }) = &query.limit_clause {
+        if let Some(sqlparser::ast::LimitClause::LimitOffset {
+            limit: Some(limit_expr),
+            ..
+        }) = &query.limit_clause
+        {
             result.push_str(&format!("\n    .limit({})", expr_to_string(limit_expr)));
         }
 
@@ -196,29 +206,66 @@ fn transform_where(expr: &Expr) -> String {
             };
             format!(".filter(\"{}\", {}, {})", col, op_str, val)
         }
-        Expr::InList { expr, list, negated } => {
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
             let col = expr_to_string(expr);
             let vals: Vec<String> = list.iter().map(expr_to_string).collect();
-            let op = if *negated { "Operator::NotIn" } else { "Operator::In" };
+            let op = if *negated {
+                "Operator::NotIn"
+            } else {
+                "Operator::In"
+            };
             format!(".filter(\"{}\", {}, vec![{}])", col, op, vals.join(", "))
         }
         Expr::IsNull(e) => {
-            format!(".filter(\"{}\", Operator::IsNull, Value::Null)", expr_to_string(e))
+            format!(
+                ".filter(\"{}\", Operator::IsNull, Value::Null)",
+                expr_to_string(e)
+            )
         }
         Expr::IsNotNull(e) => {
-            format!(".filter(\"{}\", Operator::IsNotNull, Value::Null)", expr_to_string(e))
+            format!(
+                ".filter(\"{}\", Operator::IsNotNull, Value::Null)",
+                expr_to_string(e)
+            )
         }
-        Expr::Between { expr, low, high, negated } => {
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => {
             let col = expr_to_string(expr);
-            let op = if *negated { "Operator::NotBetween" } else { "Operator::Between" };
-            format!(".filter(\"{}\", {}, ({}, {}))", col, op, expr_to_string(low), expr_to_string(high))
+            let op = if *negated {
+                "Operator::NotBetween"
+            } else {
+                "Operator::Between"
+            };
+            format!(
+                ".filter(\"{}\", {}, ({}, {}))",
+                col,
+                op,
+                expr_to_string(low),
+                expr_to_string(high)
+            )
         }
         Expr::Nested(inner) => transform_where(inner),
         Expr::Like { expr, pattern, .. } => {
-            format!(".filter(\"{}\", Operator::Like, {})", expr_to_string(expr), expr_to_string(pattern))
+            format!(
+                ".filter(\"{}\", Operator::Like, {})",
+                expr_to_string(expr),
+                expr_to_string(pattern)
+            )
         }
         Expr::ILike { expr, pattern, .. } => {
-            format!(".filter(\"{}\", Operator::ILike, {})", expr_to_string(expr), expr_to_string(pattern))
+            format!(
+                ".filter(\"{}\", Operator::ILike, {})",
+                expr_to_string(expr),
+                expr_to_string(pattern)
+            )
         }
         _ => format!("// Complex WHERE: {}", expr),
     }
@@ -228,7 +275,11 @@ fn transform_where(expr: &Expr) -> String {
 fn transform_order_by(order_by: &[sqlparser::ast::OrderByExpr]) -> String {
     if let Some(first) = order_by.first() {
         let col = expr_to_string(&first.expr);
-        let dir = if first.options.asc.unwrap_or(true) { "Asc" } else { "Desc" };
+        let dir = if first.options.asc.unwrap_or(true) {
+            "Asc"
+        } else {
+            "Desc"
+        };
         format!(".order_by(\"{}\", Order::{})", col, dir)
     } else {
         String::new()
@@ -250,7 +301,8 @@ fn transform_insert(table_name: &str, columns: &[String]) -> String {
 
 \
          let result = driver.execute(&cmd).await?;",
-        table_name, set_values.trim_end()
+        table_name,
+        set_values.trim_end()
     )
 }
 
@@ -295,7 +347,11 @@ fn expr_to_string(expr: &Expr) -> String {
             }
             s
         }
-        Expr::CompoundIdentifier(parts) => parts.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join("."),
+        Expr::CompoundIdentifier(parts) => parts
+            .iter()
+            .map(|i| i.value.clone())
+            .collect::<Vec<_>>()
+            .join("."),
         _ => format!("{}", expr),
     }
 }
@@ -312,13 +368,17 @@ fn transform_create_table(table_name: &str) -> String {
 }
 
 /// Transform DROP to QAIL.
-fn transform_drop(object_type: &sqlparser::ast::ObjectType, names: &[sqlparser::ast::ObjectName]) -> String {
+fn transform_drop(
+    object_type: &sqlparser::ast::ObjectType,
+    names: &[sqlparser::ast::ObjectName],
+) -> String {
     use sqlparser::ast::ObjectType;
-    
-    let table = names.first()
+
+    let table = names
+        .first()
         .map(|n| n.to_string())
         .unwrap_or_else(|| "table".to_string());
-    
+
     match object_type {
         ObjectType::Table => format!(
             "use qail_core::ast::{{Qail, Action}};\n\n\
@@ -350,18 +410,20 @@ fn transform_truncate(table_name: &str) -> String {
 fn transform_explain(statement: &Statement, analyze: bool) -> String {
     // Recursively transform the inner statement and wrap it
     let inner = transform_statement(statement);
-    
+
     if analyze {
         format!(
             "// EXPLAIN ANALYZE wrapper:\n\
              // Use Qail::explain_analyze(table) instead of Qail::get(table)\n\n\
-             {}", inner
+             {}",
+            inner
         )
     } else {
         format!(
             "// EXPLAIN wrapper:\n\
              // Use Qail::explain(table) instead of Qail::get(table)\n\n\
-             {}", inner
+             {}",
+            inner
         )
     }
 }

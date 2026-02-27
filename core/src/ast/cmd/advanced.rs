@@ -3,8 +3,8 @@
 //! DISTINCT ON, HAVING, row locks, table sampling, JOIN aliases, etc.
 
 use crate::ast::{
-    Cage, CageKind, Condition, Expr, Join, JoinKind, LockMode, LogicalOp, Operator,
-    OverridingKind, Qail, SampleMethod, SortOrder, Value, CTEDef,
+    CTEDef, Cage, CageKind, Condition, Expr, Join, JoinKind, LockMode, LogicalOp, Operator,
+    OverridingKind, Qail, SampleMethod, SortOrder, Value,
 };
 
 impl Qail {
@@ -88,7 +88,8 @@ impl Qail {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.from_tables.extend(tables.into_iter().map(|s| s.as_ref().to_string()));
+        self.from_tables
+            .extend(tables.into_iter().map(|s| s.as_ref().to_string()));
         self
     }
 
@@ -98,7 +99,8 @@ impl Qail {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.using_tables.extend(tables.into_iter().map(|s| s.as_ref().to_string()));
+        self.using_tables
+            .extend(tables.into_iter().map(|s| s.as_ref().to_string()));
         self
     }
 
@@ -260,20 +262,12 @@ impl Qail {
     }
 
     /// LEFT JOIN with multiple ON conditions.
-    pub fn left_join_conds(
-        self,
-        table: impl AsRef<str>,
-        conditions: Vec<Condition>,
-    ) -> Self {
+    pub fn left_join_conds(self, table: impl AsRef<str>, conditions: Vec<Condition>) -> Self {
         self.join_conds(JoinKind::Left, table, conditions)
     }
 
     /// INNER JOIN with multiple ON conditions.
-    pub fn inner_join_conds(
-        self,
-        table: impl AsRef<str>,
-        conditions: Vec<Condition>,
-    ) -> Self {
+    pub fn inner_join_conds(self, table: impl AsRef<str>, conditions: Vec<Condition>) -> Self {
         self.join_conds(JoinKind::Inner, table, conditions)
     }
 

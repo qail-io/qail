@@ -8,15 +8,16 @@
 
 mod admin;
 mod convert;
-mod query;
 #[cfg(feature = "qdrant")]
 mod qdrant;
+mod query;
 
 // ── Public re-exports (preserves existing `crate::handler::*` paths) ──
 
 pub use admin::{health_check, health_check_internal, swagger_ui};
 pub use convert::row_to_json;
 pub use query::{execute_batch, execute_query, execute_query_binary, execute_query_fast};
+pub(crate) use query::{is_query_allowed, clamp_query_limit};
 
 // ── Shared types ──
 
@@ -77,7 +78,9 @@ pub struct BatchRequest {
 }
 
 /// Serde default that returns `true` — used for `BatchRequest::transaction`.
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// Batch query response
 #[derive(Debug, Serialize)]

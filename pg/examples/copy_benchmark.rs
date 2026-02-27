@@ -26,8 +26,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create test table
     println!("📦 Setting up test table...");
-    driver.execute_raw("DROP TABLE IF EXISTS copy_bench").await.ok();
-    driver.execute_raw("CREATE TABLE copy_bench (id INT, name TEXT, value FLOAT)").await?;
+    driver
+        .execute_raw("DROP TABLE IF EXISTS copy_bench")
+        .await
+        .ok();
+    driver
+        .execute_raw("CREATE TABLE copy_bench (id INT, name TEXT, value FLOAT)")
+        .await?;
     println!("   Created copy_bench table\n");
 
     // Build COPY command
@@ -47,7 +52,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     println!("   Done in {:.2}s\n", batch_start.elapsed().as_secs_f64());
 
-    println!("📊 Executing {} COPY operations ({} rows each)...\n", BATCHES, ROWS_PER_BATCH);
+    println!(
+        "📊 Executing {} COPY operations ({} rows each)...\n",
+        BATCHES, ROWS_PER_BATCH
+    );
 
     let start = Instant::now();
     let mut total_rows_inserted: u64 = 0;
@@ -59,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_rows_inserted += count;
 
         // Progress report every 10M rows
-        if total_rows_inserted % 10_000_000 == 0 || last_report.elapsed().as_secs() >= 5 {
+        if total_rows_inserted.is_multiple_of(10_000_000) || last_report.elapsed().as_secs() >= 5 {
             let elapsed = start.elapsed();
             let rps = total_rows_inserted as f64 / elapsed.as_secs_f64();
             let remaining = TOTAL_ROWS as u64 - total_rows_inserted;

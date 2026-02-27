@@ -4,18 +4,13 @@
 //! - `qail vector create` - Create collection
 //! - `qail vector drop` - Delete collection
 
-use anyhow::Result;
 use crate::colors::*;
+use anyhow::Result;
 
 /// Create a vector collection in Qdrant.
-pub async fn vector_create(
-    collection: &str,
-    size: u64,
-    distance: &str,
-    url: &str,
-) -> Result<()> {
-    use qail_qdrant::QdrantDriver;
+pub async fn vector_create(collection: &str, size: u64, distance: &str, url: &str) -> Result<()> {
     use qail_core::ast::Distance;
+    use qail_qdrant::QdrantDriver;
 
     // Parse distance metric
     let dist = match distance.to_lowercase().as_str() {
@@ -23,11 +18,18 @@ pub async fn vector_create(
         "euclid" | "euclidean" => Distance::Euclid,
         "dot" | "dotproduct" => Distance::Dot,
         _ => {
-            anyhow::bail!("Invalid distance metric: {}. Use cosine, euclid, or dot", distance);
+            anyhow::bail!(
+                "Invalid distance metric: {}. Use cosine, euclid, or dot",
+                distance
+            );
         }
     };
 
-    println!("{} Creating collection: {}", "→".cyan(), collection.yellow());
+    println!(
+        "{} Creating collection: {}",
+        "→".cyan(),
+        collection.yellow()
+    );
     println!("  Size: {} dimensions", size);
     println!("  Distance: {:?}", dist);
     println!("  URL: {}", url);
@@ -37,9 +39,15 @@ pub async fn vector_create(
     let port = if port == 5432 { 6334 } else { port };
 
     let mut driver = QdrantDriver::connect(&host, port).await?;
-    driver.create_collection(collection, size, dist, false).await?;
+    driver
+        .create_collection(collection, size, dist, false)
+        .await?;
 
-    println!("{} Collection '{}' created successfully!", "✓".green(), collection);
+    println!(
+        "{} Collection '{}' created successfully!",
+        "✓".green(),
+        collection
+    );
     Ok(())
 }
 
@@ -47,7 +55,11 @@ pub async fn vector_create(
 pub async fn vector_drop(collection: &str, url: &str) -> Result<()> {
     use qail_qdrant::QdrantDriver;
 
-    println!("{} Dropping collection: {}", "→".cyan(), collection.yellow());
+    println!(
+        "{} Dropping collection: {}",
+        "→".cyan(),
+        collection.yellow()
+    );
     println!("  URL: {}", url);
 
     // Parse URL to extract host and port
@@ -57,6 +69,10 @@ pub async fn vector_drop(collection: &str, url: &str) -> Result<()> {
     let mut driver = QdrantDriver::connect(&host, port).await?;
     driver.delete_collection(collection).await?;
 
-    println!("{} Collection '{}' dropped successfully!", "✓".green(), collection);
+    println!(
+        "{} Collection '{}' dropped successfully!",
+        "✓".green(),
+        collection
+    );
     Ok(())
 }

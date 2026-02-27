@@ -5,8 +5,8 @@
 //! - Qdrant only
 //! - Hybrid (PostgreSQL + Qdrant with sync)
 
-use anyhow::Result;
 use crate::colors::*;
+use anyhow::Result;
 use std::fs;
 use std::io::{self, Write};
 
@@ -15,10 +15,10 @@ use std::process::Command;
 /// A detected database instance.
 #[derive(Debug, Clone)]
 struct DetectedDb {
-    source: String,    // "host", "docker", "podman"
-    name: String,      // container name or "local"
-    host: String,      // hostname
-    port: u16,         // mapped port
+    source: String, // "host", "docker", "podman"
+    name: String,   // container name or "local"
+    host: String,   // hostname
+    port: u16,      // mapped port
 }
 
 impl std::fmt::Display for DetectedDb {
@@ -115,8 +115,10 @@ fn detect_container_dbs(runtime: &str, found: &mut Vec<DetectedDb>) {
         let ports = parts[2];
 
         // Check if the image is postgres-related
-        let is_pg = image.contains("postgres") || image.contains("postgis")
-            || image.contains("timescale") || image.contains("supabase");
+        let is_pg = image.contains("postgres")
+            || image.contains("postgis")
+            || image.contains("timescale")
+            || image.contains("supabase");
         if !is_pg {
             continue;
         }
@@ -125,7 +127,9 @@ fn detect_container_dbs(runtime: &str, found: &mut Vec<DetectedDb>) {
         for mapping in ports.split(',') {
             let mapping = mapping.trim();
             if let Some(host_port) = parse_container_port(mapping)
-                && !found.iter().any(|d| d.port == host_port && d.source == runtime)
+                && !found
+                    .iter()
+                    .any(|d| d.port == host_port && d.source == runtime)
             {
                 found.push(DetectedDb {
                     source: runtime.into(),
@@ -151,7 +155,10 @@ fn parse_container_port(mapping: &str) -> Option<u16> {
 
 /// Prompt user to select a detected database or enter URL manually.
 fn prompt_db_url(mode_label: &str, default: &str) -> Result<String> {
-    println!("\n{}", format!("Scanning for {} instances...", mode_label).dimmed());
+    println!(
+        "\n{}",
+        format!("Scanning for {} instances...", mode_label).dimmed()
+    );
 
     let detected = detect_databases();
 
@@ -171,13 +178,13 @@ fn prompt_db_url(mode_label: &str, default: &str) -> Result<String> {
         };
         println!("    {}  {} {}", format!("{}.", i + 1).cyan(), label, db);
     }
-    println!("    {}  Enter URL manually", format!("{}.", detected.len() + 1).cyan());
+    println!(
+        "    {}  Enter URL manually",
+        format!("{}.", detected.len() + 1).cyan()
+    );
     println!();
 
-    let choice = prompt(
-        &format!("Select [1-{}]", detected.len() + 1),
-        "1",
-    )?;
+    let choice = prompt(&format!("Select [1-{}]", detected.len() + 1), "1")?;
 
     let idx: usize = choice.parse().unwrap_or(1);
     if idx >= 1 && idx <= detected.len() {
@@ -312,28 +319,41 @@ pub fn run_init(
 
     // Generate files
     generate_qail_toml(&config)?;
-    
+
     if config.mode == Mode::Hybrid {
         generate_queue_migration()?;
     }
 
     println!();
-    println!("{} Project '{}' initialized!", "✓".green(), config.name.yellow());
+    println!(
+        "{} Project '{}' initialized!",
+        "✓".green(),
+        config.name.yellow()
+    );
     println!();
-    
+
     match config.mode {
         Mode::Postgres => {
             println!("Next steps:");
-            println!("  {} Run 'qail pull' to introspect existing schema", "1.".dimmed());
+            println!(
+                "  {} Run 'qail pull' to introspect existing schema",
+                "1.".dimmed()
+            );
             println!("  {} Or create schema.qail manually", "2.".dimmed());
         }
         Mode::Qdrant => {
             println!("Next steps:");
-            println!("  {} Run 'qail vector create <collection>' to create collections", "1.".dimmed());
+            println!(
+                "  {} Run 'qail vector create <collection>' to create collections",
+                "1.".dimmed()
+            );
         }
         Mode::Hybrid => {
             println!("Next steps:");
-            println!("  {} Run 'qail migrate up' to create _qail_queue table", "1.".dimmed());
+            println!(
+                "  {} Run 'qail migrate up' to create _qail_queue table",
+                "1.".dimmed()
+            );
             println!("  {} Configure [[sync]] rules in qail.toml", "2.".dimmed());
             println!("  {} Run 'qail worker' to start sync daemon", "3.".dimmed());
         }
@@ -375,6 +395,7 @@ fn generate_qail_toml(config: &InitConfig) -> Result<()> {
 name = "{}"
 mode = "{}"
 # schema = "schema.qail"
+# schema_strict_manifest = false
 # migrations_dir = "deltas"
 "#,
         config.name, mode_str
@@ -501,16 +522,16 @@ drop index idx_qail_queue_poll
 drop table _qail_queue
 "#;
 
-    fs::write(
-        migrations_dir.join("001_qail_queue.up.qail"),
-        up_content,
-    )?;
+    fs::write(migrations_dir.join("001_qail_queue.up.qail"), up_content)?;
     fs::write(
         migrations_dir.join("001_qail_queue.down.qail"),
         down_content,
     )?;
 
     println!("{} Created migrations/001_qail_queue.up.qail", "✓".green());
-    println!("{} Created migrations/001_qail_queue.down.qail", "✓".green());
+    println!(
+        "{} Created migrations/001_qail_queue.down.qail",
+        "✓".green()
+    );
     Ok(())
 }

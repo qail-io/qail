@@ -3,9 +3,12 @@
 //! Functions for encoding Expr, Value, Operator, and conditions to wire format.
 
 use bytes::BytesMut;
-use qail_core::ast::{Action, CageKind, Condition, Constraint, Expr, FrameBound, ModKind, Operator, SortOrder, Value, WindowFrame};
+use qail_core::ast::{
+    Action, CageKind, Condition, Constraint, Expr, FrameBound, ModKind, Operator, SortOrder, Value,
+    WindowFrame,
+};
 
-use super::super::helpers::{i64_to_bytes, write_param_placeholder, NUMERIC_VALUES};
+use super::super::helpers::{NUMERIC_VALUES, i64_to_bytes, write_param_placeholder};
 
 /// Encode column list to buffer.
 pub fn encode_columns(columns: &[Expr], buf: &mut BytesMut) {
@@ -55,7 +58,13 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b" AS ");
             buf.extend_from_slice(alias.as_bytes());
         }
-        Expr::Aggregate { col, func, distinct, filter, alias } => {
+        Expr::Aggregate {
+            col,
+            func,
+            distinct,
+            filter,
+            alias,
+        } => {
             buf.extend_from_slice(func.to_string().as_bytes());
             buf.extend_from_slice(b"(");
             if *distinct {
@@ -63,7 +72,7 @@ fn encode_column_expr_inner(
             }
             buf.extend_from_slice(col.as_bytes());
             buf.extend_from_slice(b")");
-            
+
             // FILTER (WHERE ...) clause for aggregates
             if let Some(conditions) = filter
                 && !conditions.is_empty()
@@ -87,7 +96,9 @@ fn encode_column_expr_inner(
                             buf.extend_from_slice(b"'");
                         }
                         Value::Int(n) => buf.extend_from_slice(n.to_string().as_bytes()),
-                        Value::Bool(b) => buf.extend_from_slice(if *b { b"TRUE" } else { b"FALSE" }),
+                        Value::Bool(b) => {
+                            buf.extend_from_slice(if *b { b"TRUE" } else { b"FALSE" })
+                        }
                         Value::Null => buf.extend_from_slice(b"NULL"),
                         Value::Array(arr) => {
                             buf.extend_from_slice(b"(");
@@ -110,7 +121,7 @@ fn encode_column_expr_inner(
                 }
                 buf.extend_from_slice(b")");
             }
-            
+
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
                 buf.extend_from_slice(a.as_bytes());
@@ -131,7 +142,11 @@ fn encode_column_expr_inner(
                 buf.extend_from_slice(a.as_bytes());
             }
         }
-        Expr::Cast { expr, target_type, alias } => {
+        Expr::Cast {
+            expr,
+            target_type,
+            alias,
+        } => {
             encode_column_expr(expr, buf);
             buf.extend_from_slice(b"::");
             buf.extend_from_slice(target_type.as_bytes());
@@ -140,7 +155,12 @@ fn encode_column_expr_inner(
                 buf.extend_from_slice(a.as_bytes());
             }
         }
-        Expr::Binary { left, op, right, alias } => {
+        Expr::Binary {
+            left,
+            op,
+            right,
+            alias,
+        } => {
             buf.extend_from_slice(b"(");
             encode_column_expr(left, buf);
             buf.extend_from_slice(b" ");
@@ -156,7 +176,11 @@ fn encode_column_expr_inner(
         Expr::Literal(val) => {
             buf.extend_from_slice(val.to_string().as_bytes());
         }
-        Expr::Case { when_clauses, else_value, alias } => {
+        Expr::Case {
+            when_clauses,
+            else_value,
+            alias,
+        } => {
             buf.extend_from_slice(b"CASE");
             for (cond, then_expr) in when_clauses {
                 buf.extend_from_slice(b" WHEN ");
@@ -206,14 +230,18 @@ fn encode_column_expr_inner(
                 buf.extend_from_slice(a.as_bytes());
             }
         }
-        Expr::JsonAccess { column, path_segments, alias } => {
+        Expr::JsonAccess {
+            column,
+            path_segments,
+            alias,
+        } => {
             // Wrap in parentheses to avoid operator precedence issues with || (concat)
             buf.extend_from_slice(b"(");
             buf.extend_from_slice(column.as_bytes());
             for (key, as_text) in path_segments {
                 // Check if key is an integer (array index)
                 let is_integer = key.parse::<i64>().is_ok();
-                
+
                 if *as_text {
                     if is_integer {
                         buf.extend_from_slice(b"->>");
@@ -238,14 +266,21 @@ fn encode_column_expr_inner(
                 buf.extend_from_slice(a.as_bytes());
             }
         }
-        Expr::Window { name, func, params, partition, order, frame } => {
+        Expr::Window {
+            name,
+            func,
+            params,
+            partition,
+            order,
+            frame,
+        } => {
             buf.extend_from_slice(func.to_uppercase().as_bytes());
             buf.extend_from_slice(b"(");
             for (i, p) in params.iter().enumerate() {
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_column_expr(p, buf);  // Use Expr encoding for column references
+                encode_column_expr(p, buf); // Use Expr encoding for column references
             }
             buf.extend_from_slice(b") OVER (");
             if !partition.is_empty() {
@@ -275,7 +310,9 @@ fn encode_column_expr_inner(
                             SortOrder::Desc => buf.extend_from_slice(b" DESC"),
                             SortOrder::AscNullsFirst => buf.extend_from_slice(b" ASC NULLS FIRST"),
                             SortOrder::AscNullsLast => buf.extend_from_slice(b" ASC NULLS LAST"),
-                            SortOrder::DescNullsFirst => buf.extend_from_slice(b" DESC NULLS FIRST"),
+                            SortOrder::DescNullsFirst => {
+                                buf.extend_from_slice(b" DESC NULLS FIRST")
+                            }
                             SortOrder::DescNullsLast => buf.extend_from_slice(b" DESC NULLS LAST"),
                         }
                     }
@@ -330,7 +367,11 @@ fn encode_column_expr_inner(
                 buf.extend_from_slice(a.as_bytes());
             }
         }
-        Expr::Collate { expr, collation, alias } => {
+        Expr::Collate {
+            expr,
+            collation,
+            alias,
+        } => {
             encode_column_expr(expr, buf);
             buf.extend_from_slice(b" COLLATE \"");
             buf.extend_from_slice(collation.as_bytes());
@@ -361,7 +402,9 @@ fn encode_column_expr_inner(
                 None => {
                     let mut sub_buf = BytesMut::with_capacity(128);
                     let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
-                    if let Ok(()) = super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params) {
+                    if let Ok(()) =
+                        super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params)
+                    {
                         buf.extend_from_slice(&sub_buf);
                     }
                 }
@@ -372,7 +415,11 @@ fn encode_column_expr_inner(
                 buf.extend_from_slice(a.as_bytes());
             }
         }
-        Expr::Exists { query, negated, alias } => {
+        Expr::Exists {
+            query,
+            negated,
+            alias,
+        } => {
             // Encode EXISTS or NOT EXISTS subquery
             if *negated {
                 buf.extend_from_slice(b"NOT ");
@@ -385,7 +432,9 @@ fn encode_column_expr_inner(
                 None => {
                     let mut sub_buf = BytesMut::with_capacity(128);
                     let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
-                    if let Ok(()) = super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params) {
+                    if let Ok(()) =
+                        super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params)
+                    {
                         buf.extend_from_slice(&sub_buf);
                     }
                 }
@@ -397,7 +446,11 @@ fn encode_column_expr_inner(
             }
         }
         Expr::Raw(sql) => buf.extend_from_slice(sql.as_bytes()),
-        Expr::Def { name, data_type, constraints } => {
+        Expr::Def {
+            name,
+            data_type,
+            constraints,
+        } => {
             buf.extend_from_slice(name.as_bytes());
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(data_type.to_uppercase().as_bytes());
@@ -426,18 +479,16 @@ fn encode_column_expr_inner(
                 }
             }
         }
-        Expr::Mod { kind, col } => {
-            match kind {
-                ModKind::Add => {
-                    buf.extend_from_slice(b"ADD COLUMN ");
-                    encode_column_expr(col, buf);
-                }
-                ModKind::Drop => {
-                    buf.extend_from_slice(b"DROP COLUMN ");
-                    encode_column_expr(col, buf);
-                }
+        Expr::Mod { kind, col } => match kind {
+            ModKind::Add => {
+                buf.extend_from_slice(b"ADD COLUMN ");
+                encode_column_expr(col, buf);
             }
-        }
+            ModKind::Drop => {
+                buf.extend_from_slice(b"DROP COLUMN ");
+                encode_column_expr(col, buf);
+            }
+        },
     }
 }
 
@@ -478,6 +529,7 @@ pub fn encode_operator(op: &Operator, buf: &mut BytesMut) {
         Operator::KeyExistsAll => b"?&",
         Operator::JsonPath => b"#>",
         Operator::JsonPathText => b"#>>",
+        Operator::ArrayElemContainedInText => b"CONTAINS_ANY_TOKEN",
     };
     buf.extend_from_slice(bytes);
 }
@@ -528,6 +580,56 @@ pub fn encode_conditions(
             && matches!(&cond.value, Value::Null)
         {
             encode_expr(&cond.left, buf);
+            continue;
+        }
+
+        if cond.is_array_unnest {
+            buf.extend_from_slice(b"EXISTS (SELECT 1 FROM unnest(");
+            encode_expr(&cond.left, buf);
+            buf.extend_from_slice(b") _el WHERE ");
+
+            match cond.op {
+                Operator::Eq => {
+                    buf.extend_from_slice(b"_el = ");
+                    encode_value(&cond.value, buf, params)?;
+                }
+                Operator::Ne => {
+                    buf.extend_from_slice(b"_el != ");
+                    encode_value(&cond.value, buf, params)?;
+                }
+                Operator::Gt => {
+                    buf.extend_from_slice(b"_el > ");
+                    encode_value(&cond.value, buf, params)?;
+                }
+                Operator::Gte => {
+                    buf.extend_from_slice(b"_el >= ");
+                    encode_value(&cond.value, buf, params)?;
+                }
+                Operator::Lt => {
+                    buf.extend_from_slice(b"_el < ");
+                    encode_value(&cond.value, buf, params)?;
+                }
+                Operator::Lte => {
+                    buf.extend_from_slice(b"_el <= ");
+                    encode_value(&cond.value, buf, params)?;
+                }
+                Operator::Fuzzy => {
+                    buf.extend_from_slice(b"_el ILIKE '%' || ");
+                    encode_value(&cond.value, buf, params)?;
+                    buf.extend_from_slice(b" || '%'");
+                }
+                Operator::ArrayElemContainedInText => {
+                    buf.extend_from_slice(b"LOWER(");
+                    encode_value(&cond.value, buf, params)?;
+                    buf.extend_from_slice(b") LIKE '%' || LOWER(_el) || '%'");
+                }
+                _ => {
+                    buf.extend_from_slice(b"_el = ");
+                    encode_value(&cond.value, buf, params)?;
+                }
+            }
+
+            buf.extend_from_slice(b")");
             continue;
         }
 
@@ -616,6 +718,7 @@ pub fn encode_conditions(
             Operator::KeyExistsAll => buf.extend_from_slice(b" ?& "),
             Operator::JsonPath => buf.extend_from_slice(b" #> "),
             Operator::JsonPathText => buf.extend_from_slice(b" #>> "),
+            Operator::ArrayElemContainedInText => buf.extend_from_slice(b" = "),
             Operator::JsonExists | Operator::JsonQuery | Operator::JsonValue => {
                 buf.extend_from_slice(b" = ");
             }
@@ -639,7 +742,9 @@ pub fn encode_conditions(
                     Value::Subquery(q) => {
                         let mut sub_buf = BytesMut::with_capacity(128);
                         let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
-                        if let Ok(()) = super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params) {
+                        if let Ok(()) =
+                            super::super::dml::encode_select(q, &mut sub_buf, &mut sub_params)
+                        {
                             buf.extend_from_slice(&sub_buf);
                         }
                     }
@@ -657,26 +762,25 @@ pub fn encode_conditions(
                 // We need to rewrite the entire condition
                 let col_str = cond.left.to_string();
                 let cols: Vec<&str> = col_str.split(',').map(|s| s.trim()).collect();
-                
+
                 // Clear what was already written for the left side
                 // We need to truncate back to before encode_expr wrote the left side
                 // Instead, we'll handle this specially by computing the full expression
-                let tsvector_parts: Vec<String> = cols.iter()
-                    .map(|c| format!("coalesce({},'')", c))
-                    .collect();
+                let tsvector_parts: Vec<String> =
+                    cols.iter().map(|c| format!("coalesce({},'')", c)).collect();
                 let tsvector_expr = tsvector_parts.join(" || ' ' || ");
-                
+
                 // We already wrote the left expr, so let's replace it
                 // Truncate to position before left was written
                 // For simplicity, we append the @@ and tsquery part
                 // The left side is already written as the column name(s)
                 // We need to wrap it. Since encode_expr already wrote, we'll
                 // rewrite by clearing and rebuilding this condition.
-                
+
                 // Calculate how much to remove (the left-side column name)
                 let left_bytes = col_str.len();
                 buf.truncate(buf.len() - left_bytes);
-                
+
                 // Write the full tsvector expression
                 buf.extend_from_slice(b"to_tsvector('english', ");
                 buf.extend_from_slice(tsvector_expr.as_bytes());
@@ -701,9 +805,13 @@ pub fn encode_conditions(
 /// * `value` — AST value to encode.
 /// * `buf` — Output buffer to append the SQL fragment to.
 /// * `params` — Accumulator for parameterized bind values.
-pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
+pub fn encode_value(
+    value: &Value,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
     use crate::protocol::EncodeError;
-    
+
     match value {
         Value::Null => {
             params.push(None);
@@ -775,10 +883,10 @@ pub fn encode_value(value: &Value, buf: &mut BytesMut, params: &mut Vec<Option<V
                 || f.contains("/*")
                 || f.contains("*/")
             {
-                return Err(super::super::EncodeError::UnsafeExpression(
-                    format!("Value::Function rejected: suspicious content in '{}'",
-                            &f[..f.len().min(80)])
-                ));
+                return Err(super::super::EncodeError::UnsafeExpression(format!(
+                    "Value::Function rejected: suspicious content in '{}'",
+                    &f[..f.len().min(80)]
+                )));
             }
             buf.extend_from_slice(f.as_bytes());
         }

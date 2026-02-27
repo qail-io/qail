@@ -23,6 +23,14 @@ impl Qail {
         }
     }
 
+    /// SELECT nextval('sequence_name') AS seq.
+    ///
+    /// Convenience helper for PostgreSQL sequence reads.
+    pub fn nextval(sequence_name: impl AsRef<str>) -> Self {
+        let seq = sequence_name.as_ref().replace('\'', "''");
+        Self::raw_sql(format!("select nextval('{seq}') as seq"))
+    }
+
     /// Returns `true` if this command is a raw SQL pass-through.
     ///
     /// Raw SQL commands are created by [`Qail::raw_sql()`] and store the
@@ -34,7 +42,10 @@ impl Qail {
         }
         // Must have no columns (default) or only Star
         let cols_empty_or_star = self.columns.is_empty()
-            || self.columns.iter().all(|c| matches!(c, crate::ast::Expr::Star));
+            || self
+                .columns
+                .iter()
+                .all(|c| matches!(c, crate::ast::Expr::Star));
         if !cols_empty_or_star {
             return false;
         }
@@ -166,9 +177,9 @@ impl Qail {
     }
 
     // PostgreSQL Pub/Sub (LISTEN/NOTIFY)
-    
+
     /// Create a LISTEN command to subscribe to a channel.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmd = Qail::listen("orders");
@@ -183,7 +194,7 @@ impl Qail {
     }
 
     /// Create an UNLISTEN command to unsubscribe from a channel.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmd = Qail::unlisten("orders");
@@ -198,7 +209,7 @@ impl Qail {
     }
 
     /// Create a NOTIFY command to send a message to a channel.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let cmd = Qail::notify("orders", "new_order:123");

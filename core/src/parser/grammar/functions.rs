@@ -77,7 +77,7 @@ pub fn parse_function_or_aggregate(input: &str) -> IResult<&str, Expr> {
             Expr::Window {
                 name: alias_str,
                 func: name.to_string(),
-                params: args,  // Pass Expr args directly for native AST
+                params: args, // Pass Expr args directly for native AST
                 partition,
                 order,
                 frame,
@@ -352,54 +352,74 @@ fn parse_window_sort_item(input: &str) -> IResult<&str, Cage> {
 /// Parse window frame: ROWS/RANGE BETWEEN start AND end
 fn parse_window_frame(input: &str) -> IResult<&str, WindowFrame> {
     use nom::combinator::value;
-    
+
     // Parse ROWS or RANGE
     let (input, is_rows) = alt((
         value(true, tag_no_case("rows")),
         value(false, tag_no_case("range")),
-    )).parse(input)?;
+    ))
+    .parse(input)?;
     let (input, _) = multispace1(input)?;
     let (input, _) = tag_no_case("between").parse(input)?;
     let (input, _) = multispace1(input)?;
-    
+
     // Parse start bound
     let (input, start) = parse_frame_bound(input)?;
     let (input, _) = multispace1(input)?;
     let (input, _) = tag_no_case("and").parse(input)?;
     let (input, _) = multispace1(input)?;
-    
+
     // Parse end bound
     let (input, end) = parse_frame_bound(input)?;
-    
+
     let frame = if is_rows {
         WindowFrame::Rows { start, end }
     } else {
         WindowFrame::Range { start, end }
     };
-    
+
     Ok((input, frame))
 }
 
 /// Parse frame bound: UNBOUNDED PRECEDING, N PRECEDING, CURRENT ROW, N FOLLOWING, UNBOUNDED FOLLOWING
 fn parse_frame_bound(input: &str) -> IResult<&str, FrameBound> {
-    use nom::combinator::value;
     use nom::character::complete::i32 as parse_i32;
-    
+    use nom::combinator::value;
+
     alt((
         // UNBOUNDED PRECEDING
-        value(FrameBound::UnboundedPreceding, 
-            (tag_no_case("unbounded"), multispace1, tag_no_case("preceding"))),
+        value(
+            FrameBound::UnboundedPreceding,
+            (
+                tag_no_case("unbounded"),
+                multispace1,
+                tag_no_case("preceding"),
+            ),
+        ),
         // UNBOUNDED FOLLOWING
-        value(FrameBound::UnboundedFollowing,
-            (tag_no_case("unbounded"), multispace1, tag_no_case("following"))),
+        value(
+            FrameBound::UnboundedFollowing,
+            (
+                tag_no_case("unbounded"),
+                multispace1,
+                tag_no_case("following"),
+            ),
+        ),
         // CURRENT ROW
-        value(FrameBound::CurrentRow,
-            (tag_no_case("current"), multispace1, tag_no_case("row"))),
+        value(
+            FrameBound::CurrentRow,
+            (tag_no_case("current"), multispace1, tag_no_case("row")),
+        ),
         // N PRECEDING
-        map((parse_i32, multispace1, tag_no_case("preceding")),
-            |(n, _, _)| FrameBound::Preceding(n)),
+        map(
+            (parse_i32, multispace1, tag_no_case("preceding")),
+            |(n, _, _)| FrameBound::Preceding(n),
+        ),
         // N FOLLOWING
-        map((parse_i32, multispace1, tag_no_case("following")),
-            |(n, _, _)| FrameBound::Following(n)),
-    )).parse(input)
+        map(
+            (parse_i32, multispace1, tag_no_case("following")),
+            |(n, _, _)| FrameBound::Following(n),
+        ),
+    ))
+    .parse(input)
 }

@@ -229,11 +229,7 @@ impl AlterTable {
     }
 
     /// ADD CONSTRAINT.
-    pub fn add_constraint(
-        mut self,
-        name: impl Into<String>,
-        constraint: TableConstraint,
-    ) -> Self {
+    pub fn add_constraint(mut self, name: impl Into<String>, constraint: TableConstraint) -> Self {
         self.ops.push(AlterOp::AddConstraint {
             name: name.into(),
             constraint,
@@ -315,8 +311,7 @@ mod tests {
 
     #[test]
     fn test_alter_type_with_using() {
-        let alter = AlterTable::new("users")
-            .set_type_using("age", ColumnType::Int, "age::integer");
+        let alter = AlterTable::new("users").set_type_using("age", ColumnType::Int, "age::integer");
 
         match &alter.ops[0] {
             AlterOp::AlterType { column, using, .. } => {
@@ -329,10 +324,8 @@ mod tests {
 
     #[test]
     fn test_add_constraint() {
-        let alter = AlterTable::new("users").add_constraint(
-            "pk_users",
-            TableConstraint::PrimaryKey(vec!["id".into()]),
-        );
+        let alter = AlterTable::new("users")
+            .add_constraint("pk_users", TableConstraint::PrimaryKey(vec!["id".into()]));
 
         assert_eq!(alter.ops.len(), 1);
     }

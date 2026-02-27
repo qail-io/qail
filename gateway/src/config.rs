@@ -9,16 +9,16 @@ use std::time::Duration;
 pub struct GatewayConfig {
     /// Database connection URL
     pub database_url: String,
-    
+
     /// Path to schema file (optional)
     pub schema_path: Option<String>,
-    
+
     /// Path to policies file (optional)
     pub policy_path: Option<String>,
-    
+
     /// Server bind address
     pub bind_address: String,
-    
+
     /// Enable CORS
     #[serde(default = "default_true")]
     pub cors_enabled: bool,
@@ -43,19 +43,19 @@ pub struct GatewayConfig {
     /// `Authorization: Bearer <admin_token>`.
     #[serde(default)]
     pub admin_token: Option<String>,
-    
+
     /// Enable query caching
     #[serde(default = "default_true")]
     pub cache_enabled: bool,
-    
+
     /// Maximum cache entries
     #[serde(default = "default_cache_max")]
     pub cache_max_entries: usize,
-    
+
     /// Cache TTL in seconds
     #[serde(default = "default_cache_ttl")]
     pub cache_ttl_seconds: u64,
-    
+
     /// Path to event triggers config file (optional)
     pub events_path: Option<String>,
 
@@ -76,6 +76,11 @@ pub struct GatewayConfig {
     /// Applied to every RLS-scoped connection. Prevents runaway queries.
     #[serde(default = "default_statement_timeout_ms")]
     pub statement_timeout_ms: u32,
+
+    /// Lock timeout in milliseconds (default: 5000 = 5s).
+    /// Prevents queries from waiting indefinitely for row/table locks.
+    #[serde(default = "default_lock_timeout_ms")]
+    pub lock_timeout_ms: u32,
 
     /// Maximum rows returned per query (default: 10000).
     /// A guardrail against accidental full table scans.
@@ -149,6 +154,31 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub allow_list_path: Option<String>,
 
+    /// SECURITY: Require the query allow-list to be enabled for `/qail/binary` endpoint.
+    /// When true (default), binary AST requests are rejected unless an allow-list is loaded.
+    /// This prevents untrusted binary AST from bypassing query restrictions.
+    #[serde(default = "default_true")]
+    pub binary_requires_allow_list: bool,
+
+    /// Require schema-qualified RPC function names (`schema.function`).
+    #[serde(default)]
+    pub rpc_require_schema_qualified: bool,
+
+    /// Path to RPC allow-list file (one function per line). Optional.
+    /// Entries are matched case-insensitively against normalized function names.
+    #[serde(default)]
+    pub rpc_allowlist_path: Option<String>,
+
+    /// Validate named RPC args against PostgreSQL function signatures.
+    /// Requires schema-qualified function names.
+    #[serde(default)]
+    pub rpc_signature_check: bool,
+
+    /// Maximum request body size in bytes (default: 1MB).
+    /// Rejects payloads exceeding this limit with 413 Payload Too Large.
+    #[serde(default = "default_max_request_body_bytes")]
+    pub max_request_body_bytes: usize,
+
     /// Per-role guard overrides. Roles not listed use global defaults.
     ///
     /// Example TOML:
@@ -169,6 +199,8 @@ pub struct GuardOverrides {
     pub max_result_rows: Option<usize>,
     /// Override for `statement_timeout_ms`.
     pub statement_timeout_ms: Option<u32>,
+    /// Override for `lock_timeout_ms`.
+    pub lock_timeout_ms: Option<u32>,
     /// Override for `explain_max_cost`.
     pub explain_max_cost: Option<f64>,
     /// Override for `explain_max_rows`.
@@ -184,6 +216,8 @@ pub struct EffectiveLimits {
     pub max_result_rows: usize,
     /// Statement timeout in milliseconds.
     pub statement_timeout_ms: u32,
+    /// Lock timeout in milliseconds.
+    pub lock_timeout_ms: u32,
     /// EXPLAIN max cost threshold.
     pub explain_max_cost: f64,
     /// EXPLAIN max row estimate threshold.
@@ -192,27 +226,75 @@ pub struct EffectiveLimits {
     pub max_expand_depth: usize,
 }
 
-fn default_true() -> bool { true }
-fn default_cache_max() -> usize { 1000 }
-fn default_cache_ttl() -> u64 { 60 }
-fn default_rate_limit_rate() -> f64 { 100.0 }
-fn default_rate_limit_burst() -> u32 { 200 }
-fn default_max_expand_depth() -> usize { 4 }
-fn default_statement_timeout_ms() -> u32 { 30_000 }
-fn default_max_result_rows() -> usize { 10_000 }
-fn default_explain_mode() -> String { "precheck".to_string() }
-fn default_explain_max_cost() -> f64 { 100_000.0 }
-fn default_explain_max_rows() -> u64 { 1_000_000 }
-fn default_explain_depth_threshold() -> usize { 3 }
-fn default_explain_cache_ttl() -> u64 { 300 }
-fn default_max_concurrent_queries() -> usize { 10 }
-fn default_max_tenants() -> usize { 10_000 }
-fn default_tenant_idle_timeout() -> u64 { 300 }
-fn default_max_batch_queries() -> usize { 100 }
-fn default_max_query_depth() -> usize { 5 }
-fn default_max_query_filters() -> usize { 20 }
-fn default_max_query_joins() -> usize { 10 }
-fn default_tenant_column() -> String { "operator_id".to_string() }
+fn default_true() -> bool {
+    true
+}
+fn default_cache_max() -> usize {
+    1000
+}
+fn default_cache_ttl() -> u64 {
+    60
+}
+fn default_rate_limit_rate() -> f64 {
+    100.0
+}
+fn default_rate_limit_burst() -> u32 {
+    200
+}
+fn default_max_expand_depth() -> usize {
+    4
+}
+fn default_statement_timeout_ms() -> u32 {
+    30_000
+}
+fn default_lock_timeout_ms() -> u32 {
+    5_000
+}
+fn default_max_request_body_bytes() -> usize {
+    1_048_576 // 1MB
+}
+fn default_max_result_rows() -> usize {
+    10_000
+}
+fn default_explain_mode() -> String {
+    "precheck".to_string()
+}
+fn default_explain_max_cost() -> f64 {
+    100_000.0
+}
+fn default_explain_max_rows() -> u64 {
+    1_000_000
+}
+fn default_explain_depth_threshold() -> usize {
+    3
+}
+fn default_explain_cache_ttl() -> u64 {
+    300
+}
+fn default_max_concurrent_queries() -> usize {
+    10
+}
+fn default_max_tenants() -> usize {
+    10_000
+}
+fn default_tenant_idle_timeout() -> u64 {
+    300
+}
+fn default_max_batch_queries() -> usize {
+    100
+}
+fn default_max_query_depth() -> usize {
+    5
+}
+fn default_max_query_filters() -> usize {
+    20
+}
+fn default_max_query_joins() -> usize {
+    10
+}
+fn default_tenant_column() -> String {
+    "operator_id".to_string()
+}
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -234,6 +316,7 @@ impl Default for GatewayConfig {
             rate_limit_burst: 200,
             max_expand_depth: 4,
             statement_timeout_ms: 30_000,
+            lock_timeout_ms: 5_000,
             max_result_rows: 10_000,
             explain_mode: "precheck".to_string(),
             explain_max_cost: 100_000.0,
@@ -250,6 +333,11 @@ impl Default for GatewayConfig {
             qdrant: None,
             tenant_column: "operator_id".to_string(),
             allow_list_path: None,
+            binary_requires_allow_list: true,
+            rpc_require_schema_qualified: false,
+            rpc_allowlist_path: None,
+            rpc_signature_check: false,
+            max_request_body_bytes: 1_048_576,
             role_overrides: HashMap::new(),
         }
     }
@@ -328,6 +416,9 @@ impl GatewayConfig {
             statement_timeout_ms: overrides
                 .and_then(|o| o.statement_timeout_ms)
                 .unwrap_or(self.statement_timeout_ms),
+            lock_timeout_ms: overrides
+                .and_then(|o| o.lock_timeout_ms)
+                .unwrap_or(self.lock_timeout_ms),
             explain_max_cost: overrides
                 .and_then(|o| o.explain_max_cost)
                 .unwrap_or(self.explain_max_cost),
@@ -344,17 +435,23 @@ impl GatewayConfig {
     ///
     /// Maps `[postgres]`, `[gateway]`, and `[project]` sections.
     pub fn from_qail_config(qail: &qail_core::config::QailConfig) -> Self {
-        let (bind_address, cors_enabled, policy_path, cache_enabled, cache_max_entries, cache_ttl_seconds) =
-            if let Some(ref gw) = qail.gateway {
-                let (ce, cme, cts) = if let Some(ref cache) = gw.cache {
-                    (cache.enabled, cache.max_entries, cache.ttl_secs)
-                } else {
-                    (true, 1000, 60)
-                };
-                (gw.bind.clone(), gw.cors, gw.policy.clone(), ce, cme, cts)
+        let (
+            bind_address,
+            cors_enabled,
+            policy_path,
+            cache_enabled,
+            cache_max_entries,
+            cache_ttl_seconds,
+        ) = if let Some(ref gw) = qail.gateway {
+            let (ce, cme, cts) = if let Some(ref cache) = gw.cache {
+                (cache.enabled, cache.max_entries, cache.ttl_secs)
             } else {
-                ("0.0.0.0:8080".to_string(), true, None, true, 1000, 60)
+                (true, 1000, 60)
             };
+            (gw.bind.clone(), gw.cors, gw.policy.clone(), ce, cme, cts)
+        } else {
+            ("0.0.0.0:8080".to_string(), true, None, true, 1000, 60)
+        };
 
         Self {
             database_url: qail.postgres.url.clone(),
@@ -362,7 +459,9 @@ impl GatewayConfig {
             policy_path,
             bind_address,
             cors_enabled,
-            cors_allowed_origins: qail.gateway.as_ref()
+            cors_allowed_origins: qail
+                .gateway
+                .as_ref()
                 .and_then(|gw| gw.cors_allowed_origins.clone())
                 .unwrap_or_default(),
             cors_strict: false,
@@ -374,10 +473,13 @@ impl GatewayConfig {
             events_path: None,
             rate_limit_rate: 100.0,
             rate_limit_burst: 200,
-            max_expand_depth: qail.gateway.as_ref()
+            max_expand_depth: qail
+                .gateway
+                .as_ref()
                 .map(|gw| gw.max_expand_depth)
                 .unwrap_or(4),
             statement_timeout_ms: 30_000,
+            lock_timeout_ms: 5_000,
             max_result_rows: 10_000,
             explain_mode: "precheck".to_string(),
             explain_max_cost: 100_000.0,
@@ -394,6 +496,11 @@ impl GatewayConfig {
             qdrant: qail.qdrant.clone(),
             tenant_column: "operator_id".to_string(),
             allow_list_path: None,
+            binary_requires_allow_list: true,
+            rpc_require_schema_qualified: false,
+            rpc_allowlist_path: None,
+            rpc_signature_check: false,
+            max_request_body_bytes: 1_048_576,
             role_overrides: HashMap::new(),
         }
     }
@@ -418,25 +525,25 @@ impl GatewayConfigBuilder {
         self.config.database_url = url.into();
         self
     }
-    
+
     /// Set the schema path
     pub fn schema(mut self, path: impl Into<String>) -> Self {
         self.config.schema_path = Some(path.into());
         self
     }
-    
+
     /// Set the policy path
     pub fn policy(mut self, path: impl Into<String>) -> Self {
         self.config.policy_path = Some(path.into());
         self
     }
-    
+
     /// Set the bind address
     pub fn bind(mut self, addr: impl Into<String>) -> Self {
         self.config.bind_address = addr.into();
         self
     }
-    
+
     /// Build the configuration
     pub fn build(self) -> GatewayConfig {
         self.config

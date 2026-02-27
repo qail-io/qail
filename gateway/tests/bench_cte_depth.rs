@@ -28,7 +28,14 @@ const CTE_DEPTHS: &[usize] = &[0, 1, 2, 3, 5, 8, 10];
 fn build_cte_query(depth: usize) -> Qail {
     // Base query: a realistic filtered select
     let base = Qail::get("routes")
-        .columns(["id", "title", "origin", "destination", "price", "operator_id"])
+        .columns([
+            "id",
+            "title",
+            "origin",
+            "destination",
+            "price",
+            "operator_id",
+        ])
         .eq("active", Value::Bool(true))
         .limit(100);
 
@@ -45,29 +52,63 @@ fn build_cte_query(depth: usize) -> Qail {
         if i == 0 {
             // First CTE wraps the base query
             cmd = Qail::get(&cte_name)
-                .columns(["id", "title", "origin", "destination", "price", "operator_id"])
+                .columns([
+                    "id",
+                    "title",
+                    "origin",
+                    "destination",
+                    "price",
+                    "operator_id",
+                ])
                 .with(&cte_name, cmd);
         } else {
             // Subsequent CTEs reference the previous one with added filter
             let inner = Qail::get(&prev_cte_name)
-                .columns(["id", "title", "origin", "destination", "price", "operator_id"])
+                .columns([
+                    "id",
+                    "title",
+                    "origin",
+                    "destination",
+                    "price",
+                    "operator_id",
+                ])
                 .gt("price", Value::Int(i as i64 * 100));
 
             cmd = Qail::get(&cte_name)
-                .columns(["id", "title", "origin", "destination", "price", "operator_id"])
+                .columns([
+                    "id",
+                    "title",
+                    "origin",
+                    "destination",
+                    "price",
+                    "operator_id",
+                ])
                 .with(&cte_name, inner)
                 .with_cte(cmd.ctes.into_iter().next().unwrap());
 
             // Rebuild: attach all existing CTEs to the new outer query
-            let mut new_cmd = Qail::get(&cte_name)
-                .columns(["id", "title", "origin", "destination", "price", "operator_id"]);
+            let mut new_cmd = Qail::get(&cte_name).columns([
+                "id",
+                "title",
+                "origin",
+                "destination",
+                "price",
+                "operator_id",
+            ]);
 
             // Build all CTEs fresh
             let mut ctes_so_far: Vec<CTEDef> = Vec::new();
 
             // cte_0 = base query
             let base_q = Qail::get("routes")
-                .columns(["id", "title", "origin", "destination", "price", "operator_id"])
+                .columns([
+                    "id",
+                    "title",
+                    "origin",
+                    "destination",
+                    "price",
+                    "operator_id",
+                ])
                 .eq("active", Value::Bool(true))
                 .limit(100);
             ctes_so_far.push(base_q.to_cte("cte_0"));
@@ -76,7 +117,14 @@ fn build_cte_query(depth: usize) -> Qail {
             for j in 1..=i {
                 let prev = format!("cte_{}", j - 1);
                 let q = Qail::get(&prev)
-                    .columns(["id", "title", "origin", "destination", "price", "operator_id"])
+                    .columns([
+                        "id",
+                        "title",
+                        "origin",
+                        "destination",
+                        "price",
+                        "operator_id",
+                    ])
                     .gt("price", Value::Int(j as i64 * 100));
                 ctes_so_far.push(q.to_cte(format!("cte_{}", j)));
             }
@@ -140,13 +188,18 @@ fn ms(d: Duration) -> f64 {
 async fn bench_cte_depth() {
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║   CTE DEPTH BENCHMARK — QAIL Gateway Overhead              ║");
-    println!("║   {} iterations per depth, {} warmup                     ║", ITERATIONS, WARMUP);
+    println!(
+        "║   {} iterations per depth, {} warmup                     ║",
+        ITERATIONS, WARMUP
+    );
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
     // ── 1. AST Build + Transpile ─────────────────────────────────────
     println!("═══ Phase 1: AST Build → SQL Transpile (pure CPU) ═══\n");
-    println!("{:>7} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}  {:>6}",
-        "CTEs", "min(μs)", "avg(μs)", "p50(μs)", "p95(μs)", "p99(μs)", "max(μs)", "SQL len");
+    println!(
+        "{:>7} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}  {:>6}",
+        "CTEs", "min(μs)", "avg(μs)", "p50(μs)", "p95(μs)", "p99(μs)", "max(μs)", "SQL len"
+    );
 
     for &depth in CTE_DEPTHS {
         // Warmup
@@ -168,14 +221,25 @@ async fn bench_cte_depth() {
         }
 
         let s = compute_stats(&mut times);
-        println!("{:>7} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}  {:>6}",
-            depth, us(s.min), us(s.avg), us(s.p50), us(s.p95), us(s.p99), us(s.max), sql_len);
+        println!(
+            "{:>7} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}  {:>6}",
+            depth,
+            us(s.min),
+            us(s.avg),
+            us(s.p50),
+            us(s.p95),
+            us(s.p99),
+            us(s.max),
+            sql_len
+        );
     }
 
     // ── 2. Text Parse + Transpile ────────────────────────────────────
     println!("\n═══ Phase 2: QAIL Text → Parse → SQL (includes parser cost) ═══\n");
-    println!("{:>7} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "depth", "min(μs)", "avg(μs)", "p50(μs)", "p95(μs)", "p99(μs)");
+    println!(
+        "{:>7} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "depth", "min(μs)", "avg(μs)", "p50(μs)", "p95(μs)", "p99(μs)"
+    );
 
     for &depth in &[0usize] {
         let text = build_cte_text(depth);
@@ -197,15 +261,24 @@ async fn bench_cte_depth() {
         }
 
         let s = compute_stats(&mut times);
-        println!("{:>7} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
-            depth, us(s.min), us(s.avg), us(s.p50), us(s.p95), us(s.p99));
+        println!(
+            "{:>7} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
+            depth,
+            us(s.min),
+            us(s.avg),
+            us(s.p50),
+            us(s.p95),
+            us(s.p99)
+        );
     }
 
     // ── 3. DB Round-trip (optional) ──────────────────────────────────
     if std::env::var("DATABASE_URL").is_ok() {
         println!("\n═══ Phase 3: Full Round-trip (AST → SQL → PG → rows) ═══\n");
-        println!("{:>7} {:>10} {:>10} {:>10} {:>10} {:>10}",
-            "CTEs", "min(ms)", "avg(ms)", "p50(ms)", "p95(ms)", "p99(ms)");
+        println!(
+            "{:>7} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "CTEs", "min(ms)", "avg(ms)", "p50(ms)", "p95(ms)", "p99(ms)"
+        );
 
         let mut pg = qail_pg::PgDriver::connect_env().await.expect("PG driver");
 
@@ -219,8 +292,10 @@ async fn bench_cte_depth() {
                 price INTEGER NOT NULL DEFAULT 50000,
                 operator_id TEXT NOT NULL DEFAULT 'op_bench',
                 active BOOLEAN NOT NULL DEFAULT true
-            )"
-        ).await.ok();
+            )",
+        )
+        .await
+        .ok();
 
         // Seed some rows if empty
         let count_q = Qail::get("routes").columns(["id"]).limit(1);
@@ -230,8 +305,11 @@ async fn bench_cte_depth() {
                 pg.execute_raw(&format!(
                     "INSERT INTO routes (title, origin, destination, price, active)
                      VALUES ('Route {}', 'Port A', 'Port B', {}, true)",
-                    i, 10_000 + i * 100
-                )).await.ok();
+                    i,
+                    10_000 + i * 100
+                ))
+                .await
+                .ok();
             }
             println!("  (seeded 500 rows into routes table)\n");
         }
@@ -253,8 +331,15 @@ async fn bench_cte_depth() {
             }
 
             let s = compute_stats(&mut times);
-            println!("{:>7} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2}",
-                depth, ms(s.min), ms(s.avg), ms(s.p50), ms(s.p95), ms(s.p99));
+            println!(
+                "{:>7} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2}",
+                depth,
+                ms(s.min),
+                ms(s.avg),
+                ms(s.p50),
+                ms(s.p95),
+                ms(s.p99)
+            );
         }
     } else {
         println!("\n⚠  Skipping Phase 3 (DB round-trip): set DATABASE_URL to enable\n");

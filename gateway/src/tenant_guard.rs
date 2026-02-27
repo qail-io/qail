@@ -161,10 +161,16 @@ pub fn verify_tenant_boundary(
     }
 
     // Update global counters
-    TENANT_GUARD.rows_checked.fetch_add(checked, Ordering::Relaxed);
+    TENANT_GUARD
+        .rows_checked
+        .fetch_add(checked, Ordering::Relaxed);
     if violations > 0 {
-        TENANT_GUARD.violation_requests.fetch_add(1, Ordering::Relaxed);
-        TENANT_GUARD.violation_rows.fetch_add(violations, Ordering::Relaxed);
+        TENANT_GUARD
+            .violation_requests
+            .fetch_add(1, Ordering::Relaxed);
+        TENANT_GUARD
+            .violation_rows
+            .fetch_add(violations, Ordering::Relaxed);
         Err(TenantViolation {
             violation_count: violations,
             table: table.to_string(),
@@ -220,7 +226,8 @@ mod tests {
             json!({"id": 2, "operator_id": "op-EVIL", "name": "Leaked!"}),
             json!({"id": 3, "operator_id": "op-123", "name": "Order C"}),
         ];
-        let err = verify_tenant_boundary(&rows, "op-123", "operator_id", "orders", "GET").unwrap_err();
+        let err =
+            verify_tenant_boundary(&rows, "op-123", "operator_id", "orders", "GET").unwrap_err();
         assert_eq!(err.violation_count, 1);
     }
 
@@ -230,7 +237,8 @@ mod tests {
             json!({"id": 1, "operator_id": "op-EVIL"}),
             json!({"id": 2, "operator_id": "op-EVIL"}),
         ];
-        let err = verify_tenant_boundary(&rows, "op-123", "operator_id", "orders", "GET").unwrap_err();
+        let err =
+            verify_tenant_boundary(&rows, "op-123", "operator_id", "orders", "GET").unwrap_err();
         assert_eq!(err.violation_count, 2);
     }
 
@@ -245,17 +253,13 @@ mod tests {
 
     #[test]
     fn null_operator_id_ignored() {
-        let rows = vec![
-            json!({"id": 1, "operator_id": null, "name": "System row"}),
-        ];
+        let rows = vec![json!({"id": 1, "operator_id": null, "name": "System row"})];
         assert!(verify_tenant_boundary(&rows, "op-123", "operator_id", "settings", "GET").is_ok());
     }
 
     #[test]
     fn empty_expected_operator_id_skips_check() {
-        let rows = vec![
-            json!({"id": 1, "operator_id": "op-123"}),
-        ];
+        let rows = vec![json!({"id": 1, "operator_id": "op-123"})];
         // Empty tenant ID means unauthenticated/system — skip check
         assert!(verify_tenant_boundary(&rows, "", "operator_id", "orders", "GET").is_ok());
     }
@@ -267,9 +271,7 @@ mod tests {
 
     #[test]
     fn integer_operator_id_compared_as_string() {
-        let rows = vec![
-            json!({"id": 1, "operator_id": 123}),
-        ];
+        let rows = vec![json!({"id": 1, "operator_id": 123})];
         // Integer 123 != string "op-123"
         assert!(verify_tenant_boundary(&rows, "op-123", "operator_id", "orders", "GET").is_err());
         // But integer 123 == string "123"

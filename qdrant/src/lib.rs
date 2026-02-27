@@ -15,28 +15,32 @@
 //! let results = driver.search("products", &embedding, 10, None).await?;
 //! ```
 
-pub mod driver;
-pub mod error;
-pub mod transport;
-pub mod point;
 pub mod decoder;
+pub mod driver;
 pub mod encoder;
-pub mod protocol;
+pub mod error;
+pub mod point;
 pub mod pool;
+pub mod protocol;
+pub mod transport;
 
-pub use driver::QdrantDriver;
-pub use error::{QdrantError, QdrantResult};
-pub use point::{Point, PointId, Payload, PayloadValue, SparseVector, VectorData, MultiVectorPoint, ScoredPoint};
-pub use pool::{QdrantPool, PoolConfig, PooledConnection};
 pub use decoder::ScrollResult;
+pub use driver::QdrantDriver;
 pub use encoder::FieldType;
+pub use error::{QdrantError, QdrantResult};
+pub use point::{
+    MultiVectorPoint, Payload, PayloadValue, Point, PointId, ScoredPoint, SparseVector, VectorData,
+};
+pub use pool::{PoolConfig, PooledConnection, QdrantPool};
 
 /// Re-export qail-core prelude for convenience.
 pub mod prelude {
+    pub use crate::{FieldType, PoolConfig, QdrantPool, ScrollResult};
+    pub use crate::{MultiVectorPoint, SparseVector, VectorData};
+    pub use crate::{
+        Payload, PayloadValue, Point, PointId, QdrantDriver, QdrantError, QdrantResult, ScoredPoint,
+    };
     pub use qail_core::prelude::*;
-    pub use crate::{QdrantDriver, QdrantError, QdrantResult, Point, PointId, Payload, PayloadValue, ScoredPoint};
-    pub use crate::{SparseVector, VectorData, MultiVectorPoint};
-    pub use crate::{QdrantPool, PoolConfig, ScrollResult, FieldType};
 }
 
 /// Distance metrics for vector similarity.

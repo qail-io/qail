@@ -12,6 +12,9 @@ keywords = ["qail", "sql", "parser"]
 [features]
 default = []
 analyzer = ["dep:sqlparser", "dep:syn", "dep:proc-macro2", "dep:quote", "dep:regex"]
+# Internal-only: enables examples that depend on external crates (qail-pg, bytes).
+# Never used in normal builds — only for manual `cargo run --example`.
+_pg_examples = []
 
 [dependencies]
 nom = "8"
@@ -33,6 +36,17 @@ regex = { version = "1.10", optional = true }
 [dev-dependencies]
 proptest = "1.10.0"
 
+[[example]]
+name = "test_multiline_sql"
+required-features = ["analyzer"]
+
+# This example depends on qail-pg (external crate); gated behind _pg_examples
+# so it is excluded from `cargo test -p qail-core`.
+[[example]]
+name = "test_subquery_sql2"
+required-features = ["_pg_examples"]
+
 [lints]
 workspace = true
+
 

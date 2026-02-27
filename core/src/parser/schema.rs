@@ -25,10 +25,10 @@ use nom::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::ast::{Expr, BinaryOp, Value as AstValue};
-use crate::migrate::policy::{RlsPolicy, PolicyTarget, PolicyPermissiveness};
-use crate::transpiler::policy::{create_policy_sql, alter_table_sql};
+use crate::ast::{BinaryOp, Expr, Value as AstValue};
 use crate::migrate::alter::AlterTable;
+use crate::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
+use crate::transpiler::policy::{alter_table_sql, create_policy_sql};
 
 /// Schema containing all table definitions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -536,9 +536,7 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
         let (input, _) = ws_and_comments(remaining)?;
 
         // for all|select|insert|update|delete
-        if let Ok((rest, _)) =
-            tag_no_case::<_, _, nom::error::Error<&str>>("for").parse(input)
-        {
+        if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("for").parse(input) {
             let (rest, _) = multispace1(rest)?;
             let (rest, target) = alt((
                 map(tag_no_case("all"), |_| PolicyTarget::All),
@@ -563,9 +561,7 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
         }
 
         // to <role>
-        if let Ok((rest, _)) =
-            tag_no_case::<_, _, nom::error::Error<&str>>("to").parse(input)
-        {
+        if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("to").parse(input) {
             // Make sure it's not "to_sql" or similar — needs whitespace after
             if let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
                 let (rest, role) = identifier(rest)?;
@@ -576,12 +572,9 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
         }
 
         // with check (<expr>)
-        if let Ok((rest, _)) =
-            tag_no_case::<_, _, nom::error::Error<&str>>("with").parse(input)
-        {
+        if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("with").parse(input) {
             let (rest, _) = multispace1(rest)?;
-            if let Ok((rest, _)) =
-                tag_no_case::<_, _, nom::error::Error<&str>>("check").parse(rest)
+            if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("check").parse(rest)
             {
                 let (rest, _) = nom_ws0(rest)?;
                 let (rest, _) = char('(').parse(rest)?;
@@ -596,9 +589,7 @@ fn parse_policy(input: &str) -> IResult<&str, RlsPolicy> {
         }
 
         // using (<expr>)
-        if let Ok((rest, _)) =
-            tag_no_case::<_, _, nom::error::Error<&str>>("using").parse(input)
-        {
+        if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("using").parse(input) {
             let (rest, _) = nom_ws0(rest)?;
             let (rest, _) = char('(').parse(rest)?;
             let (rest, _) = nom_ws0(rest)?;
@@ -635,32 +626,32 @@ fn parse_policy_expr(input: &str) -> IResult<&str, Expr> {
     loop {
         let (input, _) = nom_ws0(remaining)?;
 
-        if let Ok((rest, _)) =
-            tag_no_case::<_, _, nom::error::Error<&str>>("or").parse(input)
-            && let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
-                let (rest, right) = parse_policy_comparison(rest)?;
-                result = Expr::Binary {
-                    left: Box::new(result),
-                    op: BinaryOp::Or,
-                    right: Box::new(right),
-                    alias: None,
-                };
-                remaining = rest;
-                continue;
+        if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("or").parse(input)
+            && let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest)
+        {
+            let (rest, right) = parse_policy_comparison(rest)?;
+            result = Expr::Binary {
+                left: Box::new(result),
+                op: BinaryOp::Or,
+                right: Box::new(right),
+                alias: None,
+            };
+            remaining = rest;
+            continue;
         }
 
-        if let Ok((rest, _)) =
-            tag_no_case::<_, _, nom::error::Error<&str>>("and").parse(input)
-            && let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest) {
-                let (rest, right) = parse_policy_comparison(rest)?;
-                result = Expr::Binary {
-                    left: Box::new(result),
-                    op: BinaryOp::And,
-                    right: Box::new(right),
-                    alias: None,
-                };
-                remaining = rest;
-                continue;
+        if let Ok((rest, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("and").parse(input)
+            && let Ok((rest, _)) = multispace1::<_, nom::error::Error<&str>>(rest)
+        {
+            let (rest, right) = parse_policy_comparison(rest)?;
+            result = Expr::Binary {
+                left: Box::new(result),
+                op: BinaryOp::And,
+                right: Box::new(right),
+                alias: None,
+            };
+            remaining = rest;
+            continue;
         }
 
         remaining = input;
@@ -739,9 +730,7 @@ fn parse_policy_grouped(input: &str) -> IResult<&str, Expr> {
 /// Parse true / false
 fn parse_policy_bool(input: &str) -> IResult<&str, Expr> {
     alt((
-        map(tag_no_case("true"), |_| {
-            Expr::Literal(AstValue::Bool(true))
-        }),
+        map(tag_no_case("true"), |_| Expr::Literal(AstValue::Bool(true))),
         map(tag_no_case("false"), |_| {
             Expr::Literal(AstValue::Bool(false))
         }),
@@ -791,19 +780,19 @@ fn parse_policy_func_or_ident(input: &str) -> IResult<&str, Expr> {
     let mut expr = if let Ok((rest, _)) = char::<_, nom::error::Error<&str>>('(').parse(input) {
         // Parse args
         let (rest, _) = nom_ws0(rest)?;
-        let (rest, args) = separated_list0(
-            (nom_ws0, char(','), nom_ws0),
-            parse_policy_atom,
-        )
-        .parse(rest)?;
+        let (rest, args) =
+            separated_list0((nom_ws0, char(','), nom_ws0), parse_policy_atom).parse(rest)?;
         let (rest, _) = nom_ws0(rest)?;
         let (rest, _) = char(')').parse(rest)?;
         let input = rest;
-        (input, Expr::FunctionCall {
-            name: name.to_string(),
-            args,
-            alias: None,
-        })
+        (
+            input,
+            Expr::FunctionCall {
+                name: name.to_string(),
+                args,
+                alias: None,
+            },
+        )
     } else {
         (input, Expr::Named(name.to_string()))
     };
@@ -867,12 +856,15 @@ fn parse_index(input: &str) -> IResult<&str, IndexDef> {
 
     let is_unique = unique_tag.is_some();
 
-    Ok((input, IndexDef {
-        name: name.to_string(),
-        table: table.to_string(),
-        columns,
-        unique: is_unique,
-    }))
+    Ok((
+        input,
+        IndexDef {
+            name: name.to_string(),
+            table: table.to_string(),
+            columns,
+            unique: is_unique,
+        },
+    ))
 }
 
 /// Parse complete schema file
@@ -894,7 +886,15 @@ fn parse_schema(input: &str) -> IResult<&str, Schema> {
         }
     }
 
-    Ok((input, Schema { version, tables, policies, indexes }))
+    Ok((
+        input,
+        Schema {
+            version,
+            tables,
+            policies,
+            indexes,
+        },
+    ))
 }
 
 /// Extract version from `-- qail: version=N` directive
@@ -1126,14 +1126,18 @@ mod tests {
 
         // Verify the expression is a typed Binary, not raw SQL
         match policy.using.as_ref().unwrap() {
-            Expr::Binary { left, op, right, .. } => {
+            Expr::Binary {
+                left, op, right, ..
+            } => {
                 assert_eq!(*op, BinaryOp::Eq);
                 match left.as_ref() {
                     Expr::Named(n) => assert_eq!(n, "operator_id"),
                     _ => panic!("Expected Named, got {:?}", left),
                 }
                 match right.as_ref() {
-                    Expr::Cast { target_type, expr, .. } => {
+                    Expr::Cast {
+                        target_type, expr, ..
+                    } => {
                         assert_eq!(target_type, "uuid");
                         match expr.as_ref() {
                             Expr::FunctionCall { name, args, .. } => {
@@ -1207,7 +1211,9 @@ mod tests {
         let policy = &schema.policies[0];
 
         match policy.using.as_ref().unwrap() {
-            Expr::Binary { op: BinaryOp::Or, .. } => {}
+            Expr::Binary {
+                op: BinaryOp::Or, ..
+            } => {}
             e => panic!("Expected Binary OR, got {:?}", e),
         }
     }

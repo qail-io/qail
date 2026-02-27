@@ -60,16 +60,23 @@ fn us(d: Duration) -> f64 {
 async fn bench_pg_vs_qdrant() {
     println!("\n╔══════════════════════════════════════════════════════════════╗");
     println!("║   SPEED BENCHMARK: PG vs QDRANT vs HYBRID                 ║");
-    println!("║   {} routes, {}-dim vectors, {} iterations              ║", NUM_ROUTES, DIM, ITERATIONS);
+    println!(
+        "║   {} routes, {}-dim vectors, {} iterations              ║",
+        NUM_ROUTES, DIM, ITERATIONS
+    );
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
     // ── Setup ────────────────────────────────────────────────────────
     println!("▸ Setting up...");
     let mut pg = PgDriver::connect_env().await.expect("PG: set DATABASE_URL");
-    let mut qd = QdrantDriver::connect("localhost", 6334).await.expect("Qdrant: not running");
+    let mut qd = QdrantDriver::connect("localhost", 6334)
+        .await
+        .expect("Qdrant: not running");
 
     // Cleanup
-    pg.execute_raw(&format!("DROP TABLE IF EXISTS {} CASCADE", TABLE)).await.ok();
+    pg.execute_raw(&format!("DROP TABLE IF EXISTS {} CASCADE", TABLE))
+        .await
+        .ok();
     let _ = qd.delete_collection(COLLECTION).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -82,18 +89,38 @@ async fn bench_pg_vs_qdrant() {
             destination TEXT NOT NULL,
             price_idr BIGINT NOT NULL,
             category TEXT NOT NULL
-        )", TABLE
-    )).await.unwrap();
-    pg.execute_raw(&format!("CREATE INDEX idx_{}_cat ON {} (category)", TABLE, TABLE)).await.ok();
+        )",
+        TABLE
+    ))
+    .await
+    .unwrap();
+    pg.execute_raw(&format!(
+        "CREATE INDEX idx_{}_cat ON {} (category)",
+        TABLE, TABLE
+    ))
+    .await
+    .ok();
 
     // Create Qdrant collection
-    qd.create_collection(COLLECTION, DIM, Distance::Cosine, false).await.unwrap();
+    qd.create_collection(COLLECTION, DIM, Distance::Cosine, false)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Insert data
     let categories = ["ferry", "speedboat", "yacht", "cargo", "cruise"];
-    let origins = ["Jakarta", "Surabaya", "Bali", "Lombok", "Makassar", "Semarang", "Medan"];
-    let dests = ["Nusa Penida", "Gili Trawangan", "Karimunjawa", "Flores", "Komodo", "Madura", "Bangka"];
+    let origins = [
+        "Jakarta", "Surabaya", "Bali", "Lombok", "Makassar", "Semarang", "Medan",
+    ];
+    let dests = [
+        "Nusa Penida",
+        "Gili Trawangan",
+        "Karimunjawa",
+        "Flores",
+        "Komodo",
+        "Madura",
+        "Bangka",
+    ];
 
     // PG: batch insert
     let t0 = Instant::now();
@@ -112,19 +139,24 @@ async fn bench_pg_vs_qdrant() {
     for chunk in values.chunks(100) {
         pg.execute_raw(&format!(
             "INSERT INTO {} (id, title, origin, destination, price_idr, category) VALUES {}",
-            TABLE, chunk.join(",")
-        )).await.unwrap();
+            TABLE,
+            chunk.join(",")
+        ))
+        .await
+        .unwrap();
     }
     let pg_insert_time = t0.elapsed();
 
     // Qdrant: batch upsert
     let t1 = Instant::now();
-    let points: Vec<Point> = (1..=NUM_ROUTES).map(|i| {
-        let cat = categories[i % categories.len()];
-        Point::new(i as u64, fake_embed(i))
-            .with_payload("category", cat)
-            .with_payload("route_id", i as i64)
-    }).collect();
+    let points: Vec<Point> = (1..=NUM_ROUTES)
+        .map(|i| {
+            let cat = categories[i % categories.len()];
+            Point::new(i as u64, fake_embed(i))
+                .with_payload("category", cat)
+                .with_payload("route_id", i as i64)
+        })
+        .collect();
     // Upsert in chunks of 100
     for chunk in points.chunks(100) {
         qd.upsert(COLLECTION, chunk, false).await.unwrap();
@@ -132,8 +164,16 @@ async fn bench_pg_vs_qdrant() {
     let qd_insert_time = t1.elapsed();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    println!("  PG: {} rows inserted in {:.1}ms", NUM_ROUTES, pg_insert_time.as_secs_f64() * 1000.0);
-    println!("  QD: {} vectors upserted in {:.1}ms", NUM_ROUTES, qd_insert_time.as_secs_f64() * 1000.0);
+    println!(
+        "  PG: {} rows inserted in {:.1}ms",
+        NUM_ROUTES,
+        pg_insert_time.as_secs_f64() * 1000.0
+    );
+    println!(
+        "  QD: {} vectors upserted in {:.1}ms",
+        NUM_ROUTES,
+        qd_insert_time.as_secs_f64() * 1000.0
+    );
     println!("  ✓ Setup complete\n");
 
     // ── Benchmark 1: PG SELECT by category ──────────────────────────
@@ -178,17 +218,23 @@ async fn bench_pg_vs_qdrant() {
 
         // Step A: vector search
         let results = qd.search(COLLECTION, &query, 5, None).await.unwrap();
-        let ids: Vec<String> = results.iter().map(|r| match &r.id {
-            PointId::Num(n) => n.to_string(),
-            PointId::Uuid(s) => s.clone(),
-        }).collect();
+        let ids: Vec<String> = results
+            .iter()
+            .map(|r| match &r.id {
+                PointId::Num(n) => n.to_string(),
+                PointId::Uuid(s) => s.clone(),
+            })
+            .collect();
 
         // Step B: PG fetch
         let id_list = ids.join(",");
-        let _rows = pg.fetch_raw(&format!(
-            "SELECT id, title, origin, destination, price_idr FROM {} WHERE id IN ({})",
-            TABLE, id_list
-        )).await.unwrap();
+        let _rows = pg
+            .fetch_raw(&format!(
+                "SELECT id, title, origin, destination, price_idr FROM {} WHERE id IN ({})",
+                TABLE, id_list
+            ))
+            .await
+            .unwrap();
 
         let elapsed = t.elapsed();
         if i >= WARMUP {
@@ -199,7 +245,9 @@ async fn bench_pg_vs_qdrant() {
 
     // ── Benchmark 4: PG-only equivalent of hybrid (LIKE search) ────
     println!("▸ Benchmark 4: PG full-text-ish search (ILIKE, LIMIT 5)...");
-    let search_terms = ["Bali", "Lombok", "Java", "Surabaya", "Makassar", "ferry", "Jakarta"];
+    let search_terms = [
+        "Bali", "Lombok", "Java", "Surabaya", "Makassar", "ferry", "Jakarta",
+    ];
     let mut pg_search_times = Vec::with_capacity(ITERATIONS);
     for i in 0..WARMUP + ITERATIONS {
         let term = search_terms[i % search_terms.len()];
@@ -218,24 +266,63 @@ async fn bench_pg_vs_qdrant() {
 
     // ── Results ─────────────────────────────────────────────────────
     println!("\n╔══════════════════════════════════════════════════════════════════════════╗");
-    println!("║  RESULTS  ({} iterations, {} warmup)                                  ║", ITERATIONS, WARMUP);
+    println!(
+        "║  RESULTS  ({} iterations, {} warmup)                                  ║",
+        ITERATIONS, WARMUP
+    );
     println!("╠══════════════════════════════════════════════════════════════════════════╣");
     println!("║  Path                      │  avg       │  p50       │  p95       │  p99        ║");
     println!("╠════════════════════════════╪════════════╪════════════╪════════════╪═════════════╣");
-    println!("║  PG SELECT (indexed)       │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs  ║",
-        us(pg_stats.avg), us(pg_stats.p50), us(pg_stats.p95), us(pg_stats.p99));
-    println!("║  PG ILIKE search           │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs  ║",
-        us(pgs_stats.avg), us(pgs_stats.p50), us(pgs_stats.p95), us(pgs_stats.p99));
-    println!("║  Qdrant vector search      │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs  ║",
-        us(qd_stats.avg), us(qd_stats.p50), us(qd_stats.p95), us(qd_stats.p99));
-    println!("║  Hybrid (Qdrant→PG)        │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs  ║",
-        us(hy_stats.avg), us(hy_stats.p50), us(hy_stats.p95), us(hy_stats.p99));
+    println!(
+        "║  PG SELECT (indexed)       │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs  ║",
+        us(pg_stats.avg),
+        us(pg_stats.p50),
+        us(pg_stats.p95),
+        us(pg_stats.p99)
+    );
+    println!(
+        "║  PG ILIKE search           │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs  ║",
+        us(pgs_stats.avg),
+        us(pgs_stats.p50),
+        us(pgs_stats.p95),
+        us(pgs_stats.p99)
+    );
+    println!(
+        "║  Qdrant vector search      │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs  ║",
+        us(qd_stats.avg),
+        us(qd_stats.p50),
+        us(qd_stats.p95),
+        us(qd_stats.p99)
+    );
+    println!(
+        "║  Hybrid (Qdrant→PG)        │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs │ {:>7.0} µs  ║",
+        us(hy_stats.avg),
+        us(hy_stats.p50),
+        us(hy_stats.p95),
+        us(hy_stats.p99)
+    );
     println!("╠══════════════════════════════════════════════════════════════════════════╣");
     println!("║  Min/Max:                                                              ║");
-    println!("║    PG SELECT   : {:>7.0} µs — {:>7.0} µs                                ║", us(pg_stats.min), us(pg_stats.max));
-    println!("║    PG ILIKE    : {:>7.0} µs — {:>7.0} µs                                ║", us(pgs_stats.min), us(pgs_stats.max));
-    println!("║    Qdrant      : {:>7.0} µs — {:>7.0} µs                                ║", us(qd_stats.min), us(qd_stats.max));
-    println!("║    Hybrid      : {:>7.0} µs — {:>7.0} µs                                ║", us(hy_stats.min), us(hy_stats.max));
+    println!(
+        "║    PG SELECT   : {:>7.0} µs — {:>7.0} µs                                ║",
+        us(pg_stats.min),
+        us(pg_stats.max)
+    );
+    println!(
+        "║    PG ILIKE    : {:>7.0} µs — {:>7.0} µs                                ║",
+        us(pgs_stats.min),
+        us(pgs_stats.max)
+    );
+    println!(
+        "║    Qdrant      : {:>7.0} µs — {:>7.0} µs                                ║",
+        us(qd_stats.min),
+        us(qd_stats.max)
+    );
+    println!(
+        "║    Hybrid      : {:>7.0} µs — {:>7.0} µs                                ║",
+        us(hy_stats.min),
+        us(hy_stats.max)
+    );
     println!("╚══════════════════════════════════════════════════════════════════════════╝");
 
     // Speed ratios
@@ -249,12 +336,16 @@ async fn bench_pg_vs_qdrant() {
     if qd_vs_pg < 1.0 {
         println!("\n  🚀 Qdrant vector search is FASTER than PG indexed SELECT!");
     } else {
-        println!("\n  📊 PG indexed SELECT is {:.1}x faster than Qdrant (expected — PG is local, indexed)",
-            qd_vs_pg);
+        println!(
+            "\n  📊 PG indexed SELECT is {:.1}x faster than Qdrant (expected — PG is local, indexed)",
+            qd_vs_pg
+        );
     }
 
     // ── Cleanup ─────────────────────────────────────────────────────
-    pg.execute_raw(&format!("DROP TABLE IF EXISTS {}", TABLE)).await.ok();
+    pg.execute_raw(&format!("DROP TABLE IF EXISTS {}", TABLE))
+        .await
+        .ok();
     qd.delete_collection(COLLECTION).await.ok();
     println!("\n  ✓ Cleanup done\n");
 }

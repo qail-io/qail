@@ -23,12 +23,15 @@ fn get_insights() {
 "##;
 
     let matches = detect_raw_sql(code);
-    
+
     println!("Found {} SQL matches:", matches.len());
     for m in &matches {
         println!("---");
         println!("Type: {}", m.sql_type);
-        println!("Line range: {}:{} to {}:{}", m.line, m.column, m.end_line, m.end_column);
+        println!(
+            "Line range: {}:{} to {}:{}",
+            m.line, m.column, m.end_line, m.end_column
+        );
         println!("Raw SQL ({} chars):", m.raw_sql.len());
         println!("{}", m.raw_sql);
         println!("\nSuggested QAIL:");

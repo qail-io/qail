@@ -1,6 +1,6 @@
 use qail_core::ast::Qail;
-use qail_core::ast::builders::{col, subquery, coalesce, concat, text};
 use qail_core::ast::builders::ExprExt;
+use qail_core::ast::builders::{coalesce, col, concat, subquery, text};
 
 fn main() {
     let last_message = subquery(
@@ -42,7 +42,7 @@ fn main() {
     // Use Display which calls the Formatter
     println!("=== Display (Formatter) ===");
     println!("{}", cmd);
-    
+
     // Also try the AST encoder
     use bytes::BytesMut;
     let mut sql_buf = BytesMut::new();
@@ -53,7 +53,11 @@ fn main() {
     println!("Params count: {}", params.len());
     for (i, p) in params.iter().enumerate() {
         match p {
-            Some(v) => println!("  ${}: {:?}", i + 1, std::str::from_utf8(v).unwrap_or("binary")),
+            Some(v) => println!(
+                "  ${}: {:?}",
+                i + 1,
+                std::str::from_utf8(v).unwrap_or("binary")
+            ),
             None => println!("  ${}: NULL", i + 1),
         }
     }

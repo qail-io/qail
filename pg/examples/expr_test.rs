@@ -18,22 +18,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🛠  Setup Test Data");
     println!("-------------------");
 
-    driver.execute_raw("DROP TABLE IF EXISTS expr_test CASCADE").await.ok();
-    driver.execute_raw(
-        "CREATE TABLE expr_test (
+    driver
+        .execute_raw("DROP TABLE IF EXISTS expr_test CASCADE")
+        .await
+        .ok();
+    driver
+        .execute_raw(
+            "CREATE TABLE expr_test (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             tags TEXT[] DEFAULT '{}',
             data JSONB DEFAULT '{}'
-        )"
-    ).await?;
+        )",
+        )
+        .await?;
 
-    driver.execute_raw(
-        "INSERT INTO expr_test (name, tags, data) VALUES 
+    driver
+        .execute_raw(
+            "INSERT INTO expr_test (name, tags, data) VALUES 
         ('Alice', ARRAY['rust', 'postgres'], '{\"city\": \"NYC\"}'),
         ('Bob', ARRAY['go', 'mysql'], '{\"city\": \"LA\"}'),
-        ('Carol', ARRAY['python', 'postgres', 'redis'], '{\"city\": \"SF\"}')"
-    ).await?;
+        ('Carol', ARRAY['python', 'postgres', 'redis'], '{\"city\": \"SF\"}')",
+        )
+        .await?;
     println!("  ✓ Created expr_test table with 3 rows");
 
     // =====================================================
@@ -75,7 +82,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match driver.fetch_all(&row_query).await {
         Ok(rows) => {
-            println!("  ✓ RowConstructor: {} rows returned (may be 0 due to simple driver)", rows.len());
+            println!(
+                "  ✓ RowConstructor: {} rows returned (may be 0 due to simple driver)",
+                rows.len()
+            );
         }
         Err(e) => println!("  ⚠ RowConstructor: {}", e),
     }
@@ -126,7 +136,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =====================================================
     println!("\n🧹 Cleanup");
     println!("-----------");
-    driver.execute_raw("DROP TABLE IF EXISTS expr_test CASCADE").await?;
+    driver
+        .execute_raw("DROP TABLE IF EXISTS expr_test CASCADE")
+        .await?;
     println!("  ✓ Cleanup complete");
 
     println!("\n✅ Expression test complete! All v0.14.4 features verified.");

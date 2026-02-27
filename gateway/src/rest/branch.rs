@@ -12,13 +12,13 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
+use crate::GatewayState;
 use crate::auth::extract_auth_from_headers;
 use crate::handler::row_to_json;
 use crate::middleware::ApiError;
-use crate::GatewayState;
 
 use super::filters::json_to_qail_value;
 
@@ -66,12 +66,11 @@ pub(crate) async fn apply_branch_overlay(
                             v.as_str()
                                 .map(|s| s.to_string())
                                 .or_else(|| Some(v.to_string()))
-                        }) {
-                            if existing_pk == row_pk {
-                                *existing = new_val.clone();
-                                found = true;
-                                break;
-                            }
+                        }) && existing_pk == row_pk
+                        {
+                            *existing = new_val.clone();
+                            found = true;
+                            break;
                         }
                     }
                     if !found {
@@ -110,9 +109,8 @@ pub(crate) async fn redirect_to_overlay(
     operation: &str,
     row_data: &Value,
 ) -> Result<(), ApiError> {
-    let sql = qail_pg::driver::branch_sql::write_overlay_sql(
-        branch_name, table_name, row_pk, operation,
-    );
+    let sql =
+        qail_pg::driver::branch_sql::write_overlay_sql(branch_name, table_name, row_pk, operation);
     let data_str = serde_json::to_string(row_data).unwrap_or_default();
     // Use escape_literal for proper SQL escaping (handles backslashes, NUL, quotes)
     let safe_data = qail_pg::driver::branch_sql::escape_literal(&data_str);
@@ -136,12 +134,20 @@ pub(crate) async fn branch_create_handler(
 ) -> impl IntoResponse {
     let auth = extract_auth_from_headers(&headers);
     if !auth.is_authenticated() {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Authentication required"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "Authentication required"})),
+        )
+            .into_response();
     }
 
     // SECURITY (E6): Branch operations require admin role.
     if auth.role != "admin" && auth.role != "super_admin" {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": "Admin role required for branch operations"}))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Admin role required for branch operations"})),
+        )
+            .into_response();
     }
 
     let name = match body.get("name").and_then(|v| v.as_str()) {
@@ -157,8 +163,13 @@ pub(crate) async fn branch_create_handler(
 
     let parent = body.get("parent").and_then(|v| v.as_str());
 
-    let mut conn = match state.pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+    let mut conn = match state
+        .pool
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
         .await
     {
         Ok(c) => c,
@@ -199,11 +210,20 @@ pub(crate) async fn branch_list_handler(
 ) -> impl IntoResponse {
     let auth = extract_auth_from_headers(&headers);
     if !auth.is_authenticated() {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Authentication required"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "Authentication required"})),
+        )
+            .into_response();
     }
 
-    let mut conn = match state.pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+    let mut conn = match state
+        .pool
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
         .await
     {
         Ok(c) => c,
@@ -219,10 +239,7 @@ pub(crate) async fn branch_list_handler(
     let sql = qail_pg::driver::branch_sql::list_branches_sql();
     match conn.get_mut().simple_query(sql).await {
         Ok(rows) => {
-            let branches: Vec<Value> = rows
-                .iter()
-                .map(row_to_json)
-                .collect();
+            let branches: Vec<Value> = rows.iter().map(row_to_json).collect();
             Json(json!({"branches": branches})).into_response()
         }
         Err(_) => {
@@ -240,16 +257,29 @@ pub(crate) async fn branch_delete_handler(
 ) -> impl IntoResponse {
     let auth = extract_auth_from_headers(&headers);
     if !auth.is_authenticated() {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Authentication required"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "Authentication required"})),
+        )
+            .into_response();
     }
 
     // SECURITY (E6): Branch operations require admin role.
     if auth.role != "admin" && auth.role != "super_admin" {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": "Admin role required for branch operations"}))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Admin role required for branch operations"})),
+        )
+            .into_response();
     }
 
-    let mut conn = match state.pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+    let mut conn = match state
+        .pool
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
         .await
     {
         Ok(c) => c,
@@ -289,8 +319,13 @@ pub(crate) async fn branch_merge_handler(
             .into_response();
     }
 
-    let mut conn = match state.pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+    let mut conn = match state
+        .pool
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
         .await
     {
         Ok(c) => c,
@@ -306,9 +341,7 @@ pub(crate) async fn branch_merge_handler(
     // Get overlay stats before merge
     let stats_sql = qail_pg::driver::branch_sql::branch_stats_sql(&name);
     let stats = match conn.get_mut().simple_query(&stats_sql).await {
-        Ok(rows) => {
-            rows.iter().map(row_to_json).collect::<Vec<_>>()
-        }
+        Ok(rows) => rows.iter().map(row_to_json).collect::<Vec<_>>(),
         Err(_) => vec![],
     };
 
@@ -347,8 +380,12 @@ pub(crate) async fn branch_merge_handler(
                                 // Use empty conflict columns for DO NOTHING on any constraint
                                 q = q.on_conflict_nothing::<String>(&[]);
                                 Some(q)
-                            } else { None }
-                        } else { None }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     }
                     "update" => {
                         if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
@@ -359,12 +396,15 @@ pub(crate) async fn branch_merge_handler(
                                 }
                                 q = q.eq("id", row_pk.clone());
                                 Some(q)
-                            } else { None }
-                        } else { None }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     }
                     "delete" => {
-                        let q = qail_core::ast::Qail::del(&table)
-                            .eq("id", row_pk.clone());
+                        let q = qail_core::ast::Qail::del(&table).eq("id", row_pk.clone());
                         Some(q)
                     }
                     _ => None,

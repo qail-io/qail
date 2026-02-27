@@ -177,8 +177,10 @@ impl GrpcClient {
 
         // TLS handshake
         let connector = tokio_rustls::TlsConnector::from(Arc::clone(tls_config));
-        let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
-            .map_err(|e| QdrantError::Connection(format!("Invalid server name '{}': {}", host, e)))?;
+        let server_name =
+            rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| {
+                QdrantError::Connection(format!("Invalid server name '{}': {}", host, e))
+            })?;
         let tls_stream = connector
             .connect(server_name, tcp)
             .await
@@ -240,18 +242,17 @@ impl GrpcClient {
         }
 
         let new_sender = if self.tls {
-            let config = self.tls_config.as_ref()
-                .ok_or_else(|| QdrantError::Connection("TLS config missing on reconnect".to_string()))?;
+            let config = self.tls_config.as_ref().ok_or_else(|| {
+                QdrantError::Connection("TLS config missing on reconnect".to_string())
+            })?;
             Self::establish_tls(&self.host, self.port, config).await?
         } else {
             Self::establish_plain(&self.host, self.port).await?
         };
 
-        let ready = new_sender
-            .clone()
-            .ready()
-            .await
-            .map_err(|e| QdrantError::Grpc(format!("Connection not ready after reconnect: {}", e)))?;
+        let ready = new_sender.clone().ready().await.map_err(|e| {
+            QdrantError::Grpc(format!("Connection not ready after reconnect: {}", e))
+        })?;
         *guard = Some(new_sender);
         Ok(ready)
     }

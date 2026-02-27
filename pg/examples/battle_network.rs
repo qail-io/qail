@@ -24,9 +24,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 
     // Connect to PostgreSQL
-    let mut driver = PgDriver::connect_with_password(
-        "localhost", 5432, "postgres", "postgres", "postgres"
-    ).await?;
+    let mut driver =
+        PgDriver::connect_with_password("localhost", 5432, "postgres", "postgres", "postgres")
+            .await?;
 
     println!("1️⃣  Connection established");
 
@@ -58,11 +58,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("   Client-side timeout didn't work / Server timeout ignored.");
                 return Err("Test failed: Waited too long".into());
             } else if duration.as_secs_f64() < 1.9 {
-                 println!("   ❌ FAIL: Failed too fast? ({:.2?}s)", duration);
-                 return Err("Test failed: Too fast".into());
+                println!("   ❌ FAIL: Failed too fast? ({:.2?}s)", duration);
+                return Err("Test failed: Too fast".into());
             }
 
-            if err_str.contains("canceling statement due to statement timeout") || err_str.contains("57014") {
+            if err_str.contains("canceling statement due to statement timeout")
+                || err_str.contains("57014")
+            {
                 println!("\n╔═══════════════════════════════════════════════════════════╗");
                 println!("║  ✅ PASS: Query interrupted by server timeout correctly!  ║");
                 println!("╚═══════════════════════════════════════════════════════════╝");
@@ -73,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    
+
     // Verify connection is still usable (optional, but good practice)
     println!("\n4️⃣  Verifying connection health after timeout...");
     driver.reset_statement_timeout().await?;

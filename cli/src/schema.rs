@@ -1,11 +1,11 @@
 //! Schema validation and diff operations
 
-use anyhow::Result;
 use crate::colors::*;
-use qail_core::migrate::{diff_schemas, parse_qail};
+use crate::migrations::types::{MigrationClass, classify_migration};
+use anyhow::Result;
+use qail_core::migrate::{diff_schemas, parse_qail, parse_qail_file};
 use qail_core::prelude::*;
 use qail_core::transpiler::Dialect;
-use crate::migrations::types::{MigrationClass, classify_migration};
 
 /// Output format for schema operations.
 #[derive(Clone)]
@@ -17,7 +17,12 @@ pub enum OutputFormat {
 
 /// Validate a QAIL schema file with detailed error reporting.
 /// When `src_dir` is provided, also scans source for query validation + RLS audit.
-pub fn check_schema(schema_path: &str, src_dir: Option<&str>, migrations_dir: &str) -> Result<()> {
+pub fn check_schema(
+    schema_path: &str,
+    src_dir: Option<&str>,
+    migrations_dir: &str,
+    nplus1_deny: bool,
+) -> Result<()> {
     if schema_path.contains(':') && !schema_path.starts_with("postgres") {
         let parts: Vec<&str> = schema_path.splitn(2, ':').collect();
         if parts.len() == 2 {
@@ -38,8 +43,8 @@ pub fn check_schema(schema_path: &str, src_dir: Option<&str>, migrations_dir: &s
         schema_path.yellow()
     );
 
-    let content = std::fs::read_to_string(schema_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read schema file '{}': {}", schema_path, e))?;
+    let content = qail_core::schema_source::read_qail_schema_source(schema_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read schema source '{}': {}", schema_path, e))?;
 
     match parse_qail(&content) {
         Ok(schema) => {
@@ -92,7 +97,12 @@ pub fn check_schema(schema_path: &str, src_dir: Option<&str>, migrations_dir: &s
                 if mig_path.exists() {
                     let merged = build_schema.merge_migrations(migrations_dir).unwrap_or(0);
                     if merged > 0 {
-                        println!("  {} Merged {} schema changes from {}", "✓".green(), merged, migrations_dir);
+                        println!(
+                            "  {} Merged {} schema changes from {}",
+                            "✓".green(),
+                            merged,
+                            migrations_dir
+                        );
                     }
                 }
 
@@ -101,7 +111,8 @@ pub fn check_schema(schema_path: &str, src_dir: Option<&str>, migrations_dir: &s
                 if rls_tables.is_empty() {
                     println!("  {} No RLS-enabled tables detected", "ℹ".dimmed());
                 } else {
-                    println!("  {} {} RLS-enabled table(s): {}",
+                    println!(
+                        "  {} {} RLS-enabled table(s): {}",
                         "🔐".to_string().green(),
                         rls_tables.len(),
                         rls_tables.join(", ").yellow()
@@ -118,16 +129,24 @@ pub fn check_schema(schema_path: &str, src_dir: Option<&str>, migrations_dir: &s
                     let errors = qail_core::build::validate_against_schema(&build_schema, &usages);
 
                     // Separate schema errors from RLS warnings
-                    let schema_errors: Vec<_> = errors.iter().filter(|e| !e.contains("RLS AUDIT")).collect();
-                    let rls_warnings: Vec<_> = errors.iter().filter(|e| e.contains("RLS AUDIT")).collect();
+                    let schema_errors: Vec<_> =
+                        errors.iter().filter(|e| !e.contains("RLS AUDIT")).collect();
+                    let rls_warnings: Vec<_> =
+                        errors.iter().filter(|e| e.contains("RLS AUDIT")).collect();
 
                     // Query stats
                     let total_queries = usages.len();
                     let rls_scoped = usages.iter().filter(|u| u.has_rls).count();
-                    let on_rls_tables = usages.iter().filter(|u| build_schema.is_rls_table(&u.table)).count();
+                    let on_rls_tables = usages
+                        .iter()
+                        .filter(|u| build_schema.is_rls_table(&u.table))
+                        .count();
 
-                    println!("  {} {} queries scanned in {}",
-                        "✓".green(), total_queries, src
+                    println!(
+                        "  {} {} queries scanned in {}",
+                        "✓".green(),
+                        total_queries,
+                        src
                     );
 
                     // Schema validation results
@@ -149,21 +168,74 @@ pub fn check_schema(schema_path: &str, src_dir: Option<&str>, migrations_dir: &s
                         };
 
                         println!();
-                        println!("  {} RLS Coverage: {}/{} queries scoped ({}%)",
-                            if rls_warnings.is_empty() { "✓".green() } else { "⚠".yellow() },
+                        println!(
+                            "  {} RLS Coverage: {}/{} queries scoped ({}%)",
+                            if rls_warnings.is_empty() {
+                                "✓".green()
+                            } else {
+                                "⚠".yellow()
+                            },
                             rls_scoped,
                             on_rls_tables,
-                            if coverage == 100 { format!("{}", coverage).green() } else { format!("{}", coverage).yellow() }
+                            if coverage == 100 {
+                                format!("{}", coverage).green()
+                            } else {
+                                format!("{}", coverage).yellow()
+                            }
                         );
 
                         if !rls_warnings.is_empty() {
                             println!();
-                            println!("  {} {} unscoped query(ies) on RLS tables:", "⚠".yellow(), rls_warnings.len());
+                            println!(
+                                "  {} {} unscoped query(ies) on RLS tables:",
+                                "⚠".yellow(),
+                                rls_warnings.len()
+                            );
                             for warn in &rls_warnings {
                                 // Extract file:line from warning for clean display
                                 println!("    {}", warn.yellow());
                             }
                         }
+                    }
+                }
+
+                // ── N+1 Detection ──────────────────────────────────────
+                println!();
+                println!("{}", "── N+1 Query Detection ──".cyan().bold());
+
+                let diagnostics =
+                    qail_core::analyzer::detect_n_plus_one_in_dir(std::path::Path::new(src));
+
+                if diagnostics.is_empty() {
+                    println!("  {} No N+1 patterns detected", "✓".green());
+                } else {
+                    let errors: Vec<_> = diagnostics
+                        .iter()
+                        .filter(|d| d.severity == qail_core::analyzer::NPlusOneSeverity::Error)
+                        .collect();
+                    let warnings: Vec<_> = diagnostics
+                        .iter()
+                        .filter(|d| d.severity == qail_core::analyzer::NPlusOneSeverity::Warning)
+                        .collect();
+
+                    if !errors.is_empty() {
+                        println!("  {} {} N+1 error(s):", "✗".red(), errors.len());
+                        for diag in &errors {
+                            println!("    {} {}", diag.code.as_str().red(), diag);
+                        }
+                    }
+                    if !warnings.is_empty() {
+                        println!("  {} {} N+1 warning(s):", "⚠".yellow(), warnings.len());
+                        for diag in &warnings {
+                            println!("    {} {}", diag.code.as_str().yellow(), diag);
+                        }
+                    }
+
+                    if nplus1_deny {
+                        return Err(anyhow::anyhow!(
+                            "N+1 detection: {} diagnostic(s) found (--nplus1-deny is set)",
+                            diagnostics.len()
+                        ));
                     }
                 }
             }
@@ -180,15 +252,11 @@ pub fn check_schema(schema_path: &str, src_dir: Option<&str>, migrations_dir: &s
 /// Validate a migration between two schemas.
 pub fn check_migration(old_path: &str, new_path: &str) -> Result<()> {
     // Load old schema
-    let old_content = std::fs::read_to_string(old_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read old schema '{}': {}", old_path, e))?;
-    let old_schema = parse_qail(&old_content)
+    let old_schema = parse_qail_file(old_path)
         .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
 
     // Load new schema
-    let new_content = std::fs::read_to_string(new_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read new schema '{}': {}", new_path, e))?;
-    let new_schema = parse_qail(&new_content)
+    let new_schema = parse_qail_file(new_path)
         .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
     println!("{}", "✓ Both schemas are valid".green().bold());
@@ -268,15 +336,11 @@ pub fn diff_schemas_cmd(
     );
 
     // Load old schema
-    let old_content = std::fs::read_to_string(old_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read old schema '{}': {}", old_path, e))?;
-    let old_schema = parse_qail(&old_content)
+    let old_schema = parse_qail_file(old_path)
         .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
 
     // Load new schema
-    let new_content = std::fs::read_to_string(new_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read new schema '{}': {}", new_path, e))?;
-    let new_schema = parse_qail(&new_content)
+    let new_schema = parse_qail_file(new_path)
         .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
     // Compute diff
@@ -341,7 +405,8 @@ pub async fn diff_live(
 
     // Step 1: Connect and introspect live schema
     println!("  {} Introspecting live database...", "→".dimmed());
-    let mut driver = PgDriver::connect_url(db_url).await
+    let mut driver = PgDriver::connect_url(db_url)
+        .await
         .map_err(|e| anyhow::anyhow!("Connection failed: {}", e))?;
     let live_schema = crate::shadow::introspect_schema(&mut driver).await?;
     println!(
@@ -351,16 +416,19 @@ pub async fn diff_live(
     );
 
     // Step 2: Parse target schema file
-    let new_content = std::fs::read_to_string(new_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read schema '{}': {}", new_path, e))?;
-    let new_schema = parse_qail(&new_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
+    let new_schema =
+        parse_qail_file(new_path).map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
 
     // Step 3: Diff live → target
     let cmds = diff_schemas(&live_schema, &new_schema);
 
     if cmds.is_empty() {
-        println!("\n{}", "✅ No drift detected — live DB matches schema file.".green().bold());
+        println!(
+            "\n{}",
+            "✅ No drift detected — live DB matches schema file."
+                .green()
+                .bold()
+        );
         return Ok(());
     }
 

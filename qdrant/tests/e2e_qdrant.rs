@@ -27,7 +27,10 @@ async fn e2e_qdrant_lifecycle() {
     println!("  ✓ Cleanup done");
 
     // ── 3. Create collection ────────────────────────────────────────
-    println!("▸ Creating collection '{}' (dim={})...", COLLECTION, VECTOR_DIM);
+    println!(
+        "▸ Creating collection '{}' (dim={})...",
+        COLLECTION, VECTOR_DIM
+    );
     driver
         .create_collection(COLLECTION, VECTOR_DIM as u64, Distance::Cosine, false)
         .await
@@ -45,7 +48,10 @@ async fn e2e_qdrant_lifecycle() {
             vector: vec![1.0, 0.0, 0.0, 0.0],
             payload: {
                 let mut m = HashMap::new();
-                m.insert("city".to_string(), PayloadValue::String("Jakarta".to_string()));
+                m.insert(
+                    "city".to_string(),
+                    PayloadValue::String("Jakarta".to_string()),
+                );
                 m.insert("score".to_string(), PayloadValue::Integer(95));
                 m
             },
@@ -55,7 +61,10 @@ async fn e2e_qdrant_lifecycle() {
             vector: vec![0.0, 1.0, 0.0, 0.0],
             payload: {
                 let mut m = HashMap::new();
-                m.insert("city".to_string(), PayloadValue::String("Surabaya".to_string()));
+                m.insert(
+                    "city".to_string(),
+                    PayloadValue::String("Surabaya".to_string()),
+                );
                 m.insert("score".to_string(), PayloadValue::Integer(88));
                 m
             },
@@ -90,14 +99,25 @@ async fn e2e_qdrant_lifecycle() {
 
     println!("  ✓ Got {} results:", results.len());
     for pt in &results {
-        println!("    id={:?}, score={:.4}, payload={:?}", pt.id, pt.score, pt.payload);
+        println!(
+            "    id={:?}, score={:.4}, payload={:?}",
+            pt.id, pt.score, pt.payload
+        );
     }
 
     assert!(!results.is_empty(), "Search returned no results");
     // Point 1 should be the best match (exact vector)
-    assert_eq!(results[0].id, PointId::Num(1), "First result should be point 1 (exact match)");
+    assert_eq!(
+        results[0].id,
+        PointId::Num(1),
+        "First result should be point 1 (exact match)"
+    );
     // Point 3 should be second (0.9 similarity)
-    assert_eq!(results[1].id, PointId::Num(3), "Second result should be point 3 (close match)");
+    assert_eq!(
+        results[1].id,
+        PointId::Num(3),
+        "Second result should be point 3 (close match)"
+    );
     println!("  ✓ Search ranking verified");
 
     // ── 6. Scroll ───────────────────────────────────────────────────
@@ -123,7 +143,11 @@ async fn e2e_qdrant_lifecycle() {
         .expect("Search via connect_url failed");
 
     assert!(!results2.is_empty());
-    assert_eq!(results2[0].id, PointId::Num(2), "Should find Surabaya point");
+    assert_eq!(
+        results2[0].id,
+        PointId::Num(2),
+        "Should find Surabaya point"
+    );
     println!("  ✓ connect_url works, found point 2");
 
     // ── 8. Pool test ────────────────────────────────────────────────

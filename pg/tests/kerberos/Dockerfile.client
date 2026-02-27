@@ -1,0 +1,14 @@
+# Rust build environment with Kerberos client libraries for E2E testing.
+FROM docker.io/library/rust:1.85-bookworm
+
+# Work around stale GPG signatures in the base image's apt cache.
+RUN apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    apt-get update -qq && \
+    apt-get install -y -qq krb5-user libgssapi-krb5-2 libkrb5-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+# Pre-build dependencies (cached layer).
+RUN cargo fetch

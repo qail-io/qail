@@ -30,7 +30,10 @@ fn main() {
         ("get users", "basic get"),
         ("get users fields id,name", "get with fields"),
         ("get users fields id,name limit 10", "get with limit"),
-        ("get users fields id,name limit 10 offset 20", "get with limit+offset"),
+        (
+            "get users fields id,name limit 10 offset 20",
+            "get with limit+offset",
+        ),
         ("count users", "count"),
         ("cnt users", "cnt alias"),
         ("add users", "add"),
@@ -55,8 +58,14 @@ fn main() {
         ("get users fields avg(age)", "aggregate avg"),
         ("get users fields min(age),max(age)", "aggregate min/max"),
         // Joins
-        ("get users join orders on users.id = orders.user_id", "inner join"),
-        ("get users left join orders on users.id = orders.user_id", "left join"),
+        (
+            "get users join orders on users.id = orders.user_id",
+            "inner join",
+        ),
+        (
+            "get users left join orders on users.id = orders.user_id",
+            "left join",
+        ),
         // Parameters
         ("get users[id = $1]", "positional param"),
         ("get users[id = :user_id]", "named param"),
@@ -100,7 +109,11 @@ fn main() {
             }
         }
     }
-    println!("  ✅ {}/{} valid queries parsed OK", pass, valid_queries.len());
+    println!(
+        "  ✅ {}/{} valid queries parsed OK",
+        pass,
+        valid_queries.len()
+    );
 
     // ═══════════════════════════════════════════════════
     // 2. Invalid Queries — must not panic (parse error is OK)
@@ -123,7 +136,10 @@ fn main() {
         ("get users\" OR 1=1 --", "SQL injection double quote"),
         ("get users UNION SELECT * FROM passwords", "union injection"),
         ("get users; DELETE FROM users WHERE 1=1", "delete injection"),
-        ("get users[id = '1; DROP TABLE users']", "injection in filter value"),
+        (
+            "get users[id = '1; DROP TABLE users']",
+            "injection in filter value",
+        ),
         // Malformed filters
         ("get users[", "unclosed bracket"),
         ("get users]", "orphan close bracket"),
@@ -149,7 +165,13 @@ fn main() {
     ];
     let long_ident = "a".repeat(10000);
     let long_table = format!("get {}", "a".repeat(10000));
-    let many_cols = format!("get users fields {}", (0..500).map(|i| format!("col{}", i)).collect::<Vec<_>>().join(","));
+    let many_cols = format!(
+        "get users fields {}",
+        (0..500)
+            .map(|i| format!("col{}", i))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let many_filters = format!("get users{}", "[name = 'x']".repeat(100));
     let invalid_extras: Vec<(&str, &str)> = vec![
         (&long_ident, "10K character identifier"),
@@ -166,14 +188,23 @@ fn main() {
         ("get users[name = '']", "empty string value"),
         ("get users[name = 'A\0B']", "null byte in value"),
         // Unicode normalization attacks
-        ("get users[name = '\u{0041}\u{0300}']", "combining char (À via A+grave)"),
+        (
+            "get users[name = '\u{0041}\u{0300}']",
+            "combining char (À via A+grave)",
+        ),
         ("get users[name = '\u{FEFF}admin']", "BOM prefix"),
-        ("get users[name = 'admin\u{200B}']", "zero-width space suffix"),
+        (
+            "get users[name = 'admin\u{200B}']",
+            "zero-width space suffix",
+        ),
         ("get users[name = '\u{202E}nimda']", "RTL override"),
         // Numerical edge cases
         ("get users limit -1", "negative limit"),
         ("get users limit 0.5", "float limit"),
-        ("get users limit 9999999999999999999999", "i64 overflow limit"),
+        (
+            "get users limit 9999999999999999999999",
+            "i64 overflow limit",
+        ),
         ("get users offset -100", "negative offset"),
         ("get users limit NaN", "NaN limit"),
         ("get users limit Infinity", "Infinity limit"),
@@ -215,7 +246,11 @@ fn main() {
             }
         }
     }
-    println!("  ✅ {}/{} invalid queries handled without panic", invalid_pass, invalid_queries.len());
+    println!(
+        "  ✅ {}/{} invalid queries handled without panic",
+        invalid_pass,
+        invalid_queries.len()
+    );
     if invalid_panic > 0 {
         println!("  💀 {} PANICS!", invalid_panic);
     }
@@ -240,7 +275,7 @@ fn main() {
     for query in &roundtrip_queries {
         match parse(query) {
             Ok(ast) => {
-                let displayed = format!("{}", ast);
+                let displayed = ast.to_string();
                 match parse(&displayed) {
                     Ok(ast2) => {
                         // Compare the ASTs
@@ -251,14 +286,23 @@ fn main() {
                             pass += 1;
                         } else {
                             println!("  ❌ Roundtrip mismatch: {:?}", query);
-                            println!("     Original:   {}", d1.chars().take(100).collect::<String>());
-                            println!("     Roundtrip:  {}", d2.chars().take(100).collect::<String>());
+                            println!(
+                                "     Original:   {}",
+                                d1.chars().take(100).collect::<String>()
+                            );
+                            println!(
+                                "     Roundtrip:  {}",
+                                d2.chars().take(100).collect::<String>()
+                            );
                             rt_fail += 1;
                             fail += 1;
                         }
                     }
                     Err(e) => {
-                        println!("  ❌ Roundtrip re-parse failed: {} → {} → {:?}", query, displayed, e);
+                        println!(
+                            "  ❌ Roundtrip re-parse failed: {} → {} → {:?}",
+                            query, displayed, e
+                        );
                         rt_fail += 1;
                         fail += 1;
                     }
@@ -276,8 +320,8 @@ fn main() {
     // ═══════════════════════════════════════════════════
     println!("\n── 4. Random String Fuzzing (1000 inputs) ──");
     let mut fuzz_panic = 0u32;
-    let fuzz_inputs: Vec<String> = (0..1000).map(|i| {
-        match i % 20 {
+    let fuzz_inputs: Vec<String> = (0..1000)
+        .map(|i| match i % 20 {
             0 => format!("get t{}", i),
             1 => format!("get users[f{} = {}]", i, i),
             2 => format!("get users limit {}", i * i * i),
@@ -285,21 +329,41 @@ fn main() {
             4 => format!("del t{}[id = {}]", i, i),
             5 => format!("set t{}", i),
             6 => format!("add t{}", i),
-            7 => format!("{}", (0..i % 50).map(|_| 'A').collect::<String>()),
-            8 => format!("get {}", (0..i % 100 + 1).map(|j| format!("[f{} = {}]", j, j)).collect::<String>()),
-            9 => format!("get users fields {}", (0..i % 50 + 1).map(|j| format!("c{}", j)).collect::<Vec<_>>().join(",")),
-            10 => format!("get users sort {}", (0..i % 10 + 1).map(|j| format!("c{}:asc", j)).collect::<Vec<_>>().join(",")),
+            7 => (0..i % 50).map(|_| 'A').collect::<String>(),
+            8 => format!(
+                "get {}",
+                (0..i % 100 + 1)
+                    .map(|j| format!("[f{} = {}]", j, j))
+                    .collect::<String>()
+            ),
+            9 => format!(
+                "get users fields {}",
+                (0..i % 50 + 1)
+                    .map(|j| format!("c{}", j))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            10 => format!(
+                "get users sort {}",
+                (0..i % 10 + 1)
+                    .map(|j| format!("c{}:asc", j))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             11 => String::from_utf8(vec![i as u8; (i % 100 + 1) as usize]).unwrap_or_default(),
             12 => format!("get users[name = '{}']", "x".repeat((i % 500 + 1) as usize)),
-            13 => format!("get users[a > 1][b < 2][c = 3][d != 4][e >= 5]"),
+            13 => "get users[a > 1][b < 2][c = 3][d != 4][e >= 5]".to_string(),
             14 => format!("make t{} columns id:uuid,name:text,age:int,active:bool", i),
             15 => format!("get users join t{} on users.id = t{}.user_id", i, i),
-            16 => format!("get users left join t{} on users.id = t{}.uid limit 5", i, i),
+            16 => format!(
+                "get users left join t{} on users.id = t{}.uid limit 5",
+                i, i
+            ),
             17 => "\x00\x01\x02\x03\x04\x05".to_string(),
             18 => format!("get users[id = ${}]", i),
             _ => format!("get users[name = :param{}]", i),
-        }
-    }).collect();
+        })
+        .collect();
 
     for input in &fuzz_inputs {
         match std::panic::catch_unwind(|| parse(input)) {
@@ -307,35 +371,65 @@ fn main() {
             Err(_) => {
                 fuzz_panic += 1;
                 panics += 1;
-                println!("  💀 PANIC on input: {:?}", &input[..std::cmp::min(input.len(), 80)]);
+                println!(
+                    "  💀 PANIC on input: {:?}",
+                    &input[..std::cmp::min(input.len(), 80)]
+                );
             }
         }
     }
-    println!("  ✅ {}/1000 fuzz inputs handled without panic", 1000 - fuzz_panic);
+    println!(
+        "  ✅ {}/1000 fuzz inputs handled without panic",
+        1000 - fuzz_panic
+    );
 
     // ═══════════════════════════════════════════════════
     // 5. All Action Keywords
     // ═══════════════════════════════════════════════════
     println!("\n── 5. All Action Keywords ──");
     let action_keywords = vec![
-        "get", "count", "cnt", "set", "del", "add", "make", "drop",
-        "alter", "index", "export", "explain", "lock",
-        "begin", "commit", "rollback",
-        "savepoint", "listen", "notify", "unlisten",
-        "truncate", "upsert",
+        "get",
+        "count",
+        "cnt",
+        "set",
+        "del",
+        "add",
+        "make",
+        "drop",
+        "alter",
+        "index",
+        "export",
+        "explain",
+        "lock",
+        "begin",
+        "commit",
+        "rollback",
+        "savepoint",
+        "listen",
+        "notify",
+        "unlisten",
+        "truncate",
+        "upsert",
     ];
     let mut action_pass = 0u32;
     for kw in &action_keywords {
         let query = format!("{} test_table", kw);
         match std::panic::catch_unwind(|| parse(&query)) {
-            Ok(_) => { action_pass += 1; pass += 1; }
+            Ok(_) => {
+                action_pass += 1;
+                pass += 1;
+            }
             Err(_) => {
                 println!("  💀 PANIC on action '{}'", kw);
                 panics += 1;
             }
         }
     }
-    println!("  ✅ {}/{} action keywords handled", action_pass, action_keywords.len());
+    println!(
+        "  ✅ {}/{} action keywords handled",
+        action_pass,
+        action_keywords.len()
+    );
 
     // ═══════════════════════════════════════════════════
     // SUMMARY

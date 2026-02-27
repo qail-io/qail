@@ -39,7 +39,7 @@ impl Qail {
         self.add_condition(condition);
         self
     }
-    
+
     /// Type-safe not-equal condition.
     ///
     /// # Arguments
@@ -59,7 +59,7 @@ impl Qail {
         self.add_condition(condition);
         self
     }
-    
+
     /// Type-safe greater-than condition.
     ///
     /// # Arguments
@@ -79,7 +79,7 @@ impl Qail {
         self.add_condition(condition);
         self
     }
-    
+
     /// Type-safe less-than condition.
     ///
     /// # Arguments
@@ -99,7 +99,7 @@ impl Qail {
         self.add_condition(condition);
         self
     }
-    
+
     /// Type-safe greater-than-or-equal condition.
     ///
     /// # Arguments
@@ -119,7 +119,7 @@ impl Qail {
         self.add_condition(condition);
         self
     }
-    
+
     /// Type-safe less-than-or-equal condition.
     ///
     /// # Arguments
@@ -139,13 +139,13 @@ impl Qail {
         self.add_condition(condition);
         self
     }
-    
+
     /// Type-safe column selection.
     pub fn typed_column<T>(mut self, col: TypedColumn<T>) -> Self {
         self.columns.push(Expr::Named(col.name().to_string()));
         self
     }
-    
+
     /// Type-safe filter with custom operator.
     ///
     /// # Arguments
@@ -166,12 +166,12 @@ impl Qail {
         self.add_condition(condition);
         self
     }
-    
+
     /// Helper to add condition to appropriate cage
     fn add_condition(&mut self, condition: Condition) {
-        use crate::ast::cages::CageKind;
         use crate::ast::LogicalOp;
-        
+        use crate::ast::cages::CageKind;
+
         if self.cages.is_empty() {
             self.cages.push(Cage {
                 kind: CageKind::Filter,
@@ -188,7 +188,7 @@ impl Qail {
 mod tests {
     use super::*;
     use crate::typed::TypedColumn;
-    
+
     #[test]
     fn test_typed_eq_compiles() {
         // This should compile - i64 value for i64 column
@@ -196,7 +196,7 @@ mod tests {
         let query = Qail::get("users").typed_eq(col, 25i64);
         assert!(!query.cages.is_empty());
     }
-    
+
     #[test]
     fn test_typed_column() {
         let col: TypedColumn<String> = TypedColumn::new("users", "name");

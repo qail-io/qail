@@ -9,20 +9,29 @@ use uuid::Uuid;
 
 /// Parse filter operators from query string.
 ///
-/// Supports PostgREST-style operators:
-/// - `?name.eq=John`        → name = 'John'
-/// - `?price.gte=100`       → price >= 100
-/// - `?status.in=active,pending` → status IN ('active', 'pending')
-/// - `?email.like=%@gmail%` → email LIKE '%@gmail%'
-/// - `?deleted_at.is_null=true` → deleted_at IS NULL
+/// Supports both forms:
+/// - Key-style: `?name.eq=John`, `?price.gte=100`, `?status.in=active,pending`
+/// - Value-style: `?price=gte.100`, `?status=in.(active,pending)`, `?notes=is_null`
 ///
-/// If no operator suffix, defaults to `eq`.
+/// If no operator is provided, defaults to `eq`.
 pub(crate) fn parse_filters(query_string: &str) -> Vec<(String, Operator, QailValue)> {
     let reserved = [
-        "limit", "offset", "sort", "select", "expand", "cursor", "distinct",
-        "returning", "on_conflict", "on_conflict_action",
-        "func", "column", "group_by",
-        "search", "search_columns", "stream",
+        "limit",
+        "offset",
+        "sort",
+        "select",
+        "expand",
+        "cursor",
+        "distinct",
+        "returning",
+        "on_conflict",
+        "on_conflict_action",
+        "func",
+        "column",
+        "group_by",
+        "search",
+        "search_columns",
+        "stream",
     ];
 
     let mut filters = Vec::new();
@@ -41,34 +50,16 @@ pub(crate) fn parse_filters(query_string: &str) -> Vec<(String, Operator, QailVa
             continue;
         }
 
-        // Parse column.operator pattern
-        let (column, op) = if let Some((col, op_str)) = key.rsplit_once('.') {
-            let operator = match op_str {
-                "eq" => Some(Operator::Eq),
-                "ne" | "neq" => Some(Operator::Ne),
-                "gt" => Some(Operator::Gt),
-                "gte" | "ge" => Some(Operator::Gte),
-                "lt" => Some(Operator::Lt),
-                "lte" | "le" => Some(Operator::Lte),
-                "like" => Some(Operator::Like),
-                "ilike" | "fuzzy" => Some(Operator::Fuzzy),
-                "not_like" => Some(Operator::NotLike),
-                "in" => Some(Operator::In),
-                "not_in" | "nin" => Some(Operator::NotIn),
-                "is_null" => Some(Operator::IsNull),
-                "is_not_null" => Some(Operator::IsNotNull),
-                "contains" => Some(Operator::Contains),
-                _ => None,
-            };
-            if let Some(op) = operator {
-                (col, op)
+        // Parse key-style `column.operator`.
+        let (column, mut op, key_has_operator) = if let Some((col, op_str)) = key.rsplit_once('.') {
+            if let Some(operator) = parse_operator_token(op_str) {
+                (col, operator, true)
             } else {
-                // Unknown operator suffix — treat full key as column name with eq
-                (key, Operator::Eq)
+                // Unknown suffix: treat full key as column name.
+                (key, Operator::Eq, false)
             }
         } else {
-            // No dot — treat as column = value
-            (key, Operator::Eq)
+            (key, Operator::Eq, false)
         };
 
         // Skip if this is a reserved param (column name might collide)
@@ -81,26 +72,96 @@ pub(crate) fn parse_filters(query_string: &str) -> Vec<(String, Operator, QailVa
             .unwrap_or(std::borrow::Cow::Borrowed(value))
             .to_string();
 
-        let qail_value = match op {
-            Operator::IsNull | Operator::IsNotNull => {
-                // These are unary — value is ignored (or "true"/"false")
-                QailValue::Null
+        // Parse value-style operator only if key-style operator is absent.
+        let qail_value = if !key_has_operator {
+            if let Some((value_op, value_val)) = parse_value_style_operator(&decoded_value) {
+                op = value_op;
+                value_val
+            } else {
+                parse_filter_value_for_op(op, &decoded_value)
             }
-            Operator::In | Operator::NotIn => {
-                // Comma-separated values → Array
-                let vals: Vec<QailValue> = decoded_value
-                    .split(',')
-                    .map(|v| parse_scalar_value(v.trim()))
-                    .collect();
-                QailValue::Array(vals)
-            }
-            _ => parse_scalar_value(&decoded_value),
+        } else {
+            parse_filter_value_for_op(op, &decoded_value)
         };
 
         filters.push((column.to_string(), op, qail_value));
     }
 
     filters
+}
+
+/// Parse an operator token used by key/value style filters.
+fn parse_operator_token(op_str: &str) -> Option<Operator> {
+    match op_str {
+        "eq" => Some(Operator::Eq),
+        "ne" | "neq" => Some(Operator::Ne),
+        "gt" => Some(Operator::Gt),
+        "gte" | "ge" => Some(Operator::Gte),
+        "lt" => Some(Operator::Lt),
+        "lte" | "le" => Some(Operator::Lte),
+        "like" => Some(Operator::Like),
+        "ilike" | "fuzzy" => Some(Operator::Fuzzy),
+        "not_like" => Some(Operator::NotLike),
+        "in" => Some(Operator::In),
+        "not_in" | "nin" => Some(Operator::NotIn),
+        "is_null" => Some(Operator::IsNull),
+        "is_not_null" => Some(Operator::IsNotNull),
+        "contains" => Some(Operator::Contains),
+        _ => None,
+    }
+}
+
+/// Parse a filter value according to the resolved operator.
+fn parse_filter_value_for_op(op: Operator, decoded_value: &str) -> QailValue {
+    match op {
+        Operator::IsNull | Operator::IsNotNull => QailValue::Null,
+        Operator::In | Operator::NotIn => QailValue::Array(parse_csv_values(decoded_value)),
+        Operator::Like | Operator::Fuzzy | Operator::NotLike => {
+            QailValue::String(normalize_like_pattern(decoded_value))
+        }
+        _ => parse_scalar_value(decoded_value),
+    }
+}
+
+/// Parse value-style operator syntax (`op.value`) such as `gt.100`, `in.(a,b)`.
+fn parse_value_style_operator(decoded_value: &str) -> Option<(Operator, QailValue)> {
+    let value = decoded_value.trim();
+
+    // Unary shorthand without dot.
+    if value == "is_null" {
+        return Some((Operator::IsNull, QailValue::Null));
+    }
+    if value == "is_not_null" {
+        return Some((Operator::IsNotNull, QailValue::Null));
+    }
+
+    let (op_token, raw_val) = value.split_once('.')?;
+    let op = parse_operator_token(op_token)?;
+    Some((op, parse_filter_value_for_op(op, raw_val)))
+}
+
+/// Parse comma-separated list values, accepting optional parenthesized form.
+fn parse_csv_values(raw: &str) -> Vec<QailValue> {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(trimmed);
+
+    if inner.is_empty() {
+        return Vec::new();
+    }
+
+    inner
+        .split(',')
+        .map(|v| parse_scalar_value(v.trim()))
+        .collect()
+}
+
+/// Normalize wildcard syntax for LIKE/ILIKE.
+/// Accepts `*` from URL-style patterns and maps to SQL `%`.
+fn normalize_like_pattern(s: &str) -> String {
+    s.replace('*', "%")
 }
 
 /// Parse a scalar value, attempting type detection (bool → int → float → uuid → string)
@@ -128,7 +189,10 @@ pub(crate) fn parse_scalar_value(s: &str) -> QailValue {
 }
 
 /// Apply parsed filters to a Qail command
-pub(crate) fn apply_filters(mut cmd: qail_core::ast::Qail, filters: &[(String, Operator, QailValue)]) -> qail_core::ast::Qail {
+pub(crate) fn apply_filters(
+    mut cmd: qail_core::ast::Qail,
+    filters: &[(String, Operator, QailValue)],
+) -> qail_core::ast::Qail {
     for (column, op, value) in filters {
         match op {
             Operator::IsNull => {
@@ -161,14 +225,40 @@ pub(crate) fn apply_sorting(mut cmd: qail_core::ast::Qail, sort: &str) -> qail_c
         if part.is_empty() {
             continue;
         }
-        let parts: Vec<&str> = part.split(':').collect();
-        let col = parts[0];
-        let dir = parts.get(1).unwrap_or(&"asc");
-        if *dir == "desc" {
-            cmd = cmd.order_desc(col);
-        } else {
-            cmd = cmd.order_asc(col);
+
+        // Prefix style: -col / +col
+        if let Some(col) = part.strip_prefix('-') {
+            let col = col.trim();
+            if !col.is_empty() {
+                cmd = cmd.order_desc(col);
+            }
+            continue;
         }
+        if let Some(col) = part.strip_prefix('+') {
+            let col = col.trim();
+            if !col.is_empty() {
+                cmd = cmd.order_asc(col);
+            }
+            continue;
+        }
+
+        // Explicit direction style: col:desc
+        if let Some((col, dir)) = part.split_once(':') {
+            let col = col.trim();
+            let dir = dir.trim();
+            if col.is_empty() {
+                continue;
+            }
+            if dir.eq_ignore_ascii_case("desc") {
+                cmd = cmd.order_desc(col);
+            } else {
+                cmd = cmd.order_asc(col);
+            }
+            continue;
+        }
+
+        // Default ascending
+        cmd = cmd.order_asc(part);
     }
     cmd
 }
@@ -204,9 +294,7 @@ pub(crate) fn json_to_qail_value(v: &Value) -> QailValue {
         }
         Value::Bool(b) => QailValue::Bool(*b),
         Value::Null => QailValue::Null,
-        Value::Array(arr) => {
-            QailValue::Array(arr.iter().map(json_to_qail_value).collect())
-        }
+        Value::Array(arr) => QailValue::Array(arr.iter().map(json_to_qail_value).collect()),
         other => QailValue::String(other.to_string()),
     }
 }
@@ -292,7 +380,11 @@ mod tests {
         for payload in payloads {
             let qs = format!("name.eq={}", urlencoding::encode(payload));
             let filters = parse_filters(&qs);
-            assert_eq!(filters.len(), 1, "Injection payload should produce exactly 1 filter");
+            assert_eq!(
+                filters.len(),
+                1,
+                "Injection payload should produce exactly 1 filter"
+            );
             // Value must be a String (treated as literal, never parsed as SQL)
             match &filters[0].2 {
                 QailValue::String(s) => assert_eq!(s, payload),
@@ -354,14 +446,24 @@ mod tests {
         fn arb_query_string() -> impl Strategy<Value = String> {
             prop::collection::vec(
                 (
-                    "[a-z_]{1,20}",           // column name
-                    prop_oneof![              // operator
-                        Just("eq"), Just("ne"), Just("gt"), Just("gte"),
-                        Just("lt"), Just("lte"), Just("like"), Just("ilike"),
-                        Just("in"), Just("not_in"), Just("is_null"), Just("contains"),
+                    "[a-z_]{1,20}", // column name
+                    prop_oneof![
+                        // operator
+                        Just("eq"),
+                        Just("ne"),
+                        Just("gt"),
+                        Just("gte"),
+                        Just("lt"),
+                        Just("lte"),
+                        Just("like"),
+                        Just("ilike"),
+                        Just("in"),
+                        Just("not_in"),
+                        Just("is_null"),
+                        Just("contains"),
                         Just("unknown_op"),
                     ],
-                    ".*",                     // arbitrary value
+                    ".*", // arbitrary value
                 ),
                 0..10, // 0 to 10 filter pairs
             )
@@ -417,10 +519,63 @@ mod tests {
             fn fuzz_scalar_value_is_valid(s in "[^\u{0}]{0,1000}") {
                 let val = parse_scalar_value(&s);
                 // Just verify it produced a valid QailValue (no panic)
-                match val {
-                    _ => {} // Any variant is fine — we just care it didn't panic
-                }
+                let _ = val; // Any variant is fine — we just care it didn't panic
             }
         }
+    }
+
+    #[test]
+    fn test_parse_filters_value_style() {
+        let filters = parse_filters(
+            "status=ne.cancelled&total=gt.100&notes=is_null&tags=contains.premium&name=like.*ferry*",
+        );
+        assert_eq!(filters.len(), 5);
+
+        assert_eq!(filters[0].0, "status");
+        assert!(matches!(filters[0].1, Operator::Ne));
+        assert!(matches!(filters[0].2, QailValue::String(_)));
+
+        assert_eq!(filters[1].0, "total");
+        assert!(matches!(filters[1].1, Operator::Gt));
+        assert!(matches!(filters[1].2, QailValue::Int(100)));
+
+        assert_eq!(filters[2].0, "notes");
+        assert!(matches!(filters[2].1, Operator::IsNull));
+        assert!(matches!(filters[2].2, QailValue::Null));
+
+        assert_eq!(filters[3].0, "tags");
+        assert!(matches!(filters[3].1, Operator::Contains));
+        assert!(matches!(filters[3].2, QailValue::String(_)));
+
+        assert_eq!(filters[4].0, "name");
+        assert!(matches!(filters[4].1, Operator::Like));
+        match &filters[4].2 {
+            QailValue::String(s) => assert_eq!(s, "%ferry%"),
+            _ => panic!("Expected LIKE pattern as string"),
+        }
+    }
+
+    #[test]
+    fn test_parse_filters_value_style_in_parentheses() {
+        let filters = parse_filters("status=in.(active,pending,closed)");
+        assert_eq!(filters.len(), 1);
+        assert!(matches!(filters[0].1, Operator::In));
+        match &filters[0].2 {
+            QailValue::Array(vals) => assert_eq!(vals.len(), 3),
+            _ => panic!("Expected Array value for IN filter"),
+        }
+    }
+
+    #[test]
+    fn test_apply_sorting_supports_prefix_desc() {
+        use qail_core::transpiler::ToSql;
+
+        let cmd = qail_core::ast::Qail::get("orders");
+        let cmd = apply_sorting(cmd, "-total,created_at");
+        let sql = cmd.to_sql();
+        assert_eq!(
+            sql,
+            "SELECT * FROM orders ORDER BY total DESC, created_at ASC"
+        );
     }
 }

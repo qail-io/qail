@@ -1,7 +1,7 @@
 //! Migration creation
 
-use anyhow::Result;
 use crate::colors::*;
+use anyhow::Result;
 
 /// Create a new named migration file pair (up + down) with timestamp prefix.
 /// ## Generated Files
@@ -11,7 +11,6 @@ use crate::colors::*;
 /// └── 20251231093400_add_users.down.qail
 /// ```
 pub fn migrate_create(name: &str, depends: Option<&str>, author: Option<&str>) -> Result<()> {
-
     println!("{}", "📝 Creating Migration".cyan().bold());
     println!();
 
@@ -59,7 +58,7 @@ pub fn migrate_create(name: &str, depends: Option<&str>, author: Option<&str>) -
     println!("  {} {}", "✓ Created:".green(), down_filepath.display());
     println!();
     println!("  Migration: {}", format!("{}_{}", timestamp, name).cyan());
-    
+
     if let Some(deps) = depends {
         println!("  Depends:   {}", deps.yellow());
     }
@@ -68,10 +67,15 @@ pub fn migrate_create(name: &str, depends: Option<&str>, author: Option<&str>) -
     }
     println!();
     println!("  Next steps:");
-    println!("    1. Edit {} with your schema changes", up_filename.yellow());
+    println!(
+        "    1. Edit {} with your schema changes",
+        up_filename.yellow()
+    );
     println!("    2. Edit {} with rollback logic", down_filename.yellow());
-    println!("    3. Run: {} schema.qail:migrations/ postgres://...", "qail migrate up".cyan());
+    println!(
+        "    3. Run: {} schema.qail:migrations/ postgres://...",
+        "qail migrate up".cyan()
+    );
 
     Ok(())
 }
-

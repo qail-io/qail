@@ -14,7 +14,7 @@
 //!     cargo test -p qail-pg --test red_team_integration -- --nocapture --ignored
 //! ```
 
-use qail_core::ast::{Qail, Operator};
+use qail_core::ast::{Operator, Qail};
 use qail_core::rls::RlsContext;
 use qail_core::transpiler::ToSql;
 use qail_pg::PgDriver;
@@ -45,17 +45,22 @@ async fn redteam_statement_timeout_recovery() {
     let result = driver
         .fetch_all(&Qail::get("vessels").columns(["id", "name"]))
         .await;
-    
+
     // Reset timeout and verify connection is still usable
     driver.reset_statement_timeout().await.unwrap();
-    
+
     let vessels = driver
         .fetch_all(&Qail::get("vessels").columns(["id"]).limit(1))
         .await;
-    
-    assert!(vessels.is_ok(), "Connection must be usable after timeout recovery");
-    println!("✅ Connection recovered after statement timeout (first query: {:?})", 
-             result.is_ok());
+
+    assert!(
+        vessels.is_ok(),
+        "Connection must be usable after timeout recovery"
+    );
+    println!(
+        "✅ Connection recovered after statement timeout (first query: {:?})",
+        result.is_ok()
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -82,7 +87,10 @@ async fn redteam_context_switch_guc_correctness() {
         .await
         .unwrap();
     let guc_val = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
-    assert_eq!(guc_val, OPERATOR_A_ID, "GUC must contain Operator A's operator_id");
+    assert_eq!(
+        guc_val, OPERATOR_A_ID,
+        "GUC must contain Operator A's operator_id"
+    );
 
     // Step 2: Switch to Operator B
     driver
@@ -95,7 +103,10 @@ async fn redteam_context_switch_guc_correctness() {
         .await
         .unwrap();
     let guc_val = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
-    assert_eq!(guc_val, OPERATOR_B_ID, "GUC must switch to Operator B's operator_id");
+    assert_eq!(
+        guc_val, OPERATOR_B_ID,
+        "GUC must switch to Operator B's operator_id"
+    );
 
     // Step 3: Clear context
     driver.clear_rls_context().await.unwrap();
@@ -142,7 +153,7 @@ async fn redteam_guc_state_after_timeout() {
         .await
         .unwrap();
     let guc_val = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
-    
+
     // GUC variables persist within a session even across statement timeouts
     println!("  GUC after timeout: '{}'", guc_val);
     assert_eq!(guc_val, OPERATOR_A_ID, "GUC must survive statement timeout");
@@ -167,14 +178,14 @@ async fn redteam_transaction_rollback_preserves_data() {
 
     // Start transaction, query fails, rollback
     driver.begin().await.unwrap();
-    
+
     let result = driver
         .fetch_raw("SELECT * FROM __nonexistent_table_xyz__")
         .await;
 
     assert!(result.is_err(), "Query to non-existent table must fail");
-    
-    // Rollback  
+
+    // Rollback
     driver.rollback().await.unwrap();
 
     // Verify nothing changed
@@ -185,7 +196,10 @@ async fn redteam_transaction_rollback_preserves_data() {
         .len();
 
     assert_eq!(before, after, "Rollback must preserve row count");
-    println!("✅ Transaction rollback preserved data (before={}, after={})", before, after);
+    println!(
+        "✅ Transaction rollback preserved data (before={}, after={})",
+        before, after
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -219,11 +233,11 @@ async fn redteam_app_filter_with_rls_context() {
 
     // Filter that matches nothing
     let filtered = driver
-        .fetch_all(
-            &Qail::get("vessels")
-                .columns(["id", "name"])
-                .filter("name", Operator::Eq, "__nonexistent_vessel_name__"),
-        )
+        .fetch_all(&Qail::get("vessels").columns(["id", "name"]).filter(
+            "name",
+            Operator::Eq,
+            "__nonexistent_vessel_name__",
+        ))
         .await
         .unwrap();
 
@@ -231,7 +245,9 @@ async fn redteam_app_filter_with_rls_context() {
 
     println!(
         "✅ App filters commute with RLS context (all={}, limited={}, filtered={})",
-        all_vessels.len(), limited.len(), filtered.len()
+        all_vessels.len(),
+        limited.len(),
+        filtered.len()
     );
 }
 
@@ -245,12 +261,13 @@ async fn redteam_schema_drift_nonexistent_column() {
     let mut driver = connect().await;
 
     let result = driver
-        .fetch_all(
-            &Qail::get("vessels").columns(["id", "__nonexistent_column_xyz__"]),
-        )
+        .fetch_all(&Qail::get("vessels").columns(["id", "__nonexistent_column_xyz__"]))
         .await;
 
-    assert!(result.is_err(), "Non-existent column must fail (schema drift)");
+    assert!(
+        result.is_err(),
+        "Non-existent column must fail (schema drift)"
+    );
     println!("✅ Non-existent column correctly produces error");
 }
 
@@ -260,12 +277,13 @@ async fn redteam_schema_drift_nonexistent_table() {
     let mut driver = connect().await;
 
     let result = driver
-        .fetch_all(
-            &Qail::get("__nonexistent_table_abc__").columns(["id"]),
-        )
+        .fetch_all(&Qail::get("__nonexistent_table_abc__").columns(["id"]))
         .await;
 
-    assert!(result.is_err(), "Non-existent table must fail (schema drift)");
+    assert!(
+        result.is_err(),
+        "Non-existent table must fail (schema drift)"
+    );
     println!("✅ Non-existent table correctly produces error");
 }
 
@@ -279,7 +297,11 @@ async fn redteam_rapid_context_switching_100x() {
     let mut driver = connect().await;
 
     for i in 0..100 {
-        let op_id = if i % 2 == 0 { OPERATOR_A_ID } else { OPERATOR_B_ID };
+        let op_id = if i % 2 == 0 {
+            OPERATOR_A_ID
+        } else {
+            OPERATOR_B_ID
+        };
         driver
             .set_rls_context(RlsContext::operator(op_id))
             .await
@@ -299,7 +321,10 @@ async fn redteam_rapid_context_switching_100x() {
         .await
         .unwrap();
     let final_guc = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
-    assert_eq!(final_guc, OPERATOR_B_ID, "Final GUC should be Operator B (last odd iteration)");
+    assert_eq!(
+        final_guc, OPERATOR_B_ID,
+        "Final GUC should be Operator B (last odd iteration)"
+    );
 
     println!("✅ 100 rapid context switches completed without error");
 }
@@ -320,7 +345,7 @@ async fn redteam_savepoint_partial_rollback() {
         .len();
 
     driver.begin().await.unwrap();
-    
+
     // First query succeeds
     let _ = driver
         .fetch_all(&Qail::get("vessels").columns(["id"]).limit(1))
@@ -331,9 +356,7 @@ async fn redteam_savepoint_partial_rollback() {
     driver.savepoint("sp1").await.unwrap();
 
     // Second query fails
-    let result = driver
-        .fetch_raw("SELECT * FROM __nonexistent__")
-        .await;
+    let result = driver.fetch_raw("SELECT * FROM __nonexistent__").await;
     assert!(result.is_err());
 
     // Rollback to savepoint (not the whole transaction)
@@ -377,19 +400,23 @@ async fn redteam_pipeline_batch_correctness() {
         .collect();
 
     let results = driver.pipeline_fetch(&cmds).await.unwrap();
-    
+
     assert_eq!(results.len(), 5, "Pipeline must return 5 result sets");
     for (i, result_set) in results.iter().enumerate() {
         let expected_max = i + 1;
         assert!(
             result_set.len() <= expected_max,
             "Result set {} should have <= {} rows, got {}",
-            i, expected_max, result_set.len()
+            i,
+            expected_max,
+            result_set.len()
         );
     }
-    
-    println!("✅ Pipeline batch returned correct result sets: {:?}", 
-             results.iter().map(|r| r.len()).collect::<Vec<_>>());
+
+    println!(
+        "✅ Pipeline batch returned correct result sets: {:?}",
+        results.iter().map(|r| r.len()).collect::<Vec<_>>()
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -406,19 +433,26 @@ async fn tierx_negative_limit_overflow() {
 
     let cmd = Qail::get("vessels").columns(["id"]).limit(-1);
     let sql = cmd.to_sql();
-    
+
     // Document the transpiled SQL — this is the bug
     println!("  Transpiled SQL: {}", sql);
     assert!(
         sql.contains("18446744073709551615") || sql.contains("-1"),
-        "Negative LIMIT should be visible in SQL output: {}", sql
+        "Negative LIMIT should be visible in SQL output: {}",
+        sql
     );
 
     // Postgres should handle this gracefully
     let result = driver.fetch_all(&cmd).await;
     // Either succeeds with all rows (Postgres treats huge LIMIT as no limit)
     // or fails with an error (Postgres rejects the value) — both acceptable
-    println!("  Result: {:?}", result.as_ref().map(|r| r.len()).map_err(|e| format!("{}", e)));
+    println!(
+        "  Result: {:?}",
+        result
+            .as_ref()
+            .map(|r| r.len())
+            .map_err(|e| format!("{}", e))
+    );
     println!("✅ Negative LIMIT overflow handled (no driver panic)");
 }
 
@@ -449,9 +483,9 @@ async fn tierx_100_nested_savepoints() {
     for i in 0..100 {
         let sp_name = format!("sp{}", i);
         let result = driver.savepoint(&sp_name).await;
-        if result.is_err() {
+        if let Err(e) = result {
             // Postgres hit stack depth limit — acceptable
-            println!("  Savepoint {} failed: {:?}", i, result.unwrap_err());
+            println!("  Savepoint {} failed: {:?}", i, e);
             driver.rollback().await.unwrap_or(());
             println!("✅ Postgres rejects deep savepoint nesting at depth {}", i);
             return;
@@ -478,22 +512,23 @@ async fn tierx_unicode_torture_in_guc() {
 
     // Unicode edge cases in operator_id
     let test_cases = vec![
-        ("RTL override", "\u{202e}operator_id_backwards"),   // U+202E
-        ("ZWJ sequence", "family\u{200d}operator"),              // ZWJ
-        ("BOM marker", "operator\u{FEFF}id"),                    // BOM
-        ("Cyrillic lookalike", "\u{043e}\u{043f}\u{0435}\u{0440}\u{0430}\u{0442}\u{043e}\u{0440}"), // Cyrillic
+        ("RTL override", "\u{202e}operator_id_backwards"), // U+202E
+        ("ZWJ sequence", "family\u{200d}operator"),        // ZWJ
+        ("BOM marker", "operator\u{FEFF}id"),              // BOM
+        (
+            "Cyrillic lookalike",
+            "\u{043e}\u{043f}\u{0435}\u{0440}\u{0430}\u{0442}\u{043e}\u{0440}",
+        ), // Cyrillic
         ("Empty string", ""),
         ("Just spaces", "   "),
     ];
 
     for (label, op_id) in &test_cases {
-        let result = driver
-            .set_rls_context(RlsContext::operator(op_id))
-            .await;
-        
+        let result = driver.set_rls_context(RlsContext::operator(op_id)).await;
+
         // Must not panic
         assert!(result.is_ok(), "{} should not panic: {:?}", label, result);
-        
+
         // Read back the GUC
         let rows = driver
             .fetch_raw("SELECT current_setting('app.current_operator_id')")
@@ -516,20 +551,26 @@ async fn tierx_null_byte_rejection() {
     let mut driver = connect().await;
 
     // execute_raw should reject SQL with embedded NULL bytes
-    let result = driver
-        .execute_raw("SELECT 1\0; DROP TABLE vessels")
-        .await;
+    let result = driver.execute_raw("SELECT 1\0; DROP TABLE vessels").await;
 
     assert!(result.is_err(), "NULL byte in SQL must be rejected");
     let err = format!("{}", result.unwrap_err());
-    assert!(err.contains("NULL byte"), "Error must mention NULL byte: {}", err);
+    assert!(
+        err.contains("NULL byte"),
+        "Error must mention NULL byte: {}",
+        err
+    );
 
     // Connection must still be usable after rejection
     let rows = driver
         .fetch_all(&Qail::get("vessels").columns(["id"]).limit(1))
         .await
         .unwrap();
-    assert_eq!(rows.len(), 1, "Connection must work after NULL byte rejection");
+    assert_eq!(
+        rows.len(),
+        1,
+        "Connection must work after NULL byte rejection"
+    );
     println!("✅ NULL byte injection correctly rejected, connection still alive");
 }
 
@@ -545,10 +586,13 @@ async fn tierx_sql_comment_in_column_name() {
     // Try to inject a SQL comment via column name
     let cmd = Qail::get("vessels").columns(["id", "name--; DROP TABLE vessels"]);
     let result = driver.fetch_all(&cmd).await;
-    
+
     // Should fail (column doesn't exist) but must not execute the DROP
-    assert!(result.is_err(), "SQL comment injection in column must fail safely");
-    
+    assert!(
+        result.is_err(),
+        "SQL comment injection in column must fail safely"
+    );
+
     // Verify table still exists
     let check = driver
         .fetch_all(&Qail::get("vessels").columns(["id"]).limit(1))
@@ -569,13 +613,13 @@ async fn tierx_rapid_begin_rollback_100x() {
 
     for i in 0..100 {
         driver.begin().await.unwrap();
-        
+
         // Do a small query inside the transaction
         let _ = driver
             .fetch_all(&Qail::get("vessels").columns(["id"]).limit(1))
             .await
             .unwrap();
-        
+
         if i % 2 == 0 {
             driver.commit().await.unwrap();
         } else {
@@ -603,12 +647,14 @@ async fn tierx_very_long_operator_id() {
 
     // 10KB operator_id — way beyond any UUID
     let long_id = "a".repeat(10_000);
-    let result = driver
-        .set_rls_context(RlsContext::operator(&long_id))
-        .await;
+    let result = driver.set_rls_context(RlsContext::operator(&long_id)).await;
 
     // Should succeed (GUC values can be very long)
-    assert!(result.is_ok(), "10KB GUC value should be accepted: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "10KB GUC value should be accepted: {:?}",
+        result
+    );
 
     // Read it back
     let rows = driver
@@ -636,4 +682,3 @@ async fn tierx_empty_table_name() {
     assert!(result.is_err(), "Empty table name must fail");
     println!("✅ Empty table name produces error (not panic)");
 }
-

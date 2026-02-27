@@ -39,7 +39,7 @@ proptest! {
     fn operator_needs_value_consistency(op in arb_operator()) {
         let symbol = op.sql_symbol();
         let needs_val = op.needs_value();
-        
+
         // IS NULL, IS NOT NULL shouldn't need values
         if symbol == "IS NULL" || symbol == "IS NOT NULL" {
             prop_assert!(!needs_val, "{} should not need a value", symbol);
@@ -51,7 +51,7 @@ proptest! {
     fn aggregate_func_has_sql_name(func in arb_aggregate_func()) {
         let name = func.to_string();
         prop_assert!(!name.is_empty(), "Aggregate function name should not be empty");
-        prop_assert!(name.chars().all(|c| c.is_ascii_uppercase() || c == '_'), 
+        prop_assert!(name.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
             "Aggregate function name should be uppercase: {}", name);
     }
 

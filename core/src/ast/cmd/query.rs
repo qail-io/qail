@@ -3,8 +3,7 @@
 //! Common fluent methods: columns, filter, join, order_by, limit, etc.
 
 use crate::ast::{
-    Cage, CageKind, Condition, Expr, Join, JoinKind, LogicalOp, Operator, Qail, SortOrder,
-    Value,
+    Cage, CageKind, Condition, Expr, Join, JoinKind, LogicalOp, Operator, Qail, SortOrder, Value,
 };
 
 impl Qail {
@@ -160,7 +159,6 @@ impl Qail {
         self.filter(column, Operator::Eq, value)
     }
 
-
     /// Filter: column = value (alias for `where_eq`).
     pub fn eq(self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         self.filter(column, Operator::Eq, value)
@@ -230,6 +228,23 @@ impl Qail {
             op: Operator::IsNotNull,
             value: Value::Null,
             is_array_unnest: false,
+        })
+    }
+
+    /// Filter: does `text` contain any element from `array_column`?
+    ///
+    /// Generates an `EXISTS (SELECT 1 FROM unnest(array_column) _el WHERE ...)`
+    /// predicate with case-insensitive matching.
+    pub fn array_elem_contained_in_text(
+        self,
+        array_column: impl AsRef<str>,
+        text: impl Into<Value>,
+    ) -> Self {
+        self.filter_cond(Condition {
+            left: Expr::Named(array_column.as_ref().to_string()),
+            op: Operator::ArrayElemContainedInText,
+            value: text.into(),
+            is_array_unnest: true,
         })
     }
 
@@ -354,63 +369,63 @@ impl Qail {
     ) -> Self {
         self.join(JoinKind::Inner, table, left_col, right_col)
     }
-    
+
     /// Join a related table using schema-defined foreign key relationship.
-    /// 
+    ///
     /// This is the "First-Class Relations" API - it automatically infers
     /// the join condition from the schema's `ref:` definitions.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// // Schema: posts.user_id UUID ref:users.id
-    /// 
+    ///
     /// // Instead of:
     /// Qail::get("users").left_join("posts", "users.id", "posts.user_id")
-    /// 
+    ///
     /// // Simply:
     /// Qail::get("users").join_on("posts")
     /// ```
-    /// 
+    ///
     /// # Panics
     /// Panics if no relation is found between the current table and the target.
     /// Load relations first using `schema::load_schema_relations()`.
     pub fn join_on(self, related_table: impl AsRef<str>) -> Self {
         let related = related_table.as_ref();
-        
+
         // Try: current table -> related (forward relation)
         if let Some((from_col, to_col)) = crate::schema::lookup_relation(&self.table, related) {
             return self.left_join(related, &from_col, &to_col);
         }
-        
+
         // Try: related -> current table (reverse relation)
         if let Some((from_col, to_col)) = crate::schema::lookup_relation(related, &self.table) {
             // Reverse: related.from_col references self.to_col
             return self.left_join(related, &to_col, &from_col);
         }
-        
+
         panic!(
             "No relation found between '{}' and '{}'. \
              Define a ref: in schema.qail or use load_schema_relations() first.",
             self.table, related
         );
     }
-    
+
     /// Join a related table if relation exists, otherwise no-op.
-    /// 
+    ///
     /// This is the safe version of `join_on()` that doesn't panic.
     pub fn join_on_optional(self, related_table: impl AsRef<str>) -> Self {
         let related = related_table.as_ref();
-        
+
         // Try forward relation
         if let Some((from_col, to_col)) = crate::schema::lookup_relation(&self.table, related) {
             return self.left_join(related, &from_col, &to_col);
         }
-        
+
         // Try reverse relation
         if let Some((from_col, to_col)) = crate::schema::lookup_relation(related, &self.table) {
             return self.left_join(related, &to_col, &from_col);
         }
-        
+
         // No relation found, return self unchanged
         self
     }
@@ -495,12 +510,12 @@ impl Qail {
             None => self, // Skip entirely, don't add column
         }
     }
-    
+
     /// Set column to COALESCE(new_value, existing_column) for partial updates.
-    /// 
+    ///
     /// This is useful for UPDATE operations where you want to keep the existing
     /// value if the new value is NULL.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// Qail::set("users")
@@ -509,13 +524,11 @@ impl Qail {
     /// ```
     pub fn set_coalesce(mut self, column: impl AsRef<str>, value: impl Into<Value>) -> Self {
         use crate::ast::builders::coalesce;
-        
+
         let col_name = column.as_ref().to_string();
-        let coalesce_expr = coalesce([
-            Expr::Literal(value.into()),
-            Expr::Named(col_name.clone()),
-        ]).build();
-        
+        let coalesce_expr =
+            coalesce([Expr::Literal(value.into()), Expr::Named(col_name.clone())]).build();
+
         let payload_cage = self
             .cages
             .iter_mut()
@@ -539,9 +552,9 @@ impl Qail {
         }
         self
     }
-    
+
     /// Set column to COALESCE(new_value, existing_column) only if value is Some.
-    /// 
+    ///
     /// Combines set_coalesce() with optional handling - if None, still adds
     /// the COALESCE with NULL as the first argument (so existing value is kept).
     pub fn set_coalesce_opt<T>(self, column: impl AsRef<str>, value: Option<T>) -> Self
@@ -553,9 +566,9 @@ impl Qail {
             None => self, // Skip - existing value will be kept
         }
     }
-    
+
     /// Add ON CONFLICT DO UPDATE clause for UPSERT operations.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// Qail::add("users")
@@ -567,21 +580,25 @@ impl Qail {
     where
         S: AsRef<str>,
     {
-        use super::{OnConflict, ConflictAction};
-        
+        use super::{ConflictAction, OnConflict};
+
         self.on_conflict = Some(OnConflict {
-            columns: conflict_cols.iter().map(|c| c.as_ref().to_string()).collect(),
+            columns: conflict_cols
+                .iter()
+                .map(|c| c.as_ref().to_string())
+                .collect(),
             action: ConflictAction::DoUpdate {
-                assignments: updates.iter()
+                assignments: updates
+                    .iter()
                     .map(|(col, expr)| (col.as_ref().to_string(), expr.clone()))
                     .collect(),
             },
         });
         self
     }
-    
+
     /// Add ON CONFLICT DO NOTHING clause (ignore duplicates).
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// Qail::add("users")
@@ -592,10 +609,13 @@ impl Qail {
     where
         S: AsRef<str>,
     {
-        use super::{OnConflict, ConflictAction};
-        
+        use super::{ConflictAction, OnConflict};
+
         self.on_conflict = Some(OnConflict {
-            columns: conflict_cols.iter().map(|c| c.as_ref().to_string()).collect(),
+            columns: conflict_cols
+                .iter()
+                .map(|c| c.as_ref().to_string())
+                .collect(),
             action: ConflictAction::DoNothing,
         });
         self

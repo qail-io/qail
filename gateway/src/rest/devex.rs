@@ -1,14 +1,11 @@
 //! Developer experience endpoints: schema introspection, TypeScript codegen, OpenAPI spec.
 
-use axum::{
-    extract::State,
-    response::Json,
-};
-use serde_json::{json, Value};
+use axum::{extract::State, response::Json};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::auth::extract_auth_from_headers;
 use crate::GatewayState;
+use crate::auth::extract_auth_from_headers;
 
 /// GET /api/_schema — Schema introspection
 ///
@@ -32,26 +29,33 @@ pub(crate) async fn schema_introspection_handler(
     let mut result = serde_json::Map::new();
 
     for (name, table) in tables {
-        let columns: Vec<Value> = table.columns.iter().map(|col| {
-            json!({
-                "name": col.name,
-                "type": col.col_type,
-                "pg_type": col.pg_type,
-                "nullable": col.nullable,
-                "primary_key": col.primary_key,
-                "unique": col.unique,
-                "has_default": col.has_default,
-                "foreign_key": col.foreign_key.as_ref().map(|fk| json!({
-                    "ref_table": fk.ref_table,
-                    "ref_column": fk.ref_column,
-                })),
+        let columns: Vec<Value> = table
+            .columns
+            .iter()
+            .map(|col| {
+                json!({
+                    "name": col.name,
+                    "type": col.col_type,
+                    "pg_type": col.pg_type,
+                    "nullable": col.nullable,
+                    "primary_key": col.primary_key,
+                    "unique": col.unique,
+                    "has_default": col.has_default,
+                    "foreign_key": col.foreign_key.as_ref().map(|fk| json!({
+                        "ref_table": fk.ref_table,
+                        "ref_column": fk.ref_column,
+                    })),
+                })
             })
-        }).collect();
+            .collect();
 
-        result.insert(name.clone(), json!({
-            "columns": columns,
-            "primary_key": table.primary_key,
-        }));
+        result.insert(
+            name.clone(),
+            json!({
+                "columns": columns,
+                "primary_key": table.primary_key,
+            }),
+        );
     }
 
     Ok(Json(json!({
@@ -124,44 +128,173 @@ pub(crate) async fn typescript_types_handler(
     output.push_str("}\n");
 
     Ok((
-        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
         output,
-    ).into_response())
+    )
+        .into_response())
+}
+
+/// GET /api/_rpc/contracts — Introspect callable PostgreSQL function contracts.
+///
+/// Returns schema-qualified function signatures, argument defaults, and result types.
+/// Useful for generating typed internal clients without GraphQL.
+pub(crate) async fn rpc_contracts_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<Value>, crate::middleware::ApiError> {
+    let auth = extract_auth_from_headers(&headers);
+    if !auth.is_authenticated() {
+        return Err(crate::middleware::ApiError::auth_error(
+            "Authentication required for RPC contract introspection",
+        ));
+    }
+
+    let mut conn = state
+        .pool
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
+        .await
+        .map_err(|e| crate::middleware::ApiError::from_pg_driver_error(&e, None))?;
+
+    let sql = r#"
+        SELECT
+            n.nspname AS schema_name,
+            p.proname AS function_name,
+            p.pronargs::int4 AS total_args,
+            p.pronargdefaults::int4 AS default_args,
+            (p.provariadic <> 0) AS is_variadic,
+            COALESCE((
+                SELECT jsonb_agg(NULLIF(BTRIM(arg_name), '') ORDER BY ord)
+                FROM unnest((COALESCE(p.proargnames, ARRAY[]::text[]))[1:p.pronargs])
+                     WITH ORDINALITY AS names(arg_name, ord)
+            ), '[]'::jsonb)::text AS arg_names_json,
+            COALESCE((
+                SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord)
+                FROM unnest(
+                    CASE
+                        WHEN p.pronargs = 0 THEN ARRAY[]::oid[]
+                        ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[]
+                    END
+                ) WITH ORDINALITY AS args(arg_oid, ord)
+            ), '[]'::jsonb)::text AS arg_types_json,
+            pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args,
+            pg_catalog.pg_get_function_result(p.oid) AS result_type
+        FROM pg_catalog.pg_proc p
+        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY n.nspname, p.proname, p.oid
+        LIMIT 5000
+    "#;
+    let cmd = qail_core::ast::Qail::raw_sql(sql.to_string());
+    let rows = conn
+        .fetch_all_uncached(&cmd)
+        .await
+        .map_err(|e| crate::middleware::ApiError::from_pg_driver_error(&e, None))?;
+    conn.release().await;
+
+    let mut functions: Vec<Value> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let schema_name = row.get_string(0).unwrap_or_default();
+        let function_name = row.get_string(1).unwrap_or_default();
+        let total_args = row.get_i32(2).unwrap_or(0).max(0) as usize;
+        let default_args = row.get_i32(3).unwrap_or(0).max(0) as usize;
+        let variadic = row.get_bool(4).unwrap_or(false);
+        let identity_args = row.get_string(7).unwrap_or_default();
+        let result_type = row.get_string(8).unwrap_or_default();
+
+        let arg_names: Vec<Option<String>> =
+            serde_json::from_str(&row.get_string(5).unwrap_or_else(|| "[]".to_string()))
+                .unwrap_or_default();
+        let arg_types: Vec<String> =
+            serde_json::from_str(&row.get_string(6).unwrap_or_else(|| "[]".to_string()))
+                .unwrap_or_default();
+
+        let mut args_json: Vec<Value> = Vec::with_capacity(total_args);
+        for idx in 0..total_args {
+            let name = arg_names
+                .get(idx)
+                .and_then(|v| v.as_ref())
+                .map(|v| v.to_ascii_lowercase());
+            let arg_type = arg_types
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            args_json.push(json!({
+                "position": idx + 1,
+                "name": name,
+                "type": arg_type,
+                "required": idx < total_args.saturating_sub(default_args),
+                "variadic": variadic && idx + 1 == total_args,
+            }));
+        }
+
+        functions.push(json!({
+            "schema": schema_name,
+            "function": function_name,
+            "name": format!("{}.{}", schema_name, function_name),
+            "identity_args": identity_args,
+            "result_type": result_type,
+            "total_args": total_args,
+            "required_args": total_args.saturating_sub(default_args),
+            "default_args": default_args,
+            "variadic": variadic,
+            "args": args_json,
+        }));
+    }
+
+    Ok(Json(json!({
+        "functions": functions,
+        "count": rows.len(),
+    })))
 }
 
 /// Convert a PG type string to its TypeScript equivalent
 fn pg_type_to_ts(pg_type: &str, nullable: bool) -> String {
     let base = match pg_type.to_uppercase().as_str() {
         // String types
-        "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER VARYING" | "CHARACTER"
-        | "CITEXT" | "NAME" => "string",
-        
+        "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER VARYING" | "CHARACTER" | "CITEXT" | "NAME" => {
+            "string"
+        }
+
         // UUID
         "UUID" => "string",
-        
+
         // Numeric types
-        "INT2" | "INT4" | "INT8" | "SMALLINT" | "INTEGER" | "BIGINT"
-        | "SERIAL" | "BIGSERIAL" | "SMALLSERIAL" => "number",
-        
-        "FLOAT4" | "FLOAT8" | "REAL" | "DOUBLE PRECISION"
-        | "DECIMAL" | "NUMERIC" | "MONEY" => "number",
-        
+        "INT2" | "INT4" | "INT8" | "SMALLINT" | "INTEGER" | "BIGINT" | "SERIAL" | "BIGSERIAL"
+        | "SMALLSERIAL" => "number",
+
+        "FLOAT4" | "FLOAT8" | "REAL" | "DOUBLE PRECISION" | "DECIMAL" | "NUMERIC" | "MONEY" => {
+            "number"
+        }
+
         // Boolean
         "BOOL" | "BOOLEAN" => "boolean",
-        
+
         // JSON
         "JSON" | "JSONB" => "Record<string, unknown>",
-        
+
         // Date/time → string (ISO-8601)
-        "TIMESTAMPTZ" | "TIMESTAMP" | "DATE" | "TIME" | "TIMETZ"
-        | "INTERVAL" | "TIMESTAMP WITHOUT TIME ZONE" | "TIMESTAMP WITH TIME ZONE" => "string",
-        
+        "TIMESTAMPTZ"
+        | "TIMESTAMP"
+        | "DATE"
+        | "TIME"
+        | "TIMETZ"
+        | "INTERVAL"
+        | "TIMESTAMP WITHOUT TIME ZONE"
+        | "TIMESTAMP WITH TIME ZONE" => "string",
+
         // Binary
         "BYTEA" => "string",
-        
+
         // Network
         "INET" | "CIDR" | "MACADDR" => "string",
-        
+
         // Arrays
         t if t.ends_with("[]") => {
             let inner = &t[..t.len() - 2];
@@ -173,11 +306,11 @@ fn pg_type_to_ts(pg_type: &str, nullable: bool) -> String {
                 format!("{}[]", inner_ts)
             };
         }
-        
+
         // Fallback
         _ => "unknown",
     };
-    
+
     if nullable {
         format!("{} | null", base)
     } else {
@@ -188,13 +321,11 @@ fn pg_type_to_ts(pg_type: &str, nullable: bool) -> String {
 /// Map PG type to TS type (non-nullable, for array inner types)
 fn pg_type_to_ts_base(pg_type: &str) -> &'static str {
     match pg_type {
-        "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER VARYING" | "UUID"
-        | "CITEXT" | "NAME" | "TIMESTAMPTZ" | "TIMESTAMP" | "DATE"
-        | "TIME" | "TIMETZ" | "INTERVAL" | "BYTEA" | "INET" | "CIDR"
-        | "MACADDR" => "string",
-        "INT2" | "INT4" | "INT8" | "SMALLINT" | "INTEGER" | "BIGINT"
-        | "SERIAL" | "BIGSERIAL" | "FLOAT4" | "FLOAT8" | "REAL"
-        | "DECIMAL" | "NUMERIC" | "MONEY" => "number",
+        "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER VARYING" | "UUID" | "CITEXT" | "NAME"
+        | "TIMESTAMPTZ" | "TIMESTAMP" | "DATE" | "TIME" | "TIMETZ" | "INTERVAL" | "BYTEA"
+        | "INET" | "CIDR" | "MACADDR" => "string",
+        "INT2" | "INT4" | "INT8" | "SMALLINT" | "INTEGER" | "BIGINT" | "SERIAL" | "BIGSERIAL"
+        | "FLOAT4" | "FLOAT8" | "REAL" | "DECIMAL" | "NUMERIC" | "MONEY" => "number",
         "BOOL" | "BOOLEAN" => "boolean",
         "JSON" | "JSONB" => "Record<string, unknown>",
         _ => "unknown",
@@ -245,11 +376,14 @@ pub(crate) async fn openapi_spec_handler(
             }
         }
 
-        schemas.insert(name.clone(), json!({
-            "type": "object",
-            "properties": properties,
-            "required": required_cols,
-        }));
+        schemas.insert(
+            name.clone(),
+            json!({
+                "type": "object",
+                "properties": properties,
+                "required": required_cols,
+            }),
+        );
 
         // List + Create path
         let list_path = format!("/api/{}", name);
@@ -331,6 +465,84 @@ pub(crate) async fn openapi_spec_handler(
         }
     }
 
+    // Generic function-as-RPC endpoint
+    paths.insert(
+        "/api/rpc/{function}".to_string(),
+        json!({
+            "post": {
+                "summary": "Invoke function (RPC)",
+                "tags": ["rpc"],
+                "parameters": [
+                    {
+                        "name": "function",
+                        "in": "path",
+                        "required": true,
+                        "schema": {"type": "string"},
+                        "description": "Function name ([schema.]function). Enforce schema-qualified names via gateway config."
+                    },
+                    {
+                        "name": "x-qail-result-format",
+                        "in": "header",
+                        "required": false,
+                        "schema": {"type": "string", "enum": ["text", "binary"]},
+                        "description": "Optional result wire format. `binary` reduces text decode overhead."
+                    }
+                ],
+                "requestBody": {
+                    "required": false,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "oneOf": [
+                                    {"type": "object"},
+                                    {"type": "array"},
+                                    {"type": "string"},
+                                    {"type": "number"},
+                                    {"type": "boolean"},
+                                    {"type": "null"}
+                                ]
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Function result rows",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {"type": "array", "items": {"type": "object"}},
+                                        "count": {"type": "integer"},
+                                        "function": {"type": "string"},
+                                        "result_format": {"type": "string", "enum": ["text", "binary"]}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "400": {"description": "Invalid arguments or ambiguous overload"},
+                    "403": {"description": "Blocked by policy or RPC allow-list"}
+                }
+            }
+        }),
+    );
+
+    paths.insert(
+        "/api/_rpc/contracts".to_string(),
+        json!({
+            "get": {
+                "summary": "List callable RPC function contracts",
+                "tags": ["rpc", "devex"],
+                "responses": {
+                    "200": {"description": "Success"},
+                    "401": {"description": "Authentication required"}
+                }
+            }
+        }),
+    );
+
     Ok(Json(json!({
         "openapi": "3.0.3",
         "info": {
@@ -356,10 +568,14 @@ pub(crate) async fn openapi_spec_handler(
 /// Map PostgreSQL types to OpenAPI 3.0 types
 fn pg_type_to_openapi(pg_type: &str) -> Value {
     match pg_type.to_uppercase().as_str() {
-        "INT2" | "INT4" | "SMALLINT" | "INTEGER" | "SERIAL" => json!({"type": "integer", "format": "int32"}),
+        "INT2" | "INT4" | "SMALLINT" | "INTEGER" | "SERIAL" => {
+            json!({"type": "integer", "format": "int32"})
+        }
         "INT8" | "BIGINT" | "BIGSERIAL" => json!({"type": "integer", "format": "int64"}),
         "FLOAT4" | "REAL" => json!({"type": "number", "format": "float"}),
-        "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" | "DECIMAL" => json!({"type": "number", "format": "double"}),
+        "FLOAT8" | "DOUBLE PRECISION" | "NUMERIC" | "DECIMAL" => {
+            json!({"type": "number", "format": "double"})
+        }
         "BOOL" | "BOOLEAN" => json!({"type": "boolean"}),
         "UUID" => json!({"type": "string", "format": "uuid"}),
         "TIMESTAMPTZ" | "TIMESTAMP" => json!({"type": "string", "format": "date-time"}),

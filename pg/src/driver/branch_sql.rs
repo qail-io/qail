@@ -13,18 +13,15 @@
 /// when `standard_conforming_strings = off`.
 pub fn escape_literal(val: &str) -> String {
     let clean = val
-        .replace('\0', "")     // Strip NUL bytes (C-level truncation)
+        .replace('\0', "") // Strip NUL bytes (C-level truncation)
         .replace('\\', "\\\\") // Escape backslashes FIRST
-        .replace('\'', "''");  // Then escape single quotes
+        .replace('\'', "''"); // Then escape single quotes
     format!("'{}'", clean)
 }
 
 /// SQL to set the branch context on a connection session.
 pub fn branch_context_sql(branch_name: &str) -> String {
-    format!(
-        "SET LOCAL app.branch_id = {};",
-        escape_literal(branch_name)
-    )
+    format!("SET LOCAL app.branch_id = {};", escape_literal(branch_name))
 }
 
 /// SQL to reset (clear) the branch context.
@@ -125,7 +122,12 @@ pub fn read_overlay_sql(branch_name: &str, table_name: &str) -> String {
 /// * `table_name` — Target table for the overlay row.
 /// * `row_pk` — Primary key of the affected row.
 /// * `operation` — Operation type (`insert`, `update`, `delete`).
-pub fn write_overlay_sql(branch_name: &str, table_name: &str, row_pk: &str, operation: &str) -> String {
+pub fn write_overlay_sql(
+    branch_name: &str,
+    table_name: &str,
+    row_pk: &str,
+    operation: &str,
+) -> String {
     let safe_branch = escape_literal(branch_name);
     let safe_table = escape_literal(table_name);
     let safe_pk = escape_literal(row_pk);

@@ -31,7 +31,7 @@
 //! ```
 
 use crate::ast::Expr;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// What the policy applies to (SELECT, INSERT, UPDATE, DELETE, or ALL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,8 +281,16 @@ mod tests {
     fn test_policy_builder() {
         let policy = RlsPolicy::create("orders_isolation", "orders")
             .for_all()
-            .using(tenant_check("operator_id", "app.current_operator_id", "uuid"))
-            .with_check(tenant_check("operator_id", "app.current_operator_id", "uuid"));
+            .using(tenant_check(
+                "operator_id",
+                "app.current_operator_id",
+                "uuid",
+            ))
+            .with_check(tenant_check(
+                "operator_id",
+                "app.current_operator_id",
+                "uuid",
+            ));
 
         assert_eq!(policy.name, "orders_isolation");
         assert_eq!(policy.table, "orders");
@@ -308,14 +316,18 @@ mod tests {
         let expr = tenant_check("operator_id", "app.current_operator_id", "uuid");
 
         match &expr {
-            Expr::Binary { left, op, right, .. } => {
+            Expr::Binary {
+                left, op, right, ..
+            } => {
                 assert_eq!(*op, BinaryOp::Eq);
                 match left.as_ref() {
                     Expr::Named(n) => assert_eq!(n, "operator_id"),
                     _ => panic!("Expected Named"),
                 }
                 match right.as_ref() {
-                    Expr::Cast { expr, target_type, .. } => {
+                    Expr::Cast {
+                        expr, target_type, ..
+                    } => {
                         assert_eq!(target_type, "uuid");
                         match expr.as_ref() {
                             Expr::FunctionCall { name, args, .. } => {

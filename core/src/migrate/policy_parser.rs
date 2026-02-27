@@ -181,10 +181,14 @@ mod tests {
     fn test_simple_tenant_check() {
         let expr = parse_policy_expr("id = current_setting('app.current_operator_id', true)::uuid");
         match &expr {
-            Expr::Binary { left, op, right, .. } => {
+            Expr::Binary {
+                left, op, right, ..
+            } => {
                 assert!(matches!(op, BinaryOp::Eq));
                 assert!(matches!(left.as_ref(), Expr::Named(n) if n == "id"));
-                assert!(matches!(right.as_ref(), Expr::Cast { target_type, .. } if target_type == "uuid"));
+                assert!(
+                    matches!(right.as_ref(), Expr::Cast { target_type, .. } if target_type == "uuid")
+                );
             }
             _ => panic!("Expected Binary, got {:?}", expr),
         }
@@ -193,9 +197,15 @@ mod tests {
     #[test]
     fn test_or_combinator() {
         let expr = parse_policy_expr(
-            "id = current_setting('app.op', true)::uuid OR current_setting('app.admin', true)::boolean = true"
+            "id = current_setting('app.op', true)::uuid OR current_setting('app.admin', true)::boolean = true",
         );
-        assert!(matches!(&expr, Expr::Binary { op: BinaryOp::Or, .. }));
+        assert!(matches!(
+            &expr,
+            Expr::Binary {
+                op: BinaryOp::Or,
+                ..
+            }
+        ));
     }
 
     #[test]

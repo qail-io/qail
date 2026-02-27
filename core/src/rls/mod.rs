@@ -111,8 +111,8 @@ impl RlsContext {
     pub fn tenant(tenant_id: &str) -> Self {
         Self {
             tenant_id: tenant_id.to_string(),
-            operator_id: tenant_id.to_string(),  // backward compat
-            agent_id: tenant_id.to_string(),      // backward compat
+            operator_id: tenant_id.to_string(), // backward compat
+            agent_id: tenant_id.to_string(),    // backward compat
             is_super_admin: false,
         }
     }
@@ -222,7 +222,7 @@ mod tests {
         let ctx = RlsContext::tenant("t-123");
         assert_eq!(ctx.tenant_id, "t-123");
         assert_eq!(ctx.operator_id, "t-123"); // backward compat
-        assert_eq!(ctx.agent_id, "t-123");    // backward compat
+        assert_eq!(ctx.agent_id, "t-123"); // backward compat
         assert!(!ctx.bypasses_rls());
         assert!(ctx.has_tenant());
     }
@@ -273,9 +273,15 @@ mod tests {
     #[test]
     fn test_display() {
         let token = SuperAdminToken::for_system_process("test_display");
-        assert_eq!(RlsContext::super_admin(token).to_string(), "RlsContext(super_admin)");
+        assert_eq!(
+            RlsContext::super_admin(token).to_string(),
+            "RlsContext(super_admin)"
+        );
         assert_eq!(RlsContext::tenant("x").to_string(), "RlsContext(tenant=x)");
-        assert_eq!(RlsContext::operator("x").to_string(), "RlsContext(tenant=x)");
+        assert_eq!(
+            RlsContext::operator("x").to_string(),
+            "RlsContext(tenant=x)"
+        );
     }
 
     #[test]

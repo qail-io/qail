@@ -35,37 +35,85 @@ impl Painted {
         }
     }
 
-    pub fn bold(self) -> Self { self.wrap("1") }
-    pub fn dimmed(self) -> Self { self.wrap("2") }
-    pub fn italic(self) -> Self { self.wrap("3") }
-    pub fn underline(self) -> Self { self.wrap("4") }
-    pub fn red(self) -> Self { self.wrap("31") }
-    pub fn green(self) -> Self { self.wrap("32") }
-    pub fn yellow(self) -> Self { self.wrap("33") }
-    pub fn blue(self) -> Self { self.wrap("34") }
-    pub fn magenta(self) -> Self { self.wrap("35") }
-    pub fn cyan(self) -> Self { self.wrap("36") }
-    pub fn white(self) -> Self { self.wrap("37") }
+    pub fn bold(self) -> Self {
+        self.wrap("1")
+    }
+    pub fn dimmed(self) -> Self {
+        self.wrap("2")
+    }
+    pub fn italic(self) -> Self {
+        self.wrap("3")
+    }
+    pub fn underline(self) -> Self {
+        self.wrap("4")
+    }
+    pub fn red(self) -> Self {
+        self.wrap("31")
+    }
+    pub fn green(self) -> Self {
+        self.wrap("32")
+    }
+    pub fn yellow(self) -> Self {
+        self.wrap("33")
+    }
+    pub fn blue(self) -> Self {
+        self.wrap("34")
+    }
+    pub fn magenta(self) -> Self {
+        self.wrap("35")
+    }
+    pub fn cyan(self) -> Self {
+        self.wrap("36")
+    }
+    pub fn white(self) -> Self {
+        self.wrap("37")
+    }
     #[allow(dead_code)]
-    pub fn bright_black(self) -> Self { self.wrap("90") }
+    pub fn bright_black(self) -> Self {
+        self.wrap("90")
+    }
 }
 
 /// Trait that adds color methods to `&str` and `String`.
 pub trait Colorize {
     fn paint(&self, code: &str) -> Painted;
-    fn bold(&self) -> Painted { self.paint("1") }
-    fn dimmed(&self) -> Painted { self.paint("2") }
-    fn italic(&self) -> Painted { self.paint("3") }
-    fn underline(&self) -> Painted { self.paint("4") }
-    fn red(&self) -> Painted { self.paint("31") }
-    fn green(&self) -> Painted { self.paint("32") }
-    fn yellow(&self) -> Painted { self.paint("33") }
-    fn blue(&self) -> Painted { self.paint("34") }
-    fn magenta(&self) -> Painted { self.paint("35") }
-    fn cyan(&self) -> Painted { self.paint("36") }
-    fn white(&self) -> Painted { self.paint("37") }
+    fn bold(&self) -> Painted {
+        self.paint("1")
+    }
+    fn dimmed(&self) -> Painted {
+        self.paint("2")
+    }
+    fn italic(&self) -> Painted {
+        self.paint("3")
+    }
+    fn underline(&self) -> Painted {
+        self.paint("4")
+    }
+    fn red(&self) -> Painted {
+        self.paint("31")
+    }
+    fn green(&self) -> Painted {
+        self.paint("32")
+    }
+    fn yellow(&self) -> Painted {
+        self.paint("33")
+    }
+    fn blue(&self) -> Painted {
+        self.paint("34")
+    }
+    fn magenta(&self) -> Painted {
+        self.paint("35")
+    }
+    fn cyan(&self) -> Painted {
+        self.paint("36")
+    }
+    fn white(&self) -> Painted {
+        self.paint("37")
+    }
     #[allow(dead_code)]
-    fn bright_black(&self) -> Painted { self.paint("90") }
+    fn bright_black(&self) -> Painted {
+        self.paint("90")
+    }
 }
 
 impl Colorize for &str {

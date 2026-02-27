@@ -25,13 +25,21 @@ impl fmt::Display for EncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EncodeError::NullByte => {
-                write!(f, "Value contains NULL byte (0x00) which is invalid in PostgreSQL")
+                write!(
+                    f,
+                    "Value contains NULL byte (0x00) which is invalid in PostgreSQL"
+                )
             }
             EncodeError::TooManyParameters(count) => {
                 write!(f, "Too many parameters: {} (Limit is 32767)", count)
             }
             EncodeError::MessageTooLarge(size) => {
-                write!(f, "Message too large: {} bytes (Limit is {})", size, i32::MAX)
+                write!(
+                    f,
+                    "Message too large: {} bytes (Limit is {})",
+                    size,
+                    i32::MAX
+                )
             }
             EncodeError::UnsupportedAction(action) => {
                 write!(f, "Unsupported action {:?} in AST-native encoder", action)

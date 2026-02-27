@@ -43,7 +43,10 @@ pub fn replace(
 pub fn string_agg(column: impl Into<Expr>, delimiter: &str) -> FunctionBuilder {
     func(
         "STRING_AGG",
-        vec![column.into(), Expr::Literal(crate::ast::Value::String(delimiter.to_string()))],
+        vec![
+            column.into(),
+            Expr::Literal(crate::ast::Value::String(delimiter.to_string())),
+        ],
     )
 }
 

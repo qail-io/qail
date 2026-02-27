@@ -21,8 +21,8 @@
 
 use qail_core::prelude::*;
 use qail_pg::driver::PgDriver;
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use sqlx::postgres::PgPoolOptions;
-use sea_orm::{Database, DatabaseConnection, Statement, ConnectionTrait};
 use std::time::Instant;
 
 const ITERATIONS: usize = 50_000;
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Setup QAIL
     let mut qail_driver = PgDriver::connect("127.0.0.1", 5432, "orion", "postgres").await?;
-    
+
     // Setup SQLx with statement cache ENABLED (default 100)
     let sqlx_pool = PgPoolOptions::new()
         .max_connections(1)
@@ -47,11 +47,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Setup SeaORM (uses SQLx under the hood)
-    let seaorm_db: DatabaseConnection = Database::connect("postgres://user@127.0.0.1/postgres").await?;
+    let seaorm_db: DatabaseConnection =
+        Database::connect("postgres://user@127.0.0.1/postgres").await?;
 
     // Setup test table
-    qail_driver.execute_raw("DROP TABLE IF EXISTS fair_bench").await?;
-    qail_driver.execute_raw("CREATE TABLE fair_bench (id SERIAL PRIMARY KEY, name TEXT, value INT)").await?;
+    qail_driver
+        .execute_raw("DROP TABLE IF EXISTS fair_bench")
+        .await?;
+    qail_driver
+        .execute_raw("CREATE TABLE fair_bench (id SERIAL PRIMARY KEY, name TEXT, value INT)")
+        .await?;
     qail_driver.execute_raw("INSERT INTO fair_bench (name, value) SELECT 'item' || i, i FROM generate_series(1, 100) i").await?;
     println!("✓ Test data ready (100 rows)\n");
 
@@ -66,19 +71,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Benchmark 1: SQLx with auto-caching
     // ============================================
     println!("📊 SQLx (statement_cache_capacity=100)");
-    
+
     for _ in 0..WARMUP {
-        let rows: Vec<(i32, String, i32)> = sqlx::query_as(sql)
-            .fetch_all(&sqlx_pool)
-            .await?;
+        let rows: Vec<(i32, String, i32)> = sqlx::query_as(sql).fetch_all(&sqlx_pool).await?;
         let _ = rows.len();
     }
-    
+
     let start = Instant::now();
     for _ in 0..ITERATIONS {
-        let rows: Vec<(i32, String, i32)> = sqlx::query_as(sql)
-            .fetch_all(&sqlx_pool)
-            .await?;
+        let rows: Vec<(i32, String, i32)> = sqlx::query_as(sql).fetch_all(&sqlx_pool).await?;
         let _ = rows.len();
     }
     let sqlx_time = start.elapsed();
@@ -90,21 +91,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Benchmark 2: SeaORM (SQLx under the hood)
     // ============================================
     println!("📊 SeaORM (SQLx backend)");
-    
+
     for _ in 0..WARMUP {
-        let results = seaorm_db.query_all(Statement::from_string(
-            sea_orm::DatabaseBackend::Postgres, 
-            sql.to_string()
-        )).await?;
+        let results = seaorm_db
+            .query_all(Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                sql.to_string(),
+            ))
+            .await?;
         let _ = results.len();
     }
-    
+
     let start = Instant::now();
     for _ in 0..ITERATIONS {
-        let results = seaorm_db.query_all(Statement::from_string(
-            sea_orm::DatabaseBackend::Postgres, 
-            sql.to_string()
-        )).await?;
+        let results = seaorm_db
+            .query_all(Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                sql.to_string(),
+            ))
+            .await?;
         let _ = results.len();
     }
     let seaorm_time = start.elapsed();
@@ -116,12 +121,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Benchmark 3: QAIL with prepared cache
     // ============================================
     println!("📊 QAIL (AST hash + LRU cache)");
-    
+
     for _ in 0..WARMUP {
         let rows = qail_driver.fetch_all_cached(&qail_cmd).await?;
         let _ = rows.len();
     }
-    
+
     let start = Instant::now();
     for _ in 0..ITERATIONS {
         let rows = qail_driver.fetch_all_cached(&qail_cmd).await?;
@@ -138,11 +143,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n══════════════════════════════════════════");
     println!("📈 RESULTS (All with statement caching)");
     println!("══════════════════════════════════════════");
-    
+
     println!("SeaORM: {:>6.1}μs | {:>6.0} q/s", seaorm_us, seaorm_qps);
     println!("SQLx:   {:>6.1}μs | {:>6.0} q/s", sqlx_us, sqlx_qps);
     println!("QAIL:   {:>6.1}μs | {:>6.0} q/s ⭐", qail_us, qail_qps);
-    
+
     println!("\n📊 Comparison (vs QAIL)");
     println!("────────────────────────");
     let sqlx_slower = ((sqlx_us / qail_us) - 1.0) * 100.0;

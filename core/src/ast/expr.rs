@@ -111,9 +111,12 @@ pub enum Expr {
         constraints: Vec<Constraint>,
     },
     /// ALTER TABLE modify (ADD/DROP column).
-    Mod { /// Modification kind.
-        kind: ModKind, /// Column expression.
-        col: Box<Expr> },
+    Mod {
+        /// Modification kind.
+        kind: ModKind,
+        /// Column expression.
+        col: Box<Expr>,
+    },
     /// Window Function Definition
     Window {
         /// Window name/alias.
@@ -459,7 +462,11 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::Collate { expr, collation, alias } => {
+            Expr::Collate {
+                expr,
+                collation,
+                alias,
+            } => {
                 write!(f, "{} COLLATE \"{}\"", expr, collation)?;
                 if let Some(a) = alias {
                     write!(f, " AS {}", a)?;
@@ -480,7 +487,11 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::Exists { query, negated, alias } => {
+            Expr::Exists {
+                query,
+                negated,
+                alias,
+            } => {
                 if *negated {
                     write!(f, "NOT ")?;
                 }
@@ -679,4 +690,3 @@ pub struct TriggerDef {
     /// Function to execute.
     pub execute_function: String,
 }
-

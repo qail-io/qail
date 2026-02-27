@@ -3,13 +3,13 @@
 //! Polls _qail_queue from PostgreSQL, generates embeddings,
 //! and syncs to Qdrant. Implements the "Transactional Outbox" pattern.
 
-use anyhow::Result;
 use crate::colors::*;
+use anyhow::Result;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Queue item from _qail_queue table
@@ -79,7 +79,9 @@ impl DummyEmbedding {
 impl EmbeddingModel for DummyEmbedding {
     fn embed(&self, text: &str) -> Vec<f32> {
         // Simple hash-based pseudo-random for deterministic testing
-        let hash = text.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let hash = text
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
         (0..self.dim)
             .map(|i| {
                 let x = hash.wrapping_mul((i + 1) as u64);
@@ -100,18 +102,23 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
 
     // Load config
     let config = load_config()?;
-    
+
     if config.project.mode != "hybrid" {
-        anyhow::bail!("Worker only runs in 'hybrid' mode. Current mode: {}", config.project.mode);
+        anyhow::bail!(
+            "Worker only runs in 'hybrid' mode. Current mode: {}",
+            config.project.mode
+        );
     }
 
-    let pg_url = config.postgres
+    let pg_url = config
+        .postgres
         .ok_or_else(|| anyhow::anyhow!("Missing [postgres] config in qail.toml"))?
         .url;
-    
-    let qdrant_config = config.qdrant
+
+    let qdrant_config = config
+        .qdrant
         .ok_or_else(|| anyhow::anyhow!("Missing [qdrant] config in qail.toml"))?;
-    
+
     let qdrant_grpc = qdrant_config.grpc.unwrap_or_else(|| {
         // Convert REST URL to gRPC (6333 -> 6334)
         qdrant_config.url.replace(":6333", ":6334")
@@ -124,54 +131,80 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
     println!();
 
     // Build sync rule lookup
-    let sync_rules: std::collections::HashMap<String, &SyncRule> = config.sync
+    let sync_rules: std::collections::HashMap<String, &SyncRule> = config
+        .sync
         .iter()
         .map(|r| (r.source_table.clone(), r))
         .collect();
 
     if sync_rules.is_empty() {
-        println!("{} No [[sync]] rules configured. Worker has nothing to do.", "⚠".yellow());
+        println!(
+            "{} No [[sync]] rules configured. Worker has nothing to do.",
+            "⚠".yellow()
+        );
         return Ok(());
     }
 
     println!("Sync rules:");
     for rule in &config.sync {
-        println!("  {} → {}", rule.source_table.yellow(), rule.target_collection.cyan());
+        println!(
+            "  {} → {}",
+            rule.source_table.yellow(),
+            rule.target_collection.cyan()
+        );
     }
     println!();
 
     // Connect to databases with retry
     let (pg_host, pg_port, pg_user, pg_database, pg_password) = parse_postgres_url(&pg_url)?;
     let (qdrant_host, qdrant_port) = parse_grpc_url(&qdrant_grpc)?;
-    
+
     // Retry configuration
     const MAX_RETRIES: u32 = 10;
     const INITIAL_BACKOFF_MS: u64 = 500;
     const MAX_BACKOFF_MS: u64 = 30_000;
-    
+
     // Connect to PostgreSQL with retry
     println!("{} Connecting to PostgreSQL...", "→".cyan());
     let mut pg = None;
     for attempt in 1..=MAX_RETRIES {
         let result = if let Some(ref password) = pg_password {
-            qail_pg::PgDriver::connect_with_password(&pg_host, pg_port, &pg_user, &pg_database, password).await
+            qail_pg::PgDriver::connect_with_password(
+                &pg_host,
+                pg_port,
+                &pg_user,
+                &pg_database,
+                password,
+            )
+            .await
         } else {
             qail_pg::PgDriver::connect(&pg_host, pg_port, &pg_user, &pg_database).await
         };
-        
+
         match result {
             Ok(driver) => {
                 pg = Some(driver);
                 break;
             }
             Err(e) => {
-                let backoff = std::cmp::min(INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1), MAX_BACKOFF_MS);
+                let backoff =
+                    std::cmp::min(INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1), MAX_BACKOFF_MS);
                 if attempt == MAX_RETRIES {
-                    println!("{} PostgreSQL connection failed after {} attempts: {}", "✗".red(), MAX_RETRIES, e);
+                    println!(
+                        "{} PostgreSQL connection failed after {} attempts: {}",
+                        "✗".red(),
+                        MAX_RETRIES,
+                        e
+                    );
                     anyhow::bail!("Failed to connect to PostgreSQL: {}", e);
                 }
-                println!("{} PostgreSQL connection failed (attempt {}/{}), retrying in {}ms...", 
-                    "!".yellow(), attempt, MAX_RETRIES, backoff);
+                println!(
+                    "{} PostgreSQL connection failed (attempt {}/{}), retrying in {}ms...",
+                    "!".yellow(),
+                    attempt,
+                    MAX_RETRIES,
+                    backoff
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
             }
         }
@@ -189,13 +222,24 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
                 break;
             }
             Err(e) => {
-                let backoff = std::cmp::min(INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1), MAX_BACKOFF_MS);
+                let backoff =
+                    std::cmp::min(INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1), MAX_BACKOFF_MS);
                 if attempt == MAX_RETRIES {
-                    println!("{} Qdrant connection failed after {} attempts: {}", "✗".red(), MAX_RETRIES, e);
+                    println!(
+                        "{} Qdrant connection failed after {} attempts: {}",
+                        "✗".red(),
+                        MAX_RETRIES,
+                        e
+                    );
                     anyhow::bail!("Failed to connect to Qdrant: {}", e);
                 }
-                println!("{} Qdrant connection failed (attempt {}/{}), retrying in {}ms...", 
-                    "!".yellow(), attempt, MAX_RETRIES, backoff);
+                println!(
+                    "{} Qdrant connection failed (attempt {}/{}), retrying in {}ms...",
+                    "!".yellow(),
+                    attempt,
+                    MAX_RETRIES,
+                    backoff
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
             }
         }
@@ -207,7 +251,10 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
     let embedding_model = DummyEmbedding::new(1536);
 
     println!();
-    println!("{}", "Starting poll loop... (Ctrl+C to stop)".white().bold());
+    println!(
+        "{}",
+        "Starting poll loop... (Ctrl+C to stop)".white().bold()
+    );
     println!();
 
     let poll_interval = Duration::from_millis(poll_interval_ms);
@@ -221,7 +268,11 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
     println!("{} Running startup zombie job recovery...", "→".cyan());
     match recover_stale_jobs(&mut pg).await {
         Ok(recovered) if recovered > 0 => {
-            println!("{} Recovered {} zombie jobs from previous worker crash", "✓".green(), recovered);
+            println!(
+                "{} Recovered {} zombie jobs from previous worker crash",
+                "✓".green(),
+                recovered
+            );
         }
         Ok(_) => {}
         Err(e) => {
@@ -242,8 +293,11 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
     while running.load(Ordering::SeqCst) {
         // Check for too many consecutive errors (circuit breaker)
         if consecutive_errors >= 5 {
-            println!("{} Too many consecutive errors, reconnecting...", "!".yellow());
-            
+            println!(
+                "{} Too many consecutive errors, reconnecting...",
+                "!".yellow()
+            );
+
             // Reconnect to Qdrant
             for attempt in 1..=MAX_RETRIES {
                 match qail_qdrant::QdrantDriver::connect(&qdrant_host, qdrant_port).await {
@@ -254,16 +308,29 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
                         break;
                     }
                     Err(e) => {
-                        let backoff = std::cmp::min(INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1), MAX_BACKOFF_MS);
+                        let backoff = std::cmp::min(
+                            INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1),
+                            MAX_BACKOFF_MS,
+                        );
                         if attempt == MAX_RETRIES {
-                            println!("{} Qdrant reconnection failed after {} attempts", "✗".red(), MAX_RETRIES);
+                            println!(
+                                "{} Qdrant reconnection failed after {} attempts",
+                                "✗".red(),
+                                MAX_RETRIES
+                            );
                             // Wait before trying the whole loop again
                             tokio::time::sleep(Duration::from_secs(60)).await;
                             consecutive_errors = 0; // Reset to try again
                             break;
                         }
-                        println!("{} Reconnect failed (attempt {}/{}): {}, retrying in {}ms...", 
-                            "!".yellow(), attempt, MAX_RETRIES, e, backoff);
+                        println!(
+                            "{} Reconnect failed (attempt {}/{}): {}, retrying in {}ms...",
+                            "!".yellow(),
+                            attempt,
+                            MAX_RETRIES,
+                            e,
+                            backoff
+                        );
                         tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                     }
                 }
@@ -273,7 +340,9 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
 
         // Periodic janitor: recover zombie jobs every 60 seconds
         if last_janitor_run.elapsed().as_secs() >= JANITOR_INTERVAL_SECS {
-            if let Ok(recovered) = recover_stale_jobs(&mut pg).await && recovered > 0 {
+            if let Ok(recovered) = recover_stale_jobs(&mut pg).await
+                && recovered > 0
+            {
                 println!("🧹 Janitor: Recovered {} zombie jobs", recovered);
             }
             last_janitor_run = Instant::now();
@@ -287,7 +356,12 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
             }
             Err(e) => {
                 consecutive_errors += 1;
-                println!("{} PostgreSQL poll failed: {} (consecutive: {})", "!".yellow(), e, consecutive_errors);
+                println!(
+                    "{} PostgreSQL poll failed: {} (consecutive: {})",
+                    "!".yellow(),
+                    e,
+                    consecutive_errors
+                );
                 tokio::time::sleep(poll_interval).await;
                 continue;
             }
@@ -301,12 +375,18 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
         println!("{} Processing {} items...", "→".cyan(), items.len());
 
         for item in items {
-            let result = process_item(&item, &sync_rules, &mut pg, &mut qdrant, &embedding_model).await;
-            
+            let result =
+                process_item(&item, &sync_rules, &mut pg, &mut qdrant, &embedding_model).await;
+
             match result {
                 Ok(_) => {
                     if let Err(e) = mark_processed(&mut pg, item.id).await {
-                        println!("{} Failed to mark item {} as processed: {}", "!".yellow(), item.id, e);
+                        println!(
+                            "{} Failed to mark item {} as processed: {}",
+                            "!".yellow(),
+                            item.id,
+                            e
+                        );
                     } else {
                         total_processed += 1;
                     }
@@ -315,12 +395,26 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
                 Err(e) => {
                     let error_str = e.to_string();
                     // Check if this is a connection error
-                    if error_str.contains("Connection") || error_str.contains("refused") || error_str.contains("broken pipe") {
+                    if error_str.contains("Connection")
+                        || error_str.contains("refused")
+                        || error_str.contains("broken pipe")
+                    {
                         consecutive_errors += 1;
-                        println!("{} Connection error on item {}: {} (consecutive: {})", "!".yellow(), item.id, e, consecutive_errors);
+                        println!(
+                            "{} Connection error on item {}: {} (consecutive: {})",
+                            "!".yellow(),
+                            item.id,
+                            e,
+                            consecutive_errors
+                        );
                     }
                     if let Err(mark_err) = mark_failed(&mut pg, item.id, &error_str).await {
-                        println!("{} Failed to mark item {} as failed: {}", "!".yellow(), item.id, mark_err);
+                        println!(
+                            "{} Failed to mark item {} as failed: {}",
+                            "!".yellow(),
+                            item.id,
+                            mark_err
+                        );
                     } else {
                         println!("{} Failed item {}: {}", "✗".red(), item.id, e);
                     }
@@ -329,12 +423,24 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
         }
 
         let elapsed = start_time.elapsed().as_secs();
-        let rate = if elapsed > 0 { total_processed / elapsed } else { total_processed };
-        println!("{} Processed {} total ({}/sec)", "✓".green(), total_processed, rate);
+        let rate = if elapsed > 0 {
+            total_processed / elapsed
+        } else {
+            total_processed
+        };
+        println!(
+            "{} Processed {} total ({}/sec)",
+            "✓".green(),
+            total_processed,
+            rate
+        );
     }
 
     // Graceful shutdown complete
-    println!("✅ Graceful shutdown complete. Processed {} total items.", total_processed);
+    println!(
+        "✅ Graceful shutdown complete. Processed {} total items.",
+        total_processed
+    );
     Ok(())
 }
 
@@ -349,7 +455,9 @@ fn load_config() -> Result<WorkerConfig> {
 }
 
 fn parse_grpc_url(url: &str) -> Result<(String, u16)> {
-    let url = url.trim_start_matches("http://").trim_start_matches("https://");
+    let url = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     let parts: Vec<&str> = url.split(':').collect();
     let host = parts.first().unwrap_or(&"localhost").to_string();
     let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(6334);
@@ -358,16 +466,21 @@ fn parse_grpc_url(url: &str) -> Result<(String, u16)> {
 
 /// Parse PostgreSQL URL: postgres://user:password@host:port/database
 fn parse_postgres_url(url: &str) -> Result<(String, u16, String, String, Option<String>)> {
-    let url = url.trim_start_matches("postgres://").trim_start_matches("postgresql://");
-    
+    let url = url
+        .trim_start_matches("postgres://")
+        .trim_start_matches("postgresql://");
+
     // Split by @ to separate credentials from host
     let (credentials, host_part): (Option<&str>, &str) = if url.contains('@') {
         let parts: Vec<&str> = url.splitn(2, '@').collect();
-        (Some(parts[0]), parts.get(1).copied().unwrap_or("localhost/postgres"))
+        (
+            Some(parts[0]),
+            parts.get(1).copied().unwrap_or("localhost/postgres"),
+        )
     } else {
         (None, url)
     };
-    
+
     // Parse host:port/database
     let (host_port, database) = if host_part.contains('/') {
         let parts: Vec<&str> = host_part.splitn(2, '/').collect();
@@ -375,27 +488,33 @@ fn parse_postgres_url(url: &str) -> Result<(String, u16, String, String, Option<
     } else {
         (host_part, "postgres".to_string())
     };
-    
+
     // Parse host:port
     let (host, port) = if host_port.contains(':') {
         let parts: Vec<&str> = host_port.split(':').collect();
-        (parts[0].to_string(), parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(5432))
+        (
+            parts[0].to_string(),
+            parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(5432),
+        )
     } else {
         (host_port.to_string(), 5432u16)
     };
-    
+
     // Parse user:password
     let (user, password) = if let Some(creds) = credentials {
         if creds.contains(':') {
             let parts: Vec<&str> = creds.splitn(2, ':').collect();
-            (parts[0].to_string(), Some(parts.get(1).unwrap_or(&"").to_string()))
+            (
+                parts[0].to_string(),
+                Some(parts.get(1).unwrap_or(&"").to_string()),
+            )
         } else {
             (creds.to_string(), None)
         }
     } else {
         ("postgres".to_string(), None)
     };
-    
+
     Ok((host, port, user, database, password))
 }
 
@@ -422,20 +541,22 @@ async fn fetch_pending_items(pg: &mut qail_pg::PgDriver, limit: u32) -> Result<V
         "#,
         limit
     );
-    
+
     let rows = pg.fetch_raw(&sql).await?;
-    
-    let items: Vec<QueueItem> = rows.iter().map(|row| {
-        QueueItem {
+
+    let items: Vec<QueueItem> = rows
+        .iter()
+        .map(|row| QueueItem {
             id: row.get_i64_by_name("id").unwrap_or(0),
             ref_table: row.get_string_by_name("ref_table").unwrap_or_default(),
             ref_id: row.get_string_by_name("ref_id").unwrap_or_default(),
             operation: row.get_string_by_name("operation").unwrap_or_default(),
-            payload: row.get_json_by_name("payload")
+            payload: row
+                .get_json_by_name("payload")
                 .and_then(|s| serde_json::from_str(&s).ok()),
-        }
-    }).collect();
-    
+        })
+        .collect();
+
     Ok(items)
 }
 
@@ -446,7 +567,8 @@ async fn process_item(
     qdrant: &mut qail_qdrant::QdrantDriver,
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<()> {
-    let rule = sync_rules.get(&item.ref_table)
+    let rule = sync_rules
+        .get(&item.ref_table)
         .ok_or_else(|| anyhow::anyhow!("No sync rule for table: {}", item.ref_table))?;
 
     match item.operation.as_str() {
@@ -454,49 +576,56 @@ async fn process_item(
             // READ-REPAIR PATTERN: Do NOT use stale payload from queue!
             // The queue is a "dirty flag", not a source of truth.
             // Always fetch FRESH data from the source table to prevent time-travel bugs.
-            
+
             let trigger_col = rule.trigger_column.as_deref().unwrap_or("description");
             let fetch_sql = format!(
                 "SELECT {} FROM {} WHERE id = {}",
                 trigger_col, item.ref_table, item.ref_id
             );
-            
+
             match pg.fetch_raw(&fetch_sql).await {
                 Ok(rows) if !rows.is_empty() => {
                     // Row exists - extract fresh text and upsert
-                    let text = rows[0].get_string(0)
+                    let text = rows[0]
+                        .get_string(0)
                         .ok_or_else(|| anyhow::anyhow!("No text in column '{}'", trigger_col))?;
-                    
+
                     // Generate embedding from FRESH data
                     let vector = embedding_model.embed(&text);
-                    
+
                     // Upsert to Qdrant
                     let point = qail_qdrant::Point {
                         id: qail_qdrant::PointId::Num(item.ref_id.parse().unwrap_or(0)),
                         vector,
                         payload: std::collections::HashMap::new(),
                     };
-                    
-                    qdrant.upsert(&rule.target_collection, &[point], true).await?;
+
+                    qdrant
+                        .upsert(&rule.target_collection, &[point], true)
+                        .await?;
                 }
                 Ok(_) | Err(_) => {
                     // Row doesn't exist - treat as DELETE
                     // This handles the case where the row was deleted after the queue event
                     let point_id = item.ref_id.parse().unwrap_or(0);
-                    qdrant.delete_points(&rule.target_collection, &[point_id]).await?;
+                    qdrant
+                        .delete_points(&rule.target_collection, &[point_id])
+                        .await?;
                 }
             }
         }
         "DELETE" => {
             // Deletes are idempotent and safe to execute out-of-order
             let point_id = item.ref_id.parse().unwrap_or(0);
-            qdrant.delete_points(&rule.target_collection, &[point_id]).await?;
+            qdrant
+                .delete_points(&rule.target_collection, &[point_id])
+                .await?;
         }
         _ => {
             anyhow::bail!("Unknown operation: {}", item.operation);
         }
     }
-    
+
     Ok(())
 }
 
@@ -530,9 +659,9 @@ async fn recover_stale_jobs(pg: &mut qail_pg::PgDriver) -> Result<u64> {
         WHERE status = 'processing' 
           AND processed_at < NOW() - INTERVAL '10 minutes'
     "#;
-    
+
     pg.execute_raw(sql).await?;
-    
+
     // Count how many were recovered (for logging)
     let count_sql = r#"
         SELECT COUNT(*) as count FROM _qail_queue 
@@ -540,12 +669,9 @@ async fn recover_stale_jobs(pg: &mut qail_pg::PgDriver) -> Result<u64> {
           AND retry_count > 0 
           AND processed_at >= NOW() - INTERVAL '1 minute'
     "#;
-    
+
     let rows = pg.fetch_raw(count_sql).await.unwrap_or_default();
-    let recovered = rows.first()
-        .and_then(|r| r.get_i64(0))
-        .unwrap_or(0) as u64;
-    
+    let recovered = rows.first().and_then(|r| r.get_i64(0)).unwrap_or(0) as u64;
+
     Ok(recovered)
 }
-

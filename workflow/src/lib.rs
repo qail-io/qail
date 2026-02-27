@@ -57,11 +57,11 @@ pub mod step;
 // Re-exports for convenience
 pub use channel::{ChannelError, ChannelKind, NotifyChannel};
 pub use context::WorkflowContext;
-pub use engine::{run_workflow, WorkflowError, WorkflowExecutor};
+pub use engine::{WorkflowError, WorkflowExecutor, run_workflow};
 pub use payment::{
-    ChargeRequest, ChargeResponse, ChargeStatus, Currency, PaymentError, PaymentEvent,
-    PaymentKind, PaymentProvider,
+    ChargeRequest, ChargeResponse, ChargeStatus, Currency, PaymentError, PaymentEvent, PaymentKind,
+    PaymentProvider,
 };
-pub use registry::{WorkflowDefinition, StateTransition};
+pub use registry::{StateTransition, WorkflowDefinition};
 pub use state::State;
 pub use step::WorkflowStep;

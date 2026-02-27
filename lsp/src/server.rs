@@ -34,9 +34,11 @@ impl QailLanguageServer {
         {
             return;
         }
-        
+
         if let Some(workspace_root) = uri.strip_prefix("file://").and_then(|p| {
-            std::path::Path::new(p).parent().map(|p| p.to_string_lossy().to_string())
+            std::path::Path::new(p)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
         }) {
             self.load_schema(&workspace_root);
             if let Ok(mut loaded) = self.schema_loaded.write() {
@@ -46,8 +48,8 @@ impl QailLanguageServer {
     }
 
     fn load_schema(&self, workspace_root: &str) {
-        let qail_path = format!("{}/schema.qail", workspace_root);
-        if let Ok(content) = std::fs::read_to_string(&qail_path)
+        let qail_path = std::path::Path::new(workspace_root).join("schema.qail");
+        if let Ok(content) = qail_core::schema_source::read_qail_schema_source(&qail_path)
             && let Ok(schema) = Schema::from_qail_schema(&content)
             && let Ok(mut s) = self.schema.write()
         {
@@ -76,7 +78,9 @@ impl QailLanguageServer {
                 let rest = &target_line[start..];
                 if start > 1 {
                     let before = &target_line[..start];
-                    if (before.ends_with("(\"") || before.ends_with("(r\"") || before.ends_with("= \""))
+                    if (before.ends_with("(\"")
+                        || before.ends_with("(r\"")
+                        || before.ends_with("= \""))
                         && let Some(end) = rest.find("\"")
                     {
                         return Some(rest[..end].to_string());
@@ -88,8 +92,11 @@ impl QailLanguageServer {
         None
     }
 
-    pub fn get_diagnostics(&self, text: &str) -> Vec<Diagnostic> {
+    /// Get diagnostics for a document. Pass the file URI to enable N+1 detection for `.rs` files.
+    pub fn get_diagnostics(&self, text: &str, uri: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
+
+        // ── QAIL query syntax diagnostics ──
         let patterns = ["get::", "set::", "del::", "add::", "make::", "mod::"];
 
         for (line_num, line) in text.lines().enumerate() {
@@ -104,8 +111,14 @@ impl QailLanguageServer {
                     {
                         diagnostics.push(Diagnostic {
                             range: Range {
-                                start: Position { line: line_num as u32, character: col as u32 },
-                                end: Position { line: line_num as u32, character: (col + query_line.len()) as u32 },
+                                start: Position {
+                                    line: line_num as u32,
+                                    character: col as u32,
+                                },
+                                end: Position {
+                                    line: line_num as u32,
+                                    character: (col + query_line.len()) as u32,
+                                },
                             },
                             severity: Some(DiagnosticSeverity::ERROR),
                             source: Some("qail".to_string()),
@@ -116,6 +129,43 @@ impl QailLanguageServer {
                 }
             }
         }
+
+        // ── N+1 detection for Rust files ──
+        if uri.ends_with(".rs") {
+            let file_path = uri.strip_prefix("file://").unwrap_or(uri);
+            let nplus1_diags = qail_core::analyzer::detect_n_plus_one_in_file(file_path, text);
+
+            for diag in nplus1_diags {
+                let severity = match diag.severity {
+                    qail_core::analyzer::NPlusOneSeverity::Error => DiagnosticSeverity::ERROR,
+                    qail_core::analyzer::NPlusOneSeverity::Warning => DiagnosticSeverity::WARNING,
+                };
+
+                let mut message = diag.message.clone();
+                if let Some(ref hint) = diag.hint {
+                    message.push_str(&format!("\nHint: {}", hint));
+                }
+
+                diagnostics.push(Diagnostic {
+                    range: Range {
+                        start: Position {
+                            line: (diag.line.saturating_sub(1)) as u32,
+                            character: (diag.column.saturating_sub(1)) as u32,
+                        },
+                        end: Position {
+                            line: (diag.line.saturating_sub(1)) as u32,
+                            character: (diag.end_column.saturating_sub(1)) as u32,
+                        },
+                    },
+                    severity: Some(severity),
+                    code: Some(NumberOrString::String(diag.code.as_str().to_string())),
+                    source: Some("qail-nplus1".to_string()),
+                    message,
+                    ..Default::default()
+                });
+            }
+        }
+
         diagnostics
     }
 }

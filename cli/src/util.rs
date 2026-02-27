@@ -20,11 +20,7 @@ pub fn parse_pg_url(url: &str) -> Result<(String, u16, String, Option<String>, S
     let (authority, database) = rest
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("Missing database in URL"))?;
-    let database = database
-        .split('?')
-        .next()
-        .unwrap_or(database)
-        .to_string();
+    let database = database.split('?').next().unwrap_or(database).to_string();
     if database.is_empty() {
         return Err(anyhow::anyhow!("Missing database in URL"));
     }
@@ -162,7 +158,8 @@ mod tests {
 
     #[test]
     fn test_parse_pg_url_basic() {
-        let (host, port, user, password, database) = parse_pg_url("postgres://admin:pass@localhost:5432/testdb").unwrap();
+        let (host, port, user, password, database) =
+            parse_pg_url("postgres://admin:pass@localhost:5432/testdb").unwrap();
         assert_eq!(host, "localhost");
         assert_eq!(port, 5432);
         assert_eq!(user, "admin");

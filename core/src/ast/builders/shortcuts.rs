@@ -3,12 +3,12 @@
 //! These helpers make QAIL simpler than raw SQL for analytics queries.
 //! All shortcuts are AST-native - no raw SQL strings!
 
-use crate::ast::{Condition, Expr, Operator, Value};
-use super::{count_filter, case_when, col, binary, cast, now_minus};
+use super::{binary, case_when, cast, col, count_filter, now_minus};
 use crate::ast::BinaryOp;
+use crate::ast::{Condition, Expr, Operator, Value};
 
 /// Combine two expressions with OR logic: (left OR right)
-/// 
+///
 /// # Example
 /// ```ignore
 /// // (h.photo_url IS NOT NULL OR EXISTS(...))
@@ -34,7 +34,7 @@ pub fn and_expr(left: impl Into<Expr>, right: impl Into<Expr>) -> Expr {
 }
 
 /// Create a "column IS NOT NULL" expression
-/// 
+///
 /// # Example
 /// ```ignore
 /// is_not_null_expr("photo_url")  // photo_url IS NOT NULL
@@ -149,7 +149,7 @@ where
         .into_iter()
         .map(|v| Value::String(v.as_ref().to_string()))
         .collect();
-    
+
     Condition {
         left: Expr::Named(column.to_string()),
         op: Operator::In,
@@ -170,14 +170,50 @@ pub fn percentage(numerator: &str, denominator: &str) -> super::CaseBuilder {
         cast(col(numerator), "float8").build(),
         BinaryOp::Div,
         cast(col(denominator), "float8").build(),
-    ).build();
-    
+    )
+    .build();
+
     let multiplied = binary(division, BinaryOp::Mul, Expr::Literal(Value::Float(100.0))).build();
-    
-    case_when(
-        super::gt(denominator, 0),
-        multiplied,
-    ).otherwise(Expr::Literal(Value::Float(0.0)))
+
+    case_when(super::gt(denominator, 0), multiplied).otherwise(Expr::Literal(Value::Float(0.0)))
+}
+
+/// Create an EXISTS subquery expression
+///
+/// # Example
+/// ```ignore
+/// // EXISTS(SELECT 1 FROM harbor_images WHERE harbor_id = h.id)
+/// exists(Qail::get("harbor_images").eq("harbor_id", col_ref).limit(1))
+/// ```
+pub fn exists(query: crate::ast::Qail) -> Expr {
+    Expr::Exists {
+        query: Box::new(query),
+        negated: false,
+        alias: None,
+    }
+}
+
+/// Create a NOT EXISTS subquery expression
+pub fn not_exists(query: crate::ast::Qail) -> Expr {
+    Expr::Exists {
+        query: Box::new(query),
+        negated: true,
+        alias: None,
+    }
+}
+
+/// Create a scalar subquery expression
+///
+/// # Example
+/// ```ignore
+/// // (SELECT image_url FROM harbor_images WHERE ... ORDER BY ... LIMIT 1)
+/// subquery(Qail::get("harbor_images").column("image_url").eq("harbor_id", id).limit(1))
+/// ```
+pub fn subquery(query: crate::ast::Qail) -> Expr {
+    Expr::Subquery {
+        query: Box::new(query),
+        alias: None,
+    }
 }
 
 #[cfg(test)]
@@ -211,44 +247,6 @@ mod tests {
         let builder = percentage("delivered", "sent");
         let expr = builder.alias("rate");
         assert!(matches!(expr, Expr::Case { alias: Some(a), .. } if a == "rate"));
-    }
-}
-
-/// Create an EXISTS subquery expression
-/// 
-/// # Example
-/// ```ignore
-/// // EXISTS(SELECT 1 FROM harbor_images WHERE harbor_id = h.id)
-/// exists(Qail::get("harbor_images").eq("harbor_id", col_ref).limit(1))
-/// ```
-pub fn exists(query: crate::ast::Qail) -> Expr {
-    Expr::Exists {
-        query: Box::new(query),
-        negated: false,
-        alias: None,
-    }
-}
-
-/// Create a NOT EXISTS subquery expression
-pub fn not_exists(query: crate::ast::Qail) -> Expr {
-    Expr::Exists {
-        query: Box::new(query),
-        negated: true,
-        alias: None,
-    }
-}
-
-/// Create a scalar subquery expression
-/// 
-/// # Example
-/// ```ignore
-/// // (SELECT image_url FROM harbor_images WHERE ... ORDER BY ... LIMIT 1)
-/// subquery(Qail::get("harbor_images").column("image_url").eq("harbor_id", id).limit(1))
-/// ```
-pub fn subquery(query: crate::ast::Qail) -> Expr {
-    Expr::Subquery {
-        query: Box::new(query),
-        alias: None,
     }
 }
 
