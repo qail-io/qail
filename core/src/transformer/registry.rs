@@ -4,8 +4,8 @@ use sqlparser::ast::Statement;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
-use super::traits::*;
 use super::patterns::*;
+use super::traits::*;
 
 /// Registry of SQL patterns
 pub struct PatternRegistry {
@@ -38,7 +38,8 @@ impl PatternRegistry {
     pub fn register(&mut self, pattern: Box<dyn SqlPattern>) {
         self.patterns.push(pattern);
         // Sort by priority (descending)
-        self.patterns.sort_by_key(|p| std::cmp::Reverse(p.priority()));
+        self.patterns
+            .sort_by_key(|p| std::cmp::Reverse(p.priority()));
     }
 
     /// Find matching pattern for SQL
@@ -59,8 +60,7 @@ impl PatternRegistry {
     /// * `ctx` — Transformation context (e.g., whether to include imports).
     pub fn transform_sql(&self, sql: &str, ctx: &TransformContext) -> Result<String, String> {
         let dialect = PostgreSqlDialect {};
-        let ast = Parser::parse_sql(&dialect, sql)
-            .map_err(|e| format!("Parse error: {}", e))?;
+        let ast = Parser::parse_sql(&dialect, sql).map_err(|e| format!("Parse error: {}", e))?;
 
         if ast.is_empty() {
             return Err("Empty SQL".to_string());
@@ -77,9 +77,7 @@ impl PatternRegistry {
             .extract(stmt, &match_ctx)
             .map_err(|e| e.to_string())?;
 
-        pattern
-            .transform(&data, ctx)
-            .map_err(|e| e.to_string())
+        pattern.transform(&data, ctx).map_err(|e| e.to_string())
     }
 }
 
@@ -95,10 +93,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = registry.transform_sql(
-            "SELECT id, name FROM users WHERE id = $1",
-            &ctx,
-        );
+        let result = registry.transform_sql("SELECT id, name FROM users WHERE id = $1", &ctx);
 
         assert!(result.is_ok());
         let code = result.unwrap();

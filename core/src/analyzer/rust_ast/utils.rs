@@ -1,4 +1,3 @@
-
 /// Convert snake_case to PascalCase for type names.
 /// # Example
 /// ```

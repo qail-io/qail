@@ -1,0 +1,72 @@
+
+
+# Kerberos E2E test harness for qail-pg GSS authentication.
+# Realm: TEST.QAIL.IO
+# Service principal: postgres/postgres.test.qail.io@TEST.QAIL.IO
+#
+# Usage: docker compose up --build --abort-on-container-exit
+
+services:
+  kdc:
+    image: docker.io/library/debian:bookworm-slim
+    hostname: kdc.test.qail.io
+    container_name: qail-kdc
+    volumes:
+      - keytab-vol:/shared
+      - ./setup-kdc.sh:/setup-kdc.sh:ro
+    command: ["/bin/bash", "/setup-kdc.sh"]
+    healthcheck:
+      test: ["CMD", "kadmin.local", "-q", "listprincs"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: docker.io/library/postgres:16-bookworm
+    hostname: postgres.test.qail.io
+    container_name: qail-pg-gss
+    depends_on:
+      kdc:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: qail_gss_user
+      POSTGRES_PASSWORD: unused_password
+      POSTGRES_DB: qail_gss_test
+      KRB5_KTNAME: /shared/postgres.keytab
+      KRB5_CONFIG: /shared/krb5.conf
+    volumes:
+      - keytab-vol:/shared:ro
+      - ./pg_hba_gss.conf:/etc/postgresql/pg_hba.conf:ro
+    command: >
+      postgres
+      -c hba_file=/etc/postgresql/pg_hba.conf
+      -c krb_server_keyfile=/shared/postgres.keytab
+      -c log_connections=on
+      -c log_statement=all
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qail_gss_user -d qail_gss_test"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  client:
+    build:
+      context: ../../..
+      dockerfile: pg/tests/kerberos/Dockerfile.client
+    hostname: client.test.qail.io
+    container_name: qail-pg-client
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KRB5_CONFIG: /shared/krb5.conf
+      KRB5CCNAME: /tmp/krb5cc_test
+      QAIL_GSS_TEST_DATABASE_URL: >-
+        postgresql://qail_gss_user@postgres.test.qail.io:5432/qail_gss_test?gss_provider=linux_krb5&auth_mode=gssapi_only&gss_service=postgres
+    volumes:
+      - keytab-vol:/shared:ro
+      - ./run-tests.sh:/run-tests.sh:ro
+    command: ["/bin/bash", "/run-tests.sh"]
+
+volumes:
+  keytab-vol:

@@ -102,11 +102,7 @@ mod tests {
         let wf = WorkflowDefinition::new("test_flow")
             .initial_state("created")
             .transition("created", "pending", vec![WorkflowStep::log("Starting")])
-            .transition(
-                "pending",
-                "fulfilled",
-                vec![WorkflowStep::log("Complete")],
-            );
+            .transition("pending", "fulfilled", vec![WorkflowStep::log("Complete")]);
 
         assert_eq!(wf.name, "test_flow");
         assert_eq!(wf.initial_state, "created");

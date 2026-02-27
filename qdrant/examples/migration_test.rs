@@ -1,6 +1,6 @@
-use qail_qdrant::QdrantDriver;
 use qail_core::ast::Distance;
-use tokio::time::{sleep, Duration};
+use qail_qdrant::QdrantDriver;
+use tokio::time::{Duration, sleep};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,7 +8,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let collection = "test_migration_collection";
 
     println!("Creating collection: {}", collection);
-    driver.create_collection(collection, 128, Distance::Cosine, false).await?;
+    driver
+        .create_collection(collection, 128, Distance::Cosine, false)
+        .await?;
     println!("Collection created successfully!");
 
     // Wait a bit to ensure it's ready

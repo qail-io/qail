@@ -11,12 +11,17 @@ env:
 
 jobs:
   test:
-    name: Tests
+    name: Tests (PG ${{ matrix.pg_version }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [14, 15, 16, 17]
 
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:${{ matrix.pg_version }}-alpine
         env:
           POSTGRES_DB: qail_test
           POSTGRES_USER: postgres
@@ -38,6 +43,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: pg-${{ matrix.pg_version }}
 
       # Unit tests (no DB required)
       - name: Unit tests

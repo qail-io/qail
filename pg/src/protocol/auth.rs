@@ -9,6 +9,8 @@ use rand::RngExt;
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
+const GS2_HEADER_NO_CHANNEL_BINDING: &str = "n,,";
+const GS2_HEADER_TLS_SERVER_END_POINT: &str = "p=tls-server-end-point,,";
 
 /// SCRAM-SHA-256 client state machine.
 pub struct ScramClient {
@@ -26,11 +28,28 @@ pub struct ScramClient {
     auth_message: Option<String>,
     /// Salted password (cached for verification)
     salted_password: Option<Vec<u8>>,
+    /// Channel binding bytes for SCRAM-SHA-256-PLUS (`tls-server-end-point`).
+    channel_binding_data: Option<Vec<u8>>,
+    /// GS2 header prefix (`n,,` or `p=tls-server-end-point,,`).
+    gs2_header: &'static str,
 }
 
 impl ScramClient {
     /// Create a new SCRAM client for authentication.
     pub fn new(username: &str, password: &str) -> Self {
+        Self::new_inner(username, password, None)
+    }
+
+    /// Create a SCRAM client using `tls-server-end-point` channel binding.
+    pub fn new_with_tls_server_end_point(
+        username: &str,
+        password: &str,
+        channel_binding_data: Vec<u8>,
+    ) -> Self {
+        Self::new_inner(username, password, Some(channel_binding_data))
+    }
+
+    fn new_inner(username: &str, password: &str, channel_binding_data: Option<Vec<u8>>) -> Self {
         let mut rng = rand::rng();
         let nonce: String = (0..24)
             .map(|_| {
@@ -49,20 +68,38 @@ impl ScramClient {
             iterations: None,
             auth_message: None,
             salted_password: None,
+            gs2_header: if channel_binding_data.is_some() {
+                GS2_HEADER_TLS_SERVER_END_POINT
+            } else {
+                GS2_HEADER_NO_CHANNEL_BINDING
+            },
+            channel_binding_data,
         }
     }
 
     /// Format: `n,,n=<user>,r=<nonce>`
     pub fn client_first_message(&self) -> Vec<u8> {
-        // GS2 header: n,, (no channel binding)
-        // client-first-message-bare: n=<user>,r=<nonce>
-        let msg = format!("n,,n={},r={}", self.username, self.client_nonce);
+        // client-first-message = gs2-header + client-first-message-bare
+        let msg = format!(
+            "{}n={},r={}",
+            self.gs2_header, self.username, self.client_nonce
+        );
         msg.into_bytes()
     }
 
     /// Get the client-first-message-bare (for auth message construction).
     fn client_first_message_bare(&self) -> String {
         format!("n={},r={}", self.username, self.client_nonce)
+    }
+
+    fn channel_binding_input(&self) -> Vec<u8> {
+        let binding_len = self.channel_binding_data.as_ref().map_or(0, Vec::len);
+        let mut input = Vec::with_capacity(self.gs2_header.len() + binding_len);
+        input.extend_from_slice(self.gs2_header.as_bytes());
+        if let Some(data) = &self.channel_binding_data {
+            input.extend_from_slice(data);
+        }
+        input
     }
 
     /// Process the server-first-message and generate client-final-message.
@@ -127,7 +164,8 @@ impl ScramClient {
         let stored_key = Self::sha256(&client_key);
 
         let client_first_bare = self.client_first_message_bare();
-        let client_final_without_proof = format!("c=biws,r={}", nonce); // biws = base64("n,,")
+        let channel_binding_b64 = BASE64.encode(self.channel_binding_input());
+        let client_final_without_proof = format!("c={},r={}", channel_binding_b64, nonce);
         let auth_message = format!(
             "{},{},{}",
             client_first_bare, server_str, client_final_without_proof
@@ -234,5 +272,39 @@ mod tests {
 
         assert!(final_str.starts_with("c=biws,r="));
         assert!(final_str.contains(",p="));
+    }
+
+    #[test]
+    fn test_client_first_message_plus() {
+        let client =
+            ScramClient::new_with_tls_server_end_point("user", "password", vec![1, 2, 3, 4]);
+        let msg = String::from_utf8(client.client_first_message()).unwrap();
+        assert!(msg.starts_with("p=tls-server-end-point,,n=user,r="));
+    }
+
+    #[test]
+    fn test_scram_plus_final_channel_binding_payload() {
+        let cb_data = vec![0xde, 0xad, 0xbe, 0xef];
+        let mut client =
+            ScramClient::new_with_tls_server_end_point("testuser", "testpass", cb_data.clone());
+
+        let server_nonce = format!("{}ServerPart", client.client_nonce);
+        let salt_b64 = BASE64.encode(b"randomsalt");
+        let server_first = format!("r={},s={},i=4096", server_nonce, salt_b64);
+
+        let final_msg = client
+            .process_server_first(server_first.as_bytes())
+            .unwrap();
+        let final_str = String::from_utf8(final_msg).unwrap();
+        let encoded_cb = final_str
+            .split(',')
+            .find_map(|part| part.strip_prefix("c="))
+            .unwrap()
+            .to_string();
+        let decoded = BASE64.decode(encoded_cb).unwrap();
+
+        let mut expected = GS2_HEADER_TLS_SERVER_END_POINT.as_bytes().to_vec();
+        expected.extend_from_slice(&cb_data);
+        assert_eq!(decoded, expected);
     }
 }

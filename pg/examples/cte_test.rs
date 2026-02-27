@@ -74,9 +74,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // with high_earners as (select * from employees where salary > 100000)
     // select * from high_earners
 
-    let high_earners_subquery = Qail::get("employees")
-        .select_all()
-        .filter("salary", Operator::Gt, 100000);
+    let high_earners_subquery =
+        Qail::get("employees")
+            .select_all()
+            .filter("salary", Operator::Gt, 100000);
 
     let mut cte_query = Qail::get("high_earners").select_all();
     cte_query.ctes = vec![CTEDef {
@@ -182,14 +183,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter("id", Operator::Eq, 2);
 
     // Recursive: SELECT e.* FROM employees e JOIN subordinates s ON e.manager_id = s.id
-    let recursive_query = Qail::get("employees")
-        .columns(["employees.*"])
-        .join(
-            JoinKind::Inner,
-            "subordinates",
-            "employees.manager_id",
-            "subordinates.id",
-        );
+    let recursive_query = Qail::get("employees").columns(["employees.*"]).join(
+        JoinKind::Inner,
+        "subordinates",
+        "employees.manager_id",
+        "subordinates.id",
+    );
 
     let mut recursive_cte = Qail::get("subordinates").select_all();
     recursive_cte.ctes = vec![CTEDef {
@@ -235,7 +234,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match driver.fetch_all(&cte_ordered).await {
         Ok(rows) => {
-            println!("  ✓ CTE with ORDER BY LIMIT: {} top earners (expect 3)", rows.len());
+            println!(
+                "  ✓ CTE with ORDER BY LIMIT: {} top earners (expect 3)",
+                rows.len()
+            );
             // Note: if 0 rows, may be an encoding issue with subquery ORDER BY
         }
         Err(e) => println!("  ✗ CTE with ORDER BY LIMIT: {}", e),

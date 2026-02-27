@@ -46,17 +46,24 @@ impl PgConnection {
                     let (msg, _) = BackendMessage::decode(&msg_bytes).map_err(PgError::Protocol)?;
 
                     // Intercept async notifications — buffer them instead of returning
-                    if let BackendMessage::NotificationResponse { process_id, channel, payload } = msg {
-                        self.notifications.push_back(
-                            super::notification::Notification { process_id, channel, payload }
-                        );
+                    if let BackendMessage::NotificationResponse {
+                        process_id,
+                        channel,
+                        payload,
+                    } = msg
+                    {
+                        self.notifications
+                            .push_back(super::notification::Notification {
+                                process_id,
+                                channel,
+                                payload,
+                            });
                         continue; // Keep reading for the actual response
                     }
 
                     return Ok(msg);
                 }
             }
-
 
             let n = self.read_with_timeout().await?;
             if n == 0 {
@@ -74,11 +81,10 @@ impl PgConnection {
         if self.buffer.capacity() - self.buffer.len() < 65536 {
             self.buffer.reserve(131072);
         }
-        
-        match tokio::time::timeout(
-            DEFAULT_READ_TIMEOUT,
-            self.stream.read_buf(&mut self.buffer),
-        ).await {
+
+        match tokio::time::timeout(DEFAULT_READ_TIMEOUT, self.stream.read_buf(&mut self.buffer))
+            .await
+        {
             Ok(Ok(n)) => Ok(n),
             Ok(Err(e)) => Err(PgError::Connection(format!("Read error: {}", e))),
             Err(_) => Err(PgError::Connection(format!(
@@ -146,7 +152,7 @@ impl PgConnection {
                         let (msg, _) =
                             BackendMessage::decode(&msg_bytes).map_err(PgError::Protocol)?;
                         if let BackendMessage::ErrorResponse(err) = msg {
-                            return Err(PgError::Query(err.message));
+                            return Err(PgError::QueryServer(err.into()));
                         }
                     }
 
@@ -154,7 +160,6 @@ impl PgConnection {
                     return Ok(msg_type);
                 }
             }
-
 
             let n = self.read_with_timeout().await?;
             if n == 0 {
@@ -196,7 +201,7 @@ impl PgConnection {
                         let (msg, _) =
                             BackendMessage::decode(&msg_bytes).map_err(PgError::Protocol)?;
                         if let BackendMessage::ErrorResponse(err) = msg {
-                            return Err(PgError::Query(err.message));
+                            return Err(PgError::QueryServer(err.into()));
                         }
                     }
 
@@ -213,7 +218,9 @@ impl PgConnection {
                             for _ in 0..column_count {
                                 if pos + 4 > payload.len() {
                                     let _ = self.buffer.split_to(msg_len + 1);
-                                    return Err(PgError::Protocol("DataRow truncated: missing column length".into()));
+                                    return Err(PgError::Protocol(
+                                        "DataRow truncated: missing column length".into(),
+                                    ));
                                 }
 
                                 let len = i32::from_be_bytes([
@@ -230,7 +237,9 @@ impl PgConnection {
                                     let len = len as usize;
                                     if pos + len > payload.len() {
                                         let _ = self.buffer.split_to(msg_len + 1);
-                                        return Err(PgError::Protocol("DataRow truncated: column data exceeds payload".into()));
+                                        return Err(PgError::Protocol(
+                                            "DataRow truncated: column data exceeds payload".into(),
+                                        ));
                                     }
                                     columns.push(Some(payload[pos..pos + len].to_vec()));
                                     pos += len;
@@ -247,7 +256,6 @@ impl PgConnection {
                     return Ok((msg_type, None));
                 }
             }
-
 
             let n = self.read_with_timeout().await?;
             if n == 0 {
@@ -291,7 +299,7 @@ impl PgConnection {
                         let (msg, _) =
                             BackendMessage::decode(&msg_bytes).map_err(PgError::Protocol)?;
                         if let BackendMessage::ErrorResponse(err) = msg {
-                            return Err(PgError::Query(err.message));
+                            return Err(PgError::QueryServer(err.into()));
                         }
                     }
 
@@ -309,7 +317,9 @@ impl PgConnection {
 
                             for _ in 0..column_count {
                                 if msg_bytes.remaining() < 4 {
-                                    return Err(PgError::Protocol("DataRow truncated: missing column length".into()));
+                                    return Err(PgError::Protocol(
+                                        "DataRow truncated: missing column length".into(),
+                                    ));
                                 }
 
                                 let len = msg_bytes.get_i32();
@@ -319,7 +329,9 @@ impl PgConnection {
                                 } else {
                                     let len = len as usize;
                                     if msg_bytes.remaining() < len {
-                                        return Err(PgError::Protocol("DataRow truncated: column data exceeds payload".into()));
+                                        return Err(PgError::Protocol(
+                                            "DataRow truncated: column data exceeds payload".into(),
+                                        ));
                                     }
                                     let col_data = msg_bytes.split_to(len).freeze();
                                     columns.push(Some(col_data));
@@ -336,7 +348,6 @@ impl PgConnection {
                     return Ok((msg_type, None));
                 }
             }
-
 
             let n = self.read_with_timeout().await?;
             if n == 0 {
@@ -379,7 +390,7 @@ impl PgConnection {
                         let (msg, _) =
                             BackendMessage::decode(&msg_bytes).map_err(PgError::Protocol)?;
                         if let BackendMessage::ErrorResponse(err) = msg {
-                            return Err(PgError::Query(err.message));
+                            return Err(PgError::QueryServer(err.into()));
                         }
                     }
 
@@ -389,20 +400,26 @@ impl PgConnection {
 
                         // Bounds checks to prevent panic on truncated DataRow
                         if msg_bytes.remaining() < 2 {
-                            return Err(PgError::Protocol("DataRow ultra: too short for column count".into()));
+                            return Err(PgError::Protocol(
+                                "DataRow ultra: too short for column count".into(),
+                            ));
                         }
 
                         // Read column count (expect 2)
                         let _col_count = msg_bytes.get_u16();
 
                         if msg_bytes.remaining() < 4 {
-                            return Err(PgError::Protocol("DataRow ultra: truncated before col0 length".into()));
+                            return Err(PgError::Protocol(
+                                "DataRow ultra: truncated before col0 length".into(),
+                            ));
                         }
                         let len0 = msg_bytes.get_i32();
                         let col0 = if len0 > 0 {
                             let len0 = len0 as usize;
                             if msg_bytes.remaining() < len0 {
-                                return Err(PgError::Protocol("DataRow ultra: col0 data exceeds payload".into()));
+                                return Err(PgError::Protocol(
+                                    "DataRow ultra: col0 data exceeds payload".into(),
+                                ));
                             }
                             msg_bytes.split_to(len0).freeze()
                         } else {
@@ -410,13 +427,17 @@ impl PgConnection {
                         };
 
                         if msg_bytes.remaining() < 4 {
-                            return Err(PgError::Protocol("DataRow ultra: truncated before col1 length".into()));
+                            return Err(PgError::Protocol(
+                                "DataRow ultra: truncated before col1 length".into(),
+                            ));
                         }
                         let len1 = msg_bytes.get_i32();
                         let col1 = if len1 > 0 {
                             let len1 = len1 as usize;
                             if msg_bytes.remaining() < len1 {
-                                return Err(PgError::Protocol("DataRow ultra: col1 data exceeds payload".into()));
+                                return Err(PgError::Protocol(
+                                    "DataRow ultra: col1 data exceeds payload".into(),
+                                ));
                             }
                             msg_bytes.split_to(len1).freeze()
                         } else {
@@ -431,7 +452,6 @@ impl PgConnection {
                     return Ok((msg_type, None));
                 }
             }
-
 
             let n = self.read_with_timeout().await?;
             if n == 0 {

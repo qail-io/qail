@@ -9,6 +9,7 @@ use qail_core::migrate::{self, Column as QailColumn, Table as QailTable};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 
 // ============================================================================
 // Table metadata for gateway (derived from .qail schema)
@@ -113,7 +114,7 @@ impl SchemaRegistry {
 
     /// Load schema from a `.qail` file (native format)
     pub fn load_from_qail_file(&mut self, path: &str) -> Result<(), GatewayError> {
-        let content = fs::read_to_string(path)
+        let content = qail_core::schema_source::read_qail_schema_source(path)
             .map_err(|e| GatewayError::Schema(format!("Failed to read schema: {}", e)))?;
 
         self.load_from_qail_str(&content)
@@ -186,13 +187,13 @@ impl SchemaRegistry {
 
     /// Load from a file, auto-detecting format by extension
     pub fn load_from_file(&mut self, path: &str) -> Result<(), GatewayError> {
-        if path.ends_with(".qail") {
+        if Path::new(path).is_dir() || path.ends_with(".qail") {
             self.load_from_qail_file(path)
         } else if path.ends_with(".yaml") || path.ends_with(".yml") {
             self.load_from_yaml_file(path)
         } else {
             Err(GatewayError::Schema(format!(
-                "Unknown schema format: {}. Use .qail or .yaml",
+                "Unknown schema format: {}. Use .qail, schema directory, or .yaml",
                 path
             )))
         }
@@ -233,14 +234,14 @@ impl SchemaRegistry {
         let mut children = Vec::new();
         for (table_name, table) in &self.tables {
             for col in &table.columns {
-                if let Some(ref fk) = col.foreign_key {
-                    if fk.ref_table == parent_table {
-                        children.push((
-                            table_name.as_str(),
-                            col.name.as_str(),
-                            fk.ref_column.as_str(),
-                        ));
-                    }
+                if let Some(ref fk) = col.foreign_key
+                    && fk.ref_table == parent_table
+                {
+                    children.push((
+                        table_name.as_str(),
+                        col.name.as_str(),
+                        fk.ref_column.as_str(),
+                    ));
                 }
             }
         }
@@ -258,10 +259,10 @@ impl SchemaRegistry {
     pub fn relation_for(&self, child_table: &str, parent_table: &str) -> Option<(&str, &str)> {
         let table = self.tables.get(child_table)?;
         for col in &table.columns {
-            if let Some(ref fk) = col.foreign_key {
-                if fk.ref_table == parent_table {
-                    return Some((col.name.as_str(), fk.ref_column.as_str()));
-                }
+            if let Some(ref fk) = col.foreign_key
+                && fk.ref_table == parent_table
+            {
+                return Some((col.name.as_str(), fk.ref_column.as_str()));
             }
         }
         None
@@ -327,13 +328,14 @@ impl SchemaRegistry {
                 table.columns.iter().map(|c| c.name.as_str()).collect();
 
             for col_expr in &cmd.columns {
-                if let qail_core::ast::Expr::Named(col_name) = col_expr {
-                    if col_name != "*" && !valid_columns.contains(col_name.as_str()) {
-                        return Err(GatewayError::InvalidQuery(format!(
-                            "Column '{}' not found in table '{}'",
-                            col_name, cmd.table
-                        )));
-                    }
+                if let qail_core::ast::Expr::Named(col_name) = col_expr
+                    && col_name != "*"
+                    && !valid_columns.contains(col_name.as_str())
+                {
+                    return Err(GatewayError::InvalidQuery(format!(
+                        "Column '{}' not found in table '{}'",
+                        col_name, cmd.table
+                    )));
                 }
             }
         }
@@ -449,11 +451,7 @@ table orders {
 
         // Check orders table FK
         let orders = registry.table("orders").unwrap();
-        let user_id = orders
-            .columns
-            .iter()
-            .find(|c| c.name == "user_id")
-            .unwrap();
+        let user_id = orders.columns.iter().find(|c| c.name == "user_id").unwrap();
         assert!(user_id.foreign_key.is_some());
         let fk = user_id.foreign_key.as_ref().unwrap();
         assert_eq!(fk.ref_table, "users");
@@ -461,7 +459,11 @@ table orders {
 
         // Check insertable columns (should skip auto-generated PKs)
         let insertable = users.insertable_columns();
-        assert!(insertable.iter().all(|c| c.name != "id" || c.pg_type != "SERIAL"));
+        assert!(
+            insertable
+                .iter()
+                .all(|c| c.name != "id" || c.pg_type != "SERIAL")
+        );
 
         // Check FKs
         let fks = orders.foreign_keys();

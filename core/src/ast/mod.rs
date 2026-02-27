@@ -21,8 +21,8 @@ pub use self::cmd::Qail;
 pub use self::cmd::{CTEDef, ConflictAction, OnConflict};
 pub use self::conditions::Condition;
 pub use self::expr::{
-    BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, IndexDef, TableConstraint,
-    WindowFrame, FunctionDef, TriggerDef, TriggerTiming, TriggerEvent,
+    BinaryOp, ColumnGeneration, Constraint, Expr, FrameBound, FunctionDef, IndexDef,
+    TableConstraint, TriggerDef, TriggerEvent, TriggerTiming, WindowFrame,
 };
 pub use self::joins::Join;
 pub use self::operators::{

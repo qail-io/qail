@@ -23,8 +23,7 @@ const FAST_QUERY: &str = "SELECT 1 AS ping";
 
 #[tokio::main]
 async fn main() {
-    let db_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║     CONNECTION POOL EXHAUSTION CHAOS TEST                      ║");
@@ -35,7 +34,8 @@ async fn main() {
     // =========================================================================
     println!("\n━━━ Test 1: Single connection, 5 serial slow queries ━━━");
     {
-        let mut driver = PgDriver::connect_url(&db_url).await
+        let mut driver = PgDriver::connect_url(&db_url)
+            .await
             .expect("Failed to connect");
 
         let start = Instant::now();
@@ -52,9 +52,16 @@ async fn main() {
             }
         }
 
-        println!("  ok={} err={} elapsed={:.2}s",
-            successes, errors, start.elapsed().as_secs_f64());
-        assert_eq!(errors, 0, "Single connection serial queries should never fail");
+        println!(
+            "  ok={} err={} elapsed={:.2}s",
+            successes,
+            errors,
+            start.elapsed().as_secs_f64()
+        );
+        assert_eq!(
+            errors, 0,
+            "Single connection serial queries should never fail"
+        );
     }
 
     // =========================================================================
@@ -118,8 +125,16 @@ async fn main() {
         let err = errors.load(Ordering::Relaxed);
         let max_lat = max_latency_us.load(Ordering::Relaxed);
 
-        println!("  Workers: {} | Queries/worker: {}", num_workers, queries_per_worker);
-        println!("  ok={} err={} elapsed={:.2}s", ok, err, elapsed.as_secs_f64());
+        println!(
+            "  Workers: {} | Queries/worker: {}",
+            num_workers, queries_per_worker
+        );
+        println!(
+            "  ok={} err={} elapsed={:.2}s",
+            ok,
+            err,
+            elapsed.as_secs_f64()
+        );
         println!("  Max latency: {:.1}ms", max_lat as f64 / 1000.0);
         println!("  QPS: {:.0}", (ok + err) as f64 / elapsed.as_secs_f64());
     }
@@ -129,7 +144,8 @@ async fn main() {
     // =========================================================================
     println!("\n━━━ Test 3: Recovery — fast queries after heavy load ━━━");
     {
-        let mut driver = PgDriver::connect_url(&db_url).await
+        let mut driver = PgDriver::connect_url(&db_url)
+            .await
             .expect("Failed to connect for recovery test");
 
         let mut latencies = Vec::new();
@@ -144,32 +160,45 @@ async fn main() {
             }
         }
 
-        let avg_us = latencies.iter().map(|d| d.as_micros()).sum::<u128>() / latencies.len() as u128;
+        let avg_us =
+            latencies.iter().map(|d| d.as_micros()).sum::<u128>() / latencies.len() as u128;
         let max_us = latencies.iter().map(|d| d.as_micros()).max().unwrap();
-        println!("  20 fast queries: avg={:.2}ms max={:.2}ms — ✅ recovery confirmed",
-            avg_us as f64 / 1000.0, max_us as f64 / 1000.0);
+        println!(
+            "  20 fast queries: avg={:.2}ms max={:.2}ms — ✅ recovery confirmed",
+            avg_us as f64 / 1000.0,
+            max_us as f64 / 1000.0
+        );
     }
 
     // =========================================================================
-    // Test 4: Connection timeout / hang detection  
+    // Test 4: Connection timeout / hang detection
     // =========================================================================
     println!("\n━━━ Test 4: Timeout detection — 5s deadline on 3s query ━━━");
     {
-        let mut driver = PgDriver::connect_url(&db_url).await
+        let mut driver = PgDriver::connect_url(&db_url)
+            .await
             .expect("Failed to connect for timeout test");
 
         let start = Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             driver.fetch_raw("SELECT pg_sleep(3), 'slow' AS status"),
-        ).await;
+        )
+        .await;
 
         match result {
             Ok(Ok(_)) => {
-                println!("  Completed in {:.2}s (under deadline) ✅", start.elapsed().as_secs_f64());
+                println!(
+                    "  Completed in {:.2}s (under deadline) ✅",
+                    start.elapsed().as_secs_f64()
+                );
             }
             Ok(Err(e)) => {
-                println!("  Query error after {:.2}s: {} ⚠️", start.elapsed().as_secs_f64(), e);
+                println!(
+                    "  Query error after {:.2}s: {} ⚠️",
+                    start.elapsed().as_secs_f64(),
+                    e
+                );
             }
             Err(_) => {
                 println!("  ❌ TIMED OUT at 5s — query hung!");
@@ -203,7 +232,12 @@ async fn main() {
             }
         }
 
-        println!("  ok={} err={} elapsed={:.2}s", ok, err, start.elapsed().as_secs_f64());
+        println!(
+            "  ok={} err={} elapsed={:.2}s",
+            ok,
+            err,
+            start.elapsed().as_secs_f64()
+        );
     }
 
     // =========================================================================

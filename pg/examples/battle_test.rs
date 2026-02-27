@@ -1,9 +1,9 @@
 //! Battle test: QAIL queries against real PostgreSQL
-//! 
+//!
 //! Run with: cargo run --example battle_test
 
+use qail_core::prelude::{JoinKind, Operator, Qail, SortOrder, Value};
 use qail_pg::driver::PgDriver;
-use qail_core::prelude::{Qail, Operator, SortOrder, JoinKind, Value};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,10 +15,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========== SETUP TEST DATA ===========
     println!("� Setup Test Data");
     println!("------------------");
-    
+
     // Clean slate
     let _ = driver.execute(&Qail::del("inquiries")).await;
-    
+
     // Insert test data with various values
     for (name, email, service, status) in [
         ("Alice", "alice@test.com", "wedding", "new"),
@@ -57,47 +57,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("------------------");
 
     // Equals
-    let eq = Qail::get("inquiries").columns(["name"]).filter("status", Operator::Eq, "new");
+    let eq = Qail::get("inquiries")
+        .columns(["name"])
+        .filter("status", Operator::Eq, "new");
     match driver.fetch_all(&eq).await {
         Ok(rows) => println!("  ✓ WHERE = : {} rows (expect 3)", rows.len()),
         Err(e) => println!("  ✗ WHERE = : {}", e),
     }
 
     // Not Equals
-    let ne = Qail::get("inquiries").columns(["name"]).filter("status", Operator::Ne, "new");
+    let ne = Qail::get("inquiries")
+        .columns(["name"])
+        .filter("status", Operator::Ne, "new");
     match driver.fetch_all(&ne).await {
         Ok(rows) => println!("  ✓ WHERE != : {} rows (expect 2)", rows.len()),
         Err(e) => println!("  ✗ WHERE != : {}", e),
     }
 
     // LIKE
-    let like = Qail::get("inquiries").columns(["name"]).filter("name", Operator::Like, "A%");
+    let like = Qail::get("inquiries")
+        .columns(["name"])
+        .filter("name", Operator::Like, "A%");
     match driver.fetch_all(&like).await {
         Ok(rows) => println!("  ✓ WHERE LIKE: {} rows (expect 1: Alice)", rows.len()),
         Err(e) => println!("  ✗ WHERE LIKE: {}", e),
     }
 
     // ILIKE (case-insensitive)
-    let ilike = Qail::get("inquiries").columns(["name"]).filter("name", Operator::ILike, "%LI%");
+    let ilike = Qail::get("inquiries")
+        .columns(["name"])
+        .filter("name", Operator::ILike, "%LI%");
     match driver.fetch_all(&ilike).await {
         Ok(rows) => println!("  ✓ WHERE ILIKE: {} rows (Alice, Charlie)", rows.len()),
         Err(e) => println!("  ✗ WHERE ILIKE: {}", e),
     }
 
     // IN operator
-    let in_op = Qail::get("inquiries")
-        .columns(["name"])
-        .filter("service", Operator::In, Value::Array(vec![
+    let in_op = Qail::get("inquiries").columns(["name"]).filter(
+        "service",
+        Operator::In,
+        Value::Array(vec![
             Value::String("wedding".into()),
             Value::String("birthday".into()),
-        ]));
+        ]),
+    );
     match driver.fetch_all(&in_op).await {
         Ok(rows) => println!("  ✓ WHERE IN: {} rows (expect 4)", rows.len()),
         Err(e) => println!("  ✗ WHERE IN: {}", e),
     }
 
     // IS NULL (test on optional field)
-    let is_null = Qail::get("inquiries").columns(["name"]).filter("phone", Operator::IsNull, "");
+    let is_null = Qail::get("inquiries")
+        .columns(["name"])
+        .filter("phone", Operator::IsNull, "");
     match driver.fetch_all(&is_null).await {
         Ok(rows) => println!("  ✓ WHERE IS NULL: {} rows", rows.len()),
         Err(e) => println!("  ✗ WHERE IS NULL: {}", e),
@@ -110,7 +122,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // LEFT JOIN (self-join for testing)
     let left_join = Qail::get("inquiries")
         .columns(["inquiries.id", "inquiries.name"])
-        .join(JoinKind::Left, "inquiries AS i2", "inquiries.service", "i2.service")
+        .join(
+            JoinKind::Left,
+            "inquiries AS i2",
+            "inquiries.service",
+            "i2.service",
+        )
         .limit(5);
     match driver.fetch_all(&left_join).await {
         Ok(rows) => println!("  ✓ LEFT JOIN: {} rows", rows.len()),
@@ -220,4 +237,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

@@ -11,6 +11,8 @@
 pub mod analyzer;
 /// Abstract syntax tree types.
 pub mod ast;
+/// Schema branching.
+pub mod branch;
 /// Build-time schema validation.
 pub mod build;
 /// Code generation for typed schema modules.
@@ -27,10 +29,12 @@ pub mod migrate;
 pub mod parser;
 /// Row-level security context.
 pub mod rls;
-/// Schema branching.
-pub mod branch;
+/// AST structural sanitization for untrusted binary input.
+pub mod sanitize;
 /// Schema definitions for validation.
 pub mod schema;
+/// Filesystem schema source loader (`schema.qail` or modular `schema/`).
+pub mod schema_source;
 #[cfg(feature = "analyzer")]
 pub mod transformer;
 /// SQL transpiler (AST to SQL).
@@ -50,32 +54,75 @@ pub type Qail = ast::Qail;
 
 /// Common re-exports for convenient wildcard imports.
 pub mod prelude {
-    pub use crate::ast::*;
     pub use crate::ast::builders::{
-        // Column builders
-        col, param, star,
-        // Aggregate builders
-        count, count_distinct, count_filter, count_where, count_where_all,
-        sum, avg, max, min,
-        // Condition builders  
-        eq, ne, gt, gte, lt, lte, is_null, is_not_null, is_in, not_in, like, ilike,
-        cond,
-        // Literal builders
-        text, int, float, boolean, null, bind,
-        // Expression builders
-        cast, now, now_minus, now_plus, interval, binary, case_when,
-        // Function builders
-        coalesce, func, replace, nullif, concat,
-        // JSON builders
-        json, json_path, json_obj,
-        // Shortcut helpers
-        recent, recent_col, in_list, percentage, all, and, and3,
         // Extension traits
         ExprExt,
+        all,
+        and,
+        and3,
+        avg,
+        binary,
+        bind,
+        boolean,
+        case_when,
+        // Expression builders
+        cast,
+        // Function builders
+        coalesce,
+        // Column builders
+        col,
+        concat,
+        cond,
+        // Aggregate builders
+        count,
+        count_distinct,
+        count_filter,
+        count_where,
+        count_where_all,
+        // Condition builders
+        eq,
+        float,
+        func,
+        gt,
+        gte,
+        ilike,
+        in_list,
+        int,
+        interval,
+        is_in,
+        is_not_null,
+        is_null,
+        // JSON builders
+        json,
+        json_obj,
+        json_path,
+        like,
+        lt,
+        lte,
+        max,
+        min,
+        ne,
+        not_in,
+        now,
+        now_minus,
+        now_plus,
+        null,
+        nullif,
+        param,
+        percentage,
+        // Shortcut helpers
+        recent,
+        recent_col,
+        replace,
+        star,
+        sum,
+        // Literal builders
+        text,
     };
+    pub use crate::ast::*;
 
+    pub use crate::Qail;
     pub use crate::error::*;
     pub use crate::parser::parse;
     pub use crate::transpiler::ToSql;
-    pub use crate::Qail;
 }

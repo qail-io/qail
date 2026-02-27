@@ -19,11 +19,11 @@
 //! must bolt it on at the application layer. We set app.is_super_admin=true
 //! for this benchmark to bypass RLS so timing is fair.
 
+use qail_core::ast::{JoinKind, Operator, SortOrder};
 use qail_core::prelude::*;
-use qail_core::ast::{Operator, JoinKind, SortOrder};
 use qail_pg::PgDriver;
-use std::time::{Duration, Instant};
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 const ITERATIONS: usize = 1000;
 const WARMUP: usize = 5;
@@ -38,22 +38,41 @@ fn build_join_query() -> Qail {
             "odyssey_connections.is_enabled",
             "odyssey_connections.created_at",
         ])
-        .join(JoinKind::Left, "harbors AS origin", "odyssey_connections.origin_harbor_id", "origin.id")
-        .join(JoinKind::Left, "harbors AS dest", "odyssey_connections.destination_harbor_id", "dest.id")
-        .join(JoinKind::Left, "operators", "odyssey_connections.operator_id", "operators.id")
+        .join(
+            JoinKind::Left,
+            "harbors AS origin",
+            "odyssey_connections.origin_harbor_id",
+            "origin.id",
+        )
+        .join(
+            JoinKind::Left,
+            "harbors AS dest",
+            "odyssey_connections.destination_harbor_id",
+            "dest.id",
+        )
+        .join(
+            JoinKind::Left,
+            "operators",
+            "odyssey_connections.operator_id",
+            "operators.id",
+        )
         .column("origin.name AS origin_harbor")
         .column("dest.name AS dest_harbor")
         .column("operators.brand_name AS operator_name")
-        .filter("odyssey_connections.is_enabled", Operator::Eq, Value::Bool(true))
+        .filter(
+            "odyssey_connections.is_enabled",
+            Operator::Eq,
+            Value::Bool(true),
+        )
         .order_by("odyssey_connections.name", SortOrder::Asc)
         .limit(50)
 }
 
 /// Calculate median from a slice of durations.
-fn median(times: &mut Vec<Duration>) -> Duration {
+fn median(times: &mut [Duration]) -> Duration {
     times.sort();
     let mid = times.len() / 2;
-    if times.len() % 2 == 0 {
+    if times.len().is_multiple_of(2) {
         (times[mid - 1] + times[mid]) / 2
     } else {
         times[mid]
@@ -61,7 +80,7 @@ fn median(times: &mut Vec<Duration>) -> Duration {
 }
 
 /// Calculate p99 from a sorted slice.
-fn p99(times: &mut Vec<Duration>) -> Duration {
+fn p99(times: &mut [Duration]) -> Duration {
     times.sort();
     let idx = (times.len() as f64 * 0.99) as usize;
     times[idx.min(times.len() - 1)]
@@ -72,7 +91,9 @@ fn p99(times: &mut Vec<Duration>) -> Duration {
 // This is how Qail runs in production: prepared statement auto-caching.
 // ============================================================================
 
-async fn run_qail_prepared(driver: &mut PgDriver) -> Result<(usize, Duration, Vec<Duration>), Box<dyn std::error::Error>> {
+async fn run_qail_prepared(
+    driver: &mut PgDriver,
+) -> Result<(usize, Duration, Vec<Duration>), Box<dyn std::error::Error>> {
     let cmd = build_join_query();
 
     for _ in 0..WARMUP {
@@ -97,7 +118,9 @@ async fn run_qail_prepared(driver: &mut PgDriver) -> Result<(usize, Duration, Ve
 // Approach 2: Qail AST — UNCACHED (Parse+Bind+Execute every call)
 // ============================================================================
 
-async fn run_qail_uncached(driver: &mut PgDriver) -> Result<(usize, Duration, Vec<Duration>), Box<dyn std::error::Error>> {
+async fn run_qail_uncached(
+    driver: &mut PgDriver,
+) -> Result<(usize, Duration, Vec<Duration>), Box<dyn std::error::Error>> {
     let cmd = build_join_query();
 
     for _ in 0..WARMUP {
@@ -122,7 +145,9 @@ async fn run_qail_uncached(driver: &mut PgDriver) -> Result<(usize, Duration, Ve
 // Approach 3: GraphQL NAIVE — N+1 resolver pattern (worst case)
 // ============================================================================
 
-async fn run_graphql_naive(driver: &mut PgDriver) -> Result<(usize, Duration, usize, Vec<Duration>), Box<dyn std::error::Error>> {
+async fn run_graphql_naive(
+    driver: &mut PgDriver,
+) -> Result<(usize, Duration, usize, Vec<Duration>), Box<dyn std::error::Error>> {
     let root_cmd = Qail::get("odyssey_connections")
         .filter("is_enabled", Operator::Eq, Value::Bool(true))
         .order_by("name", SortOrder::Asc)
@@ -134,10 +159,28 @@ async fn run_graphql_naive(driver: &mut PgDriver) -> Result<(usize, Duration, us
             let origin_id = conn.text(2);
             let dest_id = conn.text(3);
             let op_id = conn.get_string(8);
-            let _ = driver.fetch_all_uncached(&Qail::get("harbors").filter("id", Operator::Eq, Value::String(origin_id)).limit(1)).await?;
-            let _ = driver.fetch_all_uncached(&Qail::get("harbors").filter("id", Operator::Eq, Value::String(dest_id)).limit(1)).await?;
+            let _ = driver
+                .fetch_all_uncached(
+                    &Qail::get("harbors")
+                        .filter("id", Operator::Eq, Value::String(origin_id))
+                        .limit(1),
+                )
+                .await?;
+            let _ = driver
+                .fetch_all_uncached(
+                    &Qail::get("harbors")
+                        .filter("id", Operator::Eq, Value::String(dest_id))
+                        .limit(1),
+                )
+                .await?;
             if let Some(oid) = op_id {
-                let _ = driver.fetch_all_uncached(&Qail::get("operators").filter("id", Operator::Eq, Value::String(oid)).limit(1)).await?;
+                let _ = driver
+                    .fetch_all_uncached(
+                        &Qail::get("operators")
+                            .filter("id", Operator::Eq, Value::String(oid))
+                            .limit(1),
+                    )
+                    .await?;
             }
         }
     }
@@ -158,14 +201,32 @@ async fn run_graphql_naive(driver: &mut PgDriver) -> Result<(usize, Duration, us
             let dest_id = conn.text(3);
             let op_id = conn.get_string(8);
 
-            let _ = driver.fetch_all_uncached(&Qail::get("harbors").filter("id", Operator::Eq, Value::String(origin_id)).limit(1)).await?;
+            let _ = driver
+                .fetch_all_uncached(
+                    &Qail::get("harbors")
+                        .filter("id", Operator::Eq, Value::String(origin_id))
+                        .limit(1),
+                )
+                .await?;
             total_queries += 1;
 
-            let _ = driver.fetch_all_uncached(&Qail::get("harbors").filter("id", Operator::Eq, Value::String(dest_id)).limit(1)).await?;
+            let _ = driver
+                .fetch_all_uncached(
+                    &Qail::get("harbors")
+                        .filter("id", Operator::Eq, Value::String(dest_id))
+                        .limit(1),
+                )
+                .await?;
             total_queries += 1;
 
             if let Some(oid) = op_id {
-                let _ = driver.fetch_all_uncached(&Qail::get("operators").filter("id", Operator::Eq, Value::String(oid)).limit(1)).await?;
+                let _ = driver
+                    .fetch_all_uncached(
+                        &Qail::get("operators")
+                            .filter("id", Operator::Eq, Value::String(oid))
+                            .limit(1),
+                    )
+                    .await?;
                 total_queries += 1;
             }
         }
@@ -179,7 +240,9 @@ async fn run_graphql_naive(driver: &mut PgDriver) -> Result<(usize, Duration, us
 // Approach 4: GraphQL + DataLoader — batched IN queries (realistic)
 // ============================================================================
 
-async fn run_graphql_dataloader(driver: &mut PgDriver) -> Result<(usize, Duration, usize, Vec<Duration>), Box<dyn std::error::Error>> {
+async fn run_graphql_dataloader(
+    driver: &mut PgDriver,
+) -> Result<(usize, Duration, usize, Vec<Duration>), Box<dyn std::error::Error>> {
     let root_cmd = Qail::get("odyssey_connections")
         .filter("is_enabled", Operator::Eq, Value::Bool(true))
         .order_by("name", SortOrder::Asc)
@@ -197,14 +260,36 @@ async fn run_graphql_dataloader(driver: &mut PgDriver) -> Result<(usize, Duratio
             }
         }
         let harbor_ids_list: Vec<String> = harbor_ids.into_iter().collect();
-        let _ = driver.fetch_all_uncached(
-            &Qail::get("harbors").filter("id", Operator::In, Value::Array(harbor_ids_list.iter().map(|s| Value::String(s.clone())).collect()))
-        ).await?;
+        let _ = driver
+            .fetch_all_uncached(
+                &Qail::get("harbors").filter(
+                    "id",
+                    Operator::In,
+                    Value::Array(
+                        harbor_ids_list
+                            .iter()
+                            .map(|s| Value::String(s.clone()))
+                            .collect(),
+                    ),
+                ),
+            )
+            .await?;
         let op_ids_list: Vec<String> = operator_ids.into_iter().collect();
         if !op_ids_list.is_empty() {
-            let _ = driver.fetch_all_uncached(
-                &Qail::get("operators").filter("id", Operator::In, Value::Array(op_ids_list.iter().map(|s| Value::String(s.clone())).collect()))
-            ).await?;
+            let _ = driver
+                .fetch_all_uncached(
+                    &Qail::get("operators").filter(
+                        "id",
+                        Operator::In,
+                        Value::Array(
+                            op_ids_list
+                                .iter()
+                                .map(|s| Value::String(s.clone()))
+                                .collect(),
+                        ),
+                    ),
+                )
+                .await?;
         }
     }
 
@@ -230,16 +315,38 @@ async fn run_graphql_dataloader(driver: &mut PgDriver) -> Result<(usize, Duratio
         }
 
         let harbor_ids_list: Vec<String> = harbor_ids.into_iter().collect();
-        let _ = driver.fetch_all_uncached(
-            &Qail::get("harbors").filter("id", Operator::In, Value::Array(harbor_ids_list.iter().map(|s| Value::String(s.clone())).collect()))
-        ).await?;
+        let _ = driver
+            .fetch_all_uncached(
+                &Qail::get("harbors").filter(
+                    "id",
+                    Operator::In,
+                    Value::Array(
+                        harbor_ids_list
+                            .iter()
+                            .map(|s| Value::String(s.clone()))
+                            .collect(),
+                    ),
+                ),
+            )
+            .await?;
         total_queries += 1;
 
         let op_ids_list: Vec<String> = operator_ids.into_iter().collect();
         if !op_ids_list.is_empty() {
-            let _ = driver.fetch_all_uncached(
-                &Qail::get("operators").filter("id", Operator::In, Value::Array(op_ids_list.iter().map(|s| Value::String(s.clone())).collect()))
-            ).await?;
+            let _ = driver
+                .fetch_all_uncached(
+                    &Qail::get("operators").filter(
+                        "id",
+                        Operator::In,
+                        Value::Array(
+                            op_ids_list
+                                .iter()
+                                .map(|s| Value::String(s.clone()))
+                                .collect(),
+                        ),
+                    ),
+                )
+                .await?;
             total_queries += 1;
         }
         per_iter.push(t.elapsed());
@@ -253,7 +360,9 @@ async fn run_graphql_dataloader(driver: &mut PgDriver) -> Result<(usize, Duratio
 // Approach 5: REST NAIVE — sequential calls + JSON serialization (worst case)
 // ============================================================================
 
-async fn run_rest_naive(driver: &mut PgDriver) -> Result<(usize, Duration, usize, Vec<Duration>), Box<dyn std::error::Error>> {
+async fn run_rest_naive(
+    driver: &mut PgDriver,
+) -> Result<(usize, Duration, usize, Vec<Duration>), Box<dyn std::error::Error>> {
     let root_cmd = Qail::get("odyssey_connections")
         .filter("is_enabled", Operator::Eq, Value::Bool(true))
         .order_by("name", SortOrder::Asc)
@@ -281,7 +390,9 @@ async fn run_rest_naive(driver: &mut PgDriver) -> Result<(usize, Duration, usize
         for conn in &connections {
             conn_data.push(format!(
                 "{{\"id\":\"{}\",\"odyssey_id\":\"{}\",\"name\":\"{}\"}}",
-                conn.text(0), conn.text(1), conn.text(4)
+                conn.text(0),
+                conn.text(1),
+                conn.text(4)
             ));
         }
 
@@ -290,26 +401,38 @@ async fn run_rest_naive(driver: &mut PgDriver) -> Result<(usize, Duration, usize
             let dest_id = conn.text(3);
             let op_id = conn.get_string(8);
 
-            let origin_rows = driver.fetch_all_uncached(
-                &Qail::get("harbors").filter("id", Operator::Eq, Value::String(origin_id)).limit(1)
-            ).await?;
+            let origin_rows = driver
+                .fetch_all_uncached(
+                    &Qail::get("harbors")
+                        .filter("id", Operator::Eq, Value::String(origin_id))
+                        .limit(1),
+                )
+                .await?;
             total_queries += 1;
             if let Some(h) = origin_rows.first() {
                 let _ = format!("{{\"name\":\"{}\"}}", h.text(1));
             }
 
-            let dest_rows = driver.fetch_all_uncached(
-                &Qail::get("harbors").filter("id", Operator::Eq, Value::String(dest_id)).limit(1)
-            ).await?;
+            let dest_rows = driver
+                .fetch_all_uncached(
+                    &Qail::get("harbors")
+                        .filter("id", Operator::Eq, Value::String(dest_id))
+                        .limit(1),
+                )
+                .await?;
             total_queries += 1;
             if let Some(h) = dest_rows.first() {
                 let _ = format!("{{\"name\":\"{}\"}}", h.text(1));
             }
 
             if let Some(oid) = op_id {
-                let _ = driver.fetch_all_uncached(
-                    &Qail::get("operators").filter("id", Operator::Eq, Value::String(oid)).limit(1)
-                ).await?;
+                let _ = driver
+                    .fetch_all_uncached(
+                        &Qail::get("operators")
+                            .filter("id", Operator::Eq, Value::String(oid))
+                            .limit(1),
+                    )
+                    .await?;
                 total_queries += 1;
             }
         }
@@ -323,7 +446,9 @@ async fn run_rest_naive(driver: &mut PgDriver) -> Result<(usize, Duration, usize
 // Approach 6: REST + ?expand= — server-side JOIN (realistic/optimized)
 // ============================================================================
 
-async fn run_rest_expand(driver: &mut PgDriver) -> Result<(usize, Duration, Vec<Duration>), Box<dyn std::error::Error>> {
+async fn run_rest_expand(
+    driver: &mut PgDriver,
+) -> Result<(usize, Duration, Vec<Duration>), Box<dyn std::error::Error>> {
     let cmd = build_join_query();
 
     for _ in 0..WARMUP {
@@ -331,7 +456,9 @@ async fn run_rest_expand(driver: &mut PgDriver) -> Result<(usize, Duration, Vec<
         let mut json_out = String::with_capacity(4096);
         json_out.push('[');
         for (i, r) in rows.iter().enumerate() {
-            if i > 0 { json_out.push(','); }
+            if i > 0 {
+                json_out.push(',');
+            }
             json_out.push_str(&format!(
                 "{{\"id\":\"{}\",\"name\":\"{}\",\"origin\":\"{}\",\"dest\":\"{}\",\"operator\":\"{}\"}}",
                 r.text(0), r.text(1), r.text(5), r.text(6), r.text(7),
@@ -353,7 +480,9 @@ async fn run_rest_expand(driver: &mut PgDriver) -> Result<(usize, Duration, Vec<
         let mut json_out = String::with_capacity(4096);
         json_out.push('[');
         for (i, r) in rows.iter().enumerate() {
-            if i > 0 { json_out.push(','); }
+            if i > 0 {
+                json_out.push(',');
+            }
             json_out.push_str(&format!(
                 "{{\"id\":\"{}\",\"name\":\"{}\",\"origin\":\"{}\",\"dest\":\"{}\",\"operator\":\"{}\"}}",
                 r.text(0), r.text(1), r.text(5), r.text(6), r.text(7),
@@ -375,19 +504,23 @@ async fn run_rest_expand(driver: &mut PgDriver) -> Result<(usize, Duration, Vec<
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║       Qail vs GraphQL vs REST — Comprehensive Benchmark        ║");
     println!("║                                                                ║");
     println!("║  Query: Connections + Harbors + Operators (3×JOIN)              ║");
-    println!("║  {} iterations × 6 approaches (+ {} warmup each)             ║", ITERATIONS, WARMUP);
+    println!(
+        "║  {} iterations × 6 approaches (+ {} warmup each)             ║",
+        ITERATIONS, WARMUP
+    );
     println!("╚══════════════════════════════════════════════════════════════════╝");
     println!();
 
     let mut driver = PgDriver::connect_url(&url).await?;
-    driver.execute_raw("SET app.is_super_admin = 'true'").await?;
+    driver
+        .execute_raw("SET app.is_super_admin = 'true'")
+        .await?;
     println!("✓ Connected (RLS bypassed for fair comparison)\n");
 
     // ── Global warmup ────────────────────────────────────────
@@ -427,10 +560,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("🎲 Randomized execution order: {}\n",
-        run_order.iter().map(|i| order[*i]).collect::<Vec<_>>().join(" → "));
+    println!(
+        "🎲 Randomized execution order: {}\n",
+        run_order
+            .iter()
+            .map(|i| order[*i])
+            .collect::<Vec<_>>()
+            .join(" → ")
+    );
 
-    let mut results: Vec<Option<(String, usize, Duration, Duration, Duration, usize, Vec<Duration>)>> = vec![None; 6];
+    type BenchResult = (String, usize, Duration, Duration, Duration, usize, Vec<Duration>);
+    let mut results: Vec<Option<BenchResult>> = vec![None; 6];
 
     for &idx in &run_order {
         match idx {
@@ -440,7 +580,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let med = median(&mut times);
                 let p = p99(&mut times);
                 let avg = total / ITERATIONS as u32;
-                println!("  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}", rows, avg, med, p);
+                println!(
+                    "  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}",
+                    rows, avg, med, p
+                );
                 println!("  Queries/iter: 1  │  Wire: Bind+Execute (no Parse)\n");
                 results[0] = Some(("Qail (prepared)".into(), rows, total, med, p, 1, times));
             }
@@ -450,7 +593,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let med = median(&mut times);
                 let p = p99(&mut times);
                 let avg = total / ITERATIONS as u32;
-                println!("  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}", rows, avg, med, p);
+                println!(
+                    "  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}",
+                    rows, avg, med, p
+                );
                 println!("  Queries/iter: 1  │  Wire: Parse+Bind+Execute\n");
                 results[1] = Some(("Qail (uncached)".into(), rows, total, med, p, 1, times));
             }
@@ -461,7 +607,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let p = p99(&mut times);
                 let avg = total / ITERATIONS as u32;
                 let qpi = q / ITERATIONS;
-                println!("  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}", rows, avg, med, p);
+                println!(
+                    "  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}",
+                    rows, avg, med, p
+                );
                 println!("  Queries/iter: ~{}  │  Total queries: {}\n", qpi, q);
                 results[2] = Some(("GraphQL naive".into(), rows, total, med, p, qpi, times));
             }
@@ -472,7 +621,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let p = p99(&mut times);
                 let avg = total / ITERATIONS as u32;
                 let qpi = q / ITERATIONS;
-                println!("  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}", rows, avg, med, p);
+                println!(
+                    "  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}",
+                    rows, avg, med, p
+                );
                 println!("  Queries/iter: ~{}  │  Total queries: {}\n", qpi, q);
                 results[3] = Some(("GraphQL+DataLoader".into(), rows, total, med, p, qpi, times));
             }
@@ -483,7 +635,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let p = p99(&mut times);
                 let avg = total / ITERATIONS as u32;
                 let qpi = q / ITERATIONS;
-                println!("  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}", rows, avg, med, p);
+                println!(
+                    "  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}",
+                    rows, avg, med, p
+                );
                 println!("  Queries/iter: ~{}  │  Total queries: {}\n", qpi, q);
                 results[4] = Some(("REST naive".into(), rows, total, med, p, qpi, times));
             }
@@ -493,11 +648,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let med = median(&mut times);
                 let p = p99(&mut times);
                 let avg = total / ITERATIONS as u32;
-                println!("  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}", rows, avg, med, p);
+                println!(
+                    "  Rows: {}  │  Avg: {:?}  │  Median: {:?}  │  p99: {:?}",
+                    rows, avg, med, p
+                );
                 println!("  Queries/iter: 1  │  Wire: Parse+Bind+Execute + JSON\n");
                 results[5] = Some(("REST+expand".into(), rows, total, med, p, 1, times));
             }
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
@@ -519,8 +677,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             format!("{:.1}× slower", ratio)
         };
-        println!("║  {}. {:<20} med {:<12?} p99 {:<12?} │ {} qry │ {} ║",
-            i + 1, name, med, p, qpi, ratio_str);
+        println!(
+            "║  {}. {:<20} med {:<12?} p99 {:<12?} │ {} qry │ {} ║",
+            i + 1,
+            name,
+            med,
+            p,
+            qpi,
+            ratio_str
+        );
     }
 
     println!("║                                                                    ║");
@@ -529,17 +694,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╠══════════════════════════════════════════════════════════════════════╣");
     println!("║                                                                    ║");
 
-    let qail_prep_med = sorted.iter().find(|r| r.0.contains("prepared")).map(|r| r.3);
-    let rest_exp_med = sorted.iter().find(|r| r.0.contains("REST+expand")).map(|r| r.3);
+    let qail_prep_med = sorted
+        .iter()
+        .find(|r| r.0.contains("prepared"))
+        .map(|r| r.3);
+    let rest_exp_med = sorted
+        .iter()
+        .find(|r| r.0.contains("REST+expand"))
+        .map(|r| r.3);
     let gql_naive_med = sorted.iter().find(|r| r.0 == "GraphQL naive").map(|r| r.3);
 
     if let (Some(qp), Some(re)) = (qail_prep_med, rest_exp_med) {
         let ratio = re.as_nanos() as f64 / qp.as_nanos() as f64;
-        println!("║  • Prepared stmt reuse: Qail {:.1}× faster than REST+expand        ║", ratio);
+        println!(
+            "║  • Prepared stmt reuse: Qail {:.1}× faster than REST+expand        ║",
+            ratio
+        );
     }
     if let (Some(qp), Some(gn)) = (qail_prep_med, gql_naive_med) {
         let ratio = gn.as_nanos() as f64 / qp.as_nanos() as f64;
-        println!("║  • Vs GraphQL N+1: Qail {:.0}× faster ({} vs 151 round trips)      ║", ratio, 1);
+        println!(
+            "║  • Vs GraphQL N+1: Qail {:.0}× faster ({} vs 151 round trips)      ║",
+            ratio, 1
+        );
     }
     println!("║  • Prepared statements skip Parse = Postgres skips query planning  ║");
     println!("║  • N+1 is catastrophic regardless of framework                     ║");

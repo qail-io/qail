@@ -76,16 +76,25 @@ impl QailVisitor {
     }
 
     /// Check if this is a Qail constructor call (generic - detects ALL constructors)
-    fn check_qailcmd_call(&mut self, path: &syn::ExprPath, args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>) {
-        let segments: Vec<_> = path.path.segments.iter().map(|s| s.ident.to_string()).collect();
-        
+    fn check_qailcmd_call(
+        &mut self,
+        path: &syn::ExprPath,
+        args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>,
+    ) {
+        let segments: Vec<_> = path
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+
         // Match Qail::* where * is any method
         if segments.len() >= 2 && segments[0] == "Qail" {
             let action = &segments[1];
-            
+
             let mut columns = Vec::new();
             let mut table = String::new();
-            
+
             for arg in args {
                 let extracted = Self::extract_strings_from_expr(arg);
                 if table.is_empty() && !extracted.is_empty() {
@@ -94,12 +103,18 @@ impl QailVisitor {
                     columns.extend(extracted);
                 }
             }
-            
+
             if !table.is_empty() {
                 self.patterns.push(RustPattern {
                     table: table.clone(),
                     columns,
-                    line: self.line_from_span(path.path.segments.first().map(|s| s.ident.span()).unwrap_or_else(Span::call_site)),
+                    line: self.line_from_span(
+                        path.path
+                            .segments
+                            .first()
+                            .map(|s| s.ident.span())
+                            .unwrap_or_else(Span::call_site),
+                    ),
                     snippet: format!("Qail::{}(\"{}\")", action, table),
                 });
             }
@@ -107,22 +122,40 @@ impl QailVisitor {
     }
 
     /// Check method calls for column/table references (generic - captures ALL string arguments)
-    fn check_method_call(&mut self, method: &str, args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>, span: Span) {
+    fn check_method_call(
+        &mut self,
+        method: &str,
+        args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>,
+        span: Span,
+    ) {
         let mut all_strings = Vec::new();
         for arg in args {
             all_strings.extend(Self::extract_strings_from_expr(arg));
         }
-        
+
         // If we found any strings, record this method call
         if !all_strings.is_empty() {
             let snippet = if all_strings.len() == 1 {
                 format!(".{}(\"{}\")", method, all_strings[0])
             } else if all_strings.len() <= 3 {
-                format!(".{}([{}])", method, all_strings.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", "))
+                format!(
+                    ".{}([{}])",
+                    method,
+                    all_strings
+                        .iter()
+                        .map(|s| format!("\"{}\"", s))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             } else {
-                format!(".{}([\"{}\" +{}])", method, all_strings[0], all_strings.len() - 1)
+                format!(
+                    ".{}([\"{}\" +{}])",
+                    method,
+                    all_strings[0],
+                    all_strings.len() - 1
+                )
             };
-            
+
             self.patterns.push(RustPattern {
                 table: String::new(), // Will be merged with parent
                 columns: all_strings,
@@ -209,7 +242,7 @@ impl RustAnalyzer {
         } else {
             Some(path.join("Cargo.toml"))
         };
-        
+
         cargo_toml.map(|p| p.exists()).unwrap_or(false)
     }
 
@@ -272,14 +305,16 @@ struct SqlDetectorVisitor {
 
 impl SqlDetectorVisitor {
     fn new() -> Self {
-        Self { matches: Vec::new() }
+        Self {
+            matches: Vec::new(),
+        }
     }
 
     /// Check if a string literal contains SQL
     fn check_string_literal(&mut self, lit: &LitStr) {
         let value = lit.value();
         let upper = value.to_uppercase();
-        
+
         let sql_type = if upper.contains("SELECT") && upper.contains("FROM") {
             "SELECT"
         } else if upper.contains("INSERT INTO") {
@@ -305,11 +340,12 @@ impl SqlDetectorVisitor {
             end_column: end.column, // 0-indexed, should be after closing quote
             sql_type: sql_type.to_string(),
             raw_sql: value.clone(),
-            suggested_qail: super::transformer::sql_to_qail(&value).unwrap_or_else(|_| "// Could not parse SQL".to_string()),
+            suggested_qail: super::transformer::sql_to_qail(&value)
+                .unwrap_or_else(|_| "// Could not parse SQL".to_string()),
         });
     }
 }
- 
+
 impl<'ast> Visit<'ast> for SqlDetectorVisitor {
     fn visit_lit(&mut self, lit: &'ast Lit) {
         if let Lit::Str(lit_str) = lit {
@@ -361,7 +397,12 @@ mod tests {
         // Should find "users" table
         assert!(visitor.patterns.iter().any(|p| p.table == "users"));
         // Should find "status" column
-        assert!(visitor.patterns.iter().any(|p| p.columns.contains(&"status".to_string())));
+        assert!(
+            visitor
+                .patterns
+                .iter()
+                .any(|p| p.columns.contains(&"status".to_string()))
+        );
     }
 
     #[test]
@@ -396,13 +437,19 @@ mod tests {
 
         let matches = detect_raw_sql(code);
         assert!(!matches.is_empty());
-        
+
         let qail = &matches[0].suggested_qail;
         // Should detect CTE pattern - generates separate CTE variables
-        assert!(qail.contains("CTE 'stats'") || qail.contains("stats_cte"), 
-            "Should generate CTE variable: {}", qail);
+        assert!(
+            qail.contains("CTE 'stats'") || qail.contains("stats_cte"),
+            "Should generate CTE variable: {}",
+            qail
+        );
         // Should find the source table
-        assert!(qail.contains("messages"), "Should find source table 'messages': {}", qail);
+        assert!(
+            qail.contains("messages"),
+            "Should find source table 'messages': {}",
+            qail
+        );
     }
 }
-

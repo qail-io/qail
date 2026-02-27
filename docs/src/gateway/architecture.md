@@ -57,8 +57,8 @@ Every HTTP request flows through a fixed, ordered pipeline:
  │     Result row cap: max_result_rows (configurable)        │
  ├───────────────────────────────────────────────────────────┤
  │  9. Connection Release                                    │
- │     DISCARD ALL → clears server-side state                │
- │     Client caches cleared (prepared stmts, column info)   │
+ │     COMMIT → resets txn-local RLS + statement_timeout      │
+ │     Prepared statement caches remain hot for reuse         │
  │     Connection returned to pool in clean state            │
  └───────────────────────────────────────────────────────────┘
        │
@@ -73,35 +73,28 @@ The connection pool enforces a strict lifecycle:
 
 ### Acquisition
 
-Three public methods — `acquire_raw()` is **crate-internal only**:
+Four public methods:
 
 | Method | RLS | Timeout | Use Case |
 |--------|-----|---------|----------|
 | `acquire_with_rls(ctx)` | ✅ Set | Default | Normal tenant queries |
 | `acquire_with_rls_timeout(ctx, ms)` | ✅ Set | Custom | Gateway with `statement_timeout_ms` |
 | `acquire_system()` | ✅ Empty | Default | Schema introspection, migrations |
-| `acquire_raw()` ⚠️ | ❌ None | Default | **Internal only** — requires `// SAFETY:` comment |
+| `acquire_raw()` ⚠️ | ❌ None | Default | Advanced/internal paths that set RLS immediately |
 
 ### Release
 
 Every connection release executes:
 
 ```sql
-DISCARD ALL;   -- Clears prepared statements, temp tables, GUCs, session state
+COMMIT;   -- Ends txn opened by RLS setup; resets transaction-local GUCs
 ```
 
-Followed by client-side cleanup:
+With transaction-local settings (`set_config(..., true)` + `SET LOCAL`), this resets:
+- RLS context GUCs
+- `statement_timeout`
 
-```rust
-conn.prepared_statements.clear();
-conn.stmt_cache.clear();
-conn.column_info_cache.clear();
-
-debug_assert!(conn.prepared_statements.is_empty(),
-    "INVARIANT VIOLATED: prepared statements survived DISCARD ALL");
-```
-
-This guarantees **zero state leakage** between tenants sharing the same physical connection.
+Prepared statement caches are intentionally preserved for performance while tenant context is reset on each release.
 
 ### Why `acquire_raw()` Is Restricted
 
@@ -136,9 +129,9 @@ Limits are configurable per role via `[gateway.role_overrides.<role>]` in `qail.
 
 When a connection is released and re-acquired by a different tenant:
 
-1. `DISCARD ALL` destroys all server-side state
-2. Client-side caches are cleared
-3. New RLS context is set for the new tenant
+1. `COMMIT` resets transaction-local RLS state and timeout
+2. New RLS context is set for the new tenant
+3. Query executes under the new tenant context
 
 The integration test `test_pool_connection_recycling_isolation` verifies this with a pool of size 1, forcing the same physical connection to serve two different tenants sequentially.
 

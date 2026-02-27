@@ -55,6 +55,8 @@ pub enum FrontendMessage {
     },
     /// SASL response (subsequent messages in SCRAM)
     SASLResponse(Vec<u8>),
+    /// GSS/SSPI response token.
+    GSSResponse(Vec<u8>),
     /// CopyFail — abort a COPY IN with an error message
     CopyFail(String),
     /// Close — explicitly release a prepared statement or portal
@@ -72,8 +74,18 @@ pub enum BackendMessage {
     /// Authentication request
     /// Authentication succeeded.
     AuthenticationOk,
+    /// Server requests cleartext password.
+    AuthenticationCleartextPassword,
     /// Server requests MD5-hashed password; salt provided.
     AuthenticationMD5Password([u8; 4]),
+    /// Server requests Kerberos V5 authentication.
+    AuthenticationKerberosV5,
+    /// Server requests GSSAPI authentication.
+    AuthenticationGSS,
+    /// Server sends GSSAPI/SSPI continuation token.
+    AuthenticationGSSContinue(Vec<u8>),
+    /// Server requests SSPI authentication.
+    AuthenticationSSPI,
     /// Server initiates SASL handshake with supported mechanisms.
     AuthenticationSASL(Vec<String>),
     /// SASL challenge from server.
@@ -110,6 +122,8 @@ pub enum BackendMessage {
     BindComplete,
     /// Describe returned no row description (e.g. for DML statements).
     NoData,
+    /// Execute reached row limit (`max_rows`) and suspended the portal.
+    PortalSuspended,
     /// Copy in response (server ready to receive COPY data)
     CopyInResponse {
         /// Overall format: 0 = text, 1 = binary.
@@ -252,6 +266,15 @@ impl FrontendMessage {
                 buf.extend_from_slice(data);
                 buf
             }
+            FrontendMessage::GSSResponse(data) => {
+                let mut buf = Vec::new();
+                buf.push(b'p');
+
+                let len = (data.len() + 4) as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(data);
+                buf
+            }
             FrontendMessage::PasswordMessage(password) => {
                 let mut buf = Vec::new();
                 buf.push(b'p');
@@ -261,7 +284,11 @@ impl FrontendMessage {
                 buf.extend_from_slice(content.as_bytes());
                 buf
             }
-            FrontendMessage::Parse { name, query, param_types } => {
+            FrontendMessage::Parse {
+                name,
+                query,
+                param_types,
+            } => {
                 let mut buf = Vec::new();
                 buf.push(b'P');
 
@@ -280,7 +307,11 @@ impl FrontendMessage {
                 buf.extend_from_slice(&content);
                 buf
             }
-            FrontendMessage::Bind { portal, statement, params } => {
+            FrontendMessage::Bind {
+                portal,
+                statement,
+                params,
+            } => {
                 let mut buf = Vec::new();
                 buf.push(b'B');
 
@@ -387,6 +418,7 @@ impl BackendMessage {
             b'2' => BackendMessage::BindComplete,
             b'3' => BackendMessage::CloseComplete,
             b'n' => BackendMessage::NoData,
+            b's' => BackendMessage::PortalSuspended,
             b't' => Self::decode_parameter_description(payload)?,
             b'G' => Self::decode_copy_in_response(payload)?,
             b'H' => Self::decode_copy_out_response(payload)?,
@@ -408,14 +440,23 @@ impl BackendMessage {
         let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         match auth_type {
             0 => Ok(BackendMessage::AuthenticationOk),
+            2 => Ok(BackendMessage::AuthenticationKerberosV5),
+            3 => Ok(BackendMessage::AuthenticationCleartextPassword),
             5 => {
                 if payload.len() < 8 {
                     return Err("MD5 auth payload too short (need salt)".to_string());
                 }
                 // SAFETY: Length is verified on the check above (payload.len() < 8 returns Err).
-                let salt: [u8; 4] = payload[4..8].try_into().expect("salt slice is exactly 4 bytes");
+                let salt: [u8; 4] = payload[4..8]
+                    .try_into()
+                    .expect("salt slice is exactly 4 bytes");
                 Ok(BackendMessage::AuthenticationMD5Password(salt))
             }
+            7 => Ok(BackendMessage::AuthenticationGSS),
+            8 => Ok(BackendMessage::AuthenticationGSSContinue(
+                payload[4..].to_vec(),
+            )),
+            9 => Ok(BackendMessage::AuthenticationSSPI),
             10 => {
                 // SASL - parse mechanism list
                 let mut mechanisms = Vec::new();
@@ -653,7 +694,10 @@ impl BackendMessage {
         for _ in 0..count {
             if pos + 4 <= payload.len() {
                 oids.push(u32::from_be_bytes([
-                    payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3],
+                    payload[pos],
+                    payload[pos + 1],
+                    payload[pos + 2],
+                    payload[pos + 3],
                 ]));
                 pos += 4;
             }
@@ -715,14 +759,19 @@ impl BackendMessage {
         // Channel name (null-terminated)
         let mut i = 4;
         let remaining = payload.get(i..).unwrap_or(&[]);
-        let channel_end = remaining.iter().position(|&b| b == 0)
+        let channel_end = remaining
+            .iter()
+            .position(|&b| b == 0)
             .ok_or("NotificationResponse: missing channel null terminator")?;
         let channel = String::from_utf8_lossy(&remaining[..channel_end]).to_string();
         i += channel_end + 1;
 
         // Payload (null-terminated)
         let remaining = payload.get(i..).unwrap_or(&[]);
-        let payload_end = remaining.iter().position(|&b| b == 0).unwrap_or(remaining.len());
+        let payload_end = remaining
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(remaining.len());
         let notification_payload = String::from_utf8_lossy(&remaining[..payload_end]).to_string();
 
         Ok(BackendMessage::NotificationResponse {
@@ -769,7 +818,11 @@ mod tests {
         let mut buf = vec![b'Z'];
         buf.extend_from_slice(&100u32.to_be_bytes());
         buf.extend_from_slice(&[0u8; 5]); // only 5 payload bytes, need 96
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Incomplete"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("Incomplete")
+        );
     }
 
     #[test]
@@ -794,7 +847,60 @@ mod tests {
     fn decode_auth_payload_too_short() {
         // Auth needs at least 4 bytes for type field
         let buf = wire_msg(b'R', &[0, 0]);
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("too short"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("too short")
+        );
+    }
+
+    #[test]
+    fn decode_auth_cleartext_password() {
+        let payload = 3i32.to_be_bytes();
+        let buf = wire_msg(b'R', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(
+            msg,
+            BackendMessage::AuthenticationCleartextPassword
+        ));
+    }
+
+    #[test]
+    fn decode_auth_kerberos_v5() {
+        let payload = 2i32.to_be_bytes();
+        let buf = wire_msg(b'R', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::AuthenticationKerberosV5));
+    }
+
+    #[test]
+    fn decode_auth_gss() {
+        let payload = 7i32.to_be_bytes();
+        let buf = wire_msg(b'R', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::AuthenticationGSS));
+    }
+
+    #[test]
+    fn decode_auth_sspi() {
+        let payload = 9i32.to_be_bytes();
+        let buf = wire_msg(b'R', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::AuthenticationSSPI));
+    }
+
+    #[test]
+    fn decode_auth_gss_continue() {
+        let mut payload = 8i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let buf = wire_msg(b'R', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::AuthenticationGSSContinue(token) => {
+                assert_eq!(token, vec![0xde, 0xad, 0xbe, 0xef]);
+            }
+            _ => panic!("Expected AuthenticationGSSContinue"),
+        }
     }
 
     #[test]
@@ -824,7 +930,11 @@ mod tests {
     fn decode_auth_unknown_type_returns_error() {
         let payload = 99i32.to_be_bytes();
         let buf = wire_msg(b'R', &payload);
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Unknown auth type"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("Unknown auth type")
+        );
     }
 
     #[test]
@@ -847,21 +957,30 @@ mod tests {
     fn decode_ready_for_query_idle() {
         let buf = wire_msg(b'Z', &[b'I']);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
-        assert!(matches!(msg, BackendMessage::ReadyForQuery(TransactionStatus::Idle)));
+        assert!(matches!(
+            msg,
+            BackendMessage::ReadyForQuery(TransactionStatus::Idle)
+        ));
     }
 
     #[test]
     fn decode_ready_for_query_in_transaction() {
         let buf = wire_msg(b'Z', &[b'T']);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
-        assert!(matches!(msg, BackendMessage::ReadyForQuery(TransactionStatus::InBlock)));
+        assert!(matches!(
+            msg,
+            BackendMessage::ReadyForQuery(TransactionStatus::InBlock)
+        ));
     }
 
     #[test]
     fn decode_ready_for_query_failed() {
         let buf = wire_msg(b'Z', &[b'E']);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
-        assert!(matches!(msg, BackendMessage::ReadyForQuery(TransactionStatus::Failed)));
+        assert!(matches!(
+            msg,
+            BackendMessage::ReadyForQuery(TransactionStatus::Failed)
+        ));
     }
 
     #[test]
@@ -873,7 +992,11 @@ mod tests {
     #[test]
     fn decode_ready_for_query_unknown_status() {
         let buf = wire_msg(b'Z', &[b'X']);
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Unknown transaction"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("Unknown transaction")
+        );
     }
 
     // ========== DataRow tests ==========
@@ -925,7 +1048,11 @@ mod tests {
     fn decode_data_row_negative_count_returns_error() {
         let payload = (-1i16).to_be_bytes();
         let buf = wire_msg(b'D', &payload);
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("invalid column count"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("invalid column count")
+        );
     }
 
     #[test]
@@ -934,13 +1061,21 @@ mod tests {
         // Claims 100 bytes of data but payload ends immediately
         payload.extend_from_slice(&100i32.to_be_bytes());
         let buf = wire_msg(b'D', &payload);
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("truncated"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("truncated")
+        );
     }
 
     #[test]
     fn decode_data_row_payload_too_short() {
         let buf = wire_msg(b'D', &[0]); // only 1 byte, need 2
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("too short"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("too short")
+        );
     }
 
     #[test]
@@ -968,7 +1103,11 @@ mod tests {
     fn decode_row_description_negative_count() {
         let payload = (-1i16).to_be_bytes();
         let buf = wire_msg(b'T', &payload);
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("invalid field count"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("invalid field count")
+        );
     }
 
     #[test]
@@ -977,13 +1116,17 @@ mod tests {
         payload.extend_from_slice(b"id\0"); // field name
         // Missing 18 bytes of fixed field data
         let buf = wire_msg(b'T', &payload);
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("truncated"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("truncated")
+        );
     }
 
     #[test]
     fn decode_row_description_single_field() {
         let mut payload = 1i16.to_be_bytes().to_vec();
-        payload.extend_from_slice(b"id\0");         // name
+        payload.extend_from_slice(b"id\0"); // name
         payload.extend_from_slice(&0u32.to_be_bytes()); // table_oid
         payload.extend_from_slice(&0i16.to_be_bytes()); // column_attr
         payload.extend_from_slice(&23u32.to_be_bytes()); // type_oid (int4)
@@ -1011,7 +1154,10 @@ mod tests {
         let buf = wire_msg(b'K', &payload);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
         match msg {
-            BackendMessage::BackendKeyData { process_id, secret_key } => {
+            BackendMessage::BackendKeyData {
+                process_id,
+                secret_key,
+            } => {
                 assert_eq!(process_id, 42);
                 assert_eq!(secret_key, 99);
             }
@@ -1022,7 +1168,11 @@ mod tests {
     #[test]
     fn decode_backend_key_too_short() {
         let buf = wire_msg(b'K', &[0, 0, 0, 42]); // only 4 bytes, need 8
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("too short"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("too short")
+        );
     }
 
     // ========== ErrorResponse tests ==========
@@ -1030,9 +1180,12 @@ mod tests {
     #[test]
     fn decode_error_response_with_fields() {
         let mut payload = Vec::new();
-        payload.push(b'S'); payload.extend_from_slice(b"ERROR\0");
-        payload.push(b'C'); payload.extend_from_slice(b"42P01\0");
-        payload.push(b'M'); payload.extend_from_slice(b"relation does not exist\0");
+        payload.push(b'S');
+        payload.extend_from_slice(b"ERROR\0");
+        payload.push(b'C');
+        payload.extend_from_slice(b"42P01\0");
+        payload.push(b'M');
+        payload.extend_from_slice(b"relation does not exist\0");
         payload.push(0); // terminator
         let buf = wire_msg(b'E', &payload);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
@@ -1094,6 +1247,13 @@ mod tests {
     }
 
     #[test]
+    fn decode_portal_suspended() {
+        let buf = wire_msg(b's', &[]);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::PortalSuspended));
+    }
+
+    #[test]
     fn decode_empty_query_response() {
         let buf = wire_msg(b'I', &[]);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
@@ -1110,7 +1270,11 @@ mod tests {
         let buf = wire_msg(b'A', &payload);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
         match msg {
-            BackendMessage::NotificationResponse { process_id, channel, payload } => {
+            BackendMessage::NotificationResponse {
+                process_id,
+                channel,
+                payload,
+            } => {
                 assert_eq!(process_id, 1);
                 assert_eq!(channel, "my_channel");
                 assert_eq!(payload, "hello world");
@@ -1122,7 +1286,11 @@ mod tests {
     #[test]
     fn decode_notification_too_short() {
         let buf = wire_msg(b'A', &[0, 0]); // need at least 4 bytes
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("too short"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("too short")
+        );
     }
 
     // ========== CopyInResponse / CopyOutResponse tests ==========
@@ -1147,7 +1315,10 @@ mod tests {
         let buf = wire_msg(b'G', &payload);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
         match msg {
-            BackendMessage::CopyInResponse { format, column_formats } => {
+            BackendMessage::CopyInResponse {
+                format,
+                column_formats,
+            } => {
                 assert_eq!(format, 0);
                 assert_eq!(column_formats, vec![0]);
             }
@@ -1169,7 +1340,10 @@ mod tests {
         let mut buf = wire_msg(b'Z', &[b'I']);
         buf.extend_from_slice(&wire_msg(b'Z', &[b'T'])); // second message appended
         let (msg, consumed) = BackendMessage::decode(&buf).unwrap();
-        assert!(matches!(msg, BackendMessage::ReadyForQuery(TransactionStatus::Idle)));
+        assert!(matches!(
+            msg,
+            BackendMessage::ReadyForQuery(TransactionStatus::Idle)
+        ));
         // Should only consume the first message
         assert_eq!(consumed, 6); // 1 type + 4 length + 1 payload
     }
@@ -1184,10 +1358,19 @@ mod tests {
     }
 
     #[test]
+    fn encode_gss_response() {
+        let msg = FrontendMessage::GSSResponse(vec![1, 2, 3, 4]);
+        let encoded = msg.encode();
+        assert_eq!(encoded[0], b'p');
+        let len = i32::from_be_bytes([encoded[1], encoded[2], encoded[3], encoded[4]]);
+        assert_eq!(len, 8);
+        assert_eq!(&encoded[5..], &[1, 2, 3, 4]);
+    }
+
+    #[test]
     fn encode_terminate() {
         let msg = FrontendMessage::Terminate;
         let encoded = msg.encode();
         assert_eq!(encoded, vec![b'X', 0, 0, 0, 4]);
     }
 }
-

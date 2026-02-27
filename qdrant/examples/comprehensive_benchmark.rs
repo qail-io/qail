@@ -8,9 +8,9 @@
 //!
 //! Requires Qdrant running on localhost:6333/6334
 
-use std::time::Instant;
 use qail_qdrant::prelude::Distance;
-use qail_qdrant::{QdrantDriver, Point};
+use qail_qdrant::{Point, QdrantDriver};
+use std::time::Instant;
 
 // Official client
 use qdrant_client::Qdrant;
@@ -39,17 +39,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rest_driver
         .create_collection(COLLECTION_NAME, VECTOR_DIM as u64, Distance::Cosine, false)
         .await?;
-    println!("   ✓ Collection '{}' created ({} dimensions)", COLLECTION_NAME, VECTOR_DIM);
+    println!(
+        "   ✓ Collection '{}' created ({} dimensions)",
+        COLLECTION_NAME, VECTOR_DIM
+    );
 
     // Generate test data
-    println!("   ✓ Generating {} test points with {}D vectors...", NUM_POINTS, VECTOR_DIM);
+    println!(
+        "   ✓ Generating {} test points with {}D vectors...",
+        NUM_POINTS, VECTOR_DIM
+    );
     let points: Vec<Point> = (0..NUM_POINTS)
         .map(|i| {
             let vector: Vec<f32> = (0..VECTOR_DIM)
                 .map(|j| ((i + j) as f32 / VECTOR_DIM as f32).sin())
                 .collect();
-            Point::new_num(i as u64, vector)
-                .with_payload("index", i as i64)
+            Point::new_num(i as u64, vector).with_payload("index", i as i64)
         })
         .collect();
 
@@ -76,9 +81,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Official client
     let official_start = Instant::now();
     for vector in &query_vectors {
-        let _ = official_client.search_points(
-            SearchPointsBuilder::new(COLLECTION_NAME, vector.clone(), 10)
-        ).await?;
+        let _ = official_client
+            .search_points(SearchPointsBuilder::new(
+                COLLECTION_NAME,
+                vector.clone(),
+                10,
+            ))
+            .await?;
     }
     let official_duration = official_start.elapsed();
     let official_per_op = official_duration / NUM_SEARCHES as u32;
@@ -86,21 +95,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // QAIL
     let qail_start = Instant::now();
     for vector in &query_vectors {
-        let _ = grpc_driver.search(COLLECTION_NAME, vector, 10, None).await?;
+        let _ = grpc_driver
+            .search(COLLECTION_NAME, vector, 10, None)
+            .await?;
     }
     let qail_duration = qail_start.elapsed();
     let qail_per_op = qail_duration / NUM_SEARCHES as u32;
 
     println!("   Official: {:?}/query", official_per_op);
     println!("   QAIL:     {:?}/query", qail_per_op);
-    println!("   Result:   QAIL is {:.2}x faster\n", 
-        official_duration.as_secs_f64() / qail_duration.as_secs_f64());
+    println!(
+        "   Result:   QAIL is {:.2}x faster\n",
+        official_duration.as_secs_f64() / qail_duration.as_secs_f64()
+    );
 
     // ═══════════════════════════════════════════════════════════════
     // Test 2: Pipeline/Batch Queries
     // ═══════════════════════════════════════════════════════════════
     println!("═══════════════════════════════════════════════════════════════");
-    println!("📊 Test 2: Pipeline ({} batches of {} queries)", NUM_SEARCHES / BATCH_SIZE, BATCH_SIZE);
+    println!(
+        "📊 Test 2: Pipeline ({} batches of {} queries)",
+        NUM_SEARCHES / BATCH_SIZE,
+        BATCH_SIZE
+    );
     println!("───────────────────────────────────────────────────────────────");
 
     // Official client (sequential batches)
@@ -111,9 +128,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let client = official_client.clone();
             let vec = vector.clone();
             tasks.push(tokio::spawn(async move {
-                client.search_points(
-                    SearchPointsBuilder::new(COLLECTION_NAME, vec, 10)
-                ).await
+                client
+                    .search_points(SearchPointsBuilder::new(COLLECTION_NAME, vec, 10))
+                    .await
             }));
         }
         for task in tasks {
@@ -139,14 +156,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let qail_batch_duration = qail_batch_start.elapsed();
 
-    println!("   Official: {:?} total ({:?}/batch)", 
-        official_batch_duration, 
-        official_batch_duration / (NUM_SEARCHES / BATCH_SIZE) as u32);
-    println!("   QAIL:     {:?} total ({:?}/batch)", 
+    println!(
+        "   Official: {:?} total ({:?}/batch)",
+        official_batch_duration,
+        official_batch_duration / (NUM_SEARCHES / BATCH_SIZE) as u32
+    );
+    println!(
+        "   QAIL:     {:?} total ({:?}/batch)",
         qail_batch_duration,
-        qail_batch_duration / (NUM_SEARCHES / BATCH_SIZE) as u32);
-    println!("   Result:   QAIL is {:.2}x faster\n", 
-        official_batch_duration.as_secs_f64() / qail_batch_duration.as_secs_f64());
+        qail_batch_duration / (NUM_SEARCHES / BATCH_SIZE) as u32
+    );
+    println!(
+        "   Result:   QAIL is {:.2}x faster\n",
+        official_batch_duration.as_secs_f64() / qail_batch_duration.as_secs_f64()
+    );
 
     // ═══════════════════════════════════════════════════════════════
     // Final Summary
@@ -154,10 +177,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("═══════════════════════════════════════════════════════════════");
     println!("📈 FINAL SUMMARY");
     println!("───────────────────────────────────────────────────────────────");
-    println!("   Test 1 (Single):   QAIL {:.2}x faster", 
-        official_duration.as_secs_f64() / qail_duration.as_secs_f64());
-    println!("   Test 2 (Pipeline): QAIL {:.2}x faster", 
-        official_batch_duration.as_secs_f64() / qail_batch_duration.as_secs_f64());
+    println!(
+        "   Test 1 (Single):   QAIL {:.2}x faster",
+        official_duration.as_secs_f64() / qail_duration.as_secs_f64()
+    );
+    println!(
+        "   Test 2 (Pipeline): QAIL {:.2}x faster",
+        official_batch_duration.as_secs_f64() / qail_batch_duration.as_secs_f64()
+    );
 
     // Cleanup
     println!("\n🧹 Cleaning up...");

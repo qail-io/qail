@@ -1,8 +1,8 @@
 //! Migration plan (dry-run)
 
-use anyhow::Result;
 use crate::colors::*;
-use qail_core::migrate::{diff_schemas, parse_qail};
+use anyhow::Result;
+use qail_core::migrate::{diff_schemas, parse_qail_file};
 
 use crate::sql_gen::{cmd_to_sql, generate_rollback_sql};
 
@@ -19,14 +19,9 @@ pub fn migrate_plan(schema_diff_path: &str, output: Option<&str>) -> Result<()> 
         println!("  {} → {}", old_path.yellow(), new_path.yellow());
         println!();
 
-        let old_content = std::fs::read_to_string(old_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
-        let new_content = std::fs::read_to_string(new_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-
-        let old_schema = parse_qail(&old_content)
+        let old_schema = parse_qail_file(old_path)
             .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
-        let new_schema = parse_qail(&new_content)
+        let new_schema = parse_qail_file(new_path)
             .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
         diff_schemas(&old_schema, &new_schema)

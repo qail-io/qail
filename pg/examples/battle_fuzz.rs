@@ -1,5 +1,5 @@
 //! BATTLE TEST #7: Type Fuzzing (Panic Safety)
-//! 
+//!
 //! Purpose: Ensure the driver handles invalid data conversions safely (no panics).
 //! Fail Condition: Process crash (Panic).
 //!
@@ -13,9 +13,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║  BATTLE TEST #7: The Type Fuzzer 🎭                       ║");
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 
-    let mut driver = PgDriver::connect_with_password(
-        "localhost", 5432, "postgres", "postgres", "postgres"
-    ).await?;
+    let mut driver =
+        PgDriver::connect_with_password("localhost", 5432, "postgres", "postgres", "postgres")
+            .await?;
 
     println!("1️⃣  Testing Integer Overflow...");
     // 9,999,999,999 fits in i64 but not i32
@@ -49,14 +49,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. It does NOT panic.
     // 2. It returns the hex string (safe) OR None (if we were forcing binary).
     let rows = driver.fetch_raw("SELECT E'\\\\xFF'::bytea").await?;
-    let val_opt = rows[0].get_string(0); 
+    let val_opt = rows[0].get_string(0);
     match val_opt {
         None => println!("   ✅ PASS: Returned None (Strict parsing)."),
         Some(v) => {
             if v == "\\xff" {
-                 println!("   ✅ PASS: Received valid hex string \"\\xff\" (Standard Postgres Text Format). No Panic.");
+                println!(
+                    "   ✅ PASS: Received valid hex string \"\\xff\" (Standard Postgres Text Format). No Panic."
+                );
             } else {
-                 println!("   ⚠️  PASS? Received string: {:?}. Is this expected?", v);
+                println!("   ⚠️  PASS? Received string: {:?}. Is this expected?", v);
             }
         }
     }

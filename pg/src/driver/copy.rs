@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 /// Quote a SQL identifier to prevent injection.
 /// Wraps in double-quotes, escapes embedded double-quotes, and strips NUL bytes.
 fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"" , ident.replace('\0', "").replace('"', "\"\""))
+    format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
 }
 
 impl PgConnection {
@@ -26,7 +26,11 @@ impl PgConnection {
         use crate::protocol::encode_copy_batch;
 
         let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
-        let sql = format!("COPY {} ({}) FROM STDIN", quote_ident(table), cols.join(", "));
+        let sql = format!(
+            "COPY {} ({}) FROM STDIN",
+            quote_ident(table),
+            cols.join(", ")
+        );
 
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(&sql);
@@ -38,7 +42,7 @@ impl PgConnection {
             match msg {
                 BackendMessage::CopyInResponse { .. } => break,
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }
@@ -65,7 +69,7 @@ impl PgConnection {
                     return Ok(affected);
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }
@@ -85,7 +89,11 @@ impl PgConnection {
         data: &[u8],
     ) -> PgResult<u64> {
         let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
-        let sql = format!("COPY {} ({}) FROM STDIN", quote_ident(table), cols.join(", "));
+        let sql = format!(
+            "COPY {} ({}) FROM STDIN",
+            quote_ident(table),
+            cols.join(", ")
+        );
 
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(&sql);
@@ -97,7 +105,7 @@ impl PgConnection {
             match msg {
                 BackendMessage::CopyInResponse { .. } => break,
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }
@@ -121,7 +129,7 @@ impl PgConnection {
                     return Ok(affected);
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }
@@ -156,7 +164,6 @@ impl PgConnection {
     /// let rows = conn.copy_export(&cmd).await?;
     /// ```
     pub async fn copy_export(&mut self, cmd: &Qail) -> PgResult<Vec<Vec<String>>> {
-
         if cmd.action != Action::Export {
             return Err(PgError::Query(
                 "copy_export requires Qail::Export action".to_string(),
@@ -164,7 +171,8 @@ impl PgConnection {
         }
 
         // Encode command to SQL using AST encoder
-        let (sql, _params) = AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
+        let (sql, _params) =
+            AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
 
         // Send COPY command
         let bytes = PgEncoder::encode_query_string(&sql);
@@ -176,7 +184,7 @@ impl PgConnection {
             match msg {
                 BackendMessage::CopyOutResponse { .. } => break,
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }
@@ -199,7 +207,7 @@ impl PgConnection {
                     return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }
@@ -224,7 +232,7 @@ impl PgConnection {
             match msg {
                 BackendMessage::CopyOutResponse { .. } => break,
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }
@@ -244,7 +252,7 @@ impl PgConnection {
                     return Ok(data);
                 }
                 BackendMessage::ErrorResponse(err) => {
-                    return Err(PgError::Query(err.message));
+                    return Err(PgError::QueryServer(err.into()));
                 }
                 _ => {}
             }

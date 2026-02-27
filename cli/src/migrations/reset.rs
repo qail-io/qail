@@ -4,25 +4,24 @@
 //!
 //! Equivalent to: down (current → empty) + clear history + up (empty → target)
 
-use anyhow::Result;
 use crate::colors::*;
+use anyhow::Result;
 use qail_core::migrate::{diff_schemas, parse_qail};
 use qail_pg::PgDriver;
 
-use crate::migrations::migration_table_ddl;
+use crate::migrations::{
+    MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
+    write_migration_receipt,
+};
 use crate::util::parse_pg_url;
 
 /// Reset database: drop all objects, clear migration history, re-apply target schema.
 pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
-    println!(
-        "{} {}",
-        "🔄 Resetting database:".cyan().bold(),
-        url
-    );
+    println!("{} {}", "🔄 Resetting database:".cyan().bold(), url);
     println!();
 
     // Parse target schema
-    let target_content = std::fs::read_to_string(schema_file)
+    let target_content = qail_core::schema_source::read_qail_schema_source(schema_file)
         .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", schema_file, e))?;
     let target_schema = parse_qail(&target_content)
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", schema_file, e))?;
@@ -48,8 +47,7 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
     };
 
     // Ensure migration table exists
-    driver
-        .execute_raw(&migration_table_ddl())
+    ensure_migration_table(&mut driver)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bootstrap migration table: {}", e))?;
 
@@ -57,11 +55,7 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
     if drop_cmds.is_empty() {
         println!("  {} No objects to drop", "○".dimmed());
     } else {
-        println!(
-            "  {} Dropping {} object(s)...",
-            "↓".red(),
-            drop_cmds.len()
-        );
+        println!("  {} Dropping {} object(s)...", "↓".red(), drop_cmds.len());
 
         driver
             .begin()
@@ -89,7 +83,21 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
     // === Phase 2: Clear migration history ===
     println!("  {} Clearing migration history...", "⊘".yellow());
     let clear_cmd = qail_core::prelude::Qail::del("_qail_migrations");
-    driver.execute(&clear_cmd).await.ok(); // Ignore if empty
+    match driver.execute(&clear_cmd).await {
+        Ok(_) => println!("  {} Cleared migration history", "✓".green()),
+        Err(e) => {
+            let msg = e.to_string();
+            // Table doesn't exist yet — that's fine for reset
+            if msg.contains("does not exist") || msg.contains("42P01") {
+                println!("  {} No migration history to clear", "○".dimmed());
+            } else {
+                anyhow::bail!(
+                    "Failed to clear migration history (stale rows may cause drift): {}",
+                    e
+                );
+            }
+        }
+    }
 
     // === Phase 3: CREATE everything ===
     if create_cmds.is_empty() {
@@ -100,6 +108,9 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
             "↑".green(),
             create_cmds.len()
         );
+
+        // Capture start time before create phase for accurate receipts
+        let started_ms = now_epoch_ms();
 
         driver
             .begin()
@@ -127,16 +138,27 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
             target_content.hash(&mut hasher);
             format!("{:x}", hasher.finish())
         };
-
-        let record_sql = format!(
-            "INSERT INTO _qail_migrations (version, name, checksum, sql_up) VALUES ('{}', '{}', '{}', '{}')",
-            version,
-            name,
+        let finished_ms = now_epoch_ms();
+        let receipt = MigrationReceipt {
+            version: version.clone(),
+            name: name.clone(),
             checksum,
-            "-- reset migration"
-        );
-        driver
-            .execute_raw(&record_sql)
+            sql_up: "-- reset migration".to_string(),
+            git_sha: runtime_git_sha(),
+            qail_version: env!("CARGO_PKG_VERSION").to_string(),
+            actor: runtime_actor(),
+            started_at_ms: Some(started_ms),
+            finished_at_ms: Some(finished_ms),
+            duration_ms: Some(finished_ms.saturating_sub(started_ms)),
+            affected_rows_est: None,
+            risk_summary: Some(format!(
+                "source=reset;drop_cmds={};create_cmds={}",
+                drop_cmds.len(),
+                create_cmds.len()
+            )),
+            shadow_checksum: None,
+        };
+        write_migration_receipt(&mut driver, &receipt)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to record migration: {}", e))?;
 

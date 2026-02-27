@@ -1,3 +1,5 @@
+mod advanced;
+mod cte;
 mod ddl;
 mod dml;
 mod get;

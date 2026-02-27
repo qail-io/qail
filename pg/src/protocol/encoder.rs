@@ -11,14 +11,48 @@
 //!
 //! The async I/O layer (Layer 3) consumes these bytes.
 
-use bytes::BytesMut;
 use super::EncodeError;
+use bytes::BytesMut;
 
 /// Takes a Qail and produces wire protocol bytes.
 /// This is the "Visitor" in the visitor pattern.
 pub struct PgEncoder;
 
 impl PgEncoder {
+    /// Wire format code for text columns.
+    pub const FORMAT_TEXT: i16 = 0;
+    /// Wire format code for binary columns.
+    pub const FORMAT_BINARY: i16 = 1;
+
+    #[inline(always)]
+    fn result_format_wire_len(result_format: i16) -> usize {
+        if result_format == Self::FORMAT_TEXT {
+            2 // result format count = 0
+        } else {
+            4 // result format count = 1 + one format code
+        }
+    }
+
+    #[inline(always)]
+    fn encode_result_formats_vec(content: &mut Vec<u8>, result_format: i16) {
+        if result_format == Self::FORMAT_TEXT {
+            content.extend_from_slice(&0i16.to_be_bytes());
+        } else {
+            content.extend_from_slice(&1i16.to_be_bytes());
+            content.extend_from_slice(&result_format.to_be_bytes());
+        }
+    }
+
+    #[inline(always)]
+    fn encode_result_formats_bytesmut(buf: &mut BytesMut, result_format: i16) {
+        if result_format == Self::FORMAT_TEXT {
+            buf.extend_from_slice(&0i16.to_be_bytes());
+        } else {
+            buf.extend_from_slice(&1i16.to_be_bytes());
+            buf.extend_from_slice(&result_format.to_be_bytes());
+        }
+    }
+
     /// Encode a raw SQL string as a Simple Query message.
     /// Wire format:
     /// - 'Q' (1 byte) - message type
@@ -117,14 +151,32 @@ impl PgEncoder {
     /// - format code count (2 bytes) - we use 0 (all text)
     /// - parameter count (2 bytes)
     /// - for each parameter: length (4 bytes, -1 for NULL), data
-    /// - result format count (2 bytes) - we use 0 (all text)
+    /// - result format count + codes
     ///
     /// # Arguments
     ///
     /// * `portal` — Destination portal name (empty string for unnamed).
     /// * `statement` — Source prepared statement name (empty string for unnamed).
     /// * `params` — Parameter values; `None` entries encode as SQL NULL.
-    pub fn encode_bind(portal: &str, statement: &str, params: &[Option<Vec<u8>>]) -> Result<BytesMut, EncodeError> {
+    pub fn encode_bind(
+        portal: &str,
+        statement: &str,
+        params: &[Option<Vec<u8>>],
+    ) -> Result<BytesMut, EncodeError> {
+        Self::encode_bind_with_result_format(portal, statement, params, Self::FORMAT_TEXT)
+    }
+
+    /// Encode a Bind message with explicit result-column format.
+    ///
+    /// `result_format` is PostgreSQL wire format code: `0 = text`, `1 = binary`.
+    /// For `0`, this encodes "result format count = 0" (server default text).
+    /// For non-zero codes, this encodes one explicit result format code.
+    pub fn encode_bind_with_result_format(
+        portal: &str,
+        statement: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> Result<BytesMut, EncodeError> {
         if params.len() > i16::MAX as usize {
             return Err(EncodeError::TooManyParameters(params.len()));
         }
@@ -167,8 +219,8 @@ impl PgEncoder {
             }
         }
 
-        // Result format codes count (0 = use default text format)
-        content.extend_from_slice(&0i16.to_be_bytes());
+        // Result format codes: default text (count=0) or explicit code.
+        Self::encode_result_formats_vec(&mut content, result_format);
 
         // Length
         let len = (content.len() + 4) as i32;
@@ -239,20 +291,35 @@ impl PgEncoder {
     /// Encode a complete extended query pipeline (OPTIMIZED).
     /// This combines Parse + Bind + Execute + Sync in a single buffer.
     /// Zero intermediate allocations - writes directly to pre-sized BytesMut.
-    pub fn encode_extended_query(sql: &str, params: &[Option<Vec<u8>>]) -> Result<BytesMut, EncodeError> {
+    pub fn encode_extended_query(
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+    ) -> Result<BytesMut, EncodeError> {
+        Self::encode_extended_query_with_result_format(sql, params, Self::FORMAT_TEXT)
+    }
+
+    /// Encode a complete extended query pipeline with explicit result format.
+    ///
+    /// `result_format` is PostgreSQL wire format code: `0 = text`, `1 = binary`.
+    pub fn encode_extended_query_with_result_format(
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> Result<BytesMut, EncodeError> {
         if params.len() > i16::MAX as usize {
             return Err(EncodeError::TooManyParameters(params.len()));
         }
 
         // Calculate total size upfront to avoid reallocations
-        // Bind: 1 + 4 + 1 + 1 + 2 + 2 + params_data + 2 = 13 + params_data
+        // Bind: 1 + 4 + 1 + 1 + 2 + 2 + params_data + result_formats
         // Execute: 1 + 4 + 1 + 4 = 10
         // Sync: 5
         let params_size: usize = params
             .iter()
             .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
             .sum();
-        let total_size = 9 + sql.len() + 13 + params_size + 10 + 5;
+        let result_formats_size = Self::result_format_wire_len(result_format);
+        let total_size = 9 + sql.len() + (11 + params_size + result_formats_size) + 10 + 5;
 
         let mut buf = BytesMut::with_capacity(total_size);
 
@@ -267,7 +334,7 @@ impl PgEncoder {
 
         // ===== BIND =====
         buf.extend_from_slice(b"B");
-        let bind_len = (1 + 1 + 2 + 2 + params_size + 2 + 4) as i32;
+        let bind_len = (1 + 1 + 2 + 2 + params_size + result_formats_size + 4) as i32;
         buf.extend_from_slice(&bind_len.to_be_bytes());
         buf.extend_from_slice(&[0]); // Unnamed portal
         buf.extend_from_slice(&[0]); // Unnamed statement
@@ -285,7 +352,7 @@ impl PgEncoder {
                 }
             }
         }
-        buf.extend_from_slice(&0i16.to_be_bytes()); // Result format (default text)
+        Self::encode_result_formats_bytesmut(&mut buf, result_format);
 
         // ===== EXECUTE =====
         buf.extend_from_slice(b"E");
@@ -331,6 +398,218 @@ impl PgEncoder {
         buf.extend_from_slice(name.as_bytes());
         buf.extend_from_slice(&[0]);
         buf
+    }
+}
+
+// ==================== ULTRA-OPTIMIZED Hot Path Encoders ====================
+//
+// These encoders are designed to beat C:
+// - Direct integer writes (no temp arrays, no bounds checks)
+// - Borrowed slice params (zero-copy)
+// - Single store instructions via BufMut
+//
+
+use bytes::BufMut;
+
+/// Zero-copy parameter for ultra-fast encoding.
+/// Uses borrowed slices to avoid any allocation or copy.
+pub enum Param<'a> {
+    /// SQL NULL value.
+    Null,
+    /// Non-null parameter as a borrowed byte slice.
+    Bytes(&'a [u8]),
+}
+
+impl PgEncoder {
+    /// Direct i32 write - no temp array, no bounds check.
+    /// LLVM emits a single store instruction.
+    #[inline(always)]
+    fn put_i32_be(buf: &mut BytesMut, v: i32) {
+        buf.put_i32(v);
+    }
+
+    #[inline(always)]
+    fn put_i16_be(buf: &mut BytesMut, v: i16) {
+        buf.put_i16(v);
+    }
+
+    /// Encode Bind message - ULTRA OPTIMIZED.
+    /// - Direct integer writes (no temp arrays)
+    /// - Borrowed params (zero-copy)
+    /// - Single allocation check
+    #[inline]
+    pub fn encode_bind_ultra<'a>(
+        buf: &mut BytesMut,
+        statement: &str,
+        params: &[Param<'a>],
+    ) -> Result<(), EncodeError> {
+        Self::encode_bind_ultra_with_result_format(buf, statement, params, Self::FORMAT_TEXT)
+    }
+
+    /// Encode Bind message with explicit result-column format.
+    #[inline]
+    pub fn encode_bind_ultra_with_result_format<'a>(
+        buf: &mut BytesMut,
+        statement: &str,
+        params: &[Param<'a>],
+        result_format: i16,
+    ) -> Result<(), EncodeError> {
+        if params.len() > i16::MAX as usize {
+            return Err(EncodeError::TooManyParameters(params.len()));
+        }
+
+        // Calculate content length upfront
+        let params_size: usize = params
+            .iter()
+            .map(|p| match p {
+                Param::Null => 4,
+                Param::Bytes(b) => 4 + b.len(),
+            })
+            .sum();
+        let result_formats_size = Self::result_format_wire_len(result_format);
+        let content_len = 1 + statement.len() + 1 + 2 + 2 + params_size + result_formats_size;
+
+        // Single reserve - no more allocations
+        buf.reserve(1 + 4 + content_len);
+
+        // Message type 'B'
+        buf.put_u8(b'B');
+
+        // Length (includes itself) - DIRECT WRITE
+        Self::put_i32_be(buf, (content_len + 4) as i32);
+
+        // Portal name (empty, null-terminated)
+        buf.put_u8(0);
+
+        // Statement name (null-terminated)
+        buf.extend_from_slice(statement.as_bytes());
+        buf.put_u8(0);
+
+        // Format codes count (0 = default text)
+        Self::put_i16_be(buf, 0);
+
+        // Parameter count
+        Self::put_i16_be(buf, params.len() as i16);
+
+        // Parameters - ZERO COPY from borrowed slices
+        for param in params {
+            match param {
+                Param::Null => Self::put_i32_be(buf, -1),
+                Param::Bytes(data) => {
+                    if data.len() > i32::MAX as usize {
+                        return Err(EncodeError::MessageTooLarge(data.len()));
+                    }
+                    Self::put_i32_be(buf, data.len() as i32);
+                    buf.extend_from_slice(data);
+                }
+            }
+        }
+
+        // Result format codes
+        Self::encode_result_formats_bytesmut(buf, result_format);
+        Ok(())
+    }
+
+    /// Encode Execute message - ULTRA OPTIMIZED.
+    #[inline(always)]
+    pub fn encode_execute_ultra(buf: &mut BytesMut) {
+        // Execute: 'E' + len(9) + portal("") + max_rows(0)
+        // = 'E' 00 00 00 09 00 00 00 00 00
+        buf.extend_from_slice(&[b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0]);
+    }
+
+    /// Encode Sync message - ULTRA OPTIMIZED.
+    #[inline(always)]
+    pub fn encode_sync_ultra(buf: &mut BytesMut) {
+        buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
+    }
+
+    // Keep the original methods for compatibility
+
+    /// Encode Bind message directly into existing buffer (ZERO ALLOCATION).
+    /// This is the hot path optimization - no intermediate Vec allocation.
+    #[inline]
+    pub fn encode_bind_to(
+        buf: &mut BytesMut,
+        statement: &str,
+        params: &[Option<Vec<u8>>],
+    ) -> Result<(), EncodeError> {
+        Self::encode_bind_to_with_result_format(buf, statement, params, Self::FORMAT_TEXT)
+    }
+
+    /// Encode Bind into existing buffer with explicit result-column format.
+    #[inline]
+    pub fn encode_bind_to_with_result_format(
+        buf: &mut BytesMut,
+        statement: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> Result<(), EncodeError> {
+        if params.len() > i16::MAX as usize {
+            return Err(EncodeError::TooManyParameters(params.len()));
+        }
+
+        // Calculate content length upfront
+        // portal(1) + statement(len+1) + format_codes(2) + param_count(2)
+        // + params_data + result_formats(2 or 4)
+        let params_size: usize = params
+            .iter()
+            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
+            .sum();
+        let result_formats_size = Self::result_format_wire_len(result_format);
+        let content_len = 1 + statement.len() + 1 + 2 + 2 + params_size + result_formats_size;
+
+        buf.reserve(1 + 4 + content_len);
+
+        // Message type 'B'
+        buf.put_u8(b'B');
+
+        // Length (includes itself) - DIRECT WRITE
+        Self::put_i32_be(buf, (content_len + 4) as i32);
+
+        // Portal name (empty, null-terminated)
+        buf.put_u8(0);
+
+        // Statement name (null-terminated)
+        buf.extend_from_slice(statement.as_bytes());
+        buf.put_u8(0);
+
+        // Format codes count (0 = default text)
+        Self::put_i16_be(buf, 0);
+
+        // Parameter count
+        Self::put_i16_be(buf, params.len() as i16);
+
+        // Parameters
+        for param in params {
+            match param {
+                None => Self::put_i32_be(buf, -1),
+                Some(data) => {
+                    if data.len() > i32::MAX as usize {
+                        return Err(EncodeError::MessageTooLarge(data.len()));
+                    }
+                    Self::put_i32_be(buf, data.len() as i32);
+                    buf.extend_from_slice(data);
+                }
+            }
+        }
+
+        // Result format codes
+        Self::encode_result_formats_bytesmut(buf, result_format);
+        Ok(())
+    }
+
+    /// Encode Execute message directly into existing buffer (ZERO ALLOCATION).
+    #[inline]
+    pub fn encode_execute_to(buf: &mut BytesMut) {
+        // Content: portal(1) + max_rows(4) = 5 bytes
+        buf.extend_from_slice(&[b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0]);
+    }
+
+    /// Encode Sync message directly into existing buffer (ZERO ALLOCATION).
+    #[inline]
+    pub fn encode_sync_to(buf: &mut BytesMut) {
+        buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
     }
 }
 
@@ -399,6 +678,17 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_bind_binary_result_format() {
+        let bytes =
+            PgEncoder::encode_bind_with_result_format("", "", &[], PgEncoder::FORMAT_BINARY)
+                .unwrap();
+
+        // B + len + portal + statement + param formats + param count + result formats
+        // Result format section for binary should be: count=1, format=1.
+        assert_eq!(&bytes[11..15], &[0, 1, 0, 1]);
+    }
+
+    #[test]
     fn test_encode_execute() {
         let bytes = PgEncoder::encode_execute("", 0);
 
@@ -420,6 +710,31 @@ mod tests {
         assert!(bytes.windows(1).any(|w| w == [b'B']));
         assert!(bytes.windows(1).any(|w| w == [b'E']));
         assert!(bytes.windows(1).any(|w| w == [b'S']));
+    }
+
+    #[test]
+    fn test_encode_extended_query_binary_result_format() {
+        let bytes = PgEncoder::encode_extended_query_with_result_format(
+            "SELECT 1",
+            &[],
+            PgEncoder::FORMAT_BINARY,
+        )
+        .unwrap();
+
+        let parse_len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        let bind_start = 1 + parse_len;
+        assert_eq!(bytes[bind_start], b'B');
+
+        let bind_len = i32::from_be_bytes([
+            bytes[bind_start + 1],
+            bytes[bind_start + 2],
+            bytes[bind_start + 3],
+            bytes[bind_start + 4],
+        ]);
+        assert_eq!(bind_len, 14);
+
+        let bind_content = &bytes[bind_start + 5..bind_start + 1 + bind_len as usize];
+        assert_eq!(&bind_content[6..10], &[0, 1, 0, 1]);
     }
 
     #[test]
@@ -448,183 +763,28 @@ mod tests {
         assert_eq!(bytes[5], b'P'); // Portal type
         assert_eq!(bytes[6], 0); // Empty name null terminator
     }
-}
 
-// ==================== ULTRA-OPTIMIZED Hot Path Encoders ====================
-//
-// These encoders are designed to beat C:
-// - Direct integer writes (no temp arrays, no bounds checks)
-// - Borrowed slice params (zero-copy)
-// - Single store instructions via BufMut
-//
+    #[test]
+    fn test_encode_bind_to_binary_result_format() {
+        let mut buf = BytesMut::new();
+        PgEncoder::encode_bind_to_with_result_format(&mut buf, "", &[], PgEncoder::FORMAT_BINARY)
+            .unwrap();
 
-use bytes::BufMut;
-
-/// Zero-copy parameter for ultra-fast encoding.
-/// Uses borrowed slices to avoid any allocation or copy.
-pub enum Param<'a> {
-    /// SQL NULL value.
-    Null,
-    /// Non-null parameter as a borrowed byte slice.
-    Bytes(&'a [u8]),
-}
-
-impl PgEncoder {
-    /// Direct i32 write - no temp array, no bounds check.
-    /// LLVM emits a single store instruction.
-    #[inline(always)]
-    fn put_i32_be(buf: &mut BytesMut, v: i32) {
-        buf.put_i32(v);
+        assert_eq!(&buf[11..15], &[0, 1, 0, 1]);
     }
 
-    #[inline(always)]
-    fn put_i16_be(buf: &mut BytesMut, v: i16) {
-        buf.put_i16(v);
-    }
+    #[test]
+    fn test_encode_bind_ultra_binary_result_format() {
+        let mut buf = BytesMut::new();
+        PgEncoder::encode_bind_ultra_with_result_format(
+            &mut buf,
+            "",
+            &[],
+            PgEncoder::FORMAT_BINARY,
+        )
+        .unwrap();
 
-    /// Encode Bind message - ULTRA OPTIMIZED.
-    /// - Direct integer writes (no temp arrays)
-    /// - Borrowed params (zero-copy)
-    /// - Single allocation check
-    #[inline]
-    pub fn encode_bind_ultra<'a>(buf: &mut BytesMut, statement: &str, params: &[Param<'a>]) -> Result<(), EncodeError> {
-        if params.len() > i16::MAX as usize {
-            return Err(EncodeError::TooManyParameters(params.len()));
-        }
-
-        // Calculate content length upfront
-        let params_size: usize = params
-            .iter()
-            .map(|p| match p {
-                Param::Null => 4,
-                Param::Bytes(b) => 4 + b.len(),
-            })
-            .sum();
-        let content_len = 1 + statement.len() + 1 + 2 + 2 + params_size + 2;
-
-        // Single reserve - no more allocations
-        buf.reserve(1 + 4 + content_len);
-
-        // Message type 'B'
-        buf.put_u8(b'B');
-
-        // Length (includes itself) - DIRECT WRITE
-        Self::put_i32_be(buf, (content_len + 4) as i32);
-
-        // Portal name (empty, null-terminated)
-        buf.put_u8(0);
-
-        // Statement name (null-terminated)
-        buf.extend_from_slice(statement.as_bytes());
-        buf.put_u8(0);
-
-        // Format codes count (0 = default text)
-        Self::put_i16_be(buf, 0);
-
-        // Parameter count
-        Self::put_i16_be(buf, params.len() as i16);
-
-        // Parameters - ZERO COPY from borrowed slices
-        for param in params {
-            match param {
-                Param::Null => Self::put_i32_be(buf, -1),
-                Param::Bytes(data) => {
-                    if data.len() > i32::MAX as usize {
-                        return Err(EncodeError::MessageTooLarge(data.len()));
-                    }
-                    Self::put_i32_be(buf, data.len() as i32);
-                    buf.extend_from_slice(data);
-                }
-            }
-        }
-
-        // Result format codes count (0 = default text)
-        Self::put_i16_be(buf, 0);
-        Ok(())
-    }
-
-    /// Encode Execute message - ULTRA OPTIMIZED.
-    #[inline(always)]
-    pub fn encode_execute_ultra(buf: &mut BytesMut) {
-        // Execute: 'E' + len(9) + portal("") + max_rows(0)
-        // = 'E' 00 00 00 09 00 00 00 00 00
-        buf.extend_from_slice(&[b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0]);
-    }
-
-    /// Encode Sync message - ULTRA OPTIMIZED.
-    #[inline(always)]
-    pub fn encode_sync_ultra(buf: &mut BytesMut) {
-        buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
-    }
-
-    // Keep the original methods for compatibility
-
-    /// Encode Bind message directly into existing buffer (ZERO ALLOCATION).
-    /// This is the hot path optimization - no intermediate Vec allocation.
-    #[inline]
-    pub fn encode_bind_to(buf: &mut BytesMut, statement: &str, params: &[Option<Vec<u8>>]) -> Result<(), EncodeError> {
-        if params.len() > i16::MAX as usize {
-            return Err(EncodeError::TooManyParameters(params.len()));
-        }
-
-        // Calculate content length upfront
-        // portal(1) + statement(len+1) + format_codes(2) + param_count(2) + params_data + result_format(2)
-        let params_size: usize = params
-            .iter()
-            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
-            .sum();
-        let content_len = 1 + statement.len() + 1 + 2 + 2 + params_size + 2;
-
-        buf.reserve(1 + 4 + content_len);
-
-        // Message type 'B'
-        buf.put_u8(b'B');
-
-        // Length (includes itself) - DIRECT WRITE
-        Self::put_i32_be(buf, (content_len + 4) as i32);
-
-        // Portal name (empty, null-terminated)
-        buf.put_u8(0);
-
-        // Statement name (null-terminated)
-        buf.extend_from_slice(statement.as_bytes());
-        buf.put_u8(0);
-
-        // Format codes count (0 = default text)
-        Self::put_i16_be(buf, 0);
-
-        // Parameter count
-        Self::put_i16_be(buf, params.len() as i16);
-
-        // Parameters
-        for param in params {
-            match param {
-                None => Self::put_i32_be(buf, -1),
-                Some(data) => {
-                    if data.len() > i32::MAX as usize {
-                        return Err(EncodeError::MessageTooLarge(data.len()));
-                    }
-                    Self::put_i32_be(buf, data.len() as i32);
-                    buf.extend_from_slice(data);
-                }
-            }
-        }
-
-        // Result format codes count (0 = default text)
-        Self::put_i16_be(buf, 0);
-        Ok(())
-    }
-
-    /// Encode Execute message directly into existing buffer (ZERO ALLOCATION).
-    #[inline]
-    pub fn encode_execute_to(buf: &mut BytesMut) {
-        // Content: portal(1) + max_rows(4) = 5 bytes
-        buf.extend_from_slice(&[b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0]);
-    }
-
-    /// Encode Sync message directly into existing buffer (ZERO ALLOCATION).
-    #[inline]
-    pub fn encode_sync_to(buf: &mut BytesMut) {
-        buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
+        assert_eq!(&buf[11..15], &[0, 1, 0, 1]);
     }
 }
+

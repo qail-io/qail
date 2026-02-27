@@ -24,7 +24,6 @@ impl ToDynamo for Qail {
 }
 
 fn build_get_item(cmd: &Qail) -> String {
-
     let mut parts = Vec::new();
     parts.push(format!("\"TableName\": \"{}\"", cmd.table));
 

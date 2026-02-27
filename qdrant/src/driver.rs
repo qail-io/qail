@@ -261,7 +261,8 @@ impl QdrantDriver {
                 .await;
         }
 
-        self.search(collection, vector, limit, score_threshold).await
+        self.search(collection, vector, limit, score_threshold)
+            .await
     }
 
     // ========================================================================
@@ -352,13 +353,7 @@ impl QdrantDriver {
         wait: bool,
     ) -> QdrantResult<()> {
         self.buffer.clear();
-        encoder::encode_set_payload_proto(
-            &mut self.buffer,
-            collection,
-            point_ids,
-            payload,
-            wait,
-        );
+        encoder::encode_set_payload_proto(&mut self.buffer, collection, point_ids, payload, wait);
         let request = self.buffer.split().freeze();
         self.client.update_payload(request).await?;
         Ok(())

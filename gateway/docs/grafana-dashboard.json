@@ -1,0 +1,239 @@
+{
+  "annotations": { "list": [] },
+  "description": "QAIL Gateway production dashboard — p95/p99 latencies, throughput, errors, caching, and connection pool health.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Request Rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(qail_http_requests_total[5m]))",
+          "legendFormat": "total"
+        },
+        {
+          "expr": "sum(rate(qail_http_requests_total{status=~\"5..\"}[5m]))",
+          "legendFormat": "5xx errors"
+        },
+        {
+          "expr": "sum(rate(qail_http_requests_total{status=~\"4..\"}[5m]))",
+          "legendFormat": "4xx errors"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+    {
+      "title": "Latency Percentiles (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(qail_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(qail_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(qail_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" }
+      }
+    },
+    {
+      "title": "Query Throughput",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(qail_queries_total[5m])) by (action)",
+          "legendFormat": "{{action}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "title": "Query Duration p95/p99 (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(qail_query_duration_ms_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(qail_query_duration_ms_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" }
+      }
+    },
+    {
+      "title": "Connection Pool",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "qail_pool_active_connections",
+          "legendFormat": "active"
+        },
+        {
+          "expr": "qail_pool_idle_connections",
+          "legendFormat": "idle"
+        },
+        {
+          "expr": "qail_pool_max_connections",
+          "legendFormat": "max"
+        }
+      ]
+    },
+    {
+      "title": "Cache Performance",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "targets": [
+        {
+          "expr": "qail_cache_hits_total / (qail_cache_hits_total + qail_cache_misses_total)",
+          "legendFormat": "hit rate"
+        },
+        {
+          "expr": "qail_cache_entries",
+          "legendFormat": "entries"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit" }
+      }
+    },
+    {
+      "title": "Security & Rate Limiting",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "targets": [
+        {
+          "expr": "rate(qail_rate_limited_total[5m])",
+          "legendFormat": "rate limited"
+        },
+        {
+          "expr": "rate(qail_idempotency_hits_total[5m])",
+          "legendFormat": "idempotency replays"
+        },
+        {
+          "expr": "rate(qail_explain_rejections_total[5m])",
+          "legendFormat": "explain rejections"
+        },
+        {
+          "expr": "rate(qail_complexity_rejections_total[5m])",
+          "legendFormat": "complexity rejections"
+        }
+      ]
+    },
+    {
+      "title": "Database Errors",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum(rate(qail_db_errors_total[5m])) by (sqlstate)",
+          "legendFormat": "{{sqlstate}}"
+        }
+      ]
+    },
+    {
+      "title": "WebSocket Connections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "qail_ws_active_connections",
+          "legendFormat": "active"
+        },
+        {
+          "expr": "rate(qail_ws_connections_total[5m])",
+          "legendFormat": "new/sec"
+        }
+      ]
+    },
+    {
+      "title": "RPC Call Throughput",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "expr": "sum(rate(qail_rpc_calls_total[5m])) by (function)",
+          "legendFormat": "{{function}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops" }
+      }
+    },
+    {
+      "title": "RPC Duration p95 (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(qail_rpc_duration_ms_bucket[5m])) by (le, function))",
+          "legendFormat": "{{function}} p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" }
+      }
+    },
+    {
+      "title": "Batch Operations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "expr": "rate(qail_batch_queries_total[5m])",
+          "legendFormat": "queries/sec"
+        },
+        {
+          "expr": "rate(qail_batch_success_total[5m])",
+          "legendFormat": "success/sec"
+        }
+      ]
+    },
+    {
+      "title": "Batch Duration p99 (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(qail_batch_duration_ms_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms" }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["qail", "gateway", "production"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "QAIL Gateway — Production",
+  "uid": "qail-gateway-prod",
+  "version": 1
+}

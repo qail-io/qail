@@ -21,6 +21,11 @@ pub mod joins;
 /// Special function parsing (COALESCE, NULLIF, GREATEST, etc.).
 pub mod special_funcs;
 
+use self::base::*;
+use self::clauses::*;
+use self::ddl::*;
+use self::dml::*;
+use self::joins::*;
 use crate::ast::*;
 use nom::{
     IResult, Parser,
@@ -29,11 +34,6 @@ use nom::{
     combinator::opt,
     multi::many0,
 };
-use self::base::*;
-use self::clauses::*;
-use self::ddl::*;
-use self::dml::*;
-use self::joins::*;
 // use self::expressions::*; // Used in clauses module
 
 /// Parse a QAIL query with comment preprocessing.
@@ -46,9 +46,7 @@ pub fn parse(input: &str) -> Result<Qail, String> {
     let desugared = desugar_bracket_filter(&cleaned);
     match parse_root(&desugared) {
         Ok(("", cmd)) => Ok(cmd),
-        Ok((remaining, _)) => Err(format!(
-            "Unexpected trailing content: '{}'", remaining
-        )),
+        Ok((remaining, _)) => Err(format!("Unexpected trailing content: '{}'", remaining)),
         Err(e) => Err(format!("Parse error: {:?}", e)),
     }
 }
@@ -64,6 +62,20 @@ fn desugar_bracket_filter(input: &str) -> String {
         let before_bracket = &trimmed[..bracket_start];
         // There should be at least "action table" before the bracket
         if !before_bracket.contains(' ') {
+            return trimmed.to_string();
+        }
+
+        // Guard: don't treat brackets in clauses/values as table shorthand.
+        // Example to avoid: `... where tags && '["a","b"]'`
+        let before_lower = before_bracket.to_ascii_lowercase();
+        if before_lower.contains(" where ")
+            || before_lower.contains(" fields ")
+            || before_lower.contains(" having ")
+            || before_lower.contains(" order ")
+            || before_lower.contains(" limit ")
+            || before_lower.contains(" offset ")
+            || before_lower.contains(" join ")
+        {
             return trimmed.to_string();
         }
 
@@ -98,10 +110,7 @@ fn desugar_bracket_filter(input: &str) -> String {
             let rest_lower = rest.to_lowercase();
             if rest_lower.contains("where ") || rest_lower.contains("where\n") {
                 // Already has WHERE — append with AND
-                return format!(
-                    "{} {} AND {}",
-                    before_bracket, rest, filter
-                );
+                return format!("{} {} AND {}", before_bracket, rest, filter);
             } else if rest.is_empty() {
                 return format!("{} where {}", before_bracket, filter);
             } else {
@@ -119,6 +128,11 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
 
     // Try transaction commands first (single keywords)
     if let Ok((remaining, cmd)) = parse_txn_command(input) {
+        return Ok((remaining, cmd));
+    }
+
+    // Parse procedural/session commands that don't follow `action table ...`
+    if let Ok((remaining, cmd)) = parse_procedural_command(input) {
         return Ok((remaining, cmd));
     }
 
@@ -297,7 +311,6 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
             on_disk: None,
             function_def: None,
             trigger_def: None,
-
         },
     ))
 }

@@ -1,11 +1,11 @@
 //! Migration status operations
 
-use anyhow::Result;
 use crate::colors::*;
+use anyhow::Result;
 use qail_core::prelude::*;
 use qail_pg::PgDriver;
 
-use crate::migrations::migration_table_ddl;
+use crate::migrations::ensure_migration_table;
 use crate::util::parse_pg_url;
 
 /// Show migration status and history.
@@ -25,8 +25,7 @@ pub async fn migrate_status(url: &str) -> Result<()> {
     };
 
     // Ensure migration table exists (AST-native bootstrap)
-    driver
-        .execute_raw(&migration_table_ddl())
+    ensure_migration_table(&mut driver)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create migration table: {}", e))?;
 
@@ -63,17 +62,30 @@ pub async fn migrate_status(url: &str) -> Result<()> {
                 format!("{:<25}", "APPLIED AT").cyan().bold(),
                 "CHECKSUM".cyan().bold(),
             );
-            println!(
-                "  {}",
-                "─".repeat(85).dimmed()
-            );
+            println!("  {}", "─".repeat(85).dimmed());
 
             // Rows
             for row in &result.rows {
-                let version = row.first().and_then(|v| v.as_ref()).map(|s| s.as_str()).unwrap_or("?");
-                let name = row.get(1).and_then(|v| v.as_ref()).map(|s| s.as_str()).unwrap_or("-");
-                let applied_at = row.get(2).and_then(|v| v.as_ref()).map(|s| s.as_str()).unwrap_or("-");
-                let checksum = row.get(3).and_then(|v| v.as_ref()).map(|s| s.as_str()).unwrap_or("-");
+                let version = row
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
+                let name = row
+                    .get(1)
+                    .and_then(|v| v.as_ref())
+                    .map(|s| s.as_str())
+                    .unwrap_or("-");
+                let applied_at = row
+                    .get(2)
+                    .and_then(|v| v.as_ref())
+                    .map(|s| s.as_str())
+                    .unwrap_or("-");
+                let checksum = row
+                    .get(3)
+                    .and_then(|v| v.as_ref())
+                    .map(|s| s.as_str())
+                    .unwrap_or("-");
 
                 // Truncate checksum for display
                 let checksum_short = if checksum.len() > 12 {

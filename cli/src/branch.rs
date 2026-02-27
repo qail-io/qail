@@ -15,11 +15,13 @@ pub async fn branch_create(name: &str, parent: Option<&str>, db_url: &str) -> Re
 
     // Auto-bootstrap tables
     let ddl = branch_sql::create_branch_tables_sql();
-    conn.execute_simple(ddl).await
+    conn.execute_simple(ddl)
+        .await
         .context("Failed to create branch tables (may already exist)")?;
 
     let sql = branch_sql::create_branch_sql(name, parent);
-    conn.execute_simple(&sql).await
+    conn.execute_simple(&sql)
+        .await
         .context(format!("Failed to create branch '{}'", name))?;
 
     println!("✅ Branch '{}' created", name);
@@ -35,8 +37,7 @@ pub async fn branch_list(db_url: &str) -> Result<()> {
     let mut conn = connect(&host, port, &user, &database, password.as_deref()).await?;
 
     let sql = branch_sql::list_branches_sql();
-    let rows = conn.simple_query(sql).await
-        .unwrap_or_default();
+    let rows = conn.simple_query(sql).await.unwrap_or_default();
 
     if rows.is_empty() {
         println!("No branches found. Create one with: qail branch create <name>");
@@ -63,7 +64,8 @@ pub async fn branch_delete(name: &str, db_url: &str) -> Result<()> {
     let mut conn = connect(&host, port, &user, &database, password.as_deref()).await?;
 
     let sql = branch_sql::delete_branch_sql(name);
-    conn.execute_simple(&sql).await
+    conn.execute_simple(&sql)
+        .await
         .context(format!("Failed to delete branch '{}'", name))?;
 
     println!("🗑  Branch '{}' deleted", name);
@@ -78,18 +80,20 @@ pub async fn branch_merge(name: &str, db_url: &str) -> Result<()> {
     // Show stats first
     let stats_sql = branch_sql::branch_stats_sql(name);
     if let Ok(rows) = conn.simple_query(&stats_sql).await
-        && !rows.is_empty() {
-            println!("📊 Overlay stats for '{}':", name);
-            for row in &rows {
-                let table = row.get_string(0).unwrap_or_default();
-                let op = row.get_string(1).unwrap_or_default();
-                let count = row.get_string(2).unwrap_or_default();
-                println!("   {} {} → {} rows", table, op, count);
-            }
+        && !rows.is_empty()
+    {
+        println!("📊 Overlay stats for '{}':", name);
+        for row in &rows {
+            let table = row.get_string(0).unwrap_or_default();
+            let op = row.get_string(1).unwrap_or_default();
+            let count = row.get_string(2).unwrap_or_default();
+            println!("   {} {} → {} rows", table, op, count);
+        }
     }
 
     let sql = branch_sql::mark_merged_sql(name);
-    conn.execute_simple(&sql).await
+    conn.execute_simple(&sql)
+        .await
         .context(format!("Failed to merge branch '{}'", name))?;
 
     println!("✅ Branch '{}' merged", name);
@@ -154,8 +158,9 @@ async fn connect(
     database: &str,
     password: Option<&str>,
 ) -> Result<qail_pg::driver::PgConnection> {
-    let conn = qail_pg::driver::PgConnection::connect_with_password(host, port, user, database, password)
-        .await
-        .context("Failed to connect to database")?;
+    let conn =
+        qail_pg::driver::PgConnection::connect_with_password(host, port, user, database, password)
+            .await
+            .context("Failed to connect to database")?;
     Ok(conn)
 }

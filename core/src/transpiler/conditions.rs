@@ -103,10 +103,11 @@ impl ConditionToSql for Condition {
     /// Convert condition to SQL string.
     fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&Qail>) -> String {
         // raw_where() pattern: Expr::Raw + IsNotNull + Null → emit raw SQL as-is
-        if let Expr::Raw(sql) = &self.left {
-            if self.op == Operator::IsNotNull && matches!(&self.value, Value::Null) {
-                return sql.clone();
-            }
+        if let Expr::Raw(sql) = &self.left
+            && self.op == Operator::IsNotNull
+            && matches!(&self.value, Value::Null)
+        {
+            return sql.clone();
         }
 
         let col = match &self.left {
@@ -157,6 +158,10 @@ impl ConditionToSql for Condition {
                     };
                     format!("_el {} {}", generator.fuzzy_operator(), val)
                 }
+                Operator::ArrayElemContainedInText => format!(
+                    "LOWER({}) LIKE '%' || LOWER(_el) || '%'",
+                    self.to_value_sql(generator)
+                ),
                 _ => format!("_el = {}", self.to_value_sql(generator)),
             };
             return format!(
@@ -298,10 +303,11 @@ impl ConditionToSql for Condition {
         params: &mut ParamContext,
     ) -> String {
         // raw_where() pattern: Expr::Raw + IsNotNull + Null → emit raw SQL as-is
-        if let Expr::Raw(sql) = &self.left {
-            if self.op == Operator::IsNotNull && matches!(&self.value, Value::Null) {
-                return sql.clone();
-            }
+        if let Expr::Raw(sql) = &self.left
+            && self.op == Operator::IsNotNull
+            && matches!(&self.value, Value::Null)
+        {
+            return sql.clone();
         }
 
         let col = match &self.left {
@@ -342,6 +348,35 @@ impl ConditionToSql for Condition {
                 other => p.add_param(other.clone(), generator.as_ref()),
             }
         };
+
+        if self.is_array_unnest {
+            let inner_condition = match self.op {
+                Operator::Eq => format!("_el = {}", value_placeholder(&self.value, params)),
+                Operator::Ne => format!("_el != {}", value_placeholder(&self.value, params)),
+                Operator::Gt => format!("_el > {}", value_placeholder(&self.value, params)),
+                Operator::Gte => format!("_el >= {}", value_placeholder(&self.value, params)),
+                Operator::Lt => format!("_el < {}", value_placeholder(&self.value, params)),
+                Operator::Lte => format!("_el <= {}", value_placeholder(&self.value, params)),
+                Operator::Fuzzy => {
+                    let val = generator.string_concat(&[
+                        "'%'",
+                        &value_placeholder(&self.value, params),
+                        "'%'",
+                    ]);
+                    format!("_el {} {}", generator.fuzzy_operator(), val)
+                }
+                Operator::ArrayElemContainedInText => format!(
+                    "LOWER({}) LIKE '%' || LOWER(_el) || '%'",
+                    value_placeholder(&self.value, params)
+                ),
+                _ => format!("_el = {}", value_placeholder(&self.value, params)),
+            };
+
+            return format!(
+                "EXISTS (SELECT 1 FROM unnest({}) _el WHERE {})",
+                col, inner_condition
+            );
+        }
 
         match self.op {
             Operator::Eq => {

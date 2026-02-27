@@ -13,11 +13,13 @@
 //! on the target tables. The `qail_app` role is an operator-level app user
 //! with restricted grants.
 
-use qail_core::ast::{Qail, JoinKind};
+use qail_core::ast::{JoinKind, Qail};
 use qail_core::rls::RlsContext;
 use qail_core::transpiler::ToSql;
 use qail_pg::PgDriver;
-use qail_pg::explain::{ExplainConfig, ExplainMode, ExplainCache, check_estimate, parse_explain_json};
+use qail_pg::explain::{
+    ExplainCache, ExplainConfig, ExplainMode, check_estimate, parse_explain_json,
+};
 
 use std::time::Duration;
 
@@ -31,7 +33,10 @@ async fn connect() -> PgDriver {
 }
 
 /// Run EXPLAIN (FORMAT JSON) via driver's fetch_raw and parse the result
-async fn run_explain(driver: &mut PgDriver, cmd: &Qail) -> Option<qail_pg::explain::ExplainEstimate> {
+async fn run_explain(
+    driver: &mut PgDriver,
+    cmd: &Qail,
+) -> Option<qail_pg::explain::ExplainEstimate> {
     let sql = cmd.to_sql();
     let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
     let rows = driver.fetch_raw(&explain_sql).await.unwrap();
@@ -46,7 +51,10 @@ async fn run_explain(driver: &mut PgDriver, cmd: &Qail) -> Option<qail_pg::expla
     }
 
     if !json_output.is_empty() {
-        println!("  EXPLAIN JSON: {}", &json_output[..json_output.len().min(200)]);
+        println!(
+            "  EXPLAIN JSON: {}",
+            &json_output[..json_output.len().min(200)]
+        );
     }
 
     parse_explain_json(&json_output)
@@ -67,7 +75,8 @@ async fn test_explain_simple_select() {
     let cmd = Qail::get("vessels").columns(["id", "name"]).limit(10);
     println!("SQL: {}", cmd.to_sql());
 
-    let est = run_explain(&mut driver, &cmd).await
+    let est = run_explain(&mut driver, &cmd)
+        .await
         .expect("Should parse EXPLAIN output");
 
     println!("✅ Simple SELECT vessels LIMIT 10");
@@ -76,7 +85,10 @@ async fn test_explain_simple_select() {
     // Should be well under default thresholds
     let config = ExplainConfig::default();
     let decision = check_estimate(&est, &config);
-    assert!(!decision.is_rejected(), "Simple limited query should be ALLOWED");
+    assert!(
+        !decision.is_rejected(),
+        "Simple limited query should be ALLOWED"
+    );
     println!("   Decision: ALLOW ✓");
 }
 
@@ -94,11 +106,17 @@ async fn test_explain_multi_join() {
     // Multi-table join: orders + agents (2 JOINs)
     let cmd = Qail::get("orders")
         .join(JoinKind::Left, "agents", "orders.agent_id", "agents.id")
-        .join(JoinKind::Left, "destinations", "orders.id", "destinations.id");
+        .join(
+            JoinKind::Left,
+            "destinations",
+            "orders.id",
+            "destinations.id",
+        );
 
     println!("SQL: {}", cmd.to_sql());
 
-    let est = run_explain(&mut driver, &cmd).await
+    let est = run_explain(&mut driver, &cmd)
+        .await
         .expect("Should parse EXPLAIN output");
 
     println!("✅ Multi-join: orders + agents + destinations");
@@ -108,12 +126,15 @@ async fn test_explain_multi_join() {
     let strict_config = ExplainConfig {
         mode: ExplainMode::Enforce,
         depth_threshold: 1,
-        max_total_cost: 1.0,    // Extremely low
-        max_plan_rows: 1,       // Extremely low
+        max_total_cost: 1.0, // Extremely low
+        max_plan_rows: 1,    // Extremely low
         cache_ttl: Duration::from_secs(60),
     };
     let decision = check_estimate(&est, &strict_config);
-    assert!(decision.is_rejected(), "Multi-join with strict=1.0 should be REJECTED");
+    assert!(
+        decision.is_rejected(),
+        "Multi-join with strict=1.0 should be REJECTED"
+    );
     println!("   Strict(max_cost=1.0) → REJECTED ✓");
     if let Some(msg) = decision.rejection_message() {
         println!("   Message: {}", msg);
@@ -125,7 +146,11 @@ async fn test_explain_multi_join() {
     println!(
         "   Default(max_cost={:.0}) → {}",
         default_config.max_total_cost,
-        if default_decision.is_rejected() { "REJECTED" } else { "ALLOW" }
+        if default_decision.is_rejected() {
+            "REJECTED"
+        } else {
+            "ALLOW"
+        }
     );
 }
 
@@ -151,7 +176,10 @@ async fn test_explain_cache_roundtrip() {
     let shape_hash = hasher.finish();
 
     // Cache miss
-    assert!(cache.get(shape_hash, None).is_none(), "Should be cache miss initially");
+    assert!(
+        cache.get(shape_hash, None).is_none(),
+        "Should be cache miss initially"
+    );
 
     // Run EXPLAIN and cache
     let est = run_explain(&mut driver, &cmd).await.unwrap();
@@ -164,7 +192,10 @@ async fn test_explain_cache_roundtrip() {
 
     println!("✅ Cache roundtrip verified");
     println!("   MISS → EXPLAIN → INSERT → HIT");
-    println!("   cost={:.2}, rows={}", cached.total_cost, cached.plan_rows);
+    println!(
+        "   cost={:.2}, rows={}",
+        cached.total_cost, cached.plan_rows
+    );
 }
 
 #[tokio::test]
@@ -182,7 +213,8 @@ async fn test_explain_full_table_scan() {
     let cmd = Qail::get("orders");
     println!("SQL: {}", cmd.to_sql());
 
-    let est = run_explain(&mut driver, &cmd).await
+    let est = run_explain(&mut driver, &cmd)
+        .await
         .expect("Should parse EXPLAIN output");
 
     println!("✅ Full scan: SELECT * FROM orders (no filters, no limit)");
@@ -192,14 +224,18 @@ async fn test_explain_full_table_scan() {
     let config = ExplainConfig {
         mode: ExplainMode::Enforce,
         depth_threshold: 0,
-        max_total_cost: 5.0,    // Very tight
-        max_plan_rows: 5,       // Very tight
+        max_total_cost: 5.0, // Very tight
+        max_plan_rows: 5,    // Very tight
         cache_ttl: Duration::from_secs(60),
     };
     let decision = check_estimate(&est, &config);
     println!(
         "   Tight threshold(5.0 cost, 5 rows) → {}",
-        if decision.is_rejected() { "REJECTED ✓" } else { "ALLOW" }
+        if decision.is_rejected() {
+            "REJECTED ✓"
+        } else {
+            "ALLOW"
+        }
     );
     if let Some(msg) = decision.rejection_message() {
         println!("   Message: {}", msg);

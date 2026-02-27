@@ -2,8 +2,8 @@
 //!
 //! Provides proptest strategies for generating random AST nodes.
 
-use crate::ast::*;
 use crate::ast::values::IntervalUnit;
+use crate::ast::*;
 use proptest::prelude::*;
 
 /// Generate valid SQL identifiers (alphanumeric + underscore, starting with letter)
@@ -81,10 +81,7 @@ pub fn arb_aggregate_func() -> impl Strategy<Value = AggregateFunc> {
 
 /// Strategy for LogicalOp
 pub fn arb_logical_op() -> impl Strategy<Value = LogicalOp> {
-    prop_oneof![
-        Just(LogicalOp::And),
-        Just(LogicalOp::Or),
-    ]
+    prop_oneof![Just(LogicalOp::And), Just(LogicalOp::Or),]
 }
 
 /// Strategy for Action (common query actions)
@@ -113,7 +110,7 @@ pub fn arb_value_leaf() -> impl Strategy<Value = Value> {
         10 => any::<bool>().prop_map(Value::Bool),
         10 => any::<i64>().prop_map(Value::Int),
         5 => any::<f64>().prop_filter("safe floats", is_safe_float).prop_map(Value::Float),
-        10 => "[a-zA-Z0-9 _-]{0,50}".prop_map(|s| Value::String(s)),
+        10 => "[a-zA-Z0-9 _-]{0,50}".prop_map(Value::String),
         5 => (1usize..100).prop_map(Value::Param),
         3 => arb_identifier().prop_map(Value::NamedParam),
         3 => arb_identifier().prop_map(Value::Column),
@@ -124,9 +121,9 @@ pub fn arb_value_leaf() -> impl Strategy<Value = Value> {
 /// Strategy for Value including arrays (limited depth)
 pub fn arb_value() -> impl Strategy<Value = Value> {
     arb_value_leaf().prop_recursive(
-        2,  // depth
-        8,  // desired size
-        4,  // items per collection
+        2, // depth
+        8, // desired size
+        4, // items per collection
         |inner| {
             prop_oneof![
                 // Array of values
@@ -143,7 +140,7 @@ pub fn arb_value_no_float() -> impl Strategy<Value = Value> {
         5 => Just(Value::Null),
         10 => any::<bool>().prop_map(Value::Bool),
         10 => any::<i64>().prop_map(Value::Int),
-        10 => "[a-zA-Z0-9 _-]{0,50}".prop_map(|s| Value::String(s)),
+        10 => "[a-zA-Z0-9 _-]{0,50}".prop_map(Value::String),
         5 => (1usize..100).prop_map(Value::Param),
         3 => arb_identifier().prop_map(Value::NamedParam),
         3 => arb_identifier().prop_map(Value::Column),
@@ -164,34 +161,37 @@ pub fn arb_expr_leaf() -> impl Strategy<Value = Expr> {
 /// Strategy for Expr with limited recursion
 pub fn arb_expr() -> impl Strategy<Value = Expr> {
     arb_expr_leaf().prop_recursive(
-        3,   // depth
-        16,  // desired size
-        4,   // items per collection
+        3,  // depth
+        16, // desired size
+        4,  // items per collection
         |inner| {
             prop_oneof![
                 // Aggregate (col is a String, not Expr)
-                (arb_aggregate_func(), arb_identifier(), any::<bool>())
-                    .prop_map(|(func, col, distinct)| Expr::Aggregate {
+                (arb_aggregate_func(), arb_identifier(), any::<bool>()).prop_map(
+                    |(func, col, distinct)| Expr::Aggregate {
                         func,
                         col,
                         distinct,
                         alias: None,
                         filter: None,
-                    }),
+                    }
+                ),
                 // FunctionCall (not Function)
-                (arb_identifier(), proptest::collection::vec(inner.clone(), 0..3))
+                (
+                    arb_identifier(),
+                    proptest::collection::vec(inner.clone(), 0..3)
+                )
                     .prop_map(|(name, args)| Expr::FunctionCall {
                         name,
                         args,
                         alias: None,
                     }),
                 // Cast (target_type, not type_name)
-                (inner.clone(), arb_identifier())
-                    .prop_map(|(expr, target_type)| Expr::Cast {
-                        expr: Box::new(expr),
-                        target_type,
-                        alias: None,
-                    }),
+                (inner.clone(), arb_identifier()).prop_map(|(expr, target_type)| Expr::Cast {
+                    expr: Box::new(expr),
+                    target_type,
+                    alias: None,
+                }),
             ]
         },
     )
@@ -199,13 +199,12 @@ pub fn arb_expr() -> impl Strategy<Value = Expr> {
 
 /// Strategy for Condition
 pub fn arb_condition() -> impl Strategy<Value = Condition> {
-    (arb_expr_leaf(), arb_operator(), arb_value_leaf())
-        .prop_map(|(left, op, value)| Condition {
-            left,
-            op,
-            value,
-            is_array_unnest: false,
-        })
+    (arb_expr_leaf(), arb_operator(), arb_value_leaf()).prop_map(|(left, op, value)| Condition {
+        left,
+        op,
+        value,
+        is_array_unnest: false,
+    })
 }
 
 /// Strategy for CageKind
@@ -220,8 +219,16 @@ pub fn arb_cage_kind() -> impl Strategy<Value = CageKind> {
 
 /// Strategy for Cage
 pub fn arb_cage() -> impl Strategy<Value = Cage> {
-    (arb_cage_kind(), proptest::collection::vec(arb_condition(), 0..3), arb_logical_op())
-        .prop_map(|(kind, conditions, logical_op)| Cage { kind, conditions, logical_op })
+    (
+        arb_cage_kind(),
+        proptest::collection::vec(arb_condition(), 0..3),
+        arb_logical_op(),
+    )
+        .prop_map(|(kind, conditions, logical_op)| Cage {
+            kind,
+            conditions,
+            logical_op,
+        })
 }
 
 // ==================== No-Float Strategies for Serde Roundtrip ====================
@@ -239,40 +246,42 @@ pub fn arb_expr_leaf_no_float() -> impl Strategy<Value = Expr> {
 
 /// Expr without floats for serde roundtrip
 pub fn arb_expr_no_float() -> impl Strategy<Value = Expr> {
-    arb_expr_leaf_no_float().prop_recursive(
-        3,
-        16,
-        4,
-        |inner| {
-            prop_oneof![
-                (arb_aggregate_func(), arb_identifier(), any::<bool>())
-                    .prop_map(|(func, col, distinct)| Expr::Aggregate {
-                        func,
-                        col,
-                        distinct,
-                        alias: None,
-                        filter: None,
-                    }),
-                (arb_identifier(), proptest::collection::vec(inner.clone(), 0..3))
-                    .prop_map(|(name, args)| Expr::FunctionCall {
-                        name,
-                        args,
-                        alias: None,
-                    }),
-                (inner.clone(), arb_identifier())
-                    .prop_map(|(expr, target_type)| Expr::Cast {
-                        expr: Box::new(expr),
-                        target_type,
-                        alias: None,
-                    }),
-            ]
-        },
-    )
+    arb_expr_leaf_no_float().prop_recursive(3, 16, 4, |inner| {
+        prop_oneof![
+            (arb_aggregate_func(), arb_identifier(), any::<bool>()).prop_map(
+                |(func, col, distinct)| Expr::Aggregate {
+                    func,
+                    col,
+                    distinct,
+                    alias: None,
+                    filter: None,
+                }
+            ),
+            (
+                arb_identifier(),
+                proptest::collection::vec(inner.clone(), 0..3)
+            )
+                .prop_map(|(name, args)| Expr::FunctionCall {
+                    name,
+                    args,
+                    alias: None,
+                }),
+            (inner.clone(), arb_identifier()).prop_map(|(expr, target_type)| Expr::Cast {
+                expr: Box::new(expr),
+                target_type,
+                alias: None,
+            }),
+        ]
+    })
 }
 
 /// Condition without floats
 pub fn arb_condition_no_float() -> impl Strategy<Value = Condition> {
-    (arb_expr_leaf_no_float(), arb_operator(), arb_value_no_float())
+    (
+        arb_expr_leaf_no_float(),
+        arb_operator(),
+        arb_value_no_float(),
+    )
         .prop_map(|(left, op, value)| Condition {
             left,
             op,
@@ -283,8 +292,16 @@ pub fn arb_condition_no_float() -> impl Strategy<Value = Condition> {
 
 /// Cage without floats
 pub fn arb_cage_no_float() -> impl Strategy<Value = Cage> {
-    (arb_cage_kind(), proptest::collection::vec(arb_condition_no_float(), 0..3), arb_logical_op())
-        .prop_map(|(kind, conditions, logical_op)| Cage { kind, conditions, logical_op })
+    (
+        arb_cage_kind(),
+        proptest::collection::vec(arb_condition_no_float(), 0..3),
+        arb_logical_op(),
+    )
+        .prop_map(|(kind, conditions, logical_op)| Cage {
+            kind,
+            conditions,
+            logical_op,
+        })
 }
 
 /// Strategy for simple Qail queries (GET only for SQL output tests)

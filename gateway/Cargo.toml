@@ -25,7 +25,7 @@ tower-http = { version = "0.6", features = ["cors", "timeout", "trace", "compres
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-postcard = { version = "1", features = ["alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 # Error handling
 anyhow = "1.0"
@@ -69,9 +69,13 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Timestamps for event payloads
 chrono = "0.4"
 
+# Base64 decoding for JWT headers (JWKS kid extraction)
+base64 = "0.22"
+
 [features]
 default = ["qdrant"]
 qdrant = ["dep:qail-qdrant"]
+enterprise-gssapi = ["qail-pg/enterprise-gssapi"]
 
 [dev-dependencies]
 tokio-test = "0.4"

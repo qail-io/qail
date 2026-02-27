@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use qail_core::ast::Qail;
-use qail_core::ast::builders::{col, subquery};
 use qail_core::ast::builders::ExprExt;
+use qail_core::ast::builders::{col, subquery};
 
 fn main() {
     let last_message = subquery(
@@ -23,7 +23,7 @@ fn main() {
     .with_alias("unread_count");
 
     let cmd = Qail::get("app_chat_sessions")
-        .columns(&["app_chat_sessions.id", "app_chat_sessions.status"])
+        .columns(["app_chat_sessions.id", "app_chat_sessions.status"])
         .select_expr(last_message)
         .select_expr(unread_count)
         .left_join_as("users", "u", "u.id", "app_chat_sessions.user_id")
@@ -36,12 +36,16 @@ fn main() {
     let mut sql_buf = BytesMut::new();
     let mut params: Vec<Option<Vec<u8>>> = Vec::new();
     qail_pg::protocol::AstEncoder::encode_select_sql(&cmd, &mut sql_buf, &mut params);
-    
+
     println!("SQL: {}", std::str::from_utf8(&sql_buf).unwrap_or("ERR"));
     println!("\nParams ({})", params.len());
     for (i, p) in params.iter().enumerate() {
         match p {
-            Some(v) => println!("  ${}: {}", i + 1, std::str::from_utf8(v).unwrap_or("binary")),
+            Some(v) => println!(
+                "  ${}: {}",
+                i + 1,
+                std::str::from_utf8(v).unwrap_or("binary")
+            ),
             None => println!("  ${}: NULL", i + 1),
         }
     }

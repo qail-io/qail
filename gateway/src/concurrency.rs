@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Semaphore, OwnedSemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 /// Entry tracking a tenant's semaphore and last usage time.
 struct TenantEntry {
@@ -129,10 +129,7 @@ impl TenantSemaphore {
     /// Number of tracked tenants (for metrics / debugging).
     pub fn tenant_count(&self) -> usize {
         // Non-async best-effort via try_read
-        self.semaphores
-            .try_read()
-            .map(|m| m.len())
-            .unwrap_or(0)
+        self.semaphores.try_read().map(|m| m.len()).unwrap_or(0)
     }
 }
 
@@ -147,11 +144,17 @@ mod tests {
         // Tenant A takes 2 permits → full
         let _a1 = sem.try_acquire("tenant-a").await.unwrap();
         let _a2 = sem.try_acquire("tenant-a").await.unwrap();
-        assert!(sem.try_acquire("tenant-a").await.is_none(), "Tenant A should be full");
+        assert!(
+            sem.try_acquire("tenant-a").await.is_none(),
+            "Tenant A should be full"
+        );
 
         // Tenant B still has capacity
         let _b1 = sem.try_acquire("tenant-b").await.unwrap();
-        assert!(sem.try_acquire("tenant-b").await.is_some(), "Tenant B should have capacity");
+        assert!(
+            sem.try_acquire("tenant-b").await.is_some(),
+            "Tenant B should have capacity"
+        );
     }
 
     #[tokio::test]
@@ -162,7 +165,10 @@ mod tests {
         assert!(sem.try_acquire("t1").await.is_none(), "Should be full");
 
         drop(permit);
-        assert!(sem.try_acquire("t1").await.is_some(), "Should be free after drop");
+        assert!(
+            sem.try_acquire("t1").await.is_some(),
+            "Should be free after drop"
+        );
     }
 
     #[tokio::test]
@@ -182,7 +188,7 @@ mod tests {
         let sem = Arc::new(TenantSemaphore::new(5));
         let acquired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let rejected = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        
+
         let mut handles = Vec::new();
         for _ in 0..100 {
             let sem = sem.clone();
@@ -202,20 +208,24 @@ mod tests {
                 }
             }));
         }
-        for h in handles { h.await.unwrap(); }
-        
-        let total = acquired.load(std::sync::atomic::Ordering::Relaxed) 
-                  + rejected.load(std::sync::atomic::Ordering::Relaxed);
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let total = acquired.load(std::sync::atomic::Ordering::Relaxed)
+            + rejected.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(total, 100, "All tasks must complete");
-        assert!(rejected.load(std::sync::atomic::Ordering::Relaxed) > 0, 
-            "Some tasks must be rejected when max_permits=5 with 100 concurrent");
+        assert!(
+            rejected.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "Some tasks must be rejected when max_permits=5 with 100 concurrent"
+        );
     }
 
     #[tokio::test]
     async fn redteam_50_tenants_concurrent() {
         let sem = Arc::new(TenantSemaphore::new(2));
         let mut handles = Vec::new();
-        
+
         for i in 0..50 {
             let sem = sem.clone();
             handles.push(tokio::spawn(async move {
@@ -225,13 +235,18 @@ mod tests {
                 assert!(p1.is_some(), "First permit for {} must succeed", tenant);
                 assert!(p2.is_some(), "Second permit for {} must succeed", tenant);
                 // Third must fail (max_permits = 2)
-                assert!(sem.try_acquire(&tenant).await.is_none(), 
-                    "Third permit for {} must fail", tenant);
+                assert!(
+                    sem.try_acquire(&tenant).await.is_none(),
+                    "Third permit for {} must fail",
+                    tenant
+                );
                 drop(p1);
                 drop(p2);
             }));
         }
-        for h in handles { h.await.unwrap(); }
+        for h in handles {
+            h.await.unwrap();
+        }
         assert_eq!(sem.tenant_count(), 50);
     }
 
@@ -240,7 +255,7 @@ mod tests {
         // Simulates same tenant from 5 IPs, each sending 10 requests
         let sem = Arc::new(TenantSemaphore::new(3));
         let acquired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        
+
         let mut handles = Vec::new();
         for _ip in 0..5 {
             for _ in 0..10 {
@@ -254,7 +269,9 @@ mod tests {
                 }));
             }
         }
-        for h in handles { h.await.unwrap(); }
+        for h in handles {
+            h.await.unwrap();
+        }
         // With 50 tasks and max_permits=3, most should be rejected
         let count = acquired.load(std::sync::atomic::Ordering::Relaxed);
         assert!(count <= 50, "Cannot exceed total tasks");

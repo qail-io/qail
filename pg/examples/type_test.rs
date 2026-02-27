@@ -49,7 +49,7 @@ fn main() {
     );
     test_type!(
         "f64 (binary)",
-        &3.14159f64.to_be_bytes(),
+        &9.87654f64.to_be_bytes(),
         oid::FLOAT8,
         1,
         f64

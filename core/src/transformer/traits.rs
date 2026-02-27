@@ -144,7 +144,11 @@ pub trait SqlPattern: Send + Sync {
     fn extract(&self, stmt: &Statement, ctx: &MatchContext) -> Result<PatternData, ExtractError>;
 
     /// Generate QAIL code from extracted data
-    fn transform(&self, data: &PatternData, ctx: &TransformContext) -> Result<String, TransformError>;
+    fn transform(
+        &self,
+        data: &PatternData,
+        ctx: &TransformContext,
+    ) -> Result<String, TransformError>;
 }
 
 /// Trait for target language code generation

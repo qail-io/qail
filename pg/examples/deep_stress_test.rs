@@ -30,29 +30,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CLEANUP & SETUP
     // ========================================================================
     println!("━━━ SETUP ━━━");
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_order_items CASCADE").await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_orders CASCADE").await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_products CASCADE").await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_users CASCADE").await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS deep_order_items CASCADE")
+        .await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS deep_orders CASCADE")
+        .await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS deep_products CASCADE")
+        .await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS deep_users CASCADE")
+        .await;
 
     // Create multi-table schema with CASCADE chains
-    driver.execute_raw("
+    driver
+        .execute_raw(
+            "
         CREATE TABLE deep_users (
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
             balance INT CHECK (balance >= 0) DEFAULT 1000,
             created_at TIMESTAMPTZ DEFAULT NOW()
         )
-    ").await?;
+    ",
+        )
+        .await?;
 
-    driver.execute_raw("
+    driver
+        .execute_raw(
+            "
         CREATE TABLE deep_products (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             stock INT CHECK (stock >= 0) DEFAULT 100,
             price INT CHECK (price > 0)
         )
-    ").await?;
+    ",
+        )
+        .await?;
 
     driver.execute_raw("
         CREATE TABLE deep_orders (
@@ -63,7 +79,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     ").await?;
 
-    driver.execute_raw("
+    driver
+        .execute_raw(
+            "
         CREATE TABLE deep_order_items (
             id SERIAL PRIMARY KEY,
             order_id INT REFERENCES deep_orders(id) ON DELETE CASCADE,
@@ -71,7 +89,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             quantity INT CHECK (quantity > 0),
             unit_price INT CHECK (unit_price > 0)
         )
-    ").await?;
+    ",
+        )
+        .await?;
 
     println!("✅ Created 4-table schema with CASCADE chains\n");
 
@@ -81,17 +101,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("━━━ TEST 1: MULTI-LEVEL CASCADE DELETE ━━━");
 
     // Insert test data
-    driver.execute_raw("INSERT INTO deep_users (email) VALUES ('cascade@test.com')").await?;
-    driver.execute_raw("INSERT INTO deep_products (name, price) VALUES ('Widget', 100)").await?;
-    driver.execute_raw("INSERT INTO deep_orders (user_id, total) VALUES (1, 100)").await?;
+    driver
+        .execute_raw("INSERT INTO deep_users (email) VALUES ('cascade@test.com')")
+        .await?;
+    driver
+        .execute_raw("INSERT INTO deep_products (name, price) VALUES ('Widget', 100)")
+        .await?;
+    driver
+        .execute_raw("INSERT INTO deep_orders (user_id, total) VALUES (1, 100)")
+        .await?;
     driver.execute_raw("INSERT INTO deep_order_items (order_id, product_id, quantity, unit_price) VALUES (1, 1, 1, 100)").await?;
 
     // Delete user - should cascade through orders to order_items
-    driver.execute_raw("DELETE FROM deep_users WHERE email = 'cascade@test.com'").await?;
+    driver
+        .execute_raw("DELETE FROM deep_users WHERE email = 'cascade@test.com'")
+        .await?;
     println!("✅ User deleted - checking CASCADE chain...");
 
     // Verify cascade worked
-    match driver.execute_raw("SELECT 1 FROM deep_orders WHERE id = 1").await {
+    match driver
+        .execute_raw("SELECT 1 FROM deep_orders WHERE id = 1")
+        .await
+    {
         Err(_) => {
             println!("✅ Orders deleted via CASCADE");
             passed += 1;
@@ -108,12 +139,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================================================
     println!("\n━━━ TEST 2: RESTRICT VS CASCADE ━━━");
 
-    driver.execute_raw("INSERT INTO deep_users (email) VALUES ('restrict@test.com')").await?;
-    driver.execute_raw("INSERT INTO deep_orders (user_id, total) VALUES (2, 200)").await?;
+    driver
+        .execute_raw("INSERT INTO deep_users (email) VALUES ('restrict@test.com')")
+        .await?;
+    driver
+        .execute_raw("INSERT INTO deep_orders (user_id, total) VALUES (2, 200)")
+        .await?;
     driver.execute_raw("INSERT INTO deep_order_items (order_id, product_id, quantity, unit_price) VALUES (2, 1, 2, 100)").await?;
 
     // Try to delete product - should FAIL due to RESTRICT
-    match driver.execute_raw("DELETE FROM deep_products WHERE id = 1").await {
+    match driver
+        .execute_raw("DELETE FROM deep_products WHERE id = 1")
+        .await
+    {
         Err(_) => {
             println!("✅ RESTRICT prevented product deletion (order_items reference it)");
             passed += 1;
@@ -130,7 +168,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 3: CHECK CONSTRAINT BOUNDARIES ━━━");
 
     // Test balance=0 (edge of CHECK balance >= 0)
-    match driver.execute_raw("UPDATE deep_users SET balance = 0 WHERE id = 2").await {
+    match driver
+        .execute_raw("UPDATE deep_users SET balance = 0 WHERE id = 2")
+        .await
+    {
         Ok(_) => {
             println!("✅ balance=0 accepted (edge case)");
             passed += 1;
@@ -142,7 +183,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Test balance=-1 (violates CHECK)
-    match driver.execute_raw("UPDATE deep_users SET balance = -1 WHERE id = 2").await {
+    match driver
+        .execute_raw("UPDATE deep_users SET balance = -1 WHERE id = 2")
+        .await
+    {
         Err(_) => {
             println!("✅ balance=-1 rejected");
             passed += 1;
@@ -154,7 +198,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Test price=1 (minimum valid)
-    match driver.execute_raw("INSERT INTO deep_products (name, price) VALUES ('MinPrice', 1)").await {
+    match driver
+        .execute_raw("INSERT INTO deep_products (name, price) VALUES ('MinPrice', 1)")
+        .await
+    {
         Ok(_) => {
             println!("✅ price=1 accepted (minimum edge)");
             passed += 1;
@@ -166,7 +213,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Test price=0 (violates CHECK price > 0)
-    match driver.execute_raw("INSERT INTO deep_products (name, price) VALUES ('ZeroPrice', 0)").await {
+    match driver
+        .execute_raw("INSERT INTO deep_products (name, price) VALUES ('ZeroPrice', 0)")
+        .await
+    {
         Err(_) => {
             println!("✅ price=0 rejected");
             passed += 1;
@@ -184,7 +234,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Valid status values
     for status in &["pending", "shipped", "delivered", "cancelled"] {
-        match driver.execute_raw(&format!("UPDATE deep_orders SET status = '{}' WHERE id = 2", status)).await {
+        match driver
+            .execute_raw(&format!(
+                "UPDATE deep_orders SET status = '{}' WHERE id = 2",
+                status
+            ))
+            .await
+        {
             Ok(_) => {
                 println!("✅ status='{}' accepted", status);
                 passed += 1;
@@ -197,7 +253,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Invalid status
-    match driver.execute_raw("UPDATE deep_orders SET status = 'invalid_status' WHERE id = 2").await {
+    match driver
+        .execute_raw("UPDATE deep_orders SET status = 'invalid_status' WHERE id = 2")
+        .await
+    {
         Err(_) => {
             println!("✅ status='invalid_status' rejected");
             passed += 1;
@@ -227,7 +286,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let elapsed = start.elapsed();
-    println!("✅ Batch insert: {} succeeded, {} failed in {:?}", batch_success, batch_fail, elapsed);
+    println!(
+        "✅ Batch insert: {} succeeded, {} failed in {:?}",
+        batch_success, batch_fail, elapsed
+    );
     if batch_success == 1000 {
         passed += 1;
         println!("   Rate: {:.0} inserts/sec", 1000.0 / elapsed.as_secs_f64());
@@ -241,7 +303,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 6: UNIQUE VIOLATION DETECTION ━━━");
 
     // Try to insert duplicate email
-    match driver.execute_raw("INSERT INTO deep_users (email) VALUES ('batch0@test.com')").await {
+    match driver
+        .execute_raw("INSERT INTO deep_users (email) VALUES ('batch0@test.com')")
+        .await
+    {
         Err(_) => {
             println!("✅ Detected duplicate email violation");
             passed += 1;
@@ -258,7 +323,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 7: NULL CONSTRAINT ENFORCEMENT ━━━");
 
     // email is NOT NULL
-    match driver.execute_raw("INSERT INTO deep_users (email) VALUES (NULL)").await {
+    match driver
+        .execute_raw("INSERT INTO deep_users (email) VALUES (NULL)")
+        .await
+    {
         Err(_) => {
             println!("✅ NULL email rejected (NOT NULL constraint)");
             passed += 1;
@@ -270,7 +338,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // product name is NOT NULL
-    match driver.execute_raw("INSERT INTO deep_products (name, price) VALUES (NULL, 50)").await {
+    match driver
+        .execute_raw("INSERT INTO deep_products (name, price) VALUES (NULL, 50)")
+        .await
+    {
         Err(_) => {
             println!("✅ NULL product name rejected");
             passed += 1;
@@ -287,12 +358,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 8: TRANSACTION ISOLATION ━━━");
 
     // Test serializable transaction
-    let result = driver.execute_raw("
+    let result = driver
+        .execute_raw(
+            "
         BEGIN ISOLATION LEVEL SERIALIZABLE;
         UPDATE deep_users SET balance = balance - 100 WHERE id = 2;
         UPDATE deep_users SET balance = balance + 100 WHERE email = 'batch0@test.com';
         COMMIT;
-    ").await;
+    ",
+        )
+        .await;
 
     match result {
         Ok(_) => {
@@ -311,11 +386,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================================================
     println!("\n━━━ TEST 9: ROW-LEVEL LOCKING ━━━");
 
-    let result = driver.execute_raw("
+    let result = driver
+        .execute_raw(
+            "
         BEGIN;
         SELECT * FROM deep_users WHERE id = 2 FOR UPDATE NOWAIT;
         COMMIT;
-    ").await;
+    ",
+        )
+        .await;
 
     match result {
         Ok(_) => {
@@ -334,7 +413,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 10: INTEGER BOUNDARIES ━━━");
 
     // Test INT max value
-    match driver.execute_raw("UPDATE deep_products SET stock = 2147483647 WHERE id = 1").await {
+    match driver
+        .execute_raw("UPDATE deep_products SET stock = 2147483647 WHERE id = 1")
+        .await
+    {
         Ok(_) => {
             println!("✅ INT max (2147483647) accepted");
             passed += 1;
@@ -346,7 +428,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Test overflow (should fail)
-    match driver.execute_raw("UPDATE deep_products SET stock = 2147483648 WHERE id = 1").await {
+    match driver
+        .execute_raw("UPDATE deep_products SET stock = 2147483648 WHERE id = 1")
+        .await
+    {
         Err(_) => {
             println!("✅ INT overflow detected");
             passed += 1;
@@ -363,7 +448,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 11: EMPTY STRING VS NULL ━━━");
 
     // Empty string is valid (not NULL)
-    match driver.execute_raw("INSERT INTO deep_products (name, price) VALUES ('', 10)").await {
+    match driver
+        .execute_raw("INSERT INTO deep_products (name, price) VALUES ('', 10)")
+        .await
+    {
         Ok(_) => {
             println!("✅ Empty string accepted (different from NULL)");
             passed += 1;
@@ -401,10 +489,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n⚠️  {} tests need review", failed);
     }
 
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_order_items CASCADE").await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_orders CASCADE").await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_products CASCADE").await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS deep_users CASCADE").await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS deep_order_items CASCADE")
+        .await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS deep_orders CASCADE")
+        .await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS deep_products CASCADE")
+        .await;
+    let _ = driver
+        .execute_raw("DROP TABLE IF EXISTS deep_users CASCADE")
+        .await;
     println!("\n✅ Cleaned up test tables");
 
     Ok(())

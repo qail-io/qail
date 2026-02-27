@@ -49,7 +49,11 @@ impl std::fmt::Display for WorkflowError {
             WorkflowError::QueryFailed(e) => write!(f, "Query failed: {}", e),
             WorkflowError::NotifyFailed(e) => write!(f, "Notification failed: {}", e),
             WorkflowError::NoTransition { state, workflow } => {
-                write!(f, "No transition from '{}' in workflow '{}'", state, workflow)
+                write!(
+                    f,
+                    "No transition from '{}' in workflow '{}'",
+                    state, workflow
+                )
             }
             WorkflowError::MissingContextKey(k) => write!(f, "Context key not found: {}", k),
             WorkflowError::AlreadyTerminal(s) => write!(f, "Workflow already terminal: {}", s),
@@ -116,10 +120,8 @@ pub trait WorkflowExecutor: Send + Sync {
     async fn save_state(&self, ctx: &WorkflowContext) -> Result<(), WorkflowError>;
 
     /// Load a previously persisted workflow state.
-    async fn load_state(
-        &self,
-        workflow_id: &str,
-    ) -> Result<Option<WorkflowContext>, WorkflowError>;
+    async fn load_state(&self, workflow_id: &str)
+    -> Result<Option<WorkflowContext>, WorkflowError>;
 
     /// Create a payment charge via the appropriate provider.
     ///
@@ -189,10 +191,7 @@ fn execute_step<'a, E: WorkflowExecutor>(
                 branches,
                 default,
             } => {
-                let value = ctx
-                    .get_str(condition_key)
-                    .unwrap_or("")
-                    .to_string();
+                let value = ctx.get_str(condition_key).unwrap_or("").to_string();
 
                 let steps = branches
                     .iter()

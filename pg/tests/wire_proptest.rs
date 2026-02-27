@@ -8,7 +8,7 @@
 //! 3. PgEncoder produces valid message boundaries (type + length + payload)
 
 use proptest::prelude::*;
-use qail_pg::protocol::wire::{FrontendMessage, BackendMessage};
+use qail_pg::protocol::wire::{BackendMessage, FrontendMessage};
 
 // ============================================================================
 // Strategy: arbitrary safe strings (no interior NULLs - PG protocol invariant)
@@ -67,13 +67,12 @@ fn arb_frontend_message() -> impl Strategy<Value = FrontendMessage> {
         // Password
         arb_pg_string().prop_map(FrontendMessage::PasswordMessage),
         // SASL
-        (arb_pg_string(), proptest::collection::vec(any::<u8>(), 0..64))
-            .prop_map(|(mechanism, data)| FrontendMessage::SASLInitialResponse {
-                mechanism,
-                data,
-            }),
-        proptest::collection::vec(any::<u8>(), 0..64)
-            .prop_map(FrontendMessage::SASLResponse),
+        (
+            arb_pg_string(),
+            proptest::collection::vec(any::<u8>(), 0..64)
+        )
+            .prop_map(|(mechanism, data)| FrontendMessage::SASLInitialResponse { mechanism, data }),
+        proptest::collection::vec(any::<u8>(), 0..64).prop_map(FrontendMessage::SASLResponse),
     ]
 }
 
@@ -214,7 +213,7 @@ proptest! {
 }
 
 // ============================================================================
-// Property: PgEncoder produces valid message boundaries  
+// Property: PgEncoder produces valid message boundaries
 // ============================================================================
 
 proptest! {

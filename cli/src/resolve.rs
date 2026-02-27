@@ -64,7 +64,5 @@ pub fn resolve_ssh(cli_ssh: Option<&str>) -> Option<String> {
     }
 
     // 2. Try qail.toml
-    QailConfig::load()
-        .ok()
-        .and_then(|c| c.postgres.ssh)
+    QailConfig::load().ok().and_then(|c| c.postgres.ssh)
 }

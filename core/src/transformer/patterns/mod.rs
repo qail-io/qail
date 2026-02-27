@@ -1,11 +1,11 @@
 //! SQL Pattern implementations
 
-mod select;
-mod insert;
-mod update;
 mod delete;
+mod insert;
+mod select;
+mod update;
 
-pub use select::SelectPattern;
-pub use insert::InsertPattern;
-pub use update::UpdatePattern;
 pub use delete::DeletePattern;
+pub use insert::InsertPattern;
+pub use select::SelectPattern;
+pub use update::UpdatePattern;

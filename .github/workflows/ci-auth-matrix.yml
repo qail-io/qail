@@ -1,0 +1,101 @@
+name: Auth Matrix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pg/**'
+      - 'gateway/**'
+  pull_request:
+    paths:
+      - 'pg/**'
+      - 'gateway/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  auth-modes:
+    name: Auth (${{ matrix.auth_mode }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        auth_mode: [trust, md5, scram-sha-256]
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: qail_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: ${{ matrix.auth_mode }}
+          POSTGRES_INITDB_ARGS: "--auth-host=${{ matrix.auth_mode }}"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/qail_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: auth-${{ matrix.auth_mode }}
+
+      - name: Unit tests
+        run: cargo test --workspace --lib
+
+      - name: Integration tests
+        run: cargo test --workspace --test '*'
+
+  result-formats:
+    name: Result format (binary)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: qail_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/qail_test
+      QAIL_TEST_RESULT_FORMAT: binary
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: result-binary
+
+      - name: Integration tests (binary format)
+        run: cargo test --workspace --test '*'

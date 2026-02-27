@@ -232,7 +232,10 @@ impl Qail {
     }
 
     /// Add an equality filter (deprecated alias for `.where_eq()`).
-    #[deprecated(since = "0.11.0", note = "Use .filter(column, Operator::Eq, value) or .where_eq(column, value) instead")]
+    #[deprecated(
+        since = "0.11.0",
+        note = "Use .filter(column, Operator::Eq, value) or .where_eq(column, value) instead"
+    )]
     pub fn cage(mut self, column: &str, value: impl Into<Value>) -> Self {
         self.cages.push(Cage {
             kind: CageKind::Filter,

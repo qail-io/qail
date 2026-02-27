@@ -1,5 +1,5 @@
 //! Quick upsert debug test with delay
-use qail_qdrant::{QdrantDriver, Point, PointId};
+use qail_qdrant::{Point, PointId, QdrantDriver};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,12 +13,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create test collection
     println!("Creating test collection...");
-    driver.create_collection(
-        "upsert_debug_test",
-        4,  // Small vector for testing
-        qail_core::ast::Distance::Cosine,
-        false,
-    ).await?;
+    driver
+        .create_collection(
+            "upsert_debug_test",
+            4, // Small vector for testing
+            qail_core::ast::Distance::Cosine,
+            false,
+        )
+        .await?;
     println!("Collection created");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -52,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .output()?;
     let info = String::from_utf8_lossy(&output.stdout);
     println!("Collection info: {}", info);
-    
+
     // Parse points_count
     if info.contains("\"points_count\":0") {
         println!("\n❌ Points count is still 0!");

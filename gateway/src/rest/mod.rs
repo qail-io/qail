@@ -7,10 +7,13 @@
 //! GET    /api/{table}?expand=rel         → List with LEFT JOIN on FK relation
 //! GET    /api/{table}?expand=nested:rel  → List with nested FK objects/arrays
 //! GET    /api/{table}?stream=true        → NDJSON streaming response
-//! GET    /api/{table}?col.gte=10         → Filter with operators (eq, ne, gt, gte, lt, lte, in, like, ilike, is_null)
-//! GET    /api/{table}?sort=col:desc      → Sort (multi-column: col1:asc,col2:desc)
+//! GET    /api/{table}?col.gte=10         → Filter key-style
+//! GET    /api/{table}?col=gte.10         → Filter value-style
+//! GET    /api/{table}?sort=col:desc      → Sort explicit direction
+//! GET    /api/{table}?sort=-col          → Sort prefix direction
 //! GET    /api/{table}?distinct=col       → Distinct on columns
 //! GET    /api/{table}/aggregate          → Aggregation (count, sum, avg, min, max)
+//! GET    /api/{table}/_aggregate         → Aggregation alias (compat)
 //! GET    /api/{table}/_explain           → EXPLAIN ANALYZE for query
 //! GET    /api/{table}/{id}               → Get single row by PK
 //! POST   /api/{table}                    → Create row(s) from JSON body (single or batch)
@@ -20,6 +23,7 @@
 //! PATCH  /api/{table}/{id}?returning=*   → Return updated row
 //! DELETE /api/{table}/{id}               → Delete by PK
 //! GET    /api/{parent}/{id}/{child}      → Nested list: children filtered by parent FK
+//! POST   /api/rpc/{function}             → Call function with JSON args
 //! ```
 
 mod branch;
@@ -31,9 +35,9 @@ mod nested;
 pub mod types;
 
 use axum::{
-    http::HeaderMap,
-    routing::get,
     Router,
+    http::HeaderMap,
+    routing::{get, post},
 };
 use std::sync::Arc;
 
@@ -48,9 +52,7 @@ pub use types::*;
 /// Extract branch context from X-Branch-ID header.
 #[allow(dead_code)]
 fn extract_branch_from_headers(headers: &HeaderMap) -> BranchContext {
-    let branch_id = headers
-        .get("x-branch-id")
-        .and_then(|v| v.to_str().ok());
+    let branch_id = headers.get("x-branch-id").and_then(|v| v.to_str().ok());
     BranchContext::from_header(branch_id)
 }
 
@@ -113,15 +115,21 @@ pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
 
         // GET /api/{table} — list
         // POST /api/{table} — create
-        router = router.route(&path, get(handlers::list_handler).post(handlers::create_handler));
+        router = router.route(
+            &path,
+            get(handlers::list_handler).post(handlers::create_handler),
+        );
 
         // GET /api/{table}/aggregate — aggregation
         let agg_path = format!("/api/{}/aggregate", table_name);
+        // GET /api/{table}/_aggregate — compatibility alias
+        let agg_alias_path = format!("/api/{}/_aggregate", table_name);
 
         // GET /api/{table}/_explain — explain query plan
         let explain_path = format!("/api/{}/_explain", table_name);
         router = router.route(&explain_path, get(explain::explain_handler));
         router = router.route(&agg_path, get(handlers::aggregate_handler));
+        router = router.route(&agg_alias_path, get(handlers::aggregate_handler));
 
         if has_pk {
             let id_path = format!("/api/{}/{{id}}", table_name);
@@ -142,7 +150,10 @@ pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
             for (child_table, _fk_col, _pk_col) in &children {
                 let nested_path = format!("/api/{}/{{id}}/{}", table_name, child_table);
                 if !seen_nested.insert(nested_path.clone()) {
-                    tracing::debug!("  AUTO-REST nested: {} → skipped (duplicate FK)", nested_path);
+                    tracing::debug!(
+                        "  AUTO-REST nested: {} → skipped (duplicate FK)",
+                        nested_path
+                    );
                     continue;
                 }
                 tracing::info!("  AUTO-REST nested: {} → GET", nested_path);
@@ -153,23 +164,43 @@ pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
 
     // DevEx endpoints
     router = router
+        // POST /api/rpc/{function} — function-as-RPC
+        .route("/api/rpc/{function}", post(handlers::rpc_handler))
         // GET /api/_schema — Schema introspection
         .route("/api/_schema", get(devex::schema_introspection_handler))
         // GET /api/_schema/typescript — TypeScript interfaces from schema
-        .route("/api/_schema/typescript", get(devex::typescript_types_handler))
+        .route(
+            "/api/_schema/typescript",
+            get(devex::typescript_types_handler),
+        )
+        // GET /api/_rpc/contracts — RPC function signature contracts
+        .route("/api/_rpc/contracts", get(devex::rpc_contracts_handler))
         // GET /api/_openapi — Auto-generated OpenAPI 3.0 spec
         .route("/api/_openapi", get(devex::openapi_spec_handler));
 
     // Branch management endpoints
     router = router
-        .route("/api/_branch", axum::routing::post(branch::branch_create_handler).get(branch::branch_list_handler))
-        .route("/api/_branch/{name}", axum::routing::delete(branch::branch_delete_handler))
-        .route("/api/_branch/{name}/merge", axum::routing::post(branch::branch_merge_handler));
+        .route(
+            "/api/_branch",
+            axum::routing::post(branch::branch_create_handler).get(branch::branch_list_handler),
+        )
+        .route(
+            "/api/_branch/{name}",
+            axum::routing::delete(branch::branch_delete_handler),
+        )
+        .route(
+            "/api/_branch/{name}/merge",
+            axum::routing::post(branch::branch_merge_handler),
+        );
 
+    tracing::info!("  RPC: POST /api/rpc/:function → invoke database function");
     tracing::info!("  DEVEX: GET /api/_schema → Schema introspection");
     tracing::info!("  DEVEX: GET /api/_schema/typescript → TypeScript interfaces");
+    tracing::info!("  DEVEX: GET /api/_rpc/contracts → RPC contracts");
     tracing::info!("  DEVEX: GET /api/_openapi → OpenAPI 3.0 spec");
-    tracing::info!("  BRANCH: POST/GET /api/_branch, DELETE /api/_branch/:name, POST /api/_branch/:name/merge");
+    tracing::info!(
+        "  BRANCH: POST/GET /api/_branch, DELETE /api/_branch/:name, POST /api/_branch/:name/merge"
+    );
 
     router
 }

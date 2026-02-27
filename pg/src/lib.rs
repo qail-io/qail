@@ -11,13 +11,22 @@ pub mod driver;
 pub mod protocol;
 pub mod types;
 
+pub use driver::explain;
+#[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+pub use driver::gss::{
+    LinuxKrb5PreflightReport, LinuxKrb5ProviderConfig, linux_krb5_preflight,
+    linux_krb5_token_provider,
+};
 pub use driver::{
-    Notification, PgConnection, PgDriver, PgDriverBuilder, PgError, PgPool, PgResult, PgRow, PoolConfig, PoolStats,
-    PooledConnection, QailRow, QueryResult,
+    AuthSettings, ConnectOptions, EnterpriseAuthMechanism, GssEncMode, GssTokenProvider,
+    GssTokenProviderEx, GssTokenRequest, Notification, PgConnection, PgDriver, PgDriverBuilder,
+    PgError, PgPool, PgResult, PgRow, PgServerError, PoolConfig, PoolStats, PooledConnection,
+    QailRow, QueryResult, ResultFormat, ScramChannelBindingMode, TlsConfig, TlsMode,
 };
 pub use protocol::PgEncoder;
-pub use driver::explain;
-pub use types::{Date, FromPg, Json, Numeric, Time, Timestamp, ToPg, TypeError, Uuid};
+pub use types::{
+    Cidr, Date, FromPg, Inet, Json, MacAddr, Numeric, Time, Timestamp, ToPg, TypeError, Uuid,
+};
 
 /// Generate the RLS SQL string for pipelined execution.
 ///
@@ -25,4 +34,15 @@ pub use types::{Date, FromPg, Json, Numeric, Time, Timestamp, ToPg, TypeError, U
 /// string that can be passed to `PooledConnection::fetch_all_with_rls()`.
 pub fn rls_sql_with_timeout(ctx: &qail_core::rls::RlsContext, timeout_ms: u32) -> String {
     driver::rls::context_to_sql_with_timeout(ctx, timeout_ms)
+}
+
+/// Generate the RLS SQL string with both statement and lock timeouts.
+///
+/// When `lock_timeout_ms` is 0, the lock_timeout clause is omitted.
+pub fn rls_sql_with_timeouts(
+    ctx: &qail_core::rls::RlsContext,
+    statement_timeout_ms: u32,
+    lock_timeout_ms: u32,
+) -> String {
+    driver::rls::context_to_sql_with_timeouts(ctx, statement_timeout_ms, lock_timeout_ms)
 }

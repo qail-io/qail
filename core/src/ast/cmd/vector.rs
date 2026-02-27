@@ -127,7 +127,7 @@ mod tests {
             .vector(vec![0.1, 0.2, 0.3])
             .score_threshold(0.8)
             .limit(10);
-        
+
         assert_eq!(cmd.action, Action::Search);
         assert_eq!(cmd.table, "products");
         assert_eq!(cmd.vector, Some(vec![0.1, 0.2, 0.3]));
@@ -139,16 +139,14 @@ mod tests {
         let cmd = Qail::search("articles")
             .vector_name("title")
             .vector(vec![0.5, 0.5]);
-        
+
         assert_eq!(cmd.vector_name, Some("title".to_string()));
     }
 
     #[test]
     fn test_with_vectors() {
-        let cmd = Qail::search("products")
-            .vector(vec![0.1])
-            .with_vectors();
-        
+        let cmd = Qail::search("products").vector(vec![0.1]).with_vectors();
+
         assert!(cmd.with_vector);
     }
 }

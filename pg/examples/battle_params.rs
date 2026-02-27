@@ -1,5 +1,5 @@
 //! BATTLE TEST #8: The Parameter Limit 🔢
-//! 
+//!
 //! Purpose: Ensure the driver catches the i16 protocol limit (32,767 params).
 //! Fail Condition:
 //! 1. Panic (Integer overflow during packet building).
@@ -16,8 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║  BATTLE TEST #8: The 32k Parameter Limit 🔢               ║");
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 
-    let config = PoolConfig::new("localhost", 5432, "postgres", "postgres")
-        .password("postgres");
+    let config = PoolConfig::new("localhost", 5432, "postgres", "postgres").password("postgres");
     let pool = PgPool::connect(config).await?;
     let mut conn = pool.acquire_system().await?;
 
@@ -25,12 +24,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // VALUES ($1), ($2), ... ($40000)
     let param_count = 40_000;
     println!("1️⃣  Building query with {} parameters...", param_count);
-    
+
     let mut sql = String::from("VALUES ");
     let mut params: Vec<Option<Vec<u8>>> = Vec::with_capacity(param_count);
 
     for i in 1..=param_count {
-        if i > 1 { sql.push_str(","); }
+        if i > 1 {
+            sql.push(',');
+        }
         sql.push_str(&format!("(${})", i));
         params.push(Some(b"1".to_vec()));
     }
@@ -44,21 +45,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(_) => {
             println!("   ❌ FAIL: The query somehow succeeded? (Impossible)");
             std::process::exit(1);
-        },
+        }
         Err(e) => {
             let msg = e.to_string();
             println!("   Result: {:?}", msg);
-            
+
             if msg.to_lowercase().contains("too many parameter") || msg.contains("limit") {
                 println!("   ✅ PASS: Driver blocked the request safely.");
-            } else if msg.contains("Postgres error") || msg.contains("syntax") || msg.contains("protocol") {
+            } else if msg.contains("Postgres error")
+                || msg.contains("syntax")
+                || msg.contains("protocol")
+            {
                 println!("   ❌ FAIL: You sent the packet and Postgres complained.");
                 println!("   (You wasted bandwidth sending a doomed packet).");
                 std::process::exit(1);
             } else if msg.contains("overflow") {
-                 // If panic caught as error? Unlikely.
+                // If panic caught as error? Unlikely.
                 println!("   ⚠️  WARN: You panicked or overflowed?");
-                 std::process::exit(1);
+                std::process::exit(1);
             } else {
                 println!("   ❌ FAIL: Unknown error state: {}", msg);
                 std::process::exit(1);

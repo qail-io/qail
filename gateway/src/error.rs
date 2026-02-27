@@ -8,31 +8,31 @@ pub enum GatewayError {
     /// Configuration error
     #[error("Configuration error: {0}")]
     Config(String),
-    
+
     /// Schema loading error
     #[error("Failed to load schema: {0}")]
     Schema(String),
-    
+
     /// Policy loading error
     #[error("Failed to load policy: {0}")]
     Policy(String),
-    
+
     /// Database connection error
     #[error("Database error: {0}")]
     Database(String),
-    
+
     /// Authentication error
     #[error("Authentication failed: {0}")]
     Auth(String),
-    
+
     /// Authorization error (policy violation)
     #[error("Access denied: {0}")]
     AccessDenied(String),
-    
+
     /// Query validation error
     #[error("Invalid query: {0}")]
     InvalidQuery(String),
-    
+
     /// Internal server error
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),

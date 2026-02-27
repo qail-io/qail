@@ -184,7 +184,7 @@ impl MigrationImpact {
                             "  ❌ {}:{} → uses \"{}\" in {}\n",
                             r.file.display(),
                             r.line,
-                            column,  // The actual matched column
+                            column, // The actual matched column
                             r.snippet
                         ));
                     }

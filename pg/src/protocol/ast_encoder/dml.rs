@@ -3,10 +3,13 @@
 //! SELECT, INSERT, UPDATE, DELETE, EXPORT, and CTE statements.
 
 use bytes::BytesMut;
-use qail_core::ast::{CTEDef, CageKind, Expr, GroupByMode, JoinKind, Qail, SortOrder};
+use qail_core::ast::{CTEDef, CageKind, Expr, GroupByMode, JoinKind, LogicalOp, Qail, SetOp, SortOrder};
 
 use super::helpers::write_usize;
-use super::values::{encode_columns, encode_columns_with_params, encode_conditions, encode_expr, encode_join_value, encode_operator, encode_value};
+use super::values::{
+    encode_columns, encode_columns_with_params, encode_conditions, encode_expr, encode_join_value,
+    encode_operator, encode_value,
+};
 
 /// Encode a SELECT statement directly to bytes.
 ///
@@ -15,9 +18,20 @@ use super::values::{encode_columns, encode_columns_with_params, encode_condition
 /// * `cmd` — Qail AST command with `Action::Get`.
 /// * `buf` — Output buffer to append the SQL bytes to.
 /// * `params` — Accumulator for parameterized bind values.
-pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
+pub fn encode_select(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    // Raw SQL passthrough: if the command was created via Qail::raw_sql(),
+    // write the SQL string verbatim instead of generating SELECT ... FROM ...
+    if cmd.is_raw_sql() {
+        buf.extend_from_slice(cmd.table.as_bytes());
+        return Ok(());
+    }
+
     // CTE prefix
-    encode_cte_prefix(cmd, buf, params);
+    encode_cte_prefix(cmd, buf, params)?;
 
     buf.extend_from_slice(b"SELECT ");
 
@@ -73,18 +87,12 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         }
     }
 
-    // WHERE
-    let filter_cage = cmd.cages.iter().find(|c| c.kind == CageKind::Filter);
-    if let Some(cage) = filter_cage
-        && !cage.conditions.is_empty()
-    {
-        buf.extend_from_slice(b" WHERE ");
-        encode_conditions(&cage.conditions, buf, params)?;
-    }
+    // WHERE (supports AND + OR filter cages)
+    encode_where(cmd, buf, params)?;
 
     // GROUP BY - prefer explicit Partition cage, fall back to auto-extraction from columns
     let partition_cage = cmd.cages.iter().find(|c| c.kind == CageKind::Partition);
-    
+
     if let Some(cage) = partition_cage {
         // Explicit GROUP BY from .group_by() or .group_by_expr()
         if !cage.conditions.is_empty() {
@@ -98,15 +106,20 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         }
     } else {
         // Auto-generate GROUP BY from columns when aggregates are present
-        let group_cols: Vec<&str> = cmd.columns.iter()
+        let group_cols: Vec<&str> = cmd
+            .columns
+            .iter()
             .filter_map(|e| match e {
                 Expr::Named(name) => Some(name.as_str()),
                 Expr::Aliased { name, .. } => Some(name.as_str()),
                 _ => None,
             })
             .collect();
-        
-        let has_aggregates = cmd.columns.iter().any(|e| matches!(e, Expr::Aggregate { .. }));
+
+        let has_aggregates = cmd
+            .columns
+            .iter()
+            .any(|e| matches!(e, Expr::Aggregate { .. }));
         if has_aggregates && !group_cols.is_empty() {
             buf.extend_from_slice(b" GROUP BY ");
             match &cmd.group_by_mode {
@@ -160,7 +173,9 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
     }
 
     // ORDER BY - collect ALL sort cages and output them together
-    let sort_cages: Vec<_> = cmd.cages.iter()
+    let sort_cages: Vec<_> = cmd
+        .cages
+        .iter()
         .filter_map(|cage| {
             if let CageKind::Sort(order) = &cage.kind {
                 Some((cage, *order))
@@ -169,7 +184,7 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
             }
         })
         .collect();
-    
+
     if !sort_cages.is_empty() {
         buf.extend_from_slice(b" ORDER BY ");
         let mut first = true;
@@ -207,6 +222,18 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
             break;
         }
     }
+
+    // SET OPERATIONS (UNION, INTERSECT, EXCEPT)
+    for (set_op, other_cmd) in &cmd.set_ops {
+        match set_op {
+            SetOp::Union => buf.extend_from_slice(b" UNION "),
+            SetOp::UnionAll => buf.extend_from_slice(b" UNION ALL "),
+            SetOp::Intersect => buf.extend_from_slice(b" INTERSECT "),
+            SetOp::Except => buf.extend_from_slice(b" EXCEPT "),
+        }
+        encode_select(other_cmd, buf, params)?;
+    }
+
     Ok(())
 }
 
@@ -217,9 +244,13 @@ pub fn encode_select(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 /// * `cmd` — Qail AST command containing CTE definitions.
 /// * `buf` — Output buffer to append the WITH clause to.
 /// * `params` — Accumulator for parameterized bind values.
-pub fn encode_cte_prefix(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+pub fn encode_cte_prefix(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), super::super::EncodeError> {
     if cmd.ctes.is_empty() {
-        return;
+        return Ok(());
     }
 
     buf.extend_from_slice(b"WITH ");
@@ -233,14 +264,19 @@ pub fn encode_cte_prefix(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option
         if i > 0 {
             buf.extend_from_slice(b", ");
         }
-        encode_single_cte(cte, buf, params);
+        encode_single_cte(cte, buf, params)?;
     }
 
     buf.extend_from_slice(b" ");
+    Ok(())
 }
 
 /// Encode a single CTE definition.
-fn encode_single_cte(cte: &CTEDef, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+fn encode_single_cte(
+    cte: &CTEDef,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), super::super::EncodeError> {
     buf.extend_from_slice(cte.name.as_bytes());
 
     // Optional column list
@@ -257,18 +293,25 @@ fn encode_single_cte(cte: &CTEDef, buf: &mut BytesMut, params: &mut Vec<Option<V
 
     buf.extend_from_slice(b" AS (");
 
-    // Encode base query recursively
-    encode_select(&cte.base_query, buf, params).ok();
+    // Encode base query — check for raw SQL passthrough first.
+    // Raw SQL is stored when the CTE body couldn't be parsed as QAIL
+    // (e.g. complex SQL, VALUES lists, recursive anchors).
+    if cte.base_query.is_raw_sql() {
+        buf.extend_from_slice(cte.base_query.table.as_bytes());
+    } else {
+        encode_select(&cte.base_query, buf, params)?;
+    }
 
     // Recursive part (UNION ALL)
     if cte.recursive
         && let Some(ref recursive_query) = cte.recursive_query
     {
         buf.extend_from_slice(b" UNION ALL ");
-        encode_select(recursive_query, buf, params).ok();
+        encode_select(recursive_query, buf, params)?;
     }
 
     buf.extend_from_slice(b")");
+    Ok(())
 }
 
 /// Encode an INSERT statement.
@@ -278,13 +321,17 @@ fn encode_single_cte(cte: &CTEDef, buf: &mut BytesMut, params: &mut Vec<Option<V
 /// * `cmd` — Qail AST command with `Action::Add`.
 /// * `buf` — Output buffer to append the SQL bytes to.
 /// * `params` — Accumulator for parameterized bind values.
-pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
+pub fn encode_insert(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"INSERT INTO ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
     // Find payload cage
     let payload_cage = cmd.cages.iter().find(|c| c.kind == CageKind::Payload);
-    
+
     // Column list - prefer cmd.columns, but extract from conditions if empty (set_value pattern)
     if !cmd.columns.is_empty() {
         buf.extend_from_slice(b" (");
@@ -313,13 +360,13 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         }
         buf.extend_from_slice(b")");
     }
-    
+
     // ON CONFLICT clause (UPSERT support)
     if let Some(ref on_conflict) = cmd.on_conflict {
         use qail_core::ast::ConflictAction;
-        
+
         buf.extend_from_slice(b" ON CONFLICT ");
-        
+
         // Conflict target columns
         if !on_conflict.columns.is_empty() {
             buf.extend_from_slice(b"(");
@@ -331,7 +378,7 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
             }
             buf.extend_from_slice(b") ");
         }
-        
+
         // Conflict action
         match &on_conflict.action {
             ConflictAction::DoNothing => {
@@ -350,13 +397,13 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
             }
         }
     }
-    
+
     // RETURNING clause
     if let Some(ref ret_cols) = cmd.returning {
         buf.extend_from_slice(b" RETURNING ");
         encode_columns(ret_cols, buf);
     }
-    
+
     Ok(())
 }
 
@@ -367,7 +414,11 @@ pub fn encode_insert(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 /// * `cmd` — Qail AST command with `Action::Set`.
 /// * `buf` — Output buffer to append the SQL bytes to.
 /// * `params` — Accumulator for parameterized bind values.
-pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
+pub fn encode_update(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"UPDATE ");
     buf.extend_from_slice(cmd.table.as_bytes());
     buf.extend_from_slice(b" SET ");
@@ -401,13 +452,8 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
         }
     }
 
-    // WHERE
-    if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter)
-        && !cage.conditions.is_empty()
-    {
-        buf.extend_from_slice(b" WHERE ");
-        encode_conditions(&cage.conditions, buf, params)?;
-    }
+    // WHERE (supports AND + OR filter cages)
+    encode_where(cmd, buf, params)?;
 
     // RETURNING clause
     if let Some(ref ret_cols) = cmd.returning {
@@ -425,17 +471,16 @@ pub fn encode_update(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 /// * `cmd` — Qail AST command with `Action::Del`.
 /// * `buf` — Output buffer to append the SQL bytes to.
 /// * `params` — Accumulator for parameterized bind values.
-pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
+pub fn encode_delete(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"DELETE FROM ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
-    // WHERE
-    if let Some(cage) = cmd.cages.iter().find(|c| c.kind == CageKind::Filter)
-        && !cage.conditions.is_empty()
-    {
-        buf.extend_from_slice(b" WHERE ");
-        encode_conditions(&cage.conditions, buf, params)?;
-    }
+    // WHERE (supports AND + OR filter cages)
+    encode_where(cmd, buf, params)?;
 
     // RETURNING clause
     if let Some(ref ret_cols) = cmd.returning {
@@ -453,9 +498,72 @@ pub fn encode_delete(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec
 /// * `cmd` — Qail AST command with `Action::Export`.
 /// * `buf` — Output buffer to append the SQL bytes to.
 /// * `params` — Accumulator for parameterized bind values.
-pub fn encode_export(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) -> Result<(), crate::protocol::EncodeError> {
+pub fn encode_export(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"COPY (");
     encode_select(cmd, buf, params)?;
     buf.extend_from_slice(b") TO STDOUT");
+    Ok(())
+}
+
+/// Encode a WHERE clause that supports both AND and OR filter cages.
+///
+/// - AND conditions (from `.eq()`, `.filter()`, `.raw_where()`, etc.)
+///   are joined with `AND`.
+/// - OR conditions (from `.or_filter()`) are grouped into a single
+///   parenthesized `(c1 OR c2 OR ... OR cN)` block, appended with `AND`.
+///
+/// Example output: `WHERE is_active = $1 AND (topic ILIKE $2 OR question ILIKE $3)`
+fn encode_where(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    let and_cage = cmd
+        .cages
+        .iter()
+        .find(|c| c.kind == CageKind::Filter && c.logical_op == LogicalOp::And);
+    let or_cages: Vec<_> = cmd
+        .cages
+        .iter()
+        .filter(|c| c.kind == CageKind::Filter && c.logical_op == LogicalOp::Or)
+        .collect();
+
+    let has_and = and_cage.is_some_and(|c| !c.conditions.is_empty());
+    let has_or = !or_cages.is_empty();
+
+    if !has_and && !has_or {
+        return Ok(());
+    }
+
+    buf.extend_from_slice(b" WHERE ");
+
+    if let Some(cage) = and_cage
+        && !cage.conditions.is_empty()
+    {
+        encode_conditions(&cage.conditions, buf, params)?;
+    }
+
+    if has_or {
+        if has_and {
+            buf.extend_from_slice(b" AND ");
+        }
+        buf.extend_from_slice(b"(");
+        let mut first = true;
+        for cage in &or_cages {
+            for cond in &cage.conditions {
+                if !first {
+                    buf.extend_from_slice(b" OR ");
+                }
+                first = false;
+                encode_conditions(std::slice::from_ref(cond), buf, params)?;
+            }
+        }
+        buf.extend_from_slice(b")");
+    }
+
     Ok(())
 }

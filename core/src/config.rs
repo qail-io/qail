@@ -85,6 +85,12 @@ pub struct ProjectConfig {
 
     /// Migrations directory override (default: `deltas/`).
     pub migrations_dir: Option<String>,
+
+    /// Enforce strict `_order.qail` manifest coverage by default.
+    ///
+    /// When true, all modules under `schema/` must be explicitly listed
+    /// (directly or via listed directories) in `_order.qail`.
+    pub schema_strict_manifest: Option<bool>,
 }
 
 impl Default for ProjectConfig {
@@ -94,12 +100,17 @@ impl Default for ProjectConfig {
             mode: default_mode(),
             schema: None,
             migrations_dir: None,
+            schema_strict_manifest: None,
         }
     }
 }
 
-fn default_project_name() -> String { "qail-app".to_string() }
-fn default_mode() -> String { "postgres".to_string() }
+fn default_project_name() -> String {
+    "qail-app".to_string()
+}
+fn default_mode() -> String {
+    "postgres".to_string()
+}
 
 /// `[postgres]` — PostgreSQL connection and pool settings.
 #[derive(Debug, Clone, Deserialize)]
@@ -157,12 +168,24 @@ impl Default for PostgresConfig {
     }
 }
 
-fn default_pg_url() -> String { "postgres://postgres@localhost:5432/postgres".to_string() }
-fn default_max_connections() -> usize { 10 }
-fn default_min_connections() -> usize { 1 }
-fn default_idle_timeout() -> u64 { 600 }
-fn default_acquire_timeout() -> u64 { 30 }
-fn default_connect_timeout() -> u64 { 10 }
+fn default_pg_url() -> String {
+    "postgres://postgres@localhost:5432/postgres".to_string()
+}
+fn default_max_connections() -> usize {
+    10
+}
+fn default_min_connections() -> usize {
+    1
+}
+fn default_idle_timeout() -> u64 {
+    600
+}
+fn default_acquire_timeout() -> u64 {
+    30
+}
+fn default_connect_timeout() -> u64 {
+    10
+}
 
 /// `[postgres.rls]` — RLS default settings.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -196,7 +219,9 @@ pub struct QdrantConfig {
     pub tls: Option<bool>,
 }
 
-fn default_qdrant_url() -> String { "http://localhost:6333".to_string() }
+fn default_qdrant_url() -> String {
+    "http://localhost:6333".to_string()
+}
 
 /// `[gateway]` — Gateway server settings.
 #[derive(Debug, Clone, Deserialize)]
@@ -226,9 +251,15 @@ pub struct GatewayConfig {
     pub max_expand_depth: usize,
 }
 
-fn default_bind() -> String { "0.0.0.0:8080".to_string() }
-fn default_true() -> bool { true }
-fn default_max_expand_depth() -> usize { 4 }
+fn default_bind() -> String {
+    "0.0.0.0:8080".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_max_expand_depth() -> usize {
+    4
+}
 
 /// `[gateway.cache]` — query cache settings.
 #[derive(Debug, Clone, Deserialize)]
@@ -246,8 +277,12 @@ pub struct CacheConfig {
     pub ttl_secs: u64,
 }
 
-fn default_cache_max() -> usize { 1000 }
-fn default_cache_ttl() -> u64 { 60 }
+fn default_cache_max() -> usize {
+    1000
+}
+fn default_cache_ttl() -> u64 {
+    60
+}
 
 /// `[[sync]]` — Qdrant sync rule (unchanged from existing CLI).
 #[derive(Debug, Clone, Deserialize)]
@@ -498,6 +533,7 @@ name = "fulltest"
 mode = "hybrid"
 schema = "schema.qail"
 migrations_dir = "deltas"
+schema_strict_manifest = true
 
 [postgres]
 url = "postgres://localhost/test"
@@ -532,6 +568,7 @@ embedding_model = "candle:bert-base"
 "#;
         let config: QailConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.project.name, "fulltest");
+        assert_eq!(config.project.schema_strict_manifest, Some(true));
         assert_eq!(config.postgres.max_connections, 25);
         assert_eq!(config.postgres.min_connections, 5);
 
@@ -573,4 +610,3 @@ url = "postgres://localhost/legacy"
         assert!(config.gateway.is_none());
     }
 }
-

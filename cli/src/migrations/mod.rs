@@ -17,18 +17,25 @@ mod apply;
 mod create;
 mod down;
 mod plan;
+mod receipt;
 mod reset;
+mod risk;
 mod status;
 pub mod types;
 mod up;
+mod verify;
 #[cfg(feature = "watch")]
 mod watch;
 
 pub use analyze::migrate_analyze;
-pub use apply::{migrate_apply, MigrateDirection};
+pub use apply::{ApplyPhase, MigrateDirection, migrate_apply};
 pub use create::migrate_create;
 pub use down::migrate_down;
 pub use plan::migrate_plan;
+pub use receipt::{
+    MigrationReceipt, ensure_migration_receipt_columns, now_epoch_ms, runtime_actor,
+    runtime_git_sha, write_migration_receipt,
+};
 pub use reset::migrate_reset;
 pub use status::migrate_status;
 pub use up::migrate_up;
@@ -36,6 +43,7 @@ pub use up::migrate_up;
 pub use watch::watch_schema;
 
 use qail_core::parser::schema::Schema;
+use qail_pg::PgDriver;
 use std::path::{Path, PathBuf};
 
 /// Resolve the deltas directory for migration files.
@@ -99,7 +107,16 @@ table _qail_migrations (
     applied_at timestamptz default NOW(),
     checksum varchar(64) not null,
     sql_up text not null,
-    sql_down text
+    sql_down text,
+    git_sha varchar(64),
+    qail_version varchar(32),
+    actor varchar(255),
+    started_at_ms bigint,
+    finished_at_ms bigint,
+    duration_ms bigint,
+    affected_rows_est bigint,
+    risk_summary text,
+    shadow_checksum varchar(64)
 )
 "#;
 
@@ -111,4 +128,11 @@ pub fn migration_table_ddl() -> String {
         .first()
         .expect("No table in migration schema")
         .to_ddl()
+}
+
+/// Ensure migration table exists and has the latest receipt columns.
+pub async fn ensure_migration_table(driver: &mut PgDriver) -> anyhow::Result<()> {
+    driver.execute_raw(&migration_table_ddl()).await?;
+    ensure_migration_receipt_columns(driver).await?;
+    Ok(())
 }

@@ -13,10 +13,10 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::GatewayState;
 use crate::auth::extract_auth_from_headers;
 use crate::handler::row_to_json;
 use crate::middleware::ApiError;
-use crate::GatewayState;
 
 use super::filters::{apply_filters, apply_sorting, parse_filters};
 use super::types::*;
@@ -62,8 +62,11 @@ pub(crate) async fn nested_list_handler(
     let offset = params.offset.unwrap_or(0).clamp(0, 100_000);
 
     // Build: get child[fk_col = parent_id]
-    let mut cmd = qail_core::ast::Qail::get(&child_table)
-        .filter(fk_col, Operator::Eq, QailValue::String(parent_id));
+    let mut cmd = qail_core::ast::Qail::get(&child_table).filter(
+        fk_col,
+        Operator::Eq,
+        QailValue::String(parent_id),
+    );
 
     // Column selection
     if let Some(ref select) = params.select {
@@ -105,14 +108,18 @@ pub(crate) async fn nested_list_handler(
     // Execute — single query, no N+1
     let mut conn = state
         .pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&child_table)))?;
 
     let rows = conn
         .fetch_all_uncached(&cmd)
         .await
-        .map_err(|e| ApiError::query_error(e.to_string()));
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&child_table)));
 
     // Release connection back to pool before processing results
     conn.release().await;
@@ -132,7 +139,7 @@ pub(crate) async fn nested_list_handler(
 
 /// Expand FK relations into nested JSON objects/arrays.
 ///
-/// - **Forward FK** (e.g., `orders?expand=nested:users`): 
+/// - **Forward FK** (e.g., `orders?expand=nested:users`):
 ///   `order.user_id` → `order.user = {id, name, ...}` (nested object)
 /// - **Reverse FK** (e.g., `users?expand=nested:orders`):
 ///   `user` → `user.orders = [{...}, {...}]` (nested array)
@@ -147,9 +154,13 @@ pub(crate) async fn expand_nested(
 ) -> Result<(), ApiError> {
     let mut conn = state
         .pool
-        .acquire_with_rls_timeout(auth.to_rls_context(), state.config.statement_timeout_ms)
+        .acquire_with_rls_timeouts(
+            auth.to_rls_context(),
+            state.config.statement_timeout_ms,
+            state.config.lock_timeout_ms,
+        )
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(table_name)))?;
 
     for rel in relations {
         // Try forward FK: this table → rel table
@@ -177,13 +188,20 @@ pub(crate) async fn expand_nested(
             }
 
             // Fetch related rows in one query: get rel[ref_col IN (...)]
-            let cmd = qail_core::ast::Qail::get(*rel)
-                .filter(ref_col, Operator::In, QailValue::Array(fk_values));
+            let mut cmd = qail_core::ast::Qail::get(*rel).filter(
+                ref_col,
+                Operator::In,
+                QailValue::Array(fk_values),
+            );
+            state
+                .policy_engine
+                .apply_policies(auth, &mut cmd)
+                .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
             let rows = conn
                 .fetch_all_uncached(&cmd)
                 .await
-                .map_err(|e| ApiError::query_error(e.to_string()))?;
+                .map_err(|e| ApiError::from_pg_driver_error(&e, Some(rel)))?;
 
             // Index by PK
             let related: std::collections::HashMap<String, Value> = rows
@@ -201,13 +219,11 @@ pub(crate) async fn expand_nested(
             // Inject nested object
             for row in data.iter_mut() {
                 if let Some(fk_val) = row.get(fk_col) {
-                    let key = fk_val.as_str()
-                        .unwrap_or(&fk_val.to_string())
-                        .to_string();
-                    if let Some(related_row) = related.get(&key) {
-                        if let Some(obj) = row.as_object_mut() {
-                            obj.insert(rel.to_string(), related_row.clone());
-                        }
+                    let key = fk_val.as_str().unwrap_or(&fk_val.to_string()).to_string();
+                    if let Some(related_row) = related.get(&key)
+                        && let Some(obj) = row.as_object_mut()
+                    {
+                        obj.insert(rel.to_string(), related_row.clone());
                     }
                 }
             }
@@ -239,13 +255,20 @@ pub(crate) async fn expand_nested(
             }
 
             // Fetch all child rows: get rel[fk_col IN (...)]
-            let cmd = qail_core::ast::Qail::get(*rel)
-                .filter(fk_col, Operator::In, QailValue::Array(pk_values));
+            let mut cmd = qail_core::ast::Qail::get(*rel).filter(
+                fk_col,
+                Operator::In,
+                QailValue::Array(pk_values),
+            );
+            state
+                .policy_engine
+                .apply_policies(auth, &mut cmd)
+                .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
             let rows = conn
                 .fetch_all_uncached(&cmd)
                 .await
-                .map_err(|e| ApiError::query_error(e.to_string()))?;
+                .map_err(|e| ApiError::from_pg_driver_error(&e, Some(rel)))?;
 
             // Group by FK value
             let mut grouped: std::collections::HashMap<String, Vec<Value>> =
@@ -262,9 +285,7 @@ pub(crate) async fn expand_nested(
             // Inject nested array
             for row in data.iter_mut() {
                 if let Some(pk_val) = row.get(ref_col) {
-                    let key = pk_val.as_str()
-                        .unwrap_or(&pk_val.to_string())
-                        .to_string();
+                    let key = pk_val.as_str().unwrap_or(&pk_val.to_string()).to_string();
                     let children = grouped.get(&key).cloned().unwrap_or_default();
                     if let Some(obj) = row.as_object_mut() {
                         obj.insert(rel.to_string(), serde_json::json!(children));

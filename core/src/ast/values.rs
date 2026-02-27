@@ -65,9 +65,12 @@ pub enum Value {
     /// NULL-typed UUID.
     NullUuid,
     /// Time interval (e.g., 24 hours, 7 days)
-    Interval { /// Numeric amount.
-        amount: i64, /// Unit of time.
-        unit: IntervalUnit },
+    Interval {
+        /// Numeric amount.
+        amount: i64,
+        /// Unit of time.
+        unit: IntervalUnit,
+    },
     /// Timestamp literal.
     Timestamp(String),
     /// Binary data (bytea)
@@ -118,7 +121,9 @@ impl std::fmt::Display for Value {
             Value::Vector(v) => {
                 write!(f, "[")?;
                 for (i, val) in v.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", val)?;
                 }
                 write!(f, "]")

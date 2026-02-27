@@ -23,7 +23,7 @@ pub fn init_metrics() -> PrometheusHandle {
         .expect("Failed to set buckets")
         .install_recorder()
         .expect("Failed to install Prometheus recorder");
-    
+
     // Spawn upkeep task — required for histograms to drain properly
     let upkeep_handle = handle.clone();
     tokio::spawn(async move {
@@ -32,12 +32,12 @@ pub fn init_metrics() -> PrometheusHandle {
             upkeep_handle.run_upkeep();
         }
     });
-    
+
     // Seed all counters to zero so Prometheus reports them immediately.
     // Without this, Grafana shows "No data" instead of "0" for counters
     // that haven't been incremented yet.
     seed_zero_counters();
-    
+
     handle
 }
 
@@ -45,24 +45,66 @@ pub fn init_metrics() -> PrometheusHandle {
 /// always reports them (instead of "No data" in Grafana).
 fn seed_zero_counters() {
     // Query performance
-    counter!("qail_queries_total", &[
-        ("table", "seed".to_string()),
-        ("action", "seed".to_string()),
-        ("status", "seed".to_string()),
-    ]).absolute(0);
-    
+    counter!(
+        "qail_queries_total",
+        &[
+            ("table", "seed".to_string()),
+            ("action", "seed".to_string()),
+            ("status", "seed".to_string()),
+        ]
+    )
+    .absolute(0);
+
     // Cache
     counter!("qail_cache_hits_total").absolute(0);
     counter!("qail_cache_misses_total").absolute(0);
-    
+
     // Rate limiter
     counter!("qail_rate_limited_total").absolute(0);
-    
+
     // EXPLAIN rejections
     counter!("qail_explain_rejections_total").absolute(0);
-    
+
     // Complexity guard rejections
     counter!("qail_complexity_rejections_total").absolute(0);
+
+    // RPC hardening + execution
+    counter!("qail_rpc_allowlist_rejections_total").absolute(0);
+    counter!("qail_rpc_signature_cache_hits_total").absolute(0);
+    counter!("qail_rpc_signature_cache_misses_total").absolute(0);
+    counter!("qail_rpc_signature_local_mismatch_total").absolute(0);
+    counter!(
+        "qail_rpc_signature_rejections_total",
+        &[("reason", "seed".to_string())]
+    )
+    .absolute(0);
+    counter!(
+        "qail_rpc_calls_total",
+        &[
+            ("status", "seed".to_string()),
+            ("result_format", "seed".to_string()),
+        ]
+    )
+    .absolute(0);
+    counter!("qail_rpc_binary_decode_fallback_total").absolute(0);
+
+    // PostgreSQL SQLSTATE-classified errors
+    counter!(
+        "qail_db_errors_total",
+        &[
+            ("sqlstate", "seed".to_string()),
+            ("class", "seed".to_string()),
+        ]
+    )
+    .absolute(0);
+
+    // Idempotency replays
+    counter!("qail_idempotency_hits_total").absolute(0);
+}
+
+/// Record an idempotency key cache hit (response replayed).
+pub fn record_idempotency_hit() {
+    counter!("qail_idempotency_hits_total").increment(1);
 }
 
 /// Metrics handler - returns Prometheus format metrics
@@ -106,9 +148,12 @@ pub fn record_query(table: &str, action: &str, duration_ms: f64, success: bool) 
     let labels = [
         ("table", table.to_string()),
         ("action", action.to_string()),
-        ("status", if success { "success" } else { "error" }.to_string()),
+        (
+            "status",
+            if success { "success" } else { "error" }.to_string(),
+        ),
     ];
-    
+
     counter!("qail_queries_total", &labels).increment(1);
     histogram!("qail_query_duration_ms", &labels).record(duration_ms);
 }
@@ -179,6 +224,59 @@ pub fn record_http_request(method: &str, status: u16, duration_secs: f64) {
     histogram!("qail_http_request_duration_seconds", &labels).record(duration_secs);
 }
 
+/// Record a PostgreSQL error classified by SQLSTATE.
+pub fn record_db_error(sqlstate: &str, class: &str) {
+    let labels = [
+        ("sqlstate", sqlstate.to_string()),
+        ("class", class.to_string()),
+    ];
+    counter!("qail_db_errors_total", &labels).increment(1);
+}
+
+/// Record an RPC allow-list rejection.
+pub fn record_rpc_allowlist_rejection() {
+    counter!("qail_rpc_allowlist_rejections_total").increment(1);
+}
+
+/// Record an RPC signature cache hit.
+pub fn record_rpc_signature_cache_hit() {
+    counter!("qail_rpc_signature_cache_hits_total").increment(1);
+}
+
+/// Record an RPC signature cache miss.
+pub fn record_rpc_signature_cache_miss() {
+    counter!("qail_rpc_signature_cache_misses_total").increment(1);
+}
+
+/// Record when local signature matcher disagrees with PostgreSQL resolver.
+pub fn record_rpc_signature_local_mismatch() {
+    counter!("qail_rpc_signature_local_mismatch_total").increment(1);
+}
+
+/// Record an RPC signature contract rejection.
+pub fn record_rpc_signature_rejection(reason: &str) {
+    let labels = [("reason", reason.to_string())];
+    counter!("qail_rpc_signature_rejections_total", &labels).increment(1);
+}
+
+/// Record RPC call latency/outcome.
+pub fn record_rpc_call(duration_ms: f64, success: bool, result_format: &str) {
+    let labels = [
+        (
+            "status",
+            if success { "success" } else { "error" }.to_string(),
+        ),
+        ("result_format", result_format.to_string()),
+    ];
+    counter!("qail_rpc_calls_total", &labels).increment(1);
+    histogram!("qail_rpc_duration_ms", &labels).record(duration_ms);
+}
+
+/// Record a fallback when binary RPC output could not be strongly decoded.
+pub fn record_rpc_binary_decode_fallback() {
+    counter!("qail_rpc_binary_decode_fallback_total").increment(1);
+}
+
 /// Timer for measuring query duration
 pub struct QueryTimer {
     start: Instant,
@@ -195,7 +293,7 @@ impl QueryTimer {
             action: action.to_string(),
         }
     }
-    
+
     /// Stop the timer and record the query duration metric.
     pub fn finish(self, success: bool) {
         let duration_ms = self.start.elapsed().as_secs_f64() * 1000.0;

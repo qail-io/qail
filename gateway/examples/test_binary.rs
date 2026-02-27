@@ -7,11 +7,11 @@ use qail_core::ast::Qail;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a QAIL query
     let cmd = Qail::get("harbors").columns(["id", "name"]).limit(3);
-    
+
     // Serialize to postcard
     let bytes = postcard::to_allocvec(&cmd)?;
     println!("Binary query size: {} bytes", bytes.len());
-    
+
     // Send to gateway
     let client = reqwest::Client::new();
     let resp = client
@@ -20,12 +20,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .body(bytes)
         .send()
         .await?;
-    
+
     let status = resp.status();
     let body = resp.text().await?;
-    
+
     println!("Status: {}", status);
     println!("Response: {}", body);
-    
+
     Ok(())
 }

@@ -88,21 +88,23 @@ const VALUE_LIST: u32 = 7;
 fn decode_varint(buf: &mut &[u8]) -> QdrantResult<u64> {
     let mut result: u64 = 0;
     let mut shift = 0;
-    
+
     loop {
         if buf.is_empty() {
-            return Err(QdrantError::Decode("Unexpected end of data in varint".to_string()));
+            return Err(QdrantError::Decode(
+                "Unexpected end of data in varint".to_string(),
+            ));
         }
-        
+
         let byte = buf[0];
         *buf = &buf[1..];
-        
+
         result |= ((byte & 0x7F) as u64) << shift;
-        
+
         if byte & 0x80 == 0 {
             return Ok(result);
         }
-        
+
         shift += 7;
         if shift >= 64 {
             return Err(QdrantError::Decode("Varint too long".to_string()));
@@ -146,7 +148,10 @@ fn skip_field(buf: &mut &[u8], wire_type: u8) -> QdrantResult<()> {
             *buf = &buf[4..];
         }
         _ => {
-            return Err(QdrantError::Decode(format!("Unknown wire type: {}", wire_type)));
+            return Err(QdrantError::Decode(format!(
+                "Unknown wire type: {}",
+                wire_type
+            )));
         }
     }
     Ok(())
@@ -177,14 +182,16 @@ fn read_submessage<'a>(buf: &mut &'a [u8]) -> QdrantResult<&'a [u8]> {
 pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
     let mut results = Vec::new();
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf)?;
-        
+
         match field_number {
             SEARCH_RESULT => {
                 if wire_type != WIRE_LEN {
-                    return Err(QdrantError::Decode("Expected length-delimited for ScoredPoint".to_string()));
+                    return Err(QdrantError::Decode(
+                        "Expected length-delimited for ScoredPoint".to_string(),
+                    ));
                 }
                 let point_data = read_submessage(&mut buf)?;
                 let point = decode_scored_point(point_data)?;
@@ -195,7 +202,7 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
             }
         }
     }
-    
+
     Ok(results)
 }
 
@@ -206,10 +213,10 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
     let mut payload = Payload::new();
     let mut vector = None;
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf)?;
-        
+
         match field_number {
             SCORED_POINT_ID => {
                 if wire_type != WIRE_LEN {
@@ -255,8 +262,13 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
             }
         }
     }
-    
-    Ok(ScoredPoint { id, score, payload, vector })
+
+    Ok(ScoredPoint {
+        id,
+        score,
+        payload,
+        vector,
+    })
 }
 
 // ============================================================================
@@ -270,10 +282,10 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
 pub fn decode_get_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
     let mut results = Vec::new();
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf)?;
-        
+
         match field_number {
             GET_RESULT => {
                 if wire_type != WIRE_LEN {
@@ -289,7 +301,7 @@ pub fn decode_get_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
             }
         }
     }
-    
+
     Ok(results)
 }
 
@@ -310,10 +322,10 @@ pub fn decode_scroll_response(data: &[u8]) -> QdrantResult<ScrollResult> {
     let mut points = Vec::new();
     let mut next_offset = None;
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf)?;
-        
+
         match field_number {
             SCROLL_RESULT => {
                 if wire_type != WIRE_LEN {
@@ -337,8 +349,11 @@ pub fn decode_scroll_response(data: &[u8]) -> QdrantResult<ScrollResult> {
             }
         }
     }
-    
-    Ok(ScrollResult { points, next_offset })
+
+    Ok(ScrollResult {
+        points,
+        next_offset,
+    })
 }
 
 /// Decode a RetrievedPoint message (same shape as ScoredPoint, score = 0).
@@ -347,25 +362,34 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
     let mut payload = Payload::new();
     let mut vector = None;
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf)?;
-        
+
         match field_number {
             RETRIEVED_POINT_ID => {
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type)?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type)?;
+                    continue;
+                }
                 let id_data = read_submessage(&mut buf)?;
                 id = decode_point_id(id_data)?;
             }
             RETRIEVED_POINT_PAYLOAD => {
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type)?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type)?;
+                    continue;
+                }
                 let entry_data = read_submessage(&mut buf)?;
                 if let Some((key, value)) = decode_map_entry(entry_data, 0) {
                     payload.insert(key, value);
                 }
             }
             RETRIEVED_POINT_VECTORS => {
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type)?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type)?;
+                    continue;
+                }
                 let vec_data = read_submessage(&mut buf)?;
                 vector = decode_vectors(vec_data);
             }
@@ -374,8 +398,13 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
             }
         }
     }
-    
-    Ok(ScoredPoint { id, score: 0.0, payload, vector })
+
+    Ok(ScoredPoint {
+        id,
+        score: 0.0,
+        payload,
+        vector,
+    })
 }
 
 // ============================================================================
@@ -395,20 +424,26 @@ fn decode_map_entry(data: &[u8], depth: usize) -> Option<(String, PayloadValue)>
     let mut key = None;
     let mut value = None;
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf).ok()?;
-        
+
         match field_number {
             1 => {
                 // key (string)
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type).ok()?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
                 let s_data = read_submessage(&mut buf).ok()?;
                 key = Some(std::str::from_utf8(s_data).ok()?.to_string());
             }
             2 => {
                 // value (Value message)
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type).ok()?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
                 let v_data = read_submessage(&mut buf).ok()?;
                 value = decode_value_with_depth(v_data, depth);
             }
@@ -417,7 +452,7 @@ fn decode_map_entry(data: &[u8], depth: usize) -> Option<(String, PayloadValue)>
             }
         }
     }
-    
+
     key.and_then(|k| value.map(|v| (k, v)))
 }
 
@@ -448,54 +483,77 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> Option<PayloadValue> {
     }
 
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf).ok()?;
-        
+
         match field_number {
             VALUE_NULL => {
                 // NullValue enum (varint)
-                if wire_type == WIRE_VARINT { decode_varint(&mut buf).ok()?; }
-                else { skip_field(&mut buf, wire_type).ok()?; }
+                if wire_type == WIRE_VARINT {
+                    decode_varint(&mut buf).ok()?;
+                } else {
+                    skip_field(&mut buf, wire_type).ok()?;
+                }
                 return Some(PayloadValue::Null);
             }
             VALUE_DOUBLE => {
                 // double (fixed64)
-                if wire_type != WIRE_FIXED64 { skip_field(&mut buf, wire_type).ok()?; continue; }
-                if buf.len() < 8 { return None; }
+                if wire_type != WIRE_FIXED64 {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
+                if buf.len() < 8 {
+                    return None;
+                }
                 let bytes: [u8; 8] = buf[..8].try_into().ok()?;
                 let _rest = &buf[8..];
                 return Some(PayloadValue::Float(f64::from_le_bytes(bytes)));
             }
             VALUE_INTEGER => {
                 // int64 (varint)
-                if wire_type != WIRE_VARINT { skip_field(&mut buf, wire_type).ok()?; continue; }
+                if wire_type != WIRE_VARINT {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
                 let n = decode_varint(&mut buf).ok()? as i64;
                 return Some(PayloadValue::Integer(n));
             }
             VALUE_STRING => {
                 // string (len-delimited)
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type).ok()?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
                 let s_data = read_submessage(&mut buf).ok()?;
                 let s = std::str::from_utf8(s_data).ok()?.to_string();
                 return Some(PayloadValue::String(s));
             }
             VALUE_BOOL => {
                 // bool (varint)
-                if wire_type != WIRE_VARINT { skip_field(&mut buf, wire_type).ok()?; continue; }
+                if wire_type != WIRE_VARINT {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
                 let v = decode_varint(&mut buf).ok()?;
                 return Some(PayloadValue::Bool(v != 0));
             }
             VALUE_STRUCT => {
                 // Struct (len-delimited) — map<string, Value>
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type).ok()?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
                 let struct_data = read_submessage(&mut buf).ok()?;
                 let map = decode_struct_fields_with_depth(struct_data, depth + 1);
                 return Some(PayloadValue::Object(map));
             }
             VALUE_LIST => {
                 // ListValue (len-delimited) — repeated Value
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type).ok()?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
                 let list_data = read_submessage(&mut buf).ok()?;
                 let items = decode_list_values_with_depth(list_data, depth + 1);
                 return Some(PayloadValue::List(items));
@@ -505,33 +563,45 @@ fn decode_value_with_depth(data: &[u8], depth: usize) -> Option<PayloadValue> {
             }
         }
     }
-    
+
     None
 }
 
 /// Decode Struct.fields with depth tracking.
-fn decode_struct_fields_with_depth(data: &[u8], depth: usize) -> std::collections::HashMap<String, PayloadValue> {
+fn decode_struct_fields_with_depth(
+    data: &[u8],
+    depth: usize,
+) -> std::collections::HashMap<String, PayloadValue> {
     let mut map = std::collections::HashMap::new();
     if depth > MAX_DECODE_DEPTH {
         return map; // Too deep — return empty
     }
     let mut buf = data;
-    
+
     while !buf.is_empty() {
-        let Ok((field_number, wire_type)) = decode_tag(&mut buf) else { break };
+        let Ok((field_number, wire_type)) = decode_tag(&mut buf) else {
+            break;
+        };
         match field_number {
             1 => {
                 // Struct.fields (field 1, repeated map entry)
-                if wire_type != WIRE_LEN { let _ = skip_field(&mut buf, wire_type); continue; }
-                let Ok(entry_data) = read_submessage(&mut buf) else { break };
+                if wire_type != WIRE_LEN {
+                    let _ = skip_field(&mut buf, wire_type);
+                    continue;
+                }
+                let Ok(entry_data) = read_submessage(&mut buf) else {
+                    break;
+                };
                 if let Some((key, value)) = decode_map_entry(entry_data, depth) {
                     map.insert(key, value);
                 }
             }
-            _ => { let _ = skip_field(&mut buf, wire_type); }
+            _ => {
+                let _ = skip_field(&mut buf, wire_type);
+            }
         }
     }
-    
+
     map
 }
 
@@ -542,22 +612,31 @@ fn decode_list_values_with_depth(data: &[u8], depth: usize) -> Vec<PayloadValue>
         return items; // Too deep — return empty
     }
     let mut buf = data;
-    
+
     while !buf.is_empty() {
-        let Ok((field_number, wire_type)) = decode_tag(&mut buf) else { break };
+        let Ok((field_number, wire_type)) = decode_tag(&mut buf) else {
+            break;
+        };
         match field_number {
             1 => {
                 // ListValue.values (field 1, repeated Value)
-                if wire_type != WIRE_LEN { let _ = skip_field(&mut buf, wire_type); continue; }
-                let Ok(v_data) = read_submessage(&mut buf) else { break };
+                if wire_type != WIRE_LEN {
+                    let _ = skip_field(&mut buf, wire_type);
+                    continue;
+                }
+                let Ok(v_data) = read_submessage(&mut buf) else {
+                    break;
+                };
                 if let Some(value) = decode_value_with_depth(v_data, depth) {
                     items.push(value);
                 }
             }
-            _ => { let _ = skip_field(&mut buf, wire_type); }
+            _ => {
+                let _ = skip_field(&mut buf, wire_type);
+            }
         }
     }
-    
+
     items
 }
 
@@ -580,33 +659,41 @@ fn decode_list_values_with_depth(data: &[u8], depth: usize) -> Vec<PayloadValue>
 /// ```
 fn decode_vectors(data: &[u8]) -> Option<Vec<f32>> {
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf).ok()?;
         match field_number {
             1 => {
                 // Vector message
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type).ok()?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
                 let vec_data = read_submessage(&mut buf).ok()?;
                 return decode_vector_data(vec_data);
             }
-            _ => { skip_field(&mut buf, wire_type).ok()?; }
+            _ => {
+                skip_field(&mut buf, wire_type).ok()?;
+            }
         }
     }
-    
+
     None
 }
 
 /// Decode Vector.data (packed repeated float).
 fn decode_vector_data(data: &[u8]) -> Option<Vec<f32>> {
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf).ok()?;
         match field_number {
             1 => {
                 // data (packed repeated float)
-                if wire_type != WIRE_LEN { skip_field(&mut buf, wire_type).ok()?; continue; }
+                if wire_type != WIRE_LEN {
+                    skip_field(&mut buf, wire_type).ok()?;
+                    continue;
+                }
                 let float_data = read_submessage(&mut buf).ok()?;
                 // Each f32 = 4 bytes, little-endian
                 let count = float_data.len() / 4;
@@ -618,10 +705,12 @@ fn decode_vector_data(data: &[u8]) -> Option<Vec<f32>> {
                 }
                 return Some(result);
             }
-            _ => { skip_field(&mut buf, wire_type).ok()?; }
+            _ => {
+                skip_field(&mut buf, wire_type).ok()?;
+            }
         }
     }
-    
+
     None
 }
 
@@ -632,10 +721,10 @@ fn decode_vector_data(data: &[u8]) -> Option<Vec<f32>> {
 /// Decode a PointId message.
 fn decode_point_id(data: &[u8]) -> QdrantResult<PointId> {
     let mut buf = data;
-    
+
     while !buf.is_empty() {
         let (field_number, wire_type) = decode_tag(&mut buf)?;
-        
+
         match field_number {
             POINT_ID_NUM => {
                 if wire_type != WIRE_VARINT {
@@ -654,7 +743,7 @@ fn decode_point_id(data: &[u8]) -> QdrantResult<PointId> {
                 if buf.len() < len {
                     return Err(QdrantError::Decode("Truncated UUID".to_string()));
                 }
-                
+
                 let uuid_str = std::str::from_utf8(&buf[..len])
                     .map_err(|e| QdrantError::Decode(format!("Invalid UTF-8: {}", e)))?;
                 return Ok(PointId::Uuid(uuid_str.to_string()));
@@ -664,7 +753,7 @@ fn decode_point_id(data: &[u8]) -> QdrantResult<PointId> {
             }
         }
     }
-    
+
     Ok(PointId::Num(0))
 }
 
@@ -681,7 +770,7 @@ mod tests {
         let mut buf: &[u8] = &[0x01];
         assert_eq!(decode_varint(&mut buf).unwrap(), 1);
         assert!(buf.is_empty());
-        
+
         let mut buf: &[u8] = &[0xAC, 0x02];
         assert_eq!(decode_varint(&mut buf).unwrap(), 300);
         assert!(buf.is_empty());
@@ -693,7 +782,7 @@ mod tests {
         let (field, wire) = decode_tag(&mut buf).unwrap();
         assert_eq!(field, 1);
         assert_eq!(wire, WIRE_LEN);
-        
+
         let mut buf: &[u8] = &[0x1D];
         let (field, wire) = decode_tag(&mut buf).unwrap();
         assert_eq!(field, 3);
@@ -718,10 +807,17 @@ mod tests {
     fn test_decode_scored_point() {
         let score_bytes = 0.5f32.to_le_bytes();
         let data = &[
-            0x0A, 0x02, 0x08, 0x01,  // id = PointId { num = 1 }
-            0x1D, score_bytes[0], score_bytes[1], score_bytes[2], score_bytes[3],
+            0x0A,
+            0x02,
+            0x08,
+            0x01, // id = PointId { num = 1 }
+            0x1D,
+            score_bytes[0],
+            score_bytes[1],
+            score_bytes[2],
+            score_bytes[3],
         ];
-        
+
         let point = decode_scored_point(data).unwrap();
         assert_eq!(point.id, PointId::Num(1));
         assert!((point.score - 0.5).abs() < 0.0001);

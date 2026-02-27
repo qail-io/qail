@@ -176,8 +176,8 @@ mod tests {
     #[test]
     fn test_encode_float() {
         let mut buf = BytesMut::new();
-        encode_copy_value(&mut buf, &Value::Float(3.14159));
-        assert!(buf.starts_with(b"3.14"));
+        encode_copy_value(&mut buf, &Value::Float(9.87654));
+        assert!(buf.starts_with(b"9.87"));
     }
 
     #[test]

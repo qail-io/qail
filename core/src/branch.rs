@@ -50,7 +50,8 @@ impl BranchContext {
         assert!(
             Self::is_valid_name(name),
             "Invalid branch name: '{}'. Must be 1-{} chars, alphanumeric/hyphen/underscore/dot only.",
-            name, Self::MAX_NAME_LEN
+            name,
+            Self::MAX_NAME_LEN
         );
         Self {
             branch_id: Some(name.to_string()),
@@ -72,11 +73,9 @@ impl BranchContext {
     /// Invalid branch names are silently treated as main.
     pub fn from_header(value: Option<&str>) -> Self {
         match value {
-            Some(name) if !name.is_empty() && name != "main" && Self::is_valid_name(name) => {
-                Self {
-                    branch_id: Some(name.to_string()),
-                }
-            }
+            Some(name) if !name.is_empty() && name != "main" && Self::is_valid_name(name) => Self {
+                branch_id: Some(name.to_string()),
+            },
             _ => Self::main(),
         }
     }
@@ -165,10 +164,7 @@ mod tests {
     #[test]
     fn test_equality() {
         assert_eq!(BranchContext::main(), BranchContext::main());
-        assert_eq!(
-            BranchContext::branch("a"),
-            BranchContext::branch("a")
-        );
+        assert_eq!(BranchContext::branch("a"), BranchContext::branch("a"));
         assert_ne!(BranchContext::main(), BranchContext::branch("a"));
     }
 

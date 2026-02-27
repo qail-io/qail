@@ -8,7 +8,10 @@ The `qail-pg` crate provides a **native PostgreSQL driver** with AST-native wire
 - **Zero-Alloc** — Reusable buffers, no heap allocation per query
 - **LRU Statement Cache** — Bounded cache (100 max), auto-evicts
 - **SSL/TLS** — Full TLS with mutual TLS (mTLS) support
-- **SCRAM-SHA-256** — Secure password authentication
+- **Password Auth Modes** — Supports SCRAM-SHA-256, MD5, and cleartext server flows
+- **Enterprise Auth Policy** — Configure allowed auth mechanisms and SCRAM channel binding mode
+- **Kerberos/GSS/SSPI Hooks** — Protocol-level support with pluggable token providers (legacy + stateful)
+- **Built-in Linux Kerberos Provider** — Optional `enterprise-gssapi` feature for native krb5/GSS flow
 - **Connection Pooling** — Efficient resource management with RLS-safe checkout
 - **COPY Protocol** — Bulk insert for high throughput (1.63M rows/sec)
 - **Pipeline Execution** — Multiple queries per round-trip
@@ -23,7 +26,7 @@ Understanding **which type to use** is the most important concept:
 
 ```
 PgPool (manages N connections, handles checkout/return)
-  └── PooledConnection (auto-returns to pool on Drop, resets RLS)
+  └── PooledConnection (call `release().await` for deterministic pool return)
         └── PgConnection (raw TCP/TLS stream, wire protocol I/O)
               └── PgDriver (convenience wrapper over PgConnection)
 ```
@@ -33,7 +36,7 @@ PgPool (manages N connections, handles checkout/return)
 | `PgDriver` | Quick scripts, benchmarks, single-connection use cases |
 | `PgConnection` | You need raw control (TLS, mTLS, Unix sockets, manual lifecycle) |
 | `PgPool` | **Production code** — multi-connection, concurrent workloads |
-| `PooledConnection` | You called `pool.acquire()` — auto-returns when dropped |
+| `PooledConnection` | You called `pool.acquire*()` — call `release().await` |
 
 **Rule of thumb:** If you're building a server, use `PgPool`. Everything else is for specialized cases.
 
@@ -46,9 +49,10 @@ Choose based on your deployment:
 | Scenario | Method | Notes |
 |----------|--------|-------|
 | Local dev (`pg_hba.conf = trust`) | `PgDriver::connect()` | No password required |
-| Password auth (most common) | `PgDriver::connect_with_password()` | Auto SCRAM-SHA-256 |
+| Password auth (most common) | `PgDriver::connect_with_password()` | Auto cleartext / MD5 / SCRAM-SHA-256 |
 | Cloud DB (RDS, Cloud SQL, Supabase) | `PgConnection::connect_tls()` | Server-side TLS |
 | Zero-trust / mTLS | `PgConnection::connect_mtls()` | Client certificate |
+| Enterprise policy (TLS/auth/channel binding) | `PgDriver::connect_with_options()` | Explicit TLS mode + auth controls |
 | Unix socket (same host) | `PgConnection::connect_unix()` | Lowest latency |
 | `.env` / `DATABASE_URL` | `PgDriver::connect_env()` | Parses URL format |
 | Custom config | `PgDriver::builder()` | Builder pattern for full control |
@@ -93,6 +97,121 @@ let config = TlsConfig {
 let conn = PgConnection::connect_mtls("localhost", 5432, "user", "db", config).await?;
 ```
 
+### Enterprise Auth/TLS Policy
+
+```rust
+use qail_pg::{AuthSettings, ConnectOptions, PgDriver, ScramChannelBindingMode, TlsMode};
+
+let options = ConnectOptions {
+    tls_mode: TlsMode::Require,
+    auth: AuthSettings {
+        allow_cleartext_password: false,
+        allow_md5_password: false,
+        allow_scram_sha_256: true,
+        channel_binding: ScramChannelBindingMode::Require,
+        ..AuthSettings::default()
+    },
+    ..Default::default()
+};
+
+let driver = PgDriver::connect_with_options(
+    "db.internal",
+    5432,
+    "app_user",
+    "app_db",
+    Some("secret"),
+    options,
+)
+.await?;
+```
+
+### Kerberos / GSSAPI Token Hook
+
+```rust
+use qail_pg::{
+    AuthSettings, ConnectOptions, EnterpriseAuthMechanism, PgDriver,
+};
+
+fn gss_provider(
+    mech: EnterpriseAuthMechanism,
+    challenge: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    // Plug your krb5/gssapi token generation here.
+    // Return initial token when challenge=None, then continue tokens per challenge.
+    let _ = (mech, challenge);
+    Err("not wired yet".to_string())
+}
+
+let options = ConnectOptions {
+    auth: AuthSettings::gssapi_only(),
+    gss_token_provider: Some(gss_provider),
+    ..Default::default()
+};
+
+let _driver = PgDriver::connect_with_options(
+    "db.internal", 5432, "app_user", "app_db", None, options
+).await?;
+```
+
+### Stateful GSS Provider (Per-Session Context)
+
+```rust
+use std::sync::Arc;
+use qail_pg::{AuthSettings, ConnectOptions, GssTokenRequest, PgDriver};
+
+let provider = Arc::new(move |req: GssTokenRequest<'_>| -> Result<Vec<u8>, String> {
+    // req.session_id is stable for one auth handshake.
+    // Keep per-session context in your own map if your GSS stack requires it.
+    let _ = req;
+    Err("wire your stateful provider".to_string())
+});
+
+let options = ConnectOptions {
+    auth: AuthSettings::gssapi_only(),
+    gss_token_provider_ex: Some(provider),
+    ..Default::default()
+};
+
+let _driver = PgDriver::connect_with_options(
+    "db.internal", 5432, "app_user", "app_db", None, options
+).await?;
+```
+
+### Built-in Linux Kerberos Provider (Feature-Gated)
+
+```rust
+#[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+{
+    use qail_pg::{
+        AuthSettings, ConnectOptions, LinuxKrb5ProviderConfig, PgDriver,
+        linux_krb5_preflight, linux_krb5_token_provider,
+    };
+
+    let gss_cfg = LinuxKrb5ProviderConfig {
+        service: "postgres".to_string(),
+        host: "db.internal".to_string(),
+        target_name: None, // optional override, e.g. Some("postgres@db.internal".into())
+    };
+
+    let report = linux_krb5_preflight(&gss_cfg)?;
+    for warning in &report.warnings {
+        eprintln!("Kerberos preflight warning: {}", warning);
+    }
+
+    let provider = linux_krb5_token_provider(gss_cfg)?;
+
+    let options = ConnectOptions {
+        auth: AuthSettings::gssapi_only(),
+        gss_token_provider_ex: Some(provider),
+        ..Default::default()
+    };
+
+    let _driver = PgDriver::connect_with_options(
+        "db.internal", 5432, "app_user", "app_db", None, options
+    ).await?;
+}
+```
+
 ### Unix Socket
 
 ```rust
@@ -130,6 +249,10 @@ let affected = driver.execute(&cmd).await?;
 
 Prepared statements are cached automatically. The AST is hashed by structure, so identical query shapes reuse the same prepared statement.
 
+Cached execution includes one-shot self-heal for common server-side invalidation cases
+(`prepared statement does not exist`, `cached plan must be replanned`): local cache state is
+cleared and the statement is retried once automatically.
+
 ```rust
 // Cache is bounded (default: 100 statements)
 // Auto-evicts least recently used when full
@@ -143,7 +266,9 @@ driver.clear_cache();
 | Method | Description |
 |--------|-------------|
 | `fetch_all()` | Uses cache (~25,000 q/s) |
+| `fetch_all_with_format(cmd, ResultFormat::Binary)` | Cached fetch with binary column format |
 | `fetch_all_uncached()` | Skips cache |
+| `fetch_all_uncached_with_format(...)` | Uncached fetch with text/binary result format |
 | `cache_stats()` | Returns (current, max) |
 | `clear_cache()` | Frees all cached statements |
 
@@ -207,14 +332,17 @@ use qail_pg::{PgPool, PoolConfig};
 
 let config = PoolConfig::new("localhost", 5432, "user", "db")
     .password("secret")
+    .tls_mode(qail_pg::TlsMode::Require)
+    .auth_settings(qail_pg::AuthSettings::scram_only())
     .max_connections(20)
     .min_connections(5);
 
 let pool = PgPool::connect(config).await?;
 
-// Acquire connection (auto-returned when dropped)
+// Acquire connection (return deterministically with release())
 let mut conn = pool.acquire().await?;
 conn.simple_query("SELECT 1").await?;
+conn.release().await;
 
 // Check idle count
 let idle = pool.idle_count().await;
@@ -232,8 +360,9 @@ let ctx = RlsContext {
 };
 
 // Acquire + set RLS context in one call
-// On Drop: auto-clears RLS context, then returns to pool
+// Call release() after query work to reset context and return to pool
 let mut conn = pool.acquire_with_rls(&ctx).await?;
+conn.release().await;
 ```
 
 > **Important:** When using `acquire_with_rls()`, the RLS context is automatically cleared when the connection is returned to the pool. This prevents cross-tenant data leakage — a connection used by Tenant A will never carry Tenant A's context when checked out by Tenant B.
@@ -362,6 +491,9 @@ Available `get_by_name` methods:
 | `Date` | `DATE` |
 | `Time` | `TIME` |
 | `Json` | `JSONB` |
+| `Inet` | `INET` |
+| `Cidr` | `CIDR` |
+| `MacAddr` | `MACADDR` |
 | `Numeric` | `NUMERIC/DECIMAL` |
 
 ---

@@ -129,7 +129,9 @@ impl ExprExt for Expr {
                 negated,
                 alias: Some(alias.to_string()),
             },
-            Expr::Collate { expr, collation, .. } => Expr::Collate {
+            Expr::Collate {
+                expr, collation, ..
+            } => Expr::Collate {
                 expr,
                 collation,
                 alias: Some(alias.to_string()),
