@@ -67,7 +67,7 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
     }
 
     // Collect new tables (not in old schema), sorted by FK dependencies
-    let mut new_table_names: Vec<&String> = new
+    let new_table_names: Vec<&String> = new
         .tables
         .keys()
         .filter(|name| !old.tables.contains_key(*name))
@@ -75,12 +75,40 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
 
     // Simple FK-aware sort: tables with no FK deps first, then others
     // This handles the common case of parent -> child relationships
-    new_table_names.sort_by_key(|name| {
-        new.tables
-            .get(*name)
-            .map(|t| t.columns.iter().filter(|c| c.foreign_key.is_some()).count())
-            .unwrap_or(0)
-    });
+    // Use iterative topological sort: in each round, emit tables whose FK targets
+    // are either already emitted or not in this batch (pre-existing tables).
+    let new_set: std::collections::HashSet<&str> =
+        new_table_names.iter().map(|n| n.as_str()).collect();
+    let mut emitted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut sorted: Vec<&String> = Vec::with_capacity(new_table_names.len());
+    let mut remaining = new_table_names;
+
+    loop {
+        let before = sorted.len();
+        remaining.retain(|name| {
+            let deps_satisfied = new.tables.get(*name).is_none_or(|t| {
+                t.columns.iter().all(|c| {
+                    c.foreign_key.as_ref().is_none_or(|fk| {
+                        !new_set.contains(fk.table.as_str()) || emitted.contains(fk.table.as_str())
+                    })
+                })
+            });
+            if deps_satisfied {
+                emitted.insert(name.as_str());
+                sorted.push(name);
+                false // remove from remaining
+            } else {
+                true // keep in remaining
+            }
+        });
+        if remaining.is_empty() || sorted.len() == before {
+            // Either done or circular deps — append remaining as-is
+            sorted.extend(remaining);
+            break;
+        }
+    }
+
+    let new_table_names = sorted;
 
     // Generate CREATE TABLE commands in dependency order
     for name in new_table_names {

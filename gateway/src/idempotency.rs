@@ -11,7 +11,7 @@
 
 use axum::{
     body::Body,
-    http::{Method, Request, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -29,13 +29,19 @@ pub(crate) struct CachedResponse {
     pub body: Vec<u8>,
     /// Content-Type header value.
     pub content_type: String,
+    /// SECURITY: Request fingerprint (method+path) — used to detect
+    /// key reuse across different mutation routes.
+    pub request_fingerprint: String,
 }
 
 /// In-memory idempotency store backed by moka cache.
 #[derive(Debug)]
 pub struct IdempotencyStore {
-    /// Cache: compound key (operator_id + idempotency_key) → cached response.
+    /// Cache: compound key (tenant_scope + idempotency_key) → cached response.
     cache: moka::sync::Cache<String, CachedResponse>,
+    /// SECURITY: In-flight keys currently being processed.
+    /// Prevents concurrent duplicate execution of the same idempotency key.
+    in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl IdempotencyStore {
@@ -49,6 +55,7 @@ impl IdempotencyStore {
                 .max_capacity(max_entries)
                 .time_to_live(ttl)
                 .build(),
+            in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -57,26 +64,26 @@ impl IdempotencyStore {
         Self::new(100_000, Duration::from_secs(86400))
     }
 
-    /// Build the composite cache key: `{operator_id}:{idempotency_key}`.
-    fn cache_key(operator_id: &str, idempotency_key: &str) -> String {
-        format!("{}:{}", operator_id, idempotency_key)
+    /// Build the composite cache key: `{tenant_scope}:{idempotency_key}`.
+    pub(crate) fn cache_key(tenant_scope: &str, idempotency_key: &str) -> String {
+        format!("{}:{}", tenant_scope, idempotency_key)
     }
 
-    /// Look up a cached response by operator + idempotency key.
-    pub(crate) fn get(&self, operator_id: &str, idempotency_key: &str) -> Option<CachedResponse> {
+    /// Look up a cached response by tenant scope + idempotency key.
+    pub(crate) fn get(&self, tenant_scope: &str, idempotency_key: &str) -> Option<CachedResponse> {
         self.cache
-            .get(&Self::cache_key(operator_id, idempotency_key))
+            .get(&Self::cache_key(tenant_scope, idempotency_key))
     }
 
     /// Store a response in the idempotency cache.
     pub(crate) fn insert(
         &self,
-        operator_id: &str,
+        tenant_scope: &str,
         idempotency_key: &str,
         response: CachedResponse,
     ) {
         self.cache
-            .insert(Self::cache_key(operator_id, idempotency_key), response);
+            .insert(Self::cache_key(tenant_scope, idempotency_key), response);
     }
 
     /// Number of entries currently cached (for metrics).
@@ -88,6 +95,19 @@ impl IdempotencyStore {
     #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// RAII guard that removes an in-flight key when dropped.
+/// Ensures cleanup even on panic or tokio task cancellation.
+struct InFlightGuard {
+    store_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    key: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.store_in_flight.lock().unwrap().remove(&self.key);
     }
 }
 
@@ -106,14 +126,19 @@ fn extract_idempotency_key(request: &Request<Body>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Extract operator ID from validated auth context.
-/// Falls back to "anonymous" for unauthenticated requests.
+/// Extract tenant scope from validated auth context.
+/// Returns tenant_id (multi-tenant), user_id (single-user), or "anonymous".
 ///
-/// **Security (F3):** Uses the JWT-validated tenant_id instead of the
-/// spoofable `x-operator-id` request header.
-fn extract_operator_id(request: &Request<Body>) -> String {
-    let headers = request.headers();
-    let auth = crate::auth::extract_auth_from_headers(headers);
+/// **Security (F3):** Uses the JWT-validated tenant_id — the real SaaS tenant
+/// boundary — not the spoofable `x-operator-id` request header.
+async fn extract_tenant_scope(state: &crate::GatewayState, headers: HeaderMap) -> String {
+    let mut auth = crate::auth::extract_auth_from_headers_with_jwks(
+        &headers,
+        state.jwks_store.as_ref(),
+        &state.jwt_allowed_algorithms,
+    );
+    auth.enrich_with_operator_map(&state.user_operator_map)
+        .await;
     auth.tenant_id.clone().unwrap_or_else(|| {
         if auth.is_authenticated() {
             auth.user_id.clone()
@@ -145,18 +170,94 @@ pub async fn idempotency_middleware(
         return next.run(request).await;
     };
 
-    let operator_id = extract_operator_id(&request);
+    let tenant_scope = extract_tenant_scope(state.as_ref(), request.headers().clone()).await;
+
+    // SECURITY: Compute request fingerprint (method+path+query+body_hash) to detect key reuse
+    // across different mutation routes, query variations, or different payloads.
+    // Buffer the body, hash it, then reconstruct the request for downstream handlers.
+    let (parts_req, body_req) = request.into_parts();
+    let body_bytes_req = match axum::body::to_bytes(body_req, 10 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            // SECURITY: Body too large or read error — reject the request outright
+            // rather than forwarding a mutation with an empty body.
+            return Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"error":"payload_too_large","message":"Request body exceeds 10MB limit for idempotent mutations"}"#
+                ))
+                .unwrap();
+        }
+    };
+    let body_hash = {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+        let mut hasher = DefaultHasher::new();
+        body_bytes_req.hash(&mut hasher);
+        hasher.finish()
+    };
+    let request_fingerprint = format!("{}:{}:{:x}", parts_req.method, parts_req.uri, body_hash);
+    // Reconstruct the request with the buffered body for downstream handlers.
+    let request = Request::from_parts(parts_req, Body::from(body_bytes_req));
 
     // Check cache for replay
-    if let Some(cached) = state.idempotency_store.get(&operator_id, &idempotency_key) {
+    if let Some(cached) = state.idempotency_store.get(&tenant_scope, &idempotency_key) {
+        // SECURITY: Verify the stored fingerprint matches the current request.
+        // If a client reuses the same idempotency key for a different route/method,
+        // return 409 Conflict instead of replaying the wrong response.
+        if cached.request_fingerprint != request_fingerprint {
+            tracing::warn!(
+                tenant_scope = %tenant_scope,
+                idempotency_key = %idempotency_key,
+                stored = %cached.request_fingerprint,
+                current = %request_fingerprint,
+                "Idempotency key fingerprint mismatch — key reuse across routes"
+            );
+            return Response::builder()
+                .status(StatusCode::CONFLICT)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"error":"idempotency_key_conflict","message":"This idempotency key was already used for a different request (method or path mismatch). Use a new key."}"#
+                ))
+                .unwrap();
+        }
+
         tracing::info!(
-            operator_id = %operator_id,
+            tenant_scope = %tenant_scope,
             idempotency_key = %idempotency_key,
             "Idempotency key hit — replaying cached response"
         );
         crate::metrics::record_idempotency_hit();
         return build_response_from_cache(cached);
     }
+
+    // SECURITY: Mark this key as in-flight to prevent concurrent duplicate execution.
+    // If another request with the same key is already executing, return 409.
+    let cache_key = IdempotencyStore::cache_key(&tenant_scope, &idempotency_key);
+    {
+        let mut in_flight = state.idempotency_store.in_flight.lock().unwrap();
+        if !in_flight.insert(cache_key.clone()) {
+            tracing::warn!(
+                tenant_scope = %tenant_scope,
+                idempotency_key = %idempotency_key,
+                "Idempotency key in-flight — concurrent request rejected"
+            );
+            return Response::builder()
+                .status(StatusCode::CONFLICT)
+                .header("content-type", "application/json")
+                .header("retry-after", "1")
+                .body(Body::from(
+                    r#"{"error":"idempotency_key_in_flight","message":"A request with this idempotency key is already being processed. Retry after completion."}"#
+                ))
+                .unwrap();
+        }
+    }
+    // RAII guard: ensures in-flight key is removed even on panic or cancellation.
+    let _in_flight_guard = InFlightGuard {
+        store_in_flight: Arc::clone(&state.idempotency_store.in_flight),
+        key: cache_key,
+    };
 
     // Execute the original handler
     let response = next.run(request).await;
@@ -166,20 +267,23 @@ pub async fn idempotency_middleware(
     let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
         Ok(bytes) => bytes,
         Err(e) => {
-            // F4: Response body already consumed; cannot reconstruct original.
-            // Return 500 and skip caching so subsequent retries execute fresh.
+            // SECURITY: The mutation has already committed. Returning a synthetic 500
+            // would mislead the client and break idempotency (client retries, mutation
+            // may run again). Instead: preserve original status, return empty body,
+            // skip caching. Client sees success status and can re-fetch if needed.
             tracing::error!(
                 error = %e,
                 idempotency_key = %idempotency_key,
-                "Failed to capture response body for idempotency cache — skipping cache"
+                status = %parts.status,
+                "Failed to capture response body for idempotency cache — returning original status without caching"
             );
-            return axum::response::Response::builder()
-                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"error":"idempotency_body_capture_failed","message":"Response body could not be captured for idempotency caching. Retry the request."}"#
-                ))
-                .unwrap();
+            let mut resp = Response::from_parts(parts, Body::empty());
+            resp.headers_mut().insert(
+                "x-idempotency-body-truncated",
+                "true".parse().unwrap(),
+            );
+            // _in_flight_guard will cleanup on drop here.
+            return resp;
         }
     };
 
@@ -190,21 +294,35 @@ pub async fn idempotency_middleware(
         .unwrap_or("application/json")
         .to_string();
 
-    let cached = CachedResponse {
-        status: parts.status.as_u16(),
-        body: body_bytes.to_vec(),
-        content_type,
-    };
+    // SECURITY (Fix 4): Only cache successful (2xx) responses. Transient errors
+    // should not be replayed — the client should be able to retry and get a fresh result.
+    if parts.status.is_success() {
+        let cached = CachedResponse {
+            status: parts.status.as_u16(),
+            body: body_bytes.to_vec(),
+            content_type,
+            request_fingerprint,
+        };
 
-    state
-        .idempotency_store
-        .insert(&operator_id, &idempotency_key, cached);
+        state
+            .idempotency_store
+            .insert(&tenant_scope, &idempotency_key, cached);
 
-    tracing::debug!(
-        operator_id = %operator_id,
-        idempotency_key = %idempotency_key,
-        "Idempotency key stored"
-    );
+        tracing::debug!(
+            tenant_scope = %tenant_scope,
+            idempotency_key = %idempotency_key,
+            "Idempotency key stored"
+        );
+    } else {
+        tracing::debug!(
+            tenant_scope = %tenant_scope,
+            idempotency_key = %idempotency_key,
+            status = %parts.status,
+            "Idempotency: skipping cache for non-2xx response"
+        );
+    }
+
+    // _in_flight_guard will cleanup on drop at end of scope.
 
     // Reconstruct response
     Response::from_parts(parts, Body::from(body_bytes))
@@ -239,6 +357,7 @@ mod tests {
                 status: 201,
                 body: b"created".to_vec(),
                 content_type: "application/json".to_string(),
+                request_fingerprint: "POST:/test".to_string(),
             },
         );
 
@@ -252,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn store_scoped_by_operator() {
+    fn store_scoped_by_tenant() {
         let store = IdempotencyStore::new(100, Duration::from_secs(60));
 
         store.insert(
@@ -262,12 +381,13 @@ mod tests {
                 status: 201,
                 body: b"op1-response".to_vec(),
                 content_type: "application/json".to_string(),
+                request_fingerprint: "POST:/test".to_string(),
             },
         );
 
-        // Same key, different operator → miss
+        // Same key, different tenant → miss
         assert!(store.get("op-2", "key-same").is_none());
-        // Same operator, same key → hit
+        // Same tenant, same key → hit
         assert!(store.get("op-1", "key-same").is_some());
     }
 
@@ -282,6 +402,7 @@ mod tests {
                 status: 201,
                 body: b"a".to_vec(),
                 content_type: "application/json".to_string(),
+                request_fingerprint: "POST:/test".to_string(),
             },
         );
         store.insert(
@@ -291,6 +412,7 @@ mod tests {
                 status: 200,
                 body: b"b".to_vec(),
                 content_type: "application/json".to_string(),
+                request_fingerprint: "POST:/test".to_string(),
             },
         );
 
@@ -345,6 +467,7 @@ mod tests {
             status: 201,
             body: b"{\"id\":1}".to_vec(),
             content_type: "application/json".to_string(),
+            request_fingerprint: "POST:/test".to_string(),
         };
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: CachedResponse = serde_json::from_str(&json).unwrap();
@@ -358,6 +481,7 @@ mod tests {
             status: 200,
             body: b"ok".to_vec(),
             content_type: "application/json".to_string(),
+            request_fingerprint: "POST:/test".to_string(),
         };
         let response = build_response_from_cache(cached);
         assert_eq!(response.status(), StatusCode::OK);

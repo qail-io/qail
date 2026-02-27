@@ -335,12 +335,18 @@ fn strip_sql_comments(input: &str) -> String {
         } else if c == '/' && chars.peek() == Some(&'*') {
             // Block comment: skip until */
             chars.next(); // consume *
+            let mut closed = false;
             while let Some(nc) = chars.next() {
                 if nc == '*' && chars.peek() == Some(&'/') {
                     chars.next(); // consume /
                     result.push(' '); // replace with space to preserve separation
+                    closed = true;
                     break;
                 }
+            }
+            if !closed {
+                // Unclosed block comment — preserve raw text so parser reports error
+                result.push_str("/*");
             }
         } else {
             result.push(c);

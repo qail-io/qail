@@ -427,17 +427,21 @@ impl ConditionToSql for Condition {
                 if let Value::Array(vals) = &self.value
                     && vals.len() >= 2
                 {
-                    return format!("{} BETWEEN {} AND {}", col, vals[0], vals[1]);
+                    let low = value_placeholder(&vals[0], params);
+                    let high = value_placeholder(&vals[1], params);
+                    return format!("{} BETWEEN {} AND {}", col, low, high);
                 }
-                format!("{} BETWEEN {}", col, self.value)
+                format!("{} BETWEEN {}", col, value_placeholder(&self.value, params))
             }
             Operator::NotBetween => {
                 if let Value::Array(vals) = &self.value
                     && vals.len() >= 2
                 {
-                    return format!("{} NOT BETWEEN {} AND {}", col, vals[0], vals[1]);
+                    let low = value_placeholder(&vals[0], params);
+                    let high = value_placeholder(&vals[1], params);
+                    return format!("{} NOT BETWEEN {} AND {}", col, low, high);
                 }
-                format!("{} NOT BETWEEN {}", col, self.value)
+                format!("{} NOT BETWEEN {}", col, value_placeholder(&self.value, params))
             }
             Operator::Exists => {
                 if let Value::Subquery(cmd) = &self.value {

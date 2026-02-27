@@ -122,9 +122,20 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
         }),
         Expr::Literal(_) => Ok(()),
         Expr::JsonAccess {
-            column, alias, ..
+            column, alias, path_segments, ..
         } => {
             check_ident(field, column)?;
+            for (key, _) in path_segments {
+                // Integer indices are fine; string keys must be safe identifiers
+                if key.parse::<i64>().is_err() && !is_safe_identifier(key) {
+                    return Err(SanitizeError {
+                        field: format!("{field}.json_path"),
+                        value: key.chars().take(40).collect(),
+                        reason: "JSON path key must be a safe identifier or integer"
+                            .to_string(),
+                    });
+                }
+            }
             if let Some(a) = alias {
                 check_ident(&format!("{field}.alias"), a)?;
             }
@@ -147,7 +158,7 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             Ok(())
         }
         // For all other complex Expr variants, validate aliases where present
-        Expr::Window { name, func, partition, .. } => {
+        Expr::Window { name, func, partition, params, order, .. } => {
             if !name.is_empty() {
                 check_ident(&format!("{field}.window_alias"), name)?;
             }
@@ -155,15 +166,68 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             for p in partition {
                 check_ident(&format!("{field}.partition"), p)?;
             }
+            for p in params {
+                check_expr(&format!("{field}.window_param"), p)?;
+            }
+            for cage in order {
+                for cond in &cage.conditions {
+                    check_expr(&format!("{field}.window_order"), &cond.left)?;
+                    check_value(&format!("{field}.window_order"), &cond.value)?;
+                }
+            }
             Ok(())
         }
-        Expr::Case { alias, .. }
-        | Expr::SpecialFunction { alias, .. }
-        | Expr::ArrayConstructor { alias, .. }
-        | Expr::RowConstructor { alias, .. }
-        | Expr::Subscript { alias, .. }
-        | Expr::Collate { alias, .. }
-        | Expr::FieldAccess { alias, .. } => {
+        Expr::Case { when_clauses, else_value, alias } => {
+            for (cond, val) in when_clauses {
+                check_expr(&format!("{field}.case_when"), &Expr::Named(cond.left.to_string()))?;
+                check_expr(&format!("{field}.case_then"), val)?;
+            }
+            if let Some(e) = else_value {
+                check_expr(&format!("{field}.case_else"), e)?;
+            }
+            if let Some(a) = alias {
+                check_ident(&format!("{field}.alias"), a)?;
+            }
+            Ok(())
+        }
+        Expr::SpecialFunction { args, alias, name } => {
+            check_ident(&format!("{field}.special_func"), name)?;
+            for (_, arg) in args {
+                check_expr(&format!("{field}.special_func_arg"), arg)?;
+            }
+            if let Some(a) = alias {
+                check_ident(&format!("{field}.alias"), a)?;
+            }
+            Ok(())
+        }
+        Expr::ArrayConstructor { elements, alias } | Expr::RowConstructor { elements, alias } => {
+            for elem in elements {
+                check_expr(&format!("{field}.element"), elem)?;
+            }
+            if let Some(a) = alias {
+                check_ident(&format!("{field}.alias"), a)?;
+            }
+            Ok(())
+        }
+        Expr::Subscript { expr, index, alias } => {
+            check_expr(&format!("{field}.subscript_expr"), expr)?;
+            check_expr(&format!("{field}.subscript_index"), index)?;
+            if let Some(a) = alias {
+                check_ident(&format!("{field}.alias"), a)?;
+            }
+            Ok(())
+        }
+        Expr::Collate { expr, collation, alias } => {
+            check_expr(&format!("{field}.collate_expr"), expr)?;
+            check_ident(&format!("{field}.collation"), collation)?;
+            if let Some(a) = alias {
+                check_ident(&format!("{field}.alias"), a)?;
+            }
+            Ok(())
+        }
+        Expr::FieldAccess { expr, field: f, alias } => {
+            check_expr(&format!("{field}.field_access_expr"), expr)?;
+            check_ident(&format!("{field}.field"), f)?;
             if let Some(a) = alias {
                 check_ident(&format!("{field}.alias"), a)?;
             }
