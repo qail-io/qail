@@ -10,7 +10,7 @@ mod admin;
 mod convert;
 #[cfg(feature = "qdrant")]
 mod qdrant;
-mod query;
+pub(crate) mod query;
 
 // ── Public re-exports (preserves existing `crate::handler::*` paths) ──
 

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::GatewayState;
-use crate::auth::extract_auth_from_headers;
+use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
 use crate::middleware::ApiError;
 
@@ -132,7 +132,10 @@ pub(crate) async fn branch_create_handler(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let auth = extract_auth_from_headers(&headers);
+    let auth = match authenticate_request(state.as_ref(), &headers).await {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
     if !auth.is_authenticated() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -174,9 +177,10 @@ pub(crate) async fn branch_create_handler(
     {
         Ok(c) => c,
         Err(e) => {
+            tracing::error!("Branch pool acquire error: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Pool error: {}", e)})),
+                Json(json!({"error": "Database connection unavailable"})),
             )
                 .into_response();
         }
@@ -189,18 +193,23 @@ pub(crate) async fn branch_create_handler(
     }
 
     let sql = qail_pg::driver::branch_sql::create_branch_sql(name, parent);
-    match conn.get_mut().execute_simple(&sql).await {
+    let result = match conn.get_mut().execute_simple(&sql).await {
         Ok(_) => (
             StatusCode::CREATED,
             Json(json!({"branch": name, "status": "created"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(json!({"error": format!("Failed to create branch: {}", e)})),
-        )
-            .into_response(),
-    }
+        Err(e) => {
+            tracing::error!("Failed to create branch '{}': {}", name, e);
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "Failed to create branch (may already exist)"})),
+            )
+                .into_response()
+        }
+    };
+    conn.release().await;
+    result
 }
 
 /// GET /api/_branch — List all branches
@@ -208,11 +217,23 @@ pub(crate) async fn branch_list_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = extract_auth_from_headers(&headers);
+    let auth = match authenticate_request(state.as_ref(), &headers).await {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
     if !auth.is_authenticated() {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "Authentication required"})),
+        )
+            .into_response();
+    }
+
+    // SECURITY (P0-R2): Branch operations require admin role.
+    if auth.role != "admin" && auth.role != "super_admin" {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Admin role required for branch operations"})),
         )
             .into_response();
     }
@@ -228,16 +249,17 @@ pub(crate) async fn branch_list_handler(
     {
         Ok(c) => c,
         Err(e) => {
+            tracing::error!("Branch pool acquire error: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Pool error: {}", e)})),
+                Json(json!({"error": "Database connection unavailable"})),
             )
                 .into_response();
         }
     };
 
     let sql = qail_pg::driver::branch_sql::list_branches_sql();
-    match conn.get_mut().simple_query(sql).await {
+    let result = match conn.get_mut().simple_query(sql).await {
         Ok(rows) => {
             let branches: Vec<Value> = rows.iter().map(row_to_json).collect();
             Json(json!({"branches": branches})).into_response()
@@ -246,7 +268,9 @@ pub(crate) async fn branch_list_handler(
             // Tables may not exist yet
             Json(json!({"branches": []})).into_response()
         }
-    }
+    };
+    conn.release().await;
+    result
 }
 
 /// DELETE /api/_branch/:name — Soft-delete a branch
@@ -255,7 +279,10 @@ pub(crate) async fn branch_delete_handler(
     headers: HeaderMap,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let auth = extract_auth_from_headers(&headers);
+    let auth = match authenticate_request(state.as_ref(), &headers).await {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
     if !auth.is_authenticated() {
         return (
             StatusCode::UNAUTHORIZED,
@@ -284,23 +311,29 @@ pub(crate) async fn branch_delete_handler(
     {
         Ok(c) => c,
         Err(e) => {
+            tracing::error!("Branch pool acquire error: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Pool error: {}", e)})),
+                Json(json!({"error": "Database connection unavailable"})),
             )
                 .into_response();
         }
     };
 
     let sql = qail_pg::driver::branch_sql::delete_branch_sql(&name);
-    match conn.get_mut().execute_simple(&sql).await {
+    let result = match conn.get_mut().execute_simple(&sql).await {
         Ok(_) => Json(json!({"branch": name, "status": "deleted"})).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to delete branch: {}", e)})),
-        )
-            .into_response(),
-    }
+        Err(e) => {
+            tracing::error!("Failed to delete branch '{}': {}", name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to delete branch"})),
+            )
+                .into_response()
+        }
+    };
+    conn.release().await;
+    result
 }
 
 /// POST /api/_branch/:name/merge — Merge branch overlay into main tables
@@ -310,11 +343,23 @@ pub(crate) async fn branch_merge_handler(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     // Auth check: require authenticated user
-    let auth = extract_auth_from_headers(&headers);
+    let auth = match authenticate_request(state.as_ref(), &headers).await {
+        Ok(auth) => auth,
+        Err(e) => return e.into_response(),
+    };
     if !auth.is_authenticated() {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "Authentication required for branch operations"})),
+        )
+            .into_response();
+    }
+
+    // SECURITY (P0-R2): Branch merge requires admin role.
+    if auth.role != "admin" && auth.role != "super_admin" {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Admin role required for branch merge"})),
         )
             .into_response();
     }
@@ -330,9 +375,10 @@ pub(crate) async fn branch_merge_handler(
     {
         Ok(c) => c,
         Err(e) => {
+            tracing::error!("Branch pool acquire error: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Pool error: {}", e)})),
+                Json(json!({"error": "Database connection unavailable"})),
             )
                 .into_response();
         }
@@ -347,9 +393,11 @@ pub(crate) async fn branch_merge_handler(
 
     // Apply overlay rows to main tables — inside a transaction
     if let Err(e) = conn.get_mut().execute_simple("BEGIN;").await {
+        tracing::error!("Branch merge transaction start failed: {}", e);
+        conn.release().await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to start transaction: {}", e)})),
+            Json(json!({"error": "Failed to start merge transaction"})),
         )
             .into_response();
     }
@@ -394,7 +442,11 @@ pub(crate) async fn branch_merge_handler(
                                 for (k, v) in obj {
                                     q = q.set_value(k, json_to_qail_value(v));
                                 }
-                                q = q.eq("id", row_pk.clone());
+                                // Use schema PK instead of hardcoded "id"
+                                let pk_col = state.schema.table(&table)
+                                    .and_then(|t| t.primary_key.as_deref())
+                                    .unwrap_or("id");
+                                q = q.eq(pk_col, row_pk.clone());
                                 Some(q)
                             } else {
                                 None
@@ -404,7 +456,11 @@ pub(crate) async fn branch_merge_handler(
                         }
                     }
                     "delete" => {
-                        let q = qail_core::ast::Qail::del(&table).eq("id", row_pk.clone());
+                        // Use schema PK instead of hardcoded "id"
+                        let pk_col = state.schema.table(&table)
+                            .and_then(|t| t.primary_key.as_deref())
+                            .unwrap_or("id");
+                        let q = qail_core::ast::Qail::del(&table).eq(pk_col, row_pk.clone());
                         Some(q)
                     }
                     _ => None,
@@ -426,6 +482,7 @@ pub(crate) async fn branch_merge_handler(
     // Rollback on errors, commit on success
     if !errors.is_empty() {
         let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
+        conn.release().await;
         return (
             StatusCode::CONFLICT,
             Json(json!({"error": "Merge failed — rolled back", "merge_errors": errors})),
@@ -435,28 +492,43 @@ pub(crate) async fn branch_merge_handler(
 
     // Mark as merged (inside the same transaction)
     let merge_sql = qail_pg::driver::branch_sql::mark_merged_sql(&name);
-    match conn.get_mut().execute_simple(&merge_sql).await {
+    let result = match conn.get_mut().execute_simple(&merge_sql).await {
         Ok(_) => {
-            // COMMIT the transaction
-            let _ = conn.get_mut().execute_simple("COMMIT;").await;
-            let mut response = json!({
-                "branch": name,
-                "status": "merged",
-                "applied": applied,
-                "overlay_stats": stats,
-            });
-            if !errors.is_empty() {
-                response["merge_errors"] = json!(errors);
+            // COMMIT the transaction — if this fails, the merge did not persist.
+            match conn.get_mut().execute_simple("COMMIT;").await {
+                Ok(_) => {
+                    let mut response = json!({
+                        "branch": name,
+                        "status": "merged",
+                        "applied": applied,
+                        "overlay_stats": stats,
+                    });
+                    if !errors.is_empty() {
+                        response["merge_errors"] = json!(errors);
+                    }
+                    Json(response).into_response()
+                }
+                Err(e) => {
+                    tracing::error!("Branch merge COMMIT failed for '{}': {}", name, e);
+                    let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "Merge transaction failed to commit"})),
+                    )
+                        .into_response()
+                }
             }
-            Json(response).into_response()
         }
         Err(e) => {
             let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
+            tracing::error!("Failed to merge branch '{}': {}", name, e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to merge branch: {}", e)})),
+                Json(json!({"error": "Failed to merge branch"})),
             )
                 .into_response()
         }
-    }
+    };
+    conn.release().await;
+    result
 }

@@ -16,21 +16,40 @@ pub async fn health_check() -> Json<HealthCheckPublic> {
 
 /// Swagger UI — serves interactive API documentation.
 ///
-/// Loads swagger-ui from CDN and points it at the gateway's own `/api/_openapi` endpoint.
-/// No authentication required (the OpenAPI spec itself is auth-gated, but reading the
-/// UI chrome is harmless).
-pub async fn swagger_ui() -> axum::response::Html<String> {
+/// Loads swagger-ui from CDN with SRI integrity checks and points it at
+/// the gateway's own `/api/_openapi` endpoint.
+///
+/// **Security:** Disabled when `production_strict=true`. In strict mode,
+/// returns 403 — use direct API calls instead.
+pub async fn swagger_ui(
+    State(state): State<Arc<GatewayState>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    if state.config.production_strict {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "Swagger UI is disabled in production_strict mode",
+        )
+            .into_response();
+    }
+
     axum::response::Html(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>QAIL Gateway — API Documentation</title>
-    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+    <link rel="stylesheet"
+          href="https://unpkg.com/swagger-ui-dist@5.18.2/swagger-ui.css"
+          integrity="sha384-SF1aEBgAer1S7fZoSzh4mONLj3E0XPsmFSfBPjjr14mCsWcq43gg9DMvz21fkPl"
+          crossorigin="anonymous">
 </head>
 <body>
     <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5.18.2/swagger-ui-bundle.js"
+            integrity="sha384-dMxm7RrsoJqZPHQ+b98s7sHVMnlJNMOF7nOPFGH2kEMnnKaWcg/ddiHoCP2WAkH"
+            crossorigin="anonymous"></script>
     <script>
     SwaggerUIBundle({
         url: '/api/_openapi',
@@ -40,13 +59,6 @@ pub async fn swagger_ui() -> axum::response::Html<String> {
         deepLinking: true,
         defaultModelsExpandDepth: 1,
         docExpansion: 'list',
-        requestInterceptor: function(req) {
-            const token = localStorage.getItem('qail_token');
-            if (token) {
-                req.headers['Authorization'] = 'Bearer ' + token;
-            }
-            return req;
-        },
     });
     </script>
     <style>
@@ -57,7 +69,7 @@ pub async fn swagger_ui() -> axum::response::Html<String> {
 </body>
 </html>"#
             .to_string(),
-    )
+    ).into_response()
 }
 
 /// Internal health check — includes pool stats and tenant guard metrics.

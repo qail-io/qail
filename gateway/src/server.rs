@@ -3,12 +3,13 @@
 //! Main entry point for running the QAIL Gateway.
 
 use axum::routing::MethodRouter;
+use jsonwebtoken::Algorithm;
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use url::Url;
+
 
 use crate::cache::QueryCache;
 use crate::config::GatewayConfig;
@@ -19,7 +20,7 @@ use crate::policy::PolicyEngine;
 use crate::router::create_router;
 use crate::schema::SchemaRegistry;
 
-use qail_pg::{AuthSettings, PgPool, PoolConfig, ScramChannelBindingMode, TlsConfig, TlsMode};
+use qail_pg::{PgPool, PoolConfig, TlsConfig};
 #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
 use qail_pg::{LinuxKrb5ProviderConfig, linux_krb5_preflight, linux_krb5_token_provider};
 
@@ -66,6 +67,8 @@ pub struct GatewayState {
     pub config: GatewayConfig,
     /// Per-IP rate limiter.
     pub rate_limiter: Arc<RateLimiter>,
+    /// Per-tenant post-auth rate limiter (keyed by tenant_id:user_id).
+    pub tenant_rate_limiter: Arc<RateLimiter>,
     /// EXPLAIN cost estimate cache.
     pub explain_cache: qail_pg::explain::ExplainCache,
     /// EXPLAIN pre-check configuration.
@@ -95,6 +98,8 @@ pub struct GatewayState {
     pub idempotency_store: crate::idempotency::IdempotencyStore,
     /// JWKS key store — caches JWT public keys from a JWKS endpoint (Phase 6a).
     pub jwks_store: Option<crate::jwks::JwksKeyStore>,
+    /// Allowed JWT algorithms parsed from configuration.
+    pub jwt_allowed_algorithms: Vec<Algorithm>,
 }
 
 /// The QAIL Gateway server
@@ -125,6 +130,9 @@ impl Gateway {
 
         // SECURITY (M2): Block startup if dev-mode is enabled with unsafe config.
         self.check_dev_mode_safety()?;
+
+        // SECURITY (P0-1): Block startup if production_strict=true and controls are missing.
+        self.check_production_strict()?;
 
         // Load policies
         let mut policy_engine = PolicyEngine::new();
@@ -158,7 +166,7 @@ impl Gateway {
 
         // Create connection pool
         tracing::info!("Creating connection pool...");
-        let mut pool_config = parse_database_url(&self.config.database_url)?;
+        let mut pool_config = parse_database_url(&self.config.database_url, &self.config)?;
 
         // Allow env var overrides for pool sizing (takes precedence over URL query params)
         if let Ok(min) = std::env::var("POOL_MIN_CONNECTIONS")
@@ -217,6 +225,7 @@ impl Gateway {
                             missing.join(", ")
                         );
                         tracing::error!("{}", msg);
+                        conn.release().await;
                         return Err(GatewayError::Config(msg));
                     }
 
@@ -231,6 +240,7 @@ impl Gateway {
                     // Non-fatal: allow startup even if introspection fails
                 }
             }
+            conn.release().await;
         }
 
         // Load event triggers
@@ -252,6 +262,16 @@ impl Gateway {
             "Rate limiter: {:.0} req/s, burst={}",
             self.config.rate_limit_rate,
             self.config.rate_limit_burst
+        );
+
+        let tenant_rate_limiter = RateLimiter::new(
+            self.config.tenant_rate_limit_rate,
+            self.config.tenant_rate_limit_burst,
+        );
+        tracing::info!(
+            "Tenant rate limiter: {:.0} req/s/tenant, burst={}",
+            self.config.tenant_rate_limit_rate,
+            self.config.tenant_rate_limit_burst
         );
 
         let explain_cfg = self.config.explain_config();
@@ -307,6 +327,7 @@ impl Gateway {
                     tracing::warn!("Could not load user→operator map (non-fatal): {}", e);
                 }
             }
+            conn.release().await;
         }
 
         // Initialize Qdrant pool (optional — only if config has [qdrant])
@@ -347,7 +368,11 @@ impl Gateway {
         // Initialize query allow-list (optional)
         let mut allow_list = crate::middleware::QueryAllowList::new();
         if let Some(ref path) = self.config.allow_list_path {
-            allow_list.load_from_file(path).map_err(|e| {
+            // SECURITY (P0-R9): Validate path against config_root.
+            let canonical =
+                crate::config::validate_config_path(path, self.config.config_root.as_deref())
+                    .map_err(GatewayError::Config)?;
+            allow_list.load_from_file(canonical.to_str().unwrap_or(path)).map_err(|e| {
                 GatewayError::Config(format!("Failed to load allow-list from '{}': {}", path, e))
             })?;
             tracing::info!(
@@ -392,6 +417,10 @@ impl Gateway {
             None
         };
 
+        // Parse and validate JWT algorithm allow-list at startup.
+        let jwt_allowed_algorithms =
+            crate::auth::parse_allowed_algorithms(&self.config.jwt_allowed_algorithms)?;
+
         self.state = Some(Arc::new(GatewayState {
             pool,
             policy_engine,
@@ -400,6 +429,7 @@ impl Gateway {
             cache,
             config: self.config.clone(),
             rate_limiter,
+            tenant_rate_limiter,
             explain_cache,
             explain_config: explain_cfg,
             tenant_semaphore,
@@ -420,6 +450,7 @@ impl Gateway {
                 .build(),
             idempotency_store: crate::idempotency::IdempotencyStore::production(),
             jwks_store,
+            jwt_allowed_algorithms,
         }));
 
         tracing::info!("Gateway initialized");
@@ -465,6 +496,83 @@ impl Gateway {
         }
 
         Ok(())
+    }
+
+    /// SECURITY (P0-1): Refuse startup when `production_strict=true` and
+    /// essential security controls are not configured.
+    ///
+    /// Checks:
+    /// 1. JWT_SECRET or JWKS_URL environment variable is set
+    /// 2. Explicit CORS origins are configured
+    /// 3. Admin token is set (protects /metrics, /health/internal)
+    /// 4. Query allow-list is configured
+    fn check_production_strict(&self) -> Result<(), GatewayError> {
+        if !self.config.production_strict {
+            return Ok(());
+        }
+
+        let mut violations = Vec::new();
+
+        let jwt_set = std::env::var("JWT_SECRET").is_ok();
+        let jwks_set = std::env::var("JWKS_URL").is_ok();
+        if !jwt_set && !jwks_set {
+            violations.push("JWT_SECRET or JWKS_URL must be set");
+        }
+
+        if self.config.cors_allowed_origins.is_empty() {
+            violations.push("cors_allowed_origins must be non-empty");
+        }
+
+        // SECURITY (P0-R4): Prevent CORS fail-open on parse errors.
+        if !self.config.cors_strict {
+            violations.push("cors_strict must be true (prevents fail-open on origin parse errors)");
+        }
+
+        if self.config.admin_token.is_none() {
+            violations.push("admin_token must be set");
+        }
+
+        if self.config.allow_list_path.is_none() {
+            violations.push("allow_list_path must be set");
+        }
+
+        if self.config.rpc_allowlist_path.is_none() {
+            violations.push("rpc_allowlist_path must be set");
+        }
+
+        if !self.config.rpc_signature_check {
+            violations.push("rpc_signature_check must be true");
+        }
+
+        if self.config.jwt_allowed_algorithms.is_empty() {
+            violations.push("jwt_allowed_algorithms must be non-empty (e.g. [\"RS256\"])");
+        }
+
+        if self.config.pg_sslmode != "require" {
+            violations.push("pg_sslmode must be \"require\"");
+        }
+
+        if self.config.pg_channel_binding != "require" {
+            violations.push("pg_channel_binding must be \"require\"");
+        }
+
+        // SECURITY: Dev mode header auth allows arbitrary role spoofing.
+        if std::env::var("QAIL_DEV_MODE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+        {
+            violations.push("QAIL_DEV_MODE must not be set (header auth spoofing risk)");
+        }
+
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(GatewayError::Config(format!(
+                "SECURITY: production_strict=true but {} violation(s) found:\n  - {}",
+                violations.len(),
+                violations.join("\n  - ")
+            )))
+        }
     }
 
     /// Start serving requests
@@ -568,10 +676,11 @@ async fn shutdown_signal() {
 }
 
 /// Parse a database URL into PoolConfig
-fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
+fn parse_database_url(url_str: &str, gateway_config: &crate::config::GatewayConfig) -> Result<PoolConfig, GatewayError> {
     use percent_encoding::percent_decode_str;
+    use qail_pg::driver::{AuthSettings, ScramChannelBindingMode, TlsMode};
 
-    let url = Url::parse(url_str)
+    let url = url::Url::parse(url_str)
         .map_err(|e| GatewayError::Config(format!("Invalid database URL: {}", e)))?;
 
     let host = url
@@ -599,6 +708,15 @@ fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
 
     let mut config = PoolConfig::new(host, port, &user, database);
 
+    // Apply config-level PG security defaults (URL params will override below).
+    if let Some(mode) = TlsMode::parse_sslmode(&gateway_config.pg_sslmode) {
+        config = config.tls_mode(mode);
+    }
+    let mut auth_settings: AuthSettings = config.auth_settings;
+    if let Some(mode) = ScramChannelBindingMode::parse(&gateway_config.pg_channel_binding) {
+        auth_settings.channel_binding = mode;
+    }
+
     // Url::password() returns percent-encoded string — decode it
     // Critical: passwords with '=' get encoded as '%3D' by the url crate,
     // but SCRAM-SHA-256 needs the raw password bytes for PBKDF2.
@@ -610,7 +728,6 @@ fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
     }
 
     // Parse query params for pool settings + enterprise auth/TLS controls.
-    let mut auth_settings: AuthSettings = config.auth_settings;
     let mut sslcert_path: Option<String> = None;
     let mut sslkey_path: Option<String> = None;
     let mut gss_provider: Option<String> = None;
@@ -633,6 +750,13 @@ fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
                 let mode = TlsMode::parse_sslmode(value.as_ref()).ok_or_else(|| {
                     GatewayError::Config(format!("Invalid sslmode value: {}", value))
                 })?;
+                // SECURITY: Prevent URL params from downgrading sslmode when production_strict is on.
+                if gateway_config.production_strict && mode != TlsMode::Require {
+                    return Err(GatewayError::Config(format!(
+                        "SECURITY: production_strict=true — URL sslmode='{}' rejected (must be 'require')",
+                        value
+                    )));
+                }
                 config = config.tls_mode(mode);
             }
             "sslrootcert" => {
@@ -647,6 +771,13 @@ fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
                 let mode = ScramChannelBindingMode::parse(value.as_ref()).ok_or_else(|| {
                     GatewayError::Config(format!("Invalid channel_binding value: {}", value))
                 })?;
+                // SECURITY: Prevent URL params from downgrading channel_binding when production_strict is on.
+                if gateway_config.production_strict && mode != ScramChannelBindingMode::Require {
+                    return Err(GatewayError::Config(format!(
+                        "SECURITY: production_strict=true — URL channel_binding='{}' rejected (must be 'require')",
+                        value
+                    )));
+                }
                 auth_settings.channel_binding = mode;
             }
             "auth_scram" => {
@@ -656,12 +787,22 @@ fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
                 auth_settings.allow_scram_sha_256 = enabled;
             }
             "auth_md5" => {
+                if gateway_config.production_strict {
+                    return Err(GatewayError::Config(
+                        "SECURITY: production_strict=true — auth_md5 URL param rejected (use SCRAM only)".to_string(),
+                    ));
+                }
                 let enabled = parse_bool_query(value.as_ref()).ok_or_else(|| {
                     GatewayError::Config(format!("Invalid auth_md5 value: {}", value))
                 })?;
                 auth_settings.allow_md5_password = enabled;
             }
             "auth_cleartext" => {
+                if gateway_config.production_strict {
+                    return Err(GatewayError::Config(
+                        "SECURITY: production_strict=true — auth_cleartext URL param rejected".to_string(),
+                    ));
+                }
                 let enabled = parse_bool_query(value.as_ref()).ok_or_else(|| {
                     GatewayError::Config(format!("Invalid auth_cleartext value: {}", value))
                 })?;
@@ -686,6 +827,17 @@ fn parse_database_url(url_str: &str) -> Result<PoolConfig, GatewayError> {
                 auth_settings.allow_sspi = enabled;
             }
             "auth_mode" => {
+                if gateway_config.production_strict {
+                    // Only allow scram_only and gssapi_only under strict mode.
+                    if !value.eq_ignore_ascii_case("scram_only")
+                        && !value.eq_ignore_ascii_case("gssapi_only")
+                    {
+                        return Err(GatewayError::Config(format!(
+                            "SECURITY: production_strict=true — auth_mode='{}' rejected (only scram_only or gssapi_only allowed)",
+                            value
+                        )));
+                    }
+                }
                 if value.eq_ignore_ascii_case("scram_only") {
                     auth_settings = AuthSettings::scram_only();
                 } else if value.eq_ignore_ascii_case("gssapi_only") {
@@ -978,6 +1130,9 @@ impl Default for GatewayBuilder {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::GatewayConfig;
+    fn default_cfg() -> GatewayConfig { GatewayConfig::default() }
+
     use super::*;
     use std::io::Write;
 
@@ -1019,6 +1174,7 @@ mod tests {
     fn test_parse_database_url_rejects_invalid_gss_provider() {
         let err = match parse_database_url(
             "postgres://alice@db.internal:5432/app?gss_provider=unknown",
+            &default_cfg(),
         ) {
             Ok(_) => panic!("expected invalid gss_provider error"),
             Err(e) => e,
@@ -1028,7 +1184,7 @@ mod tests {
 
     #[test]
     fn test_parse_database_url_rejects_empty_gss_service() {
-        let err = match parse_database_url("postgres://alice@db.internal:5432/app?gss_service=") {
+        let err = match parse_database_url("postgres://alice@db.internal:5432/app?gss_service=", &default_cfg()) {
             Ok(_) => panic!("expected empty gss_service error"),
             Err(e) => e,
         };
@@ -1039,6 +1195,7 @@ mod tests {
     fn test_parse_database_url_parses_gss_retry_settings() {
         let cfg = parse_database_url(
             "postgres://alice@db.internal:5432/app?gss_connect_retries=6&gss_retry_base_ms=350&gss_circuit_threshold=7&gss_circuit_window_ms=45000&gss_circuit_cooldown_ms=9000",
+            &default_cfg(),
         )
         .expect("expected valid url");
         assert_eq!(cfg.gss_connect_retries, 6);
@@ -1060,7 +1217,7 @@ mod tests {
     #[test]
     fn test_parse_database_url_rejects_invalid_gss_retry_base() {
         let err =
-            match parse_database_url("postgres://alice@db.internal:5432/app?gss_retry_base_ms=0") {
+            match parse_database_url("postgres://alice@db.internal:5432/app?gss_retry_base_ms=0", &default_cfg()) {
                 Ok(_) => panic!("expected invalid gss_retry_base_ms error"),
                 Err(e) => e,
             };
@@ -1074,6 +1231,7 @@ mod tests {
     fn test_parse_database_url_rejects_invalid_gss_connect_retries() {
         let err = match parse_database_url(
             "postgres://alice@db.internal:5432/app?gss_connect_retries=99",
+            &default_cfg(),
         ) {
             Ok(_) => panic!("expected invalid gss_connect_retries error"),
             Err(e) => e,
@@ -1088,6 +1246,7 @@ mod tests {
     fn test_parse_database_url_rejects_invalid_gss_circuit_threshold() {
         let err = match parse_database_url(
             "postgres://alice@db.internal:5432/app?gss_circuit_threshold=101",
+            &default_cfg(),
         ) {
             Ok(_) => panic!("expected invalid gss_circuit_threshold error"),
             Err(e) => e,
@@ -1102,6 +1261,7 @@ mod tests {
     fn test_parse_database_url_rejects_invalid_gss_circuit_window() {
         let err = match parse_database_url(
             "postgres://alice@db.internal:5432/app?gss_circuit_window_ms=0",
+            &default_cfg(),
         ) {
             Ok(_) => panic!("expected invalid gss_circuit_window_ms error"),
             Err(e) => e,
@@ -1116,6 +1276,7 @@ mod tests {
     fn test_parse_database_url_rejects_invalid_gss_circuit_cooldown() {
         let err = match parse_database_url(
             "postgres://alice@db.internal:5432/app?gss_circuit_cooldown_ms=0",
+            &default_cfg(),
         ) {
             Ok(_) => panic!("expected invalid gss_circuit_cooldown_ms error"),
             Err(e) => e,
@@ -1131,6 +1292,7 @@ mod tests {
     fn test_parse_database_url_linux_krb5_requires_feature_on_linux() {
         let err = match parse_database_url(
             "postgres://alice@db.internal:5432/app?gss_provider=linux_krb5",
+            &default_cfg(),
         ) {
             Ok(_) => panic!("expected linux_krb5 feature-gate error"),
             Err(e) => e,

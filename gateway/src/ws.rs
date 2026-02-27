@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::GatewayState;
-use crate::auth::extract_auth_from_headers;
+use crate::auth::{ensure_request_auth, ensure_tenant_rate_limit, extract_auth_for_state};
 
 /// Messages sent from the WebSocket client to the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,12 +134,37 @@ pub async fn ws_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let mut auth = extract_auth_from_headers(&headers);
-    auth.enrich_with_operator_map(&state.user_operator_map)
-        .await;
+    let auth = extract_auth_for_state(&headers, state.as_ref()).await;
+
+    // SECURITY (P0-3): Enforce authentication policy on WS upgrade.
+    if let Err(e) = ensure_request_auth(&auth, state.config.production_strict) {
+        return e.into_response();
+    }
+
+    // SECURITY: Validate Origin header against CORS allowed origins.
+    // Prevents cross-site WebSocket hijacking from malicious pages.
+    if !state.config.cors_allowed_origins.is_empty() {
+        let origin_ok = headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .map(|origin| {
+                state
+                    .config
+                    .cors_allowed_origins
+                    .iter()
+                    .any(|allowed| allowed == origin)
+            })
+            .unwrap_or(false);
+        if !origin_ok {
+            return crate::middleware::ApiError::forbidden("WebSocket Origin not in allowed origins")
+                .into_response();
+        }
+    }
+
     tracing::info!("WebSocket connection from user: {}", auth.user_id);
 
     ws.on_upgrade(move |socket| handle_socket(socket, state, auth))
+        .into_response()
 }
 
 async fn handle_socket(
@@ -169,6 +194,9 @@ async fn handle_socket(
     });
 
     let mut subscribed_channels: Vec<String> = Vec::new();
+    // SECURITY (P0-R3): Track spawned LiveQuery pollers so we can abort them.
+    let mut live_query_tasks: std::collections::HashMap<String, tokio::task::JoinHandle<()>> =
+        std::collections::HashMap::new();
 
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
@@ -182,6 +210,7 @@ async fn handle_socket(
                             &tx,
                             &auth,
                             &mut subscribed_channels,
+                            &mut live_query_tasks,
                         )
                         .await;
                     }
@@ -202,14 +231,19 @@ async fn handle_socket(
         }
     }
 
-    // Cleanup: UNLISTEN all channels
     if !subscribed_channels.is_empty()
         && let Ok(mut conn) = state.pool.acquire_system().await
     {
-        for channel in &subscribed_channels {
-            let cmd = qail_core::ast::Qail::unlisten(channel);
-            let _ = conn.fetch_all_uncached(&cmd).await;
-        }
+        // SECURITY: Use UNLISTEN * to atomically clean up all listeners in one command,
+        // rather than per-channel UNLISTEN which may hit different backend sessions.
+        let _ = conn.get_mut().execute_simple("UNLISTEN *;").await;
+        conn.release().await;
+    }
+
+    // SECURITY (P0-R3): Abort all spawned LiveQuery polling tasks on disconnect.
+    for (table, handle) in live_query_tasks.drain() {
+        tracing::debug!("Aborting LiveQuery poller for table '{}' on disconnect", table);
+        handle.abort();
     }
 
     send_task.abort();
@@ -223,8 +257,22 @@ async fn handle_client_message(
     tx: &mpsc::Sender<WsServerMessage>,
     auth: &crate::auth::AuthContext,
     subscribed_channels: &mut Vec<String>,
+    live_query_tasks: &mut std::collections::HashMap<String, tokio::task::JoinHandle<()>>,
 ) {
     let user_id = &auth.user_id;
+
+    // SECURITY (P0-5): Post-auth tenant rate limiting on ALL WS messages
+    // to prevent LISTEN/UNLISTEN flood attacks, not just data-bearing messages.
+    if let Err(e) = ensure_tenant_rate_limit(state.as_ref(), auth).await
+    {
+        let _ = tx
+            .send(WsServerMessage::Error {
+                message: e.message.clone(),
+            })
+            .await;
+        return;
+    }
+
     match msg {
         WsClientMessage::Subscribe { channel } => {
             tracing::debug!("User {} subscribing to channel: {}", user_id, channel);
@@ -258,6 +306,13 @@ async fn handle_client_message(
             // Prefix with tenant_id to isolate notifications per tenant
             let scoped_channel = format!("{}_{}", tenant_id, channel);
 
+            // SECURITY: Dedup — if already subscribed to this channel, ack without
+            // consuming a slot or issuing another LISTEN.
+            if subscribed_channels.contains(&scoped_channel) {
+                let _ = tx.send(WsServerMessage::Subscribed { channel }).await;
+                return;
+            }
+
             // R7-C: Cap subscriptions per WebSocket client to prevent LISTEN exhaustion
             if subscribed_channels.len() >= 50 {
                 let _ = tx
@@ -283,6 +338,18 @@ async fn handle_client_message(
                             .await;
                     }
                 }
+                // SECURITY: Clean up LISTEN state before returning conn to pool.
+                // LISTEN is session-scoped — if we release without UNLISTEN, the
+                // backend session retains the listener and accumulates phantom subscriptions.
+                let _ = conn.get_mut().execute_simple("UNLISTEN *;").await;
+                conn.release().await;
+            } else {
+                tracing::warn!("WS Subscribe: pool acquire failed");
+                let _ = tx
+                    .send(WsServerMessage::Error {
+                        message: "Database connection unavailable".to_string(),
+                    })
+                    .await;
             }
         }
 
@@ -318,6 +385,14 @@ async fn handle_client_message(
                             .await;
                     }
                 }
+                conn.release().await;
+            } else {
+                tracing::warn!("WS Unsubscribe: pool acquire failed");
+                let _ = tx
+                    .send(WsServerMessage::Error {
+                        message: "Database connection unavailable".to_string(),
+                    })
+                    .await;
             }
         }
 
@@ -326,6 +401,26 @@ async fn handle_client_message(
 
             match qail_core::parser::parse(&qail) {
                 Ok(mut cmd) => {
+                    // SECURITY (P0-2): Reject dangerous actions on WS.
+                    if matches!(
+                        cmd.action,
+                        qail_core::ast::Action::Call
+                            | qail_core::ast::Action::Do
+                            | qail_core::ast::Action::SessionSet
+                            | qail_core::ast::Action::SessionShow
+                            | qail_core::ast::Action::SessionReset
+                    ) {
+                        let _ = tx
+                            .send(WsServerMessage::Error {
+                                message: format!(
+                                    "Action {:?} is not allowed on WebSocket",
+                                    cmd.action
+                                ),
+                            })
+                            .await;
+                        return;
+                    }
+
                     // SECURITY: Enforce allow-list — same as HTTP handler.
                     // Without this, WS is a bypass channel for allow-list restrictions.
                     if !crate::handler::is_query_allowed(&state.allow_list, Some(&qail), &cmd) {
@@ -352,8 +447,29 @@ async fn handle_client_message(
                     // SECURITY: Clamp LIMIT at AST level so PostgreSQL stops scanning early.
                     crate::handler::clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
-                    // WS queries use RLS-scoped connections
-                    if let Ok(mut conn) = state.pool.acquire_with_rls(auth.to_rls_context()).await {
+                    // SECURITY: Query complexity guard — same as HTTP /qail handler.
+                    let (depth, filters, joins) = crate::handler::query::query_complexity(&cmd);
+                    if let Err(_api_err) = state.complexity_guard.check(depth, filters, joins) {
+                        tracing::warn!(
+                            table = %cmd.table,
+                            depth, filters, joins,
+                            "WS query rejected by complexity guard"
+                        );
+                        crate::metrics::record_complexity_rejected();
+                        let _ = tx
+                            .send(WsServerMessage::Error {
+                                message: "Query too complex".to_string(),
+                            })
+                            .await;
+                        return;
+                    }
+
+                    // WS queries use RLS-scoped connections with statement/lock timeouts
+                    if let Ok(mut conn) = state.pool.acquire_with_rls_timeouts(
+                        auth.to_rls_context(),
+                        state.config.statement_timeout_ms,
+                        state.config.lock_timeout_ms,
+                    ).await {
                         match conn.fetch_all_uncached(&cmd).await {
                             Ok(rows) => {
                             let json_rows: Vec<serde_json::Value> =
@@ -370,6 +486,7 @@ async fn handle_client_message(
                                     )
                                 {
                                     tracing::error!("{}", v);
+                                    conn.release().await;
                                     let _ = tx
                                         .send(WsServerMessage::Error {
                                             message: "Data integrity error".to_string(),
@@ -396,6 +513,15 @@ async fn handle_client_message(
                                     .await;
                             }
                         }
+                        conn.release().await;
+                    } else {
+                        // SECURITY: Inform client instead of silently dropping the query.
+                        tracing::warn!("WS query: pool acquire failed");
+                        let _ = tx
+                            .send(WsServerMessage::Error {
+                                message: "Database connection unavailable".to_string(),
+                            })
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -431,6 +557,26 @@ async fn handle_client_message(
                     return;
                 }
             };
+
+            // SECURITY (P0-2): Reject dangerous actions on WS LiveQuery.
+            if matches!(
+                cmd.action,
+                qail_core::ast::Action::Call
+                    | qail_core::ast::Action::Do
+                    | qail_core::ast::Action::SessionSet
+                    | qail_core::ast::Action::SessionShow
+                    | qail_core::ast::Action::SessionReset
+            ) {
+                let _ = tx
+                    .send(WsServerMessage::Error {
+                        message: format!(
+                            "Action {:?} is not allowed on WebSocket",
+                            cmd.action
+                        ),
+                    })
+                    .await;
+                return;
+            }
 
             // SECURITY (E5): Validate table name against schema registry.
             if state.schema.table(&table).is_none() {
@@ -471,8 +617,29 @@ async fn handle_client_message(
             // SECURITY: Clamp LIMIT at AST level so PostgreSQL stops scanning early.
             crate::handler::clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
+            // SECURITY: Query complexity guard — same as HTTP /qail handler.
+            let (depth, filters, joins) = crate::handler::query::query_complexity(&cmd);
+            if let Err(_api_err) = state.complexity_guard.check(depth, filters, joins) {
+                tracing::warn!(
+                    table = %cmd.table,
+                    depth, filters, joins,
+                    "WS LiveQuery rejected by complexity guard"
+                );
+                crate::metrics::record_complexity_rejected();
+                let _ = tx
+                    .send(WsServerMessage::Error {
+                        message: "Query too complex".to_string(),
+                    })
+                    .await;
+                return;
+            }
+
             // Execute immediately and send initial snapshot
-            if let Ok(mut conn) = state.pool.acquire_with_rls(auth.to_rls_context()).await {
+            if let Ok(mut conn) = state.pool.acquire_with_rls_timeouts(
+                auth.to_rls_context(),
+                state.config.statement_timeout_ms,
+                state.config.lock_timeout_ms,
+            ).await {
                 match conn.fetch_all_uncached(&cmd).await {
                     Ok(rows) => {
                         let json_rows: Vec<serde_json::Value> =
@@ -489,6 +656,7 @@ async fn handle_client_message(
                             )
                         {
                             tracing::error!("{}", v);
+                            conn.release().await;
                             let _ = tx
                                 .send(WsServerMessage::Error {
                                     message: "Data integrity error".to_string(),
@@ -510,6 +678,7 @@ async fn handle_client_message(
                     Err(e) => {
                         // SECURITY (R3): Do not leak raw PG error to WS client
                         tracing::error!("Live query initial exec failed: {}", e);
+                        conn.release().await;
                         let _ = tx
                             .send(WsServerMessage::Error {
                                 message: "Live query execution failed".to_string(),
@@ -518,6 +687,16 @@ async fn handle_client_message(
                         return;
                     }
                 }
+                conn.release().await;
+            } else {
+                // SECURITY: Inform client instead of silently dropping the LiveQuery.
+                tracing::warn!("WS LiveQuery: pool acquire failed");
+                let _ = tx
+                    .send(WsServerMessage::Error {
+                        message: "Database connection unavailable".to_string(),
+                    })
+                    .await;
+                return;
             }
 
             // Subscribe to table's NOTIFY channel for change detection
@@ -531,30 +710,79 @@ async fn handle_client_message(
                 if conn.fetch_all_uncached(&listen_cmd).await.is_ok() {
                     subscribed_channels.push(notify_channel.clone());
                 }
+                conn.release().await;
+            } else {
+                tracing::warn!("WS LiveQuery LISTEN: pool acquire failed");
+                let _ = tx
+                    .send(WsServerMessage::Error {
+                        message: "Database connection unavailable for live query subscription".to_string(),
+                    })
+                    .await;
+                return;
             }
 
             // Spawn polling task if interval > 0
             if interval_ms > 0 {
+                // SECURITY: Cap LiveQuery pollers per client (matches Subscribe cap)
+                if live_query_tasks.len() >= 50 && !live_query_tasks.contains_key(&table) {
+                    let _ = tx
+                        .send(WsServerMessage::Error {
+                            message: "LiveQuery limit reached (max 50 per connection)"
+                                .to_string(),
+                        })
+                        .await;
+                    return;
+                }
+
                 // R7-D: Floor the poll interval to 1000ms to prevent tight-loop DoS
                 let safe_interval_ms = interval_ms.max(1000);
                 let tx_clone = tx.clone();
                 let state_clone = Arc::clone(state);
                 let table_clone = table.clone();
                 let rls_ctx = auth.to_rls_context();
+                let stmt_timeout = state.config.statement_timeout_ms;
+                let lock_timeout = state.config.lock_timeout_ms;
+                let tenant_id_clone = auth.tenant_id.clone();
+                let tenant_col = state.config.tenant_column.clone();
 
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     let mut seq = 2u64;
                     let interval = std::time::Duration::from_millis(safe_interval_ms);
                     loop {
                         tokio::time::sleep(interval).await;
 
                         if let Ok(mut conn) =
-                            state_clone.pool.acquire_with_rls(rls_ctx.clone()).await
+                            state_clone.pool.acquire_with_rls_timeouts(
+                                rls_ctx.clone(),
+                                stmt_timeout,
+                                lock_timeout,
+                            ).await
                         {
                             match conn.fetch_all_uncached(&cmd).await {
                                 Ok(rows) => {
                                     let json_rows: Vec<serde_json::Value> =
                                         rows.iter().map(crate::handler::row_to_json).collect();
+
+                                    // SECURITY: Verify tenant boundary on every poll tick.
+                                    if let Some(ref tenant_id) = tenant_id_clone {
+                                        if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+                                            &json_rows,
+                                            tenant_id,
+                                            &tenant_col,
+                                            &table_clone,
+                                            "ws_live_query_poll",
+                                        ) {
+                                            tracing::error!("{}", v);
+                                            conn.release().await;
+                                            let _ = tx_clone
+                                                .send(WsServerMessage::Error {
+                                                    message: "Data integrity error".to_string(),
+                                                })
+                                                .await;
+                                            break;
+                                        }
+                                    }
+
                                     let count = json_rows.len();
                                     if tx_clone
                                         .send(WsServerMessage::LiveQueryUpdate {
@@ -566,6 +794,7 @@ async fn handle_client_message(
                                         .await
                                         .is_err()
                                     {
+                                        conn.release().await;
                                         break; // Client disconnected
                                     }
                                     seq += 1;
@@ -574,13 +803,24 @@ async fn handle_client_message(
                                     tracing::warn!("Live query poll failed: {}", e);
                                 }
                             }
+                            conn.release().await;
                         }
                     }
                 });
+                // SECURITY: Abort old poller before inserting new handle (prevents task leak on re-subscribe).
+                if let Some(old_handle) = live_query_tasks.insert(table.clone(), handle) {
+                    old_handle.abort();
+                }
             }
         }
 
         WsClientMessage::StopLiveQuery { table } => {
+            // SECURITY (P0-R3): Abort the spawned polling task for this table.
+            if let Some(handle) = live_query_tasks.remove(&table) {
+                tracing::debug!("Aborting LiveQuery poller for table '{}'", table);
+                handle.abort();
+            }
+
             // SECURITY: reconstruct tenant-scoped channel name
             let notify_channel = match &auth.tenant_id {
                 Some(tid) if !tid.is_empty() => format!("{}_qail_table_{}", tid, table),
@@ -590,12 +830,22 @@ async fn handle_client_message(
                 let cmd = qail_core::ast::Qail::unlisten(&notify_channel);
                 let _ = conn.fetch_all_uncached(&cmd).await;
                 subscribed_channels.retain(|c| c != &notify_channel);
+                conn.release().await;
+                let _ = tx
+                    .send(WsServerMessage::Unsubscribed {
+                        channel: notify_channel,
+                    })
+                    .await;
+            } else {
+                tracing::warn!("WS StopLiveQuery UNLISTEN: pool acquire failed");
+                // Still remove from local tracking — poller is already aborted above.
+                subscribed_channels.retain(|c| c != &notify_channel);
+                let _ = tx
+                    .send(WsServerMessage::Error {
+                        message: "Database connection unavailable for unsubscribe".to_string(),
+                    })
+                    .await;
             }
-            let _ = tx
-                .send(WsServerMessage::Unsubscribed {
-                    channel: notify_channel,
-                })
-                .await;
         }
     }
 }

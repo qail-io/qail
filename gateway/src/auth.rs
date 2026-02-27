@@ -229,7 +229,45 @@ pub fn validate_jwt(token: &str, config: &JwtConfig) -> Result<AuthContext, Gate
 /// 1. `Authorization: Bearer <jwt>` (if JWT_SECRET is set)
 /// 2. X-User-ID / X-User-Role headers (dev mode only)
 pub fn extract_auth_from_headers(headers: &HeaderMap) -> AuthContext {
-    extract_auth_from_headers_with_jwks(headers, None)
+    extract_auth_from_headers_with_jwks(headers, None, &[])
+}
+
+
+/// Parse configured JWT algorithm names into [`Algorithm`] values.
+///
+/// Input is case-insensitive and duplicate values are de-duplicated while
+/// preserving first-seen order.
+pub fn parse_allowed_algorithms(values: &[String]) -> Result<Vec<Algorithm>, GatewayError> {
+    let mut out = Vec::new();
+
+    for raw in values {
+        let alg = match raw.trim().to_ascii_uppercase().as_str() {
+            "RS256" => Algorithm::RS256,
+            "RS384" => Algorithm::RS384,
+            "RS512" => Algorithm::RS512,
+            "ES256" => Algorithm::ES256,
+            "ES384" => Algorithm::ES384,
+            "PS256" => Algorithm::PS256,
+            "PS384" => Algorithm::PS384,
+            "PS512" => Algorithm::PS512,
+            "HS256" => Algorithm::HS256,
+            "HS384" => Algorithm::HS384,
+            "HS512" => Algorithm::HS512,
+            "EDDSA" => Algorithm::EdDSA,
+            other => {
+                return Err(GatewayError::Config(format!(
+                    "Unsupported JWT algorithm '{}' in jwt_allowed_algorithms",
+                    other
+                )));
+            }
+        };
+
+        if !out.contains(&alg) {
+            out.push(alg);
+        }
+    }
+
+    Ok(out)
 }
 
 /// Detect JWT algorithm from token header without full validation.
@@ -269,6 +307,7 @@ fn detect_jwt_algorithm(token: &str) -> Option<Algorithm> {
 pub fn extract_auth_from_headers_with_jwks(
     headers: &HeaderMap,
     jwks_store: Option<&crate::jwks::JwksKeyStore>,
+    allowed_algorithms: &[Algorithm],
 ) -> AuthContext {
     // Try JWT first
     if let Some(auth_header) = headers.get("authorization")
@@ -292,6 +331,17 @@ pub fn extract_auth_from_headers_with_jwks(
             if let Some(decoding_key) = key {
                 // Auto-detect algorithm from JWT header
                 let alg = detect_jwt_algorithm(token).unwrap_or(Algorithm::RS256);
+
+                // SECURITY (P0-4): Enforce server-side algorithm allow-list.
+                if !allowed_algorithms.is_empty() && !allowed_algorithms.contains(&alg) {
+                    tracing::warn!(
+                        "JWT algorithm {:?} not in allowed list {:?} — rejecting token",
+                        alg,
+                        allowed_algorithms
+                    );
+                    return AuthContext::denied();
+                }
+
                 let mut validation = Validation::new(alg);
 
                 // Apply issuer/audience from env if set
@@ -343,9 +393,20 @@ pub fn extract_auth_from_headers_with_jwks(
 
         // Path B: Static JWT_SECRET (HS256)
         if let Ok(secret) = std::env::var("JWT_SECRET") {
+            // SECURITY (P0-4): Enforce algorithm allow-list for static path too.
+            if !allowed_algorithms.is_empty() && !allowed_algorithms.contains(&Algorithm::HS256) {
+                tracing::warn!(
+                    "JWT_SECRET uses HS256 but allowed_algorithms={:?} — rejecting token",
+                    allowed_algorithms
+                );
+                return AuthContext::denied();
+            }
+
             let config = JwtConfig {
                 secret: Some(secret),
                 algorithm: Algorithm::HS256,
+                issuer: std::env::var("JWT_ISSUER").ok(),
+                audience: std::env::var("JWT_AUDIENCE").ok(),
                 ..Default::default()
             };
 
@@ -404,6 +465,79 @@ pub fn extract_auth_from_headers_with_jwks(
         tenant_id,
         claims: HashMap::new(),
     }
+}
+
+/// Extract auth using state-aware JWT/JWKS settings and enrich tenant_id from cache.
+pub async fn extract_auth_for_state(
+    headers: &HeaderMap,
+    state: &crate::GatewayState,
+) -> AuthContext {
+    let mut auth = extract_auth_from_headers_with_jwks(
+        headers,
+        state.jwks_store.as_ref(),
+        &state.jwt_allowed_algorithms,
+    );
+    auth.enrich_with_operator_map(&state.user_operator_map)
+        .await;
+    auth
+}
+
+/// Enforce request authentication policy.
+///
+/// - Always reject denied credentials
+/// - Reject anonymous access when `production_strict=true`
+pub fn ensure_request_auth(
+    auth: &AuthContext,
+    production_strict: bool,
+) -> Result<(), crate::middleware::ApiError> {
+    if auth.is_denied() {
+        return Err(crate::middleware::ApiError::with_code(
+            "AUTH_DENIED",
+            "Invalid credentials",
+        ));
+    }
+    if !auth.is_authenticated() && production_strict {
+        return Err(crate::middleware::ApiError::with_code(
+            "AUTH_REQUIRED",
+            "Authentication required",
+        ));
+    }
+    Ok(())
+}
+
+/// Apply post-auth tenant rate limiting.
+pub async fn ensure_tenant_rate_limit(
+    state: &crate::GatewayState,
+    auth: &AuthContext,
+) -> Result<(), crate::middleware::ApiError> {
+    if !auth.is_authenticated() {
+        return Ok(());
+    }
+
+    let tenant_key = format!(
+        "{}:{}",
+        auth.tenant_id.as_deref().unwrap_or("_"),
+        auth.user_id
+    );
+
+    match state.tenant_rate_limiter.check(&tenant_key).await {
+        Ok(_) => Ok(()),
+        Err(()) => Err(crate::middleware::ApiError::with_code(
+            "TENANT_RATE_LIMIT",
+            "Tenant rate limit exceeded",
+        )),
+    }
+}
+
+/// Canonical request auth path for all endpoints.
+pub async fn authenticate_request(
+    state: &crate::GatewayState,
+    headers: &HeaderMap,
+) -> Result<AuthContext, crate::middleware::ApiError> {
+    let auth = extract_auth_for_state(headers, state).await;
+    ensure_request_auth(&auth, state.config.production_strict)?;
+    ensure_tenant_rate_limit(state, &auth).await?;
+    Ok(auth)
 }
 
 #[cfg(test)]
@@ -741,7 +875,7 @@ mod tests {
         headers.insert("authorization", "Bearer invalid.jwt.token".parse().unwrap());
 
         // No JWKS store, no JWT_SECRET env → denied
-        let auth = extract_auth_from_headers_with_jwks(&headers, None);
+        let auth = extract_auth_from_headers_with_jwks(&headers, None, &[]);
         assert!(
             auth.is_denied(),
             "Invalid JWT must return denied, got: {:?}",
@@ -756,7 +890,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer some.valid.token".parse().unwrap());
 
-        let auth = extract_auth_from_headers_with_jwks(&headers, None);
+        let auth = extract_auth_from_headers_with_jwks(&headers, None, &[]);
         assert!(auth.is_denied(), "Bearer without any JWT config must deny");
     }
 
@@ -788,7 +922,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "bearer some.jwt.token".parse().unwrap());
 
-        let auth = extract_auth_from_headers_with_jwks(&headers, None);
+        let auth = extract_auth_from_headers_with_jwks(&headers, None, &[]);
         assert!(
             auth.is_denied(),
             "lowercase 'bearer' must enter JWT path and deny (no config), got: {:?}",
@@ -801,11 +935,28 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "BEARER some.jwt.token".parse().unwrap());
 
-        let auth = extract_auth_from_headers_with_jwks(&headers, None);
+        let auth = extract_auth_from_headers_with_jwks(&headers, None, &[]);
         assert!(
             auth.is_denied(),
             "uppercase 'BEARER' must enter JWT path and deny (no config), got: {:?}",
             auth
         );
+    }
+
+    #[test]
+    fn parse_allowed_algorithms_case_insensitive_dedup() {
+        let parsed = parse_allowed_algorithms(&[
+            " rs256 ".to_string(),
+            "HS256".to_string(),
+            "Rs256".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed, vec![Algorithm::RS256, Algorithm::HS256]);
+    }
+
+    #[test]
+    fn parse_allowed_algorithms_rejects_unknown() {
+        let err = parse_allowed_algorithms(&["FOO256".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("Unsupported JWT algorithm"));
     }
 }

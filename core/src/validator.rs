@@ -200,8 +200,21 @@ impl Validator {
             return Ok(());
         }
 
-        // Always allow * and qualified names like "table.column"
-        if column == "*" || column.contains('.') {
+        // Always allow *
+        if column == "*" {
+            return Ok(());
+        }
+
+        // Qualified names like "table.column" — validate against the referenced table
+        if column.contains('.') {
+            let parts: Vec<&str> = column.split('.').collect();
+            if parts.len() == 2 {
+                // Only validate if the referenced table is known to the validator
+                if self.tables.contains(&parts[0].to_string()) {
+                    return self.validate_column(parts[0], parts[1]);
+                }
+            }
+            // Unknown table prefix or complex dotted path — allow (might be JSON)
             return Ok(());
         }
 

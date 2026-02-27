@@ -376,12 +376,15 @@ pub fn encode_do(cmd: &Qail, buf: &mut BytesMut) {
 }
 
 /// Encode SET key = 'value'.
+///
+/// The value is escaped: `'` → `''` to prevent SQL injection.
 pub fn encode_session_set(cmd: &Qail, buf: &mut BytesMut) {
     let value = cmd.payload.as_deref().unwrap_or("");
+    let escaped = value.replace('\'', "''");
     buf.extend_from_slice(b"SET ");
     buf.extend_from_slice(cmd.table.as_bytes());
     buf.extend_from_slice(b" = '");
-    buf.extend_from_slice(value.as_bytes());
+    buf.extend_from_slice(escaped.as_bytes());
     buf.extend_from_slice(b"'");
 }
 

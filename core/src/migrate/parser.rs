@@ -1552,14 +1552,12 @@ table products {
         let col = &schema.tables["products"].columns[1];
         assert!(col.check.is_some());
         let expr = &col.check.as_ref().unwrap().expr;
-        match expr {
-            CheckExpr::Between { column, low, high } => {
-                assert_eq!(column, "age");
-                assert_eq!(*low, 0);
-                assert_eq!(*high, 200);
-            }
-            _ => panic!("Expected Between, got {:?}", expr),
-        }
+        let CheckExpr::Between { column, low, high } = expr else {
+            panic!("Expected Between, got {expr:?}");
+        };
+        assert_eq!(column, "age");
+        assert_eq!(*low, 0);
+        assert_eq!(*high, 200);
     }
 
     #[test]
@@ -1573,13 +1571,11 @@ table products {
         let schema = parse_qail(input).unwrap();
         let col = &schema.tables["products"].columns[1];
         let expr = &col.check.as_ref().unwrap().expr;
-        match expr {
-            CheckExpr::GreaterOrEqual { column, value } => {
-                assert_eq!(column, "score");
-                assert_eq!(*value, 0);
-            }
-            _ => panic!("Expected GreaterOrEqual, got {:?}", expr),
-        }
+        let CheckExpr::GreaterOrEqual { column, value } = expr else {
+            panic!("Expected GreaterOrEqual, got {expr:?}");
+        };
+        assert_eq!(column, "score");
+        assert_eq!(*value, 0);
     }
 
     #[test]
@@ -1596,13 +1592,11 @@ table tickets {
         assert_eq!(schema.enums.len(), 1);
         let col = &schema.tables["tickets"].columns[1];
         assert_eq!(col.name, "status");
-        match &col.data_type {
-            ColumnType::Enum { name, values } => {
-                assert_eq!(name, "ticket_status");
-                assert_eq!(values, &["draft", "active", "cancelled"]);
-            }
-            _ => panic!("Expected Enum type, got {:?}", col.data_type),
-        }
+        let ColumnType::Enum { name, values } = &col.data_type else {
+            panic!("Expected Enum type, got {:?}", col.data_type);
+        };
+        assert_eq!(name, "ticket_status");
+        assert_eq!(values, &["draft", "active", "cancelled"]);
         assert_eq!(col.default.as_deref(), Some("'draft'"));
     }
 

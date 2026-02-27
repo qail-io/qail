@@ -262,7 +262,7 @@ pub enum Operator {
     Lt,
     /// `<=`
     Lte,
-    /// Case-insensitive LIKE.
+    /// Case-insensitive LIKE (legacy alias for [`ILike`](Operator::ILike)).
     Fuzzy,
     /// IN (list).
     In,

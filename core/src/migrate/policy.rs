@@ -315,33 +315,26 @@ mod tests {
     fn test_tenant_check_helper() {
         let expr = tenant_check("operator_id", "app.current_operator_id", "uuid");
 
-        match &expr {
-            Expr::Binary {
-                left, op, right, ..
-            } => {
-                assert_eq!(*op, BinaryOp::Eq);
-                match left.as_ref() {
-                    Expr::Named(n) => assert_eq!(n, "operator_id"),
-                    _ => panic!("Expected Named"),
-                }
-                match right.as_ref() {
-                    Expr::Cast {
-                        expr, target_type, ..
-                    } => {
-                        assert_eq!(target_type, "uuid");
-                        match expr.as_ref() {
-                            Expr::FunctionCall { name, args, .. } => {
-                                assert_eq!(name, "current_setting");
-                                assert_eq!(args.len(), 1);
-                            }
-                            _ => panic!("Expected FunctionCall"),
-                        }
-                    }
-                    _ => panic!("Expected Cast"),
-                }
-            }
-            _ => panic!("Expected Binary"),
-        }
+        let Expr::Binary { left, op, right, .. } = &expr else {
+            panic!("Expected Binary, got {expr:?}");
+        };
+        assert_eq!(*op, BinaryOp::Eq);
+
+        let Expr::Named(n) = left.as_ref() else {
+            panic!("Expected Named, got {left:?}");
+        };
+        assert_eq!(n, "operator_id");
+
+        let Expr::Cast { expr: cast_expr, target_type, .. } = right.as_ref() else {
+            panic!("Expected Cast, got {right:?}");
+        };
+        assert_eq!(target_type, "uuid");
+
+        let Expr::FunctionCall { name, args, .. } = cast_expr.as_ref() else {
+            panic!("Expected FunctionCall, got {cast_expr:?}");
+        };
+        assert_eq!(name, "current_setting");
+        assert_eq!(args.len(), 1);
     }
 
     #[test]
@@ -351,10 +344,10 @@ mod tests {
             session_bool_check("app.is_super_admin"),
         );
 
-        match &expr {
-            Expr::Binary { op, .. } => assert_eq!(*op, BinaryOp::Or),
-            _ => panic!("Expected Binary OR"),
-        }
+        assert!(
+            matches!(&expr, Expr::Binary { op: BinaryOp::Or, .. }),
+            "Expected Binary OR, got {expr:?}"
+        );
     }
 
     #[test]
@@ -364,10 +357,10 @@ mod tests {
             tenant_check("agent_id", "app.current_agent_id", "uuid"),
         );
 
-        match &expr {
-            Expr::Binary { op, .. } => assert_eq!(*op, BinaryOp::And),
-            _ => panic!("Expected Binary AND"),
-        }
+        assert!(
+            matches!(&expr, Expr::Binary { op: BinaryOp::And, .. }),
+            "Expected Binary AND, got {expr:?}"
+        );
     }
 
     #[test]
