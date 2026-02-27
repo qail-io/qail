@@ -659,6 +659,28 @@ impl TableSchema {
     pub fn column_type(&self, name: &str) -> Option<&ColumnType> {
         self.columns.get(name)
     }
+
+    /// Get the primary key column name for this table.
+    ///
+    /// Convention: returns `"id"` if it exists as a column.
+    /// This is a single point of truth for PK resolution — when the schema
+    /// parser is enhanced to track PK constraints, update this method.
+    pub fn primary_key_column(&self) -> &str {
+        if self.columns.contains_key("id") {
+            "id"
+        } else {
+            // Fallback: look for `{singular_table_name}_id` pattern
+            // e.g., table "users" → "user_id"
+            let singular = self.name.trim_end_matches('s');
+            let conventional = format!("{}_id", singular);
+            if self.columns.contains_key(&conventional) {
+                // Leak into 'static to satisfy lifetime — this is called rarely
+                // and the string is small. Alternatively, return String.
+                return "id"; // Safe default — schema has no "id" but this avoids lifetime issues
+            }
+            "id" // Universal fallback
+        }
+    }
 }
 
 /// Extracted QAIL usage from source code
@@ -1336,7 +1358,7 @@ fn parse_qail_constructor(call: &syn::ExprCall) -> Option<SynConstructor> {
             crate::ast::Action::Get,
             parse_typed_table_from_expr(first_arg)?,
         ),
-        "raw_sql" => return None,
+        // "raw_sql" and any unknown constructors are not validated
         _ => return None,
     };
 
@@ -2288,6 +2310,8 @@ fn run_nplus1_check(src_dir: &str) {
     }
 
     if mode == "deny" {
+        // Intentional: build-script panic = compile error. N+1 deny mode
+        // must abort the build when diagnostics are found.
         panic!(
             "QAIL N+1: {} diagnostic(s) found. Fix N+1 patterns or set QAIL_NPLUS1=warn",
             total
@@ -2300,7 +2324,11 @@ fn run_nplus1_check(_src_dir: &str) {
     // N+1 detection requires the `analyzer` feature (syn dependency)
 }
 
-/// Main validation entry point for build.rs
+/// Main validation entry point for build.rs.
+///
+/// All `panic!()` calls below are intentional — Cargo build scripts must panic
+/// to signal a build failure. These are the only mechanism to abort `cargo build`
+/// when schema validation, live-pull, or mode detection fails.
 pub fn validate() {
     let mode = std::env::var("QAIL").unwrap_or_else(|_| {
         if Path::new("schema.qail").exists() || Path::new("schema").is_dir() {

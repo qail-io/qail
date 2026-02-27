@@ -46,7 +46,7 @@ impl QailVisitor {
     }
 
     /// Approximate line number from span
-    fn line_from_span(&self, span: Span) -> usize {
+    fn line_from_span(span: Span) -> usize {
         span.start().line
     }
 
@@ -89,16 +89,20 @@ impl QailVisitor {
             .collect();
 
         // Match Qail::* where * is any method
-        if segments.len() >= 2 && segments[0] == "Qail" {
-            let action = &segments[1];
+        if let (Some(first_seg), Some(action_seg)) = (segments.first(), segments.get(1)) {
+            if first_seg != "Qail" {
+                return;
+            }
 
             let mut columns = Vec::new();
             let mut table = String::new();
 
             for arg in args {
                 let extracted = Self::extract_strings_from_expr(arg);
-                if table.is_empty() && !extracted.is_empty() {
-                    table = extracted[0].clone();
+                if table.is_empty() {
+                    if let Some(first) = extracted.first() {
+                        table.clone_from(first);
+                    }
                 } else {
                     columns.extend(extracted);
                 }
@@ -108,14 +112,14 @@ impl QailVisitor {
                 self.patterns.push(RustPattern {
                     table: table.clone(),
                     columns,
-                    line: self.line_from_span(
+                    line: Self::line_from_span(
                         path.path
                             .segments
                             .first()
                             .map(|s| s.ident.span())
                             .unwrap_or_else(Span::call_site),
                     ),
-                    snippet: format!("Qail::{}(\"{}\")", action, table),
+                    snippet: format!("Qail::{}(\"{}\")", action_seg, table),
                 });
             }
         }
@@ -134,24 +138,22 @@ impl QailVisitor {
         }
 
         // If we found any strings, record this method call
-        if !all_strings.is_empty() {
+        if let Some(first) = all_strings.first() {
             let snippet = if all_strings.len() == 1 {
-                format!(".{}(\"{}\")", method, all_strings[0])
+                format!(".{method}(\"{first}\")")
             } else if all_strings.len() <= 3 {
                 format!(
                     ".{}([{}])",
                     method,
                     all_strings
                         .iter()
-                        .map(|s| format!("\"{}\"", s))
+                        .map(|s| format!("\"{s}\""))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
             } else {
                 format!(
-                    ".{}([\"{}\" +{}])",
-                    method,
-                    all_strings[0],
+                    ".{method}([\"{first}\" +{}])",
                     all_strings.len() - 1
                 )
             };
@@ -159,7 +161,7 @@ impl QailVisitor {
             self.patterns.push(RustPattern {
                 table: String::new(), // Will be merged with parent
                 columns: all_strings,
-                line: self.line_from_span(span),
+                line: Self::line_from_span(span),
                 snippet,
             });
         }

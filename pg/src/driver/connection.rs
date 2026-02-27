@@ -20,7 +20,6 @@ use super::{
 };
 use crate::protocol::{BackendMessage, FrontendMessage, ScramClient, TransactionStatus};
 use bytes::BytesMut;
-use lru::LruCache;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
@@ -31,6 +30,79 @@ use tokio::net::TcpStream;
 
 /// Statement cache capacity per connection.
 const STMT_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(100).unwrap();
+
+/// Small, allocation-bounded prepared statement cache.
+///
+/// This mirrors the subset of `lru::LruCache` APIs used by the driver while
+/// avoiding external unsoundness advisories on `IterMut` (which we don't use).
+#[derive(Debug)]
+pub(crate) struct StatementCache {
+    capacity: NonZeroUsize,
+    entries: HashMap<u64, String>,
+    order: VecDeque<u64>, // Front = LRU, back = MRU
+}
+
+impl StatementCache {
+    pub(crate) fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::with_capacity(capacity.get()),
+            order: VecDeque::with_capacity(capacity.get()),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn cap(&self) -> NonZeroUsize {
+        self.capacity
+    }
+
+    pub(crate) fn contains(&self, key: &u64) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    pub(crate) fn get(&mut self, key: &u64) -> Option<String> {
+        let value = self.entries.get(key).cloned()?;
+        self.touch(*key);
+        Some(value)
+    }
+
+    pub(crate) fn put(&mut self, key: u64, value: String) {
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.entries.entry(key) {
+            e.insert(value);
+            self.touch(key);
+            return;
+        }
+
+        if self.entries.len() >= self.capacity.get() {
+            let _ = self.pop_lru();
+        }
+
+        self.entries.insert(key, value);
+        self.order.push_back(key);
+    }
+
+    pub(crate) fn pop_lru(&mut self) -> Option<(u64, String)> {
+        while let Some(key) = self.order.pop_front() {
+            if let Some(value) = self.entries.remove(&key) {
+                return Some((key, value));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn touch(&mut self, key: u64) {
+        self.order.retain(|k| *k != key);
+        self.order.push_back(key);
+    }
+}
 
 /// Initial buffer capacity (64KB for pipeline performance)
 pub(crate) const BUFFER_CAPACITY: usize = 65536;
@@ -115,7 +187,7 @@ pub struct PgConnection {
     pub(crate) sql_buf: BytesMut,
     pub(crate) params_buf: Vec<Option<Vec<u8>>>,
     pub(crate) prepared_statements: HashMap<String, String>,
-    pub(crate) stmt_cache: LruCache<u64, String>,
+    pub(crate) stmt_cache: StatementCache,
     /// Cache of column metadata (RowDescription) per statement hash.
     /// PostgreSQL only sends RowDescription after Parse, not on subsequent Bind+Execute.
     /// This cache ensures by-name column access works even for cached prepared statements.
@@ -237,7 +309,7 @@ impl PgConnection {
                                 sql_buf: BytesMut::with_capacity(512),
                                 params_buf: Vec::with_capacity(16),
                                 prepared_statements: HashMap::new(),
-                                stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
+                                stmt_cache: StatementCache::new(STMT_CACHE_CAPACITY),
                                 column_info_cache: HashMap::new(),
                                 process_id: 0,
                                 secret_key: 0,
@@ -514,7 +586,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16), // SQL encoding buffer
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
+            stmt_cache: StatementCache::new(STMT_CACHE_CAPACITY),
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
@@ -680,7 +752,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
+            stmt_cache: StatementCache::new(STMT_CACHE_CAPACITY),
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
@@ -874,7 +946,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
+            stmt_cache: StatementCache::new(STMT_CACHE_CAPACITY),
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
@@ -918,7 +990,7 @@ impl PgConnection {
             sql_buf: BytesMut::with_capacity(512),
             params_buf: Vec::with_capacity(16),
             prepared_statements: HashMap::new(),
-            stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
+            stmt_cache: StatementCache::new(STMT_CACHE_CAPACITY),
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,

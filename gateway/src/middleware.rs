@@ -118,20 +118,35 @@ pub async fn rate_limit_middleware(
     let method = request.method().to_string();
     let start = std::time::Instant::now();
 
-    // Per-IP bucket key
-    // SECURITY: Use the LAST XFF entry (closest to our reverse proxy),
-    // not the first (client-controlled). Without a reverse proxy, fall back
-    // to "unknown" — ConnectInfo would be better but requires Hyper config.
+    // SECURITY: Prefer X-Real-IP (set by trusted reverse proxy) over X-Forwarded-For
+    // which can be client-spoofed. When using XFF, take the LAST entry (closest to
+    // our reverse proxy), not the first (client-controlled).
+    // NOTE: In production_strict mode, these headers are only trustworthy if the edge
+    // proxy (Caddy/Traefik) strictly overwrites them. Log a warning if they're used.
     let ip_key = request
         .headers()
-        .get("x-forwarded-for")
+        .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
-        .map(|s| {
-            s.split(',')
-                .next_back()
-                .unwrap_or("unknown")
-                .trim()
-                .to_string()
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| {
+                    s.split(',')
+                        .next_back()
+                        .unwrap_or("unknown")
+                        .trim()
+                        .to_string()
+                })
+        })
+        .or_else(|| {
+            // Fallback: use peer socket address when no proxy headers are present.
+            request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
         })
         .unwrap_or_else(|| "unknown".to_string());
 
@@ -664,7 +679,7 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             "QUERY_TOO_EXPENSIVE" | "QUERY_TOO_COMPLEX" => StatusCode::UNPROCESSABLE_ENTITY,
-            "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED" | "AUTH_DENIED" | "AUTH_REQUIRED" => StatusCode::UNAUTHORIZED,
             "FORBIDDEN" | "QUERY_NOT_ALLOWED" | "POLICY_DENIED" => StatusCode::FORBIDDEN,
             "NOT_FOUND" => StatusCode::NOT_FOUND,
             "CONNECTION_ERROR" | "QDRANT_NOT_CONFIGURED" | "QDRANT_CONNECTION_ERROR" => {

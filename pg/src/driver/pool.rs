@@ -79,7 +79,10 @@ pub struct PoolConfig {
 }
 
 impl PoolConfig {
-    /// Create a new pool configuration with sensible defaults.
+    /// Create a new pool configuration with **production-safe** defaults.
+    ///
+    /// Defaults: `tls_mode = Require`, `auth_settings = scram_only()`.
+    /// For local development without TLS, use [`PoolConfig::new_dev`].
     ///
     /// # Arguments
     ///
@@ -101,7 +104,7 @@ impl PoolConfig {
             connect_timeout: Duration::from_secs(10), // 10 seconds
             max_lifetime: None,                     // No limit by default
             test_on_acquire: false,                 // Disabled by default for performance
-            tls_mode: TlsMode::Disable,
+            tls_mode: TlsMode::Prefer,
             tls_ca_cert_pem: None,
             mtls: None,
             gss_token_provider: None,
@@ -111,9 +114,20 @@ impl PoolConfig {
             gss_circuit_breaker_threshold: 8,
             gss_circuit_breaker_window: Duration::from_secs(30),
             gss_circuit_breaker_cooldown: Duration::from_secs(15),
-            auth_settings: AuthSettings::default(),
+            auth_settings: AuthSettings::scram_only(),
             gss_enc_mode: GssEncMode::Disable,
         }
+    }
+
+    /// Create a pool configuration with **permissive** defaults for local development.
+    ///
+    /// Defaults: `tls_mode = Disable`, `auth_settings = default()` (accepts any auth).
+    /// Do NOT use in production.
+    pub fn new_dev(host: &str, port: u16, user: &str, database: &str) -> Self {
+        let mut config = Self::new(host, port, user, database);
+        config.tls_mode = TlsMode::Disable;
+        config.auth_settings = AuthSettings::default();
+        config
     }
 
     /// Set password for authentication.
@@ -911,7 +925,7 @@ impl PooledConnection {
         conn.write_buf.clear();
 
         let stmt_name = if let Some(name) = conn.stmt_cache.get(&sql_hash) {
-            name.clone()
+            name
         } else {
             let name = format!("qail_{:x}", sql_hash);
 
@@ -1130,7 +1144,7 @@ impl PooledConnection {
 
         // ── Then append the query messages (same as fetch_all_cached) ──
         let stmt_name = if let Some(name) = conn.stmt_cache.get(&sql_hash) {
-            name.clone()
+            name
         } else {
             let name = format!("qail_{:x}", sql_hash);
 
@@ -2032,12 +2046,12 @@ mod tests {
         assert_eq!(config.acquire_timeout, Duration::from_secs(30));
         assert_eq!(config.connect_timeout, Duration::from_secs(10));
         assert!(config.password.is_none());
-        assert_eq!(config.tls_mode, TlsMode::Disable);
+        assert_eq!(config.tls_mode, TlsMode::Prefer);
         assert!(config.tls_ca_cert_pem.is_none());
         assert!(config.mtls.is_none());
         assert!(config.auth_settings.allow_scram_sha_256);
-        assert!(config.auth_settings.allow_md5_password);
-        assert!(config.auth_settings.allow_cleartext_password);
+        assert!(!config.auth_settings.allow_md5_password);
+        assert!(!config.auth_settings.allow_cleartext_password);
         assert_eq!(config.gss_connect_retries, 2);
         assert_eq!(config.gss_retry_base_delay, Duration::from_millis(150));
         assert_eq!(config.gss_circuit_breaker_threshold, 8);

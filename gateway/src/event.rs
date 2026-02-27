@@ -103,11 +103,24 @@ pub enum DeliveryStatus {
 
 /// The event trigger engine — holds all registered triggers
 /// and provides the `fire` method for mutation handlers.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct EventTriggerEngine {
     triggers: Vec<EventTrigger>,
     /// Shared HTTP client (reuses connections)
     client: Option<Arc<reqwest::Client>>,
+    /// SECURITY: Bounded concurrency semaphore to prevent DoS from burst writes.
+    /// Limits max in-flight webhook deliveries.
+    webhook_semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for EventTriggerEngine {
+    fn default() -> Self {
+        Self {
+            triggers: Vec::new(),
+            client: None,
+            webhook_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
+        }
+    }
 }
 
 impl EventTriggerEngine {
@@ -118,9 +131,13 @@ impl EventTriggerEngine {
             client: Some(Arc::new(
                 reqwest::Client::builder()
                     .timeout(Duration::from_secs(30))
+                    // SECURITY: Disable redirects to prevent SSRF bypass via 301/302
+                    // to private/internal targets after DNS validation.
+                    .redirect(reqwest::redirect::Policy::none())
                     .build()
-                    .unwrap_or_default(),
+                    .expect("Failed to build webhook HTTP client — SSRF-hardened client is required"),
             )),
+            webhook_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
         }
     }
 
@@ -205,9 +222,20 @@ impl EventTriggerEngine {
             let headers = trigger.headers.clone();
             let retry_count = trigger.retry_count;
             let trigger_name = trigger.name.clone();
+            let sem = Arc::clone(&self.webhook_semaphore);
 
-            // Fire-and-forget async task
+            // SECURITY: Bounded concurrency — drop webhook if semaphore saturated.
             tokio::spawn(async move {
+                let _permit = match sem.try_acquire() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::warn!(
+                            trigger = %trigger_name,
+                            "Webhook dropped: concurrency limit reached"
+                        );
+                        return;
+                    }
+                };
                 deliver_webhook(client, &url, &headers, &payload, retry_count, &trigger_name).await;
             });
         }
@@ -216,7 +244,7 @@ impl EventTriggerEngine {
 
 /// Deliver webhook with exponential backoff retry
 async fn deliver_webhook(
-    client: Arc<reqwest::Client>,
+    mut client: Arc<reqwest::Client>,
     url: &str,
     headers: &HashMap<String, String>,
     payload: &WebhookPayload,
@@ -232,6 +260,75 @@ async fn deliver_webhook(
             "Webhook URL rejected (SSRF protection)"
         );
         return;
+    }
+
+    // SECURITY: Resolve hostname and verify resolved IPs are not private.
+    // Prevents DNS rebinding where a public hostname resolves to 127.0.0.1.
+    if let Ok(parsed) = url::Url::parse(url) {
+        if let Some(host) = parsed.host_str() {
+            // Only resolve if host is not already a raw IP
+            if host.parse::<std::net::IpAddr>().is_err() {
+                let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+                let addr_str = format!("{}:{}", host, port);
+                match tokio::net::lookup_host(&addr_str).await {
+                    Ok(addrs) => {
+                        let addrs_vec: Vec<std::net::SocketAddr> = addrs.collect();
+                        if addrs_vec.is_empty() {
+                            tracing::error!(
+                                trigger = %trigger_name,
+                                url = %url,
+                                "Webhook DNS returned no addresses"
+                            );
+                            return;
+                        }
+                        for addr in &addrs_vec {
+                            if let Err(reason) = reject_private_ip(addr.ip()) {
+                                tracing::error!(
+                                    trigger = %trigger_name,
+                                    url = %url,
+                                    resolved_ip = %addr.ip(),
+                                    reason = %reason,
+                                    "Webhook DNS resolves to private IP (SSRF protection)"
+                                );
+                                return;
+                            }
+                        }
+                        // SECURITY: Pin outbound connection to verified IP to prevent TOCTOU
+                        // DNS rebinding. reqwest .resolve() ensures the actual TCP connect
+                        // goes to this address while keeping Host/SNI correct.
+                        let pinned_addr = addrs_vec[0];
+                        let pinned_client = match reqwest::Client::builder()
+                            .timeout(Duration::from_secs(30))
+                            .redirect(reqwest::redirect::Policy::none())
+                            .resolve(host, pinned_addr)
+                            .build()
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                // SECURITY: Fail-closed — do NOT fall back to unpinned client.
+                                tracing::error!(
+                                    error = %e,
+                                    url = %url,
+                                    "Webhook SSRF-pinned client build failed — aborting delivery"
+                                );
+                                return;
+                            }
+                        };
+                        // Replace shared client with pinned client for this delivery
+                        client = Arc::new(pinned_client);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            trigger = %trigger_name,
+                            url = %url,
+                            error = %e,
+                            "Webhook DNS resolution failed"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     for attempt in 0..=max_retries {

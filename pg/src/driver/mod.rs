@@ -1100,7 +1100,7 @@ impl PgDriver {
         self.connection.write_buf.clear();
 
         let stmt_name = if let Some(name) = self.connection.stmt_cache.get(&sql_hash) {
-            name.clone()
+            name
         } else {
             let name = format!("qail_{:x}", sql_hash);
 

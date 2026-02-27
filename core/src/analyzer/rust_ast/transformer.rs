@@ -202,7 +202,12 @@ fn transform_where(expr: &Expr) -> String {
                     let right_filter = transform_where(right).replace(".filter(", ".or_filter(");
                     return format!("{}\n    {}", left_filter, right_filter);
                 }
-                _ => "Operator::Eq",
+                _ => {
+                    return format!(
+                        "// Unsupported operator {:?}: .filter(\"{}\", /* {} */, {})",
+                        op, col, op, val
+                    );
+                }
             };
             format!(".filter(\"{}\", {}, {})", col, op_str, val)
         }

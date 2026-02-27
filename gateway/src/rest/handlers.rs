@@ -23,7 +23,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::GatewayState;
-use crate::auth::extract_auth_from_headers;
+use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
 use crate::middleware::ApiError;
 use crate::policy::OperationType;
@@ -53,7 +53,7 @@ fn primary_sort_for_cursor(sort: Option<&str>) -> (String, bool) {
 
     if let Some(col) = first.strip_prefix('-') {
         let col = col.trim();
-        return if col.is_empty() {
+        return if col.is_empty() || !crate::rest::filters::is_safe_identifier(col) {
             ("id".to_string(), true)
         } else {
             (col.to_string(), true)
@@ -62,7 +62,7 @@ fn primary_sort_for_cursor(sort: Option<&str>) -> (String, bool) {
 
     if let Some(col) = first.strip_prefix('+') {
         let col = col.trim();
-        return if col.is_empty() {
+        return if col.is_empty() || !crate::rest::filters::is_safe_identifier(col) {
             ("id".to_string(), false)
         } else {
             (col.to_string(), false)
@@ -72,7 +72,7 @@ fn primary_sort_for_cursor(sort: Option<&str>) -> (String, bool) {
     if let Some((col, dir)) = first.split_once(':') {
         let col = col.trim();
         let is_desc = dir.trim().eq_ignore_ascii_case("desc");
-        return if col.is_empty() {
+        return if col.is_empty() || !crate::rest::filters::is_safe_identifier(col) {
             ("id".to_string(), is_desc)
         } else {
             (col.to_string(), is_desc)
@@ -80,7 +80,7 @@ fn primary_sort_for_cursor(sort: Option<&str>) -> (String, bool) {
     }
 
     let col = first.trim();
-    if col.is_empty() {
+    if col.is_empty() || !crate::rest::filters::is_safe_identifier(col) {
         ("id".to_string(), false)
     } else {
         (col.to_string(), false)
@@ -794,7 +794,7 @@ pub(crate) async fn rpc_handler(
     request: axum::extract::Request,
 ) -> Result<Json<Value>, ApiError> {
     let started_at = Instant::now();
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
     let function = RpcFunctionName::parse(&function_name)?;
     enforce_rpc_name_contract(
         state.config.rpc_require_schema_qualified,
@@ -926,7 +926,7 @@ pub(crate) async fn list_handler(
         .table(&table_name)
         .ok_or_else(|| ApiError::not_found(&table_name))?;
 
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     // Build Qail AST
     let max_rows = state.config.max_result_rows.min(1000) as i64;
@@ -937,8 +937,25 @@ pub(crate) async fn list_handler(
 
     // Column selection
     if let Some(ref select) = params.select {
-        let cols: Vec<&str> = select.split(',').map(|s| s.trim()).collect();
-        cmd = cmd.columns(cols);
+        let mut cols: Vec<&str> = select
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| *s == "*" || crate::rest::filters::is_safe_identifier(s))
+            .collect();
+
+        // SECURITY: Ensure tenant column is always projected so verify_tenant_boundary()
+        // can check row ownership. Without this, a malicious client could bypass the
+        // tenant guard by omitting the tenant column from `select`.
+        if !cols.contains(&"*")
+            && auth.tenant_id.is_some()
+            && !cols.iter().any(|c| *c == state.config.tenant_column.as_str())
+        {
+            cols.push(&state.config.tenant_column);
+        }
+
+        if !cols.is_empty() {
+            cmd = cmd.columns(cols);
+        }
     }
 
     // Sorting (multi-column) — default to `id ASC` for deterministic pagination
@@ -950,8 +967,14 @@ pub(crate) async fn list_handler(
 
     // Distinct
     if let Some(ref distinct) = params.distinct {
-        let cols: Vec<&str> = distinct.split(',').map(|s| s.trim()).collect();
-        cmd = cmd.distinct_on(cols);
+        let cols: Vec<&str> = distinct
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| crate::rest::filters::is_safe_identifier(s))
+            .collect();
+        if !cols.is_empty() {
+            cmd = cmd.distinct_on(cols);
+        }
     }
 
     // Expand FK relations via LEFT JOIN
@@ -1036,7 +1059,12 @@ pub(crate) async fn list_handler(
     // Full-text search
     if let Some(ref term) = params.search {
         let cols = params.search_columns.as_deref().unwrap_or("name");
-        cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
+        // SECURITY: Validate search column identifier.
+        if crate::rest::filters::is_safe_identifier(cols) {
+            cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
+        } else {
+            tracing::warn!(cols = %cols, "search_columns rejected by identifier guard");
+        }
     }
 
     // Pagination
@@ -1160,6 +1188,7 @@ pub(crate) async fn list_handler(
                                 sql = %sql_shape,
                                 "EXPLAIN pre-check: parse failure in Enforce mode — rejecting query"
                             );
+                            conn.release().await;
                             return Err(ApiError::internal(
                                 "EXPLAIN pre-check failed (enforce mode)",
                             ));
@@ -1182,6 +1211,7 @@ pub(crate) async fn list_handler(
                                 error = %e,
                                 "EXPLAIN pre-check: EXPLAIN failed in Enforce mode — rejecting query"
                             );
+                            conn.release().await;
                             return Err(ApiError::internal(
                                 "EXPLAIN pre-check failed (enforce mode)",
                             ));
@@ -1220,6 +1250,7 @@ pub(crate) async fn list_handler(
                     expand_depth,
                     "EXPLAIN pre-check REJECTED query"
                 );
+                conn.release().await;
                 return Err(ApiError::too_expensive(msg, detail));
             }
         }
@@ -1239,10 +1270,17 @@ pub(crate) async fn list_handler(
         Err(_) => Vec::new(),
     };
 
-    // Branch overlay merge (CoW Read)
+    // Branch overlay merge (CoW Read) — admin-gated
     let branch_ctx = extract_branch_from_headers(&headers);
     if let Some(branch_name) = branch_ctx.branch_name() {
-        apply_branch_overlay(&mut conn, branch_name, &table_name, &mut data, "id").await;
+        if auth.role != "admin" && auth.role != "super_admin" {
+            conn.release().await;
+            return Err(ApiError::forbidden(
+                "Admin role required for branch overlay reads",
+            ));
+        }
+        let pk_col = _table.primary_key.as_deref().unwrap_or("id");
+        apply_branch_overlay(&mut conn, branch_name, &table_name, &mut data, pk_col).await;
     }
 
     // Deterministic cleanup — connection is no longer needed
@@ -1353,7 +1391,7 @@ pub(crate) async fn aggregate_handler(
         .table(&table_name)
         .ok_or_else(|| ApiError::not_found(&table_name))?;
 
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     let func_name = params.func.as_deref().unwrap_or("count");
     let agg_func = match func_name.to_lowercase().as_str() {
@@ -1371,6 +1409,15 @@ pub(crate) async fn aggregate_handler(
     };
 
     let col_name = params.column.as_deref().unwrap_or("*");
+
+    // SECURITY: Validate aggregate column identifier.
+    if col_name != "*" && !crate::rest::filters::is_safe_identifier(col_name) {
+        return Err(ApiError::parse_error(format!(
+            "Invalid aggregate column: '{}'",
+            col_name
+        )));
+    }
+
     let is_distinct = params
         .distinct
         .as_deref()
@@ -1396,7 +1443,9 @@ pub(crate) async fn aggregate_handler(
     if let Some(ref group_by) = params.group_by {
         let group_exprs: Vec<Expr> = group_by
             .split(',')
-            .map(|s| Expr::Named(s.trim().to_string()))
+            .map(|s| s.trim())
+            .filter(|s| crate::rest::filters::is_safe_identifier(s))
+            .map(|s| Expr::Named(s.to_string()))
             .collect();
         // Add group-by columns to SELECT so they appear in the result
         for expr in &group_exprs {
@@ -1430,11 +1479,28 @@ pub(crate) async fn aggregate_handler(
     let rows = conn
         .fetch_all_uncached(&cmd)
         .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)));
 
     conn.release().await;
+    let rows = rows?;
 
     let data: Vec<Value> = rows.iter().map(row_to_json).collect();
+
+    // ── Tenant Boundary Invariant ────────────────────────────────────
+    if let Some(ref tenant_id) = auth.tenant_id {
+        let _proof = crate::tenant_guard::verify_tenant_boundary(
+            &data,
+            tenant_id,
+            &state.config.tenant_column,
+            &table_name,
+            "rest_aggregate",
+        )
+        .map_err(|v| {
+            tracing::error!("{}", v);
+            ApiError::internal("Data integrity error")
+        })?;
+    }
+
     let count = data.len();
 
     Ok(Json(AggregateResponse { data, count }))
@@ -1468,7 +1534,7 @@ pub(crate) async fn get_by_id_handler(
         .as_ref()
         .ok_or_else(|| ApiError::internal("Table has no primary key"))?;
 
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     // Build: get table[pk = $id] — use String value; PG handles type coercion
     let mut cmd = qail_core::ast::Qail::get(&table_name)
@@ -1492,20 +1558,33 @@ pub(crate) async fn get_by_id_handler(
         .await
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
-    let rows = conn
-        .fetch_all_uncached(&cmd)
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+    let rows = match conn.fetch_all_uncached(&cmd).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            conn.release().await;
+            return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+        }
+    };
 
-    let row = rows
-        .first()
-        .ok_or_else(|| ApiError::not_found(format!("{}/{}", table_name, id)))?;
+    let row = match rows.first() {
+        Some(row) => row,
+        None => {
+            conn.release().await;
+            return Err(ApiError::not_found(format!("{}/{}", table_name, id)));
+        }
+    };
 
     let mut data = row_to_json(row);
 
-    // Branch overlay: check if this row is overridden on the branch
+    // Branch overlay: check if this row is overridden on the branch — admin-gated
     let branch_ctx = extract_branch_from_headers(&headers);
     if let Some(branch_name) = branch_ctx.branch_name() {
+        if auth.role != "admin" && auth.role != "super_admin" {
+            conn.release().await;
+            return Err(ApiError::forbidden(
+                "Admin role required for branch overlay reads",
+            ));
+        }
         let sql = qail_pg::driver::branch_sql::read_overlay_sql(branch_name, &table_name);
         if let Ok(overlay_rows) = conn.get_mut().simple_query(&sql).await {
             for orow in &overlay_rows {
@@ -1514,6 +1593,7 @@ pub(crate) async fn get_by_id_handler(
                     let operation = orow.get_string(1).unwrap_or_default();
                     match operation.as_str() {
                         "delete" => {
+                            conn.release().await;
                             return Err(ApiError::not_found(format!(
                                 "{}/{} (deleted on branch)",
                                 table_name, id
@@ -1534,6 +1614,22 @@ pub(crate) async fn get_by_id_handler(
     }
 
     conn.release().await;
+
+    // ── Tenant Boundary Invariant ────────────────────────────────────
+    if let Some(ref tenant_id) = auth.tenant_id {
+        let single = vec![data.clone()];
+        let _proof = crate::tenant_guard::verify_tenant_boundary(
+            &single,
+            tenant_id,
+            &state.config.tenant_column,
+            &table_name,
+            "rest_get_by_id",
+        )
+        .map_err(|v| {
+            tracing::error!("{}", v);
+            ApiError::internal("Data integrity error")
+        })?;
+    }
 
     Ok(Json(SingleResponse { data }))
 }
@@ -1559,7 +1655,7 @@ pub(crate) async fn create_handler(
         .table(&table_name)
         .ok_or_else(|| ApiError::not_found(&table_name))?;
 
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
     let prefer = parse_prefer_header(&headers);
 
     // Validate required columns upfront (skip for upserts — conflict rows may exist)
@@ -1614,6 +1710,17 @@ pub(crate) async fn create_handler(
         }
     }
 
+    // SECURITY: Check branch admin gate BEFORE acquiring connection
+    let branch_ctx = extract_branch_from_headers(&headers);
+    if branch_ctx.branch_name().is_some()
+        && auth.role != "admin"
+        && auth.role != "super_admin"
+    {
+        return Err(ApiError::forbidden(
+            "Admin role required for branch overlay writes",
+        ));
+    }
+
     // Acquire connection
     let mut conn = state
         .pool
@@ -1626,18 +1733,18 @@ pub(crate) async fn create_handler(
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
     // Branch CoW Write: redirect inserts to overlay table
-    let branch_ctx = extract_branch_from_headers(&headers);
     if let Some(branch_name) = branch_ctx.branch_name() {
         let mut all_results: Vec<Value> = Vec::with_capacity(objects.len());
         for obj in &objects {
             let row_data: Value = Value::Object((*obj).clone());
+            let pk_col = table.primary_key.as_deref().unwrap_or("id");
             let row_pk = obj
-                .get("id")
+                .get(pk_col)
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-            redirect_to_overlay(
+            let overlay_result = redirect_to_overlay(
                 &mut conn,
                 branch_name,
                 &table_name,
@@ -1645,7 +1752,11 @@ pub(crate) async fn create_handler(
                 "insert",
                 &row_data,
             )
-            .await?;
+            .await;
+            if let Err(e) = overlay_result {
+                conn.release().await;
+                return Err(e.into());
+            }
             all_results.push(row_data);
         }
 
@@ -1687,13 +1798,23 @@ pub(crate) async fn create_handler(
         let mut cmd = qail_core::ast::Qail::add(&table_name);
 
         for (key, value) in *obj {
+            // SECURITY: Validate JSON keys as safe identifiers before AST build.
+            if !crate::rest::filters::is_safe_identifier(key) {
+                tracing::warn!(key = %key, table = %table_name, "Create: JSON key rejected by identifier guard");
+                continue;
+            }
             let qail_val = json_to_qail_value(value);
             cmd = cmd.set_value(key, qail_val);
         }
 
         // Upsert support: explicit on_conflict param takes precedence
         if let Some(ref conflict_col) = mutation_params.on_conflict {
-            let conflict_cols: Vec<&str> = conflict_col.split(',').map(|s| s.trim()).collect();
+            // SECURITY: Validate on_conflict column identifiers.
+            let conflict_cols: Vec<&str> = conflict_col
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| crate::rest::filters::is_safe_identifier(s))
+                .collect();
             let action = mutation_params
                 .on_conflict_action
                 .as_deref()
@@ -1703,9 +1824,11 @@ pub(crate) async fn create_handler(
                 cmd = cmd.on_conflict_nothing(&conflict_cols);
             } else {
                 // Default: update all provided columns on conflict
+                // SECURITY: Filter update keys through identifier guard.
                 let updates: Vec<(&str, Expr)> = obj
                     .keys()
                     .filter(|k| !conflict_cols.contains(&k.as_str()))
+                    .filter(|k| crate::rest::filters::is_safe_identifier(k))
                     .map(|k| (k.as_str(), Expr::Named(format!("EXCLUDED.{}", k))))
                     .collect();
                 cmd = cmd.on_conflict_update(&conflict_cols, &updates);
@@ -1719,9 +1842,11 @@ pub(crate) async fn create_handler(
         } else if let Some(ref pk_col) = prefer_conflict_col {
             // Prefer: resolution=merge-duplicates → DO UPDATE on all cols
             let conflict_cols: Vec<&str> = vec![pk_col.as_str()];
+            // SECURITY: Filter update keys through identifier guard.
             let updates: Vec<(&str, Expr)> = obj
                 .keys()
                 .filter(|k| k.as_str() != pk_col.as_str())
+                .filter(|k| crate::rest::filters::is_safe_identifier(k))
                 .map(|k| (k.as_str(), Expr::Named(format!("EXCLUDED.{}", k))))
                 .collect();
             cmd = cmd.on_conflict_update(&conflict_cols, &updates);
@@ -1742,10 +1867,13 @@ pub(crate) async fn create_handler(
             .apply_policies(&auth, &mut cmd)
             .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
-        let rows = conn
-            .fetch_all_uncached(&cmd)
-            .await
-            .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+        let rows = match conn.fetch_all_uncached(&cmd).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                conn.release().await;
+                return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+            }
+        };
 
         if !rows.is_empty() {
             for row in &rows {
@@ -1829,7 +1957,7 @@ pub(crate) async fn update_handler(
         .ok_or_else(|| ApiError::internal("Table has no primary key"))?
         .clone();
 
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     // Parse JSON body
     let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
@@ -1853,6 +1981,11 @@ pub(crate) async fn update_handler(
     );
 
     for (key, value) in obj {
+        // SECURITY: Validate JSON keys as safe identifiers before AST build.
+        if !crate::rest::filters::is_safe_identifier(key) {
+            tracing::warn!(key = %key, table = %table_name, "Update: JSON key rejected by identifier guard");
+            continue;
+        }
         let qail_val = json_to_qail_value(value);
         cmd = cmd.set_value(key, qail_val);
     }
@@ -1866,6 +1999,17 @@ pub(crate) async fn update_handler(
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
+    // SECURITY: Check branch admin gate BEFORE acquiring connection
+    let branch_ctx = extract_branch_from_headers(&headers);
+    if branch_ctx.branch_name().is_some()
+        && auth.role != "admin"
+        && auth.role != "super_admin"
+    {
+        return Err(ApiError::forbidden(
+            "Admin role required for branch overlay writes",
+        ));
+    }
+
     // Execute
     let mut conn = state
         .pool
@@ -1878,10 +2022,9 @@ pub(crate) async fn update_handler(
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
     // Branch CoW Write: redirect updates to overlay
-    let branch_ctx = extract_branch_from_headers(&headers);
     if let Some(branch_name) = branch_ctx.branch_name() {
         let row_data: Value = Value::Object(obj.clone());
-        redirect_to_overlay(
+        let overlay_result = redirect_to_overlay(
             &mut conn,
             branch_name,
             &table_name,
@@ -1889,17 +2032,24 @@ pub(crate) async fn update_handler(
             "update",
             &row_data,
         )
-        .await?;
+        .await;
+        if let Err(e) = overlay_result {
+            conn.release().await;
+            return Err(e.into());
+        }
         conn.release().await;
         return Ok(Json(SingleResponse {
             data: json!({"updated": true, "branch": branch_name}),
         }));
     }
 
-    let rows = conn
-        .fetch_all_uncached(&cmd)
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+    let rows = match conn.fetch_all_uncached(&cmd).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            conn.release().await;
+            return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+        }
+    };
 
     let data = rows
         .first()
@@ -1948,7 +2098,7 @@ pub(crate) async fn delete_handler(
         .ok_or_else(|| ApiError::internal("Table has no primary key"))?
         .clone();
 
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     // Build: del table[pk = $id]
     let mut cmd = qail_core::ast::Qail::del(&table_name).filter(
@@ -1963,6 +2113,17 @@ pub(crate) async fn delete_handler(
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
+    // SECURITY: Check branch admin gate BEFORE acquiring connection
+    let branch_ctx = extract_branch_from_headers(&headers);
+    if branch_ctx.branch_name().is_some()
+        && auth.role != "admin"
+        && auth.role != "super_admin"
+    {
+        return Err(ApiError::forbidden(
+            "Admin role required for branch overlay writes",
+        ));
+    }
+
     // Execute
     let mut conn = state
         .pool
@@ -1975,9 +2136,8 @@ pub(crate) async fn delete_handler(
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
     // Branch CoW Write: redirect deletes to overlay (tombstone)
-    let branch_ctx = extract_branch_from_headers(&headers);
     if let Some(branch_name) = branch_ctx.branch_name() {
-        redirect_to_overlay(
+        let overlay_result = redirect_to_overlay(
             &mut conn,
             branch_name,
             &table_name,
@@ -1985,14 +2145,22 @@ pub(crate) async fn delete_handler(
             "delete",
             &Value::Null,
         )
-        .await?;
+        .await;
+        if let Err(e) = overlay_result {
+            conn.release().await;
+            return Err(e.into());
+        }
         conn.release().await;
         return Ok(axum::http::StatusCode::NO_CONTENT);
     }
 
-    conn.fetch_all_uncached(&cmd)
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+    match conn.fetch_all_uncached(&cmd).await {
+        Ok(_) => {},
+        Err(e) => {
+            conn.release().await;
+            return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+        }
+    };
 
     // Release connection before event processing
     conn.release().await;

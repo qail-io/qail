@@ -10,8 +10,25 @@ use super::convert::{row_to_array, row_to_json};
 use super::qdrant::execute_qdrant_cmd;
 use super::{BatchQueryResult, BatchRequest, BatchResponse, FastQueryResponse, QueryResponse};
 use crate::GatewayState;
-use crate::auth::extract_auth_from_headers;
+use crate::auth::authenticate_request;
 use crate::middleware::ApiError;
+use qail_core::ast::Action;
+
+/// SECURITY (P0-2): Reject dangerous procedural/session actions on public query endpoints.
+fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), ApiError> {
+    match cmd.action {
+        Action::Call | Action::Do | Action::SessionSet | Action::SessionShow | Action::SessionReset => {
+            Err(ApiError::with_code(
+                "ACTION_DENIED",
+                format!(
+                    "Action {:?} is not allowed on public query endpoints",
+                    cmd.action
+                ),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
 
 /// Execute a single Qail query (POST /qail).
 pub async fn execute_query(
@@ -25,10 +42,8 @@ pub async fn execute_query(
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
     }
 
-    // Extract auth context from headers
-    let mut auth = extract_auth_from_headers(&headers);
-    auth.enrich_with_operator_map(&state.user_operator_map)
-        .await;
+    // Extract + enforce auth (JWT/JWKS + allowed algorithms + strict mode + tenant rate limit)
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     tracing::debug!(
         "Executing text query: {} (user: {})",
@@ -59,6 +74,9 @@ pub async fn execute_query(
             }
         }
     };
+
+    // SECURITY (P0-2): Reject dangerous actions
+    reject_dangerous_action(&cmd)?;
 
     // SECURITY: Query allow-list check (raw text, canonical QAIL, or SQL).
     if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
@@ -94,10 +112,8 @@ pub async fn execute_query_binary(
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty binary query"));
     }
 
-    // Extract auth context from headers
-    let mut auth = extract_auth_from_headers(&headers);
-    auth.enrich_with_operator_map(&state.user_operator_map)
-        .await;
+    // Extract + enforce auth (JWT/JWKS + allowed algorithms + strict mode + tenant rate limit)
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     tracing::debug!(
         "Executing binary query ({} bytes, user: {})",
@@ -150,6 +166,9 @@ pub async fn execute_query_binary(
         ));
     }
 
+    // SECURITY (P0-2): Reject dangerous actions
+    reject_dangerous_action(&cmd)?;
+
     // SECURITY: Enforce allow-list for binary endpoint too.
     if !is_query_allowed(&state.allow_list, None, &cmd) {
         tracing::warn!("Binary query rejected by allow-list");
@@ -187,9 +206,8 @@ pub async fn execute_query_fast(
         return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
     }
 
-    let mut auth = extract_auth_from_headers(&headers);
-    auth.enrich_with_operator_map(&state.user_operator_map)
-        .await;
+    // Extract + enforce auth (JWT/JWKS + allowed algorithms + strict mode + tenant rate limit)
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     let mut cmd = {
         use std::collections::hash_map::DefaultHasher;
@@ -212,6 +230,9 @@ pub async fn execute_query_fast(
             }
         }
     };
+
+    // SECURITY (P0-2): Reject dangerous actions
+    reject_dangerous_action(&cmd)?;
 
     if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
         tracing::warn!("Fast query rejected by allow-list: {}", query_text);
@@ -294,7 +315,7 @@ async fn execute_qail_cmd_fast(
 /// - depth = CTEs + set ops + source subquery nesting
 /// - filter_count = total conditions across all Filter cages
 /// - join_count = number of JOIN clauses
-fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usize) {
+pub(crate) fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usize) {
     use qail_core::ast::CageKind;
 
     let depth = cmd.ctes.len() + cmd.set_ops.len() + usize::from(cmd.source_query.is_some());
@@ -468,9 +489,9 @@ pub async fn execute_batch(
         ));
     }
 
-    let mut auth = extract_auth_from_headers(&headers);
-    auth.enrich_with_operator_map(&state.user_operator_map)
-        .await;
+    // Extract + enforce auth (JWT/JWKS + allowed algorithms + strict mode + tenant rate limit)
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
+
     tracing::info!(
         "Executing batch of {} queries (txn={}, user: {})",
         request.queries.len(),
@@ -494,10 +515,11 @@ pub async fn execute_batch(
 
     // Start transaction if requested (default: true)
     if request.transaction {
-        conn.get_mut().execute_simple("BEGIN;").await.map_err(|e| {
+        if let Err(e) = conn.get_mut().execute_simple("BEGIN;").await {
             tracing::error!("Transaction start failed: {}", e);
-            ApiError::with_code("TXN_ERROR", "Transaction start failed")
-        })?;
+            conn.release().await;
+            return Err(ApiError::with_code("TXN_ERROR", "Transaction start failed"));
+        }
     }
 
     let mut had_error = false;
@@ -523,6 +545,22 @@ pub async fn execute_batch(
                 continue;
             }
         };
+
+        // SECURITY (P0-2): Reject dangerous actions in batch
+        if let Err(e) = reject_dangerous_action(&cmd) {
+            results.push(BatchQueryResult {
+                index,
+                success: false,
+                rows: None,
+                count: None,
+                error: Some(e.message.clone()),
+            });
+            if request.transaction {
+                had_error = true;
+                break;
+            }
+            continue;
+        }
 
         if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
             results.push(BatchQueryResult {
@@ -583,6 +621,33 @@ pub async fn execute_batch(
                 let json_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
                 let count = json_rows.len();
 
+                // SECURITY (P0-R6): Tenant boundary verification in batch results.
+                if matches!(cmd.action, qail_core::ast::Action::Get) {
+                    if let Some(ref tenant_id) = auth.tenant_id {
+                        if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+                            &json_rows,
+                            tenant_id,
+                            &state.config.tenant_column,
+                            &cmd.table,
+                            "batch_query",
+                        ) {
+                            tracing::error!("{}", v);
+                            results.push(BatchQueryResult {
+                                index,
+                                success: false,
+                                rows: None,
+                                count: None,
+                                error: Some("Data integrity error".to_string()),
+                            });
+                            if request.transaction {
+                                had_error = true;
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
                 // Invalidate cache for mutations
                 if !matches!(cmd.action, qail_core::ast::Action::Get) {
                     state.cache.invalidate_table(&cmd.table);
@@ -620,13 +685,11 @@ pub async fn execute_batch(
             let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
             tracing::warn!("Batch transaction rolled back due to error");
         } else {
-            conn.get_mut()
-                .execute_simple("COMMIT;")
-                .await
-                .map_err(|e| {
-                    tracing::error!("Transaction commit failed: {}", e);
-                    ApiError::with_code("TXN_ERROR", "Transaction commit failed")
-                })?;
+            if let Err(e) = conn.get_mut().execute_simple("COMMIT;").await {
+                tracing::error!("Transaction commit failed: {}", e);
+                conn.release().await;
+                return Err(ApiError::with_code("TXN_ERROR", "Transaction commit failed"));
+            }
         }
     }
 
@@ -759,5 +822,29 @@ mod tests {
         let mut allow_list = QueryAllowList::new();
         allow_list.allow("get other_table");
         assert!(!is_query_allowed(&allow_list, None, &cmd));
+    }
+
+    // ── Regression: query_complexity is pub(crate) for WS parity ─────
+
+    #[test]
+    fn query_complexity_simple_query() {
+        let cmd = qail_core::ast::Qail::get("users").columns(["id"]).eq("active", true);
+        let (depth, filters, joins) = super::query_complexity(&cmd);
+        assert_eq!(depth, 0);
+        assert_eq!(filters, 1);
+        assert_eq!(joins, 0);
+    }
+
+    #[test]
+    fn query_complexity_with_joins() {
+        use qail_core::ast::JoinKind;
+        let cmd = qail_core::ast::Qail::get("orders")
+            .join(JoinKind::Left, "users", "orders.user_id", "users.id")
+            .eq("status", "active")
+            .eq("visible", true);
+        let (depth, filters, joins) = super::query_complexity(&cmd);
+        assert_eq!(depth, 0);
+        assert_eq!(filters, 2);
+        assert_eq!(joins, 1);
     }
 }

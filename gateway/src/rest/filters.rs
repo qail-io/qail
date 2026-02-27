@@ -7,6 +7,24 @@ use qail_core::ast::{Operator, Value as QailValue};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// SECURITY: Validate that a user-provided identifier (column name, sort key, select field)
+/// contains only safe characters. Identifiers are written into SQL in non-parameterized
+/// positions (SELECT list, WHERE left-side, ORDER BY), so they MUST NOT contain SQL syntax.
+///
+/// Allowed: alphanumeric, underscores, dots (for table.column), hyphens (for kebab-case).
+/// Rejected: quotes, semicolons, comments, parens, spaces, operators, etc.
+pub(crate) fn is_safe_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-'
+        })
+        // Must not start with a digit or hyphen
+        && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-')
+        // Must not contain SQL comment markers even though individual chars are allowed
+        && !s.contains("--")
+}
+
 /// Parse filter operators from query string.
 ///
 /// Supports both forms:
@@ -64,6 +82,12 @@ pub(crate) fn parse_filters(query_string: &str) -> Vec<(String, Operator, QailVa
 
         // Skip if this is a reserved param (column name might collide)
         if reserved.contains(&column) {
+            continue;
+        }
+
+        // SECURITY: Reject identifiers with SQL-unsafe characters.
+        if !is_safe_identifier(column) {
+            tracing::warn!("Filter column rejected by identifier guard: {:?}", column);
             continue;
         }
 
@@ -229,14 +253,14 @@ pub(crate) fn apply_sorting(mut cmd: qail_core::ast::Qail, sort: &str) -> qail_c
         // Prefix style: -col / +col
         if let Some(col) = part.strip_prefix('-') {
             let col = col.trim();
-            if !col.is_empty() {
+            if !col.is_empty() && is_safe_identifier(col) {
                 cmd = cmd.order_desc(col);
             }
             continue;
         }
         if let Some(col) = part.strip_prefix('+') {
             let col = col.trim();
-            if !col.is_empty() {
+            if !col.is_empty() && is_safe_identifier(col) {
                 cmd = cmd.order_asc(col);
             }
             continue;
@@ -246,7 +270,7 @@ pub(crate) fn apply_sorting(mut cmd: qail_core::ast::Qail, sort: &str) -> qail_c
         if let Some((col, dir)) = part.split_once(':') {
             let col = col.trim();
             let dir = dir.trim();
-            if col.is_empty() {
+            if col.is_empty() || !is_safe_identifier(col) {
                 continue;
             }
             if dir.eq_ignore_ascii_case("desc") {
@@ -258,7 +282,9 @@ pub(crate) fn apply_sorting(mut cmd: qail_core::ast::Qail, sort: &str) -> qail_c
         }
 
         // Default ascending
-        cmd = cmd.order_asc(part);
+        if is_safe_identifier(part) {
+            cmd = cmd.order_asc(part);
+        }
     }
     cmd
 }
@@ -272,8 +298,14 @@ pub(crate) fn apply_returning(
         if ret == "*" {
             cmd = cmd.returning_all();
         } else {
-            let cols: Vec<&str> = ret.split(',').map(|s| s.trim()).collect();
-            cmd = cmd.returning(cols);
+            let cols: Vec<&str> = ret
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| is_safe_identifier(s))
+                .collect();
+            if !cols.is_empty() {
+                cmd = cmd.returning(cols);
+            }
         }
     }
     cmd

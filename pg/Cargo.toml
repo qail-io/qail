@@ -36,9 +36,6 @@ md-5 = "0.10"
 itoa = "1"
 ryu = "1"
 
-# LRU cache for prepared statement management
-lru = "0.16"
-
 # TLS/SSL support
 tokio-rustls = "0.26"
 rustls-native-certs = "0.8"
@@ -60,10 +57,7 @@ workspace = true
 
 [dev-dependencies]
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid"] }
 uuid = { version = "1.9", features = ["v4"] }
-sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-native-tls"] }
-pq-sys = "0.6"
 chrono = { version = "0.4" }
 proptest = "1.10.0"
 

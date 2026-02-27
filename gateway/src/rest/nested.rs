@@ -14,7 +14,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::GatewayState;
-use crate::auth::extract_auth_from_headers;
+use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
 use crate::middleware::ApiError;
 
@@ -55,7 +55,7 @@ pub(crate) async fn nested_list_handler(
             ApiError::not_found(format!("No relation: {} → {}", child_table, parent_table))
         })?;
 
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
 
     let max_rows = state.config.max_result_rows.min(1000) as i64;
     let limit = params.limit.unwrap_or(50).clamp(1, max_rows);
@@ -70,8 +70,14 @@ pub(crate) async fn nested_list_handler(
 
     // Column selection
     if let Some(ref select) = params.select {
-        let cols: Vec<&str> = select.split(',').map(|s| s.trim()).collect();
-        cmd = cmd.columns(cols);
+        let cols: Vec<&str> = select
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| *s == "*" || crate::rest::filters::is_safe_identifier(s))
+            .collect();
+        if !cols.is_empty() {
+            cmd = cmd.columns(cols);
+        }
     }
 
     // Sorting (multi-column)
@@ -81,8 +87,14 @@ pub(crate) async fn nested_list_handler(
 
     // Distinct
     if let Some(ref distinct) = params.distinct {
-        let cols: Vec<&str> = distinct.split(',').map(|s| s.trim()).collect();
-        cmd = cmd.distinct_on(cols);
+        let cols: Vec<&str> = distinct
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| crate::rest::filters::is_safe_identifier(s))
+            .collect();
+        if !cols.is_empty() {
+            cmd = cmd.distinct_on(cols);
+        }
     }
 
     // Parse and apply filters from query string
@@ -93,7 +105,12 @@ pub(crate) async fn nested_list_handler(
     // Full-text search
     if let Some(ref term) = params.search {
         let cols = params.search_columns.as_deref().unwrap_or("name");
-        cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
+        // SECURITY: Validate search column identifier.
+        if crate::rest::filters::is_safe_identifier(cols) {
+            cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
+        } else {
+            tracing::warn!(cols = %cols, "nested: search_columns rejected by identifier guard");
+        }
     }
 
     cmd = cmd.limit(limit);
@@ -126,6 +143,22 @@ pub(crate) async fn nested_list_handler(
 
     let rows = rows?;
     let data: Vec<Value> = rows.iter().map(row_to_json).collect();
+
+    // ── Tenant Boundary Invariant ────────────────────────────────────
+    if let Some(ref tenant_id) = auth.tenant_id {
+        let _proof = crate::tenant_guard::verify_tenant_boundary(
+            &data,
+            tenant_id,
+            &state.config.tenant_column,
+            &child_table,
+            "rest_nested_list",
+        )
+        .map_err(|v| {
+            tracing::error!("{}", v);
+            crate::middleware::ApiError::internal("Data integrity error")
+        })?;
+    }
+
     let count = data.len();
 
     Ok(Json(ListResponse {
@@ -198,10 +231,13 @@ pub(crate) async fn expand_nested(
                 .apply_policies(auth, &mut cmd)
                 .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
-            let rows = conn
-                .fetch_all_uncached(&cmd)
-                .await
-                .map_err(|e| ApiError::from_pg_driver_error(&e, Some(rel)))?;
+            let rows = match conn.fetch_all_uncached(&cmd).await {
+                Ok(r) => r,
+                Err(e) => {
+                    conn.release().await;
+                    return Err(ApiError::from_pg_driver_error(&e, Some(rel)));
+                }
+            };
 
             // Index by PK
             let related: std::collections::HashMap<String, Value> = rows
@@ -265,10 +301,13 @@ pub(crate) async fn expand_nested(
                 .apply_policies(auth, &mut cmd)
                 .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
-            let rows = conn
-                .fetch_all_uncached(&cmd)
-                .await
-                .map_err(|e| ApiError::from_pg_driver_error(&e, Some(rel)))?;
+            let rows = match conn.fetch_all_uncached(&cmd).await {
+                Ok(r) => r,
+                Err(e) => {
+                    conn.release().await;
+                    return Err(ApiError::from_pg_driver_error(&e, Some(rel)));
+                }
+            };
 
             // Group by FK value
             let mut grouped: std::collections::HashMap<String, Vec<Value>> =

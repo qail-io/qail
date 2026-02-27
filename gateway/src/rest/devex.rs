@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::GatewayState;
-use crate::auth::extract_auth_from_headers;
+use crate::auth::authenticate_request;
 
 /// GET /api/_schema — Schema introspection
 ///
@@ -19,7 +19,7 @@ pub(crate) async fn schema_introspection_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<Value>, crate::middleware::ApiError> {
     // Auth gate: reject unauthenticated callers in production
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
     if !auth.is_authenticated() {
         return Err(crate::middleware::ApiError::auth_error(
             "Authentication required for schema introspection",
@@ -78,7 +78,7 @@ pub(crate) async fn typescript_types_handler(
     use axum::response::IntoResponse;
 
     // Auth gate
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
     if !auth.is_authenticated() {
         return Err(crate::middleware::ApiError::auth_error(
             "Authentication required for type generation",
@@ -145,7 +145,7 @@ pub(crate) async fn rpc_contracts_handler(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<Value>, crate::middleware::ApiError> {
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
     if !auth.is_authenticated() {
         return Err(crate::middleware::ApiError::auth_error(
             "Authentication required for RPC contract introspection",
@@ -195,8 +195,9 @@ pub(crate) async fn rpc_contracts_handler(
     let rows = conn
         .fetch_all_uncached(&cmd)
         .await
-        .map_err(|e| crate::middleware::ApiError::from_pg_driver_error(&e, None))?;
+        .map_err(|e| crate::middleware::ApiError::from_pg_driver_error(&e, None));
     conn.release().await;
+    let rows = rows?;
 
     let mut functions: Vec<Value> = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -353,7 +354,7 @@ pub(crate) async fn openapi_spec_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<Value>, crate::middleware::ApiError> {
     // Auth gate: reject unauthenticated callers in production
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
     if !auth.is_authenticated() {
         return Err(crate::middleware::ApiError::auth_error(
             "Authentication required for OpenAPI spec",

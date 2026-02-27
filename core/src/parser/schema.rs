@@ -1125,33 +1125,27 @@ mod tests {
         assert!(policy.using.is_some());
 
         // Verify the expression is a typed Binary, not raw SQL
-        match policy.using.as_ref().unwrap() {
-            Expr::Binary {
-                left, op, right, ..
-            } => {
-                assert_eq!(*op, BinaryOp::Eq);
-                match left.as_ref() {
-                    Expr::Named(n) => assert_eq!(n, "operator_id"),
-                    _ => panic!("Expected Named, got {:?}", left),
-                }
-                match right.as_ref() {
-                    Expr::Cast {
-                        target_type, expr, ..
-                    } => {
-                        assert_eq!(target_type, "uuid");
-                        match expr.as_ref() {
-                            Expr::FunctionCall { name, args, .. } => {
-                                assert_eq!(name, "current_setting");
-                                assert_eq!(args.len(), 1);
-                            }
-                            _ => panic!("Expected FunctionCall"),
-                        }
-                    }
-                    _ => panic!("Expected Cast, got {:?}", right),
-                }
-            }
-            _ => panic!("Expected Binary"),
-        }
+        let using = policy.using.as_ref().unwrap();
+        let Expr::Binary { left, op, right, .. } = using else {
+            panic!("Expected Binary, got {using:?}");
+        };
+        assert_eq!(*op, BinaryOp::Eq);
+
+        let Expr::Named(n) = left.as_ref() else {
+            panic!("Expected Named, got {left:?}");
+        };
+        assert_eq!(n, "operator_id");
+
+        let Expr::Cast { target_type, expr: cast_expr, .. } = right.as_ref() else {
+            panic!("Expected Cast, got {right:?}");
+        };
+        assert_eq!(target_type, "uuid");
+
+        let Expr::FunctionCall { name, args, .. } = cast_expr.as_ref() else {
+            panic!("Expected FunctionCall, got {cast_expr:?}");
+        };
+        assert_eq!(name, "current_setting");
+        assert_eq!(args.len(), 1);
     }
 
     #[test]
@@ -1210,12 +1204,10 @@ mod tests {
         let schema = Schema::parse(input).expect("parse failed");
         let policy = &schema.policies[0];
 
-        match policy.using.as_ref().unwrap() {
-            Expr::Binary {
-                op: BinaryOp::Or, ..
-            } => {}
-            e => panic!("Expected Binary OR, got {:?}", e),
-        }
+        assert!(
+            matches!(policy.using.as_ref().unwrap(), Expr::Binary { op: BinaryOp::Or, .. }),
+            "Expected Binary OR, got {:?}", policy.using
+        );
     }
 
     #[test]

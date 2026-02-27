@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::GatewayState;
-use crate::auth::extract_auth_from_headers;
+use crate::auth::authenticate_request;
 use crate::middleware::ApiError;
 
 use super::extract_table_name;
@@ -35,7 +35,15 @@ pub(crate) async fn explain_handler(
         .table(&table_name)
         .ok_or_else(|| ApiError::not_found(&table_name))?;
 
-    let auth = extract_auth_from_headers(&headers);
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
+
+    // SECURITY: Restrict EXPLAIN ANALYZE to admin roles only.
+    // This endpoint executes the query and reveals plan internals (costs, indexes, row counts).
+    if auth.role != "admin" && auth.role != "super_admin" {
+        return Err(ApiError::forbidden(
+            "EXPLAIN ANALYZE requires admin role",
+        ));
+    }
 
     // Build query (same as list_handler)
     let max_rows = state.config.max_result_rows.min(1000) as i64;
@@ -45,8 +53,14 @@ pub(crate) async fn explain_handler(
 
     // Apply select
     if let Some(ref select) = params.select {
-        let cols: Vec<&str> = select.split(',').map(|s| s.trim()).collect();
-        cmd = cmd.columns(cols);
+        let cols: Vec<&str> = select
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| *s == "*" || crate::rest::filters::is_safe_identifier(s))
+            .collect();
+        if !cols.is_empty() {
+            cmd = cmd.columns(cols);
+        }
     }
 
     // Apply sorting — default to `id ASC` for deterministic pagination
@@ -55,6 +69,10 @@ pub(crate) async fn explain_handler(
             let mut iter = part.splitn(2, ':');
             let col = iter.next().unwrap_or("id");
             let dir = iter.next().unwrap_or("asc");
+            // SECURITY: Validate sort column identifier.
+            if !crate::rest::filters::is_safe_identifier(col) {
+                continue;
+            }
             cmd = if dir == "desc" {
                 cmd.order_desc(col)
             } else {
@@ -125,7 +143,12 @@ pub(crate) async fn explain_handler(
     // Full-text search
     if let Some(ref term) = params.search {
         let cols = params.search_columns.as_deref().unwrap_or("name");
-        cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
+        // SECURITY: Validate search column identifier.
+        if crate::rest::filters::is_safe_identifier(cols) {
+            cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
+        } else {
+            tracing::warn!(cols = %cols, "explain: search_columns rejected by identifier guard");
+        }
     }
 
     cmd = cmd.limit(limit);
@@ -149,6 +172,18 @@ pub(crate) async fn explain_handler(
                 }
             }
         }
+    }
+
+    // ── Query Complexity Guard ───────────────────────────────────────
+    let (depth, filters, joins) = crate::handler::query::query_complexity(&cmd);
+    if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
+        tracing::warn!(
+            table = %table_name,
+            depth, filters, joins,
+            "EXPLAIN query rejected by complexity guard"
+        );
+        crate::metrics::record_complexity_rejected();
+        return Err(api_err);
     }
 
     // Generate SQL from AST
@@ -175,10 +210,16 @@ pub(crate) async fn explain_handler(
         .await
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
-    let raw_rows = conn
-        .query_raw_with_params(&explain_sql, &params_buf)
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+    let raw_rows = match conn.query_raw_with_params(&explain_sql, &params_buf).await {
+        Ok(rows) => {
+            conn.release().await;
+            rows
+        }
+        Err(e) => {
+            conn.release().await;
+            return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+        }
+    };
 
     // Convert raw row data to JSON
     let plan: Vec<Value> = raw_rows

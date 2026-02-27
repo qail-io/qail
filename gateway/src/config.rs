@@ -189,6 +189,36 @@ pub struct GatewayConfig {
     /// ```
     #[serde(default)]
     pub role_overrides: HashMap<String, GuardOverrides>,
+
+    /// SECURITY: Enforce fail-closed production checks at startup.
+    /// Refuses boot unless JWT/JWKS, explicit CORS origins, admin token,
+    /// and query/RPC allow-lists are all configured.
+    #[serde(default)]
+    pub production_strict: bool,
+
+    /// Allowed JWT algorithms for token validation.
+    /// Empty = auto-detect from token header (legacy/dev mode).
+    /// Recommended production: `["RS256"]` or `["ES256"]`.
+    #[serde(default)]
+    pub jwt_allowed_algorithms: Vec<String>,
+
+    /// Post-auth tenant rate limiter: requests per second per tenant+user.
+    #[serde(default = "default_tenant_rate_limit_rate")]
+    pub tenant_rate_limit_rate: f64,
+
+    /// Post-auth tenant rate limiter: maximum burst capacity.
+    #[serde(default = "default_tenant_rate_limit_burst")]
+    pub tenant_rate_limit_burst: u32,
+
+    /// PostgreSQL TLS mode: "disable", "prefer", "require" (default: "prefer").
+    /// Applied to the connection pool. URL `?sslmode=` overrides this.
+    #[serde(default = "default_pg_sslmode")]
+    pub pg_sslmode: String,
+
+    /// PostgreSQL SCRAM channel binding: "disable", "prefer", "require" (default: "prefer").
+    /// Applied to the connection pool. URL `?channel_binding=` overrides this.
+    #[serde(default = "default_pg_channel_binding")]
+    pub pg_channel_binding: String,
 }
 
 /// Per-role limit overrides. All fields optional — omitted fields
@@ -295,6 +325,18 @@ fn default_max_query_joins() -> usize {
 fn default_tenant_column() -> String {
     "operator_id".to_string()
 }
+fn default_tenant_rate_limit_rate() -> f64 {
+    50.0
+}
+fn default_tenant_rate_limit_burst() -> u32 {
+    100
+}
+fn default_pg_sslmode() -> String {
+    "prefer".to_string()
+}
+fn default_pg_channel_binding() -> String {
+    "prefer".to_string()
+}
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -339,6 +381,12 @@ impl Default for GatewayConfig {
             rpc_signature_check: false,
             max_request_body_bytes: 1_048_576,
             role_overrides: HashMap::new(),
+            production_strict: false,
+            jwt_allowed_algorithms: Vec::new(),
+            tenant_rate_limit_rate: 50.0,
+            tenant_rate_limit_burst: 100,
+            pg_sslmode: "prefer".to_string(),
+            pg_channel_binding: "prefer".to_string(),
         }
     }
 }
@@ -502,6 +550,12 @@ impl GatewayConfig {
             rpc_signature_check: false,
             max_request_body_bytes: 1_048_576,
             role_overrides: HashMap::new(),
+            production_strict: false,
+            jwt_allowed_algorithms: Vec::new(),
+            tenant_rate_limit_rate: 50.0,
+            tenant_rate_limit_burst: 100,
+            pg_sslmode: "prefer".to_string(),
+            pg_channel_binding: "prefer".to_string(),
         }
     }
 }
