@@ -58,7 +58,9 @@ impl PoolConfig {
     ///
     /// Used by the gateway which already has the config extracted.
     pub fn from_qail_config_ref(qdrant: &qail_core::config::QdrantConfig) -> Self {
-        let use_tls = qdrant.tls.unwrap_or_else(|| qdrant.url.starts_with("https://"));
+        let use_tls = qdrant
+            .tls
+            .unwrap_or_else(|| qdrant.url.starts_with("https://"));
 
         let (host, port) = if let Some(ref grpc) = qdrant.grpc {
             if grpc.contains(':') {
@@ -170,7 +172,8 @@ impl QdrantPool {
             None => {
                 // No idle connection — create a new one
                 if self.inner.config.tls {
-                    QdrantDriver::connect_tls(&self.inner.config.host, self.inner.config.port).await?
+                    QdrantDriver::connect_tls(&self.inner.config.host, self.inner.config.port)
+                        .await?
                 } else {
                     QdrantDriver::connect(&self.inner.config.host, self.inner.config.port).await?
                 }

@@ -1,7 +1,7 @@
 use super::Formatter;
 use crate::ast::{
-    CTEDef, Cage, CageKind, Condition, Expr, Join, JoinKind, LogicalOp, Operator, Qail,
-    SortOrder, Value,
+    CTEDef, Cage, CageKind, Condition, Expr, Join, JoinKind, LogicalOp, Operator, Qail, SortOrder,
+    Value,
 };
 
 #[test]

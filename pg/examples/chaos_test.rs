@@ -18,18 +18,18 @@
 //!
 //! WARNING: This creates real DB load. Do NOT run against production.
 
-use qail_core::prelude::*;
 use qail_core::ast::{JoinKind, Operator, SortOrder};
+use qail_core::prelude::*;
 use qail_pg::PgDriver;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Barrier;
-use std::sync::Arc;
 
 // ==================== CONFIG ====================
 
-const WORKERS: usize = 10;          // Concurrent connections
-const ITERATIONS: usize = 200;      // Queries per worker
-const WARMUP: usize = 5;            // Warmup iterations (excluded from stats)
+const WORKERS: usize = 10; // Concurrent connections
+const ITERATIONS: usize = 200; // Queries per worker
+const WARMUP: usize = 5; // Warmup iterations (excluded from stats)
 
 /// The EXACT SQL from PostgresHarborRepository::list_active()
 const LIST_ACTIVE_SQL: &str = r"
@@ -115,26 +115,36 @@ struct AggregateStats {
 
 fn aggregate(workers: &[LatencyStats], wall_clock: Duration) -> AggregateStats {
     let label = workers[0].label.clone();
-    let mut all_latencies: Vec<Duration> = workers.iter()
+    let mut all_latencies: Vec<Duration> = workers
+        .iter()
         .flat_map(|w| w.latencies.iter().copied())
         .collect();
-    let total_rows: usize = workers.iter()
-        .flat_map(|w| w.row_counts.iter())
-        .sum();
+    let total_rows: usize = workers.iter().flat_map(|w| w.row_counts.iter()).sum();
     let total_errors: usize = workers.iter().map(|w| w.errors).sum();
-    let sample_errors: Vec<String> = workers.iter()
+    let sample_errors: Vec<String> = workers
+        .iter()
         .flat_map(|w| w.error_msgs.iter().cloned())
         .take(3)
         .collect();
-    
+
     all_latencies.sort();
     let total = all_latencies.len();
-    
+
     if total == 0 {
         return AggregateStats {
-            label, total_queries: 0, total_errors, avg: Duration::ZERO, median: Duration::ZERO,
-            p95: Duration::ZERO, p99: Duration::ZERO, min: Duration::ZERO, max: Duration::ZERO,
-            avg_rows: 0.0, throughput_qps: 0.0, total_time: wall_clock, sample_errors,
+            label,
+            total_queries: 0,
+            total_errors,
+            avg: Duration::ZERO,
+            median: Duration::ZERO,
+            p95: Duration::ZERO,
+            p99: Duration::ZERO,
+            min: Duration::ZERO,
+            max: Duration::ZERO,
+            avg_rows: 0.0,
+            throughput_qps: 0.0,
+            total_time: wall_clock,
+            sample_errors,
         };
     }
 
@@ -149,18 +159,35 @@ fn aggregate(workers: &[LatencyStats], wall_clock: Duration) -> AggregateStats {
     let throughput_qps = total as f64 / wall_clock.as_secs_f64();
 
     AggregateStats {
-        label, total_queries: total, total_errors, avg, median, p95, p99, min, max,
-        avg_rows, throughput_qps, total_time: wall_clock, sample_errors,
+        label,
+        total_queries: total,
+        total_errors,
+        avg,
+        median,
+        p95,
+        p99,
+        min,
+        max,
+        avg_rows,
+        throughput_qps,
+        total_time: wall_clock,
+        sample_errors,
     }
 }
 
 fn print_stats(s: &AggregateStats) {
     println!("\n━━━ {} ━━━", s.label);
-    println!("  Queries: {}  │  Errors: {}  │  Avg rows: {:.0}", s.total_queries, s.total_errors, s.avg_rows);
+    println!(
+        "  Queries: {}  │  Errors: {}  │  Avg rows: {:.0}",
+        s.total_queries, s.total_errors, s.avg_rows
+    );
     println!("  Avg: {:?}  │  Median: {:?}", s.avg, s.median);
     println!("  p95: {:?}  │  p99: {:?}", s.p95, s.p99);
     println!("  Min: {:?}  │  Max: {:?}", s.min, s.max);
-    println!("  Throughput: {:.0} QPS  │  Wall clock: {:?}", s.throughput_qps, s.total_time);
+    println!(
+        "  Throughput: {:.0} QPS  │  Wall clock: {:?}",
+        s.throughput_qps, s.total_time
+    );
     if !s.sample_errors.is_empty() {
         println!("  ⚠️  Sample errors:");
         for e in &s.sample_errors {
@@ -181,8 +208,18 @@ fn build_harbor_list_query() -> Qail {
             "harbors.slug",
             "harbors.is_active",
         ])
-        .join(JoinKind::Left, "destination_harbors", "harbors.id", "destination_harbors.harbor_id")
-        .join(JoinKind::Left, "destinations", "destination_harbors.destination_id", "destinations.id")
+        .join(
+            JoinKind::Left,
+            "destination_harbors",
+            "harbors.id",
+            "destination_harbors.harbor_id",
+        )
+        .join(
+            JoinKind::Left,
+            "destinations",
+            "destination_harbors.destination_id",
+            "destinations.id",
+        )
         .column("destination_harbors.destination_id")
         .column("destinations.name AS destination_name")
         .filter("harbors.is_active", Operator::Eq, Value::Bool(true))
@@ -192,10 +229,14 @@ fn build_harbor_list_query() -> Qail {
 // ==================== WORKER FUNCTIONS ====================
 
 async fn connect(db_url: &str) -> PgDriver {
-    let mut driver = PgDriver::connect_url(db_url).await
+    let mut driver = PgDriver::connect_url(db_url)
+        .await
         .expect("Failed to connect");
     // Bypass RLS for fair benchmark comparison
-    driver.execute_raw("SET app.is_super_admin = 'true'").await.ok();
+    driver
+        .execute_raw("SET app.is_super_admin = 'true'")
+        .await
+        .ok();
     driver
 }
 
@@ -248,7 +289,8 @@ async fn worker_qail_cached(db_url: String, barrier: Arc<Barrier>) -> LatencySta
 async fn worker_qail_uncached(db_url: String, barrier: Arc<Barrier>) -> LatencyStats {
     let mut driver = connect(&db_url).await;
     let cmd = build_harbor_list_query();
-    let mut stats = LatencyStats::new("Qail AST fetch_all_uncached (Parse+Bind+Execute every call)");
+    let mut stats =
+        LatencyStats::new("Qail AST fetch_all_uncached (Parse+Bind+Execute every call)");
 
     for _ in 0..WARMUP {
         let _ = driver.fetch_all_uncached(&cmd).await;
@@ -268,10 +310,7 @@ async fn worker_qail_uncached(db_url: String, barrier: Arc<Barrier>) -> LatencyS
 
 // ==================== RUNNER ====================
 
-async fn run_test<F, Fut>(
-    db_url: &str,
-    worker_fn: F,
-) -> AggregateStats
+async fn run_test<F, Fut>(db_url: &str, worker_fn: F) -> AggregateStats
 where
     F: Fn(String, Arc<Barrier>) -> Fut + Send + Sync + Clone + 'static,
     Fut: std::future::Future<Output = LatencyStats> + Send + 'static,
@@ -302,15 +341,20 @@ where
 
 #[tokio::main]
 async fn main() {
-    let db_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║          CHAOS TEST — Engine API Handler vs Qail               ║");
     println!("║                                                                ║");
     println!("║  Query: list_harbors_public (2×LEFT JOIN + subqueries)         ║");
-    println!("║  Workers: {:>2}  │  Iters/worker: {:>4}  │  Warmup: {:>2}           ║", WORKERS, ITERATIONS, WARMUP);
-    println!("║  Total queries per test: {:>5}                                 ║", WORKERS * ITERATIONS);
+    println!(
+        "║  Workers: {:>2}  │  Iters/worker: {:>4}  │  Warmup: {:>2}           ║",
+        WORKERS, ITERATIONS, WARMUP
+    );
+    println!(
+        "║  Total queries per test: {:>5}                                 ║",
+        WORKERS * ITERATIONS
+    );
     println!("╚══════════════════════════════════════════════════════════════════╝");
 
     // Pre-flight check
@@ -332,20 +376,27 @@ async fn main() {
     let s3 = run_test(&db_url, worker_qail_uncached).await;
 
     // ===== Summary =====
-    println!("\n╔══════════════════════════════════════════════════════════════════════════════════════════╗");
-    println!("║  RESULTS  (sorted by throughput, highest first)                                        ║");
-    println!("╠══════════════════════════════════════════════════════════════════════════════════════════╣");
-    
+    println!(
+        "\n╔══════════════════════════════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "║  RESULTS  (sorted by throughput, highest first)                                        ║"
+    );
+    println!(
+        "╠══════════════════════════════════════════════════════════════════════════════════════════╣"
+    );
+
     let mut all = vec![&s1, &s2, &s3];
     all.sort_by(|a, b| b.throughput_qps.partial_cmp(&a.throughput_qps).unwrap());
-    
+
     for (i, s) in all.iter().enumerate() {
         let multiplier = if i == 0 {
             "baseline".to_string()
         } else {
             format!("{:.1}× slower", all[0].throughput_qps / s.throughput_qps)
         };
-        println!("║  {}. {:55}  {:>6.0} QPS  med {:>10?}  p99 {:>10?}  {} ║",
+        println!(
+            "║  {}. {:55}  {:>6.0} QPS  med {:>10?}  p99 {:>10?}  {} ║",
             i + 1,
             &s.label[..s.label.len().min(55)],
             s.throughput_qps,
@@ -354,14 +405,35 @@ async fn main() {
             multiplier,
         );
     }
-    
-    println!("╠══════════════════════════════════════════════════════════════════════════════════════════╣");
-    println!("║  {} workers × {} iters × 3 tests = {} total queries                             ║", WORKERS, ITERATIONS, WORKERS * ITERATIONS * 3);
-    println!("║                                                                                        ║");
-    println!("║  WHAT TO LOOK FOR:                                                                     ║");
-    println!("║  • p99 spikes → contention under concurrent load                                      ║");
-    println!("║  • Error rate → connection limits, deadlocks, timeouts                                 ║");
-    println!("║  • QPS ceiling → max throughput before degradation                                     ║");
-    println!("║  • Prepared vs Uncached → how much does stmt caching help under pressure?              ║");
-    println!("╚══════════════════════════════════════════════════════════════════════════════════════════╝");
+
+    println!(
+        "╠══════════════════════════════════════════════════════════════════════════════════════════╣"
+    );
+    println!(
+        "║  {} workers × {} iters × 3 tests = {} total queries                             ║",
+        WORKERS,
+        ITERATIONS,
+        WORKERS * ITERATIONS * 3
+    );
+    println!(
+        "║                                                                                        ║"
+    );
+    println!(
+        "║  WHAT TO LOOK FOR:                                                                     ║"
+    );
+    println!(
+        "║  • p99 spikes → contention under concurrent load                                      ║"
+    );
+    println!(
+        "║  • Error rate → connection limits, deadlocks, timeouts                                 ║"
+    );
+    println!(
+        "║  • QPS ceiling → max throughput before degradation                                     ║"
+    );
+    println!(
+        "║  • Prepared vs Uncached → how much does stmt caching help under pressure?              ║"
+    );
+    println!(
+        "╚══════════════════════════════════════════════════════════════════════════════════════════╝"
+    );
 }

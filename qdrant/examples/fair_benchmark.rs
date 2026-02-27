@@ -3,8 +3,8 @@
 //! Prerequisites: Run seed_qdrant.py first to seed data!
 //! Run: cargo run --example fair_benchmark --release
 
-use std::time::Instant;
 use qail_qdrant::QdrantDriver;
+use std::time::Instant;
 
 // Official client
 use qdrant_client::Qdrant;
@@ -21,7 +21,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║         QAIL vs Official qdrant-client Benchmark            ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
-    println!("⚠️  This benchmark assumes '{}' is already seeded!", COLLECTION_NAME);
+    println!(
+        "⚠️  This benchmark assumes '{}' is already seeded!",
+        COLLECTION_NAME
+    );
     println!("   Run: python3 seed_qdrant.py\n");
 
     // Connect
@@ -38,11 +41,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vector: Vec<f32> = (0..VECTOR_DIM)
                 .map(|j| {
                     let seed = (base_idx * 31 + j * 17) as f32;
-                    let base = seed.sin() * 0.5 + (seed / 100.0).cos() * 0.3 + (seed / 1000.0).sin() * 0.2;
+                    let base =
+                        seed.sin() * 0.5 + (seed / 100.0).cos() * 0.3 + (seed / 1000.0).sin() * 0.2;
                     base + ((i + j) as f32 / 10000.0).sin() * 0.01
                 })
                 .collect();
-            
+
             let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
             if norm > 0.0 {
                 vector.iter_mut().for_each(|x| *x /= norm);
@@ -61,24 +65,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Warmup
     for vector in query_vectors.iter().take(10) {
-        let _ = official_client.search_points(
-            SearchPointsBuilder::new(COLLECTION_NAME, vector.clone(), 10)
-        ).await;
+        let _ = official_client
+            .search_points(SearchPointsBuilder::new(
+                COLLECTION_NAME,
+                vector.clone(),
+                10,
+            ))
+            .await;
     }
 
     let official_start = Instant::now();
     let mut official_results = 0;
     for vector in &query_vectors {
-        let results = official_client.search_points(
-            SearchPointsBuilder::new(COLLECTION_NAME, vector.clone(), 10)
-        ).await?;
+        let results = official_client
+            .search_points(SearchPointsBuilder::new(
+                COLLECTION_NAME,
+                vector.clone(),
+                10,
+            ))
+            .await?;
         official_results += results.result.len();
     }
     let official_duration = official_start.elapsed();
-    
+
     let official_per_op = official_duration / NUM_SEARCHES as u32;
     let official_ops_per_sec = NUM_SEARCHES as f64 / official_duration.as_secs_f64();
-    
+
     println!("   Total time:    {:?}", official_duration);
     println!("   Per operation: {:?}", official_per_op);
     println!("   Throughput:    {:.0} ops/sec", official_ops_per_sec);
@@ -99,14 +111,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let qail_start = Instant::now();
     let mut qail_results = 0;
     for vector in &query_vectors {
-        let results = qail_driver.search(COLLECTION_NAME, vector, 10, None).await?;
+        let results = qail_driver
+            .search(COLLECTION_NAME, vector, 10, None)
+            .await?;
         qail_results += results.len();
     }
     let qail_duration = qail_start.elapsed();
-    
+
     let qail_per_op = qail_duration / NUM_SEARCHES as u32;
     let qail_ops_per_sec = NUM_SEARCHES as f64 / qail_duration.as_secs_f64();
-    
+
     println!("   Total time:    {:?}", qail_duration);
     println!("   Per operation: {:?}", qail_per_op);
     println!("   Throughput:    {:.0} ops/sec", qail_ops_per_sec);
@@ -118,13 +132,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("═══════════════════════════════════════════════════════════════");
     println!("📈 FINAL RESULTS");
     println!("───────────────────────────────────────────────────────────────");
-    
+
     let speedup = official_duration.as_secs_f64() / qail_duration.as_secs_f64();
-    
-    println!("   Official client: {:?}/op ({:.0} ops/sec)", official_per_op, official_ops_per_sec);
-    println!("   QAIL zero-copy:  {:?}/op ({:.0} ops/sec)", qail_per_op, qail_ops_per_sec);
+
+    println!(
+        "   Official client: {:?}/op ({:.0} ops/sec)",
+        official_per_op, official_ops_per_sec
+    );
+    println!(
+        "   QAIL zero-copy:  {:?}/op ({:.0} ops/sec)",
+        qail_per_op, qail_ops_per_sec
+    );
     println!("   ────────────────────────────");
-    
+
     if speedup > 1.0 {
         println!("   🚀 QAIL is {:.2}x faster", speedup);
     } else {

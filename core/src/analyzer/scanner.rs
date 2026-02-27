@@ -76,16 +76,27 @@ impl CodebaseScanner {
         // SAFETY: All regex patterns below are compile-time constant strings.
         // They have been validated and will never fail to compile, so .expect() is infallible.
         Self {
-            qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)").expect("valid qail action regex"),
+            qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)")
+                .expect("valid qail action regex"),
             qail_column_pattern: Regex::new(r"'(\w+)").expect("valid qail column regex"),
-            qail_v2_get_pattern: Regex::new(r"\bget\s+(\w+)\s+fields\s+([^\n]+?)(?:\s+where|\s+order|\s+limit|$)").expect("valid v2 get regex"),
-            qail_v2_set_pattern: Regex::new(r"\bset\s+(\w+)\s+values\s+([^\n]+?)(?:\s+where|$)").expect("valid v2 set regex"),
-            qail_v2_del_pattern: Regex::new(r"\bdel\s+(\w+)(?:\s+where|$)").expect("valid v2 del regex"),
-            qail_v2_add_pattern: Regex::new(r"\badd\s+(\w+)\s+fields\s+([^\n]+?)\s+values").expect("valid v2 add regex"),
-            sql_select_pattern: Regex::new(r"(?i)SELECT\s+([^\n]+?)\s+FROM\s+(\w+)").expect("valid sql select regex"),
-            sql_insert_pattern: Regex::new(r"(?i)INSERT\s+INTO\s+(\w+)").expect("valid sql insert regex"),
-            sql_update_pattern: Regex::new(r"(?i)UPDATE\s+(\w+)\s+SET").expect("valid sql update regex"),
-            sql_delete_pattern: Regex::new(r"(?i)DELETE\s+FROM\s+(\w+)").expect("valid sql delete regex"),
+            qail_v2_get_pattern: Regex::new(
+                r"\bget\s+(\w+)\s+fields\s+([^\n]+?)(?:\s+where|\s+order|\s+limit|$)",
+            )
+            .expect("valid v2 get regex"),
+            qail_v2_set_pattern: Regex::new(r"\bset\s+(\w+)\s+values\s+([^\n]+?)(?:\s+where|$)")
+                .expect("valid v2 set regex"),
+            qail_v2_del_pattern: Regex::new(r"\bdel\s+(\w+)(?:\s+where|$)")
+                .expect("valid v2 del regex"),
+            qail_v2_add_pattern: Regex::new(r"\badd\s+(\w+)\s+fields\s+([^\n]+?)\s+values")
+                .expect("valid v2 add regex"),
+            sql_select_pattern: Regex::new(r"(?i)SELECT\s+([^\n]+?)\s+FROM\s+(\w+)")
+                .expect("valid sql select regex"),
+            sql_insert_pattern: Regex::new(r"(?i)INSERT\s+INTO\s+(\w+)")
+                .expect("valid sql insert regex"),
+            sql_update_pattern: Regex::new(r"(?i)UPDATE\s+(\w+)\s+SET")
+                .expect("valid sql update regex"),
+            sql_delete_pattern: Regex::new(r"(?i)DELETE\s+FROM\s+(\w+)")
+                .expect("valid sql delete regex"),
         }
     }
 
@@ -102,10 +113,14 @@ impl CodebaseScanner {
             if let Some(ext) = path.extension()
                 && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py")
             {
-                let mode = if ext == "rs" { AnalysisMode::RustAST } else { AnalysisMode::Regex };
+                let mode = if ext == "rs" {
+                    AnalysisMode::RustAST
+                } else {
+                    AnalysisMode::Regex
+                };
                 let file_refs = self.scan_file(path);
                 let ref_count = file_refs.len();
-                
+
                 result.files.push(FileAnalysis {
                     file: path.to_path_buf(),
                     mode,
@@ -147,10 +162,14 @@ impl CodebaseScanner {
             } else if let Some(ext) = path.extension()
                 && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py")
             {
-                let mode = if ext == "rs" { AnalysisMode::RustAST } else { AnalysisMode::Regex };
+                let mode = if ext == "rs" {
+                    AnalysisMode::RustAST
+                } else {
+                    AnalysisMode::Regex
+                };
                 let file_refs = self.scan_file(&path);
                 let ref_count = file_refs.len();
-                
+
                 if ref_count > 0 {
                     result.files.push(FileAnalysis {
                         file: path.clone(),
@@ -168,7 +187,7 @@ impl CodebaseScanner {
     /// Uses Rust AST analyzer for .rs files + regex for raw SQL, regex-only for others.
     fn scan_file(&self, path: &Path) -> Vec<CodeReference> {
         let mut refs = Vec::new();
-        
+
         // For Rust files: run AST analyzer first, then also run regex for raw SQL
         if path.extension().map(|e| e == "rs").unwrap_or(false) {
             refs.extend(RustAnalyzer::scan_file(path));

@@ -4,8 +4,8 @@
 //! wire protocol encoder against adversarial inputs.
 
 use bytes::BytesMut;
-use qail_pg::protocol::encoder::{PgEncoder, Param};
 use qail_pg::protocol::EncodeError;
+use qail_pg::protocol::encoder::{Param, PgEncoder};
 
 // ============================================================================
 // MESSAGE TYPE & LENGTH INTEGRITY
@@ -23,18 +23,27 @@ fn query_length_accuracy() {
     let bytes = PgEncoder::encode_query_string(sql);
     let declared_len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
     // declared_len = 4 (itself) + sql.len() + 1 (null terminator)
-    assert_eq!(declared_len as usize, 4 + sql.len() + 1,
-        "Declared length must match actual content");
+    assert_eq!(
+        declared_len as usize,
+        4 + sql.len() + 1,
+        "Declared length must match actual content"
+    );
     // Total message = 1 (type) + declared_len
-    assert_eq!(bytes.len(), 1 + declared_len as usize,
-        "Total message size must match");
+    assert_eq!(
+        bytes.len(),
+        1 + declared_len as usize,
+        "Total message size must match"
+    );
 }
 
 #[test]
 fn query_null_terminator_present() {
     let bytes = PgEncoder::encode_query_string("SELECT 1");
-    assert_eq!(*bytes.last().unwrap(), 0,
-        "Query string must be null-terminated");
+    assert_eq!(
+        *bytes.last().unwrap(),
+        0,
+        "Query string must be null-terminated"
+    );
 }
 
 #[test]
@@ -50,15 +59,21 @@ fn query_empty_string() {
 #[test]
 fn terminate_message_exact_bytes() {
     let bytes = PgEncoder::encode_terminate();
-    assert_eq!(bytes.as_ref(), &[b'X', 0, 0, 0, 4],
-        "Terminate must be exactly 'X' + len(4)");
+    assert_eq!(
+        bytes.as_ref(),
+        &[b'X', 0, 0, 0, 4],
+        "Terminate must be exactly 'X' + len(4)"
+    );
 }
 
 #[test]
 fn sync_message_exact_bytes() {
     let bytes = PgEncoder::encode_sync();
-    assert_eq!(bytes.as_ref(), &[b'S', 0, 0, 0, 4],
-        "Sync must be exactly 'S' + len(4)");
+    assert_eq!(
+        bytes.as_ref(),
+        &[b'S', 0, 0, 0, 4],
+        "Sync must be exactly 'S' + len(4)"
+    );
 }
 
 // ============================================================================
@@ -70,7 +85,10 @@ fn parse_message_structure() {
     let bytes = PgEncoder::encode_parse("", "SELECT $1", &[]);
     assert_eq!(bytes[0], b'P', "Parse message type must be 'P'");
     // After length, first byte should be 0 (unnamed statement null terminator)
-    assert_eq!(bytes[5], 0, "Unnamed statement must be empty null-terminated string");
+    assert_eq!(
+        bytes[5], 0,
+        "Unnamed statement must be empty null-terminated string"
+    );
     // SQL follows: "SELECT $1\0"
     let sql_start = 6;
     let sql_end = sql_start + 9; // "SELECT $1"
@@ -117,7 +135,11 @@ fn bind_with_text_params() {
     let bytes = PgEncoder::encode_bind("", "", &params).unwrap();
     assert_eq!(bytes[0], b'B', "Bind message type must be 'B'");
     let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    assert_eq!(bytes.len(), 1 + len as usize, "Total size must match declared length");
+    assert_eq!(
+        bytes.len(),
+        1 + len as usize,
+        "Total size must match declared length"
+    );
 }
 
 #[test]
@@ -175,8 +197,11 @@ fn bind_binary_data_param() {
     let content = &bytes[5..];
     // Find the param data: portal(1) + stmt(1) + format(2) + count(2) + len(4) = 10
     let data_start = 1 + 1 + 2 + 2 + 4;
-    assert_eq!(&content[data_start..data_start + 6], &data,
-        "Binary data must be preserved exactly");
+    assert_eq!(
+        &content[data_start..data_start + 6],
+        &data,
+        "Binary data must be preserved exactly"
+    );
 }
 
 // ============================================================================
@@ -234,11 +259,20 @@ fn extended_query_pipeline_ordering() {
     while pos < bytes.len() {
         let msg_type = bytes[pos];
         types.push(msg_type);
-        let len = i32::from_be_bytes([bytes[pos+1], bytes[pos+2], bytes[pos+3], bytes[pos+4]]);
+        let len = i32::from_be_bytes([
+            bytes[pos + 1],
+            bytes[pos + 2],
+            bytes[pos + 3],
+            bytes[pos + 4],
+        ]);
         pos += 1 + len as usize;
     }
-    assert_eq!(types, vec![b'P', b'B', b'E', b'S'],
-        "Pipeline must be Parse→Bind→Execute→Sync, got: {:?}", types);
+    assert_eq!(
+        types,
+        vec![b'P', b'B', b'E', b'S'],
+        "Pipeline must be Parse→Bind→Execute→Sync, got: {:?}",
+        types
+    );
 }
 
 #[test]
@@ -265,11 +299,7 @@ fn ultra_bind_produces_same_as_standard() {
     let standard = PgEncoder::encode_bind("", "my_stmt", &params_standard).unwrap();
 
     let mut ultra_buf = BytesMut::new();
-    let params_ultra = vec![
-        Param::Bytes(b"hello"),
-        Param::Null,
-        Param::Bytes(b"42"),
-    ];
+    let params_ultra = vec![Param::Bytes(b"hello"), Param::Null, Param::Bytes(b"42")];
     PgEncoder::encode_bind_ultra(&mut ultra_buf, "my_stmt", &params_ultra).unwrap();
 
     // Both buffers should have the same message type and payload structure
@@ -277,15 +307,21 @@ fn ultra_bind_produces_same_as_standard() {
     let std_len = i32::from_be_bytes([standard[1], standard[2], standard[3], standard[4]]);
     let ult_len = i32::from_be_bytes([ultra_buf[1], ultra_buf[2], ultra_buf[3], ultra_buf[4]]);
     assert_eq!(std_len, ult_len, "Lengths must match");
-    assert_eq!(standard, ultra_buf, "Standard and ultra bind must produce identical bytes");
+    assert_eq!(
+        standard, ultra_buf,
+        "Standard and ultra bind must produce identical bytes"
+    );
 }
 
 #[test]
 fn ultra_execute_exact_bytes() {
     let mut buf = BytesMut::new();
     PgEncoder::encode_execute_ultra(&mut buf);
-    assert_eq!(buf.as_ref(), &[b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0],
-        "Ultra execute must match hardcoded bytes");
+    assert_eq!(
+        buf.as_ref(),
+        &[b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0],
+        "Ultra execute must match hardcoded bytes"
+    );
 }
 
 #[test]
@@ -319,8 +355,11 @@ fn query_string_with_null_bytes() {
     assert_eq!(bytes[0], b'Q');
     // Verify the length includes everything (it's passed as raw)
     let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    assert_eq!(len as usize, 4 + sql.len() + 1,
-        "Length includes null byte in SQL");
+    assert_eq!(
+        len as usize,
+        4 + sql.len() + 1,
+        "Length includes null byte in SQL"
+    );
 }
 
 // ============================================================================
@@ -332,11 +371,14 @@ fn bind_to_produces_correct_length() {
     let mut buf = BytesMut::new();
     let params = vec![Some(b"test_value".to_vec()), None];
     PgEncoder::encode_bind_to(&mut buf, "stmt1", &params).unwrap();
-    
+
     assert_eq!(buf[0], b'B');
     let declared_len = i32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
-    assert_eq!(buf.len(), 1 + declared_len as usize,
-        "bind_to length must be accurate");
+    assert_eq!(
+        buf.len(),
+        1 + declared_len as usize,
+        "bind_to length must be accurate"
+    );
 }
 
 #[test]

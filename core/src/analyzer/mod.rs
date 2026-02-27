@@ -8,10 +8,17 @@
 //! - Other files: Regex-based scanning (90% accurate)
 
 mod impact;
-pub mod rust_ast;  // Public for LSP access to query_extractor
+pub mod rust_ast; // Public for LSP access to query_extractor
 mod scanner;
 
 pub use impact::{BreakingChange, MigrationImpact};
-pub use rust_ast::{detect_raw_sql, detect_raw_sql_in_file, RawSqlMatch, RustAnalyzer};
-pub use rust_ast::{detect_query_calls, QueryCall};
-pub use scanner::{AnalysisMode, CodeReference, CodebaseScanner, FileAnalysis, QueryType, ScanResult};
+pub use rust_ast::{QueryCall, detect_query_calls};
+pub use rust_ast::{RawSqlMatch, RustAnalyzer, detect_raw_sql, detect_raw_sql_in_file};
+pub use scanner::{
+    AnalysisMode, CodeReference, CodebaseScanner, FileAnalysis, QueryType, ScanResult,
+};
+// N+1 detection
+pub use rust_ast::{
+    NPlusOneCode, NPlusOneDiagnostic, NPlusOneSeverity, detect_n_plus_one_in_dir,
+    detect_n_plus_one_in_file,
+};

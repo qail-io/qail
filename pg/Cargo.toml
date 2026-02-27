@@ -15,6 +15,8 @@ io_uring = ["tokio-uring", "io-uring"]
 chrono = ["dep:chrono"]
 # Enable uuid::Uuid parsing in PgRow::uuid_typed()
 uuid = ["dep:uuid"]
+# Enable built-in Linux Kerberos/GSS provider for enterprise auth flows.
+enterprise-gssapi = []
 
 [dependencies]
 qail-core = { version = "0.21.0", path = "../core" }
@@ -28,6 +30,7 @@ hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 base64 = "0.22"
 rand = "0.10"
+md-5 = "0.10"
 
 # Zero-allocation formatting for COPY encoder
 itoa = "1"
@@ -39,7 +42,8 @@ lru = "0.16"
 # TLS/SSL support
 tokio-rustls = "0.26"
 rustls-native-certs = "0.8"
-rustls-pemfile = "2.2.0"
+tracing = "0.1"
+metrics = "0.24"
 
 # Optional: Ergonomic row extraction
 chrono = { version = "0.4", optional = true }

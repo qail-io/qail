@@ -91,12 +91,20 @@ impl PgConnection {
 
                 if self.buffer.len() > msg_len {
                     let msg_bytes = self.buffer.split_to(msg_len + 1);
-                    let (msg, _) = BackendMessage::decode(&msg_bytes)
-                        .map_err(super::PgError::Protocol)?;
+                    let (msg, _) =
+                        BackendMessage::decode(&msg_bytes).map_err(super::PgError::Protocol)?;
 
                     match msg {
-                        BackendMessage::NotificationResponse { process_id, channel, payload } => {
-                            return Ok(Notification { process_id, channel, payload });
+                        BackendMessage::NotificationResponse {
+                            process_id,
+                            channel,
+                            payload,
+                        } => {
+                            return Ok(Notification {
+                                process_id,
+                                channel,
+                                payload,
+                            });
                         }
                         BackendMessage::EmptyQueryResponse => continue,
                         BackendMessage::ReadyForQuery(_) => {
@@ -120,7 +128,10 @@ impl PgConnection {
 
             if got_ready {
                 // No timeout — LISTEN connections idle for hours, that's fine
-                let n = self.stream.read_buf(&mut self.buffer).await
+                let n = self
+                    .stream
+                    .read_buf(&mut self.buffer)
+                    .await
                     .map_err(|e| super::PgError::Connection(format!("Read error: {e}")))?;
                 if n == 0 {
                     return Err(super::PgError::Connection("Connection closed".to_string()));

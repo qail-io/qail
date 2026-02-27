@@ -3,8 +3,8 @@
 //! Prerequisites: Run seed_qdrant.py first!
 //! Run: cargo run --example batch_benchmark --release
 
-use std::time::Instant;
 use qail_qdrant::QdrantDriver;
+use std::time::Instant;
 
 const COLLECTION_NAME: &str = "benchmark_collection";
 const VECTOR_DIM: usize = 1536;
@@ -17,7 +17,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║     Batch Benchmark: Sequential vs HTTP/2 Pipelining        ║");
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
-    println!("⚠️  Assumes '{}' is seeded (run seed_qdrant.py)\n", COLLECTION_NAME);
+    println!(
+        "⚠️  Assumes '{}' is seeded (run seed_qdrant.py)\n",
+        COLLECTION_NAME
+    );
 
     // Generate query vectors
     println!("📊 Generating {} query vectors...", BATCH_SIZE);
@@ -27,11 +30,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vector: Vec<f32> = (0..VECTOR_DIM)
                 .map(|j| {
                     let seed = (base_idx * 31 + j * 17) as f32;
-                    let base = seed.sin() * 0.5 + (seed / 100.0).cos() * 0.3 + (seed / 1000.0).sin() * 0.2;
+                    let base =
+                        seed.sin() * 0.5 + (seed / 100.0).cos() * 0.3 + (seed / 1000.0).sin() * 0.2;
                     base + ((i + j) as f32 / 10000.0).sin() * 0.01
                 })
                 .collect();
-            
+
             let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
             if norm > 0.0 {
                 vector.iter_mut().for_each(|x| *x /= norm);
@@ -58,9 +62,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sequential_results += results.len();
     }
     let sequential_duration = sequential_start.elapsed();
-    
+
     println!("   Total time:    {:?}", sequential_duration);
-    println!("   Per query:     {:?}", sequential_duration / BATCH_SIZE as u32);
+    println!(
+        "   Per query:     {:?}",
+        sequential_duration / BATCH_SIZE as u32
+    );
     println!("   Total results: {}\n", sequential_results);
 
     // ═══════════════════════════════════════════════════════════════
@@ -71,11 +78,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("───────────────────────────────────────────────────────────────");
 
     let batch_start = Instant::now();
-    let batch_results = driver.search_batch(COLLECTION_NAME, &query_vectors, 10, None).await?;
+    let batch_results = driver
+        .search_batch(COLLECTION_NAME, &query_vectors, 10, None)
+        .await?;
     let batch_duration = batch_start.elapsed();
-    
+
     let batch_total_results: usize = batch_results.iter().map(|r| r.len()).sum();
-    
+
     println!("   Total time:    {:?}", batch_duration);
     println!("   Per query:     {:?}", batch_duration / BATCH_SIZE as u32);
     println!("   Total results: {}\n", batch_total_results);
@@ -86,9 +95,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("═══════════════════════════════════════════════════════════════");
     println!("📈 RESULTS");
     println!("───────────────────────────────────────────────────────────────");
-    
+
     let speedup = sequential_duration.as_secs_f64() / batch_duration.as_secs_f64();
-    
+
     println!("   Sequential:    {:?} total", sequential_duration);
     println!("   HTTP/2 batch:  {:?} total", batch_duration);
     println!("   ────────────────────────────");

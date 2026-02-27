@@ -13,9 +13,9 @@ use qail_core::ast::Qail;
 use qail_core::rls::RlsContext;
 use qail_pg::PgDriver;
 
-/// Known test operator: Operator A (has 11 vessels in local DB)
+/// Test operator: Tenant A
 const OPERATOR_A_ID: &str = "00000000-0000-0000-0000-000000000001";
-/// Known test operator: Operator B
+/// Test operator: Tenant B
 const OPERATOR_B_ID: &str = "00000000-0000-0000-0000-000000000002";
 
 async fn connect() -> PgDriver {
@@ -36,7 +36,11 @@ async fn test_no_context_sees_nothing() {
         .await
         .unwrap();
 
-    assert_eq!(vessels.len(), 0, "Without RLS context, should see 0 vessels");
+    assert_eq!(
+        vessels.len(),
+        0,
+        "Without RLS context, should see 0 vessels"
+    );
 }
 
 #[tokio::test]
@@ -50,13 +54,13 @@ async fn test_operator_isolation() {
         .await
         .unwrap();
 
-    let ekajaya_vessels = driver
+    let tenant_a_vessels = driver
         .fetch_all(&Qail::get("vessels").columns(["id", "name"]))
         .await
         .unwrap();
 
     assert!(
-        ekajaya_vessels.len() > 0,
+        !tenant_a_vessels.is_empty(),
         "Operator A should have vessels visible"
     );
 
@@ -66,20 +70,20 @@ async fn test_operator_isolation() {
         .await
         .unwrap();
 
-    let maruti_vessels = driver
+    let tenant_b_vessels = driver
         .fetch_all(&Qail::get("vessels").columns(["id", "name"]))
         .await
         .unwrap();
 
     assert!(
-        maruti_vessels.len() > 0,
+        !tenant_b_vessels.is_empty(),
         "Operator B should have vessels visible"
     );
 
     // Different operators see different data
     assert_ne!(
-        ekajaya_vessels.len(),
-        maruti_vessels.len(),
+        tenant_a_vessels.len(),
+        tenant_b_vessels.len(),
         "Different operators should see different vessel counts"
     );
 }
@@ -100,7 +104,7 @@ async fn test_clear_context_revokes_access() {
         .await
         .unwrap();
 
-    assert!(with_context.len() > 0, "Should see vessels with context");
+    assert!(!with_context.is_empty(), "Should see vessels with context");
 
     // Clear context → see nothing
     driver.clear_rls_context().await.unwrap();
@@ -124,7 +128,9 @@ async fn test_super_admin_bypass() {
 
     // Super admin should see ALL vessels across all operators
     driver
-        .set_rls_context(RlsContext::super_admin(qail_core::rls::SuperAdminToken::for_system_process("test_super_admin")))
+        .set_rls_context(RlsContext::super_admin(
+            qail_core::rls::SuperAdminToken::for_system_process("test_super_admin"),
+        ))
         .await
         .unwrap();
 
@@ -190,10 +196,7 @@ async fn test_rls_across_multiple_tables() {
         .unwrap();
 
     // Both should return data (Operator A has vessels and odysseys)
-    assert!(
-        vessels.len() > 0,
-        "Operator A should have vessels"
-    );
+    assert!(!vessels.is_empty(), "Operator A should have vessels");
 
     // Odysseys may or may not have data for this operator,
     // but the query should succeed (no permission error)
@@ -220,11 +223,11 @@ async fn test_pool_connection_recycling_isolation() {
         .await
         .unwrap();
 
-    let ekajaya_vessels = driver
+    let tenant_a_vessels = driver
         .fetch_all(&Qail::get("vessels").columns(["id", "name"]))
         .await
         .unwrap();
-    let a_count = ekajaya_vessels.len();
+    let a_count = tenant_a_vessels.len();
     assert!(a_count > 0, "Tenant A should see vessels");
 
     // ── Step 2: Clear context (simulates connection recycling) ──
@@ -236,7 +239,11 @@ async fn test_pool_connection_recycling_isolation() {
         .fetch_all(&Qail::get("vessels").columns(["id"]))
         .await
         .unwrap();
-    assert_eq!(no_context.len(), 0, "After clearing context, should see 0 vessels");
+    assert_eq!(
+        no_context.len(),
+        0,
+        "After clearing context, should see 0 vessels"
+    );
 
     // ── Step 3: Tenant B context on SAME connection ──
     driver
@@ -244,11 +251,11 @@ async fn test_pool_connection_recycling_isolation() {
         .await
         .unwrap();
 
-    let maruti_vessels = driver
+    let tenant_b_vessels = driver
         .fetch_all(&Qail::get("vessels").columns(["id", "name"]))
         .await
         .unwrap();
-    let b_count = maruti_vessels.len();
+    let b_count = tenant_b_vessels.len();
     assert!(b_count > 0, "Tenant B should see vessels");
 
     // ── Step 4: Verify complete isolation ──

@@ -43,8 +43,8 @@
 //! qail exec -f batch.qail --url postgres://... --tx
 //! ```
 
-use anyhow::Result;
 use crate::colors::*;
+use anyhow::Result;
 use qail_core::prelude::*;
 use qail_core::transpiler::ToSql;
 use qail_pg::PgDriver;
@@ -71,16 +71,17 @@ impl SshTunnel {
     /// Forwards local_port -> remote_host:remote_port via ssh_host
     async fn new(ssh_host: &str, remote_host: &str, remote_port: u16) -> Result<Self> {
         use std::process::{Command, Stdio};
-        
+
         // Find available local port
         let local_port = Self::find_available_port()?;
-        
+
         // Construct SSH tunnel command
         // ssh -N -L local_port:remote_host:remote_port ssh_host
         let child = Command::new("ssh")
             .args([
-                "-N",  // No remote command
-                "-L", &format!("{}:{}:{}", local_port, remote_host, remote_port),
+                "-N", // No remote command
+                "-L",
+                &format!("{}:{}:{}", local_port, remote_host, remote_port),
                 ssh_host,
             ])
             .stdin(Stdio::null())
@@ -88,20 +89,20 @@ impl SshTunnel {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn SSH tunnel: {}", e))?;
-        
+
         // Wait a moment for tunnel to establish
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        
+
         Ok(Self { child, local_port })
     }
-    
+
     fn find_available_port() -> Result<u16> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         drop(listener);
         Ok(port)
     }
-    
+
     fn local_port(&self) -> u16 {
         self.local_port
     }
@@ -120,7 +121,7 @@ fn split_qail_statements(content: &str) -> Vec<String> {
     let mut in_triple_single = false;
     let mut in_triple_double = false;
     let mut chars = content.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         // Check for triple quotes
         if c == '\'' && !in_triple_double {
@@ -136,9 +137,7 @@ fn split_qail_statements(content: &str) -> Vec<String> {
                     continue;
                 }
             }
-        } else if c == '"' && !in_triple_single
-            && chars.peek() == Some(&'"')
-        {
+        } else if c == '"' && !in_triple_single && chars.peek() == Some(&'"') {
             chars.next();
             if chars.peek() == Some(&'"') {
                 chars.next();
@@ -150,7 +149,7 @@ fn split_qail_statements(content: &str) -> Vec<String> {
                 continue;
             }
         }
-        
+
         // Handle newlines - statement boundary if not in multi-line string
         if c == '\n' && !in_triple_single && !in_triple_double {
             let trimmed = current.trim();
@@ -160,16 +159,16 @@ fn split_qail_statements(content: &str) -> Vec<String> {
             current.clear();
             continue;
         }
-        
+
         current.push(c);
     }
-    
+
     // Don't forget the last statement
     let trimmed = current.trim();
     if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("--") {
         statements.push(current.trim().to_string());
     }
-    
+
     statements
 }
 
@@ -187,7 +186,7 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
 
     // Split into statements, handling multi-line strings
     let statements_str = split_qail_statements(&content);
-    
+
     if statements_str.is_empty() {
         println!("{}", "No QAIL statements to execute.".yellow());
         return Ok(());
@@ -227,21 +226,30 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
     // Set up SSH tunnel if requested
     let _tunnel: Option<SshTunnel>;
     let connect_url = if let Some(ssh_host) = &config.ssh {
-        println!("{} Opening SSH tunnel to {}...", "🔐".cyan(), ssh_host.green());
-        
+        println!(
+            "{} Opening SSH tunnel to {}...",
+            "🔐".cyan(),
+            ssh_host.green()
+        );
+
         // Parse the URL to extract host and port
         let (_scheme, remote_host, remote_port, _path) = crate::util::parse_url_parts(&db_url)?;
-        
+
         // Create tunnel
         let tunnel = SshTunnel::new(ssh_host, &remote_host, remote_port).await?;
         let local_port = tunnel.local_port();
-        
+
         // Rewrite URL to use tunnel
         let tunneled_url = crate::util::rewrite_url_host(&db_url, "127.0.0.1", local_port)?;
-        
-        println!("{} Tunnel established: localhost:{} -> {}:{}", 
-            "✓".green(), local_port, remote_host, remote_port);
-        
+
+        println!(
+            "{} Tunnel established: localhost:{} -> {}:{}",
+            "✓".green(),
+            local_port,
+            remote_host,
+            remote_port
+        );
+
         _tunnel = Some(tunnel);
         tunneled_url
     } else {
@@ -253,7 +261,8 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
     if !config.json {
         println!("{} Connecting to database...", "🔌".cyan());
     }
-    let mut driver = PgDriver::connect_url(&connect_url).await
+    let mut driver = PgDriver::connect_url(&connect_url)
+        .await
         .map_err(|e| anyhow::anyhow!("Connection failed: {}", e))?;
 
     // Execute statements using type-safe AST
@@ -262,7 +271,10 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
 
     if config.tx {
         println!("{} Starting transaction...", "🔒".cyan());
-        driver.begin().await.map_err(|e| anyhow::anyhow!("BEGIN failed: {}", e))?;
+        driver
+            .begin()
+            .await
+            .map_err(|e| anyhow::anyhow!("BEGIN failed: {}", e))?;
     }
 
     for (i, ast) in statements.iter().enumerate() {
@@ -279,11 +291,20 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
                         // JSON output mode — clean, pipe-friendly
                         let mut json_rows: Vec<String> = Vec::new();
                         for row in &result.rows {
-                            let fields: Vec<String> = result.columns.iter().enumerate()
+                            let fields: Vec<String> = result
+                                .columns
+                                .iter()
+                                .enumerate()
                                 .map(|(j, col)| {
-                                    let val = row.get(j)
+                                    let val = row
+                                        .get(j)
                                         .and_then(|v| v.as_ref())
-                                        .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
+                                        .map(|s| {
+                                            format!(
+                                                "\"{}\"",
+                                                s.replace('\\', "\\\\").replace('"', "\\\"")
+                                            )
+                                        })
                                         .unwrap_or_else(|| "null".to_string());
                                     format!("\"{}\":{}", col, val)
                                 })
@@ -293,57 +314,80 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
                         println!("[{}]", json_rows.join(","));
                         success_count += 1;
                     } else {
-                    println!("{}", "✓".green());
-                    success_count += 1;
+                        println!("{}", "✓".green());
+                        success_count += 1;
 
-                    if result.columns.is_empty() {
-                        println!("  {}", "(no columns)".dimmed());
-                    } else {
-                        // Calculate column widths
-                        let mut widths: Vec<usize> = result.columns.iter().map(|c| c.len()).collect();
-                        for row in &result.rows {
-                            for (j, col) in row.iter().enumerate() {
-                                if j < widths.len() {
-                                    let len = col.as_ref().map(|s| s.len()).unwrap_or(1); // "∅"
-                                    if len > widths[j] {
-                                        widths[j] = len;
+                        if result.columns.is_empty() {
+                            println!("  {}", "(no columns)".dimmed());
+                        } else {
+                            // Calculate column widths
+                            let mut widths: Vec<usize> =
+                                result.columns.iter().map(|c| c.len()).collect();
+                            for row in &result.rows {
+                                for (j, col) in row.iter().enumerate() {
+                                    if j < widths.len() {
+                                        let len = col.as_ref().map(|s| s.len()).unwrap_or(1); // "∅"
+                                        if len > widths[j] {
+                                            widths[j] = len;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        // Cap column widths at 40 chars for readability
-                        for w in widths.iter_mut() {
-                            if *w > 40 { *w = 40; }
-                        }
+                            // Cap column widths at 40 chars for readability
+                            for w in widths.iter_mut() {
+                                if *w > 40 {
+                                    *w = 40;
+                                }
+                            }
 
-                        // Print header
-                        println!();
-                        let header: Vec<String> = result.columns.iter().enumerate()
-                            .map(|(j, c)| format!("{:<width$}", c, width = widths[j]))
-                            .collect();
-                        println!("  {}", header.join(" │ ").cyan().bold());
-
-                        // Print separator
-                        let sep: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
-                        println!("  {}", sep.join("─┼─").dimmed());
-
-                        // Print rows
-                        for row in &result.rows {
-                            let cells: Vec<String> = row.iter().enumerate()
-                                .map(|(j, col)| {
-                                    let val = col.as_ref()
-                                        .map(|s| if s.len() > 40 { format!("{}…", &s[..39]) } else { s.clone() })
-                                        .unwrap_or_else(|| "∅".to_string());
-                                    let w = if j < widths.len() { widths[j] } else { val.len() };
-                                    format!("{:<width$}", val, width = w)
-                                })
+                            // Print header
+                            println!();
+                            let header: Vec<String> = result
+                                .columns
+                                .iter()
+                                .enumerate()
+                                .map(|(j, c)| format!("{:<width$}", c, width = widths[j]))
                                 .collect();
-                            println!("  {}", cells.join(" │ "));
-                        }
+                            println!("  {}", header.join(" │ ").cyan().bold());
 
-                        // Row count
-                        println!("\n  {} {} row(s)", "→".dimmed(), result.rows.len().to_string().green());
-                    }
+                            // Print separator
+                            let sep: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+                            println!("  {}", sep.join("─┼─").dimmed());
+
+                            // Print rows
+                            for row in &result.rows {
+                                let cells: Vec<String> = row
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(j, col)| {
+                                        let val = col
+                                            .as_ref()
+                                            .map(|s| {
+                                                if s.len() > 40 {
+                                                    format!("{}…", &s[..39])
+                                                } else {
+                                                    s.clone()
+                                                }
+                                            })
+                                            .unwrap_or_else(|| "∅".to_string());
+                                        let w = if j < widths.len() {
+                                            widths[j]
+                                        } else {
+                                            val.len()
+                                        };
+                                        format!("{:<width$}", val, width = w)
+                                    })
+                                    .collect();
+                                println!("  {}", cells.join(" │ "));
+                            }
+
+                            // Row count
+                            println!(
+                                "\n  {} {} row(s)",
+                                "→".dimmed(),
+                                result.rows.len().to_string().green()
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -380,7 +424,10 @@ pub async fn run_exec(config: ExecConfig) -> Result<()> {
 
     if config.tx {
         println!("{} Committing transaction...", "🔓".cyan());
-        driver.commit().await.map_err(|e| anyhow::anyhow!("COMMIT failed: {}", e))?;
+        driver
+            .commit()
+            .await
+            .map_err(|e| anyhow::anyhow!("COMMIT failed: {}", e))?;
     }
 
     if !config.json {

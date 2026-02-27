@@ -6,8 +6,8 @@ pub mod ast_encoder;
 pub mod auth;
 pub mod copy_encoder;
 pub mod encoder;
-pub mod types;
 pub mod error;
+pub mod types;
 pub mod wire;
 
 pub use error::EncodeError;

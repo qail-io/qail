@@ -1,9 +1,9 @@
 //! Code Action Handler - SQL to QAIL Migration
 
+use qail_core::analyzer::detect_raw_sql;
 use std::collections::HashMap;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use qail_core::analyzer::detect_raw_sql;
 
 use crate::server::QailLanguageServer;
 
@@ -11,10 +11,18 @@ use crate::server::QailLanguageServer;
 fn detect_fetch_method(lines: &[&str], start: usize, end: usize) -> &'static str {
     for i in start..=end.min(lines.len().saturating_sub(1)) {
         if let Some(line) = lines.get(i) {
-            if line.contains(".fetch_optional") { return "fetch_optional"; }
-            if line.contains(".fetch_one") { return "fetch_one"; }
-            if line.contains(".fetch_all") { return "fetch_all"; }
-            if line.contains(".execute") { return "execute"; }
+            if line.contains(".fetch_optional") {
+                return "fetch_optional";
+            }
+            if line.contains(".fetch_one") {
+                return "fetch_one";
+            }
+            if line.contains(".fetch_all") {
+                return "fetch_all";
+            }
+            if line.contains(".execute") {
+                return "execute";
+            }
         }
     }
     "fetch_all"
@@ -72,7 +80,7 @@ fn find_block_range(lines: &[&str], sql_start: usize, sql_end: usize) -> (usize,
     let mut block_start = sql_start;
     for i in (0..=sql_start).rev() {
         if let Some(line) = lines.get(i)
-            && line.trim_start().starts_with("let ") 
+            && line.trim_start().starts_with("let ")
             && (line.contains("= r\"") || line.contains("= \"") || line.contains("query"))
         {
             block_start = i;
@@ -109,7 +117,11 @@ fn apply_indentation(code: &str, target_indent: usize) -> String {
             } else {
                 let line_indent = line.len() - line.trim_start().len();
                 let relative = line_indent.saturating_sub(min_indent);
-                format!("{}{}", " ".repeat(target_indent + relative), line.trim_start())
+                format!(
+                    "{}{}",
+                    " ".repeat(target_indent + relative),
+                    line.trim_start()
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -134,11 +146,11 @@ fn transform_qail_code(
     let columns: Vec<String> = code
         .match_indices(".set_value(\"")
         .filter_map(|(idx, _)| {
-            let rest = &code[idx + 12..];  // Skip `.set_value("`
+            let rest = &code[idx + 12..]; // Skip `.set_value("`
             rest.find('"').map(|end| rest[..end].to_string())
         })
         .collect();
-    
+
     // Replace each {col}_value placeholder with corresponding bind value
     for (i, col) in columns.iter().enumerate() {
         if let Some(bind) = binds.get(i) {
@@ -237,25 +249,36 @@ impl QailLanguageServer {
                 );
 
                 // Apply indentation
-                let target_indent = lines.get(block_start)
+                let target_indent = lines
+                    .get(block_start)
                     .map(|l| l.len() - l.trim_start().len())
                     .unwrap_or(0);
                 let indented_code = apply_indentation(&qail_code, target_indent);
 
-                let end_col = lines.get(block_end)
+                let end_col = lines
+                    .get(block_end)
                     .map(|l| l.find(';').map(|p| p + 1).unwrap_or(l.len()))
                     .unwrap_or(0);
 
                 let range = Range {
-                    start: Position { line: block_start as u32, character: 0 },
-                    end: Position { line: block_end as u32, character: end_col as u32 },
+                    start: Position {
+                        line: block_start as u32,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: block_end as u32,
+                        character: end_col as u32,
+                    },
                 };
 
                 let mut changes = HashMap::new();
-                changes.insert(uri.clone(), vec![TextEdit {
-                    range,
-                    new_text: indented_code,
-                }]);
+                changes.insert(
+                    uri.clone(),
+                    vec![TextEdit {
+                        range,
+                        new_text: indented_code,
+                    }],
+                );
 
                 actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                     title: format!("🚀 Migrate {} to QAIL", sql_match.sql_type),

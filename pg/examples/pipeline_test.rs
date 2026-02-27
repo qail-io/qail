@@ -26,27 +26,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     // Create test table with proper types for all operators
-    driver.execute_raw("DROP TABLE IF EXISTS qail_test CASCADE").await.ok();
-    driver.execute_raw(r#"
+    driver
+        .execute_raw("DROP TABLE IF EXISTS qail_test CASCADE")
+        .await
+        .ok();
+    driver
+        .execute_raw(
+            r#"
         CREATE TABLE qail_test (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             tags INTEGER[] NOT NULL DEFAULT '{}',
             data JSONB NOT NULL DEFAULT '{}'
         )
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     // Seed test data
-    driver.execute_raw(r#"
+    driver
+        .execute_raw(
+            r#"
         INSERT INTO qail_test (name, tags, data) VALUES
         ('Harbor 1', ARRAY[1, 2, 3], '{"key": "value1", "nested": {"a": 1}}'),
         ('Harbor 2', ARRAY[2, 3, 4], '{"key": "value2", "nested": {"b": 2}}'),
         ('Harbor 3', ARRAY[3, 4, 5], '{"key": "value3", "nested": {"c": 3}}'),
         ('Port Alpha', ARRAY[10, 20], '{"type": "port", "active": true}'),
         ('Port Beta', ARRAY[20, 30], '{"type": "port", "active": false}')
-    "#).await?;
+    "#,
+        )
+        .await?;
     println!("✅ Created qail_test table with JSONB and array columns\n");
-    
+
     let mut passed = 0;
     let mut failed = 0;
 
@@ -57,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ($name:expr, $query:expr, $expected_sql:expr) => {
             let sql = $query.to_sql();
             let sql_ok = sql.contains($expected_sql);
-            
+
             if !sql_ok {
                 failed += 1;
                 println!("❌ {} - SQL mismatch", $name);
@@ -85,33 +96,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("FLUENT METHODS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("upper()", 
-        Qail::get("harbors").column_expr(col("name").upper().with_alias("u")).limit(1),
-        "UPPER(name)");
+    test_sql!(
+        "upper()",
+        Qail::get("harbors")
+            .column_expr(col("name").upper().with_alias("u"))
+            .limit(1),
+        "UPPER(name)"
+    );
 
-    test_sql!("lower()", 
-        Qail::get("harbors").column_expr(col("name").lower().with_alias("l")).limit(1),
-        "LOWER(name)");
+    test_sql!(
+        "lower()",
+        Qail::get("harbors")
+            .column_expr(col("name").lower().with_alias("l"))
+            .limit(1),
+        "LOWER(name)"
+    );
 
-    test_sql!("trim()", 
-        Qail::get("harbors").column_expr(col("name").trim().with_alias("t")).limit(1),
-        "TRIM(name)");
+    test_sql!(
+        "trim()",
+        Qail::get("harbors")
+            .column_expr(col("name").trim().with_alias("t"))
+            .limit(1),
+        "TRIM(name)"
+    );
 
-    test_sql!("length()", 
-        Qail::get("harbors").column_expr(col("name").length().with_alias("len")).limit(1),
-        "LENGTH(name)");
+    test_sql!(
+        "length()",
+        Qail::get("harbors")
+            .column_expr(col("name").length().with_alias("len"))
+            .limit(1),
+        "LENGTH(name)"
+    );
 
-    test_sql!("abs()", 
-        Qail::get("harbors").column_expr(col("id").abs().with_alias("a")).limit(1),
-        "ABS(id)");
+    test_sql!(
+        "abs()",
+        Qail::get("harbors")
+            .column_expr(col("id").abs().with_alias("a"))
+            .limit(1),
+        "ABS(id)"
+    );
 
-    test_sql!("cast()", 
-        Qail::get("harbors").column_expr(col("id").cast("text").with_alias("c")).limit(1),
-        "id::text");
+    test_sql!(
+        "cast()",
+        Qail::get("harbors")
+            .column_expr(col("id").cast("text").with_alias("c"))
+            .limit(1),
+        "id::text"
+    );
 
-    test_sql!("or_default() / COALESCE", 
-        Qail::get("harbors").column_expr(col("name").or_default(text("N/A")).with_alias("d")).limit(1),
-        "COALESCE(name");
+    test_sql!(
+        "or_default() / COALESCE",
+        Qail::get("harbors")
+            .column_expr(col("name").or_default(text("N/A")).with_alias("d"))
+            .limit(1),
+        "COALESCE(name"
+    );
 
     // ========================================================================
     // COMPARISON CONDITIONS
@@ -120,29 +159,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("COMPARISON CONDITIONS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("eq()", 
+    test_sql!(
+        "eq()",
         Qail::get("harbors").column("id").filter_cond(eq("id", 1)),
-        "id = 1");
+        "id = 1"
+    );
 
-    test_sql!("ne()", 
-        Qail::get("harbors").column("id").filter_cond(ne("id", 1)).limit(3),
-        "id != 1");
+    test_sql!(
+        "ne()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(ne("id", 1))
+            .limit(3),
+        "id != 1"
+    );
 
-    test_sql!("gt()", 
-        Qail::get("harbors").column("id").filter_cond(gt("id", 5)).limit(3),
-        "id > 5");
+    test_sql!(
+        "gt()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(gt("id", 5))
+            .limit(3),
+        "id > 5"
+    );
 
-    test_sql!("gte()", 
-        Qail::get("harbors").column("id").filter_cond(gte("id", 5)).limit(3),
-        "id >= 5");
+    test_sql!(
+        "gte()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(gte("id", 5))
+            .limit(3),
+        "id >= 5"
+    );
 
-    test_sql!("lt()", 
-        Qail::get("harbors").column("id").filter_cond(lt("id", 5)).limit(3),
-        "id < 5");
+    test_sql!(
+        "lt()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(lt("id", 5))
+            .limit(3),
+        "id < 5"
+    );
 
-    test_sql!("lte()", 
-        Qail::get("harbors").column("id").filter_cond(lte("id", 5)).limit(3),
-        "id <= 5");
+    test_sql!(
+        "lte()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(lte("id", 5))
+            .limit(3),
+        "id <= 5"
+    );
 
     // ========================================================================
     // PATTERN MATCHING
@@ -151,25 +217,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("PATTERN MATCHING");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("like()", 
-        Qail::get("harbors").column("name").filter_cond(like("name", "Harbor%")).limit(3),
-        "LIKE");
+    test_sql!(
+        "like()",
+        Qail::get("harbors")
+            .column("name")
+            .filter_cond(like("name", "Harbor%"))
+            .limit(3),
+        "LIKE"
+    );
 
-    test_sql!("not_like()", 
-        Qail::get("harbors").column("name").filter_cond(not_like("name", "Harbor 1%")).limit(3),
-        "NOT LIKE");
+    test_sql!(
+        "not_like()",
+        Qail::get("harbors")
+            .column("name")
+            .filter_cond(not_like("name", "Harbor 1%"))
+            .limit(3),
+        "NOT LIKE"
+    );
 
-    test_sql!("ilike()", 
-        Qail::get("harbors").column("name").filter_cond(ilike("name", "harbor%")).limit(3),
-        "ILIKE");
+    test_sql!(
+        "ilike()",
+        Qail::get("harbors")
+            .column("name")
+            .filter_cond(ilike("name", "harbor%"))
+            .limit(3),
+        "ILIKE"
+    );
 
-    test_sql!("regex()", 
-        Qail::get("harbors").column("name").filter_cond(regex("name", "^Harbor [0-9]+$")).limit(3),
-        "~");
+    test_sql!(
+        "regex()",
+        Qail::get("harbors")
+            .column("name")
+            .filter_cond(regex("name", "^Harbor [0-9]+$"))
+            .limit(3),
+        "~"
+    );
 
-    test_sql!("regex_i()", 
-        Qail::get("harbors").column("name").filter_cond(regex_i("name", "^harbor")).limit(3),
-        "~*");
+    test_sql!(
+        "regex_i()",
+        Qail::get("harbors")
+            .column("name")
+            .filter_cond(regex_i("name", "^harbor"))
+            .limit(3),
+        "~*"
+    );
 
     // ========================================================================
     // RANGE CONDITIONS
@@ -178,13 +269,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RANGE CONDITIONS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("between()", 
-        Qail::get("harbors").column("id").filter_cond(between("id", 2, 4)).order_by("id", SortOrder::Asc),
-        "BETWEEN");
+    test_sql!(
+        "between()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(between("id", 2, 4))
+            .order_by("id", SortOrder::Asc),
+        "BETWEEN"
+    );
 
-    test_sql!("not_between()", 
-        Qail::get("harbors").column("id").filter_cond(not_between("id", 2, 4)).limit(5),
-        "NOT BETWEEN");
+    test_sql!(
+        "not_between()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(not_between("id", 2, 4))
+            .limit(5),
+        "NOT BETWEEN"
+    );
 
     // ========================================================================
     // SET CONDITIONS
@@ -193,13 +294,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("SET CONDITIONS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("is_in()", 
-        Qail::get("harbors").column("id").filter_cond(is_in("id", [1, 3, 5])).order_by("id", SortOrder::Asc),
-        "ANY");  // Transpiler uses = ANY() syntax
+    test_sql!(
+        "is_in()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(is_in("id", [1, 3, 5]))
+            .order_by("id", SortOrder::Asc),
+        "ANY"
+    ); // Transpiler uses = ANY() syntax
 
-    test_sql!("not_in()", 
-        Qail::get("harbors").column("id").filter_cond(not_in("id", [1, 2, 3])).limit(3),
-        "ALL");  // Transpiler uses != ALL() syntax
+    test_sql!(
+        "not_in()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(not_in("id", [1, 2, 3]))
+            .limit(3),
+        "ALL"
+    ); // Transpiler uses != ALL() syntax
 
     // ========================================================================
     // NULL CONDITIONS
@@ -208,13 +319,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("NULL CONDITIONS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("is_null()", 
-        Qail::get("harbors").column("id").filter_cond(is_null("name")).limit(3),
-        "IS NULL");
+    test_sql!(
+        "is_null()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(is_null("name"))
+            .limit(3),
+        "IS NULL"
+    );
 
-    test_sql!("is_not_null()", 
-        Qail::get("harbors").column("id").filter_cond(is_not_null("name")).limit(3),
-        "IS NOT NULL");
+    test_sql!(
+        "is_not_null()",
+        Qail::get("harbors")
+            .column("id")
+            .filter_cond(is_not_null("name"))
+            .limit(3),
+        "IS NOT NULL"
+    );
 
     // ========================================================================
     // AGGREGATE FUNCTIONS
@@ -223,41 +344,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("AGGREGATE FUNCTIONS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("count()", 
+    test_sql!(
+        "count()",
         Qail::get("harbors").column_expr(count().alias("cnt")),
-        "COUNT(*)");
+        "COUNT(*)"
+    );
 
-    test_sql!("sum()", 
+    test_sql!(
+        "sum()",
         Qail::get("harbors").column_expr(sum("id").alias("total")),
-        "SUM(id)");
+        "SUM(id)"
+    );
 
-    test_sql!("avg()", 
+    test_sql!(
+        "avg()",
         Qail::get("harbors").column_expr(avg("id").alias("average")),
-        "AVG(id)");
+        "AVG(id)"
+    );
 
-    test_sql!("min()", 
+    test_sql!(
+        "min()",
         Qail::get("harbors").column_expr(min("id").alias("minimum")),
-        "MIN(id)");
+        "MIN(id)"
+    );
 
-    test_sql!("max()", 
+    test_sql!(
+        "max()",
         Qail::get("harbors").column_expr(max("id").alias("maximum")),
-        "MAX(id)");
+        "MAX(id)"
+    );
 
-    test_sql!("count_distinct()", 
+    test_sql!(
+        "count_distinct()",
         Qail::get("harbors").column_expr(count_distinct("name").alias("d")),
-        "COUNT(DISTINCT name)");
+        "COUNT(DISTINCT name)"
+    );
 
-    test_sql!("array_agg()", 
-        Qail::get("harbors").column_expr(array_agg("name").alias("names")).filter_cond(lte("id", 3)),
-        "ARRAY_AGG(name)");
+    test_sql!(
+        "array_agg()",
+        Qail::get("harbors")
+            .column_expr(array_agg("name").alias("names"))
+            .filter_cond(lte("id", 3)),
+        "ARRAY_AGG(name)"
+    );
 
-    test_sql!("string_agg()", 
-        Qail::get("harbors").column_expr(string_agg(col("name"), ", ").alias("all")).filter_cond(lte("id", 3)),
-        "STRING_AGG(name");
+    test_sql!(
+        "string_agg()",
+        Qail::get("harbors")
+            .column_expr(string_agg(col("name"), ", ").alias("all"))
+            .filter_cond(lte("id", 3)),
+        "STRING_AGG(name"
+    );
 
-    test_sql!("json_agg()", 
-        Qail::get("harbors").column_expr(json_agg("name").alias("j")).filter_cond(lte("id", 3)),
-        "JSON_AGG(name)");
+    test_sql!(
+        "json_agg()",
+        Qail::get("harbors")
+            .column_expr(json_agg("name").alias("j"))
+            .filter_cond(lte("id", 3)),
+        "JSON_AGG(name)"
+    );
 
     // ========================================================================
     // FUNCTION BUILDERS
@@ -266,13 +411,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("FUNCTION BUILDERS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("coalesce()", 
-        Qail::get("harbors").column_expr(coalesce([col("name"), text("N/A")]).alias("c")).limit(1),
-        "COALESCE(name");
+    test_sql!(
+        "coalesce()",
+        Qail::get("harbors")
+            .column_expr(coalesce([col("name"), text("N/A")]).alias("c"))
+            .limit(1),
+        "COALESCE(name"
+    );
 
-    test_sql!("concat()", 
-        Qail::get("harbors").column_expr(concat([col("name"), text("-"), col("id").cast("text")]).alias("c")).limit(1),
-        "||");
+    test_sql!(
+        "concat()",
+        Qail::get("harbors")
+            .column_expr(concat([col("name"), text("-"), col("id").cast("text")]).alias("c"))
+            .limit(1),
+        "||"
+    );
 
     // ========================================================================
     // TIME FUNCTIONS
@@ -281,17 +434,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("TIME FUNCTIONS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("now()", 
-        Qail::get("harbors").column_expr(now().with_alias("t")).limit(1),
-        "NOW()");
+    test_sql!(
+        "now()",
+        Qail::get("harbors")
+            .column_expr(now().with_alias("t"))
+            .limit(1),
+        "NOW()"
+    );
 
-    test_sql!("now_minus()", 
-        Qail::get("harbors").column_expr(now_minus("1 hour").with_alias("t")).limit(1),
-        "NOW() - INTERVAL");
+    test_sql!(
+        "now_minus()",
+        Qail::get("harbors")
+            .column_expr(now_minus("1 hour").with_alias("t"))
+            .limit(1),
+        "NOW() - INTERVAL"
+    );
 
-    test_sql!("now_plus()", 
-        Qail::get("harbors").column_expr(now_plus("1 day").with_alias("t")).limit(1),
-        "NOW() + INTERVAL");
+    test_sql!(
+        "now_plus()",
+        Qail::get("harbors")
+            .column_expr(now_plus("1 day").with_alias("t"))
+            .limit(1),
+        "NOW() + INTERVAL"
+    );
 
     // ========================================================================
     // CASE EXPRESSIONS
@@ -300,12 +465,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("CASE EXPRESSIONS");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    test_sql!("case_when()", 
+    test_sql!(
+        "case_when()",
         Qail::get("harbors")
             .column("id")
-            .column_expr(case_when(gt("id", 5), text("big")).otherwise(text("small")).alias("size"))
+            .column_expr(
+                case_when(gt("id", 5), text("big"))
+                    .otherwise(text("small"))
+                    .alias("size")
+            )
             .limit(10),
-        "CASE WHEN");
+        "CASE WHEN"
+    );
 
     // ========================================================================
     // ADDITIONAL OPERATORS (Using qail_test with proper column types)
@@ -315,29 +486,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     // Test similar_to() with real DB execution (TEXT column)
-    test_sql!("similar_to()",
-        Qail::get("qail_test").column("name").filter_cond(similar_to("name", "Harbor%")).limit(3),
-        "SIMILAR TO");
+    test_sql!(
+        "similar_to()",
+        Qail::get("qail_test")
+            .column("name")
+            .filter_cond(similar_to("name", "Harbor%"))
+            .limit(3),
+        "SIMILAR TO"
+    );
 
     // Test contains() operator with array column (tags @> ARRAY[1])
-    test_sql!("contains() array",
-        Qail::get("qail_test").column("name").filter_cond(contains("tags", [1])),
-        "@>");
+    test_sql!(
+        "contains() array",
+        Qail::get("qail_test")
+            .column("name")
+            .filter_cond(contains("tags", [1])),
+        "@>"
+    );
 
     // Test overlaps() operator with array column (tags && ARRAY[1,2,3])
-    test_sql!("overlaps() array",
-        Qail::get("qail_test").column("name").filter_cond(overlaps("tags", [1, 2, 3])),
-        "&&");
+    test_sql!(
+        "overlaps() array",
+        Qail::get("qail_test")
+            .column("name")
+            .filter_cond(overlaps("tags", [1, 2, 3])),
+        "&&"
+    );
 
     // Test key_exists() with JSONB column (data ? 'key')
-    test_sql!("key_exists() jsonb",
-        Qail::get("qail_test").column("name").filter_cond(key_exists("data", "key")),
-        "?");
+    test_sql!(
+        "key_exists() jsonb",
+        Qail::get("qail_test")
+            .column("name")
+            .filter_cond(key_exists("data", "key")),
+        "?"
+    );
 
     // Test json() accessor with JSONB column (data->>'key')
-    test_sql!("json() accessor",
-        Qail::get("qail_test").column_expr(col("data").json("key").alias("k")).limit(3),
-        "->>'key'");
+    test_sql!(
+        "json() accessor",
+        Qail::get("qail_test")
+            .column_expr(col("data").json("key").alias("k"))
+            .limit(3),
+        "->>'key'"
+    );
 
     // ========================================================================
     // DML MUTATIONS (INSERT, UPDATE, DELETE)
@@ -356,8 +548,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test INSERT via AST - check SQL generation
     {
-        let q = Qail::add("qail_test")
-            .set_value("name", "AST Insert");
+        let q = Qail::add("qail_test").set_value("name", "AST Insert");
         let sql = q.to_sql();
         if sql.contains("INSERT INTO") && sql.contains("qail_test") {
             passed += 1;
@@ -393,8 +584,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test DELETE
     {
-        let q = Qail::del("qail_test")
-            .filter_cond(eq("name", "Updated Name"));
+        let q = Qail::del("qail_test").filter_cond(eq("name", "Updated Name"));
         let sql = q.to_sql();
         if sql.contains("DELETE FROM") {
             match driver.execute(&q).await {
@@ -422,7 +612,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test GROUP BY with COUNT(*) - SQL check only (execution has column qualification issue)
     {
-        let q = Qail::get("qail_test").columns(&["name"]).column_expr(count().alias("cnt")).group_by(&["name"]).limit(5);
+        let q = Qail::get("qail_test")
+            .columns(&["name"])
+            .column_expr(count().alias("cnt"))
+            .group_by(&["name"])
+            .limit(5);
         let sql = q.to_sql();
         if sql.contains("GROUP BY") && sql.contains("name") {
             passed += 1;
@@ -476,9 +670,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     // DISTINCT via distinct_on
-    test_sql!("DISTINCT ON",
-        Qail::get("harbors").distinct_on(&["name"]).column("name").limit(5),
-        "DISTINCT ON");
+    test_sql!(
+        "DISTINCT ON",
+        Qail::get("harbors")
+            .distinct_on(&["name"])
+            .column("name")
+            .limit(5),
+        "DISTINCT ON"
+    );
 
     // ========================================================================
     // JOINS
@@ -647,7 +846,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Passed: {}", passed);
     println!("❌ Failed: {}", failed);
     println!("📊 Total:  {}", passed + failed);
-    
+
     if failed == 0 {
         println!("\n🎉 ALL PIPELINE TESTS PASSED!");
         println!("   - Builder creates correct AST");

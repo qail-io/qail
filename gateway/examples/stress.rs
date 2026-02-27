@@ -21,8 +21,8 @@
 
 use hdrhistogram::Histogram;
 use reqwest::Client;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -62,17 +62,16 @@ impl Config {
 struct PhaseMetrics {
     histogram: Mutex<Histogram<u64>>,
     success: AtomicU64,
-    client_errors: AtomicU64,   // 4xx
-    server_errors: AtomicU64,   // 5xx
-    network_errors: AtomicU64,  // connection failures
+    client_errors: AtomicU64,  // 4xx
+    server_errors: AtomicU64,  // 5xx
+    network_errors: AtomicU64, // connection failures
 }
 
 impl PhaseMetrics {
     fn new() -> Self {
         Self {
             histogram: Mutex::new(
-                Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
-                    .expect("histogram init"),
+                Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("histogram init"),
             ),
             success: AtomicU64::new(0),
             client_errors: AtomicU64::new(0),
@@ -197,17 +196,18 @@ async fn run_phase<F, Fut>(
     let qps = total as f64 / wall_time.as_secs_f64();
 
     metrics.report(name).await;
-    println!("  Wall:     {:.2}s | {:.0} QPS", wall_time.as_secs_f64(), qps);
+    println!(
+        "  Wall:     {:.2}s | {:.0} QPS",
+        wall_time.as_secs_f64(),
+        qps
+    );
 }
 
 // ============================================================================
 // Request helpers
 // ============================================================================
 
-async fn do_request(
-    metrics: &Arc<PhaseMetrics>,
-    request: reqwest::RequestBuilder,
-) {
+async fn do_request(metrics: &Arc<PhaseMetrics>, request: reqwest::RequestBuilder) {
     let start = Instant::now();
     match request.send().await {
         Ok(resp) => {
@@ -299,7 +299,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &m,
             |client, base, metrics, i| async move {
                 // Round-robin across tables to test cache + pool behavior
-                let tables = ["harbors", "vessels", "odysseys", "operators", "destinations"];
+                let tables = [
+                    "harbors",
+                    "vessels",
+                    "odysseys",
+                    "operators",
+                    "destinations",
+                ];
                 let table = tables[(i as usize) % tables.len()];
                 let limit = (i % 10) + 1;
                 let req = client.get(format!("{}/api/{}?limit={}", base, table, limit));
@@ -330,9 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "slug": format!("stress-harbor-{}", i),
                     "is_active": false,
                 });
-                let req = client
-                    .post(format!("{}/api/harbors", base))
-                    .json(&body);
+                let req = client.post(format!("{}/api/harbors", base)).json(&body);
                 do_request(&metrics, req).await;
             },
         )
@@ -379,9 +383,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "slug": format!("mixed-harbor-{}", i),
                             "is_active": false,
                         });
-                        let req = client
-                            .post(format!("{}/api/harbors", base))
-                            .json(&body);
+                        let req = client.post(format!("{}/api/harbors", base)).json(&body);
                         do_request(&metrics, req).await;
                     }
                     // 10% operators
@@ -425,7 +427,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
         let rejected = m.client_errors.load(Ordering::Relaxed);
-        let total = m.success.load(Ordering::Relaxed) + rejected
+        let total = m.success.load(Ordering::Relaxed)
+            + rejected
             + m.server_errors.load(Ordering::Relaxed)
             + m.network_errors.load(Ordering::Relaxed);
         if total > 0 {

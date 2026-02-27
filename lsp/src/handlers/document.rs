@@ -1,7 +1,7 @@
 //! Document lifecycle handlers
 
-use tower_lsp::lsp_types::*;
 use crate::server::QailLanguageServer;
+use tower_lsp::lsp_types::*;
 
 impl QailLanguageServer {
     pub async fn handle_did_open(&self, params: DidOpenTextDocumentParams) {
@@ -14,7 +14,7 @@ impl QailLanguageServer {
             docs.insert(uri.clone(), text.clone());
         }
 
-        let diagnostics = self.get_diagnostics(&text);
+        let diagnostics = self.get_diagnostics(&text, &uri);
         self.client
             .publish_diagnostics(params.text_document.uri, diagnostics, None)
             .await;
@@ -30,7 +30,7 @@ impl QailLanguageServer {
                 docs.insert(uri.clone(), text.clone());
             }
 
-            let diagnostics = self.get_diagnostics(&text);
+            let diagnostics = self.get_diagnostics(&text, &uri);
             self.client
                 .publish_diagnostics(params.text_document.uri, diagnostics, None)
                 .await;

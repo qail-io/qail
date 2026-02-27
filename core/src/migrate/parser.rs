@@ -17,12 +17,12 @@
 //!                | "drop" PATH ["confirm"]
 //! ```
 
+use super::policy::{PolicyTarget, RlsPolicy};
 use super::schema::{
     CheckConstraint, CheckExpr, Column, Comment, EnumType, Extension, FkAction, Grant, Index,
     MigrationHint, MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind, Schema,
     SchemaFunctionDef, SchemaTriggerDef, Sequence, Table, ViewDef,
 };
-use super::policy::{RlsPolicy, PolicyTarget};
 use super::types::ColumnType;
 use crate::ast::Expr;
 use std::collections::HashMap;
@@ -45,44 +45,34 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
             schema.add_table(table);
             // consumed lines already processed
             let _ = consumed;
-        }
-        else if line.starts_with("unique index ") || line.starts_with("index ") {
+        } else if line.starts_with("unique index ") || line.starts_with("index ") {
             let index = parse_index(line)?;
             schema.add_index(index);
-        }
-        else if line.starts_with("extension ") {
+        } else if line.starts_with("extension ") {
             let ext = parse_extension(line)?;
             schema.add_extension(ext);
-        }
-        else if line.starts_with("comment ") {
+        } else if line.starts_with("comment ") {
             let comment = parse_comment(line)?;
             schema.add_comment(comment);
-        }
-        else if line.starts_with("sequence ") {
+        } else if line.starts_with("sequence ") {
             let seq = parse_sequence(line, &mut lines)?;
             schema.add_sequence(seq);
-        }
-        else if line.starts_with("enum ") {
+        } else if line.starts_with("enum ") {
             let enum_type = parse_enum(line, &mut lines)?;
             schema.add_enum(enum_type);
-        }
-        else if line.starts_with("view ") || line.starts_with("materialized view ") {
+        } else if line.starts_with("view ") || line.starts_with("materialized view ") {
             let view = parse_view(line, &mut lines)?;
             schema.add_view(view);
-        }
-        else if line.starts_with("function ") {
+        } else if line.starts_with("function ") {
             let func = parse_function(line, &mut lines)?;
             schema.add_function(func);
-        }
-        else if line.starts_with("trigger ") {
+        } else if line.starts_with("trigger ") {
             let trigger = parse_trigger(line)?;
             schema.add_trigger(trigger);
-        }
-        else if line.starts_with("grant ") || line.starts_with("revoke ") {
+        } else if line.starts_with("grant ") || line.starts_with("revoke ") {
             let grant = parse_grant(line)?;
             schema.add_grant(grant);
-        }
-        else if line.starts_with("rename ") {
+        } else if line.starts_with("rename ") {
             let hint = parse_rename(line)?;
             schema.add_hint(hint);
         } else if line.starts_with("transform ") {
@@ -111,6 +101,16 @@ pub fn parse_qail(input: &str) -> Result<Schema, String> {
     Ok(schema)
 }
 
+/// Parse schema from a file or modular schema directory.
+///
+/// `path` may be:
+/// - a single `.qail` file
+/// - a directory containing one or more `.qail` modules
+pub fn parse_qail_file(path: &str) -> Result<Schema, String> {
+    let content = crate::schema_source::read_qail_schema_source(path)?;
+    parse_qail(&content)
+}
+
 /// Parse a table definition with columns.
 fn parse_table<'a, I>(
     first_line: &str,
@@ -120,7 +120,9 @@ fn parse_table<'a, I>(
 where
     I: Iterator<Item = &'a str>,
 {
-    let rest = first_line.strip_prefix("table ").ok_or("Expected 'table' prefix")?;
+    let rest = first_line
+        .strip_prefix("table ")
+        .ok_or("Expected 'table' prefix")?;
     let name = rest.trim_end_matches('{').trim().to_string();
 
     if name.is_empty() {
@@ -275,8 +277,9 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("");
                 if !inner.is_empty()
-                    && let Some(expr) = parse_check_expr_from_qail(inner) {
-                        col.check = Some(CheckConstraint { expr, name: None });
+                    && let Some(expr) = parse_check_expr_from_qail(inner)
+                {
+                    col.check = Some(CheckConstraint { expr, name: None });
                 }
             }
             _ => {
@@ -293,9 +296,11 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
 fn parse_index(line: &str) -> Result<Index, String> {
     let is_unique = line.starts_with("unique ");
     let rest = if is_unique {
-        line.strip_prefix("unique index ").ok_or("Expected 'unique index' prefix")?
+        line.strip_prefix("unique index ")
+            .ok_or("Expected 'unique index' prefix")?
     } else {
-        line.strip_prefix("index ").ok_or("Expected 'index' prefix")?
+        line.strip_prefix("index ")
+            .ok_or("Expected 'index' prefix")?
     };
 
     let parts: Vec<&str> = rest.splitn(2, " on ").collect();
@@ -314,7 +319,9 @@ fn parse_index(line: &str) -> Result<Index, String> {
     let columns: Vec<String> = cols_str.split(',').map(|s| s.trim().to_string()).collect();
 
     // Detect expression indexes: columns contain parentheses like "(lower(email))"
-    let has_expressions = columns.iter().any(|c| c.starts_with('(') || c.contains("("));
+    let has_expressions = columns
+        .iter()
+        .any(|c| c.starts_with('(') || c.contains("("));
 
     let mut index = if has_expressions {
         Index::expression(&name, &table, columns)
@@ -331,7 +338,9 @@ fn parse_index(line: &str) -> Result<Index, String> {
 /// Parse a rename hint.
 fn parse_rename(line: &str) -> Result<MigrationHint, String> {
     // rename users.username -> users.name
-    let rest = line.strip_prefix("rename ").ok_or("Expected 'rename' prefix")?;
+    let rest = line
+        .strip_prefix("rename ")
+        .ok_or("Expected 'rename' prefix")?;
     let parts: Vec<&str> = rest.split(" -> ").collect();
 
     if parts.len() != 2 {
@@ -347,7 +356,9 @@ fn parse_rename(line: &str) -> Result<MigrationHint, String> {
 /// Parse a transform hint.
 fn parse_transform(line: &str) -> Result<MigrationHint, String> {
     // transform age * 12 -> age_months
-    let rest = line.strip_prefix("transform ").ok_or("Expected 'transform' prefix")?;
+    let rest = line
+        .strip_prefix("transform ")
+        .ok_or("Expected 'transform' prefix")?;
     let parts: Vec<&str> = rest.split(" -> ").collect();
 
     if parts.len() != 2 {
@@ -366,7 +377,10 @@ fn parse_drop(line: &str) -> Result<MigrationHint, String> {
     let rest = line.strip_prefix("drop ").ok_or("Expected 'drop' prefix")?;
     let confirmed = rest.ends_with(" confirm");
     let target = if confirmed {
-        rest.strip_suffix(" confirm").ok_or("Expected 'confirm' suffix")?.trim().to_string()
+        rest.strip_suffix(" confirm")
+            .ok_or("Expected 'confirm' suffix")?
+            .trim()
+            .to_string()
     } else {
         rest.trim().to_string()
     };
@@ -378,7 +392,10 @@ fn parse_drop(line: &str) -> Result<MigrationHint, String> {
 /// Syntax: `extension "uuid-ossp"` or `extension pgcrypto`
 ///         `extension "uuid-ossp" schema public version "1.1"`
 fn parse_extension(line: &str) -> Result<Extension, String> {
-    let rest = line.strip_prefix("extension ").ok_or("Expected 'extension' prefix")?.trim();
+    let rest = line
+        .strip_prefix("extension ")
+        .ok_or("Expected 'extension' prefix")?
+        .trim();
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
@@ -457,7 +474,10 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
     first_line: &str,
     lines: &mut std::iter::Peekable<I>,
 ) -> Result<Sequence, String> {
-    let rest = first_line.strip_prefix("sequence ").ok_or("Expected 'sequence' prefix")?.trim();
+    let rest = first_line
+        .strip_prefix("sequence ")
+        .ok_or("Expected 'sequence' prefix")?
+        .trim();
 
     if rest.contains('{') {
         // SAFETY: split() always yields at least one element
@@ -488,18 +508,19 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
                     i += 2;
                 }
                 "increment" if i + 1 < tokens.len() => {
-                    seq.increment =
-                        Some(tokens[i + 1].parse().map_err(|_| "invalid increment value")?);
+                    seq.increment = Some(
+                        tokens[i + 1]
+                            .parse()
+                            .map_err(|_| "invalid increment value")?,
+                    );
                     i += 2;
                 }
                 "minvalue" if i + 1 < tokens.len() => {
-                    seq.min_value =
-                        Some(tokens[i + 1].parse().map_err(|_| "invalid minvalue")?);
+                    seq.min_value = Some(tokens[i + 1].parse().map_err(|_| "invalid minvalue")?);
                     i += 2;
                 }
                 "maxvalue" if i + 1 < tokens.len() => {
-                    seq.max_value =
-                        Some(tokens[i + 1].parse().map_err(|_| "invalid maxvalue")?);
+                    seq.max_value = Some(tokens[i + 1].parse().map_err(|_| "invalid maxvalue")?);
                     i += 2;
                 }
                 "cache" if i + 1 < tokens.len() => {
@@ -535,7 +556,10 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
     first_line: &str,
     lines: &mut std::iter::Peekable<I>,
 ) -> Result<EnumType, String> {
-    let rest = first_line.strip_prefix("enum ").ok_or("Expected 'enum' prefix")?.trim();
+    let rest = first_line
+        .strip_prefix("enum ")
+        .ok_or("Expected 'enum' prefix")?
+        .trim();
 
     if rest.contains('{') {
         // SAFETY: split() always yields at least one element
@@ -574,10 +598,7 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
 /// Parse a table-level multi-column foreign key.
 /// Syntax: `foreign_key (a, b) references other_table(x, y)`
 fn parse_multi_column_fk(line: &str) -> Result<MultiColumnForeignKey, String> {
-    let rest = line
-        .strip_prefix("foreign_key")
-        .unwrap_or(line)
-        .trim();
+    let rest = line.strip_prefix("foreign_key").unwrap_or(line).trim();
 
     // Extract local columns from (...)
     let local_start = rest.find('(').ok_or("foreign_key missing ( for columns")?;
@@ -617,9 +638,15 @@ fn parse_view<'a, I: Iterator<Item = &'a str>>(
 ) -> Result<ViewDef, String> {
     let materialized = first_line.starts_with("materialized ");
     let rest = if materialized {
-        first_line.strip_prefix("materialized view ").ok_or("Expected 'materialized view' prefix")?.trim()
+        first_line
+            .strip_prefix("materialized view ")
+            .ok_or("Expected 'materialized view' prefix")?
+            .trim()
     } else {
-        first_line.strip_prefix("view ").ok_or("Expected 'view' prefix")?.trim()
+        first_line
+            .strip_prefix("view ")
+            .ok_or("Expected 'view' prefix")?
+            .trim()
     };
 
     // Split name from body at $$
@@ -660,7 +687,10 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     first_line: &str,
     lines: &mut std::iter::Peekable<I>,
 ) -> Result<SchemaFunctionDef, String> {
-    let rest = first_line.strip_prefix("function ").ok_or("Expected 'function' prefix")?.trim();
+    let rest = first_line
+        .strip_prefix("function ")
+        .ok_or("Expected 'function' prefix")?
+        .trim();
 
     // Extract name and args
     let paren_start = rest.find('(').ok_or("function missing (")?;
@@ -733,7 +763,10 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
 /// Parse a trigger definition.
 /// Syntax: `trigger name on table before|after insert|update|delete execute function_name`
 fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
-    let rest = line.strip_prefix("trigger ").ok_or("Expected 'trigger' prefix")?.trim();
+    let rest = line
+        .strip_prefix("trigger ")
+        .ok_or("Expected 'trigger' prefix")?
+        .trim();
     let parts: Vec<&str> = rest.split_whitespace().collect();
 
     if parts.len() < 6 {
@@ -749,7 +782,10 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
         .ok_or("trigger missing 'on' keyword")?;
     let table = parts.get(on_idx + 1).ok_or("trigger missing table name")?;
 
-    let timing = parts.get(on_idx + 2).ok_or("trigger missing timing")?.to_uppercase();
+    let timing = parts
+        .get(on_idx + 2)
+        .ok_or("trigger missing timing")?
+        .to_uppercase();
 
     // Collect events (INSERT, UPDATE, DELETE, etc.) until "execute"
     let mut events = Vec::new();
@@ -783,14 +819,18 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
 fn parse_grant(line: &str) -> Result<Grant, String> {
     let is_revoke = line.starts_with("revoke ");
     let rest = if is_revoke {
-        line.strip_prefix("revoke ").ok_or("Expected 'revoke' prefix")?
+        line.strip_prefix("revoke ")
+            .ok_or("Expected 'revoke' prefix")?
     } else {
-        line.strip_prefix("grant ").ok_or("Expected 'grant' prefix")?
+        line.strip_prefix("grant ")
+            .ok_or("Expected 'grant' prefix")?
     }
     .trim();
 
     // Find "on" keyword
-    let on_idx = rest.find(" on ").ok_or("grant/revoke missing 'on' keyword")?;
+    let on_idx = rest
+        .find(" on ")
+        .ok_or("grant/revoke missing 'on' keyword")?;
     let privs_str = &rest[..on_idx].trim();
     let after_on = rest[on_idx + 4..].trim();
 
@@ -799,14 +839,9 @@ fn parse_grant(line: &str) -> Result<Grant, String> {
         let from_idx = after_on
             .find(" from ")
             .ok_or("revoke missing 'from' keyword")?;
-        (
-            after_on[..from_idx].trim(),
-            after_on[from_idx + 6..].trim(),
-        )
+        (after_on[..from_idx].trim(), after_on[from_idx + 6..].trim())
     } else {
-        let to_idx = after_on
-            .find(" to ")
-            .ok_or("grant missing 'to' keyword")?;
+        let to_idx = after_on.find(" to ").ok_or("grant missing 'to' keyword")?;
         (after_on[..to_idx].trim(), after_on[to_idx + 4..].trim())
     };
 
@@ -860,7 +895,11 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
         let col = parts[0].to_string();
         let low = parts[2].parse::<i64>().ok()?;
         let high = parts[3].parse::<i64>().ok()?;
-        return Some(CheckExpr::Between { column: col, low, high });
+        return Some(CheckExpr::Between {
+            column: col,
+            low,
+            high,
+        });
     }
 
     // Try "left and right"
@@ -878,12 +917,24 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     }
 
     // Try simple comparisons: "col >= val", "col > val", etc.
-    #[allow(clippy::type_complexity)]
-    let ops: &[(&str, fn(String, i64) -> CheckExpr)] = &[
-        (">=", |col, val| CheckExpr::GreaterOrEqual { column: col, value: val }),
-        ("<=", |col, val| CheckExpr::LessOrEqual { column: col, value: val }),
-        (">", |col, val| CheckExpr::GreaterThan { column: col, value: val }),
-        ("<", |col, val| CheckExpr::LessThan { column: col, value: val }),
+    type CheckExprConstructor = fn(String, i64) -> CheckExpr;
+    let ops: &[(&str, CheckExprConstructor)] = &[
+        (">=", |col, val| CheckExpr::GreaterOrEqual {
+            column: col,
+            value: val,
+        }),
+        ("<=", |col, val| CheckExpr::LessOrEqual {
+            column: col,
+            value: val,
+        }),
+        (">", |col, val| CheckExpr::GreaterThan {
+            column: col,
+            value: val,
+        }),
+        ("<", |col, val| CheckExpr::LessThan {
+            column: col,
+            value: val,
+        }),
     ];
 
     for (op, constructor) in ops {
@@ -911,7 +962,9 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
 
     // Try "col not_null"
     if parts.len() == 2 && parts[1] == "not_null" {
-        return Some(CheckExpr::NotNull { column: parts[0].to_string() });
+        return Some(CheckExpr::NotNull {
+            column: parts[0].to_string(),
+        });
     }
 
     None
@@ -1011,7 +1064,10 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
     lines: &mut std::iter::Peekable<I>,
 ) -> Result<RlsPolicy, String> {
     // Parse header: "policy NAME on TABLE for TARGET"
-    let rest = first_line.strip_prefix("policy ").ok_or("Expected 'policy' prefix")?.trim();
+    let rest = first_line
+        .strip_prefix("policy ")
+        .ok_or("Expected 'policy' prefix")?
+        .trim();
     let parts: Vec<&str> = rest.split_whitespace().collect();
 
     // Minimum: NAME on TABLE for TARGET  (4 tokens)
@@ -1021,14 +1077,20 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
 
     let name = parts[0];
 
-    let on_idx = parts.iter().position(|&p| p == "on")
+    let on_idx = parts
+        .iter()
+        .position(|&p| p == "on")
         .ok_or_else(|| format!("policy missing 'on' keyword: {}", first_line))?;
-    let table = parts.get(on_idx + 1)
+    let table = parts
+        .get(on_idx + 1)
         .ok_or_else(|| format!("policy missing table name: {}", first_line))?;
 
-    let for_idx = parts.iter().position(|&p| p == "for")
+    let for_idx = parts
+        .iter()
+        .position(|&p| p == "for")
         .ok_or_else(|| format!("policy missing 'for' keyword: {}", first_line))?;
-    let target_str = parts.get(for_idx + 1)
+    let target_str = parts
+        .get(for_idx + 1)
         .ok_or_else(|| format!("policy missing target: {}", first_line))?;
 
     let target = match target_str.to_lowercase().as_str() {
@@ -1115,8 +1177,8 @@ fn extract_dollar_body<'a, I: Iterator<Item = &'a str>>(
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::schema::GrantAction;
+    use super::*;
 
     #[test]
     fn test_parse_simple_table() {
@@ -1268,7 +1330,10 @@ comment on users.name "Full name"
         let schema = parse_qail(input).unwrap();
         assert_eq!(schema.enums.len(), 1);
         assert_eq!(schema.enums[0].name, "status");
-        assert_eq!(schema.enums[0].values, vec!["active", "inactive", "pending"]);
+        assert_eq!(
+            schema.enums[0].values,
+            vec!["active", "inactive", "pending"]
+        );
     }
 
     #[test]
@@ -1572,7 +1637,9 @@ table orders {
 
         // Enum column
         let method = &table.columns[1];
-        assert!(matches!(&method.data_type, ColumnType::Enum { name, .. } if name == "payment_method"));
+        assert!(
+            matches!(&method.data_type, ColumnType::Enum { name, .. } if name == "payment_method")
+        );
         assert_eq!(method.default.as_deref(), Some("'card'"));
 
         // FK with cascade
@@ -1582,11 +1649,17 @@ table orders {
 
         // CHECK >= 0
         let score = &table.columns[3];
-        assert!(matches!(&score.check.as_ref().unwrap().expr, CheckExpr::GreaterOrEqual { .. }));
+        assert!(matches!(
+            &score.check.as_ref().unwrap().expr,
+            CheckExpr::GreaterOrEqual { .. }
+        ));
 
         // CHECK between
         let age = &table.columns[4];
-        assert!(matches!(&age.check.as_ref().unwrap().expr, CheckExpr::Between { .. }));
+        assert!(matches!(
+            &age.check.as_ref().unwrap().expr,
+            CheckExpr::Between { .. }
+        ));
     }
 
     #[test]

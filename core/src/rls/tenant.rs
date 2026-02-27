@@ -12,8 +12,8 @@
 //! assert_eq!(lookup_tenant_column("migrations"), None);
 //! ```
 
-use std::sync::LazyLock;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::RwLock;
 
 /// Registry of tables that participate in tenant-scope isolation.
@@ -182,7 +182,7 @@ mod tests {
     fn test_registry_len() {
         let mut reg = TenantRegistry::new();
         assert!(reg.is_empty());
-        
+
         reg.register("orders", "operator_id");
         assert_eq!(reg.len(), 1);
         assert!(!reg.is_empty());
@@ -192,7 +192,10 @@ mod tests {
     fn test_global_register_and_lookup() {
         // Use unique table names to avoid test interference
         register_tenant_table("_test_t1", "operator_id");
-        assert_eq!(lookup_tenant_column("_test_t1"), Some("operator_id".to_string()));
+        assert_eq!(
+            lookup_tenant_column("_test_t1"),
+            Some("operator_id".to_string())
+        );
         assert_eq!(lookup_tenant_column("_test_nonexistent"), None);
 
         // Clean up
@@ -208,8 +211,14 @@ mod tests {
             ("_test_bulk_b", "operator_id"),
         ]);
 
-        assert_eq!(lookup_tenant_column("_test_bulk_a"), Some("operator_id".to_string()));
-        assert_eq!(lookup_tenant_column("_test_bulk_b"), Some("operator_id".to_string()));
+        assert_eq!(
+            lookup_tenant_column("_test_bulk_a"),
+            Some("operator_id".to_string())
+        );
+        assert_eq!(
+            lookup_tenant_column("_test_bulk_b"),
+            Some("operator_id".to_string())
+        );
 
         // Clean up
         if let Ok(mut reg) = TENANT_TABLES.write() {

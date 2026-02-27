@@ -12,15 +12,20 @@
 //! - `pipeline.rs` - High-performance pipelining
 //! - `cancel.rs` - Query cancellation
 
-use super::stream::PgStream;
-use super::{PgError, PgResult};
 use super::notification::Notification;
+use super::stream::PgStream;
+use super::{
+    AuthSettings, ConnectOptions, EnterpriseAuthMechanism, GssEncMode, GssTokenProvider,
+    GssTokenProviderEx, GssTokenRequest, PgError, PgResult, ScramChannelBindingMode, TlsMode,
+};
 use crate::protocol::{BackendMessage, FrontendMessage, ScramClient, TransactionStatus};
 use bytes::BytesMut;
 use lru::LruCache;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -33,15 +38,36 @@ pub(crate) const BUFFER_CAPACITY: usize = 65536;
 /// SSLRequest message bytes (request code: 80877103)
 const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 47];
 
+/// GSSENCRequest message bytes (request code: 80877104)
+/// Byte breakdown: length=8 (00 00 00 08), code=80877104 (04 D2 16 30)
+const GSSENC_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 210, 22, 48];
+
+/// Result of sending a GSSENCRequest to the server.
+#[derive(Debug)]
+enum GssEncNegotiationResult {
+    /// Server responded 'G' — willing to perform GSSAPI encryption.
+    /// The TCP stream is returned for the caller to establish the
+    /// GSSAPI security context and wrap all subsequent traffic.
+    Accepted(TcpStream),
+    /// Server responded 'N' — unwilling to perform GSSAPI encryption.
+    Rejected,
+    /// Server sent an ErrorMessage — must not be displayed to user
+    /// (CVE-2024-10977: server not yet authenticated).
+    ServerError,
+}
+
 /// CancelRequest protocol code: 80877102
 pub(crate) const CANCEL_REQUEST_CODE: i32 = 80877102;
+
+/// Monotonic session id source for stateful GSS provider callbacks.
+static GSS_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Default timeout for TCP connect + PostgreSQL handshake.
 /// Prevents Slowloris DoS where a malicious server accepts TCP but never responds.
 pub(crate) const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// TLS configuration for mutual TLS (client certificate authentication).
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TlsConfig {
     /// Client certificate in PEM format
     pub client_cert_pem: Vec<u8>,
@@ -64,6 +90,21 @@ impl TlsConfig {
             ca_cert_pem: ca_path.map(|p| std::fs::read(p)).transpose()?,
         })
     }
+}
+
+/// Bundled connection parameters for internal functions.
+///
+/// Groups the 8 common arguments to avoid exceeding clippy's
+/// `too_many_arguments` threshold.
+struct ConnectParams<'a> {
+    host: &'a str,
+    port: u16,
+    user: &'a str,
+    database: &'a str,
+    password: Option<&'a str>,
+    auth_settings: AuthSettings,
+    gss_token_provider: Option<GssTokenProvider>,
+    gss_token_provider_ex: Option<GssTokenProviderEx>,
 }
 
 /// A raw PostgreSQL connection.
@@ -108,25 +149,358 @@ impl PgConnection {
         database: &str,
         password: Option<&str>,
     ) -> PgResult<Self> {
-        tokio::time::timeout(
-            DEFAULT_CONNECT_TIMEOUT,
-            Self::connect_with_password_inner(host, port, user, database, password),
+        Self::connect_with_password_and_auth(
+            host,
+            port,
+            user,
+            database,
+            password,
+            AuthSettings::default(),
         )
         .await
-        .map_err(|_| PgError::Connection(format!(
-            "Connection timeout after {:?} (TCP connect + handshake)",
-            DEFAULT_CONNECT_TIMEOUT
-        )))?
     }
 
-    /// Inner connection logic without timeout wrapper.
-    async fn connect_with_password_inner(
+    /// Connect to PostgreSQL with explicit enterprise options.
+    ///
+    /// Negotiation preface order follows libpq:
+    ///   1. If gss_enc_mode != Disable → try GSSENCRequest on fresh TCP
+    ///   2. If GSSENC rejected/unavailable and tls_mode != Disable → try SSLRequest
+    ///   3. If both rejected/unavailable → plain StartupMessage
+    pub async fn connect_with_options(
         host: &str,
         port: u16,
         user: &str,
         database: &str,
         password: Option<&str>,
+        options: ConnectOptions,
     ) -> PgResult<Self> {
+        let ConnectOptions {
+            tls_mode,
+            gss_enc_mode,
+            tls_ca_cert_pem,
+            mtls,
+            gss_token_provider,
+            gss_token_provider_ex,
+            auth,
+        } = options;
+
+        if mtls.is_some() && matches!(tls_mode, TlsMode::Disable) {
+            return Err(PgError::Connection(
+                "Invalid connect options: mTLS requires tls_mode=Prefer or Require".to_string(),
+            ));
+        }
+
+        // Enforce gss_enc_mode policy before mTLS early-return.
+        // GSSENC and mTLS are both transport-level encryption; using
+        // both simultaneously is not supported by the PostgreSQL protocol.
+        if gss_enc_mode == GssEncMode::Require && mtls.is_some() {
+            return Err(PgError::Connection(
+                "gssencmode=require is incompatible with mTLS — both provide \
+                 transport encryption; use one or the other"
+                    .to_string(),
+            ));
+        }
+
+        if let Some(mtls_config) = mtls {
+            // gss_enc_mode is Disable or Prefer here (Require rejected above).
+            // mTLS already provides transport encryption; skip GSSENC.
+            return Self::connect_mtls_with_password_and_auth_and_gss(
+                ConnectParams {
+                    host,
+                    port,
+                    user,
+                    database,
+                    password,
+                    auth_settings: auth,
+                    gss_token_provider,
+                    gss_token_provider_ex,
+                },
+                mtls_config,
+            )
+            .await;
+        }
+
+        // ── Phase 1: Try GSSENC if requested ──────────────────────────
+        if gss_enc_mode != GssEncMode::Disable {
+            match Self::try_gssenc_request(host, port).await {
+                Ok(GssEncNegotiationResult::Accepted(tcp_stream)) => {
+                    #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+                    {
+                        let gssenc_fut = async {
+                            let gss_stream = super::gss::gssenc_handshake(tcp_stream, host)
+                                .await
+                                .map_err(PgError::Auth)?;
+                            let mut conn = Self {
+                                stream: PgStream::GssEnc(gss_stream),
+                                buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+                                write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),
+                                sql_buf: BytesMut::with_capacity(512),
+                                params_buf: Vec::with_capacity(16),
+                                prepared_statements: HashMap::new(),
+                                stmt_cache: LruCache::new(STMT_CACHE_CAPACITY),
+                                column_info_cache: HashMap::new(),
+                                process_id: 0,
+                                secret_key: 0,
+                                notifications: VecDeque::new(),
+                            };
+                            conn.send(FrontendMessage::Startup {
+                                user: user.to_string(),
+                                database: database.to_string(),
+                            })
+                            .await?;
+                            conn.handle_startup(
+                                user,
+                                password,
+                                auth,
+                                gss_token_provider,
+                                gss_token_provider_ex,
+                            )
+                            .await?;
+                            Ok(conn)
+                        };
+                        return tokio::time::timeout(DEFAULT_CONNECT_TIMEOUT, gssenc_fut)
+                            .await
+                            .map_err(|_| {
+                                PgError::Connection(format!(
+                                    "GSSENC connection timeout after {:?} \
+                                 (handshake + auth)",
+                                    DEFAULT_CONNECT_TIMEOUT
+                                ))
+                            })?;
+                    }
+                    #[cfg(not(all(feature = "enterprise-gssapi", target_os = "linux")))]
+                    {
+                        let _ = tcp_stream;
+                        return Err(PgError::Connection(
+                            "Server accepted GSSENCRequest but GSSAPI encryption requires \
+                             feature enterprise-gssapi on Linux"
+                                .to_string(),
+                        ));
+                    }
+                }
+                Ok(GssEncNegotiationResult::Rejected)
+                | Ok(GssEncNegotiationResult::ServerError) => {
+                    if gss_enc_mode == GssEncMode::Require {
+                        return Err(PgError::Connection(
+                            "gssencmode=require but server rejected GSSENCRequest".to_string(),
+                        ));
+                    }
+                    // gss_enc_mode == Prefer — fall through to TLS / plain
+                }
+                Err(e) => {
+                    if gss_enc_mode == GssEncMode::Require {
+                        return Err(e);
+                    }
+                    // gss_enc_mode == Prefer — connection error, fall through
+                    tracing::debug!(
+                        host = %host,
+                        port = %port,
+                        error = %e,
+                        "gssenc_prefer_fallthrough"
+                    );
+                }
+            }
+        }
+
+        // ── Phase 2: TLS / plain per sslmode ──────────────────────────
+        match tls_mode {
+            TlsMode::Disable => {
+                Self::connect_with_password_and_auth_and_gss(ConnectParams {
+                    host,
+                    port,
+                    user,
+                    database,
+                    password,
+                    auth_settings: auth,
+                    gss_token_provider,
+                    gss_token_provider_ex,
+                })
+                .await
+            }
+            TlsMode::Require => {
+                Self::connect_tls_with_auth_and_gss(
+                    ConnectParams {
+                        host,
+                        port,
+                        user,
+                        database,
+                        password,
+                        auth_settings: auth,
+                        gss_token_provider,
+                        gss_token_provider_ex,
+                    },
+                    tls_ca_cert_pem.as_deref(),
+                )
+                .await
+            }
+            TlsMode::Prefer => {
+                match Self::connect_tls_with_auth_and_gss(
+                    ConnectParams {
+                        host,
+                        port,
+                        user,
+                        database,
+                        password,
+                        auth_settings: auth,
+                        gss_token_provider,
+                        gss_token_provider_ex: gss_token_provider_ex.clone(),
+                    },
+                    tls_ca_cert_pem.as_deref(),
+                )
+                .await
+                {
+                    Ok(conn) => Ok(conn),
+                    Err(PgError::Connection(msg))
+                        if msg.contains("Server does not support TLS") =>
+                    {
+                        Self::connect_with_password_and_auth_and_gss(ConnectParams {
+                            host,
+                            port,
+                            user,
+                            database,
+                            password,
+                            auth_settings: auth,
+                            gss_token_provider,
+                            gss_token_provider_ex,
+                        })
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
+
+    /// Attempt GSSAPI session encryption negotiation.
+    ///
+    /// Opens a fresh TCP connection, sends GSSENCRequest (80877104),
+    /// reads exactly one byte (CVE-2021-23222 safe), and returns
+    /// the result.  The entire operation is bounded by
+    /// `DEFAULT_CONNECT_TIMEOUT`.
+    async fn try_gssenc_request(host: &str, port: u16) -> PgResult<GssEncNegotiationResult> {
+        tokio::time::timeout(
+            DEFAULT_CONNECT_TIMEOUT,
+            Self::try_gssenc_request_inner(host, port),
+        )
+        .await
+        .map_err(|_| {
+            PgError::Connection(format!(
+                "GSSENCRequest timeout after {:?}",
+                DEFAULT_CONNECT_TIMEOUT
+            ))
+        })?
+    }
+
+    /// Inner GSSENCRequest logic without timeout wrapper.
+    async fn try_gssenc_request_inner(host: &str, port: u16) -> PgResult<GssEncNegotiationResult> {
+        use tokio::io::AsyncReadExt;
+
+        let addr = format!("{}:{}", host, port);
+        let mut tcp_stream = TcpStream::connect(&addr).await?;
+        tcp_stream.set_nodelay(true)?;
+
+        // Send the 8-byte GSSENCRequest.
+        tcp_stream.write_all(&GSSENC_REQUEST).await?;
+        tcp_stream.flush().await?;
+
+        // CVE-2021-23222: Read exactly one byte.  The server must
+        // respond with a single 'G' or 'N'.  Any additional bytes
+        // in the buffer indicate a buffer-stuffing attack.
+        let mut response = [0u8; 1];
+        tcp_stream.read_exact(&mut response).await?;
+
+        match response[0] {
+            b'G' => {
+                // CVE-2021-23222 check: verify no extra bytes are buffered.
+                // Use a non-blocking peek to detect leftover data.
+                let mut peek_buf = [0u8; 1];
+                match tcp_stream.try_read(&mut peek_buf) {
+                    Ok(0) => {} // EOF — fine (shouldn't happen yet but harmless)
+                    Ok(_n) => {
+                        // Extra bytes after 'G' — possible buffer-stuffing.
+                        return Err(PgError::Connection(
+                            "Protocol violation: extra bytes after GSSENCRequest 'G' response \
+                             (possible CVE-2021-23222 buffer-stuffing attack)"
+                                .to_string(),
+                        ));
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // No extra data — this is the expected path.
+                    }
+                    Err(e) => {
+                        return Err(PgError::Io(e));
+                    }
+                }
+                Ok(GssEncNegotiationResult::Accepted(tcp_stream))
+            }
+            b'N' => Ok(GssEncNegotiationResult::Rejected),
+            b'E' => {
+                // Server sent an ErrorMessage.  Per CVE-2024-10977 we
+                // must NOT display this to users since the server has
+                // not been authenticated.  Log at trace only.
+                tracing::trace!(
+                    host = %host,
+                    port = %port,
+                    "gssenc_request_server_error (suppressed per CVE-2024-10977)"
+                );
+                Ok(GssEncNegotiationResult::ServerError)
+            }
+            other => Err(PgError::Connection(format!(
+                "Unexpected response to GSSENCRequest: 0x{:02X} \
+                     (expected 'G'=0x47 or 'N'=0x4E)",
+                other
+            ))),
+        }
+    }
+
+    /// Connect to PostgreSQL server with optional password authentication and auth policy.
+    pub async fn connect_with_password_and_auth(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+        auth_settings: AuthSettings,
+    ) -> PgResult<Self> {
+        Self::connect_with_password_and_auth_and_gss(ConnectParams {
+            host,
+            port,
+            user,
+            database,
+            password,
+            auth_settings,
+            gss_token_provider: None,
+            gss_token_provider_ex: None,
+        })
+        .await
+    }
+
+    async fn connect_with_password_and_auth_and_gss(params: ConnectParams<'_>) -> PgResult<Self> {
+        tokio::time::timeout(
+            DEFAULT_CONNECT_TIMEOUT,
+            Self::connect_with_password_inner(params),
+        )
+        .await
+        .map_err(|_| {
+            PgError::Connection(format!(
+                "Connection timeout after {:?} (TCP connect + handshake)",
+                DEFAULT_CONNECT_TIMEOUT
+            ))
+        })?
+    }
+
+    /// Inner connection logic without timeout wrapper.
+    async fn connect_with_password_inner(params: ConnectParams<'_>) -> PgResult<Self> {
+        let ConnectParams {
+            host,
+            port,
+            user,
+            database,
+            password,
+            auth_settings,
+            gss_token_provider,
+            gss_token_provider_ex,
+        } = params;
         let addr = format!("{}:{}", host, port);
         let tcp_stream = TcpStream::connect(&addr).await?;
 
@@ -153,7 +527,14 @@ impl PgConnection {
         })
         .await?;
 
-        conn.handle_startup(user, password).await?;
+        conn.handle_startup(
+            user,
+            password,
+            auth_settings,
+            gss_token_provider,
+            gss_token_provider_ex,
+        )
+        .await?;
 
         Ok(conn)
     }
@@ -167,29 +548,80 @@ impl PgConnection {
         database: &str,
         password: Option<&str>,
     ) -> PgResult<Self> {
-        tokio::time::timeout(
-            DEFAULT_CONNECT_TIMEOUT,
-            Self::connect_tls_inner(host, port, user, database, password),
+        Self::connect_tls_with_auth(
+            host,
+            port,
+            user,
+            database,
+            password,
+            AuthSettings::default(),
+            None,
         )
         .await
-        .map_err(|_| PgError::Connection(format!(
-            "TLS connection timeout after {:?}",
-            DEFAULT_CONNECT_TIMEOUT
-        )))?
     }
 
-    /// Inner TLS connection logic without timeout wrapper.
-    async fn connect_tls_inner(
+    /// Connect to PostgreSQL over TLS with explicit auth policy and optional custom CA bundle.
+    pub async fn connect_tls_with_auth(
         host: &str,
         port: u16,
         user: &str,
         database: &str,
         password: Option<&str>,
+        auth_settings: AuthSettings,
+        ca_cert_pem: Option<&[u8]>,
     ) -> PgResult<Self> {
+        Self::connect_tls_with_auth_and_gss(
+            ConnectParams {
+                host,
+                port,
+                user,
+                database,
+                password,
+                auth_settings,
+                gss_token_provider: None,
+                gss_token_provider_ex: None,
+            },
+            ca_cert_pem,
+        )
+        .await
+    }
+
+    async fn connect_tls_with_auth_and_gss(
+        params: ConnectParams<'_>,
+        ca_cert_pem: Option<&[u8]>,
+    ) -> PgResult<Self> {
+        tokio::time::timeout(
+            DEFAULT_CONNECT_TIMEOUT,
+            Self::connect_tls_inner(params, ca_cert_pem),
+        )
+        .await
+        .map_err(|_| {
+            PgError::Connection(format!(
+                "TLS connection timeout after {:?}",
+                DEFAULT_CONNECT_TIMEOUT
+            ))
+        })?
+    }
+
+    /// Inner TLS connection logic without timeout wrapper.
+    async fn connect_tls_inner(
+        params: ConnectParams<'_>,
+        ca_cert_pem: Option<&[u8]>,
+    ) -> PgResult<Self> {
+        let ConnectParams {
+            host,
+            port,
+            user,
+            database,
+            password,
+            auth_settings,
+            gss_token_provider,
+            gss_token_provider_ex,
+        } = params;
         use tokio::io::AsyncReadExt;
         use tokio_rustls::TlsConnector;
         use tokio_rustls::rustls::ClientConfig;
-        use tokio_rustls::rustls::pki_types::ServerName;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 
         let addr = format!("{}:{}", host, port);
         let mut tcp_stream = TcpStream::connect(&addr).await?;
@@ -207,11 +639,25 @@ impl PgConnection {
             ));
         }
 
-        // TLS handshake
-        let certs = rustls_native_certs::load_native_certs();
         let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();
-        for cert in certs.certs {
-            let _ = root_cert_store.add(cert);
+
+        if let Some(ca_pem) = ca_cert_pem {
+            let certs = CertificateDer::pem_slice_iter(ca_pem)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| PgError::Connection(format!("Invalid CA certificate PEM: {}", e)))?;
+            if certs.is_empty() {
+                return Err(PgError::Connection(
+                    "No CA certificates found in provided PEM".to_string(),
+                ));
+            }
+            for cert in certs {
+                let _ = root_cert_store.add(cert);
+            }
+        } else {
+            let certs = rustls_native_certs::load_native_certs();
+            for cert in certs.certs {
+                let _ = root_cert_store.add(cert);
+            }
         }
 
         let config = ClientConfig::builder()
@@ -228,7 +674,7 @@ impl PgConnection {
             .map_err(|e| PgError::Connection(format!("TLS handshake failed: {}", e)))?;
 
         let mut conn = Self {
-            stream: PgStream::Tls(tls_stream),
+            stream: PgStream::Tls(Box::new(tls_stream)),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
             write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),
             sql_buf: BytesMut::with_capacity(512),
@@ -247,7 +693,14 @@ impl PgConnection {
         })
         .await?;
 
-        conn.handle_startup(user, password).await?;
+        conn.handle_startup(
+            user,
+            password,
+            auth_settings,
+            gss_token_provider,
+            gss_token_provider_ex,
+        )
+        .await?;
 
         Ok(conn)
     }
@@ -275,11 +728,78 @@ impl PgConnection {
         database: &str,
         config: TlsConfig,
     ) -> PgResult<Self> {
+        Self::connect_mtls_with_password_and_auth(
+            host,
+            port,
+            user,
+            database,
+            None,
+            config,
+            AuthSettings::default(),
+        )
+        .await
+    }
+
+    /// Connect with mutual TLS and optional password fallback.
+    pub async fn connect_mtls_with_password_and_auth(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+        config: TlsConfig,
+        auth_settings: AuthSettings,
+    ) -> PgResult<Self> {
+        Self::connect_mtls_with_password_and_auth_and_gss(
+            ConnectParams {
+                host,
+                port,
+                user,
+                database,
+                password,
+                auth_settings,
+                gss_token_provider: None,
+                gss_token_provider_ex: None,
+            },
+            config,
+        )
+        .await
+    }
+
+    async fn connect_mtls_with_password_and_auth_and_gss(
+        params: ConnectParams<'_>,
+        config: TlsConfig,
+    ) -> PgResult<Self> {
+        tokio::time::timeout(
+            DEFAULT_CONNECT_TIMEOUT,
+            Self::connect_mtls_inner(params, config),
+        )
+        .await
+        .map_err(|_| {
+            PgError::Connection(format!(
+                "mTLS connection timeout after {:?}",
+                DEFAULT_CONNECT_TIMEOUT
+            ))
+        })?
+    }
+
+    /// Inner mTLS connection logic without timeout wrapper.
+    async fn connect_mtls_inner(params: ConnectParams<'_>, config: TlsConfig) -> PgResult<Self> {
+        let ConnectParams {
+            host,
+            port,
+            user,
+            database,
+            password,
+            auth_settings,
+            gss_token_provider,
+            gss_token_provider_ex,
+        } = params;
         use tokio::io::AsyncReadExt;
         use tokio_rustls::TlsConnector;
         use tokio_rustls::rustls::{
             ClientConfig,
-            pki_types::{CertificateDer, ServerName},
+            pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject},
         };
 
         let addr = format!("{}:{}", host, port);
@@ -301,9 +821,14 @@ impl PgConnection {
         let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();
 
         if let Some(ca_pem) = &config.ca_cert_pem {
-            let certs = rustls_pemfile::certs(&mut ca_pem.as_slice())
-                .filter_map(|r| r.ok())
-                .collect::<Vec<_>>();
+            let certs = CertificateDer::pem_slice_iter(ca_pem)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| PgError::Connection(format!("Invalid CA certificate PEM: {}", e)))?;
+            if certs.is_empty() {
+                return Err(PgError::Connection(
+                    "No CA certificates found in provided PEM".to_string(),
+                ));
+            }
             for cert in certs {
                 let _ = root_cert_store.add(cert);
             }
@@ -316,13 +841,17 @@ impl PgConnection {
         }
 
         let client_certs: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut config.client_cert_pem.as_slice())
-                .filter_map(|r| r.ok())
-                .collect();
+            CertificateDer::pem_slice_iter(&config.client_cert_pem)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| PgError::Connection(format!("Invalid client cert PEM: {}", e)))?;
+        if client_certs.is_empty() {
+            return Err(PgError::Connection(
+                "No client certificates found in PEM".to_string(),
+            ));
+        }
 
-        let client_key = rustls_pemfile::private_key(&mut config.client_key_pem.as_slice())
-            .map_err(|e| PgError::Connection(format!("Invalid client key: {:?}", e)))?
-            .ok_or_else(|| PgError::Connection("No private key found in PEM".to_string()))?;
+        let client_key = PrivateKeyDer::from_pem_slice(&config.client_key_pem)
+            .map_err(|e| PgError::Connection(format!("Invalid client key PEM: {}", e)))?;
 
         let tls_config = ClientConfig::builder()
             .with_root_certificates(root_cert_store)
@@ -339,7 +868,7 @@ impl PgConnection {
             .map_err(|e| PgError::Connection(format!("mTLS handshake failed: {}", e)))?;
 
         let mut conn = Self {
-            stream: PgStream::Tls(tls_stream),
+            stream: PgStream::Tls(Box::new(tls_stream)),
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
             write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),
             sql_buf: BytesMut::with_capacity(512),
@@ -358,8 +887,14 @@ impl PgConnection {
         })
         .await?;
 
-        // mTLS typically uses cert auth, no password needed
-        conn.handle_startup(user, None).await?;
+        conn.handle_startup(
+            user,
+            password,
+            auth_settings,
+            gss_token_provider,
+            gss_token_provider_ex,
+        )
+        .await?;
 
         Ok(conn)
     }
@@ -396,41 +931,210 @@ impl PgConnection {
         })
         .await?;
 
-        conn.handle_startup(user, password).await?;
+        conn.handle_startup(user, password, AuthSettings::default(), None, None)
+            .await?;
 
         Ok(conn)
     }
 
     /// Handle startup sequence (auth + params).
-    async fn handle_startup(&mut self, user: &str, password: Option<&str>) -> PgResult<()> {
+    async fn handle_startup(
+        &mut self,
+        user: &str,
+        password: Option<&str>,
+        auth_settings: AuthSettings,
+        gss_token_provider: Option<GssTokenProvider>,
+        gss_token_provider_ex: Option<GssTokenProviderEx>,
+    ) -> PgResult<()> {
         let mut scram_client: Option<ScramClient> = None;
+        let mut gss_mechanism: Option<EnterpriseAuthMechanism> = None;
+        let gss_session_id = GSS_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut gss_roundtrips: u32 = 0;
+        const MAX_GSS_ROUNDTRIPS: u32 = 32;
 
         loop {
             let msg = self.recv().await?;
             match msg {
                 BackendMessage::AuthenticationOk => {}
-                BackendMessage::AuthenticationMD5Password(_salt) => {
-                    return Err(PgError::Auth(
-                        "MD5 auth not supported. Use SCRAM-SHA-256.".to_string(),
-                    ));
+                BackendMessage::AuthenticationKerberosV5 => {
+                    if !auth_settings.allow_kerberos_v5 {
+                        return Err(PgError::Auth(
+                            "Server requested Kerberos V5 authentication, but Kerberos V5 is disabled by AuthSettings".to_string(),
+                        ));
+                    }
+
+                    if gss_token_provider.is_none() && gss_token_provider_ex.is_none() {
+                        return Err(PgError::Auth(
+                            "Kerberos V5 authentication requested but no GSS token provider is configured. Set ConnectOptions.gss_token_provider or ConnectOptions.gss_token_provider_ex.".to_string(),
+                        ));
+                    }
+
+                    let token = generate_gss_token(
+                        gss_session_id,
+                        EnterpriseAuthMechanism::KerberosV5,
+                        None,
+                        gss_token_provider,
+                        gss_token_provider_ex.as_ref(),
+                    )
+                    .map_err(|e| {
+                        PgError::Auth(format!("Kerberos V5 token generation failed: {}", e))
+                    })?;
+
+                    self.send(FrontendMessage::GSSResponse(token)).await?;
+                    gss_mechanism = Some(EnterpriseAuthMechanism::KerberosV5);
+                }
+                BackendMessage::AuthenticationGSS => {
+                    if !auth_settings.allow_gssapi {
+                        return Err(PgError::Auth(
+                            "Server requested GSSAPI authentication, but GSSAPI is disabled by AuthSettings".to_string(),
+                        ));
+                    }
+
+                    if gss_token_provider.is_none() && gss_token_provider_ex.is_none() {
+                        return Err(PgError::Auth(
+                            "GSSAPI authentication requested but no GSS token provider is configured. Set ConnectOptions.gss_token_provider or ConnectOptions.gss_token_provider_ex.".to_string(),
+                        ));
+                    }
+
+                    let token = generate_gss_token(
+                        gss_session_id,
+                        EnterpriseAuthMechanism::GssApi,
+                        None,
+                        gss_token_provider,
+                        gss_token_provider_ex.as_ref(),
+                    )
+                    .map_err(|e| {
+                        PgError::Auth(format!("GSSAPI initial token generation failed: {}", e))
+                    })?;
+
+                    self.send(FrontendMessage::GSSResponse(token)).await?;
+                    gss_mechanism = Some(EnterpriseAuthMechanism::GssApi);
+                }
+                BackendMessage::AuthenticationSSPI => {
+                    if !auth_settings.allow_sspi {
+                        return Err(PgError::Auth(
+                            "Server requested SSPI authentication, but SSPI is disabled by AuthSettings".to_string(),
+                        ));
+                    }
+
+                    if gss_token_provider.is_none() && gss_token_provider_ex.is_none() {
+                        return Err(PgError::Auth(
+                            "SSPI authentication requested but no GSS token provider is configured. Set ConnectOptions.gss_token_provider or ConnectOptions.gss_token_provider_ex.".to_string(),
+                        ));
+                    }
+
+                    let token = generate_gss_token(
+                        gss_session_id,
+                        EnterpriseAuthMechanism::Sspi,
+                        None,
+                        gss_token_provider,
+                        gss_token_provider_ex.as_ref(),
+                    )
+                    .map_err(|e| {
+                        PgError::Auth(format!("SSPI initial token generation failed: {}", e))
+                    })?;
+
+                    self.send(FrontendMessage::GSSResponse(token)).await?;
+                    gss_mechanism = Some(EnterpriseAuthMechanism::Sspi);
+                }
+                BackendMessage::AuthenticationGSSContinue(server_token) => {
+                    gss_roundtrips += 1;
+                    if gss_roundtrips > MAX_GSS_ROUNDTRIPS {
+                        return Err(PgError::Auth(format!(
+                            "GSS handshake exceeded {} roundtrips — aborting",
+                            MAX_GSS_ROUNDTRIPS
+                        )));
+                    }
+
+                    let mechanism = gss_mechanism.ok_or_else(|| {
+                        PgError::Auth(
+                            "Received GSSContinue without AuthenticationGSS/SSPI/KerberosV5 init"
+                                .to_string(),
+                        )
+                    })?;
+
+                    if gss_token_provider.is_none() && gss_token_provider_ex.is_none() {
+                        return Err(PgError::Auth(
+                            "Received GSSContinue but no GSS token provider is configured. Set ConnectOptions.gss_token_provider or ConnectOptions.gss_token_provider_ex.".to_string(),
+                        ));
+                    }
+
+                    let token = generate_gss_token(
+                        gss_session_id,
+                        mechanism,
+                        Some(&server_token),
+                        gss_token_provider,
+                        gss_token_provider_ex.as_ref(),
+                    )
+                    .map_err(|e| {
+                        PgError::Auth(format!("GSS continue token generation failed: {}", e))
+                    })?;
+
+                    // Only send the response if there is actually a token to
+                    // send.  When gss_init_sec_context returns GSS_S_COMPLETE
+                    // on the final round, the token may be empty.  Sending an
+                    // empty GSSResponse ('p') after the server already
+                    // considers auth complete trips the "invalid frontend
+                    // message type 112" FATAL in PostgreSQL.
+                    if !token.is_empty() {
+                        self.send(FrontendMessage::GSSResponse(token)).await?;
+                    }
+                }
+                BackendMessage::AuthenticationCleartextPassword => {
+                    if !auth_settings.allow_cleartext_password {
+                        return Err(PgError::Auth(
+                            "Server requested cleartext authentication, but cleartext is disabled by AuthSettings"
+                                .to_string(),
+                        ));
+                    }
+                    let password = password.ok_or_else(|| {
+                        PgError::Auth("Password required for cleartext authentication".to_string())
+                    })?;
+                    self.send(FrontendMessage::PasswordMessage(password.to_string()))
+                        .await?;
+                }
+                BackendMessage::AuthenticationMD5Password(salt) => {
+                    if !auth_settings.allow_md5_password {
+                        return Err(PgError::Auth(
+                            "Server requested MD5 authentication, but MD5 is disabled by AuthSettings"
+                                .to_string(),
+                        ));
+                    }
+                    let password = password.ok_or_else(|| {
+                        PgError::Auth("Password required for MD5 authentication".to_string())
+                    })?;
+                    let md5_password = md5_password_message(user, password, salt);
+                    self.send(FrontendMessage::PasswordMessage(md5_password))
+                        .await?;
                 }
                 BackendMessage::AuthenticationSASL(mechanisms) => {
+                    if !auth_settings.allow_scram_sha_256 {
+                        return Err(PgError::Auth(
+                            "Server requested SCRAM authentication, but SCRAM is disabled by AuthSettings"
+                                .to_string(),
+                        ));
+                    }
                     let password = password.ok_or_else(|| {
                         PgError::Auth("Password required for SCRAM authentication".to_string())
                     })?;
 
-                    if !mechanisms.iter().any(|m| m == "SCRAM-SHA-256") {
-                        return Err(PgError::Auth(format!(
-                            "Server doesn't support SCRAM-SHA-256. Available: {:?}",
-                            mechanisms
-                        )));
-                    }
+                    let tls_binding = self.tls_server_end_point_channel_binding();
+                    let (mechanism, channel_binding_data) = select_scram_mechanism(
+                        &mechanisms,
+                        tls_binding,
+                        auth_settings.channel_binding,
+                    )
+                    .map_err(PgError::Auth)?;
 
-                    let client = ScramClient::new(user, password);
+                    let client = if let Some(binding_data) = channel_binding_data {
+                        ScramClient::new_with_tls_server_end_point(user, password, binding_data)
+                    } else {
+                        ScramClient::new(user, password)
+                    };
                     let first_message = client.client_first_message();
 
                     self.send(FrontendMessage::SASLInitialResponse {
-                        mechanism: "SCRAM-SHA-256".to_string(),
+                        mechanism,
                         data: first_message,
                     })
                     .await?;
@@ -477,16 +1181,34 @@ impl PgConnection {
         }
     }
 
+    /// Build SCRAM `tls-server-end-point` channel-binding bytes from the server leaf cert.
+    ///
+    /// PostgreSQL expects the hash of the peer certificate DER for
+    /// `SCRAM-SHA-256-PLUS` channel binding. We currently use SHA-256 here.
+    fn tls_server_end_point_channel_binding(&self) -> Option<Vec<u8>> {
+        let PgStream::Tls(tls) = &self.stream else {
+            return None;
+        };
+
+        let (_, conn) = tls.get_ref();
+        let certs = conn.peer_certificates()?;
+        let leaf_cert = certs.first()?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(leaf_cert.as_ref());
+        Some(hasher.finalize().to_vec())
+    }
+
     /// Gracefully close the connection by sending a Terminate message.
     /// This tells the server we're done and allows proper cleanup.
     pub async fn close(mut self) -> PgResult<()> {
         use crate::protocol::PgEncoder;
-        
+
         // Send Terminate packet ('X')
         let terminate = PgEncoder::encode_terminate();
         self.stream.write_all(&terminate).await?;
         self.stream.flush().await?;
-        
+
         Ok(())
     }
 
@@ -517,6 +1239,111 @@ impl PgConnection {
             }
         }
     }
+
+    /// Clear all local prepared-statement state for this connection.
+    ///
+    /// Used by one-shot self-heal paths when server-side statement state
+    /// becomes invalid after DDL or failover.
+    pub(crate) fn clear_prepared_statement_state(&mut self) {
+        self.stmt_cache.clear();
+        self.prepared_statements.clear();
+        self.column_info_cache.clear();
+    }
+}
+
+fn generate_gss_token(
+    session_id: u64,
+    mechanism: EnterpriseAuthMechanism,
+    server_token: Option<&[u8]>,
+    legacy_provider: Option<GssTokenProvider>,
+    stateful_provider: Option<&GssTokenProviderEx>,
+) -> Result<Vec<u8>, String> {
+    if let Some(provider) = stateful_provider {
+        return provider(GssTokenRequest {
+            session_id,
+            mechanism,
+            server_token,
+        });
+    }
+
+    if let Some(provider) = legacy_provider {
+        return provider(mechanism, server_token);
+    }
+
+    Err("No GSS token provider configured".to_string())
+}
+
+fn select_scram_mechanism(
+    mechanisms: &[String],
+    tls_server_end_point_binding: Option<Vec<u8>>,
+    channel_binding_mode: ScramChannelBindingMode,
+) -> Result<(String, Option<Vec<u8>>), String> {
+    let has_scram = mechanisms.iter().any(|m| m == "SCRAM-SHA-256");
+    let has_scram_plus = mechanisms.iter().any(|m| m == "SCRAM-SHA-256-PLUS");
+
+    match channel_binding_mode {
+        ScramChannelBindingMode::Disable => {
+            if has_scram {
+                return Ok(("SCRAM-SHA-256".to_string(), None));
+            }
+            Err(format!(
+                "channel_binding=disable, but server does not advertise SCRAM-SHA-256. Available: {:?}",
+                mechanisms
+            ))
+        }
+        ScramChannelBindingMode::Prefer => {
+            if has_scram_plus {
+                if let Some(binding) = tls_server_end_point_binding {
+                    return Ok(("SCRAM-SHA-256-PLUS".to_string(), Some(binding)));
+                }
+
+                if has_scram {
+                    return Ok(("SCRAM-SHA-256".to_string(), None));
+                }
+
+                return Err(
+                    "Server requires SCRAM-SHA-256-PLUS but TLS channel binding is unavailable"
+                        .to_string(),
+                );
+            }
+
+            if has_scram {
+                return Ok(("SCRAM-SHA-256".to_string(), None));
+            }
+
+            Err(format!(
+                "Server doesn't support SCRAM-SHA-256. Available: {:?}",
+                mechanisms
+            ))
+        }
+        ScramChannelBindingMode::Require => {
+            if !has_scram_plus {
+                return Err(
+                    "channel_binding=require, but server does not advertise SCRAM-SHA-256-PLUS"
+                        .to_string(),
+                );
+            }
+            let binding = tls_server_end_point_binding.ok_or_else(|| {
+                "channel_binding=require, but TLS channel binding data is unavailable".to_string()
+            })?;
+            Ok(("SCRAM-SHA-256-PLUS".to_string(), Some(binding)))
+        }
+    }
+}
+
+/// PostgreSQL MD5 password response: `md5` + md5(hex(md5(password + user)) + 4-byte salt).
+fn md5_password_message(user: &str, password: &str, salt: [u8; 4]) -> String {
+    use md5::{Digest, Md5};
+
+    let mut inner = Md5::new();
+    inner.update(password.as_bytes());
+    inner.update(user.as_bytes());
+    let inner_hex = format!("{:x}", inner.finalize());
+
+    let mut outer = Md5::new();
+    outer.update(inner_hex.as_bytes());
+    outer.update(salt);
+    format!("md5{:x}", outer.finalize())
 }
 
 /// Drop implementation sends Terminate packet if possible.
@@ -526,7 +1353,7 @@ impl Drop for PgConnection {
         // Try to send Terminate packet synchronously using try_write
         // This is best-effort - if it fails, TCP RST will handle cleanup
         let terminate: [u8; 5] = [b'X', 0, 0, 0, 4];
-        
+
         match &mut self.stream {
             PgStream::Tcp(tcp) => {
                 // try_write is non-blocking
@@ -550,4 +1377,112 @@ pub(crate) fn parse_affected_rows(tag: &str) -> u64 {
         .last()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{md5_password_message, select_scram_mechanism};
+    use crate::driver::ScramChannelBindingMode;
+
+    #[test]
+    fn test_md5_password_message_known_vector() {
+        let hash = md5_password_message("postgres", "secret", [0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(hash, "md521561af64619ca746c2a6c4d6cbedb30");
+    }
+
+    #[test]
+    fn test_md5_password_message_is_stable() {
+        let a = md5_password_message("user_a", "pw", [1, 2, 3, 4]);
+        let b = md5_password_message("user_a", "pw", [1, 2, 3, 4]);
+        assert_eq!(a, b);
+        assert!(a.starts_with("md5"));
+        assert_eq!(a.len(), 35);
+    }
+
+    #[test]
+    fn test_select_scram_plus_when_binding_available() {
+        let mechanisms = vec![
+            "SCRAM-SHA-256".to_string(),
+            "SCRAM-SHA-256-PLUS".to_string(),
+        ];
+        let binding = vec![1, 2, 3];
+        let (mechanism, selected_binding) = select_scram_mechanism(
+            &mechanisms,
+            Some(binding.clone()),
+            ScramChannelBindingMode::Prefer,
+        )
+        .unwrap();
+        assert_eq!(mechanism, "SCRAM-SHA-256-PLUS");
+        assert_eq!(selected_binding, Some(binding));
+    }
+
+    #[test]
+    fn test_select_scram_fallback_without_binding() {
+        let mechanisms = vec![
+            "SCRAM-SHA-256".to_string(),
+            "SCRAM-SHA-256-PLUS".to_string(),
+        ];
+        let (mechanism, selected_binding) =
+            select_scram_mechanism(&mechanisms, None, ScramChannelBindingMode::Prefer).unwrap();
+        assert_eq!(mechanism, "SCRAM-SHA-256");
+        assert_eq!(selected_binding, None);
+    }
+
+    #[test]
+    fn test_select_scram_plus_only_requires_binding() {
+        let mechanisms = vec!["SCRAM-SHA-256-PLUS".to_string()];
+        let err =
+            select_scram_mechanism(&mechanisms, None, ScramChannelBindingMode::Prefer).unwrap_err();
+        assert!(err.contains("SCRAM-SHA-256-PLUS"));
+    }
+
+    #[test]
+    fn test_select_scram_require_fails_without_plus() {
+        let mechanisms = vec!["SCRAM-SHA-256".to_string()];
+        let err = select_scram_mechanism(
+            &mechanisms,
+            Some(vec![1, 2, 3]),
+            ScramChannelBindingMode::Require,
+        )
+        .unwrap_err();
+        assert!(err.contains("channel_binding=require"));
+        assert!(err.contains("SCRAM-SHA-256-PLUS"));
+    }
+
+    #[test]
+    fn test_select_scram_disable_rejects_plus_only() {
+        let mechanisms = vec!["SCRAM-SHA-256-PLUS".to_string()];
+        let err = select_scram_mechanism(&mechanisms, None, ScramChannelBindingMode::Disable)
+            .unwrap_err();
+        assert!(err.contains("channel_binding=disable"));
+    }
+
+    #[test]
+    fn test_select_scram_require_fails_without_tls_binding() {
+        let mechanisms = vec![
+            "SCRAM-SHA-256".to_string(),
+            "SCRAM-SHA-256-PLUS".to_string(),
+        ];
+        let err = select_scram_mechanism(&mechanisms, None, ScramChannelBindingMode::Require)
+            .unwrap_err();
+        assert!(err.contains("channel_binding=require"));
+        assert!(err.contains("unavailable"));
+    }
+
+    #[test]
+    fn test_select_scram_require_succeeds_with_plus_and_binding() {
+        let mechanisms = vec![
+            "SCRAM-SHA-256".to_string(),
+            "SCRAM-SHA-256-PLUS".to_string(),
+        ];
+        let binding = vec![10, 20, 30];
+        let (mechanism, selected_binding) = select_scram_mechanism(
+            &mechanisms,
+            Some(binding.clone()),
+            ScramChannelBindingMode::Require,
+        )
+        .unwrap();
+        assert_eq!(mechanism, "SCRAM-SHA-256-PLUS");
+        assert_eq!(selected_binding, Some(binding));
+    }
 }

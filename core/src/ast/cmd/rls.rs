@@ -30,9 +30,7 @@
 //! // Transpiles to: SELECT * FROM orders WHERE operator_id = '550e8400-...'
 //! ```
 
-use crate::ast::{
-    Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value,
-};
+use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
 use crate::rls::RlsContext;
 use crate::rls::tenant::lookup_tenant_column;
 
@@ -220,7 +218,10 @@ mod tests {
             .cages
             .iter()
             .find(|c| matches!(c.kind, CageKind::Filter));
-        assert!(filter.is_none(), "Unregistered table should not have filter");
+        assert!(
+            filter.is_none(),
+            "Unregistered table should not have filter"
+        );
     }
 
     #[test]
@@ -277,9 +278,9 @@ mod tests {
 
         let conditions = &filter.unwrap().conditions;
         assert!(
-            conditions.iter().any(|c| {
-                matches!(&c.left, Expr::Named(n) if n == "operator_id")
-            }),
+            conditions
+                .iter()
+                .any(|c| { matches!(&c.left, Expr::Named(n) if n == "operator_id") }),
             "Expected operator_id filter on SET"
         );
     }
@@ -296,6 +297,9 @@ mod tests {
             .cages
             .iter()
             .find(|c| matches!(c.kind, CageKind::Filter));
-        assert!(filter.is_none(), "Agent-only should not inject operator filter");
+        assert!(
+            filter.is_none(),
+            "Agent-only should not inject operator filter"
+        );
     }
 }

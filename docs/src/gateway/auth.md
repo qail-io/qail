@@ -10,15 +10,7 @@ The gateway provides multiple layers of security: JWT authentication, PostgreSQL
 
 The gateway validates JWT tokens and extracts tenant context for RLS.
 
-Set `JWT_SECRET` as an environment variable or in `qail.toml`:
-
-```toml
-# qail.toml
-[gateway]
-jwt_secret = "your-hs256-secret"
-```
-
-Or set via environment variable (takes precedence over TOML):
+Set `JWT_SECRET` as an environment variable:
 
 ```bash
 export JWT_SECRET="your-hs256-secret"
@@ -39,12 +31,18 @@ set_config('app.role', '<from JWT>', false);
 For development, pass claims directly as headers:
 
 ```bash
-curl -H "x-operator-id: uuid" -H "x-user-id: uuid" /api/orders
+curl \
+  -H "x-user-id: user-123" \
+  -H "x-user-role: operator" \
+  -H "x-tenant-id: tenant-abc" \
+  /api/orders
 ```
 
-> **Warning:** Header-based auth is only active when `QAIL_DEV_MODE=true` is set **and** `JWT_SECRET` is **not set**. The gateway will **refuse to start** in dev mode when the bind address is not `localhost` — preventing accidental exposure of header-based auth on public interfaces.
+> **Warning:** Header-based auth is only active when `QAIL_DEV_MODE=true` is set.
+> This works independently of `JWT_SECRET` — you can have both JWT and dev-mode headers active simultaneously.
+> If a `Bearer` token is provided but fails validation, the request is **denied** (not degraded to dev-mode or anonymous).
+> The gateway logs a startup warning when dev mode is enabled and does not enforce bind-address restrictions.
 
----
 ---
 
 ## Row-Level Security (RLS)
@@ -63,7 +61,7 @@ Your PostgreSQL RLS policies reference these variables:
 ```sql
 CREATE POLICY tenant_isolation ON orders
   FOR ALL
-  USING (operator_id = current_setting('app.operator_id')::uuid);
+  USING (operator_id = current_setting('app.current_operator_id')::uuid);
 
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders FORCE ROW LEVEL SECURITY;
@@ -81,19 +79,17 @@ Fine-grained access control per table, per role:
 
 ```yaml
 policies:
-  orders:
-    roles:
-      agent:
-        select: true
-        insert: true
-        update: true
-        delete: false
-        columns: ["id", "status", "total", "created_at"]  # Column-level
-        filter:                                             # Row-level
-          operator_id: "x-operator-id"
-      viewer:
-        select: true
-        columns: ["id", "status"]
+  - name: orders_agent_read
+    table: orders
+    role: agent
+    operations: [read]
+    filter: "operator_id = $tenant_id"
+    allowed_columns: ["id", "status", "total", "created_at"]
+  - name: orders_viewer_read
+    table: orders
+    role: viewer
+    operations: [read]
+    allowed_columns: ["id", "status"]
 ```
 
 ### Column Permissions
@@ -111,8 +107,8 @@ Control CRUD operations per role per table:
 
 | Permission | Operations |
 |-----------|-----------|
-| `select` | `GET` list and single |
-| `insert` | `POST` create |
+| `read` | `GET` list and single |
+| `create` | `POST` create |
 | `update` | `PATCH` update |
 | `delete` | `DELETE` delete |
 
@@ -124,17 +120,109 @@ Lock down which queries can run in production:
 
 ```toml
 # qail.toml
-[gateway.security]
-allow_list_enabled = true
-allow_list = [
-  "GET /api/orders",
-  "GET /api/orders/:id",
-]
-complexity_limit = 10
-rate_limit = 100
+[gateway]
+allow_list_path = "allow_list.txt"
 ```
 
 When enabled, any query pattern not in the allow-list is rejected with `403 Forbidden`. This provides defense-in-depth: even if auth is bypassed, only pre-approved query shapes can execute.
+
+---
+
+## RPC Contract Hardening
+
+Harden `/api/rpc/{function}` with strict function naming and signature checks:
+
+```toml
+[gateway]
+rpc_require_schema_qualified = true
+rpc_allowlist_path = "rpc_allowlist.txt"
+rpc_signature_check = true
+```
+
+`rpc_allowlist_path` format:
+
+```text
+# One function per line (case-insensitive)
+api.search_orders
+public.health_check
+```
+
+What each control does:
+
+| Setting | Effect |
+|--------|--------|
+| `rpc_require_schema_qualified` | Rejects unqualified calls like `search_orders`; requires `schema.function` |
+| `rpc_allowlist_path` | Blocks RPC calls not explicitly listed |
+| `rpc_signature_check` | For named-arg JSON bodies, rejects unknown argument keys not present in PostgreSQL function signatures |
+
+When `rpc_signature_check=true`, the gateway also uses a parser-only PostgreSQL probe (`PREPARE ...; DEALLOCATE`) to align overload resolution with PostgreSQL itself before execution.
+
+RPC DevEx endpoint:
+
+- `GET /api/_rpc/contracts` returns callable function signatures (`identity_args`, defaults, variadic, return type) for typed client generation.
+
+RPC result format control:
+
+- Optional header `x-qail-result-format: binary` enables binary column format on RPC responses.
+- Default is `x-qail-result-format: text`.
+
+---
+
+## Database Auth/TLS Hardening
+
+Gateway database transport/auth policy can be configured through `database_url` query parameters:
+
+```toml
+[gateway]
+database_url = "postgresql://app:secret@db.internal:5432/app\
+?sslmode=require\
+&sslrootcert=/etc/qail/ca.pem\
+&channel_binding=require\
+&auth_mode=scram_only"
+```
+
+Supported parameters:
+
+| Parameter | Values | Effect |
+|-----------|--------|--------|
+| `sslmode` | `disable`, `prefer`, `require` (`verify-ca`/`verify-full` map to `require`) | TLS policy |
+| `sslrootcert` | file path | Custom CA bundle for server cert validation |
+| `sslcert` + `sslkey` | file paths | Enable mTLS client cert auth |
+| `channel_binding` | `disable`, `prefer`, `require` | SCRAM channel-binding policy |
+| `auth_mode` | `scram_only`, `gssapi_only`, `compat` | Auth policy preset |
+| `auth_scram` / `auth_md5` / `auth_cleartext` | boolean | Fine-grained mechanism toggles |
+| `auth_kerberos` / `auth_gssapi` / `auth_sspi` | boolean | Enterprise auth mechanism toggles |
+| `gss_provider` | `linux_krb5`, `callback`, `custom` | Selects built-in Linux krb5 provider vs external callback wiring |
+| `gss_service` | string (default `postgres`) | Kerberos service used for host-based target (`service@host`) |
+| `gss_target` | string | Optional full host-based target override |
+| `gss_connect_retries` | integer (default `2`) | Retries transient GSS/Kerberos connect/auth failures |
+| `gss_retry_base_ms` | integer ms (default `150`) | Base delay for exponential GSS retry backoff |
+| `gss_circuit_threshold` | integer (default `8`) | Failures in window before local GSS circuit opens |
+| `gss_circuit_window_ms` | integer ms (default `30000`) | Rolling window for circuit failure counting |
+| `gss_circuit_cooldown_ms` | integer ms (default `15000`) | Cooldown while open circuit blocks new connect attempts |
+
+If `sslcert` or `sslkey` is provided, both must be set.
+
+If `gss_provider=linux_krb5` is set, build the gateway with feature `enterprise-gssapi` on Linux.
+
+Startup runs Kerberos preflight checks and emits clear diagnostics for common misconfiguration
+(missing explicit credential cache/keytab paths, invalid `KRB5_CONFIG`, etc).
+
+Example:
+
+```toml
+[gateway]
+database_url = "postgresql://app@db.internal:5432/app\
+?sslmode=require\
+&auth_mode=gssapi_only\
+&gss_provider=linux_krb5\
+&gss_service=postgres\
+&gss_connect_retries=3\
+&gss_retry_base_ms=200\
+&gss_circuit_threshold=8\
+&gss_circuit_window_ms=30000\
+&gss_circuit_cooldown_ms=15000"
+```
 
 ---
 

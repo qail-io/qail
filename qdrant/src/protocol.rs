@@ -5,7 +5,7 @@
 
 use crate::error::QdrantResult;
 use crate::point::{PayloadValue, Point, PointId, ScoredPoint};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 /// Encode a vector search request to JSON format.
 ///
@@ -34,15 +34,15 @@ pub fn encode_search_request(
         "with_payload": true,
         "with_vector": with_vector,
     });
-    
+
     if let Some(off) = offset {
         request["offset"] = json!(off);
     }
-    
+
     if let Some(threshold) = score_threshold {
         request["score_threshold"] = json!(threshold);
     }
-    
+
     serde_json::to_vec(&request).unwrap_or_default()
 }
 
@@ -62,15 +62,15 @@ pub fn encode_search_request_with_filter(
         "with_vector": with_vector,
         "filter": filter,
     });
-    
+
     if let Some(off) = offset {
         request["offset"] = json!(off);
     }
-    
+
     if let Some(threshold) = score_threshold {
         request["score_threshold"] = json!(threshold);
     }
-    
+
     serde_json::to_vec(&request).unwrap_or_default()
 }
 
@@ -94,12 +94,13 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
                 PointId::Uuid(s) => json!(s),
                 PointId::Num(n) => json!(n),
             };
-            
-            let payload: JsonValue = p.payload
+
+            let payload: JsonValue = p
+                .payload
                 .iter()
                 .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
                 .collect();
-            
+
             json!({
                 "id": id,
                 "vector": p.vector,
@@ -107,7 +108,7 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
             })
         })
         .collect();
-    
+
     let request = json!({ "points": points_json });
     serde_json::to_vec(&request).unwrap_or_default()
 }
@@ -117,7 +118,7 @@ pub fn encode_upsert_request(points: &[Point]) -> Vec<u8> {
 /// For collections with multiple vector fields (e.g., "title", "content").
 pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoint]) -> Vec<u8> {
     use crate::point::MultiVectorPoint;
-    
+
     let points_json: Vec<JsonValue> = points
         .iter()
         .map(|p: &MultiVectorPoint| {
@@ -125,18 +126,20 @@ pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoi
                 PointId::Uuid(s) => json!(s),
                 PointId::Num(n) => json!(n),
             };
-            
-            let payload: JsonValue = p.payload
+
+            let payload: JsonValue = p
+                .payload
                 .iter()
                 .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
                 .collect();
-            
+
             // Named vectors as object
-            let vectors: JsonValue = p.vectors
+            let vectors: JsonValue = p
+                .vectors
                 .iter()
                 .map(|(k, v)| (k.clone(), json!(v)))
                 .collect();
-            
+
             json!({
                 "id": id,
                 "vector": vectors,
@@ -144,7 +147,7 @@ pub fn encode_upsert_multi_vector_request(points: &[crate::point::MultiVectorPoi
             })
         })
         .collect();
-    
+
     let request = json!({ "points": points_json });
     serde_json::to_vec(&request).unwrap_or_default()
 }
@@ -165,7 +168,7 @@ pub fn encode_delete_request(ids: &[PointId]) -> Vec<u8> {
             PointId::Num(n) => json!(n),
         })
         .collect();
-    
+
     let request = json!({ "points": ids_json });
     serde_json::to_vec(&request).unwrap_or_default()
 }
@@ -203,9 +206,12 @@ pub fn encode_create_collection_request(
 /// let filter = encode_conditions_to_filter(&conditions, false);
 /// // Returns: {"must": [{"key": "category", "match": {"value": "electronics"}}, {"key": "price", "range": {"lt": 1000}}]}
 /// ```
-pub fn encode_conditions_to_filter(conditions: &[qail_core::ast::Condition], is_or: bool) -> JsonValue {
+pub fn encode_conditions_to_filter(
+    conditions: &[qail_core::ast::Condition],
+    is_or: bool,
+) -> JsonValue {
     use qail_core::ast::{Expr, Operator, Value};
-    
+
     let clauses: Vec<JsonValue> = conditions
         .iter()
         .filter_map(|cond| {
@@ -215,7 +221,7 @@ pub fn encode_conditions_to_filter(conditions: &[qail_core::ast::Condition], is_
                 Expr::Aliased { name, .. } => name.clone(),
                 _ => return None,
             };
-            
+
             // Convert operator and value to Qdrant filter clause
             let clause = match (&cond.op, &cond.value) {
                 // Match (equality)
@@ -231,7 +237,7 @@ pub fn encode_conditions_to_filter(conditions: &[qail_core::ast::Condition], is_
                     "key": key,
                     "match": { "value": b }
                 }),
-                
+
                 // Range operators
                 (Operator::Gt, Value::Int(n)) => json!({
                     "key": key,
@@ -265,7 +271,7 @@ pub fn encode_conditions_to_filter(conditions: &[qail_core::ast::Condition], is_
                     "key": key,
                     "range": { "lte": f }
                 }),
-                
+
                 // In / NotIn (array membership)
                 (Operator::In, Value::Array(arr)) => {
                     let values: Vec<JsonValue> = arr.iter().filter_map(value_to_json).collect();
@@ -273,8 +279,8 @@ pub fn encode_conditions_to_filter(conditions: &[qail_core::ast::Condition], is_
                         "key": key,
                         "match": { "any": values }
                     })
-                },
-                
+                }
+
                 // IsNull / IsNotNull
                 (Operator::IsNull, _) => json!({
                     "is_null": { "key": key }
@@ -282,13 +288,13 @@ pub fn encode_conditions_to_filter(conditions: &[qail_core::ast::Condition], is_
                 (Operator::IsNotNull, _) => json!({
                     "is_empty": { "key": key, "is_empty": false }
                 }),
-                
+
                 // Text/keyword match with contains
                 (Operator::Contains | Operator::Like, Value::String(s)) => json!({
                     "key": key,
                     "match": { "text": s }
                 }),
-                
+
                 // Default: try match for other types
                 (_, Value::String(s)) => json!({
                     "key": key,
@@ -298,14 +304,14 @@ pub fn encode_conditions_to_filter(conditions: &[qail_core::ast::Condition], is_
                     "key": key,
                     "match": { "value": n }
                 }),
-                
+
                 _ => return None,
             };
-            
+
             Some(clause)
         })
         .collect();
-    
+
     // Use "should" for OR, "must" for AND
     if is_or {
         json!({ "should": clauses })
@@ -331,25 +337,32 @@ fn value_to_json(value: &qail_core::ast::Value) -> Option<JsonValue> {
 pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
     let response: JsonValue = serde_json::from_slice(data)
         .map_err(|e| crate::error::QdrantError::Decode(e.to_string()))?;
-    
+
     let results = response["result"]
         .as_array()
         .ok_or_else(|| crate::error::QdrantError::Decode("Missing 'result' array".to_string()))?;
-    
+
     let scored_points: Vec<ScoredPoint> = results
         .iter()
         .filter_map(|item| {
             let id = parse_point_id(&item["id"])?;
             let score = item["score"].as_f64()? as f32;
             let payload = parse_payload(&item["payload"]);
-            let vector = item["vector"]
-                .as_array()
-                .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect());
-            
-            Some(ScoredPoint { id, score, payload, vector })
+            let vector = item["vector"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect()
+            });
+
+            Some(ScoredPoint {
+                id,
+                score,
+                payload,
+                vector,
+            })
         })
         .collect();
-    
+
     Ok(scored_points)
 }
 
@@ -365,7 +378,7 @@ pub fn parse_point_id(value: &JsonValue) -> Option<PointId> {
 /// Parse payload from JSON object.
 pub fn parse_payload(value: &JsonValue) -> crate::point::Payload {
     let mut payload = crate::point::Payload::new();
-    
+
     if let Some(obj) = value.as_object() {
         for (k, v) in obj {
             if let Some(pv) = json_to_payload_value(v) {
@@ -373,7 +386,7 @@ pub fn parse_payload(value: &JsonValue) -> crate::point::Payload {
             }
         }
     }
-    
+
     payload
 }
 
@@ -387,9 +400,11 @@ fn payload_value_to_json(value: &PayloadValue) -> JsonValue {
         PayloadValue::List(arr) => {
             JsonValue::Array(arr.iter().map(payload_value_to_json).collect())
         }
-        PayloadValue::Object(obj) => {
-            JsonValue::Object(obj.iter().map(|(k, v)| (k.clone(), payload_value_to_json(v))).collect())
-        }
+        PayloadValue::Object(obj) => JsonValue::Object(
+            obj.iter()
+                .map(|(k, v)| (k.clone(), payload_value_to_json(v)))
+                .collect(),
+        ),
         PayloadValue::Null => JsonValue::Null,
     }
 }
@@ -424,43 +439,43 @@ fn json_to_payload_value(value: &JsonValue) -> Option<PayloadValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_encode_search_request() {
         let vector = vec![0.1, 0.2, 0.3];
         let json_bytes = encode_search_request(&vector, 10, None, None, false);
         let json: JsonValue = serde_json::from_slice(&json_bytes).unwrap();
-        
+
         // Check structure exists
         assert!(json["vector"].is_array());
         assert_eq!(json["limit"], 10);
         assert_eq!(json["with_payload"], true);
-        
+
         // Check vector length
         assert_eq!(json["vector"].as_array().unwrap().len(), 3);
     }
-    
+
     #[test]
     fn test_encode_upsert_request() {
         let point = Point::new("test-id", vec![0.5, 0.5]);
         let json_bytes = encode_upsert_request(&[point]);
         let json_str = String::from_utf8(json_bytes).unwrap();
-        
+
         assert!(json_str.contains("\"points\""));
         assert!(json_str.contains("\"test-id\""));
         assert!(json_str.contains("[0.5,0.5]"));
     }
-    
+
     #[test]
     fn test_encode_delete_request() {
         let ids = vec![PointId::Uuid("id1".to_string()), PointId::Num(42)];
         let json_bytes = encode_delete_request(&ids);
         let json_str = String::from_utf8(json_bytes).unwrap();
-        
+
         assert!(json_str.contains("\"id1\""));
         assert!(json_str.contains("42"));
     }
-    
+
     #[test]
     fn test_decode_search_response() {
         let response = r#"{
@@ -469,7 +484,7 @@ mod tests {
                 {"id": 123, "score": 0.80, "payload": {}}
             ]
         }"#;
-        
+
         let results = decode_search_response(response.as_bytes()).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].score, 0.95);
@@ -479,7 +494,7 @@ mod tests {
     #[test]
     fn test_encode_conditions_to_filter() {
         use qail_core::ast::{Condition, Expr, Operator, Value};
-        
+
         let conditions = vec![
             Condition {
                 left: Expr::Named("category".to_string()),
@@ -494,18 +509,18 @@ mod tests {
                 is_array_unnest: false,
             },
         ];
-        
+
         let filter = encode_conditions_to_filter(&conditions, false);
-        
+
         // Should have "must" with 2 clauses
         assert!(filter["must"].is_array());
         let must = filter["must"].as_array().unwrap();
         assert_eq!(must.len(), 2);
-        
+
         // First clause: category match
         assert_eq!(must[0]["key"], "category");
         assert_eq!(must[0]["match"]["value"], "electronics");
-        
+
         // Second clause: price range
         assert_eq!(must[1]["key"], "price");
         assert_eq!(must[1]["range"]["lt"], 1000);
@@ -514,18 +529,16 @@ mod tests {
     #[test]
     fn test_encode_conditions_to_filter_or() {
         use qail_core::ast::{Condition, Expr, Operator, Value};
-        
-        let conditions = vec![
-            Condition {
-                left: Expr::Named("status".to_string()),
-                op: Operator::Eq,
-                value: Value::String("active".to_string()),
-                is_array_unnest: false,
-            },
-        ];
-        
+
+        let conditions = vec![Condition {
+            left: Expr::Named("status".to_string()),
+            op: Operator::Eq,
+            value: Value::String("active".to_string()),
+            is_array_unnest: false,
+        }];
+
         let filter = encode_conditions_to_filter(&conditions, true);
-        
+
         // Should have "should" instead of "must"
         assert!(filter["should"].is_array());
         assert!(filter["must"].is_null());

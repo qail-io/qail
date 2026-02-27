@@ -232,12 +232,12 @@ impl Validator {
             _ => None,
         }
     }
-    
+
     /// Get column type for a table.column
     pub fn get_column_type(&self, table: &str, column: &str) -> Option<&String> {
         self.column_types.get(table)?.get(column)
     }
-    
+
     /// Validate that a Value's type matches the expected column type.
     /// Returns Ok(()) if compatible, Err with TypeMismatch if not.
     pub fn validate_value_type(
@@ -247,23 +247,30 @@ impl Validator {
         value: &crate::ast::Value,
     ) -> Result<(), ValidationError> {
         use crate::ast::Value;
-        
+
         // Get the expected type for this column
         let expected_type = match self.get_column_type(table, column) {
             Some(t) => t.to_uppercase(),
             None => return Ok(()), // Column type unknown, skip validation
         };
-        
+
         // NULL is always allowed (for nullable columns)
         if matches!(value, Value::Null | Value::NullUuid) {
             return Ok(());
         }
-        
+
         // Param and NamedParam are runtime values - can't validate at compile time
-        if matches!(value, Value::Param(_) | Value::NamedParam(_) | Value::Function(_) | Value::Subquery(_) | Value::Expr(_)) {
+        if matches!(
+            value,
+            Value::Param(_)
+                | Value::NamedParam(_)
+                | Value::Function(_)
+                | Value::Subquery(_)
+                | Value::Expr(_)
+        ) {
             return Ok(());
         }
-        
+
         // Map Value variant to its type name
         let value_type = match value {
             Value::Bool(_) => "BOOLEAN",
@@ -280,7 +287,7 @@ impl Validator {
             Value::Json(_) => "JSONB",
             _ => return Ok(()), // Unknown value type, skip
         };
-        
+
         // Check compatibility
         if !Self::types_compatible(&expected_type, value_type) {
             return Err(ValidationError::TypeMismatch {
@@ -290,65 +297,80 @@ impl Validator {
                 got: value_type.to_string(),
             });
         }
-        
+
         Ok(())
     }
-    
+
     /// Check if expected column type is compatible with value type.
     /// Allows flexible matching (e.g., INT matches INT4, BIGINT, INTEGER, etc.)
     fn types_compatible(expected: &str, value_type: &str) -> bool {
         let expected = expected.to_uppercase();
         let value_type = value_type.to_uppercase();
-        
+
         // Exact match
         if expected == value_type {
             return true;
         }
-        
+
         // Integer family
-        let int_types = ["INT", "INT4", "INT8", "INTEGER", "BIGINT", "SMALLINT", "SERIAL", "BIGSERIAL"];
+        let int_types = [
+            "INT",
+            "INT4",
+            "INT8",
+            "INTEGER",
+            "BIGINT",
+            "SMALLINT",
+            "SERIAL",
+            "BIGSERIAL",
+        ];
         if int_types.contains(&expected.as_str()) && value_type == "INT" {
             return true;
         }
-        
+
         // Float family
-        let float_types = ["FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DECIMAL", "NUMERIC", "REAL"];
-        if float_types.contains(&expected.as_str()) && (value_type == "FLOAT" || value_type == "INT") {
+        let float_types = [
+            "FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DECIMAL", "NUMERIC", "REAL",
+        ];
+        if float_types.contains(&expected.as_str())
+            && (value_type == "FLOAT" || value_type == "INT")
+        {
             return true;
         }
-        
+
         // Text family - TEXT is very flexible in PostgreSQL
         let text_types = ["TEXT", "VARCHAR", "CHAR", "CHARACTER", "CITEXT", "NAME"];
         if text_types.contains(&expected.as_str()) && value_type == "TEXT" {
             return true;
         }
-        
+
         // Boolean
         if (expected == "BOOLEAN" || expected == "BOOL") && value_type == "BOOLEAN" {
             return true;
         }
-        
+
         // UUID
         if expected == "UUID" && (value_type == "UUID" || value_type == "TEXT") {
             return true;
         }
-        
+
         // Timestamp family
         let ts_types = ["TIMESTAMP", "TIMESTAMPTZ", "DATE", "TIME", "TIMETZ"];
-        if ts_types.contains(&expected.as_str()) && (value_type == "TIMESTAMP" || value_type == "TEXT") {
+        if ts_types.contains(&expected.as_str())
+            && (value_type == "TIMESTAMP" || value_type == "TEXT")
+        {
             return true;
         }
-        
+
         // JSONB/JSON accepts almost anything
         if expected == "JSONB" || expected == "JSON" {
             return true;
         }
-        
+
         // Arrays
         if expected.contains("[]") || expected.starts_with("_") {
             return value_type == "ARRAY";
         }
-        
+
         false
     }
 
@@ -379,7 +401,9 @@ impl Validator {
                                 errors.push(e);
                             }
                             // Type validation for qualified column
-                            if let Err(e) = self.validate_value_type(parts[0], parts[1], &cond.value) {
+                            if let Err(e) =
+                                self.validate_value_type(parts[0], parts[1], &cond.value)
+                            {
                                 errors.push(e);
                             }
                         }
@@ -396,12 +420,36 @@ impl Validator {
             }
         }
 
-        for join in &cmd.joins {
+        for cond in &cmd.having {
+            if let Some(name) = Self::extract_column_name(&cond.left) {
+                if name.contains('(') || name == "*" {
+                    continue;
+                }
+                if name.contains('.') {
+                    let parts: Vec<&str> = name.split('.').collect();
+                    if parts.len() == 2 {
+                        if let Err(e) = self.validate_column(parts[0], parts[1]) {
+                            errors.push(e);
+                        }
+                        if let Err(e) = self.validate_value_type(parts[0], parts[1], &cond.value) {
+                            errors.push(e);
+                        }
+                    }
+                } else {
+                    if let Err(e) = self.validate_column(&cmd.table, &name) {
+                        errors.push(e);
+                    }
+                    if let Err(e) = self.validate_value_type(&cmd.table, &name, &cond.value) {
+                        errors.push(e);
+                    }
+                }
+            }
+        }
 
+        for join in &cmd.joins {
             if let Err(e) = self.validate_table(&join.table) {
                 errors.push(e);
             }
-
 
             if let Some(conditions) = &join.on {
                 for cond in conditions {
@@ -552,6 +600,25 @@ mod tests {
         assert!(
             matches!(&errors[0], ValidationError::ColumnNotFound { column, .. } if column == "emial")
         );
+    }
+
+    #[test]
+    fn test_validate_having_columns() {
+        let mut v = Validator::new();
+        v.add_table("orders", &["id", "status", "total"]);
+
+        let mut cmd = Qail::get("orders");
+        cmd.having.push(crate::ast::Condition {
+            left: Expr::Named("totl".to_string()),
+            op: crate::ast::Operator::Eq,
+            value: crate::ast::Value::Int(1),
+            is_array_unnest: false,
+        });
+
+        let errors = v.validate_command(&cmd).unwrap_err();
+        assert!(errors.iter().any(
+            |e| matches!(e, ValidationError::ColumnNotFound { column, .. } if column == "totl")
+        ));
     }
 
     #[test]

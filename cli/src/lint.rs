@@ -1,8 +1,8 @@
 //! Schema linting for best practices
 
-use anyhow::Result;
 use crate::colors::*;
-use qail_core::migrate::{ColumnType, parse_qail};
+use anyhow::Result;
+use qail_core::migrate::{ColumnType, parse_qail_file};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LintLevel {
@@ -26,11 +26,8 @@ pub fn lint_schema(schema_path: &str, strict: bool) -> Result<()> {
     println!("{}", "🔍 Schema Linter".cyan().bold());
     println!();
 
-    let content = std::fs::read_to_string(schema_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read schema: {}", e))?;
-
-    let schema =
-        parse_qail(&content).map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
+    let schema = parse_qail_file(schema_path)
+        .map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
 
     println!("  Linting: {}", schema_path.yellow());
     println!("  Tables: {}", schema.tables.len());

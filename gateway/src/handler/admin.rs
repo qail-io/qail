@@ -20,7 +20,8 @@ pub async fn health_check() -> Json<HealthCheckPublic> {
 /// No authentication required (the OpenAPI spec itself is auth-gated, but reading the
 /// UI chrome is harmless).
 pub async fn swagger_ui() -> axum::response::Html<String> {
-    axum::response::Html(r#"<!DOCTYPE html>
+    axum::response::Html(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -54,7 +55,9 @@ pub async fn swagger_ui() -> axum::response::Html<String> {
         .swagger-ui .info .title { font-size: 2em; font-weight: 700; }
     </style>
 </body>
-</html>"#.to_string())
+</html>"#
+            .to_string(),
+    )
 }
 
 /// Internal health check — includes pool stats and tenant guard metrics.

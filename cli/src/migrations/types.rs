@@ -31,12 +31,12 @@ pub fn classify_migration(cmd: &Qail) -> MigrationClass {
         // CREATE operations are generally reversible
         Action::Make => MigrationClass::Reversible,
         Action::Index => MigrationClass::Reversible,
-        
+
         // DROP operations lose data
         Action::Drop => MigrationClass::DataLosing,
         Action::AlterDrop => MigrationClass::DataLosing,
         Action::DropIndex => MigrationClass::Reversible, // Indexes can be recreated
-        
+
         // Type changes depend on direction
         Action::AlterType => {
             if let Some(Expr::Def { data_type, .. }) = cmd.columns.first() {
@@ -50,13 +50,13 @@ pub fn classify_migration(cmd: &Qail) -> MigrationClass {
                 MigrationClass::Reversible
             }
         }
-        
+
         // ADD COLUMN is generally reversible
         Action::Alter => MigrationClass::Reversible,
-        
+
         // RENAME is reversible
         Action::Mod => MigrationClass::Reversible,
-        
+
         // Default to reversible for unknown actions
         _ => MigrationClass::Reversible,
     }
@@ -67,12 +67,22 @@ pub fn classify_migration(cmd: &Qail) -> MigrationClass {
 pub fn is_narrowing_type(target: &str) -> bool {
     matches!(
         target.to_uppercase().as_str(),
-        "INT" | "INTEGER" | "BIGINT" | "SMALLINT" 
-        | "BOOLEAN" | "BOOL" 
-        | "UUID" 
-        | "NUMERIC" | "DECIMAL"
-        | "REAL" | "FLOAT" | "DOUBLE PRECISION"
-        | "DATE" | "TIME" | "TIMESTAMP" | "TIMESTAMPTZ"
+        "INT"
+            | "INTEGER"
+            | "BIGINT"
+            | "SMALLINT"
+            | "BOOLEAN"
+            | "BOOL"
+            | "UUID"
+            | "NUMERIC"
+            | "DECIMAL"
+            | "REAL"
+            | "FLOAT"
+            | "DOUBLE PRECISION"
+            | "DATE"
+            | "TIME"
+            | "TIMESTAMP"
+            | "TIMESTAMPTZ"
     )
 }
 
@@ -80,37 +90,37 @@ pub fn is_narrowing_type(target: &str) -> bool {
 pub fn is_safe_cast(from: &str, to: &str) -> bool {
     let from_upper = from.to_uppercase();
     let to_upper = to.to_uppercase();
-    
+
     // Same type is always safe
     if from_upper == to_upper {
         return true;
     }
-    
+
     // TEXT can accept anything (widening)
     if to_upper == "TEXT" || to_upper == "VARCHAR" {
         return true;
     }
-    
+
     // INT -> BIGINT is safe (widening)
     if (from_upper == "INT" || from_upper == "INTEGER")
         && (to_upper == "BIGINT" || to_upper == "TEXT")
     {
         return true;
     }
-    
+
     // SMALLINT -> INT/BIGINT is safe
     if from_upper == "SMALLINT"
         && (to_upper == "INT" || to_upper == "INTEGER" || to_upper == "BIGINT")
     {
         return true;
     }
-    
+
     // If target is a narrowing type and source is TEXT/VARCHAR, it's unsafe
     // (TEXT -> INT requires USING clause)
     if is_narrowing_type(&to_upper) && (from_upper == "TEXT" || from_upper == "VARCHAR") {
         return false;
     }
-    
+
     // Other cases - generally safer
     !is_narrowing_type(&to_upper)
 }
@@ -135,10 +145,10 @@ mod tests {
         assert!(is_safe_cast("INT", "TEXT"));
         assert!(is_safe_cast("INT", "BIGINT"));
         assert!(is_safe_cast("SMALLINT", "INT"));
-        
+
         // Same type is safe
         assert!(is_safe_cast("TEXT", "TEXT"));
-        
+
         // Narrowing is unsafe
         assert!(!is_safe_cast("TEXT", "INT"));
     }
@@ -153,7 +163,7 @@ mod tests {
             data_type: "INT".to_string(),
             constraints: vec![],
         }];
-        
+
         assert_eq!(classify_migration(&cmd), MigrationClass::Irreversible);
     }
 }

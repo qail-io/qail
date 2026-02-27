@@ -3,12 +3,12 @@
 //! Extracts schema from live databases into QAIL format.
 //! Uses purely AST-native queries via `Qail::get()` — zero raw SQL.
 
-use anyhow::{Result, anyhow};
 use crate::colors::*;
+use anyhow::{Result, anyhow};
 use qail_core::ast::{Operator, Qail};
-use qail_core::migrate::{Column, Schema, Table, to_qail_string, parse_policy_expr};
-use qail_core::migrate::schema::{ViewDef, SchemaFunctionDef, SchemaTriggerDef};
-use qail_core::migrate::policy::{RlsPolicy, PolicyTarget, PolicyPermissiveness};
+use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
+use qail_core::migrate::schema::{SchemaFunctionDef, SchemaTriggerDef, ViewDef};
+use qail_core::migrate::{Column, Schema, Table, parse_policy_expr, to_qail_string};
 use qail_pg::driver::PgDriver;
 
 use crate::util::parse_pg_url;
@@ -58,7 +58,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     // ── 0. Enums (must be before columns to resolve enum column types) ──
     let enum_cmd = Qail::get("pg_catalog.pg_type")
         .columns(["typname", "oid"])
-        .filter("typtype", Operator::Eq, "e");  // 'e' = enum type
+        .filter("typtype", Operator::Eq, "e"); // 'e' = enum type
 
     let enum_rows = driver
         .fetch_all(&enum_cmd)
@@ -91,7 +91,13 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     // ── 1. Columns + Defaults (AST-native) ──────────────────────────────
     let columns_cmd = Qail::get("information_schema.columns")
-        .columns(["table_name", "column_name", "udt_name", "is_nullable", "column_default"])
+        .columns([
+            "table_name",
+            "column_name",
+            "udt_name",
+            "is_nullable",
+            "column_default",
+        ])
         .filter("table_schema", Operator::Eq, "public");
 
     let rows = driver
@@ -139,7 +145,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
                 };
                 // Strip surrounding single quotes from string literals
                 let clean = if clean.starts_with('\'') && clean.ends_with('\'') {
-                    format!("'{}'", &clean[1..clean.len()-1])
+                    format!("'{}'", &clean[1..clean.len() - 1])
                 } else {
                     clean
                 };
@@ -163,7 +169,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     let pk_constraint_names: std::collections::HashSet<String> = pk_rows
         .iter()
-        .map(|r| r.text(1))  // constraint_name
+        .map(|r| r.text(1)) // constraint_name
         .collect();
 
     // ── 3. Key Column Usage (for PK + Unique + FK) (AST-native) ─────────
@@ -277,21 +283,27 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
         if let Some((table_name, col_name)) = check_column_map.get(&constraint_name)
             && let Some(columns) = tables.get_mut(table_name.as_str())
-            && let Some(expr) = parse_check_expr(&check_clause, col_name) {
-                for col in columns.iter_mut() {
-                    if col.name == *col_name {
-                        col.check = Some(qail_core::migrate::CheckConstraint {
-                            expr: expr.clone(),
-                            name: Some(constraint_name.clone()),
-                        });
-                    }
+            && let Some(expr) = parse_check_expr(&check_clause, col_name)
+        {
+            for col in columns.iter_mut() {
+                if col.name == *col_name {
+                    col.check = Some(qail_core::migrate::CheckConstraint {
+                        expr: expr.clone(),
+                        name: Some(constraint_name.clone()),
+                    });
                 }
+            }
         }
     }
 
     // Get FK constraint names, referenced constraint, and ON DELETE/UPDATE rules
     let fk_ref_cmd = Qail::get("information_schema.referential_constraints")
-        .columns(["constraint_name", "unique_constraint_name", "delete_rule", "update_rule"])
+        .columns([
+            "constraint_name",
+            "unique_constraint_name",
+            "delete_rule",
+            "update_rule",
+        ])
         .filter("constraint_schema", Operator::Eq, "public");
 
     let fk_ref_rows = driver
@@ -300,8 +312,14 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .map_err(|e| anyhow!("Failed to query foreign key refs: {}", e))?;
 
     // Map FK constraint_name → (referenced constraint_name, on_delete, on_update)
-    let mut fk_to_ref: std::collections::HashMap<String, (String, qail_core::migrate::schema::FkAction, qail_core::migrate::schema::FkAction)> =
-        std::collections::HashMap::new();
+    let mut fk_to_ref: std::collections::HashMap<
+        String,
+        (
+            String,
+            qail_core::migrate::schema::FkAction,
+            qail_core::migrate::schema::FkAction,
+        ),
+    > = std::collections::HashMap::new();
     for row in fk_ref_rows {
         let fk_constraint = row.text(0);
         let unique_constraint = row.text(1);
@@ -320,8 +338,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query deferrable constraints: {}", e))?;
 
-    let mut deferrable_map: std::collections::HashMap<String, qail_core::migrate::schema::Deferrable> =
-        std::collections::HashMap::new();
+    let mut deferrable_map: std::collections::HashMap<
+        String,
+        qail_core::migrate::schema::Deferrable,
+    > = std::collections::HashMap::new();
     for row in defer_rows {
         let conname = row.text(0);
         let condeferrable = row.text(1) == "t";
@@ -342,34 +362,37 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let ref_cols = constraint_columns.get(ref_constraint.as_str());
 
         if let (Some(fk_list), Some(ref_list)) = (fk_cols, ref_cols)
-            && fk_list.len() == 1 && ref_list.len() == 1 {
-                let (fk_table, fk_col) = &fk_list[0];
-                let (ref_table, ref_col) = &ref_list[0];
+            && fk_list.len() == 1
+            && ref_list.len() == 1
+        {
+            let (fk_table, fk_col) = &fk_list[0];
+            let (ref_table, ref_col) = &ref_list[0];
 
-                if let Some(columns) = tables.get_mut(fk_table.as_str()) {
-                    for col in columns.iter_mut() {
-                        if col.name == *fk_col {
-                            // Look up deferrable status from pg_constraint
-                            let def_status = deferrable_map.get(fk_constraint.as_str())
-                                .cloned()
-                                .unwrap_or(qail_core::migrate::schema::Deferrable::NotDeferrable);
-                            col.foreign_key = Some(qail_core::migrate::ForeignKey {
-                                table: ref_table.clone(),
-                                column: ref_col.clone(),
-                                on_delete: on_delete.clone(),
-                                on_update: on_update.clone(),
-                                deferrable: def_status,
-                            });
-                        }
+            if let Some(columns) = tables.get_mut(fk_table.as_str()) {
+                for col in columns.iter_mut() {
+                    if col.name == *fk_col {
+                        // Look up deferrable status from pg_constraint
+                        let def_status = deferrable_map
+                            .get(fk_constraint.as_str())
+                            .cloned()
+                            .unwrap_or(qail_core::migrate::schema::Deferrable::NotDeferrable);
+                        col.foreign_key = Some(qail_core::migrate::ForeignKey {
+                            table: ref_table.clone(),
+                            column: ref_col.clone(),
+                            on_delete: on_delete.clone(),
+                            on_update: on_update.clone(),
+                            deferrable: def_status,
+                        });
                     }
                 }
             }
+        }
     }
 
     // ── 6. RLS Status (AST-native) ──────────────────────────────────────
     let rls_cmd = Qail::get("pg_catalog.pg_class")
         .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
-        .filter("relkind", Operator::Eq, "r");  // 'r' = ordinary table
+        .filter("relkind", Operator::Eq, "r"); // 'r' = ordinary table
 
     let rls_rows = driver
         .fetch_all(&rls_cmd)
@@ -397,10 +420,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query indexes: {}", e))?;
 
-
     // ── 9. Extensions (AST-native) ──────────────────────────────────────
-    let ext_cmd = Qail::get("pg_catalog.pg_extension")
-        .columns(["extname", "extversion"]);
+    let ext_cmd = Qail::get("pg_catalog.pg_extension").columns(["extname", "extversion"]);
 
     let ext_rows = driver
         .fetch_all(&ext_cmd)
@@ -424,7 +445,13 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     // ── 10. Sequences (AST-native) ──────────────────────────────────────
     let seq_cmd = Qail::get("information_schema.sequences")
-        .columns(["sequence_name", "start_value", "increment", "minimum_value", "maximum_value"])
+        .columns([
+            "sequence_name",
+            "start_value",
+            "increment",
+            "minimum_value",
+            "maximum_value",
+        ])
         .filter("sequence_schema", Operator::Eq, "public");
 
     let seq_rows = driver
@@ -493,7 +520,13 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     // ── 13. Functions (AST-native) ────────────────────────────────────────
     // 13a: Function metadata from information_schema.routines
     let routine_cmd = Qail::get("information_schema.routines")
-        .columns(["routine_name", "specific_name", "routine_definition", "external_language", "data_type"])
+        .columns([
+            "routine_name",
+            "specific_name",
+            "routine_definition",
+            "external_language",
+            "data_type",
+        ])
         .filter("routine_schema", Operator::Eq, "public")
         .filter("routine_type", Operator::Eq, "FUNCTION");
 
@@ -504,7 +537,13 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     // 13b: Function parameters from information_schema.parameters
     let param_cmd = Qail::get("information_schema.parameters")
-        .columns(["specific_name", "parameter_name", "udt_name", "parameter_mode", "ordinal_position"])
+        .columns([
+            "specific_name",
+            "parameter_name",
+            "udt_name",
+            "parameter_mode",
+            "ordinal_position",
+        ])
         .filter("specific_schema", Operator::Eq, "public");
 
     let param_rows = driver
@@ -523,7 +562,9 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let ordinal: i32 = row.get_string(4).and_then(|s| s.parse().ok()).unwrap_or(0);
 
         // Only include IN parameters (skip OUT/INOUT for now)
-        if mode != "IN" { continue; }
+        if mode != "IN" {
+            continue;
+        }
 
         let arg_str = if pname.is_empty() {
             ptype.clone()
@@ -531,17 +572,22 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             format!("{} {}", pname, ptype)
         };
 
-        param_map.entry(specific).or_default().push((ordinal, arg_str));
+        param_map
+            .entry(specific)
+            .or_default()
+            .push((ordinal, arg_str));
     }
 
     // 13c: Volatility from pg_proc (AST-native — no function calls needed)
     let vol_cmd = Qail::get("pg_catalog.pg_proc")
         .columns(["proname", "provolatile"])
-        .filter("pronamespace", Operator::Eq, "(SELECT oid FROM pg_namespace WHERE nspname = 'public')");
+        .filter(
+            "pronamespace",
+            Operator::Eq,
+            "(SELECT oid FROM pg_namespace WHERE nspname = 'public')",
+        );
 
-    let vol_rows = driver
-        .fetch_all(&vol_cmd)
-        .await;
+    let vol_rows = driver.fetch_all(&vol_cmd).await;
 
     let mut volatility_map: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
@@ -567,7 +613,9 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let returns = row.text(4);
 
         // Skip functions without bodies (e.g. C functions)
-        if body.is_empty() { continue; }
+        if body.is_empty() {
+            continue;
+        }
 
         // Assemble sorted args from param_map
         let args = if let Some(mut params) = param_map.remove(&specific) {
@@ -588,7 +636,13 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     // ── 14. Triggers (AST-native) ───────────────────────────────────────
     let trig_cmd = Qail::get("information_schema.triggers")
-        .columns(["trigger_name", "event_object_table", "action_timing", "event_manipulation", "action_statement"])
+        .columns([
+            "trigger_name",
+            "event_object_table",
+            "action_timing",
+            "event_manipulation",
+            "action_statement",
+        ])
         .filter("trigger_schema", Operator::Eq, "public");
 
     let trig_rows = driver
@@ -597,8 +651,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .map_err(|e| anyhow!("Failed to query triggers: {}", e))?;
 
     // Group by (trigger_name, table) since each event is a separate row
-    let mut trigger_map: std::collections::HashMap<(String, String), (String, Vec<String>, String)> =
-        std::collections::HashMap::new();
+    let mut trigger_map: std::collections::HashMap<
+        (String, String),
+        (String, Vec<String>, String),
+    > = std::collections::HashMap::new();
     for row in trig_rows {
         let name = row.text(0);
         let table = row.text(1);
@@ -630,7 +686,15 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     // ── 15. RLS Policies (AST-native) ──────────────────────────────────
     let policy_cmd = Qail::get("pg_policies")
-        .columns(["policyname", "tablename", "cmd", "permissive", "roles", "qual", "with_check"])
+        .columns([
+            "policyname",
+            "tablename",
+            "cmd",
+            "permissive",
+            "roles",
+            "qual",
+            "with_check",
+        ])
         .filter("schemaname", Operator::Eq, "public");
 
     let policy_rows = driver
@@ -638,17 +702,15 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query RLS policies: {}", e))?;
 
-
     let mut policies: Vec<RlsPolicy> = Vec::new();
     for row in policy_rows {
         let name = row.text(0);
         let table = row.text(1);
         let cmd_str = row.text(2);
-        let permissive_str = row.text(3);  // "PERMISSIVE" or "RESTRICTIVE"
-        let roles_str = row.text(4);       // e.g. "{app_user}" or "{public}"
-        let qual = row.get_string(5);      // USING expression (raw SQL)
+        let permissive_str = row.text(3); // "PERMISSIVE" or "RESTRICTIVE"
+        let roles_str = row.text(4); // e.g. "{app_user}" or "{public}"
+        let qual = row.get_string(5); // USING expression (raw SQL)
         let with_check = row.get_string(6); // WITH CHECK expression (raw SQL)
-
 
         let target = match cmd_str.as_str() {
             "ALL" => PolicyTarget::All,
@@ -792,10 +854,7 @@ fn parse_check_expr(
 
         if let (Some(l), Some(r)) = (parse_simple_cmp(left), parse_simple_cmp(right)) {
             // col >= low AND col <= high → Between
-            if l.0 == r.0
-                && matches!(l.1, CmpOp::Gte)
-                && matches!(r.1, CmpOp::Lte)
-            {
+            if l.0 == r.0 && matches!(l.1, CmpOp::Gte) && matches!(r.1, CmpOp::Lte) {
                 return Some(CheckExpr::Between {
                     column: l.0,
                     low: l.2,
@@ -803,10 +862,7 @@ fn parse_check_expr(
                 });
             }
             // col >= low AND col <= high but reversed
-            if l.0 == r.0
-                && matches!(l.1, CmpOp::Lte)
-                && matches!(r.1, CmpOp::Gte)
-            {
+            if l.0 == r.0 && matches!(l.1, CmpOp::Lte) && matches!(r.1, CmpOp::Gte) {
                 return Some(CheckExpr::Between {
                     column: l.0,
                     low: r.2,
@@ -860,12 +916,16 @@ fn parse_simple_cmp(s: &str) -> Option<(String, CmpOp, i64)> {
                 val_str
             };
             if let Ok(val) = val_clean.parse::<i64>() {
-                return Some((col, match op {
-                    CmpOp::Gte => CmpOp::Gte,
-                    CmpOp::Gt => CmpOp::Gt,
-                    CmpOp::Lte => CmpOp::Lte,
-                    CmpOp::Lt => CmpOp::Lt,
-                }, val));
+                return Some((
+                    col,
+                    match op {
+                        CmpOp::Gte => CmpOp::Gte,
+                        CmpOp::Gt => CmpOp::Gt,
+                        CmpOp::Lte => CmpOp::Lte,
+                        CmpOp::Lt => CmpOp::Lt,
+                    },
+                    val,
+                ));
             }
         }
     }
@@ -877,10 +937,21 @@ fn cmp_to_check_expr(
 ) -> Option<qail_core::migrate::schema::CheckExpr> {
     use qail_core::migrate::schema::CheckExpr;
     match op {
-        CmpOp::Gte => Some(CheckExpr::GreaterOrEqual { column: col, value: val }),
-        CmpOp::Gt => Some(CheckExpr::GreaterThan { column: col, value: val }),
-        CmpOp::Lte => Some(CheckExpr::LessOrEqual { column: col, value: val }),
-        CmpOp::Lt => Some(CheckExpr::LessThan { column: col, value: val }),
+        CmpOp::Gte => Some(CheckExpr::GreaterOrEqual {
+            column: col,
+            value: val,
+        }),
+        CmpOp::Gt => Some(CheckExpr::GreaterThan {
+            column: col,
+            value: val,
+        }),
+        CmpOp::Lte => Some(CheckExpr::LessOrEqual {
+            column: col,
+            value: val,
+        }),
+        CmpOp::Lt => Some(CheckExpr::LessThan {
+            column: col,
+            value: val,
+        }),
     }
 }
-

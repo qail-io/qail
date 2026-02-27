@@ -1,12 +1,17 @@
 //! Migration UP operations
 
-use anyhow::Result;
 use crate::colors::*;
-use qail_core::migrate::{diff_schemas, parse_qail};
+use anyhow::Result;
+use qail_core::migrate::{diff_schemas, parse_qail_file};
 use qail_core::prelude::Qail;
 use qail_pg::driver::PgDriver;
 
-use crate::migrations::migration_table_ddl;
+use crate::migrations::risk::preflight_lock_risk;
+use crate::migrations::verify::post_apply_verify;
+use crate::migrations::{
+    MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
+    write_migration_receipt,
+};
 use crate::sql_gen::cmd_to_sql;
 use crate::util::parse_pg_url;
 
@@ -16,6 +21,9 @@ pub async fn migrate_up(
     url: &str,
     codebase: Option<&str>,
     force: bool,
+    allow_destructive: bool,
+    allow_no_shadow_receipt: bool,
+    allow_lock_risk: bool,
 ) -> Result<()> {
     println!("{} {}", "Migrating UP:".cyan().bold(), url.yellow());
 
@@ -25,14 +33,9 @@ pub async fn migrate_up(
             let old_path = parts[0];
             let new_path = parts[1];
 
-            let old_content = std::fs::read_to_string(old_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
-            let new_content = std::fs::read_to_string(new_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-
-            let old_schema = parse_qail(&old_content)
+            let old_schema = parse_qail_file(old_path)
                 .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
-            let new_schema = parse_qail(&new_content)
+            let new_schema = parse_qail_file(new_path)
                 .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
             let cmds = diff_schemas(&old_schema, &new_schema);
@@ -49,6 +52,7 @@ pub async fn migrate_up(
     }
 
     println!("{} {} migration(s) to apply", "Found:".cyan(), cmds.len());
+    let planned_checksum = migration_cmds_checksum(&cmds);
 
     // === PHASE 0: Codebase Impact Analysis ===
     if let Some(codebase_path) = codebase {
@@ -62,7 +66,10 @@ pub async fn migrate_up(
         let code_path = Path::new(codebase_path);
 
         if !code_path.exists() {
-            return Err(anyhow::anyhow!("Codebase path not found: {}", codebase_path));
+            return Err(anyhow::anyhow!(
+                "Codebase path not found: {}",
+                codebase_path
+            ));
         }
 
         let code_refs = scanner.scan(code_path);
@@ -70,7 +77,10 @@ pub async fn migrate_up(
 
         if !impact.safe_to_run {
             println!();
-            println!("{}", "⚠️  BREAKING CHANGES DETECTED IN CODEBASE".red().bold());
+            println!(
+                "{}",
+                "⚠️  BREAKING CHANGES DETECTED IN CODEBASE".red().bold()
+            );
             println!(
                 "   {} file(s) affected, {} reference(s) found",
                 impact.affected_files,
@@ -126,12 +136,16 @@ pub async fn migrate_up(
                 println!();
                 println!(
                     "{}",
-                    "Migration BLOCKED. Fix your code first, or use --force to proceed anyway.".red()
+                    "Migration BLOCKED. Fix your code first, or use --force to proceed anyway."
+                        .red()
                 );
                 return Ok(());
             } else {
                 println!();
-                println!("{}", "⚠️  Proceeding anyway due to --force flag...".yellow());
+                println!(
+                    "{}",
+                    "⚠️  Proceeding anyway due to --force flag...".yellow()
+                );
             }
         } else {
             println!("   {} No breaking changes detected", "✓".green());
@@ -149,27 +163,61 @@ pub async fn migrate_up(
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
 
+    // === PHASE 0.5: Shadow Receipt Verification ===
+    if allow_no_shadow_receipt {
+        println!(
+            "{}",
+            "⚠️  Skipping shadow receipt verification due to --allow-no-shadow-receipt".yellow()
+        );
+    } else {
+        let has_receipt =
+            crate::shadow::has_verified_shadow_receipt_with_driver(&mut driver, &planned_checksum)
+                .await?;
+        if !has_receipt {
+            return Err(anyhow::anyhow!(
+                "Migration blocked: no verified shadow receipt for checksum {}.\n\
+                 Run 'qail migrate shadow <old.qail:new.qail> --url <db>' first, or override with --allow-no-shadow-receipt.",
+                planned_checksum
+            ));
+        }
+        println!(
+            "  {} Verified shadow receipt checksum: {}",
+            "✓".green(),
+            planned_checksum.cyan()
+        );
+    }
+
+    // === PHASE 0.75: Lock Risk Preflight ===
+    preflight_lock_risk(&mut driver, &cmds, allow_lock_risk).await?;
+
     // === PHASE 1: Impact Analysis ===
     use crate::backup::{
-        analyze_impact, create_snapshots, display_impact, prompt_migration_choice, MigrationChoice,
+        MigrationChoice, analyze_impact, create_snapshots, display_impact, prompt_migration_choice,
     };
 
     let mut impacts = Vec::new();
     for cmd in &cmds {
-        if let Ok(impact) = analyze_impact(&mut driver, cmd).await {
-            impacts.push(impact);
-        }
+        let impact = analyze_impact(&mut driver, cmd).await?;
+        impacts.push(impact);
     }
 
     let has_destructive = impacts.iter().any(|i| i.is_destructive);
-    let mut _migration_version = String::new();
 
     if has_destructive {
         display_impact(&impacts);
 
-        let choice = prompt_migration_choice();
+        if !allow_destructive {
+            return Err(anyhow::anyhow!(
+                "Migration blocked: destructive operations detected.\n\
+                 Re-run with --allow-destructive to continue."
+            ));
+        }
+        println!(
+            "{}",
+            "⚠️  Destructive changes acknowledged via --allow-destructive".yellow()
+        );
 
-        _migration_version = crate::time::timestamp_version();
+        let choice = prompt_migration_choice();
 
         match choice {
             MigrationChoice::Cancel => {
@@ -181,7 +229,8 @@ pub async fn migrate_up(
             }
             MigrationChoice::BackupToDatabase => {
                 use crate::backup::create_db_snapshots;
-                create_db_snapshots(&mut driver, &_migration_version, &impacts).await?;
+                let migration_version = crate::time::timestamp_version();
+                create_db_snapshots(&mut driver, &migration_version, &impacts).await?;
             }
             MigrationChoice::Proceed => {
                 println!("{}", "Proceeding without backup...".dimmed());
@@ -191,14 +240,14 @@ pub async fn migrate_up(
 
     // Begin transaction for atomic migration
     println!("{}", "Starting transaction...".dimmed());
+    let apply_started_ms = now_epoch_ms();
     driver
         .begin()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start transaction: {}", e))?;
 
     // Ensure migration table exists (AST-native bootstrap)
-    driver
-        .execute_raw(&migration_table_ddl())
+    ensure_migration_table(&mut driver)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create migration table: {}", e))?;
 
@@ -230,21 +279,43 @@ pub async fn migrate_up(
         applied += 1;
     }
 
+    // === PHASE 2: Post-apply Verification Gates ===
+    post_apply_verify(&mut driver, &new_schema, &cmds).await?;
+
+    let apply_finished_ms = now_epoch_ms();
     let version = crate::time::timestamp_version();
     let checksum = crate::time::md5_hex(&sql_up_all);
+    let affected_rows_est: i64 = impacts
+        .iter()
+        .map(|i| i64::try_from(i.rows_affected).unwrap_or(i64::MAX))
+        .sum();
+    let destructive_ops = impacts.iter().filter(|i| i.is_destructive).count();
+    let risk_summary = format!(
+        "destructive_ops={};estimated_rows={};allow_destructive={};allow_lock_risk={};shadow_receipt_required={}",
+        destructive_ops,
+        affected_rows_est,
+        allow_destructive,
+        allow_lock_risk,
+        !allow_no_shadow_receipt
+    );
 
-    // Record migration in history (AST-native)
-    let record_cmd = Qail::add("_qail_migrations")
-        .columns(["version", "name", "checksum", "sql_up"])
-        .values([
-            version.clone(),
-            format!("auto_{}", version),
-            checksum,
-            sql_up_all,
-        ]);
+    let receipt = MigrationReceipt {
+        version: version.clone(),
+        name: format!("auto_{}", version),
+        checksum,
+        sql_up: sql_up_all,
+        git_sha: runtime_git_sha(),
+        qail_version: env!("CARGO_PKG_VERSION").to_string(),
+        actor: runtime_actor(),
+        started_at_ms: Some(apply_started_ms),
+        finished_at_ms: Some(apply_finished_ms),
+        duration_ms: Some(apply_finished_ms.saturating_sub(apply_started_ms)),
+        affected_rows_est: Some(affected_rows_est),
+        risk_summary: Some(risk_summary),
+        shadow_checksum: Some(planned_checksum),
+    };
 
-    driver
-        .execute(&record_cmd)
+    write_migration_receipt(&mut driver, &receipt)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to record migration: {}", e))?;
 
@@ -262,4 +333,13 @@ pub async fn migrate_up(
     );
     println!("  Recorded as migration: {}", version.cyan());
     Ok(())
+}
+
+fn migration_cmds_checksum(cmds: &[Qail]) -> String {
+    let mut sql_up_all = String::new();
+    for cmd in cmds {
+        sql_up_all.push_str(&cmd_to_sql(cmd));
+        sql_up_all.push_str(";\n");
+    }
+    crate::time::md5_hex(&sql_up_all)
 }

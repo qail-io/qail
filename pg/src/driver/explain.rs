@@ -140,11 +140,14 @@ impl ExplainCache {
             if entries.len() >= self.max_entries {
                 return;
             }
-            entries.insert(shape_hash, CachedEstimate {
-                plan_rows: estimate.plan_rows,
-                estimate,
-                cached_at: Instant::now(),
-            });
+            entries.insert(
+                shape_hash,
+                CachedEstimate {
+                    plan_rows: estimate.plan_rows,
+                    estimate,
+                    cached_at: Instant::now(),
+                },
+            );
         }
     }
 
@@ -186,7 +189,9 @@ fn extract_json_number(json: &str, key: &str) -> Option<f64> {
     let trimmed = after_key.trim_start();
 
     // Parse the number (may be integer or float)
-    let end = trimmed.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != 'e' && c != 'E' && c != '+')?;
+    let end = trimmed.find(|c: char| {
+        !c.is_ascii_digit() && c != '.' && c != '-' && c != 'e' && c != 'E' && c != '+'
+    })?;
     let num_str = &trimmed[..end];
     num_str.parse::<f64>().ok()
 }
@@ -220,14 +225,17 @@ impl ExplainDecision {
     /// Human-readable rejection message for API responses.
     pub fn rejection_message(&self) -> Option<String> {
         match self {
-            ExplainDecision::Reject { total_cost, plan_rows, max_cost, max_rows } => {
-                Some(format!(
-                    "Query rejected: estimated cost {:.0} exceeds limit {:.0}, \
+            ExplainDecision::Reject {
+                total_cost,
+                plan_rows,
+                max_cost,
+                max_rows,
+            } => Some(format!(
+                "Query rejected: estimated cost {:.0} exceeds limit {:.0}, \
                      or estimated rows {} exceeds limit {}. \
                      Try narrowing your filters, reducing ?expand depth, or using pagination.",
-                    total_cost, max_cost, plan_rows, max_rows
-                ))
-            }
+                total_cost, max_cost, plan_rows, max_rows
+            )),
             _ => None,
         }
     }
@@ -238,20 +246,23 @@ impl ExplainDecision {
     /// Client SDKs can use this to programmatically react to cost rejections.
     pub fn rejection_detail(&self) -> Option<ExplainRejectionDetail> {
         match self {
-            ExplainDecision::Reject { total_cost, plan_rows, max_cost, max_rows } => {
-                Some(ExplainRejectionDetail {
-                    estimated_cost: *total_cost,
-                    cost_limit: *max_cost,
-                    estimated_rows: *plan_rows,
-                    row_limit: *max_rows,
-                    suggestions: vec![
-                        "Add WHERE clauses to narrow the result set".to_string(),
-                        "Reduce ?expand depth (deep JOINs multiply cost)".to_string(),
-                        "Use ?limit and ?offset for pagination".to_string(),
-                        "Add indexes on frequently filtered columns".to_string(),
-                    ],
-                })
-            }
+            ExplainDecision::Reject {
+                total_cost,
+                plan_rows,
+                max_cost,
+                max_rows,
+            } => Some(ExplainRejectionDetail {
+                estimated_cost: *total_cost,
+                cost_limit: *max_cost,
+                estimated_rows: *plan_rows,
+                row_limit: *max_rows,
+                suggestions: vec![
+                    "Add WHERE clauses to narrow the result set".to_string(),
+                    "Reduce ?expand depth (deep JOINs multiply cost)".to_string(),
+                    "Use ?limit and ?offset for pagination".to_string(),
+                    "Add indexes on frequently filtered columns".to_string(),
+                ],
+            }),
             _ => None,
         }
     }
@@ -316,7 +327,10 @@ mod tests {
     #[test]
     fn test_check_estimate_allow() {
         let config = ExplainConfig::default();
-        let est = ExplainEstimate { total_cost: 100.0, plan_rows: 500 };
+        let est = ExplainEstimate {
+            total_cost: 100.0,
+            plan_rows: 500,
+        };
         let decision = check_estimate(&est, &config);
         assert!(!decision.is_rejected());
     }
@@ -324,7 +338,10 @@ mod tests {
     #[test]
     fn test_check_estimate_reject_cost() {
         let config = ExplainConfig::default();
-        let est = ExplainEstimate { total_cost: 200_000.0, plan_rows: 500 };
+        let est = ExplainEstimate {
+            total_cost: 200_000.0,
+            plan_rows: 500,
+        };
         let decision = check_estimate(&est, &config);
         assert!(decision.is_rejected());
         assert!(decision.rejection_message().unwrap().contains("200000"));
@@ -333,7 +350,10 @@ mod tests {
     #[test]
     fn test_check_estimate_reject_rows() {
         let config = ExplainConfig::default();
-        let est = ExplainEstimate { total_cost: 50.0, plan_rows: 5_000_000 };
+        let est = ExplainEstimate {
+            total_cost: 50.0,
+            plan_rows: 5_000_000,
+        };
         let decision = check_estimate(&est, &config);
         assert!(decision.is_rejected());
     }
@@ -343,7 +363,13 @@ mod tests {
         let cache = ExplainCache::new(Duration::from_secs(60));
         assert!(cache.is_empty());
 
-        cache.insert(42, ExplainEstimate { total_cost: 100.0, plan_rows: 50 });
+        cache.insert(
+            42,
+            ExplainEstimate {
+                total_cost: 100.0,
+                plan_rows: 50,
+            },
+        );
         assert_eq!(cache.len(), 1);
 
         let cached = cache.get(42, None).unwrap();
@@ -357,7 +383,13 @@ mod tests {
     #[test]
     fn test_cache_expiry() {
         let cache = ExplainCache::new(Duration::from_millis(1));
-        cache.insert(1, ExplainEstimate { total_cost: 100.0, plan_rows: 50 });
+        cache.insert(
+            1,
+            ExplainEstimate {
+                total_cost: 100.0,
+                plan_rows: 50,
+            },
+        );
 
         // Wait for expiry
         std::thread::sleep(Duration::from_millis(5));
@@ -369,7 +401,13 @@ mod tests {
         let cache = ExplainCache::new(Duration::from_secs(60));
 
         // ── Small dataset: relative drift alone should NOT invalidate ──
-        cache.insert(1, ExplainEstimate { total_cost: 50.0, plan_rows: 1000 });
+        cache.insert(
+            1,
+            ExplainEstimate {
+                total_cost: 50.0,
+                plan_rows: 1000,
+            },
+        );
 
         // No reltuples — pure TTL, should hit
         assert!(cache.get(1, None).is_some());
@@ -378,25 +416,52 @@ mod tests {
         assert!(cache.get(1, Some(1000)).is_some());
 
         // 60% relative drift but only 600 absolute — below 10k floor, should STILL hit
-        assert!(cache.get(1, Some(1600)).is_some(), "small table should not thrash");
+        assert!(
+            cache.get(1, Some(1600)).is_some(),
+            "small table should not thrash"
+        );
 
         // 60% shrinkage but only 600 absolute — should STILL hit
-        assert!(cache.get(1, Some(400)).is_some(), "small shrinkage should not thrash");
+        assert!(
+            cache.get(1, Some(400)).is_some(),
+            "small shrinkage should not thrash"
+        );
 
         // ── Large dataset: BOTH relative AND absolute thresholds exceeded ──
-        cache.insert(3, ExplainEstimate { total_cost: 500.0, plan_rows: 50_000 });
+        cache.insert(
+            3,
+            ExplainEstimate {
+                total_cost: 500.0,
+                plan_rows: 50_000,
+            },
+        );
 
         // 70% drift + 35k absolute (both above threshold) — should miss
-        assert!(cache.get(3, Some(85_000)).is_none(), "large drift should invalidate");
+        assert!(
+            cache.get(3, Some(85_000)).is_none(),
+            "large drift should invalidate"
+        );
 
         // 40% drift + 20k absolute (relative below 50%) — should STILL hit
-        assert!(cache.get(3, Some(70_000)).is_some(), "moderate drift should not invalidate");
+        assert!(
+            cache.get(3, Some(70_000)).is_some(),
+            "moderate drift should not invalidate"
+        );
 
         // 60% shrinkage + 30k absolute (both above threshold) — should miss
-        assert!(cache.get(3, Some(20_000)).is_none(), "large shrinkage should invalidate");
+        assert!(
+            cache.get(3, Some(20_000)).is_none(),
+            "large shrinkage should invalidate"
+        );
 
         // Edge: plan_rows = 0 in cache — skip drift check entirely
-        cache.insert(2, ExplainEstimate { total_cost: 10.0, plan_rows: 0 });
+        cache.insert(
+            2,
+            ExplainEstimate {
+                total_cost: 10.0,
+                plan_rows: 0,
+            },
+        );
         assert!(cache.get(2, Some(999_999)).is_some());
     }
 

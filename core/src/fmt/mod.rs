@@ -235,7 +235,13 @@ impl Formatter {
                     write!(self.buffer, " as {}", a)?;
                 }
             }
-            Expr::Window { name, func, params, partition, .. } => {
+            Expr::Window {
+                name,
+                func,
+                params,
+                partition,
+                ..
+            } => {
                 // Use Window function format: func(params) OVER (PARTITION BY ...)
                 let params_str: Vec<String> = params.iter().map(|p| p.to_string()).collect();
                 write!(self.buffer, "{}({})", func, params_str.join(", "))?;
@@ -244,7 +250,11 @@ impl Formatter {
                 }
                 write!(self.buffer, " as {}", name)?;
             }
-            Expr::Case { when_clauses, else_value, alias } => {
+            Expr::Case {
+                when_clauses,
+                else_value,
+                alias,
+            } => {
                 write!(self.buffer, "case")?;
                 for (cond, val) in when_clauses {
                     write!(self.buffer, " when {} then {}", cond.left, val)?;
@@ -257,7 +267,11 @@ impl Formatter {
                     write!(self.buffer, " as {}", a)?;
                 }
             }
-            Expr::JsonAccess { column, path_segments, alias } => {
+            Expr::JsonAccess {
+                column,
+                path_segments,
+                alias,
+            } => {
                 write!(self.buffer, "{}", column)?;
                 for (path, as_text) in path_segments {
                     let op = if *as_text { "->>" } else { "->" };
@@ -271,13 +285,22 @@ impl Formatter {
                     write!(self.buffer, " as {}", a)?;
                 }
             }
-            Expr::Cast { expr, target_type, alias } => {
+            Expr::Cast {
+                expr,
+                target_type,
+                alias,
+            } => {
                 write!(self.buffer, "{}::{}", expr, target_type)?;
                 if let Some(a) = alias {
                     write!(self.buffer, " as {}", a)?;
                 }
             }
-            Expr::Binary { left, op, right, alias } => {
+            Expr::Binary {
+                left,
+                op,
+                right,
+                alias,
+            } => {
                 write!(self.buffer, "({} {} {})", left, op, right)?;
                 if let Some(a) = alias {
                     write!(self.buffer, " as {}", a)?;
@@ -286,7 +309,9 @@ impl Formatter {
             Expr::SpecialFunction { name, args, alias } => {
                 write!(self.buffer, "{}(", name)?;
                 for (i, (keyword, expr)) in args.iter().enumerate() {
-                    if i > 0 { write!(self.buffer, " ")?; }
+                    if i > 0 {
+                        write!(self.buffer, " ")?;
+                    }
                     if let Some(kw) = keyword {
                         write!(self.buffer, "{} ", kw)?;
                     }
@@ -298,64 +323,99 @@ impl Formatter {
                 }
             }
             Expr::Literal(val) => self.format_value(val)?,
-            Expr::Def { name, data_type, constraints } => {
+            Expr::Def {
+                name,
+                data_type,
+                constraints,
+            } => {
                 write!(self.buffer, "{}:{}", name, data_type)?;
                 for c in constraints {
                     write!(self.buffer, "^{}", c)?;
                 }
             }
             Expr::Mod { kind, col } => {
-                let prefix = match kind { crate::ast::ModKind::Add => "+", crate::ast::ModKind::Drop => "-" };
+                let prefix = match kind {
+                    crate::ast::ModKind::Add => "+",
+                    crate::ast::ModKind::Drop => "-",
+                };
                 write!(self.buffer, "{}{}", prefix, col)?;
             }
             Expr::ArrayConstructor { elements, alias } => {
                 write!(self.buffer, "ARRAY[")?;
                 for (i, elem) in elements.iter().enumerate() {
-                    if i > 0 { write!(self.buffer, ", ")?; }
+                    if i > 0 {
+                        write!(self.buffer, ", ")?;
+                    }
                     self.format_column(elem)?;
                 }
                 write!(self.buffer, "]")?;
-                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
             }
             Expr::RowConstructor { elements, alias } => {
                 write!(self.buffer, "ROW(")?;
                 for (i, elem) in elements.iter().enumerate() {
-                    if i > 0 { write!(self.buffer, ", ")?; }
+                    if i > 0 {
+                        write!(self.buffer, ", ")?;
+                    }
                     self.format_column(elem)?;
                 }
                 write!(self.buffer, ")")?;
-                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
             }
             Expr::Subscript { expr, index, alias } => {
                 self.format_column(expr)?;
                 write!(self.buffer, "[")?;
                 self.format_column(index)?;
                 write!(self.buffer, "]")?;
-                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
             }
-            Expr::Collate { expr, collation, alias } => {
+            Expr::Collate {
+                expr,
+                collation,
+                alias,
+            } => {
                 self.format_column(expr)?;
                 write!(self.buffer, " COLLATE \"{}\"", collation)?;
-                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
             }
             Expr::FieldAccess { expr, field, alias } => {
                 write!(self.buffer, "(")?;
                 self.format_column(expr)?;
                 write!(self.buffer, ").{}", field)?;
-                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
             }
             Expr::Subquery { query, alias } => {
                 write!(self.buffer, "(")?;
                 self.visit_cmd(query)?;
                 write!(self.buffer, ")")?;
-                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
             }
-            Expr::Exists { query, negated, alias } => {
-                if *negated { write!(self.buffer, "not ")?; }
+            Expr::Exists {
+                query,
+                negated,
+                alias,
+            } => {
+                if *negated {
+                    write!(self.buffer, "not ")?;
+                }
                 write!(self.buffer, "exists (")?;
                 self.visit_cmd(query)?;
                 write!(self.buffer, ")")?;
-                if let Some(a) = alias { write!(self.buffer, " as {}", a)?; }
+                if let Some(a) = alias {
+                    write!(self.buffer, " as {}", a)?;
+                }
             }
             Expr::Raw(sql) => write!(self.buffer, "{}", sql)?,
         }
@@ -447,11 +507,15 @@ impl Formatter {
             Value::NamedParam(name) => write!(self.buffer, ":{}", name)?,
             Value::Uuid(u) => write!(self.buffer, "'{}'", u)?,
             Value::NullUuid => write!(self.buffer, "null")?,
-            Value::Interval { amount, unit } => write!(self.buffer, "interval '{} {}'", amount, unit)?,
+            Value::Interval { amount, unit } => {
+                write!(self.buffer, "interval '{} {}'", amount, unit)?
+            }
             Value::Timestamp(ts) => write!(self.buffer, "'{}'", ts)?,
             Value::Bytes(bytes) => {
                 write!(self.buffer, "'\\x")?;
-                for byte in bytes { write!(self.buffer, "{:02x}", byte)?; }
+                for byte in bytes {
+                    write!(self.buffer, "{:02x}", byte)?;
+                }
                 write!(self.buffer, "'")?;
             }
             Value::Subquery(cmd) => {
@@ -463,7 +527,9 @@ impl Formatter {
             Value::Vector(v) => {
                 write!(self.buffer, "[")?;
                 for (i, val) in v.iter().enumerate() {
-                    if i > 0 { write!(self.buffer, ", ")?; }
+                    if i > 0 {
+                        write!(self.buffer, ", ")?;
+                    }
                     write!(self.buffer, "{}", val)?;
                 }
                 write!(self.buffer, "]")?;

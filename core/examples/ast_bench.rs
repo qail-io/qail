@@ -23,8 +23,14 @@ fn main() {
     println!("╔═══════════════════════════════════════════════════════╗");
     println!("║  qail-core (Rust) — AST Build + Transpile Benchmark  ║");
     println!("╠═══════════════════════════════════════════════════════╣");
-    println!("║  Iterations: {:>10} per tier                    ║", ITERATIONS);
-    println!("║  Warmup:     {:>10}                              ║", WARMUP);
+    println!(
+        "║  Iterations: {:>10} per tier                    ║",
+        ITERATIONS
+    );
+    println!(
+        "║  Warmup:     {:>10}                              ║",
+        WARMUP
+    );
     println!("║  Mode:       --release (optimized)                   ║");
     println!("╚═══════════════════════════════════════════════════════╝");
     println!();
@@ -183,7 +189,10 @@ fn main() {
     // ─────────────────────────────────────────────────────
     println!();
     println!("────────────────────────────────────────────────────────");
-    println!("  Total SQL bytes produced: {} (consumed to prevent DCE)", total_bytes);
+    println!(
+        "  Total SQL bytes produced: {} (consumed to prevent DCE)",
+        total_bytes
+    );
     println!();
     println!("  Sample SQL outputs:");
     println!("    T1: {}", t1.to_sql());

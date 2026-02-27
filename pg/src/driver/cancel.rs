@@ -18,12 +18,7 @@ impl CancelToken {
     /// Attempt to cancel the ongoing query.
     /// This opens a new TCP connection and sends a CancelRequest message.
     pub async fn cancel_query(&self) -> PgResult<()> {
-        PgConnection::cancel_query(
-            &self.host,
-            self.port,
-            self.process_id,
-            self.secret_key
-        ).await
+        PgConnection::cancel_query(&self.host, self.port, self.process_id, self.secret_key).await
     }
 }
 

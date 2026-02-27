@@ -1,8 +1,8 @@
 //! Migration impact analyzer
 
-use anyhow::Result;
 use crate::colors::*;
-use qail_core::migrate::{diff_schemas, parse_qail};
+use anyhow::Result;
+use qail_core::migrate::{diff_schemas, parse_qail_file};
 
 use crate::sql_gen::cmd_to_sql;
 
@@ -12,9 +12,7 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
     use std::path::Path;
 
     // Detect CI mode: explicit flag OR environment variable
-    let ci_mode = ci_flag 
-        || std::env::var("CI").is_ok() 
-        || std::env::var("GITHUB_ACTIONS").is_ok();
+    let ci_mode = ci_flag || std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok();
 
     if !ci_mode {
         println!("{}", "🔍 Migration Impact Analyzer".cyan().bold());
@@ -29,14 +27,9 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
 
             println!("  Schema: {} → {}", old_path.yellow(), new_path.yellow());
 
-            let old_content = std::fs::read_to_string(old_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
-            let new_content = std::fs::read_to_string(new_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-
-            let old = parse_qail(&old_content)
+            let old = parse_qail_file(old_path)
                 .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
-            let new = parse_qail(&new_content)
+            let new = parse_qail_file(new_path)
                 .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
             let cmds = diff_schemas(&old, &new);
@@ -68,7 +61,7 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
             p
         }
     };
-    
+
     println!("  Codebase: {}", display_path.yellow());
     println!();
 
@@ -85,11 +78,14 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
 
     println!("{}", "Scanning codebase...".dimmed());
     let scan_result = scanner.scan_with_details(code_path);
-    
+
     // Show per-file analysis breakdown with badges
     println!("🔍 {}", "Analyzing files...".dimmed());
     for file_analysis in &scan_result.files {
-        let relative_path = file_analysis.file.strip_prefix(code_path).unwrap_or(&file_analysis.file);
+        let relative_path = file_analysis
+            .file
+            .strip_prefix(code_path)
+            .unwrap_or(&file_analysis.file);
         let mode_badge = match file_analysis.mode {
             qail_core::analyzer::AnalysisMode::RustAST => "🦀",
             qail_core::analyzer::AnalysisMode::Regex => {
@@ -104,8 +100,9 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
             qail_core::analyzer::AnalysisMode::RustAST => "AST",
             qail_core::analyzer::AnalysisMode::Regex => "Regex",
         };
-        println!("   ├── {} {} ({}: {} refs)", 
-            mode_badge, 
+        println!(
+            "   ├── {} {} ({}: {} refs)",
+            mode_badge,
             relative_path.display().to_string().cyan(),
             mode_name.dimmed(),
             file_analysis.ref_count
@@ -115,7 +112,7 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
         println!("   └── {} files analyzed", scan_result.files.len());
     }
     println!();
-    
+
     let code_refs = scan_result.refs;
     println!("  Found {} query references\n", code_refs.len());
 
@@ -145,7 +142,10 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
     Ok(())
 }
 
-fn print_ci_breaking_changes(impact: &qail_core::analyzer::MigrationImpact, code_path: &std::path::Path) {
+fn print_ci_breaking_changes(
+    impact: &qail_core::analyzer::MigrationImpact,
+    code_path: &std::path::Path,
+) {
     // Find repo root
     let repo_root = {
         let mut current = code_path.to_path_buf();
@@ -158,7 +158,7 @@ fn print_ci_breaking_changes(impact: &qail_core::analyzer::MigrationImpact, code
             }
         }
     };
-    
+
     for change in &impact.breaking_changes {
         match change {
             qail_core::analyzer::BreakingChange::DroppedTable { table, references } => {
@@ -172,7 +172,11 @@ fn print_ci_breaking_changes(impact: &qail_core::analyzer::MigrationImpact, code
                     );
                 }
             }
-            qail_core::analyzer::BreakingChange::DroppedColumn { table, column, references } => {
+            qail_core::analyzer::BreakingChange::DroppedColumn {
+                table,
+                column,
+                references,
+            } => {
                 for r in references {
                     let file_path = r.file.strip_prefix(&repo_root).unwrap_or(&r.file);
                     println!(
@@ -185,7 +189,12 @@ fn print_ci_breaking_changes(impact: &qail_core::analyzer::MigrationImpact, code
                     );
                 }
             }
-            qail_core::analyzer::BreakingChange::RenamedColumn { table, old_name, new_name, references } => {
+            qail_core::analyzer::BreakingChange::RenamedColumn {
+                table,
+                old_name,
+                new_name,
+                references,
+            } => {
                 for r in references {
                     let file_path = r.file.strip_prefix(&repo_root).unwrap_or(&r.file);
                     println!(
@@ -202,7 +211,11 @@ fn print_ci_breaking_changes(impact: &qail_core::analyzer::MigrationImpact, code
         }
     }
     println!("::group::Migration Impact Summary");
-    println!("{} breaking changes found in {} files", impact.breaking_changes.len(), impact.affected_files);
+    println!(
+        "{} breaking changes found in {} files",
+        impact.breaking_changes.len(),
+        impact.affected_files
+    );
     println!("::endgroup::");
 }
 
@@ -236,7 +249,11 @@ fn print_human_breaking_changes(impact: &qail_core::analyzer::MigrationImpact) {
                 println!("└──────────────────────────────────────────────────────┘");
                 println!();
             }
-            qail_core::analyzer::BreakingChange::DroppedColumn { table, column, references } => {
+            qail_core::analyzer::BreakingChange::DroppedColumn {
+                table,
+                column,
+                references,
+            } => {
                 println!(
                     "┌─ {} {}.{} ({} references) ─────────────────┐",
                     "DROP COLUMN".red(),
@@ -268,7 +285,9 @@ fn print_human_breaking_changes(impact: &qail_core::analyzer::MigrationImpact) {
                 println!("└──────────────────────────────────────────────────────┘");
                 println!();
             }
-            qail_core::analyzer::BreakingChange::RenamedColumn { table, references, .. } => {
+            qail_core::analyzer::BreakingChange::RenamedColumn {
+                table, references, ..
+            } => {
                 println!(
                     "┌─ {} on {} ({} references) ───────────────────┐",
                     "RENAME".yellow(),

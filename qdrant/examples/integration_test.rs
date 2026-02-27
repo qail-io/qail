@@ -10,7 +10,7 @@ use qail_qdrant::{Point, QdrantDriver};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔌 Connecting to Qdrant...");
-    
+
     let mut driver = match QdrantDriver::connect("localhost", 6333).await {
         Ok(d) => {
             println!("✅ Connected to Qdrant");
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Search without filter ---
     println!("\n🔍 Search: Similar to [0.85, 0.15, 0.0, 0.0]...");
     let query_vector = vec![0.85, 0.15, 0.0, 0.0];
-    
+
     let results = driver.search(collection, &query_vector, 3, None).await?;
     println!("   Found {} results:", results.len());
     for r in &results {
@@ -68,8 +68,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Search with score threshold ---
     println!("\n🔍 Search with score_threshold > 0.9...");
-    let threshold_results = driver.search(collection, &query_vector, 10, Some(0.9)).await?;
-    println!("   Found {} results with score > 0.9:", threshold_results.len());
+    let threshold_results = driver
+        .search(collection, &query_vector, 10, Some(0.9))
+        .await?;
+    println!(
+        "   Found {} results with score > 0.9:",
+        threshold_results.len()
+    );
     for r in &threshold_results {
         println!("   - {:?} (score: {:.3})", r.id, r.score);
     }

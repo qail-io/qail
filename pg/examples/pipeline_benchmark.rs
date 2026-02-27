@@ -8,12 +8,12 @@
 //! Run with: cargo run --example pipeline_benchmark --release
 
 use qail_core::prelude::*;
-use qail_pg::driver::{PgDriver, PgPool, PoolConfig, PgConnection};
+use qail_pg::driver::{PgConnection, PgDriver, PgPool, PoolConfig};
 use std::time::Instant;
 
 const SINGLE_ITERATIONS: usize = 10_000;
 const BATCH_SIZE: usize = 500;
-const BATCH_ITERATIONS: usize = 20;  // 20 x 500 = 10,000 total
+const BATCH_ITERATIONS: usize = 20; // 20 x 500 = 10,000 total
 const POOL_SIZE: usize = 10;
 
 #[tokio::main]
@@ -24,16 +24,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Setup
     let mut driver = PgDriver::connect("127.0.0.1", 5432, "orion", "qail_test_migration").await?;
-    
+
     // Create test table
     println!("📦 Setting up test data...");
-    driver.execute_raw("DROP TABLE IF EXISTS bench_data").await.ok();
-    driver.execute_raw("CREATE TABLE bench_data (id SERIAL PRIMARY KEY, name TEXT, value INT)").await?;
+    driver
+        .execute_raw("DROP TABLE IF EXISTS bench_data")
+        .await
+        .ok();
+    driver
+        .execute_raw("CREATE TABLE bench_data (id SERIAL PRIMARY KEY, name TEXT, value INT)")
+        .await?;
     for i in 0..100 {
-        driver.execute_raw(&format!("INSERT INTO bench_data (name, value) VALUES ('item{}', {})", i, i * 100)).await?;
+        driver
+            .execute_raw(&format!(
+                "INSERT INTO bench_data (name, value) VALUES ('item{}', {})",
+                i,
+                i * 100
+            ))
+            .await?;
     }
     println!("   Created bench_data table with 100 rows\n");
-    
+
     // Simple query for fair comparison
     let query = Qail::get("bench_data")
         .columns(["id", "name", "value"])
@@ -49,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ============================================
     print!("⏱  Single query (fetch_all): ");
     std::io::Write::flush(&mut std::io::stdout())?;
-    
+
     let start = Instant::now();
     for _ in 0..SINGLE_ITERATIONS {
         let _ = driver.fetch_all(&query).await?;
@@ -63,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ============================================
     print!("⏱  Pipeline (1 conn, batch): ");
     std::io::Write::flush(&mut std::io::stdout())?;
-    
+
     // Create batch of queries
     let batch: Vec<Qail> = (0..BATCH_SIZE)
         .map(|i| {
@@ -73,13 +84,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .limit(10)
         })
         .collect();
-    
+
     // Need raw connection for pipeline
     let mut conn = PgConnection::connect("127.0.0.1", 5432, "orion", "qail_test_migration").await?;
-    
+
     // Warmup
     let _ = conn.pipeline_ast_cached(&batch).await?;
-    
+
     let start = Instant::now();
     for _ in 0..BATCH_ITERATIONS {
         let _ = conn.pipeline_ast_cached(&batch).await?;
@@ -93,18 +104,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ============================================
     print!("⏱  Pool + Pipeline ({} conn): ", POOL_SIZE);
     std::io::Write::flush(&mut std::io::stdout())?;
-    
+
     let config = PoolConfig::new("127.0.0.1", 5432, "orion", "qail_test_migration")
         .max_connections(POOL_SIZE);
     let pool = PgPool::connect(config).await?;
-    
+
     let start = Instant::now();
     let mut handles = Vec::new();
-    
+
     for _ in 0..POOL_SIZE {
         let pool_clone = pool.clone();
         let batch_clone = batch.clone();
-        
+
         handles.push(tokio::spawn(async move {
             let mut conn = pool_clone.acquire_system().await.unwrap();
             for _ in 0..BATCH_ITERATIONS {
@@ -112,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }));
     }
-    
+
     for h in handles {
         h.await?;
     }
@@ -129,8 +140,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📊 Results");
     println!("============================================");
     println!("Single query:    {:>12.0} q/s", single_qps);
-    println!("Pipeline:        {:>12.0} q/s ({:.0}x faster)", pipeline_qps, pipeline_qps / single_qps);
-    println!("Pool + Pipeline: {:>12.0} q/s ({:.0}x faster)", pool_qps, pool_qps / single_qps);
+    println!(
+        "Pipeline:        {:>12.0} q/s ({:.0}x faster)",
+        pipeline_qps,
+        pipeline_qps / single_qps
+    );
+    println!(
+        "Pool + Pipeline: {:>12.0} q/s ({:.0}x faster)",
+        pool_qps,
+        pool_qps / single_qps
+    );
 
     Ok(())
 }

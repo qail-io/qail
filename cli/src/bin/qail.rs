@@ -21,16 +21,17 @@ use qail_core::transpiler::{Dialect, ToSql};
 
 use qail::introspection;
 use qail::lint::lint_schema;
-use qail::migrations::{
-    migrate_analyze, migrate_apply, migrate_down, migrate_plan, migrate_reset, migrate_status,
-    migrate_up, MigrateDirection,
-};
 #[cfg(feature = "watch")]
 use qail::migrations::watch_schema;
+use qail::migrations::{
+    ApplyPhase, MigrateDirection, migrate_analyze, migrate_apply, migrate_down, migrate_plan,
+    migrate_reset, migrate_status, migrate_up,
+};
 #[cfg(feature = "repl")]
 use qail::repl::run_repl;
 use qail::resolve::resolve_db_url;
 use qail::schema::{OutputFormat as SchemaOutputFormat, check_schema, diff_schemas_cmd};
+use qail::schema_tools::{doctor_schema, format_schema_source, merge_schema, split_schema};
 
 #[derive(Parser)]
 #[command(name = "qail")]
@@ -80,6 +81,25 @@ impl From<CliDialect> for Dialect {
         match val {
             CliDialect::Postgres => Dialect::Postgres,
             CliDialect::Sqlite => Dialect::SQLite,
+        }
+    }
+}
+
+#[derive(Clone, ValueEnum)]
+enum CliApplyPhase {
+    All,
+    Expand,
+    Backfill,
+    Contract,
+}
+
+impl From<CliApplyPhase> for ApplyPhase {
+    fn from(value: CliApplyPhase) -> Self {
+        match value {
+            CliApplyPhase::All => ApplyPhase::All,
+            CliApplyPhase::Expand => ApplyPhase::Expand,
+            CliApplyPhase::Backfill => ApplyPhase::Backfill,
+            CliApplyPhase::Contract => ApplyPhase::Contract,
         }
     }
 }
@@ -153,8 +173,8 @@ EXAMPLES:
         #[arg(long)]
         ssh: Option<String>,
     },
-    /// Format a QAIL query to canonical v2 syntax
-    Fmt { query: String },
+    /// Format a QAIL query or schema source path (file/dir)
+    Fmt { input: String },
     /// Validate a QAIL schema file (and optionally audit source for RLS coverage)
     Check {
         /// Schema file path (or old:new for migration validation)
@@ -165,6 +185,9 @@ EXAMPLES:
         /// Migrations directory to merge before validation
         #[arg(long, default_value = "migrations")]
         migrations: String,
+        /// Fail if N+1 query patterns are detected
+        #[arg(long)]
+        nplus1_deny: bool,
     },
     /// Diff two schema files and show migration AST
     Diff {
@@ -503,6 +526,11 @@ EXAMPLES:
         #[command(subcommand)]
         action: BranchAction,
     },
+    /// Modular schema tooling
+    Schema {
+        #[command(subcommand)]
+        action: SchemaAction,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -511,6 +539,40 @@ enum SyncAction {
     Generate,
     /// List configured sync rules
     List,
+}
+
+#[derive(Subcommand, Clone)]
+enum SchemaAction {
+    /// Diagnose module-order and schema integrity issues
+    Doctor {
+        /// Schema source path (schema.qail, schema/, or module file)
+        #[arg(default_value = "schema.qail")]
+        schema: String,
+        /// Fail on warnings (not just errors)
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Split monolithic schema into modular schema/ directory
+    Split {
+        /// Input schema source (usually schema.qail)
+        #[arg(default_value = "schema.qail")]
+        input: String,
+        /// Output directory for modules
+        #[arg(short, long, default_value = "schema")]
+        out: String,
+        /// Overwrite files in output directory
+        #[arg(long)]
+        force: bool,
+    },
+    /// Merge modular schema source into one .qail file
+    Merge {
+        /// Input schema source (schema/ or schema.qail)
+        #[arg(default_value = "schema")]
+        input: String,
+        /// Output merged schema file
+        #[arg(short, long, default_value = "schema.qail")]
+        output: String,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -606,7 +668,13 @@ EXAMPLES:
     qail migrate up v1.qail:v2.qail postgres://... -c ./src
     
     # Force apply even if breaking changes detected
-    qail migrate up v1.qail:v2.qail postgres://... -c ./src --force"#)]
+    qail migrate up v1.qail:v2.qail postgres://... -c ./src --force
+
+    # Explicitly allow destructive operations (DROP / narrowing type / SET NOT NULL on non-empty tables)
+    qail migrate up v1.qail:v2.qail postgres://... --allow-destructive
+
+    # Override lock-risk preflight guardrails (not recommended)
+    qail migrate up v1.qail:v2.qail postgres://... --allow-lock-risk"#)]
     Up {
         /// Schema diff file or inline diff
         schema_diff: String,
@@ -619,6 +687,15 @@ EXAMPLES:
         /// Force migration even if breaking changes detected
         #[arg(long)]
         force: bool,
+        /// Explicitly allow destructive migration operations
+        #[arg(long)]
+        allow_destructive: bool,
+        /// Skip shadow receipt verification gate (not recommended)
+        #[arg(long)]
+        allow_no_shadow_receipt: bool,
+        /// Skip lock-risk preflight guardrails (not recommended)
+        #[arg(long)]
+        allow_lock_risk: bool,
     },
     /// Rollback migrations
     #[command(after_help = r#"EXAMPLES:
@@ -641,11 +718,30 @@ EXAMPLES:
     qail migrate apply
     
     # Apply with explicit URL
-    qail migrate apply --url postgres://user@localhost/mydb"#)]
+    qail migrate apply --url postgres://user@localhost/mydb
+
+    # Apply only expand/backfill/contract phase
+    qail migrate apply --phase expand
+    qail migrate apply --phase backfill --backfill-chunk-size 10000
+
+    # Contract safety guard with code reference scan
+    qail migrate apply --phase contract --codebase ./src"#)]
     Apply {
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
         url: Option<String>,
+        /// Migration phase to apply (all, expand, backfill, contract)
+        #[arg(long, value_enum, default_value = "all")]
+        phase: CliApplyPhase,
+        /// Codebase path for contract-reference safety checks
+        #[arg(short, long)]
+        codebase: Option<String>,
+        /// Override contract guard even when references still exist in code
+        #[arg(long)]
+        allow_contract_with_references: bool,
+        /// Default chunk size for chunked backfill runner directives
+        #[arg(long, default_value_t = 5000)]
+        backfill_chunk_size: usize,
     },
     /// Create a new named migration file
     #[command(after_help = r#"EXAMPLES:
@@ -770,28 +866,35 @@ enum VectorAction {
 }
 
 /// Parse schema diff and also return old schema commands, diff commands, and paths (for shadow migration)
-fn parse_schema_diff_with_old(schema_diff: &str) -> Result<(Vec<qail_core::ast::Qail>, Vec<qail_core::ast::Qail>, String, String)> {
-    use qail_core::migrate::{diff_schemas, parse_qail, schema_to_commands};
+fn parse_schema_diff_with_old(
+    schema_diff: &str,
+) -> Result<(
+    Vec<qail_core::ast::Qail>,
+    Vec<qail_core::ast::Qail>,
+    String,
+    String,
+)> {
+    use qail_core::migrate::{diff_schemas, parse_qail_file, schema_to_commands};
 
     if schema_diff.contains(':') && !schema_diff.starts_with("postgres") {
         let parts: Vec<&str> = schema_diff.splitn(2, ':').collect();
         let old_path = parts[0];
         let new_path = parts[1];
 
-        let old_content = std::fs::read_to_string(old_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read old schema: {}", e))?;
-        let new_content = std::fs::read_to_string(new_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read new schema: {}", e))?;
-
-        let old_schema = parse_qail(&old_content)
+        let old_schema = parse_qail_file(old_path)
             .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
-        let new_schema = parse_qail(&new_content)
+        let new_schema = parse_qail_file(new_path)
             .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
         let old_cmds = schema_to_commands(&old_schema);
         let diff_cmds = diff_schemas(&old_schema, &new_schema);
-        
-        Ok((old_cmds, diff_cmds, old_path.to_string(), new_path.to_string()))
+
+        Ok((
+            old_cmds,
+            diff_cmds,
+            old_path.to_string(),
+            new_path.to_string(),
+        ))
     } else {
         Err(anyhow::anyhow!(
             "Please provide two .qail files: old.qail:new.qail"
@@ -804,7 +907,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::Init { name, mode, url, deployment }) => {
+        Some(Commands::Init {
+            name,
+            mode,
+            url,
+            deployment,
+        }) => {
             qail::init::run_init(name.clone(), mode.clone(), url.clone(), deployment.clone())?;
         }
         Some(Commands::Explain { query }) => explain_query(query),
@@ -818,13 +926,24 @@ async fn main() -> Result<()> {
             let db_url = resolve_db_url(url.as_deref())?;
             introspection::pull_schema(&db_url, introspection::SchemaOutputFormat::Qail).await?;
         }
-        Some(Commands::Fmt { query }) => {
-            format_query(query)?;
+        Some(Commands::Fmt { input }) => {
+            format_input(input)?;
         }
-        Some(Commands::Check { schema, src, migrations }) => {
-            check_schema(schema, src.as_deref(), migrations)?;
+        Some(Commands::Check {
+            schema,
+            src,
+            migrations,
+            nplus1_deny,
+        }) => {
+            check_schema(schema, src.as_deref(), migrations, *nplus1_deny)?;
         }
-        Some(Commands::Diff { old, new, format, live, url }) => {
+        Some(Commands::Diff {
+            old,
+            new,
+            format,
+            live,
+            url,
+        }) => {
             let schema_fmt = match format {
                 OutputFormat::Sql => SchemaOutputFormat::Sql,
                 OutputFormat::Json => SchemaOutputFormat::Json,
@@ -864,9 +983,26 @@ async fn main() -> Result<()> {
                 schema_diff,
                 output,
             } => migrate_plan(schema_diff, output.as_deref())?,
-            MigrateAction::Up { schema_diff, url, codebase, force } => {
+            MigrateAction::Up {
+                schema_diff,
+                url,
+                codebase,
+                force,
+                allow_destructive,
+                allow_no_shadow_receipt,
+                allow_lock_risk,
+            } => {
                 let db_url = resolve_db_url(url.as_deref())?;
-                migrate_up(schema_diff, &db_url, codebase.as_deref(), *force).await?;
+                migrate_up(
+                    schema_diff,
+                    &db_url,
+                    codebase.as_deref(),
+                    *force,
+                    *allow_destructive,
+                    *allow_no_shadow_receipt,
+                    *allow_lock_risk,
+                )
+                .await?;
             }
             MigrateAction::Down { schema_diff, url } => {
                 let db_url = resolve_db_url(url.as_deref())?;
@@ -876,9 +1012,23 @@ async fn main() -> Result<()> {
                 let db_url = resolve_db_url(url.as_deref())?;
                 migrate_reset(schema, &db_url).await?;
             }
-            MigrateAction::Apply { url } => {
+            MigrateAction::Apply {
+                url,
+                phase,
+                codebase,
+                allow_contract_with_references,
+                backfill_chunk_size,
+            } => {
                 let db_url = resolve_db_url(url.as_deref())?;
-                migrate_apply(&db_url, MigrateDirection::Up).await?;
+                migrate_apply(
+                    &db_url,
+                    MigrateDirection::Up,
+                    phase.clone().into(),
+                    codebase.as_deref(),
+                    *allow_contract_with_references,
+                    *backfill_chunk_size,
+                )
+                .await?;
             }
             MigrateAction::Create {
                 name,
@@ -887,13 +1037,21 @@ async fn main() -> Result<()> {
             } => {
                 qail::migrations::migrate_create(name, depends.as_deref(), author.as_deref())?;
             }
-            MigrateAction::Shadow { schema_diff, url, live } => {
+            MigrateAction::Shadow {
+                schema_diff,
+                url,
+                live,
+            } => {
                 let db_url = resolve_db_url(url.as_deref())?;
                 if *live {
                     qail::shadow::run_shadow_migration_live(&db_url, schema_diff).await?;
                 } else {
-                    let (old_cmds, diff_cmds, old_path, new_path) = parse_schema_diff_with_old(schema_diff)?;
-                    qail::shadow::run_shadow_migration(&db_url, &old_cmds, &diff_cmds, &old_path, &new_path).await?;
+                    let (old_cmds, diff_cmds, old_path, new_path) =
+                        parse_schema_diff_with_old(schema_diff)?;
+                    qail::shadow::run_shadow_migration(
+                        &db_url, &old_cmds, &diff_cmds, &old_path, &new_path,
+                    )
+                    .await?;
                 }
             }
             MigrateAction::Promote { url } => {
@@ -907,19 +1065,33 @@ async fn main() -> Result<()> {
         },
         #[cfg(feature = "vector")]
         Some(Commands::Vector { action }) => match action {
-            VectorAction::Create { collection, size, distance, url } => {
+            VectorAction::Create {
+                collection,
+                size,
+                distance,
+                url,
+            } => {
                 qail::vector::vector_create(collection, *size, distance, url).await?;
             }
             VectorAction::Drop { collection, url } => {
                 qail::vector::vector_drop(collection, url).await?;
             }
-            VectorAction::Backup { collection, output, url } => {
+            VectorAction::Backup {
+                collection,
+                output,
+                url,
+            } => {
                 let snapshot = qail::snapshot::snapshot_create(collection, url).await?;
                 if let Some(out_path) = output {
-                    qail::snapshot::snapshot_download(collection, &snapshot.name, out_path, url).await?;
+                    qail::snapshot::snapshot_download(collection, &snapshot.name, out_path, url)
+                        .await?;
                 }
             }
-            VectorAction::Restore { collection, snapshot, url } => {
+            VectorAction::Restore {
+                collection,
+                snapshot,
+                url,
+            } => {
                 qail::snapshot::snapshot_restore(collection, snapshot, url).await?;
             }
             VectorAction::Snapshots { collection, url } => {
@@ -929,10 +1101,12 @@ async fn main() -> Result<()> {
                 } else {
                     println!("Snapshots for '{}':", collection);
                     for s in snapshots {
-                        println!("  {} ({} bytes, created: {})", 
-                            s.name, 
+                        println!(
+                            "  {} ({} bytes, created: {})",
+                            s.name,
                             s.size,
-                            s.creation_time.as_deref().unwrap_or("unknown"));
+                            s.creation_time.as_deref().unwrap_or("unknown")
+                        );
                     }
                 }
             }
@@ -948,8 +1122,16 @@ async fn main() -> Result<()> {
         #[cfg(feature = "vector")]
         Some(Commands::Worker { interval, batch }) => {
             qail::worker::run_worker(*interval, *batch).await?;
-        },
-        Some(Commands::Exec { query, file, url, ssh, tx, dry_run, json }) => {
+        }
+        Some(Commands::Exec {
+            query,
+            file,
+            url,
+            ssh,
+            tx,
+            dry_run,
+            json,
+        }) => {
             qail::exec::run_exec(qail::exec::ExecConfig {
                 query: query.clone(),
                 file: file.clone(),
@@ -958,9 +1140,16 @@ async fn main() -> Result<()> {
                 tx: *tx,
                 dry_run: *dry_run,
                 json: *json,
-            }).await?;
-        },
-        Some(Commands::Seed { file, url, ssh, tx, dry_run }) => {
+            })
+            .await?;
+        }
+        Some(Commands::Seed {
+            file,
+            url,
+            ssh,
+            tx,
+            dry_run,
+        }) => {
             println!("{}", format!("Seeding from: {}", file).cyan());
             qail::exec::run_exec(qail::exec::ExecConfig {
                 query: None,
@@ -970,11 +1159,12 @@ async fn main() -> Result<()> {
                 tx: *tx,
                 dry_run: *dry_run,
                 json: false,
-            }).await?;
-        },
+            })
+            .await?;
+        }
         Some(Commands::Types { schema, output }) => {
             qail::types::generate_types(schema, output.as_deref())?;
-        },
+        }
         Some(Commands::Branch { action }) => {
             // Resolve DB URL from --url flag or qail.toml
             let get_url = |url: &Option<String>| -> Result<String> {
@@ -982,12 +1172,16 @@ async fn main() -> Result<()> {
                     Ok(u.clone())
                 } else {
                     // Try reading from qail.toml
-                    let config = std::fs::read_to_string("qail.toml")
-                        .unwrap_or_default();
+                    let config = std::fs::read_to_string("qail.toml").unwrap_or_default();
                     for line in config.lines() {
                         let line = line.trim();
                         if line.starts_with("url") && line.contains('=') {
-                            let val = line.split_once('=').map(|x| x.1).unwrap_or("").trim().trim_matches('"');
+                            let val = line
+                                .split_once('=')
+                                .map(|x| x.1)
+                                .unwrap_or("")
+                                .trim()
+                                .trim_matches('"');
                             if val.starts_with("postgres") {
                                 return Ok(val.to_string());
                             }
@@ -1013,6 +1207,17 @@ async fn main() -> Result<()> {
                     let db_url = get_url(url)?;
                     qail::branch::branch_merge(name, &db_url).await?;
                 }
+            }
+        }
+        Some(Commands::Schema { action }) => match action {
+            SchemaAction::Doctor { schema, strict } => {
+                doctor_schema(schema, *strict)?;
+            }
+            SchemaAction::Split { input, out, force } => {
+                split_schema(input, out, *force)?;
+            }
+            SchemaAction::Merge { input, output } => {
+                merge_schema(input, output)?;
             }
         },
         None => {
@@ -1055,8 +1260,13 @@ fn transpile_query(query: &str, cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn format_query(query: &str) -> Result<()> {
-    let cmd = qail_core::parse(query).map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
+fn format_input(input: &str) -> Result<()> {
+    let path = std::path::Path::new(input);
+    if path.exists() {
+        return format_schema_source(input);
+    }
+
+    let cmd = qail_core::parse(input).map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
     let formatter = Formatter::new();
     let formatted = formatter
         .format(&cmd)
@@ -1120,5 +1330,3 @@ fn explain_query(query: &str) {
         }
     }
 }
-
-

@@ -13,9 +13,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║  BATTLE TEST #1: Zombie Connection Test 🧟                ║");
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 
-    let mut driver = PgDriver::connect_with_password(
-        "localhost", 5432, "postgres", "postgres", "postgres"
-    ).await?;
+    let mut driver =
+        PgDriver::connect_with_password("localhost", 5432, "postgres", "postgres", "postgres")
+            .await?;
 
     println!("1️⃣  Connection established");
 
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Now test: Can we run queries that touch actual data?
     println!("\n4️⃣  Testing query that needs transaction state...");
     let data_result = driver.fetch_all(&Qail::get("pg_database").limit(1)).await;
-    
+
     match &data_result {
         Ok(rows) => {
             println!("   Result: Fetch succeeded ({} rows)", rows.len());
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📊 BATTLE TEST SUMMARY:");
     println!("   - Transaction state IS tracked correctly");
     println!("   - execute_raw uses Simple Query protocol");
-    println!("   - fetch_all uses Extended Query protocol");  
+    println!("   - fetch_all uses Extended Query protocol");
     println!("   - Pool MUST issue ROLLBACK before reuse");
 
     Ok(())

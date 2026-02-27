@@ -7,8 +7,8 @@ use axum::response::Json;
 use std::sync::Arc;
 
 use super::QueryResponse;
-use crate::middleware::ApiError;
 use crate::GatewayState;
+use crate::middleware::ApiError;
 
 /// Execute a Qdrant vector command.
 ///
@@ -55,10 +55,7 @@ pub(super) async fn execute_qdrant_cmd(
                 .await
                 .map_err(|e| qdrant_err(e, "search"))?;
 
-            let rows: Vec<serde_json::Value> = results
-                .iter()
-                .map(scored_point_to_json)
-                .collect();
+            let rows: Vec<serde_json::Value> = results.iter().map(scored_point_to_json).collect();
             let count = rows.len();
 
             Ok(Json(QueryResponse { rows, count }))
@@ -70,11 +67,8 @@ pub(super) async fn execute_qdrant_cmd(
                 .await
                 .map_err(|e| qdrant_err(e, "scroll"))?;
 
-            let rows: Vec<serde_json::Value> = result
-                .points
-                .iter()
-                .map(scored_point_to_json)
-                .collect();
+            let rows: Vec<serde_json::Value> =
+                result.points.iter().map(scored_point_to_json).collect();
             let count = rows.len();
 
             Ok(Json(QueryResponse { rows, count }))
@@ -85,7 +79,9 @@ pub(super) async fn execute_qdrant_cmd(
             // Full upsert requires parsing points from the AST body.
             tracing::info!("Qdrant UPSERT on '{}' (routed via gateway)", collection);
             Ok(Json(QueryResponse {
-                rows: vec![serde_json::json!({"status": "upsert_routed", "collection": collection})],
+                rows: vec![
+                    serde_json::json!({"status": "upsert_routed", "collection": collection}),
+                ],
                 count: 1,
             }))
         }

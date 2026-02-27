@@ -12,8 +12,8 @@
 
 use moka::sync::Cache;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Cache configuration
@@ -117,22 +117,20 @@ impl QueryCache {
 
         // Track which keys belong to which table for invalidation
         if let Ok(mut map) = self.table_keys.write() {
-            map.entry(table.to_string())
-                .or_default()
-                .push(key);
+            map.entry(table.to_string()).or_default().push(key);
         }
     }
 
     /// Invalidate all cache entries for a table
     pub fn invalidate_table(&self, table: &str) {
-        if let Ok(mut map) = self.table_keys.write() {
-            if let Some(keys) = map.remove(table) {
-                let count = keys.len();
-                for key in &keys {
-                    self.entries.invalidate(key);
-                }
-                tracing::debug!("Invalidated {} cache entries for table '{}'", count, table);
+        if let Ok(mut map) = self.table_keys.write()
+            && let Some(keys) = map.remove(table)
+        {
+            let count = keys.len();
+            for key in &keys {
+                self.entries.invalidate(key);
             }
+            tracing::debug!("Invalidated {} cache entries for table '{}'", count, table);
         }
     }
 
@@ -225,18 +223,35 @@ mod tests {
         let cache = QueryCache::new(CacheConfig::default());
 
         // Initial state: cache "v1"
-        cache.set("SELECT * FROM users", "users", r#"{"version":"v1"}"#.to_string());
-        assert_eq!(cache.get("SELECT * FROM users").unwrap(), r#"{"version":"v1"}"#);
+        cache.set(
+            "SELECT * FROM users",
+            "users",
+            r#"{"version":"v1"}"#.to_string(),
+        );
+        assert_eq!(
+            cache.get("SELECT * FROM users").unwrap(),
+            r#"{"version":"v1"}"#
+        );
 
         // Simulate a mutation → invalidate
         cache.invalidate_table("users");
 
         // Read MUST miss (no stale v1)
-        assert!(cache.get("SELECT * FROM users").is_none(), "Must not return stale data after invalidation");
+        assert!(
+            cache.get("SELECT * FROM users").is_none(),
+            "Must not return stale data after invalidation"
+        );
 
         // Re-cache with "v2"
-        cache.set("SELECT * FROM users", "users", r#"{"version":"v2"}"#.to_string());
-        assert_eq!(cache.get("SELECT * FROM users").unwrap(), r#"{"version":"v2"}"#);
+        cache.set(
+            "SELECT * FROM users",
+            "users",
+            r#"{"version":"v2"}"#.to_string(),
+        );
+        assert_eq!(
+            cache.get("SELECT * FROM users").unwrap(),
+            r#"{"version":"v2"}"#
+        );
     }
 
     #[test]
@@ -249,8 +264,14 @@ mod tests {
 
         cache.invalidate_table("users");
 
-        assert!(cache.get("SELECT * FROM users").is_none(), "users should be invalidated");
-        assert!(cache.get("SELECT * FROM orders").is_some(), "orders should NOT be invalidated");
+        assert!(
+            cache.get("SELECT * FROM users").is_none(),
+            "users should be invalidated"
+        );
+        assert!(
+            cache.get("SELECT * FROM orders").is_some(),
+            "orders should NOT be invalidated"
+        );
     }
 
     #[test]
@@ -324,7 +345,8 @@ mod tests {
         }
 
         for h in handles {
-            h.join().expect("Thread panicked during concurrent cache test");
+            h.join()
+                .expect("Thread panicked during concurrent cache test");
         }
 
         // If we get here without panics or deadlocks, the test passes
@@ -346,7 +368,11 @@ mod tests {
         let stats = cache.stats();
         assert_eq!(stats.hits, 3);
         assert_eq!(stats.misses, 1);
-        assert!((stats.hit_rate() - 75.0).abs() < 0.01, "Hit rate should be 75%, got {}", stats.hit_rate());
+        assert!(
+            (stats.hit_rate() - 75.0).abs() < 0.01,
+            "Hit rate should be 75%, got {}",
+            stats.hit_rate()
+        );
     }
 
     #[test]

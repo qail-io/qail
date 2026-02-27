@@ -12,14 +12,13 @@ Subscribe to table changes via WebSocket (backed by PostgreSQL `LISTEN/NOTIFY`):
 const ws = new WebSocket('ws://localhost:8080/ws');
 ws.send(JSON.stringify({
   type: 'subscribe',
-  table: 'orders',
-  filter: { status: 'paid' }
+  channel: 'qail_table_orders'
 }));
 
 ws.onmessage = (event) => {
-  const { type, data } = JSON.parse(event.data);
-  // type: "INSERT" | "UPDATE" | "DELETE"
-  console.log('Change:', type, data);
+  const msg = JSON.parse(event.data);
+  // type: "subscribed" | "notification" | "error"
+  console.log(msg);
 };
 ```
 
@@ -34,8 +33,9 @@ Auto-refresh query results when underlying data changes:
 ```javascript
 ws.send(JSON.stringify({
   type: 'live_query',
-  query: '/api/orders?status=paid&sort=-created_at&limit=10',
-  interval: 2000  // Poll interval in ms
+  qail: "get orders where status = 'paid' order by created_at desc limit 10",
+  table: 'orders',
+  interval_ms: 2000
 }));
 ```
 
@@ -48,20 +48,17 @@ The gateway re-executes the query at the specified interval and pushes updated r
 Fire webhooks on database mutations. Define triggers in YAML:
 
 ```yaml
-events:
-  - name: order_created
-    table: orders
-    operations: [INSERT]
-    webhook: "https://api.example.com/hooks/order-created"
-    headers:
-      X-Secret: "webhook-secret-key"
-    retry:
-      count: 3
-      interval: 5000
-  - name: order_updated
-    table: orders
-    operations: [UPDATE]
-    webhook: "https://api.example.com/hooks/order-updated"
+- name: order_created
+  table: orders
+  operations: [create]
+  webhook_url: "https://api.example.com/hooks/order-created"
+  headers:
+    X-Secret: webhook-secret-key
+  retry_count: 3
+- name: order_updated
+  table: orders
+  operations: [update]
+  webhook_url: "https://api.example.com/hooks/order-updated"
 ```
 
 ### Webhook Payload
@@ -91,9 +88,9 @@ Each trigger can fire on one or more operations:
 
 | Operation | Fires on | Payload |
 |-----------|----------|---------|
-| `INSERT` | `POST /api/{table}` | `new` data |
-| `UPDATE` | `PATCH /api/{table}/:id` | `new` + `old` data |
-| `DELETE` | `DELETE /api/{table}/:id` | `old` data |
+| `create` | `POST /api/{table}` | `new` data |
+| `update` | `PATCH /api/{table}/:id` | `new` + `old` data |
+| `delete` | `DELETE /api/{table}/:id` | `old` data |
 
 ---
 

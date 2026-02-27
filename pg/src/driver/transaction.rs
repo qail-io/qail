@@ -33,15 +33,19 @@ impl PgConnection {
     /// Savepoints allow partial rollback within a transaction.
     /// Use `rollback_to()` to return to this savepoint.
     pub async fn savepoint(&mut self, name: &str) -> PgResult<()> {
-        self.execute_simple(&format!("SAVEPOINT {}", quote_savepoint_name(name))).await
+        self.execute_simple(&format!("SAVEPOINT {}", quote_savepoint_name(name)))
+            .await
     }
 
     /// Rollback to a previously created savepoint.
     /// Discards all changes since the named savepoint was created,
     /// but keeps the transaction open.
     pub async fn rollback_to(&mut self, name: &str) -> PgResult<()> {
-        self.execute_simple(&format!("ROLLBACK TO SAVEPOINT {}", quote_savepoint_name(name)))
-            .await
+        self.execute_simple(&format!(
+            "ROLLBACK TO SAVEPOINT {}",
+            quote_savepoint_name(name)
+        ))
+        .await
     }
 
     /// Release a savepoint (free resources, if no longer needed).

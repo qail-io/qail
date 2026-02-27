@@ -17,7 +17,10 @@ pub fn interval(duration: &str) -> Expr {
     Expr::SpecialFunction {
         name: "INTERVAL".to_string(),
         // Use Expr::Literal so the encoder wraps in quotes properly
-        args: vec![(None, Box::new(Expr::Literal(Value::String(duration.to_string()))))],
+        args: vec![(
+            None,
+            Box::new(Expr::Literal(Value::String(duration.to_string()))),
+        )],
         alias: None,
     }
 }

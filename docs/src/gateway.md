@@ -20,8 +20,10 @@ POST   /api/{table}              # Create
 PATCH  /api/{table}/:id          # Update
 DELETE /api/{table}/:id          # Delete
 GET    /api/{table}/_explain     # EXPLAIN ANALYZE
-GET    /api/{table}/_aggregate   # Aggregations
+GET    /api/{table}/aggregate    # Aggregations
+GET    /api/{table}/_aggregate   # Aggregations (compat alias)
 GET    /api/{table}/:id/{child}  # Nested resources (FK-based)
+POST   /api/rpc/{function}       # Function RPC with JSON args
 ```
 
 ## Query API
@@ -86,6 +88,8 @@ GET /api/orders?expand=nested:users                       # Nested FK expansion
 
 Response includes the full related object inline — **no N+1 queries**. The gateway performs a server-side JOIN.
 
+`expand=` is for forward (many-to-one / one-to-one) relations. For reverse one-to-many expansion, use `nested:` to avoid parent-row duplication.
+
 ### Nested Resource Routes
 
 Access child resources through parent:
@@ -134,31 +138,34 @@ All mutations support `?returning=id,status` to get back specific columns after 
 ## Aggregations
 
 ```
-GET /api/orders/_aggregate?fn=count                       # COUNT(*)
-GET /api/orders/_aggregate?fn=sum&column=total            # SUM(total)
-GET /api/orders/_aggregate?fn=avg&column=total            # AVG
-GET /api/orders/_aggregate?fn=min&column=created_at       # MIN
-GET /api/orders/_aggregate?fn=max&column=total            # MAX
-GET /api/orders/_aggregate?fn=count&status=paid           # Filtered aggregation
+GET /api/orders/aggregate?fn=count                        # COUNT(*)
+GET /api/orders/aggregate?fn=sum&column=total             # SUM(total)
+GET /api/orders/aggregate?fn=avg&column=total             # AVG
+GET /api/orders/aggregate?fn=min&column=created_at        # MIN
+GET /api/orders/aggregate?fn=max&column=total             # MAX
+GET /api/orders/aggregate?fn=count&status=paid            # Filtered aggregation
+GET /api/orders/_aggregate?fn=count                        # Alias (compat)
+```
+
+## Function RPC
+
+```
+POST /api/rpc/search_orders
+Body: { "tenant_id": "acme", "limit": 25 }               # Named args
+
+POST /api/rpc/rebuild_index
+Body: ["orders", true]                                     # Positional args
 ```
 
 ## Authentication & Security
 
 ### JWT Authentication
 
-The gateway validates JWT tokens and extracts tenant context for RLS:
+The gateway validates `Authorization: Bearer <jwt>` tokens and extracts tenant context for RLS.
+Set `JWT_SECRET` in the environment:
 
-```yaml
-# gateway.yaml
-auth:
-  jwt:
-    secret: "your-hs256-secret"        # HS256
-    # OR
-    jwks_url: "https://..."            # RS256 via JWKS
-  claims:
-    operator_id: "operator_id"
-    user_id: "sub"
-    role: "role"
+```bash
+export JWT_SECRET="your-hs256-secret"
 ```
 
 ### Header-Based Dev Auth
@@ -166,23 +173,16 @@ auth:
 For development, pass claims directly as headers:
 
 ```bash
-curl -H "x-operator-id: uuid" -H "x-user-id: uuid" /api/orders
-```
-
-### Webhook Auth
-
-Delegate authentication to an external service:
-
-```yaml
-auth:
-  webhook:
-    url: "https://auth.example.com/verify"
-    headers_forward: ["Authorization", "Cookie"]
+curl \
+  -H "x-user-id: user-123" \
+  -H "x-user-role: operator" \
+  -H "x-tenant-id: tenant-abc" \
+  /api/orders
 ```
 
 ### Row-Level Security (RLS)
 
-Every query is automatically scoped to the authenticated tenant via PostgreSQL's native RLS. The gateway sets session variables (`app.operator_id`, `app.user_id`) before each query — **no manual WHERE clauses needed**.
+Every query is automatically scoped to the authenticated tenant via PostgreSQL's native RLS. The gateway sets session variables (`app.current_operator_id`, `app.current_user_id`) before each query — **no manual WHERE clauses needed**.
 
 ### YAML Policy Engine
 
@@ -190,34 +190,27 @@ Fine-grained access control per table, per role:
 
 ```yaml
 policies:
-  orders:
-    roles:
-      agent:
-        select: true
-        insert: true
-        update: true
-        delete: false
-        columns: ["id", "status", "total", "created_at"]  # Column-level
-        filter:                                             # Row-level
-          operator_id: "x-operator-id"
-      viewer:
-        select: true
-        columns: ["id", "status"]
+  - name: orders_agent_read
+    table: orders
+    role: agent
+    operations: [read]
+    filter: "operator_id = $tenant_id"
+    allowed_columns: ["id", "status", "total", "created_at"]
+  - name: orders_viewer_read
+    table: orders
+    role: viewer
+    operations: [read]
+    allowed_columns: ["id", "status"]
 ```
 
 ### Query Allow-Listing
 
 Lock down which queries can run in production:
 
-```yaml
-security:
-  allow_list:
-    enabled: true
-    queries:
-      - "GET /api/orders"
-      - "GET /api/orders/:id"
-  complexity_limit: 10        # Max query depth
-  rate_limit: 100             # Requests per minute
+```toml
+# qail.toml
+[gateway]
+allow_list_path = "allow_list.txt"
 ```
 
 ## Real-Time
@@ -230,14 +223,13 @@ Subscribe to table changes via WebSocket (PostgreSQL LISTEN/NOTIFY):
 const ws = new WebSocket('ws://localhost:8080/ws');
 ws.send(JSON.stringify({
   type: 'subscribe',
-  table: 'orders',
-  filter: { status: 'paid' }
+  channel: 'qail_table_orders'
 }));
 
 ws.onmessage = (event) => {
-  const { type, data } = JSON.parse(event.data);
-  // type: "INSERT" | "UPDATE" | "DELETE"
-  console.log('Change:', type, data);
+  const msg = JSON.parse(event.data);
+  // type: "subscribed" | "notification" | "error"
+  console.log(msg);
 };
 ```
 
@@ -248,8 +240,9 @@ Auto-refresh query results when underlying data changes:
 ```javascript
 ws.send(JSON.stringify({
   type: 'live_query',
-  query: '/api/orders?status=paid&sort=-created_at&limit=10',
-  interval: 2000  // Poll interval in ms
+  qail: "get orders where status = 'paid' order by created_at desc limit 10",
+  table: 'orders',
+  interval_ms: 2000
 }));
 ```
 
@@ -258,18 +251,17 @@ ws.send(JSON.stringify({
 Fire webhooks on database mutations:
 
 ```yaml
-events:
-  - name: order_created
-    table: orders
-    operations: [INSERT]
-    webhook: "https://api.example.com/hooks/order-created"
-    retry:
-      count: 3
-      interval: 5000
-  - name: order_updated
-    table: orders
-    operations: [UPDATE]
-    webhook: "https://api.example.com/hooks/order-updated"
+- name: order_created
+  table: orders
+  operations: [create]
+  webhook_url: "https://api.example.com/hooks/order-created"
+  retry_count: 3
+  headers:
+    X-Secret: webhook-secret-key
+- name: order_updated
+  table: orders
+  operations: [update]
+  webhook_url: "https://api.example.com/hooks/order-updated"
 ```
 
 ## Performance

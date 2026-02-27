@@ -22,9 +22,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔═══════════════════════════════════════════════════════╗");
     println!("║  qail-rs — Pipeline + Pool Benchmark                 ║");
     println!("╠═══════════════════════════════════════════════════════╣");
-    println!("║  Queries:    {:>10}                              ║", TOTAL_QUERIES);
-    println!("║  Batch size: {:>10}                              ║", BATCH_SIZE);
-    println!("║  Pool size:  {:>10}                              ║", POOL_SIZE);
+    println!(
+        "║  Queries:    {:>10}                              ║",
+        TOTAL_QUERIES
+    );
+    println!(
+        "║  Batch size: {:>10}                              ║",
+        BATCH_SIZE
+    );
+    println!(
+        "║  Pool size:  {:>10}                              ║",
+        POOL_SIZE
+    );
     println!("║  Host:       127.0.0.1:5432                          ║");
     println!("║  Database:   qail_e2e_test                           ║");
     println!("║  Mode:       Full I/O (TCP round-trip, async)        ║");
@@ -349,7 +358,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .order_by("pipe_orders.amount", SortOrder::Desc)
                     .limit(10)
-                    })
+            })
             .collect();
 
         let batches_per_conn = TOTAL_QUERIES / BATCH_SIZE / POOL_SIZE;

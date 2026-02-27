@@ -74,17 +74,29 @@ pub fn ilike(column: &str, pattern: &str) -> Condition {
 
 /// NOT LIKE pattern match.
 pub fn not_like(column: &str, pattern: &str) -> Condition {
-    make_condition(column, Operator::NotLike, Value::String(pattern.to_string()))
+    make_condition(
+        column,
+        Operator::NotLike,
+        Value::String(pattern.to_string()),
+    )
 }
 
 /// BETWEEN condition (column BETWEEN low AND high).
 pub fn between(column: &str, low: impl Into<Value>, high: impl Into<Value>) -> Condition {
-    make_condition(column, Operator::Between, Value::Array(vec![low.into(), high.into()]))
+    make_condition(
+        column,
+        Operator::Between,
+        Value::Array(vec![low.into(), high.into()]),
+    )
 }
 
 /// NOT BETWEEN condition.
 pub fn not_between(column: &str, low: impl Into<Value>, high: impl Into<Value>) -> Condition {
-    make_condition(column, Operator::NotBetween, Value::Array(vec![low.into(), high.into()]))
+    make_condition(
+        column,
+        Operator::NotBetween,
+        Value::Array(vec![low.into(), high.into()]),
+    )
 }
 
 /// Regex match (column ~ pattern).
@@ -121,7 +133,11 @@ pub fn cond(left: Expr, op: Operator, value: impl Into<Value>) -> Condition {
 
 /// SIMILAR TO pattern match.
 pub fn similar_to(column: &str, pattern: &str) -> Condition {
-    make_condition(column, Operator::SimilarTo, Value::String(pattern.to_string()))
+    make_condition(
+        column,
+        Operator::SimilarTo,
+        Value::String(pattern.to_string()),
+    )
 }
 /// JSONB/hstore key exists condition (column ? key).
 pub fn key_exists(column: &str, key: &str) -> Condition {

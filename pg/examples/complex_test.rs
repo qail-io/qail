@@ -3,9 +3,7 @@
 //!
 //! Run with: cargo run --example complex_test
 
-use qail_core::ast::{
-    AggregateFunc, Condition, Expr, FrameBound, Operator, Value, WindowFrame,
-};
+use qail_core::ast::{AggregateFunc, Condition, Expr, FrameBound, Operator, Value, WindowFrame};
 use qail_core::prelude::Qail;
 use qail_pg::driver::PgDriver;
 
@@ -108,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📖 Test 3: Multiple FILTER Aggregates");
     println!("--------------------------------------");
 
-    // SELECT 
+    // SELECT
     //   COUNT(*) FILTER (WHERE direction = 'inbound') AS inbound,
     //   COUNT(*) FILTER (WHERE direction = 'outbound') AS outbound
     // FROM messages
@@ -156,28 +154,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // SELECT id, phone_number, amount,
     //   SUM(amount) OVER (
-    //     PARTITION BY phone_number 
+    //     PARTITION BY phone_number
     //     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     //   ) AS running_total
     // FROM messages
     // Note: Using raw query to verify FRAME encoding works
-    let frame_result = driver.execute_raw(
-        "SELECT id, phone_number, amount,
+    let frame_result = driver
+        .execute_raw(
+            "SELECT id, phone_number, amount,
          SUM(amount) OVER (
            PARTITION BY phone_number 
            ORDER BY created_at
            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
          ) AS running_total
-         FROM messages ORDER BY phone_number, created_at"
-    ).await;
-    
+         FROM messages ORDER BY phone_number, created_at",
+        )
+        .await;
+
     match frame_result {
         Ok(_) => {
             println!("  ✓ Window FRAME (raw SQL verification): works");
         }
         Err(e) => println!("  ✗ Window FRAME: {}", e),
     }
-    
+
     // Now test the AST encoding produces correct SQL
     let mut window_frame_query = Qail::get("messages");
     window_frame_query.columns = vec![
@@ -186,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Expr::Window {
             name: "running_total".to_string(),
             func: "SUM".to_string(),
-            params: vec![Expr::Named("amount".to_string())],  // Native AST - column reference
+            params: vec![Expr::Named("amount".to_string())], // Native AST - column reference
             partition: vec!["phone_number".to_string()],
             order: vec![],
             frame: Some(WindowFrame::Rows {
@@ -195,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         },
     ];
-    
+
     // The current Window encoding needs the column in params differently
     // For now, verify the FRAME clause itself encodes correctly
     println!("  ✓ Window FRAME clause encoding verified");
@@ -214,7 +214,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📖 Test 5: DISTINCT ON Multiple Columns");
     println!("----------------------------------------");
 
-    let mut multi_distinct = Qail::get("messages").columns(["phone_number", "direction", "content"]);
+    let mut multi_distinct =
+        Qail::get("messages").columns(["phone_number", "direction", "content"]);
     multi_distinct.distinct_on = vec![
         Expr::Named("phone_number".to_string()),
         Expr::Named("direction".to_string()),

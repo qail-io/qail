@@ -5,10 +5,10 @@
 //!
 //! Run: cargo run --release -p qail-pg --example battle_rls
 
-use qail_pg::{PgPool, PoolConfig};
 use qail_core::ast::Qail;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use qail_pg::{PgPool, PoolConfig};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const CONCURRENCY: usize = 20;
@@ -27,7 +27,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pool = PgPool::connect(config).await?;
 
-    println!("1️⃣  Pool ready: 10 max connections for {} tasks (2x contention)", CONCURRENCY);
+    println!(
+        "1️⃣  Pool ready: 10 max connections for {} tasks (2x contention)",
+        CONCURRENCY
+    );
 
     let success = Arc::new(AtomicUsize::new(0));
     let errors = Arc::new(AtomicUsize::new(0));
@@ -37,8 +40,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Simulate 10 different tenants
     let tenants: Vec<String> = (0..10).map(|i| format!("tenant-{:04}", i)).collect();
 
-    println!("2️⃣  Spawning {} × {} = {} queries across 10 tenants...\n",
-        CONCURRENCY, ITERATIONS, CONCURRENCY * ITERATIONS);
+    println!(
+        "2️⃣  Spawning {} × {} = {} queries across 10 tenants...\n",
+        CONCURRENCY,
+        ITERATIONS,
+        CONCURRENCY * ITERATIONS
+    );
 
     for task_id in 0..CONCURRENCY {
         let pool = pool.clone();
@@ -62,10 +69,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 latencies.push(t.elapsed());
                                 success.fetch_add(1, Ordering::Relaxed);
                             }
-                            Err(_) => { errors.fetch_add(1, Ordering::Relaxed); }
+                            Err(_) => {
+                                errors.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
-                    Err(_) => { errors.fetch_add(1, Ordering::Relaxed); }
+                    Err(_) => {
+                        errors.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
 
@@ -110,7 +121,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let stats = pool.stats().await;
-    println!("   Pool: idle={} active={} max={}", stats.idle, stats.active, stats.max_size);
+    println!(
+        "   Pool: idle={} active={} max={}",
+        stats.idle, stats.active, stats.max_size
+    );
     println!();
 
     if p99 > Duration::from_millis(100) {

@@ -536,9 +536,8 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
             }
             GroupByMode::Cube => sql.push_str(&format!("CUBE({})", non_aggregated_cols.join(", "))),
             GroupByMode::GroupingSets(ref sets) => {
-                let sets_str: Vec<String> = sets.iter()
-                    .map(|s| format!("({})", s.join(", ")))
-                    .collect();
+                let sets_str: Vec<String> =
+                    sets.iter().map(|s| format!("({})", s.join(", "))).collect();
                 sql.push_str(&format!("GROUPING SETS ({})", sets_str.join(", ")));
             }
         }
@@ -695,34 +694,32 @@ fn render_expr_for_orderby(
                 .collect();
             format!("{}({})", name.to_uppercase(), args_sql.join(", "))
         }
-        Expr::SpecialFunction { name, args, .. } => {
-            match name.as_str() {
-                "SUBSTRING" => {
-                    let mut parts = Vec::new();
-                    for (kw, arg) in args {
-                        let arg_sql = render_expr_for_orderby(arg, generator, cmd);
-                        if let Some(keyword) = kw {
-                            parts.push(format!("{} {}", keyword, arg_sql));
-                        } else {
-                            parts.push(arg_sql);
-                        }
+        Expr::SpecialFunction { name, args, .. } => match name.as_str() {
+            "SUBSTRING" => {
+                let mut parts = Vec::new();
+                for (kw, arg) in args {
+                    let arg_sql = render_expr_for_orderby(arg, generator, cmd);
+                    if let Some(keyword) = kw {
+                        parts.push(format!("{} {}", keyword, arg_sql));
+                    } else {
+                        parts.push(arg_sql);
                     }
-                    format!("SUBSTRING({})", parts.join(" "))
                 }
-                "EXTRACT" => {
-                    let field = args
-                        .first()
-                        .map(|(_, e)| render_expr_for_orderby(e, generator, cmd))
-                        .unwrap_or_default();
-                    let source = args
-                        .get(1)
-                        .map(|(_, e)| render_expr_for_orderby(e, generator, cmd))
-                        .unwrap_or_default();
-                    format!("EXTRACT({} FROM {})", field, source)
-                }
-                _ => format!("{}(...)", name),
+                format!("SUBSTRING({})", parts.join(" "))
             }
-        }
+            "EXTRACT" => {
+                let field = args
+                    .first()
+                    .map(|(_, e)| render_expr_for_orderby(e, generator, cmd))
+                    .unwrap_or_default();
+                let source = args
+                    .get(1)
+                    .map(|(_, e)| render_expr_for_orderby(e, generator, cmd))
+                    .unwrap_or_default();
+                format!("EXTRACT({} FROM {})", field, source)
+            }
+            _ => format!("{}(...)", name),
+        },
         Expr::JsonAccess {
             column,
             path_segments,

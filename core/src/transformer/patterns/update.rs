@@ -2,8 +2,8 @@
 
 use sqlparser::ast::Statement;
 
-use crate::transformer::traits::*;
 use crate::transformer::clauses::*;
+use crate::transformer::traits::*;
 
 /// UPDATE query pattern
 pub struct UpdatePattern;
@@ -40,11 +40,7 @@ impl SqlPattern for UpdatePattern {
             })
             .collect();
 
-        let filter = update
-            .selection
-            .as_ref()
-            .map(extract_filter)
-            .transpose()?;
+        let filter = update.selection.as_ref().map(extract_filter).transpose()?;
 
         let returning = update.returning.as_ref().map(|items| {
             items
@@ -65,7 +61,11 @@ impl SqlPattern for UpdatePattern {
         })
     }
 
-    fn transform(&self, data: &PatternData, ctx: &TransformContext) -> Result<String, TransformError> {
+    fn transform(
+        &self,
+        data: &PatternData,
+        ctx: &TransformContext,
+    ) -> Result<String, TransformError> {
         let PatternData::Update {
             table,
             set_values,

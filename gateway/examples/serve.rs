@@ -16,17 +16,16 @@ async fn main() -> anyhow::Result<()> {
                 .add_directive("tower_http=info".parse()?),
         )
         .init();
-    
+
     // Get configuration from environment
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://localhost/qail".to_string());
-    
-    let bind_address = std::env::var("BIND_ADDRESS")
-        .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/qail".to_string());
+
+    let bind_address = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+
     let schema_path = std::env::var("SCHEMA_PATH").ok();
     let policy_path = std::env::var("POLICY_PATH").ok();
-    
+
     tracing::info!("Starting QAIL Gateway...");
     tracing::info!("  Database: {}", database_url);
     if let Some(ref path) = schema_path {
@@ -35,11 +34,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref path) = policy_path {
         tracing::info!("  Policies: {}", path);
     }
-    
+
     let mut builder = Gateway::builder()
         .database(&database_url)
         .bind(&bind_address);
-    
+
     if let Some(ref path) = schema_path {
         builder = builder.schema(path);
     }
@@ -50,18 +49,19 @@ async fn main() -> anyhow::Result<()> {
     // Allow overriding rate limits via env for stress testing
     if let Ok(rate) = std::env::var("RATE_LIMIT_RATE") {
         if let Ok(r) = rate.parse::<f64>() {
-            builder = builder.rate_limit(r, 
+            builder = builder.rate_limit(
+                r,
                 std::env::var("RATE_LIMIT_BURST")
                     .ok()
                     .and_then(|b| b.parse().ok())
-                    .unwrap_or((r * 2.0) as u32)
+                    .unwrap_or((r * 2.0) as u32),
             );
         }
     }
-    
+
     let gateway = builder.build_and_init().await?;
-    
+
     gateway.serve().await?;
-    
+
     Ok(())
 }

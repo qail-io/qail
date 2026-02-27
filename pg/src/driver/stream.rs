@@ -11,14 +11,16 @@ use tokio::net::TcpStream;
 use tokio::net::UnixStream;
 use tokio_rustls::client::TlsStream;
 
-/// A PostgreSQL connection stream (TCP, TLS, or Unix).
-#[allow(clippy::large_enum_variant)]
+/// A PostgreSQL connection stream (TCP, TLS, Unix, or GSSENC).
 pub enum PgStream {
     Tcp(TcpStream),
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
     /// Unix domain socket connection
     #[cfg(unix)]
     Unix(UnixStream),
+    /// GSSAPI session-encrypted connection
+    #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+    GssEnc(super::gss::GssEncStream),
 }
 
 impl AsyncRead for PgStream {
@@ -32,6 +34,8 @@ impl AsyncRead for PgStream {
             PgStream::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(unix)]
             PgStream::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+            PgStream::GssEnc(stream) => Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
@@ -47,6 +51,8 @@ impl AsyncWrite for PgStream {
             PgStream::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(unix)]
             PgStream::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+            PgStream::GssEnc(stream) => Pin::new(stream).poll_write(cx, buf),
         }
     }
 
@@ -56,6 +62,8 @@ impl AsyncWrite for PgStream {
             PgStream::Tls(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(unix)]
             PgStream::Unix(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+            PgStream::GssEnc(stream) => Pin::new(stream).poll_flush(cx),
         }
     }
 
@@ -65,6 +73,8 @@ impl AsyncWrite for PgStream {
             PgStream::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(unix)]
             PgStream::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+            PgStream::GssEnc(stream) => Pin::new(stream).poll_shutdown(cx),
         }
     }
 }

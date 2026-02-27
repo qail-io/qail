@@ -9,9 +9,37 @@ use super::dml::{encode_delete, encode_export, encode_insert, encode_select, enc
 
 use crate::protocol::EncodeError;
 
+#[inline(always)]
+fn result_format_wire_len(result_format: i16) -> usize {
+    if result_format == 0 { 2 } else { 4 }
+}
+
+#[inline(always)]
+fn write_result_formats(buf: &mut BytesMut, result_format: i16) {
+    if result_format == 0 {
+        buf.extend_from_slice(&0i16.to_be_bytes());
+    } else {
+        buf.extend_from_slice(&1i16.to_be_bytes());
+        buf.extend_from_slice(&result_format.to_be_bytes());
+    }
+}
+
 /// Build Extended Query protocol: Parse + Bind + Describe + Execute + Sync.
 /// Includes Describe to get RowDescription (column metadata).
-pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<BytesMut, EncodeError> {
+pub fn build_extended_query(
+    sql: &[u8],
+    params: &[Option<Vec<u8>>],
+) -> Result<BytesMut, EncodeError> {
+    build_extended_query_with_result_format(sql, params, 0)
+}
+
+/// Build Extended Query protocol with explicit result-column format.
+/// `result_format`: 0 = text, 1 = binary.
+pub fn build_extended_query_with_result_format(
+    sql: &[u8],
+    params: &[Option<Vec<u8>>],
+    result_format: i16,
+) -> Result<BytesMut, EncodeError> {
     if params.len() > i16::MAX as usize {
         return Err(EncodeError::TooManyParameters(params.len()));
     }
@@ -20,11 +48,12 @@ pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<By
         .iter()
         .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
         .sum();
+    let result_formats_size = result_format_wire_len(result_format);
     // Extra 6 bytes for Describe message ('D' + len + 'P' + null)
-    let total_size = 9 + sql.len() + 13 + params_size + 6 + 10 + 5;
+    let total_size = 9 + sql.len() + (11 + params_size + result_formats_size) + 6 + 10 + 5;
 
     let mut buf = BytesMut::with_capacity(total_size);
-    build_extended_query_into(&mut buf, sql, params)?;
+    build_extended_query_into_with_result_format(&mut buf, sql, params, result_format)?;
     Ok(buf)
 }
 
@@ -37,7 +66,22 @@ pub fn build_extended_query(sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<By
 /// * `buf` — Caller-owned buffer to write protocol messages into.
 /// * `sql` — SQL query bytes.
 /// * `params` — Bind parameter values; `None` entries encode as SQL NULL.
-pub fn build_extended_query_into(buf: &mut BytesMut, sql: &[u8], params: &[Option<Vec<u8>>]) -> Result<(), EncodeError> {
+pub fn build_extended_query_into(
+    buf: &mut BytesMut,
+    sql: &[u8],
+    params: &[Option<Vec<u8>>],
+) -> Result<(), EncodeError> {
+    build_extended_query_into_with_result_format(buf, sql, params, 0)
+}
+
+/// Build Extended Query protocol into caller buffer with explicit result format.
+/// `result_format`: 0 = text, 1 = binary.
+pub fn build_extended_query_into_with_result_format(
+    buf: &mut BytesMut,
+    sql: &[u8],
+    params: &[Option<Vec<u8>>],
+    result_format: i16,
+) -> Result<(), EncodeError> {
     if params.len() > i16::MAX as usize {
         return Err(EncodeError::TooManyParameters(params.len()));
     }
@@ -46,8 +90,9 @@ pub fn build_extended_query_into(buf: &mut BytesMut, sql: &[u8], params: &[Optio
         .iter()
         .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
         .sum();
+    let result_formats_size = result_format_wire_len(result_format);
     // Extra 6 bytes for Describe message ('D' + len + 'P' + null)
-    let total_size = 9 + sql.len() + 13 + params_size + 6 + 10 + 5;
+    let total_size = 9 + sql.len() + (11 + params_size + result_formats_size) + 6 + 10 + 5;
 
     buf.clear();
     buf.reserve(total_size);
@@ -63,7 +108,7 @@ pub fn build_extended_query_into(buf: &mut BytesMut, sql: &[u8], params: &[Optio
 
     // ===== BIND =====
     buf.extend_from_slice(b"B");
-    let bind_len = (1 + 1 + 2 + 2 + params_size + 2 + 4) as i32;
+    let bind_len = (1 + 1 + 2 + 2 + params_size + result_formats_size + 4) as i32;
     buf.extend_from_slice(&bind_len.to_be_bytes());
     buf.extend_from_slice(&[0]); // Unnamed portal
     buf.extend_from_slice(&[0]); // Unnamed statement
@@ -78,7 +123,7 @@ pub fn build_extended_query_into(buf: &mut BytesMut, sql: &[u8], params: &[Optio
             }
         }
     }
-    buf.extend_from_slice(&0i16.to_be_bytes()); // Result format
+    write_result_formats(buf, result_format);
 
     // ===== DESCRIBE (Portal) =====
     // Send Describe to get RowDescription with column names
@@ -105,7 +150,17 @@ pub fn build_extended_query_into(buf: &mut BytesMut, sql: &[u8], params: &[Optio
 /// DDL actions (Make/Drop/Index/Alter/etc.) fall through to `encode_cmd_sql_to`,
 /// which already supports 24 DDL actions.
 pub fn encode_batch(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
+    encode_batch_with_result_format(cmds, 0)
+}
+
+/// Encode multiple Qails as a pipeline batch with explicit result-column format.
+/// `result_format`: 0 = text, 1 = binary.
+pub fn encode_batch_with_result_format(
+    cmds: &[Qail],
+    result_format: i16,
+) -> Result<BytesMut, EncodeError> {
     let mut total_buf = BytesMut::with_capacity(cmds.len() * 256);
+    let result_formats_size = result_format_wire_len(result_format);
 
     for cmd in cmds {
         let mut sql_buf = BytesMut::with_capacity(256);
@@ -135,7 +190,7 @@ pub fn encode_batch(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
                 super::AstEncoder::encode_cmd_sql_to(cmd, &mut sql_buf, &mut params)?;
                 Ok(())
             }
-        }.ok();
+        }?;
 
         let sql_bytes = sql_buf.freeze();
         let params_size: usize = params
@@ -154,7 +209,7 @@ pub fn encode_batch(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
 
         // BIND
         total_buf.extend_from_slice(b"B");
-        let bind_len = (1 + 1 + 2 + 2 + params_size + 2 + 4) as i32;
+        let bind_len = (1 + 1 + 2 + 2 + params_size + result_formats_size + 4) as i32;
         total_buf.extend_from_slice(&bind_len.to_be_bytes());
         total_buf.extend_from_slice(&[0]);
         total_buf.extend_from_slice(&[0]);
@@ -169,7 +224,7 @@ pub fn encode_batch(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
                 }
             }
         }
-        total_buf.extend_from_slice(&0i16.to_be_bytes());
+        write_result_formats(&mut total_buf, result_format);
 
         // EXECUTE
         total_buf.extend_from_slice(b"E");
@@ -221,7 +276,7 @@ pub fn encode_batch_simple(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
                 super::AstEncoder::encode_cmd_sql_to(cmd, &mut total_buf, &mut params)?;
                 Ok(())
             }
-        }.ok();
+        }?;
         total_buf.extend_from_slice(b";");
     }
 

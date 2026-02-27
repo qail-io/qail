@@ -67,7 +67,11 @@ impl SqlPattern for InsertPattern {
         })
     }
 
-    fn transform(&self, data: &PatternData, ctx: &TransformContext) -> Result<String, TransformError> {
+    fn transform(
+        &self,
+        data: &PatternData,
+        ctx: &TransformContext,
+    ) -> Result<String, TransformError> {
         let PatternData::Insert {
             table,
             columns,
@@ -90,7 +94,10 @@ impl SqlPattern for InsertPattern {
         let mut chain = format!("let cmd = Qail::add(\"{}\")", table);
 
         for (i, col) in columns.iter().enumerate() {
-            let value = values.get(i).map(|v| format_value(v, &ctx.binds)).unwrap_or_else(|| "None".to_string());
+            let value = values
+                .get(i)
+                .map(|v| format_value(v, &ctx.binds))
+                .unwrap_or_else(|| "None".to_string());
             chain.push_str(&format!("\n    .set_value(\"{}\", {})", col, value));
         }
 

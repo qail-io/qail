@@ -1,8 +1,8 @@
 //! Migration DOWN (rollback) operations
 
-use anyhow::Result;
 use crate::colors::*;
-use qail_core::migrate::{diff_schemas, parse_qail};
+use anyhow::Result;
+use qail_core::migrate::{diff_schemas, parse_qail_file};
 use qail_core::prelude::{Action, Expr};
 use qail_pg::driver::PgDriver;
 
@@ -19,14 +19,9 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
         let current_path = parts[0];
         let target_path = parts[1];
 
-        let current_content = std::fs::read_to_string(current_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read current schema: {}", e))?;
-        let target_content = std::fs::read_to_string(target_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read target schema: {}", e))?;
-
-        let current_schema = parse_qail(&current_content)
+        let current_schema = parse_qail_file(current_path)
             .map_err(|e| anyhow::anyhow!("Failed to parse current schema: {}", e))?;
-        let target_schema = parse_qail(&target_content)
+        let target_schema = parse_qail_file(target_path)
             .map_err(|e| anyhow::anyhow!("Failed to parse target schema: {}", e))?;
 
         diff_schemas(&current_schema, &target_schema)
@@ -46,7 +41,10 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
         .iter()
         .filter(|cmd| cmd.action == Action::AlterType)
         .filter_map(|cmd| {
-            if let Some(Expr::Def { name, data_type, .. }) = cmd.columns.first() {
+            if let Some(Expr::Def {
+                name, data_type, ..
+            }) = cmd.columns.first()
+            {
                 let target = data_type.as_str();
                 if is_narrowing_type(target) {
                     Some(format!("{}.{} → {}", cmd.table, name, target))

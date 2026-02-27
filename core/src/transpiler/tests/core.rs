@@ -114,6 +114,41 @@ fn test_array_unnest() {
 }
 
 #[test]
+fn test_array_elem_contained_in_text() {
+    use crate::ast::*;
+    let cmd = Qail::get("ai_knowledge_base").array_elem_contained_in_text("keywords", "Komodo");
+    let sql = cmd.to_sql();
+    assert!(sql.contains("EXISTS (SELECT 1 FROM unnest(keywords) _el"));
+    assert!(sql.contains("LOWER('Komodo') LIKE '%' || LOWER(_el) || '%'"));
+}
+
+#[test]
+fn test_array_elem_contained_in_text_parameterized() {
+    use crate::ast::{Qail, Value};
+    use crate::transpiler::ToSqlParameterized;
+
+    let cmd = Qail::get("ai_knowledge_base")
+        .array_elem_contained_in_text("keywords", Value::NamedParam("query".to_string()));
+    let result = cmd.to_sql_parameterized();
+    assert!(
+        result
+            .sql
+            .contains("LOWER($1) LIKE '%' || LOWER(_el) || '%'"),
+        "sql={}",
+        result.sql
+    );
+    assert_eq!(result.named_params, vec!["query"]);
+}
+
+#[test]
+fn test_nextval_constructor() {
+    use crate::ast::Qail;
+    let cmd = Qail::nextval("invoice_number_seq");
+    assert!(cmd.is_raw_sql());
+    assert_eq!(cmd.table, "select nextval('invoice_number_seq') as seq");
+}
+
+#[test]
 fn test_left_join() {
     use crate::ast::*;
     let mut cmd = Qail::get("users");

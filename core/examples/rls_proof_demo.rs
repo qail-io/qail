@@ -8,8 +8,8 @@
 
 use qail_core::ast::Qail;
 use qail_core::rls::RlsContext;
-use qail_core::typed::{Table, DirectBuild, RequiresRls};
 use qail_core::transpiler::ToSql;
+use qail_core::typed::{DirectBuild, RequiresRls, Table};
 
 // ============================================================
 // Simulated codegen output from `qail types schema.qail`
@@ -17,24 +17,60 @@ use qail_core::transpiler::ToSql;
 
 // Table WITHOUT operator_id → gets DirectBuild
 pub struct Migrations;
-impl Table for Migrations { fn table_name() -> &'static str { "migrations" } }
-impl AsRef<str> for Migrations { fn as_ref(&self) -> &str { "migrations" } }
-impl From<Migrations> for String { fn from(_: Migrations) -> String { "migrations".into() } }
-impl DirectBuild for Migrations {}  // ← No RLS needed
+impl Table for Migrations {
+    fn table_name() -> &'static str {
+        "migrations"
+    }
+}
+impl AsRef<str> for Migrations {
+    fn as_ref(&self) -> &str {
+        "migrations"
+    }
+}
+impl From<Migrations> for String {
+    fn from(_: Migrations) -> String {
+        "migrations".into()
+    }
+}
+impl DirectBuild for Migrations {} // ← No RLS needed
 
-// Table WITH operator_id → gets RequiresRls  
+// Table WITH operator_id → gets RequiresRls
 pub struct Orders;
-impl Table for Orders { fn table_name() -> &'static str { "orders" } }
-impl AsRef<str> for Orders { fn as_ref(&self) -> &str { "orders" } }
-impl From<Orders> for String { fn from(_: Orders) -> String { "orders".into() } }
-impl RequiresRls for Orders {}  // ← RLS REQUIRED
+impl Table for Orders {
+    fn table_name() -> &'static str {
+        "orders"
+    }
+}
+impl AsRef<str> for Orders {
+    fn as_ref(&self) -> &str {
+        "orders"
+    }
+}
+impl From<Orders> for String {
+    fn from(_: Orders) -> String {
+        "orders".into()
+    }
+}
+impl RequiresRls for Orders {} // ← RLS REQUIRED
 
 // Table WITH operator_id → gets RequiresRls
 pub struct Bookings;
-impl Table for Bookings { fn table_name() -> &'static str { "bookings" } }
-impl AsRef<str> for Bookings { fn as_ref(&self) -> &str { "bookings" } }
-impl From<Bookings> for String { fn from(_: Bookings) -> String { "bookings".into() } }
-impl RequiresRls for Bookings {}  // ← RLS REQUIRED
+impl Table for Bookings {
+    fn table_name() -> &'static str {
+        "bookings"
+    }
+}
+impl AsRef<str> for Bookings {
+    fn as_ref(&self) -> &str {
+        "bookings"
+    }
+}
+impl From<Bookings> for String {
+    fn from(_: Bookings) -> String {
+        "bookings".into()
+    }
+}
+impl RequiresRls for Bookings {} // ← RLS REQUIRED
 
 fn main() {
     println!("=== RLS Proof Witness Demo ===\n");
@@ -46,7 +82,7 @@ fn main() {
         .column("id")
         .column("name")
         .column("applied_at")
-        .build();  // ✅ Compiles — Migrations has DirectBuild
+        .build(); // ✅ Compiles — Migrations has DirectBuild
 
     println!("✅ Non-RLS table (Migrations):");
     println!("   {}\n", query.to_sql());
@@ -60,8 +96,8 @@ fn main() {
         .column("id")
         .column("status")
         .column("total_fare")
-        .with_rls(&ctx)    // Returns RlsQuery<Orders> — proof provided
-        .build();          // ✅ Compiles — RlsQuery has .build()
+        .with_rls(&ctx) // Returns RlsQuery<Orders> — proof provided
+        .build(); // ✅ Compiles — RlsQuery has .build()
 
     println!("✅ RLS table with proof (Orders):");
     println!("   {}\n", query.to_sql());
@@ -77,7 +113,7 @@ fn main() {
         .filter("status", qail_core::ast::Operator::Eq, "confirmed")
         .order_by("created_at", qail_core::ast::SortOrder::Desc)
         .limit(10)
-        .build();  // ✅ Compiles
+        .build(); // ✅ Compiles
 
     println!("✅ RLS table with chaining (Bookings):");
     println!("   {}\n", query.to_sql());
@@ -90,7 +126,7 @@ fn main() {
     let query = Qail::typed(Orders)
         .column("id")
         .column("operator_id")
-        .with_rls(&admin_ctx)  // Proof satisfied, but no filter injected
+        .with_rls(&admin_ctx) // Proof satisfied, but no filter injected
         .build();
 
     println!("✅ Super admin (no tenant filter, but proof still required):");

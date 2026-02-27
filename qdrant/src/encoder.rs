@@ -155,35 +155,35 @@ pub fn encode_search_proto(
     vector_name: Option<&str>,
 ) {
     buf.clear();
-    
+
     // Field 1: collection_name (string)
     buf.put_u8(SEARCH_COLLECTION);
     encode_varint(buf, collection.len());
     buf.extend_from_slice(collection.as_bytes());
-    
+
     // Field 2: vector (packed repeated float)
     // This is the key optimization - direct memcpy of float bytes!
     buf.put_u8(SEARCH_VECTOR);
     let vector_bytes_len = vector.len() * 4; // f32 = 4 bytes
     encode_varint(buf, vector_bytes_len);
-    
+
     // ZERO-COPY: Write floats directly as bytes via bytemuck (safe, zero-cost)
     let float_bytes: &[u8] = bytemuck::cast_slice(vector);
     buf.extend_from_slice(float_bytes);
-    
+
     // Field 4: limit (varint)
     buf.put_u8(SEARCH_LIMIT);
     encode_varint_u64(buf, limit);
-    
+
     // Field 6: with_payload = true
     encode_with_payload_true(buf);
-    
+
     // Field 8: score_threshold (float, optional)
     if let Some(threshold) = score_threshold {
         buf.put_u8(SEARCH_SCORE_THRESHOLD);
         buf.put_f32_le(threshold);
     }
-    
+
     // Field 10: vector_name (string, optional)
     if let Some(name) = vector_name {
         buf.put_u8(SEARCH_VECTOR_NAME);
@@ -208,19 +208,19 @@ pub fn encode_search_with_filter_proto(
     is_or: bool,
 ) {
     buf.clear();
-    
+
     // Field 1: collection_name
     buf.put_u8(SEARCH_COLLECTION);
     encode_varint(buf, collection.len());
     buf.extend_from_slice(collection.as_bytes());
-    
+
     // Field 2: vector (packed floats, zero-copy)
     buf.put_u8(SEARCH_VECTOR);
     let vector_bytes_len = vector.len() * 4;
     encode_varint(buf, vector_bytes_len);
     let float_bytes: &[u8] = bytemuck::cast_slice(vector);
     buf.extend_from_slice(float_bytes);
-    
+
     // Field 3: filter (Filter message)
     if !conditions.is_empty() {
         let filter_buf = encode_filter_message(conditions, is_or);
@@ -228,20 +228,20 @@ pub fn encode_search_with_filter_proto(
         encode_varint(buf, filter_buf.len());
         buf.extend_from_slice(&filter_buf);
     }
-    
+
     // Field 4: limit
     buf.put_u8(SEARCH_LIMIT);
     encode_varint_u64(buf, limit);
-    
+
     // Field 6: with_payload = true
     encode_with_payload_true(buf);
-    
+
     // Field 8: score_threshold
     if let Some(threshold) = score_threshold {
         buf.put_u8(SEARCH_SCORE_THRESHOLD);
         buf.put_f32_le(threshold);
     }
-    
+
     // Field 10: vector_name
     if let Some(name) = vector_name {
         buf.put_u8(SEARCH_VECTOR_NAME);
@@ -252,7 +252,7 @@ pub fn encode_search_with_filter_proto(
 
 /// Encode with_payload = true as a sub-message.
 pub fn encode_with_payload_true(buf: &mut BytesMut) {
-    // WithPayloadSelector { enable = true } 
+    // WithPayloadSelector { enable = true }
     // Field 1: enable (bool) = 0x08, value = 1
     buf.put_u8(SEARCH_WITH_PAYLOAD);
     encode_varint(buf, 2); // submessage length
@@ -289,10 +289,10 @@ pub fn encode_with_payload_true(buf: &mut BytesMut) {
 /// ```
 fn encode_filter_message(conditions: &[qail_core::ast::Condition], is_or: bool) -> BytesMut {
     use qail_core::ast::{Expr, Operator, Value};
-    
+
     let mut filter_buf = BytesMut::with_capacity(conditions.len() * 32);
     let clause_tag = if is_or { FILTER_SHOULD } else { FILTER_MUST };
-    
+
     for cond in conditions {
         // Extract field name
         let key = match &cond.left {
@@ -300,44 +300,54 @@ fn encode_filter_message(conditions: &[qail_core::ast::Condition], is_or: bool) 
             Expr::Aliased { name, .. } => name.as_str(),
             _ => continue,
         };
-        
+
         // Build the Condition message
         let cond_buf = match (&cond.op, &cond.value) {
             // Match (equality) conditions
-            (Operator::Eq, Value::String(s)) => {
-                encode_field_condition_match_keyword(key, s)
-            }
-            (Operator::Eq, Value::Int(n)) => {
-                encode_field_condition_match_integer(key, *n)
-            }
-            (Operator::Eq, Value::Bool(b)) => {
-                encode_field_condition_match_bool(key, *b)
-            }
-            
+            (Operator::Eq, Value::String(s)) => encode_field_condition_match_keyword(key, s),
+            (Operator::Eq, Value::Int(n)) => encode_field_condition_match_integer(key, *n),
+            (Operator::Eq, Value::Bool(b)) => encode_field_condition_match_bool(key, *b),
+
             // Range conditions
-            (Operator::Gt, Value::Int(n)) => encode_field_condition_range(key, None, None, Some(*n as f64), None),
-            (Operator::Gt, Value::Float(f)) => encode_field_condition_range(key, None, None, Some(*f), None),
-            (Operator::Gte, Value::Int(n)) => encode_field_condition_range(key, None, None, None, Some(*n as f64)),
-            (Operator::Gte, Value::Float(f)) => encode_field_condition_range(key, None, None, None, Some(*f)),
-            (Operator::Lt, Value::Int(n)) => encode_field_condition_range(key, Some(*n as f64), None, None, None),
-            (Operator::Lt, Value::Float(f)) => encode_field_condition_range(key, Some(*f), None, None, None),
-            (Operator::Lte, Value::Int(n)) => encode_field_condition_range(key, None, Some(*n as f64), None, None),
-            (Operator::Lte, Value::Float(f)) => encode_field_condition_range(key, None, Some(*f), None, None),
-            
+            (Operator::Gt, Value::Int(n)) => {
+                encode_field_condition_range(key, None, None, Some(*n as f64), None)
+            }
+            (Operator::Gt, Value::Float(f)) => {
+                encode_field_condition_range(key, None, None, Some(*f), None)
+            }
+            (Operator::Gte, Value::Int(n)) => {
+                encode_field_condition_range(key, None, None, None, Some(*n as f64))
+            }
+            (Operator::Gte, Value::Float(f)) => {
+                encode_field_condition_range(key, None, None, None, Some(*f))
+            }
+            (Operator::Lt, Value::Int(n)) => {
+                encode_field_condition_range(key, Some(*n as f64), None, None, None)
+            }
+            (Operator::Lt, Value::Float(f)) => {
+                encode_field_condition_range(key, Some(*f), None, None, None)
+            }
+            (Operator::Lte, Value::Int(n)) => {
+                encode_field_condition_range(key, None, Some(*n as f64), None, None)
+            }
+            (Operator::Lte, Value::Float(f)) => {
+                encode_field_condition_range(key, None, Some(*f), None, None)
+            }
+
             // Text match (contains / like)
             (Operator::Contains | Operator::Like, Value::String(s)) => {
                 encode_field_condition_match_text(key, s)
             }
-            
+
             _ => continue,
         };
-        
+
         // Write as repeated Condition in the filter's must/should field
         filter_buf.put_u8(clause_tag);
         encode_varint(&mut filter_buf, cond_buf.len());
         filter_buf.extend_from_slice(&cond_buf);
     }
-    
+
     filter_buf
 }
 
@@ -357,7 +367,7 @@ fn encode_field_condition_match_keyword(key: &str, value: &str) -> BytesMut {
     match_buf.put_u8(0x0A); // field 1 (keyword), wire LEN
     encode_varint(&mut match_buf, value.len());
     match_buf.extend_from_slice(value.as_bytes());
-    
+
     // FieldCondition message
     let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
     // field 1: key (string)
@@ -368,13 +378,13 @@ fn encode_field_condition_match_keyword(key: &str, value: &str) -> BytesMut {
     fc_buf.put_u8(0x12);
     encode_varint(&mut fc_buf, match_buf.len());
     fc_buf.extend_from_slice(&match_buf);
-    
+
     // Condition: field 1 = FieldCondition
     let mut cond_buf = BytesMut::with_capacity(fc_buf.len() + 4);
     cond_buf.put_u8(0x0A); // field 1
     encode_varint(&mut cond_buf, fc_buf.len());
     cond_buf.extend_from_slice(&fc_buf);
-    
+
     cond_buf
 }
 
@@ -384,7 +394,7 @@ fn encode_field_condition_match_integer(key: &str, value: i64) -> BytesMut {
     let mut match_buf = BytesMut::with_capacity(16);
     match_buf.put_u8(0x10); // field 2 (integer), wire VARINT
     encode_varint_u64(&mut match_buf, value as u64);
-    
+
     let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
     fc_buf.put_u8(0x0A);
     encode_varint(&mut fc_buf, key.len());
@@ -392,12 +402,12 @@ fn encode_field_condition_match_integer(key: &str, value: i64) -> BytesMut {
     fc_buf.put_u8(0x12);
     encode_varint(&mut fc_buf, match_buf.len());
     fc_buf.extend_from_slice(&match_buf);
-    
+
     let mut cond_buf = BytesMut::with_capacity(fc_buf.len() + 4);
     cond_buf.put_u8(0x0A);
     encode_varint(&mut cond_buf, fc_buf.len());
     cond_buf.extend_from_slice(&fc_buf);
-    
+
     cond_buf
 }
 
@@ -407,7 +417,7 @@ fn encode_field_condition_match_bool(key: &str, value: bool) -> BytesMut {
     let mut match_buf = BytesMut::with_capacity(4);
     match_buf.put_u8(0x20); // field 4 (boolean), wire VARINT
     match_buf.put_u8(if value { 1 } else { 0 });
-    
+
     let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
     fc_buf.put_u8(0x0A);
     encode_varint(&mut fc_buf, key.len());
@@ -415,12 +425,12 @@ fn encode_field_condition_match_bool(key: &str, value: bool) -> BytesMut {
     fc_buf.put_u8(0x12);
     encode_varint(&mut fc_buf, match_buf.len());
     fc_buf.extend_from_slice(&match_buf);
-    
+
     let mut cond_buf = BytesMut::with_capacity(fc_buf.len() + 4);
     cond_buf.put_u8(0x0A);
     encode_varint(&mut cond_buf, fc_buf.len());
     cond_buf.extend_from_slice(&fc_buf);
-    
+
     cond_buf
 }
 
@@ -431,7 +441,7 @@ fn encode_field_condition_match_text(key: &str, value: &str) -> BytesMut {
     match_buf.put_u8(0x1A); // field 3 (text), wire LEN
     encode_varint(&mut match_buf, value.len());
     match_buf.extend_from_slice(value.as_bytes());
-    
+
     let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
     fc_buf.put_u8(0x0A);
     encode_varint(&mut fc_buf, key.len());
@@ -439,12 +449,12 @@ fn encode_field_condition_match_text(key: &str, value: &str) -> BytesMut {
     fc_buf.put_u8(0x12);
     encode_varint(&mut fc_buf, match_buf.len());
     fc_buf.extend_from_slice(&match_buf);
-    
+
     let mut cond_buf = BytesMut::with_capacity(fc_buf.len() + 4);
     cond_buf.put_u8(0x0A);
     encode_varint(&mut cond_buf, fc_buf.len());
     cond_buf.extend_from_slice(&fc_buf);
-    
+
     cond_buf
 }
 
@@ -480,7 +490,7 @@ fn encode_field_condition_range(
         range_buf.put_u8(0x21); // field 4, wire 1
         range_buf.put_f64_le(v);
     }
-    
+
     // FieldCondition: key + range
     let mut fc_buf = BytesMut::with_capacity(key.len() + range_buf.len() + 16);
     fc_buf.put_u8(0x0A); // field 1: key
@@ -489,13 +499,13 @@ fn encode_field_condition_range(
     fc_buf.put_u8(0x1A); // field 3: range (Range message)
     encode_varint(&mut fc_buf, range_buf.len());
     fc_buf.extend_from_slice(&range_buf);
-    
+
     // Condition: field 1 = FieldCondition
     let mut cond_buf = BytesMut::with_capacity(fc_buf.len() + 4);
     cond_buf.put_u8(0x0A);
     encode_varint(&mut cond_buf, fc_buf.len());
     cond_buf.extend_from_slice(&fc_buf);
-    
+
     cond_buf
 }
 
@@ -511,18 +521,18 @@ pub fn encode_upsert_proto(
     wait: bool,
 ) {
     buf.clear();
-    
+
     // Field 1: collection_name
     buf.put_u8(UPSERT_COLLECTION);
     encode_varint(buf, collection.len());
     buf.extend_from_slice(collection.as_bytes());
-    
+
     // Field 2: wait (bool)
     if wait {
         buf.put_u8(UPSERT_WAIT);
         buf.put_u8(0x01);
     }
-    
+
     // Field 3: points (repeated PointStruct)
     for point in points {
         encode_point_struct(buf, point);
@@ -534,20 +544,20 @@ fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) {
     // We need to encode into a temp buffer first to get length,
     // since PointStruct is length-delimited
     let mut point_buf = BytesMut::with_capacity(point.vector.len() * 4 + 64);
-    
+
     // Field 1: id (PointId oneof)
     encode_point_id_field(&mut point_buf, &point.id);
-    
+
     // Field 3: payload (map<string, Value>)
     if !point.payload.is_empty() {
         encode_payload_map(&mut point_buf, &point.payload);
     }
-    
+
     // Field 4: vectors (Vectors -> Vector)
     let vector_bytes_len = point.vector.len() * 4;
     let vector_inner_len = 1 + varint_len(vector_bytes_len as u64) + vector_bytes_len;
     let vectors_len = 1 + varint_len(vector_inner_len as u64) + vector_inner_len;
-    
+
     point_buf.put_u8(POINT_VECTORS);
     encode_varint(&mut point_buf, vectors_len);
     point_buf.put_u8(0x0A); // Vectors.vector (field 1)
@@ -556,7 +566,7 @@ fn encode_point_struct(buf: &mut BytesMut, point: &crate::Point) {
     encode_varint(&mut point_buf, vector_bytes_len);
     let float_bytes: &[u8] = bytemuck::cast_slice(&point.vector);
     point_buf.extend_from_slice(float_bytes);
-    
+
     // Write to main buffer with length prefix
     buf.put_u8(UPSERT_POINTS);
     encode_varint(buf, point_buf.len());
@@ -590,18 +600,18 @@ fn encode_point_id_field(buf: &mut BytesMut, id: &crate::PointId) {
 fn encode_payload_map(buf: &mut BytesMut, payload: &crate::point::Payload) {
     for (key, value) in payload {
         let mut entry_buf = BytesMut::with_capacity(key.len() + 32);
-        
+
         // Map entry field 1: key (string)
         entry_buf.put_u8(0x0A);
         encode_varint(&mut entry_buf, key.len());
         entry_buf.extend_from_slice(key.as_bytes());
-        
+
         // Map entry field 2: value (Value message)
         let value_buf = encode_payload_value(value);
         entry_buf.put_u8(0x12);
         encode_varint(&mut entry_buf, value_buf.len());
         entry_buf.extend_from_slice(&value_buf);
-        
+
         // Write map entry as field 3 of PointStruct (payload)
         buf.put_u8(POINT_PAYLOAD);
         encode_varint(buf, entry_buf.len());
@@ -627,7 +637,7 @@ fn encode_payload_map(buf: &mut BytesMut, payload: &crate::point::Payload) {
 fn encode_payload_value(value: &crate::point::PayloadValue) -> BytesMut {
     use crate::point::PayloadValue;
     let mut buf = BytesMut::with_capacity(32);
-    
+
     match value {
         PayloadValue::Null => {
             // field 1: null_value (enum, always 0)
@@ -694,7 +704,7 @@ fn encode_payload_value(value: &crate::point::PayloadValue) -> BytesMut {
             buf.extend_from_slice(&struct_buf);
         }
     }
-    
+
     buf
 }
 
@@ -719,12 +729,12 @@ pub fn encode_get_points_proto(
     with_vectors: bool,
 ) {
     buf.clear();
-    
+
     // Field 1: collection_name
     buf.put_u8(0x0A);
     encode_varint(buf, collection.len());
     buf.extend_from_slice(collection.as_bytes());
-    
+
     // Field 2: ids (repeated PointId)
     for id in ids {
         let mut id_buf = BytesMut::with_capacity(40);
@@ -743,13 +753,13 @@ pub fn encode_get_points_proto(
         encode_varint(buf, id_buf.len());
         buf.extend_from_slice(&id_buf);
     }
-    
+
     // Field 4: with_payload = true
     buf.put_u8(0x22); // (4 << 3) | 2 = 0x22
     encode_varint(buf, 2);
     buf.put_u8(0x08); // enable = true
     buf.put_u8(0x01);
-    
+
     // Field 5: with_vectors
     if with_vectors {
         buf.put_u8(0x2A); // (5 << 3) | 2 = 0x2A
@@ -783,12 +793,12 @@ pub fn encode_scroll_points_proto(
     with_vectors: bool,
 ) {
     buf.clear();
-    
+
     // Field 1: collection_name
     buf.put_u8(0x0A);
     encode_varint(buf, collection.len());
     buf.extend_from_slice(collection.as_bytes());
-    
+
     // Field 3: offset (optional PointId)
     if let Some(id) = offset {
         let mut id_buf = BytesMut::with_capacity(40);
@@ -807,17 +817,17 @@ pub fn encode_scroll_points_proto(
         encode_varint(buf, id_buf.len());
         buf.extend_from_slice(&id_buf);
     }
-    
+
     // Field 4: limit (uint32)
     buf.put_u8(0x20); // (4 << 3) | 0 = 0x20
     encode_varint(buf, limit as usize);
-    
+
     // Field 6: with_payload = true
     buf.put_u8(0x32); // (6 << 3) | 2 = 0x32
     encode_varint(buf, 2);
     buf.put_u8(0x08);
     buf.put_u8(0x01);
-    
+
     // Field 7: with_vectors
     if with_vectors {
         buf.put_u8(0x3A); // (7 << 3) | 2 = 0x3A
@@ -849,35 +859,35 @@ pub fn encode_set_payload_proto(
     wait: bool,
 ) {
     buf.clear();
-    
+
     // Field 1: collection_name
     buf.put_u8(0x0A);
     encode_varint(buf, collection.len());
     buf.extend_from_slice(collection.as_bytes());
-    
+
     // Field 2: wait
     if wait {
         buf.put_u8(0x10);
         buf.put_u8(0x01);
     }
-    
+
     // Field 3: payload (map<string, Value>)
     for (key, value) in payload {
         let mut entry_buf = BytesMut::with_capacity(key.len() + 32);
         entry_buf.put_u8(0x0A); // key (field 1)
         encode_varint(&mut entry_buf, key.len());
         entry_buf.extend_from_slice(key.as_bytes());
-        
+
         let val_buf = encode_payload_value(value);
         entry_buf.put_u8(0x12); // value (field 2)
         encode_varint(&mut entry_buf, val_buf.len());
         entry_buf.extend_from_slice(&val_buf);
-        
+
         buf.put_u8(0x1A); // field 3 (payload map entry)
         encode_varint(buf, entry_buf.len());
         buf.extend_from_slice(&entry_buf);
     }
-    
+
     // Field 5: points_selector -> PointsIdsList
     let selector_buf = encode_points_selector(point_ids);
     buf.put_u8(0x2A); // (5 << 3) | 2 = 0x2A
@@ -909,23 +919,23 @@ pub fn encode_create_field_index_proto(
     wait: bool,
 ) {
     buf.clear();
-    
+
     // Field 1: collection_name
     buf.put_u8(0x0A);
     encode_varint(buf, collection.len());
     buf.extend_from_slice(collection.as_bytes());
-    
+
     // Field 2: wait
     if wait {
         buf.put_u8(0x10);
         buf.put_u8(0x01);
     }
-    
+
     // Field 3: field_name
     buf.put_u8(0x1A);
     encode_varint(buf, field_name.len());
     buf.extend_from_slice(field_name.as_bytes());
-    
+
     // Field 4: field_type (optional enum)
     buf.put_u8(0x20); // (4 << 3) | 0 = 0x20
     encode_varint(buf, field_type as usize);
@@ -986,7 +996,7 @@ pub fn encode_create_collection_proto(
 
     // Field 2: vectors_config (VectorsConfig -> VectorParams)
     let mut params_buf = BytesMut::with_capacity(32);
-    
+
     // VectorParams.size (field 1, uint64)
     params_buf.put_u8(0x08);
     encode_varint_u64(&mut params_buf, vector_size);
@@ -1050,16 +1060,16 @@ pub fn encode_delete_points_mixed_proto(
     point_ids: &[crate::PointId],
 ) {
     buf.clear();
-    
+
     // Field 1: collection_name
     buf.put_u8(0x0A);
     encode_varint(buf, collection_name.len());
     buf.put_slice(collection_name.as_bytes());
-    
+
     // Field 2: wait = true
     buf.put_u8(0x10);
     buf.put_u8(1);
-    
+
     // Field 4: points (PointsSelector -> PointsIdsList)
     let selector_buf = encode_points_selector(point_ids);
     buf.put_u8(0x22);
@@ -1068,12 +1078,11 @@ pub fn encode_delete_points_mixed_proto(
 }
 
 /// Legacy: Encode a DeletePoints request (numeric IDs only).
-pub fn encode_delete_points_proto(
-    buf: &mut BytesMut,
-    collection_name: &str,
-    point_ids: &[u64],
-) {
-    let ids: Vec<crate::PointId> = point_ids.iter().map(|&id| crate::PointId::Num(id)).collect();
+pub fn encode_delete_points_proto(buf: &mut BytesMut, collection_name: &str, point_ids: &[u64]) {
+    let ids: Vec<crate::PointId> = point_ids
+        .iter()
+        .map(|&id| crate::PointId::Num(id))
+        .collect();
     encode_delete_points_mixed_proto(buf, collection_name, &ids);
 }
 
@@ -1098,13 +1107,13 @@ fn encode_points_selector(ids: &[crate::PointId]) -> BytesMut {
         encode_varint(&mut ids_list, id_buf.len());
         ids_list.extend_from_slice(&id_buf);
     }
-    
+
     // PointsSelector.points (field 1 = PointsIdsList)
     let mut selector = BytesMut::with_capacity(ids_list.len() + 8);
     selector.put_u8(0x0A); // field 1, LEN
     encode_varint(&mut selector, ids_list.len());
     selector.extend_from_slice(&ids_list);
-    
+
     selector
 }
 
@@ -1158,20 +1167,20 @@ mod tests {
     #[test]
     fn test_varint_encoding() {
         let mut buf = BytesMut::new();
-        
+
         // Single byte
         encode_varint(&mut buf, 1);
         assert_eq!(&buf[..], &[0x01]);
-        
+
         buf.clear();
         encode_varint(&mut buf, 127);
         assert_eq!(&buf[..], &[0x7F]);
-        
+
         // Two bytes
         buf.clear();
         encode_varint(&mut buf, 128);
         assert_eq!(&buf[..], &[0x80, 0x01]);
-        
+
         buf.clear();
         encode_varint(&mut buf, 300);
         assert_eq!(&buf[..], &[0xAC, 0x02]);
@@ -1181,12 +1190,12 @@ mod tests {
     fn test_encode_search_basic() {
         let mut buf = BytesMut::with_capacity(1024);
         let vector = vec![0.1f32, 0.2, 0.3, 0.4];
-        
+
         encode_search_proto(&mut buf, "test_collection", &vector, 10, None, None);
-        
+
         // Verify starts with collection name field
         assert_eq!(buf[0], SEARCH_COLLECTION);
-        
+
         // Verify buffer is not empty
         assert!(buf.len() > 20);
     }
@@ -1195,9 +1204,9 @@ mod tests {
     fn test_zero_copy_vector() {
         let mut buf = BytesMut::with_capacity(1024);
         let vector = vec![1.0f32, 2.0, 3.0, 4.0];
-        
+
         encode_search_proto(&mut buf, "test", &vector, 5, None, None);
-        
+
         // Find where vector data starts (after collection name + vector tag + length)
         // collection: 0x0A, len(4), "test" = 6 bytes
         // vector tag: 0x12 = 1 byte
@@ -1205,7 +1214,7 @@ mod tests {
         // Total header: 8 bytes
         let vector_start = 8;
         let vector_bytes = &buf[vector_start..vector_start + 16];
-        
+
         // Verify floats are correctly encoded as little-endian bytes
         let float_bytes: [u8; 4] = 1.0f32.to_le_bytes();
         assert_eq!(&vector_bytes[0..4], &float_bytes);
@@ -1224,7 +1233,7 @@ mod tests {
     #[test]
     fn test_encode_search_with_filter() {
         use qail_core::ast::{Condition, Expr, Operator, Value};
-        
+
         let mut buf = BytesMut::with_capacity(1024);
         let vector = vec![0.1f32, 0.2, 0.3];
         let conditions = vec![
@@ -1241,11 +1250,18 @@ mod tests {
                 is_array_unnest: false,
             },
         ];
-        
+
         encode_search_with_filter_proto(
-            &mut buf, "products", &vector, 10, None, None, &conditions, false,
+            &mut buf,
+            "products",
+            &vector,
+            10,
+            None,
+            None,
+            &conditions,
+            false,
         );
-        
+
         // Should contain collection, vector, filter, limit, with_payload
         assert!(buf.len() > 50);
         // First byte should be collection tag
@@ -1261,9 +1277,9 @@ mod tests {
             crate::PointId::Num(42),
             crate::PointId::Uuid("abc-123".to_string()),
         ];
-        
+
         encode_get_points_proto(&mut buf, "my_collection", &ids, true);
-        
+
         assert_eq!(buf[0], 0x0A); // collection name tag
         assert!(buf.len() > 20);
     }
@@ -1271,9 +1287,9 @@ mod tests {
     #[test]
     fn test_encode_scroll_points() {
         let mut buf = BytesMut::with_capacity(1024);
-        
+
         encode_scroll_points_proto(&mut buf, "my_collection", 100, None, false);
-        
+
         assert_eq!(buf[0], 0x0A);
         assert!(buf.len() > 10);
     }
@@ -1285,9 +1301,9 @@ mod tests {
             crate::PointId::Uuid("test-uuid-1".to_string()),
             crate::PointId::Num(99),
         ];
-        
+
         encode_delete_points_mixed_proto(&mut buf, "products", &ids);
-        
+
         assert_eq!(buf[0], 0x0A); // collection name
         assert!(buf.len() > 20);
     }
@@ -1297,10 +1313,13 @@ mod tests {
         let mut buf = BytesMut::with_capacity(1024);
         let ids = vec![crate::PointId::Num(1)];
         let mut payload = crate::point::Payload::new();
-        payload.insert("name".to_string(), crate::point::PayloadValue::String("updated".to_string()));
-        
+        payload.insert(
+            "name".to_string(),
+            crate::point::PayloadValue::String("updated".to_string()),
+        );
+
         encode_set_payload_proto(&mut buf, "my_col", &ids, &payload, true);
-        
+
         assert_eq!(buf[0], 0x0A);
         assert!(buf.len() > 15);
     }
@@ -1308,9 +1327,9 @@ mod tests {
     #[test]
     fn test_encode_create_field_index() {
         let mut buf = BytesMut::with_capacity(256);
-        
+
         encode_create_field_index_proto(&mut buf, "products", "category", FieldType::Keyword, true);
-        
+
         assert_eq!(buf[0], 0x0A);
         assert!(buf.len() > 10);
     }
@@ -1319,7 +1338,7 @@ mod tests {
     fn test_encode_payload_value_string() {
         let val = crate::point::PayloadValue::String("hello".to_string());
         let buf = encode_payload_value(&val);
-        
+
         // field 4 tag (0x22) + length + "hello"
         assert_eq!(buf[0], 0x22);
         assert!(buf.len() > 5);
@@ -1329,7 +1348,7 @@ mod tests {
     fn test_encode_payload_value_integer() {
         let val = crate::point::PayloadValue::Integer(42);
         let buf = encode_payload_value(&val);
-        
+
         // field 3 tag (0x18) + varint(42)
         assert_eq!(buf[0], 0x18);
     }

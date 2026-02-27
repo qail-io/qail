@@ -6,7 +6,7 @@
 use super::PgRow;
 
 /// Trait for types that can be constructed from a database row.
-/// 
+///
 /// Implement this trait on your structs to enable typed fetching:
 /// ```ignore
 /// impl QailRow for User {
@@ -22,7 +22,7 @@ use super::PgRow;
 ///         }
 ///     }
 /// }
-/// 
+///
 /// // Then use:
 /// let users: Vec<User> = driver.fetch_typed::<User>(&query).await?;
 /// ```
@@ -30,7 +30,7 @@ pub trait QailRow: Sized {
     /// Return the column names this struct expects.
     /// These are used to automatically build SELECT queries.
     fn columns() -> &'static [&'static str];
-    
+
     /// Construct an instance from a PgRow.
     /// Column indices match the order returned by `columns()`.
     fn from_row(row: &PgRow) -> Self;
@@ -198,7 +198,8 @@ impl PgRow {
     /// Parse UUID column as uuid::Uuid type.
     #[cfg(feature = "uuid")]
     pub fn uuid_typed(&self, idx: usize) -> Option<uuid::Uuid> {
-        self.get_uuid(idx).and_then(|s| uuid::Uuid::parse_str(&s).ok())
+        self.get_uuid(idx)
+            .and_then(|s| uuid::Uuid::parse_str(&s).ok())
     }
 
     // ==================== GET BY COLUMN NAME ====================

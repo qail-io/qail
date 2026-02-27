@@ -4,10 +4,10 @@
 //! Applies security hardening: CORS, security headers, body limits.
 
 use axum::{
+    Router,
     http::HeaderValue,
     middleware as axum_mw,
-    routing::{get, post, MethodRouter},
-    Router,
+    routing::{MethodRouter, get, post},
 };
 use std::sync::Arc;
 use tower_http::{
@@ -18,15 +18,14 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::handler::{execute_batch, execute_query, execute_query_binary, execute_query_fast, health_check, health_check_internal, swagger_ui};
+use crate::GatewayState;
+use crate::handler::{
+    execute_batch, execute_query, execute_query_binary, execute_query_fast, health_check,
+    health_check_internal, swagger_ui,
+};
 use crate::middleware::rate_limit_middleware;
 use crate::rest::auto_rest_routes;
 use crate::ws::ws_handler;
-use crate::GatewayState;
-
-/// Maximum request body size (2 MiB).
-/// Prevents large-payload DoS attacks.
-const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
 
 /// Create the main router for the gateway.
 ///
@@ -42,9 +41,12 @@ pub fn create_router(
     // ── Tracing ──────────────────────────────────────────────────────
     let trace = TraceLayer::new_for_http();
 
+    // ── Body size limit from config ─────────────────────────────────
+    let max_body = state.config.max_request_body_bytes;
+
     // ── Auto-REST routes from schema ─────────────────────────────────
     let rest = auto_rest_routes(Arc::clone(&state));
-    
+
     let mut router = Router::new()
         // Health check (public — minimal info)
         .route("/health", get(health_check))
@@ -74,9 +76,17 @@ pub fn create_router(
 
     router
         // Middleware layers (order: bottom = outermost = first to run)
-        .layer(axum_mw::from_fn_with_state(Arc::clone(&state), rate_limit_middleware))
-        .layer(CompressionLayer::new()
-            .compress_when(tower_http::compression::predicate::SizeAbove::new(1024))
+        .layer(axum_mw::from_fn_with_state(
+            Arc::clone(&state),
+            rate_limit_middleware,
+        ))
+        .layer(axum_mw::from_fn_with_state(
+            Arc::clone(&state),
+            crate::idempotency::idempotency_middleware,
+        ))
+        .layer(
+            CompressionLayer::new()
+                .compress_when(tower_http::compression::predicate::SizeAbove::new(1024)),
         )
         // ── Security Response Headers ────────────────────────────────
         .layer(SetResponseHeaderLayer::overriding(
@@ -95,8 +105,13 @@ pub fn create_router(
             axum::http::header::HeaderName::from_static("permissions-policy"),
             HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
         ))
+        // ── Stable API Version Header (Phase 4) ─────────────────────
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::header::HeaderName::from_static("x-api-version"),
+            HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+        ))
         // ── Request Body Size Limit ──────────────────────────────────
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
+        .layer(RequestBodyLimitLayer::new(max_body))
         .layer(trace)
         .layer(cors)
         .with_state(state)
@@ -105,24 +120,23 @@ pub fn create_router(
 /// Build CORS layer from gateway config.
 ///
 /// - If `cors_allowed_origins` is non-empty → strict origin allowlist
-/// - Otherwise → `allow_origin(Any)` (backward compatible)
+/// - Otherwise → `allow_origin(Any)` (backward compatible unless `cors_strict=true`)
 fn build_cors_layer(config: &crate::config::GatewayConfig) -> CorsLayer {
     if !config.cors_enabled {
         // CORS disabled — return restrictive layer (no Access-Control headers)
         return CorsLayer::new();
     }
 
-    let base = CorsLayer::new()
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let base = CorsLayer::new().allow_methods(Any).allow_headers(Any);
 
     if config.cors_allowed_origins.is_empty() {
         if config.cors_strict {
-            // SECURITY (M1): In strict mode, refuse to start without explicit origins.
-            panic!(
+            tracing::error!(
                 "SECURITY: cors_strict=true but cors_allowed_origins is empty. \
+                 Applying fail-closed CORS (no allowed origins). \
                  Configure explicit CORS origins or set cors_strict=false."
             );
+            return base;
         }
         // Backward compatible: warn and allow all
         tracing::warn!(
@@ -138,8 +152,18 @@ fn build_cors_layer(config: &crate::config::GatewayConfig) -> CorsLayer {
             .collect();
 
         if origins.is_empty() {
-            tracing::warn!("cors_allowed_origins configured but none parsed — falling back to Any");
-            base.allow_origin(Any)
+            if config.cors_strict {
+                tracing::error!(
+                    "SECURITY: cors_strict=true and none of cors_allowed_origins parsed. \
+                     Applying fail-closed CORS (no allowed origins)."
+                );
+                base
+            } else {
+                tracing::warn!(
+                    "cors_allowed_origins configured but none parsed — falling back to Any"
+                );
+                base.allow_origin(Any)
+            }
         } else {
             tracing::info!(
                 "CORS restricted to {} origin(s): {:?}",

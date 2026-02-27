@@ -8,11 +8,12 @@
 //!
 //! This is Phase 3 of the data-safe migration system.
 
-use anyhow::{Result, anyhow};
 use crate::colors::*;
+use anyhow::{Result, anyhow};
 use qail_core::ast::Qail;
 use qail_pg::driver::PgDriver;
 
+use crate::sql_gen::cmd_to_sql;
 use crate::util::parse_pg_url;
 
 /// Shadow database state
@@ -66,15 +67,32 @@ async fn ensure_shadow_state_table(driver: &mut PgDriver) -> Result<()> {
             shadow_name TEXT NOT NULL,
             primary_url TEXT NOT NULL,
             diff_cmds TEXT NOT NULL,
+            diff_checksum TEXT,
             old_schema_path TEXT,
             new_schema_path TEXT,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             status TEXT DEFAULT 'pending'
         )
     "#;
-    driver.execute_raw(sql).await
+    driver
+        .execute_raw(sql)
+        .await
         .map_err(|e| anyhow!("Failed to create shadow state table: {}", e))?;
+    driver
+        .execute_raw("ALTER TABLE _qail_shadow_state ADD COLUMN IF NOT EXISTS diff_checksum TEXT")
+        .await
+        .map_err(|e| anyhow!("Failed to migrate shadow state table: {}", e))?;
     Ok(())
+}
+
+/// Stable checksum for a migration command sequence.
+pub fn diff_cmds_checksum(diff_cmds: &[Qail]) -> String {
+    let mut sql_up_all = String::new();
+    for cmd in diff_cmds {
+        sql_up_all.push_str(&cmd_to_sql(cmd));
+        sql_up_all.push_str(";\n");
+    }
+    crate::time::md5_hex(&sql_up_all)
 }
 
 /// Save shadow state to _qail_shadow_state table (for promote/abort recovery)
@@ -86,54 +104,77 @@ async fn save_shadow_state(
     new_path: &str,
 ) -> Result<()> {
     ensure_shadow_state_table(driver).await?;
-    
+
     // Serialize diff commands as JSON
     let diff_json = serde_json::to_string(diff_cmds)
         .map_err(|e| anyhow!("Failed to serialize diff commands: {}", e))?;
-    
+    let diff_checksum = diff_cmds_checksum(diff_cmds);
+
     // Clear any existing pending state
-    let clear_sql = "DELETE FROM _qail_shadow_state WHERE status = 'pending'";
+    let clear_sql = "DELETE FROM _qail_shadow_state WHERE status IN ('pending', 'verified')";
     let _ = driver.execute_raw(clear_sql).await;
-    
+
     // Insert new state
     let insert_sql = format!(
-        "INSERT INTO _qail_shadow_state (shadow_name, primary_url, diff_cmds, old_schema_path, new_schema_path, status) VALUES ('{}', '{}', '{}', '{}', '{}', 'pending')",
+        "INSERT INTO _qail_shadow_state (shadow_name, primary_url, diff_cmds, diff_checksum, old_schema_path, new_schema_path, status) VALUES ('{}', '{}', '{}', '{}', '{}', '{}', 'verified')",
         state.shadow_name,
         state.primary_url.replace('\'', "''"),
         diff_json.replace('\'', "''"),
+        diff_checksum,
         old_path.replace('\'', "''"),
         new_path.replace('\'', "''")
     );
-    driver.execute_raw(&insert_sql).await
+    driver
+        .execute_raw(&insert_sql)
+        .await
         .map_err(|e| anyhow!("Failed to save shadow state: {}", e))?;
-    
+
     Ok(())
 }
 
 /// Load pending shadow state from _qail_shadow_state table
 async fn load_shadow_state(driver: &mut PgDriver) -> Result<Option<(ShadowState, Vec<Qail>)>> {
     ensure_shadow_state_table(driver).await?;
-    
-    let cmd = Qail::get("_qail_shadow_state")
+
+    let cmd_verified = Qail::get("_qail_shadow_state")
         .columns(["shadow_name", "primary_url", "diff_cmds"])
-        .filter("status", qail_core::ast::Operator::Eq, "pending")
+        .filter("status", qail_core::ast::Operator::Eq, "verified")
         .limit(1);
-    
-    let rows = driver.fetch_all(&cmd).await
+
+    let mut rows = driver
+        .fetch_all(&cmd_verified)
+        .await
         .map_err(|e| anyhow!("Failed to load shadow state: {}", e))?;
-    
+
+    if rows.is_empty() {
+        let cmd_pending = Qail::get("_qail_shadow_state")
+            .columns(["shadow_name", "primary_url", "diff_cmds"])
+            .filter("status", qail_core::ast::Operator::Eq, "pending")
+            .limit(1);
+        rows = driver
+            .fetch_all(&cmd_pending)
+            .await
+            .map_err(|e| anyhow!("Failed to load shadow state: {}", e))?;
+    }
+
     if rows.is_empty() {
         return Ok(None);
     }
-    
+
     let row = &rows[0];
-    let shadow_name = row.get_string(0).ok_or_else(|| anyhow!("Missing shadow_name"))?;
-    let primary_url = row.get_string(1).ok_or_else(|| anyhow!("Missing primary_url"))?;
-    let diff_json = row.get_string(2).ok_or_else(|| anyhow!("Missing diff_cmds"))?;
-    
+    let shadow_name = row
+        .get_string(0)
+        .ok_or_else(|| anyhow!("Missing shadow_name"))?;
+    let primary_url = row
+        .get_string(1)
+        .ok_or_else(|| anyhow!("Missing primary_url"))?;
+    let diff_json = row
+        .get_string(2)
+        .ok_or_else(|| anyhow!("Missing diff_cmds"))?;
+
     let diff_cmds: Vec<Qail> = serde_json::from_str(&diff_json)
         .map_err(|e| anyhow!("Failed to deserialize diff commands: {}", e))?;
-    
+
     let state = ShadowState {
         primary_url: primary_url.clone(),
         shadow_name,
@@ -142,26 +183,63 @@ async fn load_shadow_state(driver: &mut PgDriver) -> Result<Option<(ShadowState,
         tables_synced: 0,
         rows_synced: 0,
     };
-    
+
     Ok(Some((state, diff_cmds)))
 }
 
 /// Update shadow state status (pending → promoted/aborted)
 async fn update_shadow_state_status(driver: &mut PgDriver, new_status: &str) -> Result<()> {
     let sql = format!(
-        "UPDATE _qail_shadow_state SET status = '{}' WHERE status = 'pending'",
+        "UPDATE _qail_shadow_state SET status = '{}' WHERE status IN ('pending', 'verified')",
         new_status
     );
-    driver.execute_raw(&sql).await
+    driver
+        .execute_raw(&sql)
+        .await
         .map_err(|e| anyhow!("Failed to update shadow state: {}", e))?;
     Ok(())
+}
+
+/// Verify an active shadow receipt by SQL checksum.
+pub async fn has_verified_shadow_receipt_with_driver(
+    driver: &mut PgDriver,
+    expected_checksum: &str,
+) -> Result<bool> {
+    ensure_shadow_state_table(driver).await?;
+
+    for status in ["verified", "pending"] {
+        let cmd = Qail::get("_qail_shadow_state")
+            .columns(["diff_cmds", "diff_checksum"])
+            .filter("status", qail_core::ast::Operator::Eq, status)
+            .limit(5);
+        let rows = driver
+            .fetch_all(&cmd)
+            .await
+            .map_err(|e| anyhow!("Failed to query shadow receipts: {}", e))?;
+
+        for row in rows {
+            if let Some(stored_checksum) = row.get_string(1)
+                && stored_checksum == expected_checksum
+            {
+                return Ok(true);
+            }
+            if let Some(diff_json) = row.get_string(0)
+                && let Ok(diff_cmds) = serde_json::from_str::<Vec<Qail>>(&diff_json)
+                && diff_cmds_checksum(&diff_cmds) == expected_checksum
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema Introspection (Zero-Dep)
 // ─────────────────────────────────────────────────────────────────────────────
 
-use qail_core::migrate::{Schema, Table, Column, Index, ColumnType, IndexMethod};
+use qail_core::migrate::{Column, ColumnType, Index, IndexMethod, Schema, Table};
 
 /// Introspect the live database schema from information_schema.
 /// Returns a Schema struct that represents the current state of the database.
@@ -169,36 +247,46 @@ use qail_core::migrate::{Schema, Table, Column, Index, ColumnType, IndexMethod};
 pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     use qail_core::ast::Operator;
 
-    
     let mut schema = Schema::default();
-    
+
     // 1. Query all tables
     let tables_cmd = Qail::get("information_schema.tables")
         .column("table_name")
         .filter("table_schema", Operator::Eq, "public")
         .filter("table_type", Operator::Eq, "BASE TABLE");
-    
-    let table_rows = driver.fetch_all(&tables_cmd).await
+
+    let table_rows = driver
+        .fetch_all(&tables_cmd)
+        .await
         .map_err(|e| anyhow!("Failed to query tables: {}", e))?;
-    
-    let table_names: Vec<String> = table_rows.iter()
+
+    let table_names: Vec<String> = table_rows
+        .iter()
         .filter_map(|r| r.get_string(0))
         .filter(|t| !t.starts_with("_qail")) // Skip internal tables
         .collect();
-    
+
     // 2. For each table, query columns
     for table_name in &table_names {
         let cols_cmd = Qail::get("information_schema.columns")
-            .columns(["column_name", "data_type", "is_nullable", "column_default", "is_identity"])
+            .columns([
+                "column_name",
+                "data_type",
+                "is_nullable",
+                "column_default",
+                "is_identity",
+            ])
             .filter("table_schema", Operator::Eq, "public")
             .filter("table_name", Operator::Eq, table_name.clone());
-        
-        let col_rows = driver.fetch_all(&cols_cmd).await
+
+        let col_rows = driver
+            .fetch_all(&cols_cmd)
+            .await
             .map_err(|e| anyhow!("Failed to query columns for {}: {}", table_name, e))?;
-        
+
         let mut columns = Vec::new();
         let mut pk_already_set = false; // Track if we've already set a PK for this table
-        
+
         for row in &col_rows {
             let col_name = row.get_string(0).unwrap_or_default();
             let data_type_str = row.get_string(1).unwrap_or_default();
@@ -206,10 +294,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             let raw_default = row.get_string(3);
             // is_identity: 'YES' for identity columns (GENERATED ALWAYS/BY DEFAULT AS IDENTITY)
             let is_identity = row.get_string(4).map(|s| s == "YES").unwrap_or(false);
-            
+
             // Parse data type to ColumnType
             let data_type = parse_column_type(&data_type_str);
-            
+
             // Strip defaults for SERIAL and IDENTITY columns (auto-generated)
             // nextval() for SERIAL, identity columns handle their own generation
             let default = match &raw_default {
@@ -217,7 +305,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 _ if is_identity => None, // Identity columns don't need explicit default
                 other => other.clone(),
             };
-            
+
             // Check if this column is a primary key
             // Only mark first PK column (for composite PKs, we can only represent 1)
             let is_pk = if !pk_already_set {
@@ -229,10 +317,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             } else {
                 false
             };
-            
+
             // Check if this column has a unique constraint
             let is_unique = is_unique_column(driver, table_name, &col_name).await?;
-            
+
             columns.push(Column {
                 name: col_name,
                 data_type,
@@ -245,43 +333,48 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 generated: None,
             });
         }
-        
-        schema.tables.insert(table_name.clone(), Table {
-            name: table_name.clone(),
-            columns,
-            multi_column_fks: vec![],
-            enable_rls: false,
-            force_rls: false,
-        });
+
+        schema.tables.insert(
+            table_name.clone(),
+            Table {
+                name: table_name.clone(),
+                columns,
+                multi_column_fks: vec![],
+                enable_rls: false,
+                force_rls: false,
+            },
+        );
     }
-    
+
     // 3. Query indexes
     let idx_cmd = Qail::get("pg_indexes")
         .columns(["indexname", "tablename", "indexdef"])
         .filter("schemaname", Operator::Eq, "public");
-    
-    let idx_rows = driver.fetch_all(&idx_cmd).await
+
+    let idx_rows = driver
+        .fetch_all(&idx_cmd)
+        .await
         .map_err(|e| anyhow!("Failed to query indexes: {}", e))?;
-    
+
     for row in &idx_rows {
         let idx_name = row.get_string(0).unwrap_or_default();
         let table_name = row.get_string(1).unwrap_or_default();
         let indexdef = row.get_string(2).unwrap_or_default();
-        
+
         // Skip primary key indexes (they're implicit)
         if idx_name.ends_with("_pkey") {
             continue;
         }
-        
+
         // Skip constraint-based unique indexes (ending with _key) - already covered by column unique flag
         if idx_name.ends_with("_key") {
             continue;
         }
-        
+
         // Parse columns from indexdef (simple extraction)
         let cols = extract_index_columns(&indexdef);
         let is_unique = indexdef.contains("UNIQUE");
-        
+
         schema.indexes.push(Index {
             name: idx_name,
             table: table_name,
@@ -294,18 +387,31 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             expressions: vec![],
         });
     }
-    
+
     // 4. Query FK constraints (batch approach, not N+1)
     let fk_ref_cmd = Qail::get("information_schema.referential_constraints")
-        .columns(["constraint_name", "unique_constraint_name", "delete_rule", "update_rule"])
+        .columns([
+            "constraint_name",
+            "unique_constraint_name",
+            "delete_rule",
+            "update_rule",
+        ])
         .filter("constraint_schema", Operator::Eq, "public");
-    
-    let fk_ref_rows = driver.fetch_all(&fk_ref_cmd).await
+
+    let fk_ref_rows = driver
+        .fetch_all(&fk_ref_cmd)
+        .await
         .map_err(|e| anyhow!("Failed to query FK refs: {}", e))?;
 
     // Build FK constraint → (referenced constraint, on_delete, on_update)
-    let mut fk_map: std::collections::HashMap<String, (String, qail_core::migrate::schema::FkAction, qail_core::migrate::schema::FkAction)> =
-        std::collections::HashMap::new();
+    let mut fk_map: std::collections::HashMap<
+        String,
+        (
+            String,
+            qail_core::migrate::schema::FkAction,
+            qail_core::migrate::schema::FkAction,
+        ),
+    > = std::collections::HashMap::new();
     for row in fk_ref_rows {
         let fk_name = row.text(0);
         let ref_name = row.text(1);
@@ -330,8 +436,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     let kcu_cmd = Qail::get("information_schema.key_column_usage")
         .columns(["table_name", "column_name", "constraint_name"])
         .filter("table_schema", Operator::Eq, "public");
-    
-    let kcu_rows = driver.fetch_all(&kcu_cmd).await
+
+    let kcu_rows = driver
+        .fetch_all(&kcu_cmd)
+        .await
         .map_err(|e| anyhow!("Failed to query key columns: {}", e))?;
 
     let mut constraint_cols: std::collections::HashMap<String, Vec<(String, String)>> =
@@ -340,7 +448,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         let table = row.text(0);
         let column = row.text(1);
         let constraint = row.text(2);
-        constraint_cols.entry(constraint).or_default().push((table, column));
+        constraint_cols
+            .entry(constraint)
+            .or_default()
+            .push((table, column));
     }
 
     // Resolve FKs
@@ -348,22 +459,24 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         let fk_cols = constraint_cols.get(fk_name.as_str());
         let ref_cols = constraint_cols.get(ref_name.as_str());
         if let (Some(fk_list), Some(ref_list)) = (fk_cols, ref_cols)
-            && fk_list.len() == 1 && ref_list.len() == 1 {
-                let (fk_table, fk_col) = &fk_list[0];
-                let (ref_table, ref_col) = &ref_list[0];
-                if let Some(table) = schema.tables.get_mut(fk_table.as_str()) {
-                    for col in table.columns.iter_mut() {
-                        if col.name == *fk_col {
-                            col.foreign_key = Some(qail_core::migrate::ForeignKey {
-                                table: ref_table.clone(),
-                                column: ref_col.clone(),
-                                on_delete: on_delete.clone(),
-                                on_update: on_update.clone(),
-                                deferrable: qail_core::migrate::schema::Deferrable::NotDeferrable,
-                            });
-                        }
+            && fk_list.len() == 1
+            && ref_list.len() == 1
+        {
+            let (fk_table, fk_col) = &fk_list[0];
+            let (ref_table, ref_col) = &ref_list[0];
+            if let Some(table) = schema.tables.get_mut(fk_table.as_str()) {
+                for col in table.columns.iter_mut() {
+                    if col.name == *fk_col {
+                        col.foreign_key = Some(qail_core::migrate::ForeignKey {
+                            table: ref_table.clone(),
+                            column: ref_col.clone(),
+                            on_delete: on_delete.clone(),
+                            on_update: on_update.clone(),
+                            deferrable: qail_core::migrate::schema::Deferrable::NotDeferrable,
+                        });
                     }
                 }
+            }
         }
     }
 
@@ -371,21 +484,24 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     let rls_cmd = Qail::get("pg_catalog.pg_class")
         .columns(["relname", "relrowsecurity", "relforcerowsecurity"])
         .filter("relkind", Operator::Eq, "r");
-    
-    let rls_rows = driver.fetch_all(&rls_cmd).await
+
+    let rls_rows = driver
+        .fetch_all(&rls_cmd)
+        .await
         .map_err(|e| anyhow!("Failed to query RLS: {}", e))?;
-    
+
     for row in rls_rows {
         let tbl_name = row.text(0);
         let enable = row.text(1) == "t";
         let force = row.text(2) == "t";
         if (enable || force)
-            && let Some(table) = schema.tables.get_mut(&tbl_name) {
-                table.enable_rls = enable;
-                table.force_rls = force;
+            && let Some(table) = schema.tables.get_mut(&tbl_name)
+        {
+            table.enable_rls = enable;
+            table.force_rls = force;
         }
     }
-    
+
     Ok(schema)
 }
 
@@ -421,17 +537,19 @@ async fn is_primary_key(driver: &mut PgDriver, table: &str, column: &str) -> Res
         .filter("table_name", Operator::Eq, table)
         .filter("constraint_type", Operator::Eq, "PRIMARY KEY")
         .limit(1);
-    
+
     // Get constraint name first
-    let tc_rows = driver.fetch_all(&cmd).await
+    let tc_rows = driver
+        .fetch_all(&cmd)
+        .await
         .map_err(|e| anyhow!("Failed to query PK constraints: {}", e))?;
-    
+
     if tc_rows.is_empty() {
         return Ok(false);
     }
-    
+
     let constraint_name = tc_rows[0].get_string(0).unwrap_or_default();
-    
+
     // Now check if this column is part of that constraint
     let kcu_cmd = Qail::get("information_schema.key_column_usage")
         .column("column_name")
@@ -439,10 +557,12 @@ async fn is_primary_key(driver: &mut PgDriver, table: &str, column: &str) -> Res
         .filter("table_name", Operator::Eq, table)
         .filter("constraint_name", Operator::Eq, constraint_name.clone())
         .filter("column_name", Operator::Eq, column);
-    
-    let kcu_rows = driver.fetch_all(&kcu_cmd).await
+
+    let kcu_rows = driver
+        .fetch_all(&kcu_cmd)
+        .await
         .map_err(|e| anyhow!("Failed to query PK columns: {}", e))?;
-    
+
     Ok(!kcu_rows.is_empty())
 }
 
@@ -455,33 +575,37 @@ async fn is_unique_column(driver: &mut PgDriver, table: &str, column: &str) -> R
         .filter("table_schema", Operator::Eq, "public")
         .filter("table_name", Operator::Eq, table)
         .filter("constraint_type", Operator::Eq, "UNIQUE");
-    
-    let tc_rows = driver.fetch_all(&cmd).await
+
+    let tc_rows = driver
+        .fetch_all(&cmd)
+        .await
         .map_err(|e| anyhow!("Failed to query UNIQUE constraints: {}", e))?;
-    
+
     if tc_rows.is_empty() {
         return Ok(false);
     }
-    
+
     // Check if column is in any of the unique constraints
     for row in &tc_rows {
         let constraint_name = row.get_string(0).unwrap_or_default();
-        
+
         let kcu_cmd = Qail::get("information_schema.key_column_usage")
             .column("column_name")
             .filter("table_schema", Operator::Eq, "public")
             .filter("table_name", Operator::Eq, table)
             .filter("constraint_name", Operator::Eq, constraint_name)
             .filter("column_name", Operator::Eq, column);
-        
-        let kcu_rows = driver.fetch_all(&kcu_cmd).await
+
+        let kcu_rows = driver
+            .fetch_all(&kcu_cmd)
+            .await
             .map_err(|e| anyhow!("Failed to query UNIQUE columns: {}", e))?;
-        
+
         if !kcu_rows.is_empty() {
             return Ok(true);
         }
     }
-    
+
     Ok(false)
 }
 
@@ -491,10 +615,8 @@ fn extract_index_columns(indexdef: &str) -> Vec<String> {
     if let Some(start) = indexdef.find('(')
         && let Some(end) = indexdef.rfind(')')
     {
-        let cols_str = &indexdef[start+1..end];
-        return cols_str.split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
+        let cols_str = &indexdef[start + 1..end];
+        return cols_str.split(',').map(|s| s.trim().to_string()).collect();
     }
     vec![]
 }
@@ -637,86 +759,83 @@ pub async fn sync_data_to_shadow(state: &mut ShadowState) -> Result<()> {
             .column("column_name")
             .filter("table_schema", Operator::Eq, "public")
             .filter("table_name", Operator::Eq, table.clone());
-        
+
         let col_rows = shadow_driver
             .fetch_all(&cols_cmd)
             .await
             .map_err(|e| anyhow!("Failed to get columns for {}: {}", table, e))?;
-        
-        let shadow_columns: Vec<String> = col_rows
-            .iter()
-            .filter_map(|r| r.get_string(0))
-            .collect();
-        
+
+        let shadow_columns: Vec<String> = col_rows.iter().filter_map(|r| r.get_string(0)).collect();
+
         if shadow_columns.is_empty() {
             continue;
         }
-        
+
         // Check if table exists in primary (it might not after migration diff)
         let check_cmd = Qail::get("information_schema.tables")
             .column("table_name")
             .filter("table_schema", Operator::Eq, "public")
             .filter("table_name", Operator::Eq, table.clone());
-        
+
         let exists = primary_driver
             .fetch_all(&check_cmd)
             .await
             .map_err(|e| anyhow!("Failed to check table {} in primary: {}", table, e))?;
-        
+
         if exists.is_empty() {
             // Table doesn't exist in primary (new table in migration)
             println!("    {} {} (new table, no data)", "⊕".blue(), table.cyan());
             continue;
         }
-        
+
         // Get columns that exist in PRIMARY to find intersection
         let primary_cols_cmd = Qail::get("information_schema.columns")
             .column("column_name")
             .filter("table_schema", Operator::Eq, "public")
             .filter("table_name", Operator::Eq, table.clone());
-        
+
         let primary_col_rows = primary_driver
             .fetch_all(&primary_cols_cmd)
             .await
             .map_err(|e| anyhow!("Failed to get primary columns for {}: {}", table, e))?;
-        
+
         let primary_columns: std::collections::HashSet<String> = primary_col_rows
             .iter()
             .filter_map(|r| r.get_string(0))
             .collect();
-        
+
         // Use intersection: columns that exist in BOTH shadow AND primary
         let columns: Vec<String> = shadow_columns
             .into_iter()
             .filter(|c| primary_columns.contains(c))
             .collect();
-        
+
         if columns.is_empty() {
             println!("    {} {} (no common columns)", "⊕".blue(), table.cyan());
             continue;
         }
-        
+
         // Use COPY streaming: export from primary, import to shadow
         let copy_data = primary_driver
             .copy_export_table(table, &columns)
             .await
             .map_err(|e| anyhow!("Failed to export {}: {}", table, e))?;
-        
+
         let row_count = copy_data.iter().filter(|&&b| b == b'\n').count();
-        
+
         if !copy_data.is_empty() {
             // Build Qail::Add for copy_bulk_bytes
             let mut add_cmd = Qail::add(table);
             for col in &columns {
                 add_cmd = add_cmd.column(col);
             }
-            
+
             shadow_driver
                 .copy_bulk_bytes(&add_cmd, &copy_data)
                 .await
                 .map_err(|e| anyhow!("Failed to import {}: {}", table, e))?;
         }
-        
+
         state.rows_synced += row_count as u64;
         println!("    {} {} ({} rows)", "✓".green(), table.cyan(), row_count);
     }
@@ -760,7 +879,7 @@ pub fn display_shadow_status(state: &ShadowState) {
 }
 
 /// Promote shadow to primary (Option B: apply migration to primary, then cleanup)
-/// 
+///
 /// Workflow:
 /// 1. Load diff commands from _qail_shadow_state table
 /// 2. Apply migration to PRIMARY database (not swap!)
@@ -789,27 +908,37 @@ pub async fn promote_shadow(primary_url: &str) -> Result<()> {
     // Load stored state (diff commands)
     println!("  [1/4] Loading migration state...");
     let state_option = load_shadow_state(&mut primary_driver).await?;
-    
-    let (_, diff_cmds) = state_option
-        .ok_or_else(|| anyhow!("No pending shadow migration found. Run 'qail migrate shadow' first."))?;
-    
-    println!("    {} {} migration commands loaded", "✓".green(), diff_cmds.len());
+
+    let (_, diff_cmds) = state_option.ok_or_else(|| {
+        anyhow!("No pending shadow migration found. Run 'qail migrate shadow' first.")
+    })?;
+
+    println!(
+        "    {} {} migration commands loaded",
+        "✓".green(),
+        diff_cmds.len()
+    );
 
     // Data Drift Warning (documented edge case)
     println!();
-    println!("    {} Changes on primary since shadow sync may cause failure.", "⚠️".yellow());
+    println!(
+        "    {} Changes on primary since shadow sync may cause failure.",
+        "⚠️".yellow()
+    );
     println!();
-    
+
     // Apply migration to PRIMARY (wrapped in transaction for atomic rollback)
     println!("  [2/4] Applying migration to primary...");
-    
+
     // BEGIN transaction for atomic rollback
-    primary_driver.execute_raw("BEGIN").await
+    primary_driver
+        .execute_raw("BEGIN")
+        .await
         .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
-    
+
     let mut migration_failed = false;
     let mut failure_reason = String::new();
-    
+
     for (i, cmd) in diff_cmds.iter().enumerate() {
         if let Err(e) = primary_driver.execute(cmd).await {
             migration_failed = true;
@@ -817,20 +946,31 @@ pub async fn promote_shadow(primary_url: &str) -> Result<()> {
             break;
         }
     }
-    
+
     if migration_failed {
         // ROLLBACK on failure - atomic rollback!
-        primary_driver.execute_raw("ROLLBACK").await
+        primary_driver
+            .execute_raw("ROLLBACK")
+            .await
             .map_err(|e| anyhow!("Failed to rollback: {}", e))?;
-        println!("    {} Transaction rolled back - primary unchanged!", "↩️".yellow());
+        println!(
+            "    {} Transaction rolled back - primary unchanged!",
+            "↩️".yellow()
+        );
         return Err(anyhow!(failure_reason));
     }
-    
+
     // COMMIT on success
-    primary_driver.execute_raw("COMMIT").await
+    primary_driver
+        .execute_raw("COMMIT")
+        .await
         .map_err(|e| anyhow!("Failed to commit: {}", e))?;
-    
-    println!("    {} {} migrations applied to primary", "✓".green(), diff_cmds.len());
+
+    println!(
+        "    {} {} migrations applied to primary",
+        "✓".green(),
+        diff_cmds.len()
+    );
 
     // Drop shadow database
     println!("  [3/4] Dropping shadow database...");
@@ -903,7 +1043,7 @@ pub async fn abort_shadow(primary_url: &str) -> Result<()> {
             .await
             .map_err(|e| anyhow!("Failed to connect to primary: {}", e))?
     };
-    
+
     let _ = update_shadow_state_status(&mut primary_driver, "aborted").await;
 
     println!(
@@ -915,8 +1055,8 @@ pub async fn abort_shadow(primary_url: &str) -> Result<()> {
 }
 
 pub async fn run_shadow_migration(
-    primary_url: &str, 
-    old_cmds: &[Qail], 
+    primary_url: &str,
+    old_cmds: &[Qail],
     diff_cmds: &[Qail],
     old_path: &str,
     new_path: &str,
@@ -925,7 +1065,7 @@ pub async fn run_shadow_migration(
 
     // Step 1: Apply OLD schema to create base tables
     apply_base_schema_to_shadow(&mut state, old_cmds).await?;
-    
+
     // Step 2: Apply DIFF commands (migrations)
     apply_migrations_to_shadow(&mut state, diff_cmds).await?;
 
@@ -942,7 +1082,7 @@ pub async fn run_shadow_migration(
             .await
             .map_err(|e| anyhow!("Failed to connect to primary: {}", e))?
     };
-    
+
     save_shadow_state(&mut primary_driver, &state, diff_cmds, old_path, new_path).await?;
 
     state.is_ready = true;
@@ -955,16 +1095,24 @@ pub async fn run_shadow_migration(
 /// Run shadow migration with LIVE introspection (catches drift!)
 /// Instead of using old.qail file, introspects the live primary database.
 /// This fixes the "False Confidence" trap where file schema differs from production.
-pub async fn run_shadow_migration_live(primary_url: &str, new_schema_path: &str) -> Result<ShadowState> {
-    use qail_core::migrate::{diff_schemas, parse_qail, schema_to_commands};
-    
+pub async fn run_shadow_migration_live(
+    primary_url: &str,
+    new_schema_path: &str,
+) -> Result<ShadowState> {
+    use qail_core::migrate::{diff_schemas, parse_qail_file, schema_to_commands};
+
     println!();
-    println!("{}", "🔄 Shadow Migration Mode (Live Introspection)".cyan().bold());
+    println!(
+        "{}",
+        "🔄 Shadow Migration Mode (Live Introspection)"
+            .cyan()
+            .bold()
+    );
     println!("{}", "━".repeat(40).dimmed());
-    
+
     // Step 0: Connect to primary and introspect live schema
     println!("  {} Introspecting live database schema...", "[0/4]".cyan());
-    
+
     let (host, port, user, password, database) = parse_pg_url(primary_url)?;
     let mut primary_driver = if let Some(pwd) = password.clone() {
         PgDriver::connect_with_password(&host, port, &user, &database, &pwd)
@@ -975,38 +1123,41 @@ pub async fn run_shadow_migration_live(primary_url: &str, new_schema_path: &str)
             .await
             .map_err(|e| anyhow!("Failed to connect to primary: {}", e))?
     };
-    
+
     let live_schema = introspect_schema(&mut primary_driver).await?;
-    println!("    {} {} tables, {} indexes introspected", 
-        "✓".green(), 
+    println!(
+        "    {} {} tables, {} indexes introspected",
+        "✓".green(),
         live_schema.tables.len(),
         live_schema.indexes.len()
     );
-    
+
     // Step 1: Parse new schema from file
-    let new_content = std::fs::read_to_string(new_schema_path)
-        .map_err(|e| anyhow!("Failed to read new schema: {}", e))?;
-    let new_schema = parse_qail(&new_content)
+    let new_schema = parse_qail_file(new_schema_path)
         .map_err(|e| anyhow!("Failed to parse new schema: {}", e))?;
-    
+
     // Step 2: Generate diff between LIVE schema and new schema
     let old_cmds = schema_to_commands(&live_schema);
     let diff_cmds = diff_schemas(&live_schema, &new_schema);
-    
-    println!("    {} {} migration commands generated", "✓".green(), diff_cmds.len());
-    
+
+    println!(
+        "    {} {} migration commands generated",
+        "✓".green(),
+        diff_cmds.len()
+    );
+
     // Step 3: Create shadow database
     let mut state = create_shadow_database(primary_url).await?;
-    
+
     // Step 4: Apply LIVE schema to shadow (not file schema!)
     apply_base_schema_to_shadow(&mut state, &old_cmds).await?;
-    
+
     // Step 5: Apply DIFF commands (migrations)
     apply_migrations_to_shadow(&mut state, &diff_cmds).await?;
-    
+
     // Step 6: Sync data
     sync_data_to_shadow(&mut state).await?;
-    
+
     // Step 7: Save state
     let mut primary_reconnect = if let Some(pwd) = password {
         PgDriver::connect_with_password(&host, port, &user, &database, &pwd)
@@ -1017,12 +1168,19 @@ pub async fn run_shadow_migration_live(primary_url: &str, new_schema_path: &str)
             .await
             .map_err(|e| anyhow!("Failed to connect to primary: {}", e))?
     };
-    
-    save_shadow_state(&mut primary_reconnect, &state, &diff_cmds, "[introspected]", new_schema_path).await?;
-    
+
+    save_shadow_state(
+        &mut primary_reconnect,
+        &state,
+        &diff_cmds,
+        "[introspected]",
+        new_schema_path,
+    )
+    .await?;
+
     state.is_ready = true;
     display_shadow_status(&state);
-    
+
     Ok(state)
 }
 

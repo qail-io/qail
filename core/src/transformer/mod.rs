@@ -11,12 +11,12 @@
 //! SQL String → Parser → Statement AST → Pattern Matcher → PatternData → Target Emitter → QAIL Code
 //! ```
 
-mod traits;
-mod patterns;
 mod clauses;
+mod patterns;
 mod registry;
+mod traits;
 
-pub use traits::*;
-pub use patterns::*;
 pub use clauses::*;
+pub use patterns::*;
 pub use registry::*;
+pub use traits::*;

@@ -35,7 +35,12 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
 
     let mut first = true;
     for col in &cmd.columns {
-        if let Expr::Def { name, data_type, constraints } = col {
+        if let Expr::Def {
+            name,
+            data_type,
+            constraints,
+        } = col
+        {
             if !first {
                 buf.extend_from_slice(b", ");
             }
@@ -168,7 +173,12 @@ pub fn encode_drop_index(cmd: &Qail, buf: &mut BytesMut) {
 /// Encode ALTER TABLE ADD COLUMN statement.
 pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
     for col in &cmd.columns {
-        if let Expr::Def { name, data_type, constraints } = col {
+        if let Expr::Def {
+            name,
+            data_type,
+            constraints,
+        } = col
+        {
             buf.extend_from_slice(b"ALTER TABLE ");
             buf.extend_from_slice(cmd.table.as_bytes());
             buf.extend_from_slice(b" ADD COLUMN ");
@@ -213,7 +223,10 @@ pub fn encode_alter_drop_column(cmd: &Qail, buf: &mut BytesMut) {
 /// Encode ALTER TABLE ALTER COLUMN TYPE statement.
 pub fn encode_alter_column_type(cmd: &Qail, buf: &mut BytesMut) {
     for col in &cmd.columns {
-        if let Expr::Def { name, data_type, .. } = col {
+        if let Expr::Def {
+            name, data_type, ..
+        } = col
+        {
             buf.extend_from_slice(b"ALTER TABLE ");
             buf.extend_from_slice(cmd.table.as_bytes());
             buf.extend_from_slice(b" ALTER COLUMN ");
@@ -244,15 +257,20 @@ pub fn encode_rename_column(cmd: &Qail, buf: &mut BytesMut) {
 
 /// Encode CREATE VIEW statement.
 /// CREATE VIEW name AS SELECT ...
-pub fn encode_create_view(cmd: &Qail, buf: &mut BytesMut, params: &mut Vec<Option<Vec<u8>>>) {
+pub fn encode_create_view(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), super::super::EncodeError> {
     buf.extend_from_slice(b"CREATE VIEW ");
     buf.extend_from_slice(cmd.table.as_bytes());
     buf.extend_from_slice(b" AS ");
-    
+
     // The source_query contains the SELECT statement for the view
     if let Some(ref source) = cmd.source_query {
-        super::dml::encode_select(source, buf, params).ok();
+        super::dml::encode_select(source, buf, params)?;
     }
+    Ok(())
 }
 
 /// Encode DROP VIEW statement.
@@ -346,7 +364,11 @@ pub fn encode_call(cmd: &Qail, buf: &mut BytesMut) {
 /// Encode DO $$ body $$ LANGUAGE lang.
 pub fn encode_do(cmd: &Qail, buf: &mut BytesMut) {
     let body = cmd.payload.as_deref().unwrap_or("");
-    let lang = if cmd.table.is_empty() { "plpgsql" } else { &cmd.table };
+    let lang = if cmd.table.is_empty() {
+        "plpgsql"
+    } else {
+        &cmd.table
+    };
     buf.extend_from_slice(b"DO $$ ");
     buf.extend_from_slice(body.as_bytes());
     buf.extend_from_slice(b" $$ LANGUAGE ");

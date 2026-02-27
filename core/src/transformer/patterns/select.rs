@@ -2,8 +2,8 @@
 
 use sqlparser::ast::{SetExpr, Statement};
 
-use crate::transformer::traits::*;
 use crate::transformer::clauses::*;
+use crate::transformer::traits::*;
 
 /// SELECT query pattern
 pub struct SelectPattern;
@@ -36,32 +36,24 @@ impl SqlPattern for SelectPattern {
 
         let table = extract_table(select)?;
         let columns = extract_columns(select);
-        let filter = select
-            .selection
-            .as_ref()
-            .map(extract_filter)
-            .transpose()?;
+        let filter = select.selection.as_ref().map(extract_filter).transpose()?;
 
-        let order_by = query.order_by.as_ref().and_then(|ob| {
-            match &ob.kind {
-                sqlparser::ast::OrderByKind::All(_) => None,
-                sqlparser::ast::OrderByKind::Expressions(exprs) => {
-                    if exprs.is_empty() {
-                        None
-                    } else {
-                        Some(extract_order_by(exprs))
-                    }
+        let order_by = query.order_by.as_ref().and_then(|ob| match &ob.kind {
+            sqlparser::ast::OrderByKind::All(_) => None,
+            sqlparser::ast::OrderByKind::Expressions(exprs) => {
+                if exprs.is_empty() {
+                    None
+                } else {
+                    Some(extract_order_by(exprs))
                 }
             }
         });
 
-        let limit = query.limit_clause.as_ref().and_then(|lc| {
-            match lc {
-                sqlparser::ast::LimitClause::LimitOffset { limit, .. } => {
-                    limit.as_ref().and_then(extract_limit)
-                }
-                _ => None,
+        let limit = query.limit_clause.as_ref().and_then(|lc| match lc {
+            sqlparser::ast::LimitClause::LimitOffset { limit, .. } => {
+                limit.as_ref().and_then(extract_limit)
             }
+            _ => None,
         });
 
         Ok(PatternData::Select {
@@ -74,7 +66,11 @@ impl SqlPattern for SelectPattern {
         })
     }
 
-    fn transform(&self, data: &PatternData, ctx: &TransformContext) -> Result<String, TransformError> {
+    fn transform(
+        &self,
+        data: &PatternData,
+        ctx: &TransformContext,
+    ) -> Result<String, TransformError> {
         let PatternData::Select {
             table,
             columns,
@@ -105,12 +101,11 @@ impl SqlPattern for SelectPattern {
 
         if let Some(f) = filter {
             let value = match &f.value {
-                ValueData::Param(n) => {
-                    ctx.binds
-                        .get(*n - 1)
-                        .cloned()
-                        .unwrap_or_else(|| format!("param_{}", n))
-                }
+                ValueData::Param(n) => ctx
+                    .binds
+                    .get(*n - 1)
+                    .cloned()
+                    .unwrap_or_else(|| format!("param_{}", n)),
                 ValueData::Literal(s) => s.clone(),
                 ValueData::Column(c) => format!("\"{}\"", c),
                 ValueData::Null => "None".to_string(),
@@ -123,7 +118,11 @@ impl SqlPattern for SelectPattern {
 
         if let Some(orders) = order_by {
             for o in orders {
-                let dir = if o.descending { "Order::Desc" } else { "Order::Asc" };
+                let dir = if o.descending {
+                    "Order::Desc"
+                } else {
+                    "Order::Asc"
+                };
                 chain.push_str(&format!("\n    .order_by(\"{}\", {})", o.column, dir));
             }
         }

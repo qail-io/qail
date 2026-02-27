@@ -222,6 +222,208 @@ impl ToPg for Uuid {
     }
 }
 
+// ==================== Network Types ====================
+
+fn from_utf8_string(bytes: &[u8]) -> Result<String, TypeError> {
+    std::str::from_utf8(bytes)
+        .map(|s| s.to_string())
+        .map_err(|e| TypeError::InvalidData(e.to_string()))
+}
+
+fn decode_inet_like_binary(bytes: &[u8], force_prefix: bool) -> Result<String, TypeError> {
+    // inet/cidr binary format:
+    // 1 byte family (2 = IPv4, 3 = IPv6)
+    // 1 byte bits (netmask length)
+    // 1 byte is_cidr (0 = inet, 1 = cidr)
+    // 1 byte addr_len
+    // N bytes address
+    if bytes.len() < 4 {
+        return Err(TypeError::InvalidData(
+            "inet/cidr binary payload too short".to_string(),
+        ));
+    }
+
+    let family = bytes[0];
+    let bits = bytes[1];
+    let is_cidr = bytes[2];
+    let addr_len = bytes[3] as usize;
+
+    if bytes.len() != 4 + addr_len {
+        return Err(TypeError::InvalidData(
+            "inet/cidr binary payload length mismatch".to_string(),
+        ));
+    }
+
+    let addr = &bytes[4..];
+    match family {
+        2 => {
+            if addr_len > 4 {
+                return Err(TypeError::InvalidData(
+                    "invalid IPv4 inet/cidr address length".to_string(),
+                ));
+            }
+            let mut full = [0u8; 4];
+            full[..addr_len].copy_from_slice(addr);
+            let ip = std::net::Ipv4Addr::from(full);
+            let include_prefix = force_prefix || is_cidr != 0 || bits != 32;
+            if include_prefix {
+                Ok(format!("{}/{}", ip, bits))
+            } else {
+                Ok(ip.to_string())
+            }
+        }
+        3 => {
+            if addr_len > 16 {
+                return Err(TypeError::InvalidData(
+                    "invalid IPv6 inet/cidr address length".to_string(),
+                ));
+            }
+            let mut full = [0u8; 16];
+            full[..addr_len].copy_from_slice(addr);
+            let ip = std::net::Ipv6Addr::from(full);
+            let include_prefix = force_prefix || is_cidr != 0 || bits != 128;
+            if include_prefix {
+                Ok(format!("{}/{}", ip, bits))
+            } else {
+                Ok(ip.to_string())
+            }
+        }
+        _ => Err(TypeError::InvalidData(format!(
+            "unsupported inet/cidr address family: {}",
+            family
+        ))),
+    }
+}
+
+/// IPv4/IPv6 host/network address (`inet`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inet(pub String);
+
+impl Inet {
+    /// Create a new `Inet` value from text representation.
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Borrow the underlying textual representation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromPg for Inet {
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
+        if oid_val != oid::INET {
+            return Err(TypeError::UnexpectedOid {
+                expected: "inet",
+                got: oid_val,
+            });
+        }
+
+        let s = if format == 1 {
+            decode_inet_like_binary(bytes, false)?
+        } else {
+            from_utf8_string(bytes)?
+        };
+        Ok(Inet(s))
+    }
+}
+
+impl ToPg for Inet {
+    fn to_pg(&self) -> (Vec<u8>, u32, i16) {
+        (self.0.as_bytes().to_vec(), oid::INET, 0)
+    }
+}
+
+/// IPv4/IPv6 network block (`cidr`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cidr(pub String);
+
+impl Cidr {
+    /// Create a new `Cidr` value from text representation.
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Borrow the underlying textual representation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromPg for Cidr {
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
+        if oid_val != oid::CIDR {
+            return Err(TypeError::UnexpectedOid {
+                expected: "cidr",
+                got: oid_val,
+            });
+        }
+
+        let s = if format == 1 {
+            decode_inet_like_binary(bytes, true)?
+        } else {
+            from_utf8_string(bytes)?
+        };
+        Ok(Cidr(s))
+    }
+}
+
+impl ToPg for Cidr {
+    fn to_pg(&self) -> (Vec<u8>, u32, i16) {
+        (self.0.as_bytes().to_vec(), oid::CIDR, 0)
+    }
+}
+
+/// MAC address (`macaddr`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacAddr(pub String);
+
+impl MacAddr {
+    /// Create a new `MacAddr` value from text representation.
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Borrow the underlying textual representation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromPg for MacAddr {
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
+        if oid_val != oid::MACADDR {
+            return Err(TypeError::UnexpectedOid {
+                expected: "macaddr",
+                got: oid_val,
+            });
+        }
+
+        let s = if format == 1 {
+            if bytes.len() != 6 {
+                return Err(TypeError::InvalidData(
+                    "Expected 6 bytes for macaddr".to_string(),
+                ));
+            }
+            format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+            )
+        } else {
+            from_utf8_string(bytes)?
+        };
+
+        Ok(MacAddr(s))
+    }
+}
+
+impl ToPg for MacAddr {
+    fn to_pg(&self) -> (Vec<u8>, u32, i16) {
+        (self.0.as_bytes().to_vec(), oid::MACADDR, 0)
+    }
+}
+
 // ==================== JSON/JSONB ====================
 
 /// JSON value (wraps the raw JSON string)
@@ -333,5 +535,52 @@ mod tests {
         ];
         let result = Uuid::from_pg(&uuid_bytes, oid::UUID, 1).unwrap();
         assert_eq!(result.0, "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_inet_from_pg_text() {
+        let inet = Inet::from_pg(b"10.0.0.1", oid::INET, 0).unwrap();
+        assert_eq!(inet.0, "10.0.0.1");
+    }
+
+    #[test]
+    fn test_inet_from_pg_binary_ipv4() {
+        // family=2 (IPv4), bits=32, is_cidr=0, addr_len=4, addr=10.1.2.3
+        let bytes = [2u8, 32, 0, 4, 10, 1, 2, 3];
+        let inet = Inet::from_pg(&bytes, oid::INET, 1).unwrap();
+        assert_eq!(inet.0, "10.1.2.3");
+    }
+
+    #[test]
+    fn test_cidr_from_pg_binary_ipv4() {
+        // family=2 (IPv4), bits=24, is_cidr=1, addr_len=4, addr=192.168.1.0
+        let bytes = [2u8, 24, 1, 4, 192, 168, 1, 0];
+        let cidr = Cidr::from_pg(&bytes, oid::CIDR, 1).unwrap();
+        assert_eq!(cidr.0, "192.168.1.0/24");
+    }
+
+    #[test]
+    fn test_macaddr_from_pg_binary() {
+        let bytes = [0x08u8, 0x00, 0x2b, 0x01, 0x02, 0x03];
+        let mac = MacAddr::from_pg(&bytes, oid::MACADDR, 1).unwrap();
+        assert_eq!(mac.0, "08:00:2b:01:02:03");
+    }
+
+    #[test]
+    fn test_network_types_to_pg_oids() {
+        let inet = Inet::new("10.0.0.0/8");
+        let (_, inet_oid, inet_format) = inet.to_pg();
+        assert_eq!(inet_oid, oid::INET);
+        assert_eq!(inet_format, 0);
+
+        let cidr = Cidr::new("10.0.0.0/8");
+        let (_, cidr_oid, cidr_format) = cidr.to_pg();
+        assert_eq!(cidr_oid, oid::CIDR);
+        assert_eq!(cidr_format, 0);
+
+        let mac = MacAddr::new("08:00:2b:01:02:03");
+        let (_, mac_oid, mac_format) = mac.to_pg();
+        assert_eq!(mac_oid, oid::MACADDR);
+        assert_eq!(mac_format, 0);
     }
 }
