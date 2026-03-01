@@ -3,7 +3,7 @@ name: Publish qail-wasm to npm
 on:
   push:
     tags:
-      - 'v*'
+      - 'wasm-v*'
   workflow_dispatch:
     inputs:
       dry_run:
