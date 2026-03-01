@@ -724,6 +724,256 @@ fn scan_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
     }
 }
 
+/// Phase 1+2: Collect let-bindings that map variable names to string literal(s).
+///
+/// Handles:
+///   `let table = "foo";`                                    → {"table": ["foo"]}
+///   `let (table, col) = ("foo", "bar");`                    → {"table": ["foo"], "col": ["bar"]}
+///   `let (table, col) = if cond { ("a", "x") } else { ("b", "y") };`
+///                                                           → {"table": ["a", "b"], "col": ["x", "y"]}
+///   `let table = if cond { "a" } else { "b" };`             → {"table": ["a", "b"]}
+fn collect_let_bindings(content: &str) -> HashMap<String, Vec<String>> {
+    let mut bindings: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Join all lines for multi-line let analysis
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i].trim();
+
+        // Look for: let IDENT = "literal"
+        // or:       let (IDENT, IDENT) = ...
+        if let Some(rest) = line.strip_prefix("let ") {
+            let rest = rest.trim();
+
+            // Phase 1: Simple  let table = "literal";
+            if let Some((var, rhs)) = parse_simple_let(rest) {
+                if let Some(lit) = extract_string_arg(rhs.trim()) {
+                    bindings.entry(var).or_default().push(lit);
+                    i += 1;
+                    continue;
+                }
+
+                // Phase 2: let table = if cond { "a" } else { "b" };
+                let rhs = rhs.trim();
+                if rhs.starts_with("if ") {
+                    // Collect the full if/else expression, possibly spanning multiple lines
+                    let mut full_expr = rhs.to_string();
+                    let mut j = i + 1;
+                    // Keep joining lines until we see the closing `;`
+                    while j < lines.len() && !full_expr.contains(';') {
+                        full_expr.push(' ');
+                        full_expr.push_str(lines[j].trim());
+                        j += 1;
+                    }
+                    let literals = extract_branch_literals(&full_expr);
+                    if !literals.is_empty() {
+                        bindings.entry(var).or_default().extend(literals);
+                    }
+                }
+            }
+
+            // Phase 2: Destructuring  let (table, col) = if cond { ("a", "x") } else { ("b", "y") };
+            //          or             let (table, col) = ("a", "b");
+            if rest.starts_with('(') {
+                // Collect the full line (may span multiple lines)
+                let mut full_line = line.to_string();
+                let mut j = i + 1;
+                while j < lines.len() && !full_line.contains(';') {
+                    full_line.push(' ');
+                    full_line.push_str(lines[j].trim());
+                    j += 1;
+                }
+
+                if let Some(result) = parse_destructuring_let(&full_line) {
+                    for (name, values) in result {
+                        bindings.entry(name).or_default().extend(values);
+                    }
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    bindings
+}
+
+/// Parse `ident = rest` from a let statement (after stripping `let `).
+/// Returns (variable_name, right_hand_side).
+fn parse_simple_let(s: &str) -> Option<(String, &str)> {
+    // Must start with an ident char, not `(` (that's destructuring) or `mut`
+    let s = s.strip_prefix("mut ").unwrap_or(s).trim();
+    if s.starts_with('(') {
+        return None;
+    }
+
+    // Extract identifier
+    let ident: String = s.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    if ident.is_empty() {
+        return None;
+    }
+
+    // Skip optional type annotation  : Type
+    let rest = s[ident.len()..].trim_start();
+    let rest = if rest.starts_with(':') {
+        // Skip past the type, find the `=`
+        rest.find('=').map(|pos| &rest[pos..])?
+    } else {
+        rest
+    };
+
+    let rest = rest.strip_prefix('=')?.trim();
+    Some((ident, rest))
+}
+
+/// Extract string literals from if/else branches.
+/// Handles: `if cond { "a" } else { "b" }` → ["a", "b"]
+fn extract_branch_literals(expr: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+
+    // Find all `{ "literal" }` patterns in the expression
+    let mut remaining = expr;
+    while let Some(brace_pos) = remaining.find('{') {
+        let inside = &remaining[brace_pos + 1..];
+        if let Some(close_pos) = inside.find('}') {
+            let block = inside[..close_pos].trim();
+            // Check if block content is a simple string literal
+            if let Some(lit) = extract_string_arg(block) {
+                literals.push(lit);
+            }
+            remaining = &inside[close_pos + 1..];
+        } else {
+            break;
+        }
+    }
+
+    literals
+}
+
+/// Parse destructuring let: `let (a, b) = ...;`
+/// Returns vec of (name, possible_values) for each position.
+fn parse_destructuring_let(line: &str) -> Option<Vec<(String, Vec<String>)>> {
+    // Find `let (` or `let mut (`
+    let rest = line.strip_prefix("let ")?.trim();
+    let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim();
+    let rest = rest.strip_prefix('(')?;
+
+    // Extract variable names from the tuple pattern
+    let close_paren = rest.find(')')?;
+    let names_str = &rest[..close_paren];
+    let names: Vec<String> = names_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.starts_with('_'))
+        .collect();
+
+    if names.is_empty() {
+        return None;
+    }
+
+    // Find the RHS after `=`
+    let after_pattern = &rest[close_paren + 1..];
+    let eq_pos = after_pattern.find('=')?;
+    let rhs = after_pattern[eq_pos + 1..].trim();
+
+    // Case 1: Simple tuple  ("a", "b")
+    if rhs.starts_with('(') {
+        let values = extract_tuple_literals(rhs);
+        if values.len() == names.len() {
+            return Some(
+                names.into_iter()
+                    .zip(values.into_iter())
+                    .map(|(n, v)| (n, vec![v]))
+                    .collect()
+            );
+        }
+    }
+
+    // Case 2: if/else  if cond { ("a", "x") } else { ("b", "y") }
+    if rhs.starts_with("if ") {
+        let mut all_tuples: Vec<Vec<String>> = Vec::new();
+
+        // Extract tuples from each branch
+        let mut remaining = rhs;
+        while let Some(brace_pos) = remaining.find('{') {
+            let inside = &remaining[brace_pos + 1..];
+            if let Some(close_pos) = find_matching_brace(inside) {
+                let block = inside[..close_pos].trim();
+                // Try to extract a tuple from the block
+                if block.starts_with('(') {
+                    let values = extract_tuple_literals(block);
+                    if values.len() == names.len() {
+                        all_tuples.push(values);
+                    }
+                }
+                remaining = &inside[close_pos + 1..];
+            } else {
+                break;
+            }
+        }
+
+        if !all_tuples.is_empty() {
+            let mut result: Vec<(String, Vec<String>)> = names.iter()
+                .map(|n| (n.clone(), Vec::new()))
+                .collect();
+
+            for tuple in &all_tuples {
+                for (i, val) in tuple.iter().enumerate() {
+                    if i < result.len() {
+                        result[i].1.push(val.clone());
+                    }
+                }
+            }
+
+            return Some(result);
+        }
+    }
+
+    None
+}
+
+/// Extract string literals from a tuple: ("a", "b", "c") → ["a", "b", "c"]
+fn extract_tuple_literals(s: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let s = s.trim();
+    let s = s.strip_prefix('(').unwrap_or(s);
+    // Find the closing paren (handle nested parens)
+    let content = if let Some(pos) = s.rfind(')') {
+        &s[..pos]
+    } else {
+        s.trim_end_matches(';').trim_end_matches(')')
+    };
+
+    for part in content.split(',') {
+        let part = part.trim();
+        if let Some(lit) = extract_string_arg(part) {
+            literals.push(lit);
+        }
+    }
+    literals
+}
+
+/// Find the position of the matching `}` for the first `{`,
+/// handling nested braces.
+fn find_matching_brace(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, ch) in s.chars().enumerate() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
     // All CRUD patterns: GET=SELECT, ADD=INSERT, SET=UPDATE, DEL=DELETE, PUT=UPSERT
     // Also detect Qail::typed (compile-time safety) and Qail::raw_sql (advisory)
@@ -736,6 +986,9 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
         ("Qail::typed(", "TYPED"),
         ("Qail::raw_sql(", "RAW"),
     ];
+
+    // Phase 1+2: Collect let-bindings that resolve variable → string literal(s)
+    let let_bindings = collect_let_bindings(content);
 
     // First pass: collect all CTE alias names defined anywhere in the file.
     // Catches .to_cte("name") and .with("name", ...) patterns.
@@ -830,13 +1083,51 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
                     // Skip to end of chain
                     i = j.saturating_sub(1);
                 } else if *action != "TYPED" {
-                    // Dynamic table name — cannot validate at build time.
-                    // Extract the variable name for a helpful warning.
+                    // Dynamic table name — try to resolve via let-bindings
                     let var_hint = after.split(')').next().unwrap_or("?").trim();
-                    println!(
-                        "cargo:warning=Qail: dynamic table name `{}` in {}:{} — cannot validate columns at build time. Consider using string literals.",
-                        var_hint, file, start_line
-                    );
+
+                    // Strip field access: ct.table → table, etc.
+                    let lookup_key = var_hint.rsplit('.').next().unwrap_or(var_hint);
+
+                    if let Some(resolved_tables) = let_bindings.get(lookup_key) {
+                        // Resolved! Validate each possible table
+                        // Join continuation lines for column extraction
+                        let mut full_chain = line.to_string();
+                        let mut j = i + 1;
+                        while j < lines.len() {
+                            let next = lines[j].trim();
+                            if next.starts_with('.') {
+                                full_chain.push_str(next);
+                                j += 1;
+                            } else if next.is_empty() {
+                                j += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        let columns = extract_columns(&full_chain);
+                        let has_rls = full_chain.contains(".with_rls(") || full_chain.contains(".rls(");
+
+                        for resolved_table in resolved_tables {
+                            let is_cte_ref = file_cte_names.contains(resolved_table);
+                            usages.push(QailUsage {
+                                file: file.to_string(),
+                                line: start_line,
+                                table: resolved_table.clone(),
+                                columns: columns.clone(),
+                                action: action.to_string(),
+                                is_cte_ref,
+                                has_rls,
+                            });
+                        }
+                        i = j.saturating_sub(1);
+                    } else {
+                        // Truly dynamic — cannot validate
+                        println!(
+                            "cargo:warning=Qail: dynamic table name `{}` in {}:{} — cannot validate columns at build time. Consider using string literals.",
+                            var_hint, file, start_line
+                        );
+                    }
                 }
                 // else: Qail::typed with non-parsable table — skip silently (it has compile-time safety)
                 break; // Only match one pattern per line
