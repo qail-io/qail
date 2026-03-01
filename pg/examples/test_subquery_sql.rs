@@ -35,7 +35,7 @@ fn main() {
     // AST encoder (parameterized)
     let mut sql_buf = BytesMut::new();
     let mut params: Vec<Option<Vec<u8>>> = Vec::new();
-    qail_pg::protocol::AstEncoder::encode_select_sql(&cmd, &mut sql_buf, &mut params);
+    let _ = qail_pg::protocol::AstEncoder::encode_select_sql(&cmd, &mut sql_buf, &mut params);
 
     println!("SQL: {}", std::str::from_utf8(&sql_buf).unwrap_or("ERR"));
     println!("\nParams ({})", params.len());
