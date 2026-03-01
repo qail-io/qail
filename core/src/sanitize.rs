@@ -122,7 +122,10 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
         }),
         Expr::Literal(_) => Ok(()),
         Expr::JsonAccess {
-            column, alias, path_segments, ..
+            column,
+            alias,
+            path_segments,
+            ..
         } => {
             check_ident(field, column)?;
             for (key, _) in path_segments {
@@ -131,8 +134,7 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
                     return Err(SanitizeError {
                         field: format!("{field}.json_path"),
                         value: key.chars().take(40).collect(),
-                        reason: "JSON path key must be a safe identifier or integer"
-                            .to_string(),
+                        reason: "JSON path key must be a safe identifier or integer".to_string(),
                     });
                 }
             }
@@ -148,9 +150,7 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             }
             Ok(())
         }
-        Expr::Exists {
-            query, alias, ..
-        } => {
+        Expr::Exists { query, alias, .. } => {
             validate_ast(query)?;
             if let Some(a) = alias {
                 check_ident(&format!("{field}.alias"), a)?;
@@ -158,7 +158,14 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             Ok(())
         }
         // For all other complex Expr variants, validate aliases where present
-        Expr::Window { name, func, partition, params, order, .. } => {
+        Expr::Window {
+            name,
+            func,
+            partition,
+            params,
+            order,
+            ..
+        } => {
             if !name.is_empty() {
                 check_ident(&format!("{field}.window_alias"), name)?;
             }
@@ -177,9 +184,16 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             }
             Ok(())
         }
-        Expr::Case { when_clauses, else_value, alias } => {
+        Expr::Case {
+            when_clauses,
+            else_value,
+            alias,
+        } => {
             for (cond, val) in when_clauses {
-                check_expr(&format!("{field}.case_when"), &Expr::Named(cond.left.to_string()))?;
+                check_expr(
+                    &format!("{field}.case_when"),
+                    &Expr::Named(cond.left.to_string()),
+                )?;
                 check_expr(&format!("{field}.case_then"), val)?;
             }
             if let Some(e) = else_value {
@@ -217,7 +231,11 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             }
             Ok(())
         }
-        Expr::Collate { expr, collation, alias } => {
+        Expr::Collate {
+            expr,
+            collation,
+            alias,
+        } => {
             check_expr(&format!("{field}.collate_expr"), expr)?;
             check_ident(&format!("{field}.collation"), collation)?;
             if let Some(a) = alias {
@@ -225,7 +243,11 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             }
             Ok(())
         }
-        Expr::FieldAccess { expr, field: f, alias } => {
+        Expr::FieldAccess {
+            expr,
+            field: f,
+            alias,
+        } => {
             check_expr(&format!("{field}.field_access_expr"), expr)?;
             check_ident(&format!("{field}.field"), f)?;
             if let Some(a) = alias {
@@ -442,7 +464,12 @@ mod tests {
     #[test]
     fn injection_in_join_table_rejected() {
         use crate::ast::JoinKind;
-        let cmd = Qail::get("users").join(JoinKind::Left, "orders; DROP TABLE x", "users.id", "orders.user_id");
+        let cmd = Qail::get("users").join(
+            JoinKind::Left,
+            "orders; DROP TABLE x",
+            "users.id",
+            "orders.user_id",
+        );
         let err = validate_ast(&cmd).unwrap_err();
         assert!(err.field.contains("joins"));
     }

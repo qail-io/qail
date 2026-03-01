@@ -810,7 +810,10 @@ fn parse_simple_let(s: &str) -> Option<(String, &str)> {
     }
 
     // Extract identifier
-    let ident: String = s.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let ident: String = s
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
     if ident.is_empty() {
         return None;
     }
@@ -883,10 +886,11 @@ fn parse_destructuring_let(line: &str) -> Option<Vec<(String, Vec<String>)>> {
         let values = extract_tuple_literals(rhs);
         if values.len() == names.len() {
             return Some(
-                names.into_iter()
+                names
+                    .into_iter()
                     .zip(values)
                     .map(|(n, v)| (n, vec![v]))
-                    .collect()
+                    .collect(),
             );
         }
     }
@@ -915,9 +919,8 @@ fn parse_destructuring_let(line: &str) -> Option<Vec<(String, Vec<String>)>> {
         }
 
         if !all_tuples.is_empty() {
-            let mut result: Vec<(String, Vec<String>)> = names.iter()
-                .map(|n| (n.clone(), Vec::new()))
-                .collect();
+            let mut result: Vec<(String, Vec<String>)> =
+                names.iter().map(|n| (n.clone(), Vec::new())).collect();
 
             for tuple in &all_tuples {
                 for (i, val) in tuple.iter().enumerate() {
@@ -1106,7 +1109,8 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
                             }
                         }
                         let columns = extract_columns(&full_chain);
-                        let has_rls = full_chain.contains(".with_rls(") || full_chain.contains(".rls(");
+                        let has_rls =
+                            full_chain.contains(".with_rls(") || full_chain.contains(".rls(");
 
                         for resolved_table in resolved_tables {
                             let is_cte_ref = file_cte_names.contains(resolved_table);

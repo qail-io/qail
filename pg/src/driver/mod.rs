@@ -1705,7 +1705,9 @@ impl PgDriver {
 
         // Declare cursor
         // Declare cursor with bind params — Extended Query Protocol handles $1, $2 etc.
-        self.connection.declare_cursor(&cursor_name, &sql, &params).await?;
+        self.connection
+            .declare_cursor(&cursor_name, &sql, &params)
+            .await?;
 
         // Fetch all batches
         let mut all_batches = Vec::new();

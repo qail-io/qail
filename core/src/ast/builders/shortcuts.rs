@@ -249,4 +249,3 @@ mod tests {
         assert!(matches!(expr, Expr::Case { alias: Some(a), .. } if a == "rate"));
     }
 }
-

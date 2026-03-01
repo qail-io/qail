@@ -71,10 +71,7 @@ fn parse_cte_definition(input: &str, is_recursive: bool) -> IResult<&str, CTEDef
     } else {
         // Non-recursive strict path: must be valid QAIL with full consumption.
         let base_query = parse_qail_strict(cte_body).map_err(|_| {
-            nom::Err::Failure(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            ))
+            nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
         })?;
 
         Ok((
@@ -279,7 +276,9 @@ pub fn split_top_level_union_all(body: &str) -> Result<(&str, &str), &'static st
                     // Bare UNION (without ALL) — reject
                     let after_union = i + 5;
                     if after_union >= len || !is_ident_char(bytes[after_union]) {
-                        return Err("bare UNION (without ALL) found; only UNION ALL is supported in recursive CTEs");
+                        return Err(
+                            "bare UNION (without ALL) found; only UNION ALL is supported in recursive CTEs",
+                        );
                     }
                 }
                 i += 1;

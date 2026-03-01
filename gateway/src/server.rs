@@ -10,7 +10,6 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
-
 use crate::cache::QueryCache;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
@@ -20,9 +19,9 @@ use crate::policy::PolicyEngine;
 use crate::router::create_router;
 use crate::schema::SchemaRegistry;
 
-use qail_pg::{PgPool, PoolConfig, TlsConfig};
 #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
 use qail_pg::{LinuxKrb5ProviderConfig, linux_krb5_preflight, linux_krb5_token_provider};
+use qail_pg::{PgPool, PoolConfig, TlsConfig};
 
 /// Cached callable signature metadata for one PostgreSQL function overload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,9 +371,14 @@ impl Gateway {
             let canonical =
                 crate::config::validate_config_path(path, self.config.config_root.as_deref())
                     .map_err(GatewayError::Config)?;
-            allow_list.load_from_file(canonical.to_str().unwrap_or(path)).map_err(|e| {
-                GatewayError::Config(format!("Failed to load allow-list from '{}': {}", path, e))
-            })?;
+            allow_list
+                .load_from_file(canonical.to_str().unwrap_or(path))
+                .map_err(|e| {
+                    GatewayError::Config(format!(
+                        "Failed to load allow-list from '{}': {}",
+                        path, e
+                    ))
+                })?;
             tracing::info!(
                 "Query allow-list: {} patterns loaded from '{}'",
                 allow_list.len(),
@@ -676,7 +680,10 @@ async fn shutdown_signal() {
 }
 
 /// Parse a database URL into PoolConfig
-fn parse_database_url(url_str: &str, gateway_config: &crate::config::GatewayConfig) -> Result<PoolConfig, GatewayError> {
+fn parse_database_url(
+    url_str: &str,
+    gateway_config: &crate::config::GatewayConfig,
+) -> Result<PoolConfig, GatewayError> {
     use percent_encoding::percent_decode_str;
     use qail_pg::driver::{AuthSettings, ScramChannelBindingMode, TlsMode};
 
@@ -800,7 +807,8 @@ fn parse_database_url(url_str: &str, gateway_config: &crate::config::GatewayConf
             "auth_cleartext" => {
                 if gateway_config.production_strict {
                     return Err(GatewayError::Config(
-                        "SECURITY: production_strict=true — auth_cleartext URL param rejected".to_string(),
+                        "SECURITY: production_strict=true — auth_cleartext URL param rejected"
+                            .to_string(),
                     ));
                 }
                 let enabled = parse_bool_query(value.as_ref()).ok_or_else(|| {
@@ -1131,7 +1139,9 @@ impl Default for GatewayBuilder {
 #[cfg(test)]
 mod tests {
     use crate::config::GatewayConfig;
-    fn default_cfg() -> GatewayConfig { GatewayConfig::default() }
+    fn default_cfg() -> GatewayConfig {
+        GatewayConfig::default()
+    }
 
     use super::*;
     use std::io::Write;
@@ -1184,7 +1194,10 @@ mod tests {
 
     #[test]
     fn test_parse_database_url_rejects_empty_gss_service() {
-        let err = match parse_database_url("postgres://alice@db.internal:5432/app?gss_service=", &default_cfg()) {
+        let err = match parse_database_url(
+            "postgres://alice@db.internal:5432/app?gss_service=",
+            &default_cfg(),
+        ) {
             Ok(_) => panic!("expected empty gss_service error"),
             Err(e) => e,
         };
@@ -1216,11 +1229,13 @@ mod tests {
 
     #[test]
     fn test_parse_database_url_rejects_invalid_gss_retry_base() {
-        let err =
-            match parse_database_url("postgres://alice@db.internal:5432/app?gss_retry_base_ms=0", &default_cfg()) {
-                Ok(_) => panic!("expected invalid gss_retry_base_ms error"),
-                Err(e) => e,
-            };
+        let err = match parse_database_url(
+            "postgres://alice@db.internal:5432/app?gss_retry_base_ms=0",
+            &default_cfg(),
+        ) {
+            Ok(_) => panic!("expected invalid gss_retry_base_ms error"),
+            Err(e) => e,
+        };
         assert!(
             err.to_string()
                 .contains("gss_retry_base_ms must be greater than 0")

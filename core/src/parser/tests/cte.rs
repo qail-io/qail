@@ -52,7 +52,10 @@ fn test_recursive_cte_missing_union_all() {
     ) get tree";
 
     let result = parse(input);
-    assert!(result.is_err(), "should fail: no UNION ALL in recursive CTE");
+    assert!(
+        result.is_err(),
+        "should fail: no UNION ALL in recursive CTE"
+    );
 }
 
 // ─── Multiple top-level UNION ALL → error ────────────────────────────
@@ -64,10 +67,7 @@ fn test_recursive_cte_multiple_union_all() {
     ) get tree";
 
     let result = parse(input);
-    assert!(
-        result.is_err(),
-        "should fail: multiple top-level UNION ALL"
-    );
+    assert!(result.is_err(), "should fail: multiple top-level UNION ALL");
 }
 
 // ─── Bare UNION (without ALL) → error ────────────────────────────────
@@ -166,7 +166,10 @@ fn test_union_all_inside_nested_parens_ignored() {
 
     let body = "get t1 where id in (SELECT 1 UNION ALL SELECT 2) UNION ALL get t2";
     let result = split_top_level_union_all(body);
-    assert!(result.is_ok(), "should find exactly one top-level UNION ALL");
+    assert!(
+        result.is_ok(),
+        "should find exactly one top-level UNION ALL"
+    );
 
     let (base, _) = result.unwrap();
     assert!(
@@ -180,8 +183,7 @@ fn test_union_all_inside_nested_parens_ignored() {
 #[test]
 fn test_non_recursive_cte_raw_sql_rejected() {
     // Non-recursive CTE with raw SQL body — strict mode should reject
-    let input =
-        "WITH summary AS (SELECT id, count(*) as cnt FROM orders GROUP BY id) get summary";
+    let input = "WITH summary AS (SELECT id, count(*) as cnt FROM orders GROUP BY id) get summary";
 
     let result = parse(input);
     assert!(result.is_err(), "non-recursive raw SQL must be rejected");
@@ -258,8 +260,5 @@ fn test_contains_ident_case_insensitive() {
         "tree"
     ));
     // Should not match as substring
-    assert!(!contains_ident_outside_quotes_comments(
-        "get trees",
-        "tree"
-    ));
+    assert!(!contains_ident_outside_quotes_comments("get trees", "tree"));
 }

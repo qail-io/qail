@@ -327,7 +327,11 @@ async fn binary_float8() {
     let val = rows[0]["ret_float8"].as_f64().unwrap();
     #[allow(clippy::approx_constant)]
     let expected = 3.14;
-    assert!((val - expected).abs() < 0.001, "expected ~3.14, got {}", val);
+    assert!(
+        (val - expected).abs() < 0.001,
+        "expected ~3.14, got {}",
+        val
+    );
 }
 
 #[tokio::test]
