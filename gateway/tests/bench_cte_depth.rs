@@ -281,7 +281,14 @@ async fn bench_cte_depth() {
             "CTEs", "min(ms)", "avg(ms)", "p50(ms)", "p95(ms)", "p99(ms)"
         );
 
-        let mut pg = qail_pg::PgDriver::connect_env().await.expect("PG driver");
+        let pg_result = qail_pg::PgDriver::connect_env().await;
+        let mut pg = match pg_result {
+            Ok(pg) => pg,
+            Err(e) => {
+                println!("  ⚠  Skipping Phase 3: PG connect failed: {}\n", e);
+                return;
+            }
+        };
 
         // Ensure the routes table exists for the benchmark
         pg.execute_raw(
