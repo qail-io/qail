@@ -7,6 +7,6 @@ ignore = [
     # rustls-pemfile — unmaintained, pulled in by tonic → qdrant-client
     # Will be resolved when tonic upgrades to rustls-pki-types
     "RUSTSEC-2025-0134",
-    # notify — unmaintained, pulled in by notify-debouncer-full (LSP file watcher)
-    "RUSTSEC-2024-0388",
+    # instant — unmaintained, pulled in by notify-types → notify-debouncer-full (LSP file watcher)
+    "RUSTSEC-2024-0384",
 ]
