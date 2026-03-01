@@ -1312,8 +1312,10 @@ impl Drop for PooledConnection {
             //   - Missed release() call (programming error)
             //
             // We DESTROY the connection (don't return to pool) to prevent
-            // dirty session state from being reused. This costs a pool slot
-            // but guarantees no cross-tenant leakage.
+            // dirty session state from being reused. But we MUST return the
+            // semaphore permit so the pool can create a replacement connection
+            // on the next acquire. Without this, leaked connections permanently
+            // reduce pool capacity until all slots are consumed.
             //
             // The `conn` field is dropped here, closing the TCP socket.
             eprintln!(
@@ -1326,6 +1328,9 @@ impl Drop for PooledConnection {
             self.pool
                 .active_count
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            // Return the semaphore permit so the pool slot can be reused.
+            // Without this, each leaked connection permanently reduces capacity.
+            self.pool.semaphore.add_permits(1);
         }
     }
 }
