@@ -571,8 +571,7 @@ fn sort_paths_lexical(root: &Path, files: &mut [PathBuf]) {
 }
 
 fn canonical(path: &Path) -> Result<PathBuf> {
-    path
-        .canonicalize()
+    path.canonicalize()
         .with_context(|| format!("Failed to canonicalize '{}'", path.display()))
 }
 

@@ -16,8 +16,8 @@ pub(crate) mod query;
 
 pub use admin::{health_check, health_check_internal, swagger_ui};
 pub use convert::row_to_json;
+pub(crate) use query::{clamp_query_limit, is_query_allowed};
 pub use query::{execute_batch, execute_query, execute_query_binary, execute_query_fast};
-pub(crate) use query::{is_query_allowed, clamp_query_limit};
 
 // ── Shared types ──
 

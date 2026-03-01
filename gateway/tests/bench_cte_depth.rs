@@ -75,7 +75,6 @@ fn build_cte_query(depth: usize) -> Qail {
                 ])
                 .gt("price", Value::Int(i as i64 * 100));
 
-
             cmd = Qail::get(&cte_name)
                 .columns([
                     "id",

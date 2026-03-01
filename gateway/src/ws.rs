@@ -156,8 +156,10 @@ pub async fn ws_handler(
             })
             .unwrap_or(false);
         if !origin_ok {
-            return crate::middleware::ApiError::forbidden("WebSocket Origin not in allowed origins")
-                .into_response();
+            return crate::middleware::ApiError::forbidden(
+                "WebSocket Origin not in allowed origins",
+            )
+            .into_response();
         }
     }
 
@@ -242,7 +244,10 @@ async fn handle_socket(
 
     // SECURITY (P0-R3): Abort all spawned LiveQuery polling tasks on disconnect.
     for (table, handle) in live_query_tasks.drain() {
-        tracing::debug!("Aborting LiveQuery poller for table '{}' on disconnect", table);
+        tracing::debug!(
+            "Aborting LiveQuery poller for table '{}' on disconnect",
+            table
+        );
         handle.abort();
     }
 
@@ -263,8 +268,7 @@ async fn handle_client_message(
 
     // SECURITY (P0-5): Post-auth tenant rate limiting on ALL WS messages
     // to prevent LISTEN/UNLISTEN flood attacks, not just data-bearing messages.
-    if let Err(e) = ensure_tenant_rate_limit(state.as_ref(), auth).await
-    {
+    if let Err(e) = ensure_tenant_rate_limit(state.as_ref(), auth).await {
         let _ = tx
             .send(WsServerMessage::Error {
                 message: e.message.clone(),
@@ -465,14 +469,18 @@ async fn handle_client_message(
                     }
 
                     // WS queries use RLS-scoped connections with statement/lock timeouts
-                    if let Ok(mut conn) = state.pool.acquire_with_rls_timeouts(
-                        auth.to_rls_context(),
-                        state.config.statement_timeout_ms,
-                        state.config.lock_timeout_ms,
-                    ).await {
+                    if let Ok(mut conn) = state
+                        .pool
+                        .acquire_with_rls_timeouts(
+                            auth.to_rls_context(),
+                            state.config.statement_timeout_ms,
+                            state.config.lock_timeout_ms,
+                        )
+                        .await
+                    {
                         match conn.fetch_all_uncached(&cmd).await {
                             Ok(rows) => {
-                            let json_rows: Vec<serde_json::Value> =
+                                let json_rows: Vec<serde_json::Value> =
                                     rows.iter().map(crate::handler::row_to_json).collect();
 
                                 // SECURITY (G4): Verify tenant boundary — fail-closed.
@@ -569,10 +577,7 @@ async fn handle_client_message(
             ) {
                 let _ = tx
                     .send(WsServerMessage::Error {
-                        message: format!(
-                            "Action {:?} is not allowed on WebSocket",
-                            cmd.action
-                        ),
+                        message: format!("Action {:?} is not allowed on WebSocket", cmd.action),
                     })
                     .await;
                 return;
@@ -635,11 +640,15 @@ async fn handle_client_message(
             }
 
             // Execute immediately and send initial snapshot
-            if let Ok(mut conn) = state.pool.acquire_with_rls_timeouts(
-                auth.to_rls_context(),
-                state.config.statement_timeout_ms,
-                state.config.lock_timeout_ms,
-            ).await {
+            if let Ok(mut conn) = state
+                .pool
+                .acquire_with_rls_timeouts(
+                    auth.to_rls_context(),
+                    state.config.statement_timeout_ms,
+                    state.config.lock_timeout_ms,
+                )
+                .await
+            {
                 match conn.fetch_all_uncached(&cmd).await {
                     Ok(rows) => {
                         let json_rows: Vec<serde_json::Value> =
@@ -715,7 +724,8 @@ async fn handle_client_message(
                 tracing::warn!("WS LiveQuery LISTEN: pool acquire failed");
                 let _ = tx
                     .send(WsServerMessage::Error {
-                        message: "Database connection unavailable for live query subscription".to_string(),
+                        message: "Database connection unavailable for live query subscription"
+                            .to_string(),
                     })
                     .await;
                 return;
@@ -727,8 +737,7 @@ async fn handle_client_message(
                 if live_query_tasks.len() >= 50 && !live_query_tasks.contains_key(&table) {
                     let _ = tx
                         .send(WsServerMessage::Error {
-                            message: "LiveQuery limit reached (max 50 per connection)"
-                                .to_string(),
+                            message: "LiveQuery limit reached (max 50 per connection)".to_string(),
                         })
                         .await;
                     return;
@@ -751,12 +760,10 @@ async fn handle_client_message(
                     loop {
                         tokio::time::sleep(interval).await;
 
-                        if let Ok(mut conn) =
-                            state_clone.pool.acquire_with_rls_timeouts(
-                                rls_ctx.clone(),
-                                stmt_timeout,
-                                lock_timeout,
-                            ).await
+                        if let Ok(mut conn) = state_clone
+                            .pool
+                            .acquire_with_rls_timeouts(rls_ctx.clone(), stmt_timeout, lock_timeout)
+                            .await
                         {
                             match conn.fetch_all_uncached(&cmd).await {
                                 Ok(rows) => {
@@ -771,16 +778,17 @@ async fn handle_client_message(
                                             &tenant_col,
                                             &table_clone,
                                             "ws_live_query_poll",
-                                        ) {
-                                            tracing::error!("{}", v);
-                                            conn.release().await;
-                                            let _ = tx_clone
-                                                .send(WsServerMessage::Error {
-                                                    message: "Data integrity error".to_string(),
-                                                })
-                                                .await;
-                                            break;
-                                        }
+                                        )
+                                    {
+                                        tracing::error!("{}", v);
+                                        conn.release().await;
+                                        let _ = tx_clone
+                                            .send(WsServerMessage::Error {
+                                                message: "Data integrity error".to_string(),
+                                            })
+                                            .await;
+                                        break;
+                                    }
 
                                     let count = json_rows.len();
                                     if tx_clone

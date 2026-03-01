@@ -232,7 +232,6 @@ pub fn extract_auth_from_headers(headers: &HeaderMap) -> AuthContext {
     extract_auth_from_headers_with_jwks(headers, None, &[])
 }
 
-
 /// Parse configured JWT algorithm names into [`Algorithm`] values.
 ///
 /// Input is case-insensitive and duplicate values are de-duplicated while

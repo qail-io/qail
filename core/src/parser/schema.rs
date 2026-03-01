@@ -1126,7 +1126,10 @@ mod tests {
 
         // Verify the expression is a typed Binary, not raw SQL
         let using = policy.using.as_ref().unwrap();
-        let Expr::Binary { left, op, right, .. } = using else {
+        let Expr::Binary {
+            left, op, right, ..
+        } = using
+        else {
             panic!("Expected Binary, got {using:?}");
         };
         assert_eq!(*op, BinaryOp::Eq);
@@ -1136,7 +1139,12 @@ mod tests {
         };
         assert_eq!(n, "operator_id");
 
-        let Expr::Cast { target_type, expr: cast_expr, .. } = right.as_ref() else {
+        let Expr::Cast {
+            target_type,
+            expr: cast_expr,
+            ..
+        } = right.as_ref()
+        else {
             panic!("Expected Cast, got {right:?}");
         };
         assert_eq!(target_type, "uuid");
@@ -1205,8 +1213,15 @@ mod tests {
         let policy = &schema.policies[0];
 
         assert!(
-            matches!(policy.using.as_ref().unwrap(), Expr::Binary { op: BinaryOp::Or, .. }),
-            "Expected Binary OR, got {:?}", policy.using
+            matches!(
+                policy.using.as_ref().unwrap(),
+                Expr::Binary {
+                    op: BinaryOp::Or,
+                    ..
+                }
+            ),
+            "Expected Binary OR, got {:?}",
+            policy.using
         );
     }
 

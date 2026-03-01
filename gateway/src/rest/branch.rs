@@ -443,7 +443,9 @@ pub(crate) async fn branch_merge_handler(
                                     q = q.set_value(k, json_to_qail_value(v));
                                 }
                                 // Use schema PK instead of hardcoded "id"
-                                let pk_col = state.schema.table(&table)
+                                let pk_col = state
+                                    .schema
+                                    .table(&table)
                                     .and_then(|t| t.primary_key.as_deref())
                                     .unwrap_or("id");
                                 q = q.eq(pk_col, row_pk.clone());
@@ -457,7 +459,9 @@ pub(crate) async fn branch_merge_handler(
                     }
                     "delete" => {
                         // Use schema PK instead of hardcoded "id"
-                        let pk_col = state.schema.table(&table)
+                        let pk_col = state
+                            .schema
+                            .table(&table)
                             .and_then(|t| t.primary_key.as_deref())
                             .unwrap_or("id");
                         let q = qail_core::ast::Qail::del(&table).eq(pk_col, row_pk.clone());

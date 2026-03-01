@@ -21,9 +21,7 @@ pub async fn health_check() -> Json<HealthCheckPublic> {
 ///
 /// **Security:** Disabled when `production_strict=true`. In strict mode,
 /// returns 403 — use direct API calls instead.
-pub async fn swagger_ui(
-    State(state): State<Arc<GatewayState>>,
-) -> axum::response::Response {
+pub async fn swagger_ui(State(state): State<Arc<GatewayState>>) -> axum::response::Response {
     use axum::response::IntoResponse;
 
     if state.config.production_strict {
@@ -69,7 +67,8 @@ pub async fn swagger_ui(
 </body>
 </html>"#
             .to_string(),
-    ).into_response()
+    )
+    .into_response()
 }
 
 /// Internal health check — includes pool stats and tenant guard metrics.

@@ -152,10 +152,7 @@ impl QailVisitor {
                         .join(", ")
                 )
             } else {
-                format!(
-                    ".{method}([\"{first}\" +{}])",
-                    all_strings.len() - 1
-                )
+                format!(".{method}([\"{first}\" +{}])", all_strings.len() - 1)
             };
 
             self.patterns.push(RustPattern {

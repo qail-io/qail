@@ -17,15 +17,17 @@ use qail_core::ast::Action;
 /// SECURITY (P0-2): Reject dangerous procedural/session actions on public query endpoints.
 fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), ApiError> {
     match cmd.action {
-        Action::Call | Action::Do | Action::SessionSet | Action::SessionShow | Action::SessionReset => {
-            Err(ApiError::with_code(
-                "ACTION_DENIED",
-                format!(
-                    "Action {:?} is not allowed on public query endpoints",
-                    cmd.action
-                ),
-            ))
-        }
+        Action::Call
+        | Action::Do
+        | Action::SessionSet
+        | Action::SessionShow
+        | Action::SessionReset => Err(ApiError::with_code(
+            "ACTION_DENIED",
+            format!(
+                "Action {:?} is not allowed on public query endpoints",
+                cmd.action
+            ),
+        )),
         _ => Ok(()),
     }
 }
@@ -515,11 +517,12 @@ pub async fn execute_batch(
 
     // Start transaction if requested (default: true)
     if request.transaction
-        && let Err(e) = conn.get_mut().execute_simple("BEGIN;").await {
-            tracing::error!("Transaction start failed: {}", e);
-            conn.release().await;
-            return Err(ApiError::with_code("TXN_ERROR", "Transaction start failed"));
-        }
+        && let Err(e) = conn.get_mut().execute_simple("BEGIN;").await
+    {
+        tracing::error!("Transaction start failed: {}", e);
+        conn.release().await;
+        return Err(ApiError::with_code("TXN_ERROR", "Transaction start failed"));
+    }
 
     let mut had_error = false;
 
@@ -623,27 +626,28 @@ pub async fn execute_batch(
                 // SECURITY (P0-R6): Tenant boundary verification in batch results.
                 if matches!(cmd.action, qail_core::ast::Action::Get)
                     && let Some(ref tenant_id) = auth.tenant_id
-                        && let Err(v) = crate::tenant_guard::verify_tenant_boundary(
-                            &json_rows,
-                            tenant_id,
-                            &state.config.tenant_column,
-                            &cmd.table,
-                            "batch_query",
-                        ) {
-                            tracing::error!("{}", v);
-                            results.push(BatchQueryResult {
-                                index,
-                                success: false,
-                                rows: None,
-                                count: None,
-                                error: Some("Data integrity error".to_string()),
-                            });
-                            if request.transaction {
-                                had_error = true;
-                                break;
-                            }
-                            continue;
-                        }
+                    && let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+                        &json_rows,
+                        tenant_id,
+                        &state.config.tenant_column,
+                        &cmd.table,
+                        "batch_query",
+                    )
+                {
+                    tracing::error!("{}", v);
+                    results.push(BatchQueryResult {
+                        index,
+                        success: false,
+                        rows: None,
+                        count: None,
+                        error: Some("Data integrity error".to_string()),
+                    });
+                    if request.transaction {
+                        had_error = true;
+                        break;
+                    }
+                    continue;
+                }
 
                 // Invalidate cache for mutations
                 if !matches!(cmd.action, qail_core::ast::Action::Get) {
@@ -684,7 +688,10 @@ pub async fn execute_batch(
         } else if let Err(e) = conn.get_mut().execute_simple("COMMIT;").await {
             tracing::error!("Transaction commit failed: {}", e);
             conn.release().await;
-            return Err(ApiError::with_code("TXN_ERROR", "Transaction commit failed"));
+            return Err(ApiError::with_code(
+                "TXN_ERROR",
+                "Transaction commit failed",
+            ));
         }
     }
 
@@ -823,7 +830,9 @@ mod tests {
 
     #[test]
     fn query_complexity_simple_query() {
-        let cmd = qail_core::ast::Qail::get("users").columns(["id"]).eq("active", true);
+        let cmd = qail_core::ast::Qail::get("users")
+            .columns(["id"])
+            .eq("active", true);
         let (depth, filters, joins) = super::query_complexity(&cmd);
         assert_eq!(depth, 0);
         assert_eq!(filters, 1);

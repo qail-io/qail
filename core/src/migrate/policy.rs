@@ -315,7 +315,10 @@ mod tests {
     fn test_tenant_check_helper() {
         let expr = tenant_check("operator_id", "app.current_operator_id", "uuid");
 
-        let Expr::Binary { left, op, right, .. } = &expr else {
+        let Expr::Binary {
+            left, op, right, ..
+        } = &expr
+        else {
             panic!("Expected Binary, got {expr:?}");
         };
         assert_eq!(*op, BinaryOp::Eq);
@@ -325,7 +328,12 @@ mod tests {
         };
         assert_eq!(n, "operator_id");
 
-        let Expr::Cast { expr: cast_expr, target_type, .. } = right.as_ref() else {
+        let Expr::Cast {
+            expr: cast_expr,
+            target_type,
+            ..
+        } = right.as_ref()
+        else {
             panic!("Expected Cast, got {right:?}");
         };
         assert_eq!(target_type, "uuid");
@@ -345,7 +353,13 @@ mod tests {
         );
 
         assert!(
-            matches!(&expr, Expr::Binary { op: BinaryOp::Or, .. }),
+            matches!(
+                &expr,
+                Expr::Binary {
+                    op: BinaryOp::Or,
+                    ..
+                }
+            ),
             "Expected Binary OR, got {expr:?}"
         );
     }
@@ -358,7 +372,13 @@ mod tests {
         );
 
         assert!(
-            matches!(&expr, Expr::Binary { op: BinaryOp::And, .. }),
+            matches!(
+                &expr,
+                Expr::Binary {
+                    op: BinaryOp::And,
+                    ..
+                }
+            ),
             "Expected Binary AND, got {expr:?}"
         );
     }

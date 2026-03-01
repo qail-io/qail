@@ -569,7 +569,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(" → ")
     );
 
-    type BenchResult = (String, usize, Duration, Duration, Duration, usize, Vec<Duration>);
+    type BenchResult = (
+        String,
+        usize,
+        Duration,
+        Duration,
+        Duration,
+        usize,
+        Vec<Duration>,
+    );
     let mut results: Vec<Option<BenchResult>> = vec![None; 6];
 
     for &idx in &run_order {

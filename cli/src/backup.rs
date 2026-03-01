@@ -54,13 +54,13 @@ pub async fn analyze_impact(driver: &mut PgDriver, cmd: &Qail) -> Result<Migrati
 
             if let Some((column, target_type)) = alter_type_target(cmd)
                 && let Some(source_type) = column_data_type(driver, &cmd.table, &column).await?
-                    && is_narrowing_type_change(&source_type, &target_type)
-                {
-                    impact.operation =
-                        format!("ALTER TYPE (narrowing {} -> {})", source_type, target_type);
-                    impact.is_destructive = true;
-                    impact.rows_affected = count_table_rows(driver, &cmd.table).await?;
-                }
+                && is_narrowing_type_change(&source_type, &target_type)
+            {
+                impact.operation =
+                    format!("ALTER TYPE (narrowing {} -> {})", source_type, target_type);
+                impact.is_destructive = true;
+                impact.rows_affected = count_table_rows(driver, &cmd.table).await?;
+            }
         }
         Action::AlterSetNotNull => {
             impact.operation = "ALTER SET NOT NULL".to_string();
