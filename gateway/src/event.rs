@@ -264,8 +264,8 @@ async fn deliver_webhook(
 
     // SECURITY: Resolve hostname and verify resolved IPs are not private.
     // Prevents DNS rebinding where a public hostname resolves to 127.0.0.1.
-    if let Ok(parsed) = url::Url::parse(url) {
-        if let Some(host) = parsed.host_str() {
+    if let Ok(parsed) = url::Url::parse(url)
+        && let Some(host) = parsed.host_str() {
             // Only resolve if host is not already a raw IP
             if host.parse::<std::net::IpAddr>().is_err() {
                 let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
@@ -329,7 +329,6 @@ async fn deliver_webhook(
                 }
             }
         }
-    }
 
     for attempt in 0..=max_retries {
         if attempt > 0 {

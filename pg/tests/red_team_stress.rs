@@ -28,7 +28,7 @@ fn tierz_recursive_subquery_stack_overflow() {
     let mut inner = Qail::get("leaf").columns(["id"]);
 
     for i in 0..5_000 {
-        let mut outer = Qail::get(&format!("t{}", i)).columns(["id"]);
+        let mut outer = Qail::get(format!("t{}", i)).columns(["id"]);
         outer.cages.push(Cage {
             kind: CageKind::Filter,
             conditions: vec![Condition {
@@ -66,7 +66,7 @@ fn tierz_10k_where_conditions() {
     let mut q = Qail::get("vessels").columns(["id"]);
 
     for i in 0..10_000 {
-        q = q.filter(&format!("col_{}", i), Operator::Eq, Value::Int(i));
+        q = q.filter(format!("col_{}", i), Operator::Eq, Value::Int(i));
     }
 
     let sql = q.to_sql();

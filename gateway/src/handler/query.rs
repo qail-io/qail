@@ -514,13 +514,12 @@ pub async fn execute_batch(
         .map_err(|e| ApiError::from_pg_driver_error(&e, None))?;
 
     // Start transaction if requested (default: true)
-    if request.transaction {
-        if let Err(e) = conn.get_mut().execute_simple("BEGIN;").await {
+    if request.transaction
+        && let Err(e) = conn.get_mut().execute_simple("BEGIN;").await {
             tracing::error!("Transaction start failed: {}", e);
             conn.release().await;
             return Err(ApiError::with_code("TXN_ERROR", "Transaction start failed"));
         }
-    }
 
     let mut had_error = false;
 
@@ -622,9 +621,9 @@ pub async fn execute_batch(
                 let count = json_rows.len();
 
                 // SECURITY (P0-R6): Tenant boundary verification in batch results.
-                if matches!(cmd.action, qail_core::ast::Action::Get) {
-                    if let Some(ref tenant_id) = auth.tenant_id {
-                        if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+                if matches!(cmd.action, qail_core::ast::Action::Get)
+                    && let Some(ref tenant_id) = auth.tenant_id
+                        && let Err(v) = crate::tenant_guard::verify_tenant_boundary(
                             &json_rows,
                             tenant_id,
                             &state.config.tenant_column,
@@ -645,8 +644,6 @@ pub async fn execute_batch(
                             }
                             continue;
                         }
-                    }
-                }
 
                 // Invalidate cache for mutations
                 if !matches!(cmd.action, qail_core::ast::Action::Get) {
@@ -684,12 +681,10 @@ pub async fn execute_batch(
         if had_error {
             let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
             tracing::warn!("Batch transaction rolled back due to error");
-        } else {
-            if let Err(e) = conn.get_mut().execute_simple("COMMIT;").await {
-                tracing::error!("Transaction commit failed: {}", e);
-                conn.release().await;
-                return Err(ApiError::with_code("TXN_ERROR", "Transaction commit failed"));
-            }
+        } else if let Err(e) = conn.get_mut().execute_simple("COMMIT;").await {
+            tracing::error!("Transaction commit failed: {}", e);
+            conn.release().await;
+            return Err(ApiError::with_code("TXN_ERROR", "Transaction commit failed"));
         }
     }
 

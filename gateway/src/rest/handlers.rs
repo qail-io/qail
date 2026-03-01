@@ -1755,7 +1755,7 @@ pub(crate) async fn create_handler(
             .await;
             if let Err(e) = overlay_result {
                 conn.release().await;
-                return Err(e.into());
+                return Err(e);
             }
             all_results.push(row_data);
         }
@@ -2035,7 +2035,7 @@ pub(crate) async fn update_handler(
         .await;
         if let Err(e) = overlay_result {
             conn.release().await;
-            return Err(e.into());
+            return Err(e);
         }
         conn.release().await;
         return Ok(Json(SingleResponse {
@@ -2148,7 +2148,7 @@ pub(crate) async fn delete_handler(
         .await;
         if let Err(e) = overlay_result {
             conn.release().await;
-            return Err(e.into());
+            return Err(e);
         }
         conn.release().await;
         return Ok(axum::http::StatusCode::NO_CONTENT);

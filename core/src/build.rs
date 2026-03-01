@@ -884,7 +884,7 @@ fn parse_destructuring_let(line: &str) -> Option<Vec<(String, Vec<String>)>> {
         if values.len() == names.len() {
             return Some(
                 names.into_iter()
-                    .zip(values.into_iter())
+                    .zip(values)
                     .map(|(n, v)| (n, vec![v]))
                     .collect()
             );

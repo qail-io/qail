@@ -68,7 +68,7 @@ async fn test_tls_list_tables() -> PgResult<()> {
         }
     }
 
-    assert!(rows.len() > 0, "Expected at least one table");
+    assert!(!rows.is_empty(), "Expected at least one table");
 
     Ok(())
 }

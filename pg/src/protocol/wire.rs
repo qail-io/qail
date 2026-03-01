@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn decode_ready_for_query_idle() {
-        let buf = wire_msg(b'Z', &[b'I']);
+        let buf = wire_msg(b'Z', b"I");
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
         assert!(matches!(
             msg,
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn decode_ready_for_query_in_transaction() {
-        let buf = wire_msg(b'Z', &[b'T']);
+        let buf = wire_msg(b'Z', b"T");
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
         assert!(matches!(
             msg,
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn decode_ready_for_query_failed() {
-        let buf = wire_msg(b'Z', &[b'E']);
+        let buf = wire_msg(b'Z', b"E");
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
         assert!(matches!(
             msg,
@@ -991,7 +991,7 @@ mod tests {
 
     #[test]
     fn decode_ready_for_query_unknown_status() {
-        let buf = wire_msg(b'Z', &[b'X']);
+        let buf = wire_msg(b'Z', b"X");
         assert!(
             BackendMessage::decode(&buf)
                 .unwrap_err()
@@ -1330,15 +1330,15 @@ mod tests {
 
     #[test]
     fn decode_consumed_length_is_correct() {
-        let buf = wire_msg(b'Z', &[b'I']);
+        let buf = wire_msg(b'Z', b"I");
         let (_, consumed) = BackendMessage::decode(&buf).unwrap();
         assert_eq!(consumed, buf.len());
     }
 
     #[test]
     fn decode_with_trailing_data_only_consumes_one_message() {
-        let mut buf = wire_msg(b'Z', &[b'I']);
-        buf.extend_from_slice(&wire_msg(b'Z', &[b'T'])); // second message appended
+        let mut buf = wire_msg(b'Z', b"I");
+        buf.extend_from_slice(&wire_msg(b'Z', b"T")); // second message appended
         let (msg, consumed) = BackendMessage::decode(&buf).unwrap();
         assert!(matches!(
             msg,

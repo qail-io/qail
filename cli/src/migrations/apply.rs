@@ -199,7 +199,7 @@ fn parse_drop_targets(sql: &str) -> (Vec<String>, Vec<(String, String)>) {
     let mut columns = Vec::new();
 
     for stmt in sql.split(';') {
-        let normalized = stmt.replace('\n', " ").replace('\t', " ");
+        let normalized = stmt.replace(['\n', '\t'], " ");
         let tokens: Vec<String> = normalized
             .split_whitespace()
             .map(|t| t.trim().to_string())
