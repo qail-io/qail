@@ -2468,7 +2468,7 @@ mod tests {
                 hint: None,
             }),
             PgError::NoRows,
-            PgError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io")),
+            PgError::Io(std::io::Error::other("io")),
             PgError::Encode("enc".into()),
             PgError::Timeout("timeout".into()),
             PgError::PoolExhausted { max: 10 },

@@ -25,6 +25,7 @@ const CTE_DEPTHS: &[usize] = &[0, 1, 2, 3, 5, 8, 10];
 /// depth=0: plain `SELECT id, title, price FROM routes WHERE active = true LIMIT 100`
 /// depth=1: WITH cte_0 AS (SELECT ...) SELECT * FROM cte_0
 /// depth=3: WITH cte_0 AS (...), cte_1 AS (SELECT * FROM cte_0 WHERE ...), ...
+#[allow(unused_assignments)]
 fn build_cte_query(depth: usize) -> Qail {
     // Base query: a realistic filtered select
     let base = Qail::get("routes")
@@ -73,6 +74,7 @@ fn build_cte_query(depth: usize) -> Qail {
                     "operator_id",
                 ])
                 .gt("price", Value::Int(i as i64 * 100));
+
 
             cmd = Qail::get(&cte_name)
                 .columns([
@@ -160,7 +162,7 @@ struct Stats {
     p99: Duration,
 }
 
-fn compute_stats(times: &mut Vec<Duration>) -> Stats {
+fn compute_stats(times: &mut [Duration]) -> Stats {
     times.sort();
     let n = times.len();
     let total: Duration = times.iter().sum();

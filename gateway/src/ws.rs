@@ -764,8 +764,8 @@ async fn handle_client_message(
                                         rows.iter().map(crate::handler::row_to_json).collect();
 
                                     // SECURITY: Verify tenant boundary on every poll tick.
-                                    if let Some(ref tenant_id) = tenant_id_clone {
-                                        if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+                                    if let Some(ref tenant_id) = tenant_id_clone
+                                        && let Err(v) = crate::tenant_guard::verify_tenant_boundary(
                                             &json_rows,
                                             tenant_id,
                                             &tenant_col,
@@ -781,7 +781,6 @@ async fn handle_client_message(
                                                 .await;
                                             break;
                                         }
-                                    }
 
                                     let count = json_rows.len();
                                     if tx_clone

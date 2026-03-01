@@ -157,8 +157,8 @@ async fn weird_high_dim_vectors() {
         .map(|i| {
             let mut vec = vec![0.0f32; 1536];
             // Seed different dimensions for each point
-            for j in 0..1536 {
-                vec[j] = ((i * 1536 + j) as f32 * 0.001).sin();
+            for (j, v) in vec.iter_mut().enumerate() {
+                *v = ((i * 1536 + j) as f32 * 0.001).sin();
             }
             Point::new((i + 1) as u64, vec).with_payload("dim", 1536i64)
         })
@@ -572,8 +572,8 @@ async fn weird_batch_upsert_1000() {
     let points: Vec<Point> = (1..=1000)
         .map(|i| {
             let mut vec = vec![0.0f32; 8];
-            for j in 0..8 {
-                vec[j] = ((i * 8 + j) as f32 * 0.01).sin();
+            for (j, v) in vec.iter_mut().enumerate() {
+                *v = ((i * 8 + j) as f32 * 0.01).sin();
             }
             Point::new(i as u64, vec).with_payload("batch_id", i as i64)
         })

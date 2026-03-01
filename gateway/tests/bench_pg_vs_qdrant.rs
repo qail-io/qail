@@ -37,7 +37,7 @@ struct Stats {
     p99: Duration,
 }
 
-fn compute_stats(times: &mut Vec<Duration>) -> Stats {
+fn compute_stats(times: &mut [Duration]) -> Stats {
     times.sort();
     let n = times.len();
     let total: Duration = times.iter().sum();

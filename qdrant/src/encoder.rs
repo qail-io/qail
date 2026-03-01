@@ -1267,7 +1267,7 @@ mod tests {
         // First byte should be collection tag
         assert_eq!(buf[0], SEARCH_COLLECTION);
         // Filter tag (0x1A) should appear somewhere after vector
-        assert!(buf.iter().any(|&b| b == SEARCH_FILTER));
+        assert!(buf.contains(&SEARCH_FILTER));
     }
 
     #[test]

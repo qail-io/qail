@@ -409,7 +409,7 @@ fn inspect_order_file(root: &Path, modules: &[PathBuf]) -> Result<OrderReport> {
             ));
             continue;
         }
-        if !entry.extension().is_some_and(|e| e == "qail") {
+        if entry.extension().is_none_or(|e| e != "qail") {
             report.unresolved_entries.push(format!(
                 "line {} '{}': expected .qail file or directory",
                 line_no + 1,
@@ -459,7 +459,7 @@ fn collect_module_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             continue;
         }
         if path.extension().is_some_and(|e| e == "qail")
-            && !path.file_name().is_some_and(|n| n == ORDER_FILE)
+            && path.file_name().is_none_or(|n| n != ORDER_FILE)
         {
             out.push(path);
         }
@@ -567,13 +567,13 @@ fn rel_path(root: &Path, path: &Path) -> String {
 }
 
 fn sort_paths_lexical(root: &Path, files: &mut [PathBuf]) {
-    files.sort_by(|a, b| rel_path(root, a).cmp(&rel_path(root, b)));
+    files.sort_by_key(|a| rel_path(root, a));
 }
 
 fn canonical(path: &Path) -> Result<PathBuf> {
-    Ok(path
+    path
         .canonicalize()
-        .with_context(|| format!("Failed to canonicalize '{}'", path.display()))?)
+        .with_context(|| format!("Failed to canonicalize '{}'", path.display()))
 }
 
 fn strict_manifest_default_enabled(schema_root: &Path) -> bool {
