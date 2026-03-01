@@ -441,7 +441,11 @@ impl ConditionToSql for Condition {
                     let high = value_placeholder(&vals[1], params);
                     return format!("{} NOT BETWEEN {} AND {}", col, low, high);
                 }
-                format!("{} NOT BETWEEN {}", col, value_placeholder(&self.value, params))
+                format!(
+                    "{} NOT BETWEEN {}",
+                    col,
+                    value_placeholder(&self.value, params)
+                )
             }
             Operator::Exists => {
                 if let Value::Subquery(cmd) = &self.value {

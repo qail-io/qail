@@ -948,7 +948,9 @@ pub(crate) async fn list_handler(
         // tenant guard by omitting the tenant column from `select`.
         if !cols.contains(&"*")
             && auth.tenant_id.is_some()
-            && !cols.iter().any(|c| *c == state.config.tenant_column.as_str())
+            && !cols
+                .iter()
+                .any(|c| *c == state.config.tenant_column.as_str())
         {
             cols.push(&state.config.tenant_column);
         }
@@ -1712,10 +1714,7 @@ pub(crate) async fn create_handler(
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers);
-    if branch_ctx.branch_name().is_some()
-        && auth.role != "admin"
-        && auth.role != "super_admin"
-    {
+    if branch_ctx.branch_name().is_some() && auth.role != "admin" && auth.role != "super_admin" {
         return Err(ApiError::forbidden(
             "Admin role required for branch overlay writes",
         ));
@@ -2001,10 +2000,7 @@ pub(crate) async fn update_handler(
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers);
-    if branch_ctx.branch_name().is_some()
-        && auth.role != "admin"
-        && auth.role != "super_admin"
-    {
+    if branch_ctx.branch_name().is_some() && auth.role != "admin" && auth.role != "super_admin" {
         return Err(ApiError::forbidden(
             "Admin role required for branch overlay writes",
         ));
@@ -2115,10 +2111,7 @@ pub(crate) async fn delete_handler(
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers);
-    if branch_ctx.branch_name().is_some()
-        && auth.role != "admin"
-        && auth.role != "super_admin"
-    {
+    if branch_ctx.branch_name().is_some() && auth.role != "admin" && auth.role != "super_admin" {
         return Err(ApiError::forbidden(
             "Admin role required for branch overlay writes",
         ));
@@ -2155,7 +2148,7 @@ pub(crate) async fn delete_handler(
     }
 
     match conn.fetch_all_uncached(&cmd).await {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             conn.release().await;
             return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));

@@ -191,8 +191,8 @@ pub async fn idempotency_middleware(
         }
     };
     let body_hash = {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         body_bytes_req.hash(&mut hasher);
         hasher.finish()
@@ -278,10 +278,8 @@ pub async fn idempotency_middleware(
                 "Failed to capture response body for idempotency cache — returning original status without caching"
             );
             let mut resp = Response::from_parts(parts, Body::empty());
-            resp.headers_mut().insert(
-                "x-idempotency-body-truncated",
-                "true".parse().unwrap(),
-            );
+            resp.headers_mut()
+                .insert("x-idempotency-body-truncated", "true".parse().unwrap());
             // _in_flight_guard will cleanup on drop here.
             return resp;
         }

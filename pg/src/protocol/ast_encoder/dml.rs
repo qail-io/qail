@@ -3,7 +3,9 @@
 //! SELECT, INSERT, UPDATE, DELETE, EXPORT, and CTE statements.
 
 use bytes::BytesMut;
-use qail_core::ast::{CTEDef, CageKind, Expr, GroupByMode, JoinKind, LogicalOp, Qail, SetOp, SortOrder};
+use qail_core::ast::{
+    CTEDef, CageKind, Expr, GroupByMode, JoinKind, LogicalOp, Qail, SetOp, SortOrder,
+};
 
 use super::helpers::write_usize;
 use super::values::{

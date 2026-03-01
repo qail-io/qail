@@ -140,9 +140,15 @@ fn normalize_group_key(name: &str) -> String {
         .trim_end_matches(".down")
         .to_string();
     for token in [
-        ".expand", ".backfill", ".contract",
-        "_expand", "_backfill", "_contract",
-        "-expand", "-backfill", "-contract",
+        ".expand",
+        ".backfill",
+        ".contract",
+        "_expand",
+        "_backfill",
+        "_contract",
+        "-expand",
+        "-backfill",
+        "-contract",
     ] {
         if let Some(stripped) = base.strip_suffix(token) {
             base = stripped.to_string();
@@ -484,9 +490,7 @@ pub async fn migrate_apply(
 
                 let required_phases: &[MigrationPhase] = match mig.phase {
                     MigrationPhase::Backfill => &[MigrationPhase::Expand],
-                    MigrationPhase::Contract => {
-                        &[MigrationPhase::Expand, MigrationPhase::Backfill]
-                    }
+                    MigrationPhase::Contract => &[MigrationPhase::Expand, MigrationPhase::Backfill],
                     MigrationPhase::Expand => &[],
                 };
 
@@ -712,7 +716,11 @@ fn parse_backfill_spec(content: &str, default_chunk_size: usize) -> Result<Optio
             "Backfill directive file must only contain `-- @backfill.*` directives and comments, \
              but found non-directive body: '{}'. Move schema/data SQL to a separate expand or \
              contract migration.",
-            if trimmed.len() > 80 { &trimmed[..80] } else { trimmed }
+            if trimmed.len() > 80 {
+                &trimmed[..80]
+            } else {
+                trimmed
+            }
         );
     }
 
@@ -1757,7 +1765,10 @@ index idx_orders_status on orders (status)
 ALTER TABLE users ADD COLUMN name_ci text;
 "#;
         let result = parse_backfill_spec(content, 5000);
-        assert!(result.is_err(), "Should reject files mixing directives and SQL body");
+        assert!(
+            result.is_err(),
+            "Should reject files mixing directives and SQL body"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("non-directive body"),
