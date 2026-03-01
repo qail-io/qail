@@ -861,12 +861,12 @@ mod tests {
     fn test_decode_value_double() {
         // Value { double_value = 3.14 }
         // field 2, wire FIXED64: tag 0x11
-        let f_bytes = 3.14f64.to_le_bytes();
+        let f_bytes = std::f64::consts::PI.to_le_bytes();
         let mut data = vec![0x11];
         data.extend_from_slice(&f_bytes);
         let val = decode_value(&data).unwrap();
         match val {
-            PayloadValue::Float(f) => assert!((f - 3.14).abs() < 0.001),
+            PayloadValue::Float(f) => assert!((f - std::f64::consts::PI).abs() < 0.001),
             _ => panic!("Expected Float"),
         }
     }

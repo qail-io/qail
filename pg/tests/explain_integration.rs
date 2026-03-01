@@ -43,11 +43,10 @@ async fn run_explain(
 
     let mut json_output = String::new();
     for row in &rows {
-        if let Some(Some(val)) = row.columns.first() {
-            if let Ok(text) = std::str::from_utf8(val) {
+        if let Some(Some(val)) = row.columns.first()
+            && let Ok(text) = std::str::from_utf8(val) {
                 json_output.push_str(text);
             }
-        }
     }
 
     if !json_output.is_empty() {

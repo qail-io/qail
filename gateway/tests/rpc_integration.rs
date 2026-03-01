@@ -340,7 +340,7 @@ async fn binary_numeric() {
     let val = &rows[0]["ret_numeric"];
     if let Some(f) = val.as_f64() {
         // Accept both 99.95 (f64 path) and 99 (i64 path).
-        assert!(f >= 99.0 && f <= 100.0, "expected ~99-100, got {}", f);
+        assert!((99.0..=100.0).contains(&f), "expected ~99-100, got {}", f);
     } else {
         let s = val.as_str().unwrap_or("");
         assert!(
@@ -567,7 +567,7 @@ async fn binary_decode_inline_types() {
     assert!((r["float8_col"].as_f64().unwrap() - expected_float).abs() < 0.001);
     // Numeric binary decode may truncate 99.95 to i64(99).
     if let Some(f) = r["numeric_col"].as_f64() {
-        assert!(f >= 99.0 && f <= 100.0);
+        assert!((99.0..=100.0).contains(&f));
     } else {
         assert!(
             r["numeric_col"].is_string(),
