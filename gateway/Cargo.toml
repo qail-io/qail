@@ -80,5 +80,6 @@ enterprise-gssapi = ["qail-pg/enterprise-gssapi"]
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
 hdrhistogram = "7"
 proptest = "1.10.0"

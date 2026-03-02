@@ -219,6 +219,19 @@ pub struct GatewayConfig {
     /// Applied to the connection pool. URL `?channel_binding=` overrides this.
     #[serde(default = "default_pg_channel_binding")]
     pub pg_channel_binding: String,
+
+    /// Tables to block from auto-REST endpoint generation.
+    /// Blocked tables will not have any CRUD routes, cannot be referenced
+    /// via `?expand=`, and cannot appear as nested route targets.
+    /// Use this to hide sensitive tables (e.g., `users`) from the HTTP API.
+    #[serde(default)]
+    pub blocked_tables: Vec<String>,
+
+    /// Tables to allow for auto-REST endpoint generation (whitelist mode).
+    /// When set, ONLY these tables are exposed — all others are blocked.
+    /// Takes precedence over `blocked_tables`.
+    #[serde(default)]
+    pub allowed_tables: Vec<String>,
 }
 
 /// Per-role limit overrides. All fields optional — omitted fields
@@ -387,6 +400,8 @@ impl Default for GatewayConfig {
             tenant_rate_limit_burst: 100,
             pg_sslmode: "prefer".to_string(),
             pg_channel_binding: "prefer".to_string(),
+            blocked_tables: Vec::new(),
+            allowed_tables: Vec::new(),
         }
     }
 }
@@ -556,6 +571,16 @@ impl GatewayConfig {
             tenant_rate_limit_burst: 100,
             pg_sslmode: "prefer".to_string(),
             pg_channel_binding: "prefer".to_string(),
+            blocked_tables: qail
+                .gateway
+                .as_ref()
+                .and_then(|gw| gw.blocked_tables.clone())
+                .unwrap_or_default(),
+            allowed_tables: qail
+                .gateway
+                .as_ref()
+                .and_then(|gw| gw.allowed_tables.clone())
+                .unwrap_or_default(),
         }
     }
 }

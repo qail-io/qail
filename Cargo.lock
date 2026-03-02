@@ -2382,6 +2382,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
+ "toml",
  "tower 0.5.2",
  "tower-http",
  "tracing",
