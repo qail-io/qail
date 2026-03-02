@@ -53,3 +53,10 @@ pub mod ws;
 pub use config::GatewayConfig;
 pub use error::GatewayError;
 pub use server::{Gateway, GatewayState};
+
+// Embeddable API — for use when embedding the gateway in another Axum app
+pub use router::create_router;
+pub use rest::nested::expand_nested;
+pub use schema::SchemaRegistry;
+pub use policy::PolicyEngine;
+pub use auth::AuthContext;
