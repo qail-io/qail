@@ -700,6 +700,10 @@ pub struct QailUsage {
     pub is_cte_ref: bool,
     /// Whether this query chain includes `.with_rls(` call
     pub has_rls: bool,
+    /// Whether the containing file uses `SuperAdminToken::for_system_process()`.
+    /// When true AND the queried table is tenant-scoped, the build emits a
+    /// warning: the query may bypass tenant isolation.
+    pub file_uses_super_admin: bool,
 }
 
 /// Scan Rust source files for QAIL usage patterns
@@ -993,6 +997,13 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
     // Phase 1+2: Collect let-bindings that resolve variable → string literal(s)
     let let_bindings = collect_let_bindings(content);
 
+    // ── File-level flags ─────────────────────────────────────────────
+    // Detect SuperAdminToken::for_system_process() usage anywhere in file.
+    // Files can opt out with `// qail:allow(super_admin)` comment.
+    let file_has_allow_super_admin = content.contains("// qail:allow(super_admin)");
+    let file_uses_super_admin = !file_has_allow_super_admin
+        && content.contains("for_system_process(");
+
     // First pass: collect all CTE alias names defined anywhere in the file.
     // Catches .to_cte("name") and .with("name", ...) patterns.
     // Note: .with_cte(cte_var) takes a variable, not a string literal,
@@ -1081,6 +1092,7 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
                         action: action.to_string(),
                         is_cte_ref,
                         has_rls,
+                        file_uses_super_admin,
                     });
 
                     // Skip to end of chain
@@ -1122,6 +1134,7 @@ fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
                                 action: action.to_string(),
                                 is_cte_ref,
                                 has_rls,
+                                file_uses_super_admin,
                             });
                         }
                         i = j.saturating_sub(1);
@@ -2546,6 +2559,24 @@ pub fn validate_against_schema(schema: &Schema, usages: &[QailUsage]) -> Vec<Str
                 "{}:{}: ⚠️ RLS AUDIT: Qail::{}(\"{}\") has no .with_rls() — table has RLS enabled, query may leak tenant data",
                 usage.file, usage.line, usage.action.to_lowercase(), usage.table
             ));
+        }
+
+        // SuperAdmin Audit: warn if file uses for_system_process() and queries
+        // a table that has tenant_id (tenant-scoped). This catches cases where
+        // acquire_with_rls(SuperAdmin) bypasses tenant isolation at the
+        // connection level — invisible to the per-command .with_rls() check.
+        if usage.file_uses_super_admin {
+            let table_has_tenant_id = schema
+                .table(&usage.table)
+                .map(|t| t.has_column("tenant_id"))
+                .unwrap_or(false);
+            if table_has_tenant_id {
+                rls_warnings.push(format!(
+                    "{}:{}: ⚠️ RLS AUDIT: Qail::{}(\"{}\") in file using SuperAdminToken::for_system_process() \
+— query may bypass tenant isolation. Use claims-based scoping or add `// qail:allow(super_admin)` if intentional.",
+                    usage.file, usage.line, usage.action.to_lowercase(), usage.table
+                ));
+            }
         }
     }
 

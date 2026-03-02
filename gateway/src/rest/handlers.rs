@@ -911,6 +911,29 @@ pub(crate) async fn rpc_handler(
     })))
 }
 
+/// SECURITY: Runtime guard — reject requests targeting inaccessible tables.
+/// Allowlist takes precedence: if set, only listed tables are allowed.
+/// Otherwise falls back to blocklist check.
+/// Belt-and-suspenders: routes for blocked tables are not registered,
+/// but this catches edge cases (e.g., expand references, nested routes).
+fn check_table_not_blocked(state: &GatewayState, table_name: &str) -> Result<(), ApiError> {
+    if !state.allowed_tables.is_empty() {
+        // Allowlist mode: only allow listed tables
+        if !state.allowed_tables.contains(table_name) {
+            return Err(ApiError::forbidden(format!(
+                "Table '{}' is not accessible via REST",
+                table_name
+            )));
+        }
+    } else if state.blocked_tables.contains(table_name) {
+        return Err(ApiError::forbidden(format!(
+            "Table '{}' is not accessible via REST",
+            table_name
+        )));
+    }
+    Ok(())
+}
+
 /// GET /api/{table} — list with pagination, sorting, filtering, column selection
 pub(crate) async fn list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -920,6 +943,7 @@ pub(crate) async fn list_handler(
 ) -> Result<Response, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     let _table = state
         .schema
@@ -998,6 +1022,9 @@ pub(crate) async fn list_handler(
             )));
         }
         for rel in relations {
+            // SECURITY: Block expand into blocked tables
+            check_table_not_blocked(&state, rel)?;
+
             // Try: this table references `rel` (forward: orders?expand=users)
             if let Some((fk_col, ref_col)) = state.schema.relation_for(&table_name, rel) {
                 let left = format!("{}.{}", table_name, fk_col);
@@ -1387,6 +1414,7 @@ pub(crate) async fn aggregate_handler(
         return Err(ApiError::not_found("aggregate route"));
     }
     let table_name = parts[1].to_string();
+    check_table_not_blocked(&state, &table_name)?;
 
     let _table = state
         .schema
@@ -1517,6 +1545,7 @@ pub(crate) async fn get_by_id_handler(
 ) -> Result<Json<SingleResponse>, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     // F5: Accept any PK type (UUID, text, integer, serial, etc.)
     // Let Postgres validate the value against the actual column type.
@@ -1651,6 +1680,7 @@ pub(crate) async fn create_handler(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     let table = state
         .schema
@@ -1937,6 +1967,7 @@ pub(crate) async fn update_handler(
 ) -> Result<Json<SingleResponse>, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     // F5: Accept any PK type
     if id.is_empty() {
@@ -2075,6 +2106,7 @@ pub(crate) async fn delete_handler(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     // F5: Accept any PK type
     if id.is_empty() {

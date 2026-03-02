@@ -43,6 +43,30 @@ pub(crate) async fn nested_list_handler(
     let parent_table = parts[1].to_string();
     let child_table = parts[3].to_string();
 
+    // SECURITY: Block nested access to/from inaccessible tables
+    let parent_blocked = if !state.allowed_tables.is_empty() {
+        !state.allowed_tables.contains(&parent_table)
+    } else {
+        state.blocked_tables.contains(&parent_table)
+    };
+    if parent_blocked {
+        return Err(ApiError::forbidden(format!(
+            "Table '{}' is not accessible via REST",
+            parent_table
+        )));
+    }
+    let child_blocked = if !state.allowed_tables.is_empty() {
+        !state.allowed_tables.contains(&child_table)
+    } else {
+        state.blocked_tables.contains(&child_table)
+    };
+    if child_blocked {
+        return Err(ApiError::forbidden(format!(
+            "Table '{}' is not accessible via REST",
+            child_table
+        )));
+    }
+
     // Validate parent UUID format
     Uuid::parse_str(&parent_id)
         .map_err(|_| ApiError::parse_error(format!("Invalid UUID: {}", parent_id)))?;
@@ -178,7 +202,7 @@ pub(crate) async fn nested_list_handler(
 ///   `user` → `user.orders = [{...}, {...}]` (nested array)
 ///
 /// Uses batched WHERE IN queries to avoid N+1.
-pub(crate) async fn expand_nested(
+pub async fn expand_nested(
     state: &Arc<GatewayState>,
     table_name: &str,
     data: &mut [Value],
@@ -196,6 +220,19 @@ pub(crate) async fn expand_nested(
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(table_name)))?;
 
     for rel in relations {
+        // SECURITY: Block nested expansion into inaccessible tables
+        let rel_blocked = if !state.allowed_tables.is_empty() {
+            !state.allowed_tables.contains(*rel)
+        } else {
+            state.blocked_tables.contains(*rel)
+        };
+        if rel_blocked {
+            return Err(ApiError::forbidden(format!(
+                "Table '{}' is not accessible via REST",
+                rel
+            )));
+        }
+
         // Try forward FK: this table → rel table
         if let Some((fk_col, ref_col)) = state.schema.relation_for(table_name, rel) {
             // Collect all FK values from data
