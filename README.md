@@ -237,6 +237,14 @@ Runs automatically via `validate()` when using Qail's build-time checks:
 |---------|--------|---------|
 | `QAIL_NPLUS1` | `off` \| `warn` \| `deny` | `warn` |
 | `QAIL_NPLUS1_MAX_WARNINGS` | integer | `50` |
+| `QAIL_SCAN_DIRS` | comma-separated source roots | `src` |
+
+Monorepo example:
+
+```bash
+# Scan multiple Rust roots during build validation + N+1 checks
+QAIL_SCAN_DIRS="src,apps/api/src,crates/billing/src" cargo build
+```
 
 ### CLI
 
@@ -279,6 +287,15 @@ let users = conn.fetch_all(
 | **Performance** | Connection Pool, Query Cache (LRU+TTL), Prepared Statements, Binary Protocol |
 | **Connection** | SSL/TLS, SCRAM-SHA-256, Unix Socket |
 | **Operations** | EXPLAIN ANALYZE, Statement Timeout, LOCK TABLE, Batch Transactions |
+
+### Connection Pool Maintenance
+
+Activate background pool health maintenance (idle connection cleanup + `min_connections` backfill) by calling `spawn_pool_maintenance` after creating the pool:
+
+```rust
+let pool = qail_pg::PgPool::connect(config).await?;
+qail_pg::spawn_pool_maintenance(pool.clone());
+```
 
 ---
 
