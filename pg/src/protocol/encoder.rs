@@ -53,37 +53,44 @@ impl PgEncoder {
         }
     }
 
-    /// Encode a raw SQL string as a Simple Query message.
-    /// Wire format:
-    /// - 'Q' (1 byte) - message type
-    /// - length (4 bytes, big-endian, includes self)
-    /// - query string (null-terminated)
-    pub fn encode_query_string(sql: &str) -> BytesMut {
-        let mut buf = BytesMut::new();
+    #[inline(always)]
+    fn content_len_to_wire_len(content_len: usize) -> Result<i32, EncodeError> {
+        let total = content_len
+            .checked_add(4)
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        i32::try_from(total).map_err(|_| EncodeError::MessageTooLarge(total))
+    }
 
-        // Bounds check: SQL + null terminator + 4 bytes length must fit in i32
-        let content_len = sql.len() + 1; // +1 for null terminator
-        if content_len > (i32::MAX as usize) - 4 {
-            // Return empty buffer — write will fail safely rather than
-            // producing a malformed message with overflowed length.
-            return buf;
+    #[inline(always)]
+    fn usize_to_i16(n: usize) -> Result<i16, EncodeError> {
+        i16::try_from(n).map_err(|_| EncodeError::TooManyParameters(n))
+    }
+
+    #[inline(always)]
+    fn usize_to_i32(n: usize) -> Result<i32, EncodeError> {
+        i32::try_from(n).map_err(|_| EncodeError::MessageTooLarge(n))
+    }
+
+    #[inline(always)]
+    fn has_nul(s: &str) -> bool {
+        s.as_bytes().contains(&0)
+    }
+
+    /// Fallible simple-query encoder.
+    pub fn try_encode_query_string(sql: &str) -> Result<BytesMut, EncodeError> {
+        if Self::has_nul(sql) {
+            return Err(EncodeError::NullByte);
         }
 
-        // Message type 'Q' for Query
+        let mut buf = BytesMut::new();
+        let content_len = sql.len() + 1; // +1 for null terminator
+        let total_len = Self::content_len_to_wire_len(content_len)?;
+
         buf.extend_from_slice(b"Q");
-
-        let total_len = (content_len + 4) as i32; // +4 for length field itself
-
-        // Length (4 bytes, big-endian)
         buf.extend_from_slice(&total_len.to_be_bytes());
-
-        // Query string
         buf.extend_from_slice(sql.as_bytes());
-
-        // Null terminator
         buf.extend_from_slice(&[0]);
-
-        buf
+        Ok(buf)
     }
 
     /// Encode a Terminate message to close the connection.
@@ -102,44 +109,37 @@ impl PgEncoder {
 
     // ==================== Extended Query Protocol ====================
 
-    /// Encode a Parse message (prepare a statement).
-    /// Wire format:
-    /// - 'P' (1 byte) - message type
-    /// - length (4 bytes)
-    /// - statement name (null-terminated, "" for unnamed)
-    /// - query string (null-terminated)
-    /// - parameter count (2 bytes)
-    /// - parameter OIDs (4 bytes each, 0 = infer type)
-    pub fn encode_parse(name: &str, sql: &str, param_types: &[u32]) -> BytesMut {
-        let mut buf = BytesMut::new();
+    /// Fallible Parse message encoder.
+    pub fn try_encode_parse(
+        name: &str,
+        sql: &str,
+        param_types: &[u32],
+    ) -> Result<BytesMut, EncodeError> {
+        if Self::has_nul(name) || Self::has_nul(sql) {
+            return Err(EncodeError::NullByte);
+        }
+        if param_types.len() > i16::MAX as usize {
+            return Err(EncodeError::TooManyParameters(param_types.len()));
+        }
 
-        // Message type 'P'
+        let mut buf = BytesMut::new();
         buf.extend_from_slice(b"P");
 
         let mut content = Vec::new();
-
-        // Statement name (null-terminated)
         content.extend_from_slice(name.as_bytes());
         content.push(0);
-
-        // Query string (null-terminated)
         content.extend_from_slice(sql.as_bytes());
         content.push(0);
-
-        // Parameter count
-        content.extend_from_slice(&(param_types.len() as i16).to_be_bytes());
-
-        // Parameter OIDs
+        let param_count = Self::usize_to_i16(param_types.len())?;
+        content.extend_from_slice(&param_count.to_be_bytes());
         for &oid in param_types {
             content.extend_from_slice(&oid.to_be_bytes());
         }
 
-        // Length (includes length field itself)
-        let len = (content.len() + 4) as i32;
+        let len = Self::content_len_to_wire_len(content.len())?;
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(&content);
-
-        buf
+        Ok(buf)
     }
 
     /// Encode a Bind message (bind parameters to a prepared statement).
@@ -177,6 +177,9 @@ impl PgEncoder {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> Result<BytesMut, EncodeError> {
+        if Self::has_nul(portal) || Self::has_nul(statement) {
+            return Err(EncodeError::NullByte);
+        }
         if params.len() > i16::MAX as usize {
             return Err(EncodeError::TooManyParameters(params.len()));
         }
@@ -200,7 +203,8 @@ impl PgEncoder {
         content.extend_from_slice(&0i16.to_be_bytes());
 
         // Parameter count
-        content.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        let param_count = Self::usize_to_i16(params.len())?;
+        content.extend_from_slice(&param_count.to_be_bytes());
 
         // Parameters
         for param in params {
@@ -210,10 +214,8 @@ impl PgEncoder {
                     content.extend_from_slice(&(-1i32).to_be_bytes());
                 }
                 Some(data) => {
-                    if data.len() > i32::MAX as usize {
-                        return Err(EncodeError::MessageTooLarge(data.len()));
-                    }
-                    content.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                    let data_len = Self::usize_to_i32(data.len())?;
+                    content.extend_from_slice(&data_len.to_be_bytes());
                     content.extend_from_slice(data);
                 }
             }
@@ -223,69 +225,54 @@ impl PgEncoder {
         Self::encode_result_formats_vec(&mut content, result_format);
 
         // Length
-        let len = (content.len() + 4) as i32;
+        let len = Self::content_len_to_wire_len(content.len())?;
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(&content);
 
         Ok(buf)
     }
 
-    /// Encode an Execute message (execute a bound portal).
-    /// Wire format:
-    /// - 'E' (1 byte) - message type
-    /// - length (4 bytes)
-    /// - portal name (null-terminated)
-    /// - max rows (4 bytes, 0 = unlimited)
-    pub fn encode_execute(portal: &str, max_rows: i32) -> BytesMut {
-        let mut buf = BytesMut::new();
+    /// Fallible Execute message encoder.
+    pub fn try_encode_execute(portal: &str, max_rows: i32) -> Result<BytesMut, EncodeError> {
+        if Self::has_nul(portal) {
+            return Err(EncodeError::NullByte);
+        }
+        if max_rows < 0 {
+            return Err(EncodeError::InvalidMaxRows(max_rows));
+        }
 
-        // Message type 'E'
+        let mut buf = BytesMut::new();
         buf.extend_from_slice(b"E");
 
         let mut content = Vec::new();
-
-        // Portal name (null-terminated)
         content.extend_from_slice(portal.as_bytes());
         content.push(0);
-
-        // Max rows
         content.extend_from_slice(&max_rows.to_be_bytes());
 
-        // Length
-        let len = (content.len() + 4) as i32;
+        let len = Self::content_len_to_wire_len(content.len())?;
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(&content);
-
-        buf
+        Ok(buf)
     }
 
-    /// Encode a Describe message (get statement/portal metadata).
-    /// Wire format:
-    /// - 'D' (1 byte) - message type
-    /// - length (4 bytes)
-    /// - 'S' for statement or 'P' for portal
-    /// - name (null-terminated)
-    pub fn encode_describe(is_portal: bool, name: &str) -> BytesMut {
-        let mut buf = BytesMut::new();
+    /// Fallible Describe message encoder.
+    pub fn try_encode_describe(is_portal: bool, name: &str) -> Result<BytesMut, EncodeError> {
+        if Self::has_nul(name) {
+            return Err(EncodeError::NullByte);
+        }
 
-        // Message type 'D'
+        let mut buf = BytesMut::new();
         buf.extend_from_slice(b"D");
 
         let mut content = Vec::new();
-
-        // Type: 'S' for statement, 'P' for portal
         content.push(if is_portal { b'P' } else { b'S' });
-
-        // Name (null-terminated)
         content.extend_from_slice(name.as_bytes());
         content.push(0);
 
-        // Length
-        let len = (content.len() + 4) as i32;
+        let len = Self::content_len_to_wire_len(content.len())?;
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(&content);
-
-        buf
+        Ok(buf)
     }
 
     /// Encode a complete extended query pipeline (OPTIMIZED).
@@ -306,6 +293,9 @@ impl PgEncoder {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> Result<BytesMut, EncodeError> {
+        if Self::has_nul(sql) {
+            return Err(EncodeError::NullByte);
+        }
         if params.len() > i16::MAX as usize {
             return Err(EncodeError::TooManyParameters(params.len()));
         }
@@ -314,18 +304,33 @@ impl PgEncoder {
         // Bind: 1 + 4 + 1 + 1 + 2 + 2 + params_data + result_formats
         // Execute: 1 + 4 + 1 + 4 = 10
         // Sync: 5
-        let params_size: usize = params
-            .iter()
-            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
-            .sum();
+        let params_size = params.iter().try_fold(0usize, |acc, p| {
+            let field_size = 4usize
+                .checked_add(p.as_ref().map_or(0usize, |v| v.len()))
+                .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+            acc.checked_add(field_size)
+                .ok_or(EncodeError::MessageTooLarge(usize::MAX))
+        })?;
         let result_formats_size = Self::result_format_wire_len(result_format);
-        let total_size = 9 + sql.len() + (11 + params_size + result_formats_size) + 10 + 5;
+        let total_size = 9usize
+            .checked_add(sql.len())
+            .and_then(|v| v.checked_add(11))
+            .and_then(|v| v.checked_add(params_size))
+            .and_then(|v| v.checked_add(result_formats_size))
+            .and_then(|v| v.checked_add(10))
+            .and_then(|v| v.checked_add(5))
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
 
         let mut buf = BytesMut::with_capacity(total_size);
 
         // ===== PARSE =====
         buf.extend_from_slice(b"P");
-        let parse_len = (1 + sql.len() + 1 + 2 + 4) as i32; // name + sql + param_count
+        let parse_content_len = 1usize
+            .checked_add(sql.len())
+            .and_then(|v| v.checked_add(1))
+            .and_then(|v| v.checked_add(2))
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        let parse_len = Self::content_len_to_wire_len(parse_content_len)?;
         buf.extend_from_slice(&parse_len.to_be_bytes());
         buf.extend_from_slice(&[0]); // Unnamed statement
         buf.extend_from_slice(sql.as_bytes());
@@ -334,20 +339,26 @@ impl PgEncoder {
 
         // ===== BIND =====
         buf.extend_from_slice(b"B");
-        let bind_len = (1 + 1 + 2 + 2 + params_size + result_formats_size + 4) as i32;
+        let bind_content_len = 1usize
+            .checked_add(1)
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(params_size))
+            .and_then(|v| v.checked_add(result_formats_size))
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        let bind_len = Self::content_len_to_wire_len(bind_content_len)?;
         buf.extend_from_slice(&bind_len.to_be_bytes());
         buf.extend_from_slice(&[0]); // Unnamed portal
         buf.extend_from_slice(&[0]); // Unnamed statement
         buf.extend_from_slice(&0i16.to_be_bytes()); // Format codes (default text)
-        buf.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        let param_count = Self::usize_to_i16(params.len())?;
+        buf.extend_from_slice(&param_count.to_be_bytes());
         for param in params {
             match param {
                 None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
                 Some(data) => {
-                    if data.len() > i32::MAX as usize {
-                        return Err(EncodeError::MessageTooLarge(data.len()));
-                    }
-                    buf.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                    let data_len = Self::usize_to_i32(data.len())?;
+                    buf.extend_from_slice(&data_len.to_be_bytes());
                     buf.extend_from_slice(data);
                 }
             }
@@ -366,38 +377,37 @@ impl PgEncoder {
         Ok(buf)
     }
 
-    /// Encode a CopyFail message to abort a COPY IN with an error.
-    /// Wire format:
-    /// - 'f' (1 byte) - message type
-    /// - length (4 bytes)
-    /// - error message (null-terminated)
-    pub fn encode_copy_fail(reason: &str) -> BytesMut {
+    /// Fallible CopyFail encoder.
+    pub fn try_encode_copy_fail(reason: &str) -> Result<BytesMut, EncodeError> {
+        if Self::has_nul(reason) {
+            return Err(EncodeError::NullByte);
+        }
+
         let mut buf = BytesMut::new();
         buf.extend_from_slice(b"f");
         let content_len = reason.len() + 1; // +1 for null terminator
-        let len = (content_len + 4) as i32;
+        let len = Self::content_len_to_wire_len(content_len)?;
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(reason.as_bytes());
         buf.extend_from_slice(&[0]);
-        buf
+        Ok(buf)
     }
 
-    /// Encode a Close message to release a prepared statement or portal.
-    /// Wire format:
-    /// - 'C' (1 byte) - message type
-    /// - length (4 bytes)
-    /// - 'S' for statement or 'P' for portal
-    /// - name (null-terminated)
-    pub fn encode_close(is_portal: bool, name: &str) -> BytesMut {
+    /// Fallible Close encoder.
+    pub fn try_encode_close(is_portal: bool, name: &str) -> Result<BytesMut, EncodeError> {
+        if Self::has_nul(name) {
+            return Err(EncodeError::NullByte);
+        }
+
         let mut buf = BytesMut::new();
         buf.extend_from_slice(b"C");
         let content_len = 1 + name.len() + 1; // type + name + null
-        let len = (content_len + 4) as i32;
+        let len = Self::content_len_to_wire_len(content_len)?;
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(&[if is_portal { b'P' } else { b'S' }]);
         buf.extend_from_slice(name.as_bytes());
         buf.extend_from_slice(&[0]);
-        buf
+        Ok(buf)
     }
 }
 
@@ -454,20 +464,34 @@ impl PgEncoder {
         params: &[Param<'a>],
         result_format: i16,
     ) -> Result<(), EncodeError> {
+        if Self::has_nul(statement) {
+            return Err(EncodeError::NullByte);
+        }
         if params.len() > i16::MAX as usize {
             return Err(EncodeError::TooManyParameters(params.len()));
         }
 
         // Calculate content length upfront
-        let params_size: usize = params
-            .iter()
-            .map(|p| match p {
-                Param::Null => 4,
-                Param::Bytes(b) => 4 + b.len(),
-            })
-            .sum();
+        let params_size = params.iter().try_fold(0usize, |acc, p| {
+            let field_size = match p {
+                Param::Null => 4usize,
+                Param::Bytes(b) => 4usize
+                    .checked_add(b.len())
+                    .ok_or(EncodeError::MessageTooLarge(usize::MAX))?,
+            };
+            acc.checked_add(field_size)
+                .ok_or(EncodeError::MessageTooLarge(usize::MAX))
+        })?;
         let result_formats_size = Self::result_format_wire_len(result_format);
-        let content_len = 1 + statement.len() + 1 + 2 + 2 + params_size + result_formats_size;
+        let content_len = 1usize
+            .checked_add(statement.len())
+            .and_then(|v| v.checked_add(1))
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(params_size))
+            .and_then(|v| v.checked_add(result_formats_size))
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        let wire_len = Self::content_len_to_wire_len(content_len)?;
 
         // Single reserve - no more allocations
         buf.reserve(1 + 4 + content_len);
@@ -476,7 +500,7 @@ impl PgEncoder {
         buf.put_u8(b'B');
 
         // Length (includes itself) - DIRECT WRITE
-        Self::put_i32_be(buf, (content_len + 4) as i32);
+        Self::put_i32_be(buf, wire_len);
 
         // Portal name (empty, null-terminated)
         buf.put_u8(0);
@@ -489,17 +513,16 @@ impl PgEncoder {
         Self::put_i16_be(buf, 0);
 
         // Parameter count
-        Self::put_i16_be(buf, params.len() as i16);
+        let param_count = Self::usize_to_i16(params.len())?;
+        Self::put_i16_be(buf, param_count);
 
         // Parameters - ZERO COPY from borrowed slices
         for param in params {
             match param {
                 Param::Null => Self::put_i32_be(buf, -1),
                 Param::Bytes(data) => {
-                    if data.len() > i32::MAX as usize {
-                        return Err(EncodeError::MessageTooLarge(data.len()));
-                    }
-                    Self::put_i32_be(buf, data.len() as i32);
+                    let data_len = Self::usize_to_i32(data.len())?;
+                    Self::put_i32_be(buf, data_len);
                     buf.extend_from_slice(data);
                 }
             }
@@ -545,6 +568,9 @@ impl PgEncoder {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> Result<(), EncodeError> {
+        if Self::has_nul(statement) {
+            return Err(EncodeError::NullByte);
+        }
         if params.len() > i16::MAX as usize {
             return Err(EncodeError::TooManyParameters(params.len()));
         }
@@ -552,12 +578,23 @@ impl PgEncoder {
         // Calculate content length upfront
         // portal(1) + statement(len+1) + format_codes(2) + param_count(2)
         // + params_data + result_formats(2 or 4)
-        let params_size: usize = params
-            .iter()
-            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
-            .sum();
+        let params_size = params.iter().try_fold(0usize, |acc, p| {
+            let field_size = 4usize
+                .checked_add(p.as_ref().map_or(0usize, |v| v.len()))
+                .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+            acc.checked_add(field_size)
+                .ok_or(EncodeError::MessageTooLarge(usize::MAX))
+        })?;
         let result_formats_size = Self::result_format_wire_len(result_format);
-        let content_len = 1 + statement.len() + 1 + 2 + 2 + params_size + result_formats_size;
+        let content_len = 1usize
+            .checked_add(statement.len())
+            .and_then(|v| v.checked_add(1))
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(params_size))
+            .and_then(|v| v.checked_add(result_formats_size))
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        let wire_len = Self::content_len_to_wire_len(content_len)?;
 
         buf.reserve(1 + 4 + content_len);
 
@@ -565,7 +602,7 @@ impl PgEncoder {
         buf.put_u8(b'B');
 
         // Length (includes itself) - DIRECT WRITE
-        Self::put_i32_be(buf, (content_len + 4) as i32);
+        Self::put_i32_be(buf, wire_len);
 
         // Portal name (empty, null-terminated)
         buf.put_u8(0);
@@ -578,17 +615,16 @@ impl PgEncoder {
         Self::put_i16_be(buf, 0);
 
         // Parameter count
-        Self::put_i16_be(buf, params.len() as i16);
+        let param_count = Self::usize_to_i16(params.len())?;
+        Self::put_i16_be(buf, param_count);
 
         // Parameters
         for param in params {
             match param {
                 None => Self::put_i32_be(buf, -1),
                 Some(data) => {
-                    if data.len() > i32::MAX as usize {
-                        return Err(EncodeError::MessageTooLarge(data.len()));
-                    }
-                    Self::put_i32_be(buf, data.len() as i32);
+                    let data_len = Self::usize_to_i32(data.len())?;
+                    Self::put_i32_be(buf, data_len);
                     buf.extend_from_slice(data);
                 }
             }
@@ -621,7 +657,7 @@ mod tests {
     #[test]
     fn test_encode_query_string() {
         let sql = "SELECT 1";
-        let bytes = PgEncoder::encode_query_string(sql);
+        let bytes = PgEncoder::try_encode_query_string(sql).unwrap();
 
         // Message type
         assert_eq!(bytes[0], b'Q');
@@ -651,7 +687,7 @@ mod tests {
 
     #[test]
     fn test_encode_parse() {
-        let bytes = PgEncoder::encode_parse("", "SELECT $1", &[]);
+        let bytes = PgEncoder::try_encode_parse("", "SELECT $1", &[]).unwrap();
 
         // Message type 'P'
         assert_eq!(bytes[0], b'P');
@@ -690,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_encode_execute() {
-        let bytes = PgEncoder::encode_execute("", 0);
+        let bytes = PgEncoder::try_encode_execute("", 0).unwrap();
 
         // Message type 'E'
         assert_eq!(bytes[0], b'E');
@@ -698,6 +734,12 @@ mod tests {
         // Length: 4 + 1 (null) + 4 (max_rows) = 9
         let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
         assert_eq!(len, 9);
+    }
+
+    #[test]
+    fn test_encode_execute_negative_max_rows_returns_error() {
+        let err = PgEncoder::try_encode_execute("", -1).expect_err("must reject negative max_rows");
+        assert_eq!(err, EncodeError::InvalidMaxRows(-1));
     }
 
     #[test]
@@ -739,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_encode_copy_fail() {
-        let bytes = PgEncoder::encode_copy_fail("bad data");
+        let bytes = PgEncoder::try_encode_copy_fail("bad data").unwrap();
         assert_eq!(bytes[0], b'f');
         let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
         assert_eq!(len as usize, 4 + "bad data".len() + 1);
@@ -749,7 +791,7 @@ mod tests {
 
     #[test]
     fn test_encode_close_statement() {
-        let bytes = PgEncoder::encode_close(false, "my_stmt");
+        let bytes = PgEncoder::try_encode_close(false, "my_stmt").unwrap();
         assert_eq!(bytes[0], b'C');
         assert_eq!(bytes[5], b'S'); // Statement type
         assert_eq!(&bytes[6..13], b"my_stmt");
@@ -758,10 +800,18 @@ mod tests {
 
     #[test]
     fn test_encode_close_portal() {
-        let bytes = PgEncoder::encode_close(true, "");
+        let bytes = PgEncoder::try_encode_close(true, "").unwrap();
         assert_eq!(bytes[0], b'C');
         assert_eq!(bytes[5], b'P'); // Portal type
         assert_eq!(bytes[6], 0); // Empty name null terminator
+    }
+
+    #[test]
+    fn test_encode_parse_too_many_param_types_returns_error() {
+        let param_types = vec![0u32; (i16::MAX as usize) + 1];
+        let err =
+            PgEncoder::try_encode_parse("s", "SELECT 1", &param_types).expect_err("must reject");
+        assert_eq!(err, EncodeError::TooManyParameters(param_types.len()));
     }
 
     #[test]
@@ -785,5 +835,42 @@ mod tests {
         .unwrap();
 
         assert_eq!(&buf[11..15], &[0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn test_encode_query_string_with_nul_returns_empty() {
+        let err =
+            PgEncoder::try_encode_query_string("select 1\0select 2").expect_err("must reject NUL");
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
+    fn test_encode_parse_with_nul_returns_empty() {
+        let err = PgEncoder::try_encode_parse("s", "SELECT 1\0", &[]).expect_err("must reject");
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
+    fn test_encode_bind_with_nul_rejected() {
+        let err = PgEncoder::encode_bind_with_result_format("\0", "", &[], PgEncoder::FORMAT_TEXT)
+            .expect_err("bind with NUL portal must fail");
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
+    fn test_encode_extended_query_with_nul_rejected() {
+        let err = PgEncoder::encode_extended_query_with_result_format(
+            "SELECT 1\0UNION SELECT 2",
+            &[],
+            PgEncoder::FORMAT_TEXT,
+        )
+        .expect_err("extended query with NUL SQL must fail");
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
+    fn test_encode_copy_fail_with_nul_returns_empty() {
+        let err = PgEncoder::try_encode_copy_fail("bad\0data").expect_err("must reject");
+        assert_eq!(err, EncodeError::NullByte);
     }
 }

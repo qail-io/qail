@@ -222,6 +222,22 @@ impl ToPg for Uuid {
     }
 }
 
+#[cfg(feature = "uuid")]
+impl FromPg for uuid::Uuid {
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
+        let wrapped = Uuid::from_pg(bytes, oid_val, format)?;
+        uuid::Uuid::parse_str(&wrapped.0)
+            .map_err(|e| TypeError::InvalidData(format!("Invalid UUID: {}", e)))
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl ToPg for uuid::Uuid {
+    fn to_pg(&self) -> (Vec<u8>, u32, i16) {
+        (self.as_bytes().to_vec(), oid::UUID, 1)
+    }
+}
+
 // ==================== Network Types ====================
 
 fn from_utf8_string(bytes: &[u8]) -> Result<String, TypeError> {
@@ -535,6 +551,17 @@ mod tests {
         ];
         let result = Uuid::from_pg(&uuid_bytes, oid::UUID, 1).unwrap();
         assert_eq!(result.0, "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[cfg(feature = "uuid")]
+    #[test]
+    fn test_std_uuid_from_pg_binary() {
+        let uuid_bytes: [u8; 16] = [
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
+        let result = uuid::Uuid::from_pg(&uuid_bytes, oid::UUID, 1).unwrap();
+        assert_eq!(result.to_string(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
     #[test]

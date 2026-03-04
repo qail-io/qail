@@ -75,6 +75,58 @@ impl ToPg for Timestamp {
     }
 }
 
+#[cfg(feature = "chrono")]
+impl FromPg for chrono::DateTime<chrono::Utc> {
+    fn from_pg(bytes: &[u8], oid_val: u32, format: i16) -> Result<Self, TypeError> {
+        if oid_val != oid::TIMESTAMP && oid_val != oid::TIMESTAMPTZ {
+            return Err(TypeError::UnexpectedOid {
+                expected: "timestamp",
+                got: oid_val,
+            });
+        }
+
+        if format == 1 {
+            if bytes.len() != 8 {
+                return Err(TypeError::InvalidData(
+                    "Expected 8 bytes for timestamp".to_string(),
+                ));
+            }
+            let pg_usec = i64::from_be_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            let unix_usec = pg_usec.saturating_add(PG_EPOCH_OFFSET_USEC);
+            chrono::DateTime::<chrono::Utc>::from_timestamp_micros(unix_usec).ok_or_else(|| {
+                TypeError::InvalidData(format!("Timestamp out of range: {}", unix_usec))
+            })
+        } else {
+            let s =
+                std::str::from_utf8(bytes).map_err(|e| TypeError::InvalidData(e.to_string()))?;
+
+            if oid_val == oid::TIMESTAMPTZ {
+                chrono::DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z")
+                    .or_else(|_| chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%#z"))
+                    .or_else(|_| chrono::DateTime::parse_from_rfc3339(s))
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|e| TypeError::InvalidData(format!("Invalid timestamptz: {}", e)))
+            } else {
+                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f"))
+                    .map(|naive| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc))
+                    .map_err(|e| TypeError::InvalidData(format!("Invalid timestamp: {}", e)))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "chrono")]
+impl ToPg for chrono::DateTime<chrono::Utc> {
+    fn to_pg(&self) -> (Vec<u8>, u32, i16) {
+        let unix_usec = self.timestamp_micros();
+        let pg_usec = unix_usec.saturating_sub(PG_EPOCH_OFFSET_USEC);
+        (pg_usec.to_be_bytes().to_vec(), oid::TIMESTAMPTZ, 1)
+    }
+}
+
 /// Parse PostgreSQL text timestamp format
 fn parse_timestamp_text(s: &str) -> Result<Timestamp, TypeError> {
     // Format: "2024-12-25 17:30:00" or "2024-12-25 17:30:00.123456"
@@ -324,6 +376,8 @@ fn parse_time_text(s: &str) -> Result<Time, TypeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "chrono")]
+    use chrono::{Datelike, Timelike};
 
     #[test]
     fn test_timestamp_unix_conversion() {
@@ -369,5 +423,42 @@ mod tests {
         assert_eq!(time.hour(), 14);
         assert_eq!(time.minute(), 30);
         assert_eq!(time.second(), 0);
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn test_chrono_datetime_from_pg_binary() {
+        // PostgreSQL binary timestamp at Unix epoch.
+        let pg_usec = -PG_EPOCH_OFFSET_USEC;
+        let bytes = pg_usec.to_be_bytes();
+        let dt = chrono::DateTime::<chrono::Utc>::from_pg(&bytes, oid::TIMESTAMPTZ, 1).unwrap();
+        assert_eq!(dt.timestamp(), 0);
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn test_chrono_datetime_from_pg_text_timestamptz() {
+        let dt = chrono::DateTime::<chrono::Utc>::from_pg(
+            b"2024-12-25 17:30:00+00",
+            oid::TIMESTAMPTZ,
+            0,
+        )
+        .unwrap();
+        assert_eq!(dt.year(), 2024);
+        assert_eq!(dt.month(), 12);
+        assert_eq!(dt.day(), 25);
+        assert_eq!(dt.hour(), 17);
+        assert_eq!(dt.minute(), 30);
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn test_chrono_datetime_to_pg_binary() {
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(1_704_067_200, 123_456_000)
+            .unwrap();
+        let (bytes, oid_val, format) = dt.to_pg();
+        assert_eq!(oid_val, oid::TIMESTAMPTZ);
+        assert_eq!(format, 1);
+        assert_eq!(bytes.len(), 8);
     }
 }

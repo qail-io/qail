@@ -373,6 +373,20 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_cmd_rejects_raw_sql_with_nul() {
+        let cmd = Qail::raw_sql("SELECT 1\0; SELECT 2");
+        let err = AstEncoder::encode_cmd(&cmd).expect_err("NUL in SQL must be rejected");
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
+    fn test_encode_batch_simple_rejects_raw_sql_with_nul() {
+        let cmd = Qail::raw_sql("SELECT 1\0; SELECT 2");
+        let err = AstEncoder::encode_batch_simple(&[cmd]).expect_err("NUL in SQL must be rejected");
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
     fn test_encode_select_with_filter() {
         use qail_core::ast::Operator;
 
