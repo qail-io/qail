@@ -21,7 +21,7 @@ These aren't edge cases. They're the *default* outcome of string-based SQL.
 
 ## The Fix
 
-Qail is a **native AST PostgreSQL driver**. Instead of passing SQL strings, you work with a typed Abstract Syntax Tree that compiles directly to PostgreSQL wire protocol bytes.
+Qail is a **native AST PostgreSQL pipeline**. Instead of passing SQL strings, you work with a typed Abstract Syntax Tree that compiles directly to PostgreSQL wire protocol bytes.
 
 ```rust
 // String-based (every other driver): parse → plan → execute
@@ -31,7 +31,12 @@ sqlx::query!("SELECT id, email FROM users WHERE active = $1", true)
 Qail::get("users").columns(["id", "email"]).eq("active", true)
 ```
 
-**N+1 is structurally impossible.** The AST guides you to `.join()` — there's no "lazy loading" to accidentally trigger. Security is compiled in, not bolted on.
+**N+1 is structurally discouraged by design and enforced by build-time detection.** The AST guides you to `.join()` (no implicit lazy-loading path), and validator/lint rules catch looped query patterns before production.
+
+### Best Fit / Not Fit
+
+- **Best fit:** PostgreSQL-first SaaS backends that want strong tenant isolation, AST safety, and high-throughput query execution.
+- **Not fit:** teams that need GraphQL-first ecosystems, cross-database federation, or SQL-string-centric workflows.
 
 ---
 
@@ -47,9 +52,9 @@ We ran the same complex query — 3×LEFT JOIN across 4 tables, filtered, sorted
 | 4 | GraphQL naive | 18.2ms | 151 | **40×** |
 | 5 | REST naive | 22.5ms | 151 | **50×** |
 
-> **The headline isn't 0.4ms vs 0.6ms.** It's that 90% of developers ship Approach 4 or 5 — the one that's **40-50× slower** — because their tools let them.
+> **The headline isn't 0.4ms vs 0.6ms.** It's that many teams ship Approach 4 or 5 — the one that's **40-50× slower** — because their tools allow N+1 by default.
 >
-> Qail makes it impossible to write the slow version. The AST naturally guides you to `.join()`. That's the product.
+> Qail makes the slow version hard to write and easy to catch in CI. The AST guides you to `.join()`, and N+1 detection closes the gap.
 
 <details>
 <summary><strong>Methodology notes (click to expand)</strong></summary>
@@ -59,6 +64,7 @@ We ran the same complex query — 3×LEFT JOIN across 4 tables, filtered, sorted
 - **DataLoader:** Realistically batches N lookups into `WHERE id IN (...)` queries — the standard GraphQL optimization.
 - **REST + expand:** Server-side JOIN (same query as Qail) + JSON serialization overhead. The 1.4× gap is pure JSON ser/de cost.
 - **Network latency:** Local benchmark = 0ms latency. In production (app → RDS), each extra round trip adds 1-2ms. The gap between Qail (1 trip) and DataLoader (3 trips) widens significantly.
+- **Benchmark context:** These are snapshot numbers from Feb 2026. Absolute latency varies by hardware/Postgres config; relative N+1 vs single-query behavior is the key signal.
 - Run it yourself: `DATABASE_URL=... cargo run --example battle_comparison --features chrono,uuid --release`
 
 </details>
@@ -98,7 +104,7 @@ cargo install qail
 qail init --name myapp --mode postgres --url postgres://localhost/mydb
 qail exec "get users'id'email[active=true]" --url postgres://localhost/mydb
 qail pull postgres://localhost/mydb              # Introspect → schema.qail
-qail diff _ schema.qail --live --url pg://...    # Drift detection
+qail diff _ schema.qail --live --url postgres://...    # Drift detection
 qail migrate up v1:v2 postgres://...             # Apply migrations
 qail types schema.qail > src/generated/schema.rs # Typed codegen
 ```
@@ -111,7 +117,7 @@ qail types schema.qail > src/generated/schema.rs # Typed codegen
 
 | Threat | String SQL | Qail |
 |--------|-----------|------|
-| SQL injection | Possible (one mistake) | **Impossible** (binary AST, no strings) |
+| SQL injection | Possible (one mistake) | **Prevented on AST path** (binary AST, no string interpolation) |
 | Tenant data leak | Missing WHERE clause | **RLS injected automatically** |
 | Query abuse | Unbounded depth/joins | **AST validates at compile time** |
 | IDOR | Must check per endpoint | **Tenant isolation built into protocol** |
@@ -273,7 +279,7 @@ let users = conn.fetch_all(
 
 ---
 
-## Feature Status (v0.20.4)
+## Feature Status (March 2026)
 
 | Category | Features |
 |----------|----------|
