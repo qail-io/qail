@@ -32,8 +32,9 @@ pub fn build_cte(cmd: &Qail, dialect: Dialect) -> String {
 
     sql.push_str(&cte_parts.join(", "));
 
-    // SAFETY: Early return on line 16 guarantees ctes is non-empty here.
-    let final_table = &cmd.ctes.last().unwrap().name;
+    let Some(final_table) = cmd.ctes.last().map(|cte| &cte.name) else {
+        return build_select(cmd, dialect);
+    };
 
     sql.push_str(" SELECT * FROM ");
     sql.push_str(&generator.quote_identifier(final_table));

@@ -112,7 +112,21 @@ pub fn resolve_schema_source(path: impl AsRef<Path>) -> Result<ResolvedSchemaSou
 
     if root.is_dir() {
         let mut discovered_files = Vec::new();
-        collect_qail_files(&root, &mut discovered_files)?;
+        let root_canonical = root.canonicalize().map_err(|e| {
+            format!(
+                "Failed to canonicalize schema root '{}': {}",
+                root.display(),
+                e
+            )
+        })?;
+        let mut visited_dirs = HashSet::new();
+        visited_dirs.insert(root_canonical.clone());
+        collect_qail_files(
+            &root,
+            &root_canonical,
+            &mut visited_dirs,
+            &mut discovered_files,
+        )?;
         sort_paths_by_relative_path(&root, &mut discovered_files);
 
         if discovered_files.is_empty() {
@@ -163,7 +177,12 @@ fn resolve_root_path(requested: &Path) -> Result<PathBuf, String> {
     ))
 }
 
-fn collect_qail_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_qail_files(
+    dir: &Path,
+    root_canonical: &Path,
+    visited_dirs: &mut HashSet<PathBuf>,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
     let entries = fs::read_dir(dir)
         .map_err(|e| format!("Failed to read schema directory '{}': {}", dir.display(), e))?;
 
@@ -176,6 +195,13 @@ fn collect_qail_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> 
             )
         })?;
         let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| {
+            format!(
+                "Failed to read file type in schema directory '{}': {}",
+                dir.display(),
+                e
+            )
+        })?;
 
         let hidden = path
             .file_name()
@@ -185,14 +211,37 @@ fn collect_qail_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> 
             continue;
         }
 
-        if path.is_dir() {
-            collect_qail_files(&path, out)?;
+        if file_type.is_dir() {
+            let canonical = path.canonicalize().map_err(|e| {
+                format!(
+                    "Failed to canonicalize schema directory '{}': {}",
+                    path.display(),
+                    e
+                )
+            })?;
+            if !canonical.starts_with(root_canonical) {
+                continue;
+            }
+            if !visited_dirs.insert(canonical) {
+                continue;
+            }
+            collect_qail_files(&path, root_canonical, visited_dirs, out)?;
         } else if path
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("qail"))
             && path.file_name() != Some(OsStr::new(MODULE_ORDER_FILE))
         {
+            let canonical = path.canonicalize().map_err(|e| {
+                format!(
+                    "Failed to canonicalize schema module '{}': {}",
+                    path.display(),
+                    e
+                )
+            })?;
+            if !canonical.starts_with(root_canonical) {
+                continue;
+            }
             out.push(path);
         }
     }
@@ -302,7 +351,14 @@ fn apply_module_order(root: &Path, all_files: Vec<PathBuf>) -> Result<Vec<PathBu
 
         if canonical.is_dir() {
             let mut nested = Vec::new();
-            collect_qail_files(&canonical, &mut nested)?;
+            let mut nested_visited = HashSet::new();
+            nested_visited.insert(canonical.clone());
+            collect_qail_files(
+                &requested,
+                &root_canonical,
+                &mut nested_visited,
+                &mut nested,
+            )?;
             sort_paths_by_relative_path(root, &mut nested);
 
             if nested.is_empty() {
@@ -692,6 +748,57 @@ mod tests {
         let err = resolve_schema_source(root.join("schema.qail")).expect_err("should error");
         assert!(err.contains("strict manifest enabled"));
         assert!(err.contains("billing.qail"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_ignores_symlinked_outside_modules() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp_dir("symlink_outside");
+        let schema_dir = root.join("schema");
+        let outside_dir = root.join("outside");
+        fs::create_dir_all(&schema_dir).expect("mkdir schema");
+        fs::create_dir_all(&outside_dir).expect("mkdir outside");
+        fs::write(
+            schema_dir.join("users.qail"),
+            "table users {\n  id uuid primary_key\n}\n",
+        )
+        .expect("write users");
+        fs::write(
+            outside_dir.join("leak.qail"),
+            "table leaked {\n  id uuid primary_key\n}\n",
+        )
+        .expect("write leak");
+        symlink(&outside_dir, schema_dir.join("ext")).expect("symlink outside");
+
+        let resolved = resolve_schema_source(root.join("schema.qail")).expect("resolved");
+        assert_eq!(resolved.files.len(), 1);
+        assert!(resolved.files[0].ends_with("users.qail"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_ignores_symlink_directory_loops() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp_dir("symlink_loop");
+        let schema_dir = root.join("schema");
+        fs::create_dir_all(&schema_dir).expect("mkdir schema");
+        fs::write(
+            schema_dir.join("users.qail"),
+            "table users {\n  id uuid primary_key\n}\n",
+        )
+        .expect("write users");
+        symlink(&schema_dir, schema_dir.join("loop")).expect("symlink loop");
+
+        let resolved = resolve_schema_source(root.join("schema.qail")).expect("resolved");
+        assert_eq!(resolved.files.len(), 1);
+        assert!(resolved.files[0].ends_with("users.qail"));
 
         let _ = fs::remove_dir_all(root);
     }

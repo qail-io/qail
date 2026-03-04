@@ -1,6 +1,6 @@
 [package]
 name = "qail-core"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 description = "AST-native query builder - type-safe expressions, zero SQL strings"
 license = "Apache-2.0"
@@ -11,7 +11,8 @@ keywords = ["qail", "sql", "parser"]
 
 [features]
 default = []
-analyzer = ["dep:sqlparser", "dep:syn", "dep:proc-macro2", "dep:quote", "dep:regex"]
+syn-scanner = ["dep:syn", "dep:proc-macro2"]
+analyzer = ["syn-scanner", "dep:sqlparser", "dep:quote", "dep:regex"]
 # Internal-only: enables examples that depend on external crates (qail-pg, bytes).
 # Never used in normal builds — only for manual `cargo run --example`.
 _pg_examples = []
@@ -24,7 +25,7 @@ thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "js"] }
 strsim = "0.11"
-toml = "0.8"
+toml = "1.0"
 
 # Analyzer-only: SQL-to-QAIL refactoring tool
 syn = { version = "2", features = ["full", "visit", "parsing"], optional = true }

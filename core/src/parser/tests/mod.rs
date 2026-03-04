@@ -2,6 +2,7 @@ mod advanced;
 mod cte;
 mod ddl;
 mod dml;
+mod export;
 mod get;
 mod index;
 mod joins;

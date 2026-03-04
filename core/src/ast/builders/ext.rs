@@ -4,6 +4,24 @@
 use super::json::JsonBuilder;
 use crate::ast::Expr;
 
+const INVALID_JSON_SOURCE_IDENT: &str = "__qail_invalid_json_source__";
+
+fn json_source_or_invalid(expr: Expr, method: &str) -> String {
+    match expr {
+        Expr::Named(name) => name,
+        Expr::Aliased { name, .. } => name,
+        Expr::JsonAccess { column, .. } => column,
+        other => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "QAIL: {}() expects a column-like expression, got {:?}; using fallback identifier {}",
+                method, other, INVALID_JSON_SOURCE_IDENT
+            );
+            INVALID_JSON_SOURCE_IDENT.to_string()
+        }
+    }
+}
+
 /// Extension trait to add fluent methods to Expr
 pub trait ExprExt {
     /// Add an alias to this expression.
@@ -149,10 +167,7 @@ impl ExprExt for Expr {
     }
 
     fn json(self, key: &str) -> JsonBuilder {
-        let column = match self {
-            Expr::Named(name) => name,
-            _ => panic!("json() can only be called on column references"),
-        };
+        let column = json_source_or_invalid(self, "json");
         JsonBuilder {
             column,
             path_segments: vec![(key.to_string(), true)], // true = text extraction (->>)
@@ -161,10 +176,7 @@ impl ExprExt for Expr {
     }
 
     fn path(self, dotted_path: &str) -> JsonBuilder {
-        let column = match self {
-            Expr::Named(name) => name,
-            _ => panic!("path() can only be called on column references"),
-        };
+        let column = json_source_or_invalid(self, "path");
 
         let segments: Vec<&str> = dotted_path.split('.').collect();
         let len = segments.len();

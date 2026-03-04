@@ -386,6 +386,34 @@ table comments {
         let query = Qail::get("users").join_on_optional("nonexistent");
         assert!(query.joins.is_empty());
     }
+
+    #[test]
+    fn test_join_on_returns_self_when_no_relation() {
+        use crate::Qail;
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
+            *reg = RelationRegistry::new();
+        }
+
+        let query = Qail::get("users").join_on("nonexistent");
+        assert!(query.joins.is_empty());
+    }
+
+    #[test]
+    fn test_try_join_on_returns_error_when_no_relation() {
+        use crate::Qail;
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
+            *reg = RelationRegistry::new();
+        }
+
+        let err = Qail::get("users")
+            .try_join_on("nonexistent")
+            .expect_err("expected missing relation error");
+        assert!(err.contains("No relation found"));
+    }
 }
 
 use std::collections::HashMap;

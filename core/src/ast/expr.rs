@@ -340,8 +340,8 @@ impl std::fmt::Display for Expr {
                         write!(f, ", Frame={:?}", fr)?; // Debug format for now
                     }
                     write!(f, "}}")?;
-                } else if frame.is_some() {
-                    write!(f, "{{Frame={:?}}}", frame.as_ref().unwrap())?;
+                } else if let Some(fr) = frame {
+                    write!(f, "{{Frame={:?}}}", fr)?;
                 }
 
                 // Print order cages

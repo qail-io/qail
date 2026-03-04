@@ -386,9 +386,10 @@ impl Qail {
     /// Qail::get("users").join_on("posts")
     /// ```
     ///
-    /// # Panics
-    /// Panics if no relation is found between the current table and the target.
-    /// Load relations first using `schema::load_schema_relations()`.
+    /// If no relation is found, this returns `self` unchanged.
+    ///
+    /// Use [`Qail::try_join_on`] when you need a strict error on missing
+    /// relation metadata.
     pub fn join_on(self, related_table: impl AsRef<str>) -> Self {
         let related = related_table.as_ref();
 
@@ -403,11 +404,33 @@ impl Qail {
             return self.left_join(related, &to_col, &from_col);
         }
 
-        panic!(
-            "No relation found between '{}' and '{}'. \
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "QAIL: join_on skipped — no relation found between '{}' and '{}'. \
              Define a ref: in schema.qail or use load_schema_relations() first.",
             self.table, related
         );
+        self
+    }
+
+    /// Strict relation join that returns an error when no relation is found.
+    pub fn try_join_on(self, related_table: impl AsRef<str>) -> Result<Self, String> {
+        let related = related_table.as_ref();
+
+        // Try: current table -> related (forward relation)
+        if let Some((from_col, to_col)) = crate::schema::lookup_relation(&self.table, related) {
+            return Ok(self.left_join(related, &from_col, &to_col));
+        }
+
+        // Try: related -> current table (reverse relation)
+        if let Some((from_col, to_col)) = crate::schema::lookup_relation(related, &self.table) {
+            return Ok(self.left_join(related, &to_col, &from_col));
+        }
+
+        Err(format!(
+            "No relation found between '{}' and '{}'. Define a ref: in schema.qail or use load_schema_relations() first.",
+            self.table, related
+        ))
     }
 
     /// Join a related table if relation exists, otherwise no-op.
