@@ -2,7 +2,12 @@
 //!
 //! Text, binary, fast, and batch query endpoints.
 
-use axum::{body::Bytes, extract::State, http::HeaderMap, response::Json};
+use axum::{
+    body::{Body, Bytes},
+    extract::State,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{Json, Response},
+};
 use std::sync::Arc;
 
 use super::convert::{row_to_array, row_to_json};
@@ -15,7 +20,7 @@ use crate::middleware::ApiError;
 use qail_core::ast::Action;
 
 /// SECURITY (P0-2): Reject dangerous procedural/session actions on public query endpoints.
-fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), ApiError> {
+pub(crate) fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), ApiError> {
     match cmd.action {
         Action::Call
         | Action::Do
@@ -99,6 +104,119 @@ pub async fn execute_query(
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
     execute_qail_cmd(&state, &auth, &cmd).await
+}
+
+/// Execute a streaming export query (POST /qail/export).
+///
+/// Accepts QAIL text that must compile to `Action::Export` and streams raw
+/// COPY TO STDOUT chunks to the HTTP response body.
+pub async fn execute_query_export(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, ApiError> {
+    let query_text = body.trim();
+    if query_text.is_empty() {
+        return Err(ApiError::bad_request("EMPTY_QUERY", "Empty query"));
+    }
+
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
+
+    let mut cmd = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        query_text.hash(&mut h);
+        let key = h.finish();
+
+        if let Some(cached) = state.parse_cache.get(&key) {
+            cached
+        } else {
+            match qail_core::parser::parse(query_text) {
+                Ok(cmd) => {
+                    state.parse_cache.insert(key, cmd.clone());
+                    cmd
+                }
+                Err(e) => {
+                    tracing::warn!("Parse error: {}", e);
+                    return Err(ApiError::parse_error(format!("Parse error: {}", e)));
+                }
+            }
+        }
+    };
+
+    if cmd.action != Action::Export {
+        return Err(ApiError::bad_request(
+            "EXPORT_ONLY",
+            "Endpoint /qail/export only accepts QAIL export commands",
+        ));
+    }
+
+    // Reuse the same public endpoint action deny-list for consistency.
+    reject_dangerous_action(&cmd)?;
+
+    if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
+        tracing::warn!("Export query rejected by allow-list: {}", query_text);
+        return Err(ApiError::with_code(
+            "QUERY_NOT_ALLOWED",
+            "Query not in allow-list",
+        ));
+    }
+
+    if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
+        tracing::warn!("Policy error: {}", e);
+        return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
+    }
+
+    let (depth, filters, joins) = query_complexity(&cmd);
+    if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
+        crate::metrics::record_complexity_rejected();
+        return Err(api_err);
+    }
+
+    let mut conn = state
+        .acquire_with_auth_rls_guarded(&auth, Some(&cmd.table))
+        .await?;
+    let cmd_for_stream = cmd.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+
+    tokio::spawn(async move {
+        let tx_for_chunks = tx.clone();
+        let result = conn
+            .copy_export_stream_raw(&cmd_for_stream, move |chunk| {
+                let tx = tx_for_chunks.clone();
+                async move {
+                    tx.send(Ok(Bytes::from(chunk))).await.map_err(|_| {
+                        qail_pg::PgError::Query(
+                            "export stream receiver dropped before completion".to_string(),
+                        )
+                    })
+                }
+            })
+            .await;
+
+        if let Err(e) = result {
+            let _ = tx
+                .send(Err(std::io::Error::other(format!(
+                    "export stream failed: {}",
+                    e
+                ))))
+                .await;
+        }
+        conn.release().await;
+    });
+
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+
+    let mut response = Response::new(Body::from_stream(stream));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    Ok(response)
 }
 
 /// Execute a QAIL query (BINARY format)
@@ -284,14 +402,8 @@ async fn execute_qail_cmd_fast(
     }
 
     let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
+        .acquire_with_auth_rls_guarded(auth, Some(&cmd.table))
+        .await?;
 
     let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
     let rows = conn
@@ -397,10 +509,8 @@ async fn execute_qail_cmd(
 
     // Acquire raw connection (no RLS setup yet — pipelined below)
     let mut conn = state
-        .pool
-        .acquire_raw()
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
+        .acquire_raw_with_auth_guarded(auth, Some(&cmd.table))
+        .await?;
 
     // Generate RLS SQL for pipelining (BEGIN + SET LOCAL + set_config)
     let rls_sql = qail_pg::rls_sql_with_timeouts(
@@ -505,23 +615,23 @@ pub async fn execute_batch(
     let mut success_count = 0;
 
     // Acquire RLS-scoped connection with statement timeout
-    let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, None))?;
+    let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
 
     // Start transaction if requested (default: true)
-    if request.transaction
-        && let Err(e) = conn.get_mut().execute_simple("BEGIN;").await
-    {
-        tracing::error!("Transaction start failed: {}", e);
-        conn.release().await;
-        return Err(ApiError::with_code("TXN_ERROR", "Transaction start failed"));
+    if request.transaction {
+        match conn.get_mut() {
+            Ok(pg_conn) => {
+                if let Err(e) = pg_conn.execute_simple("BEGIN;").await {
+                    tracing::error!("Transaction start failed: {}", e);
+                    conn.release().await;
+                    return Err(ApiError::with_code("TXN_ERROR", "Transaction start failed"));
+                }
+            }
+            Err(e) => {
+                conn.release().await;
+                return Err(ApiError::from_pg_driver_error(&e, None));
+            }
+        }
     }
 
     let mut had_error = false;
@@ -664,6 +774,7 @@ pub async fn execute_batch(
                 success_count += 1;
             }
             Err(e) => {
+                timer.finish(false);
                 tracing::error!("Batch query [{}] error: {}", index, e);
                 results.push(BatchQueryResult {
                     index,
@@ -676,6 +787,24 @@ pub async fn execute_batch(
                     had_error = true;
                     break;
                 }
+                // Non-transactional batch: the failed query put PG into
+                // aborted-transaction state (because acquire_with_rls uses BEGIN).
+                // Reset the connection so subsequent batch queries can execute.
+                if let Ok(pg_conn) = conn.get_mut() {
+                    let rls_sql = qail_pg::rls_sql_with_timeouts(
+                        &auth.to_rls_context(),
+                        state.config.statement_timeout_ms,
+                        state.config.lock_timeout_ms,
+                    );
+                    let reset_sql = format!("ROLLBACK; {}", rls_sql);
+                    if let Err(re) = pg_conn.execute_simple(&reset_sql).await {
+                        tracing::warn!(
+                            "Batch non-txn reset failed after query error: {}; \
+                             remaining queries will fail",
+                            re
+                        );
+                    }
+                }
             }
         }
     }
@@ -683,15 +812,27 @@ pub async fn execute_batch(
     // Transaction finalization
     if request.transaction {
         if had_error {
-            let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
+            if let Ok(pg_conn) = conn.get_mut() {
+                let _ = pg_conn.execute_simple("ROLLBACK;").await;
+            }
             tracing::warn!("Batch transaction rolled back due to error");
-        } else if let Err(e) = conn.get_mut().execute_simple("COMMIT;").await {
-            tracing::error!("Transaction commit failed: {}", e);
-            conn.release().await;
-            return Err(ApiError::with_code(
-                "TXN_ERROR",
-                "Transaction commit failed",
-            ));
+        } else {
+            match conn.get_mut() {
+                Ok(pg_conn) => {
+                    if let Err(e) = pg_conn.execute_simple("COMMIT;").await {
+                        tracing::error!("Transaction commit failed: {}", e);
+                        conn.release().await;
+                        return Err(ApiError::with_code(
+                            "TXN_ERROR",
+                            "Transaction commit failed",
+                        ));
+                    }
+                }
+                Err(e) => {
+                    conn.release().await;
+                    return Err(ApiError::from_pg_driver_error(&e, None));
+                }
+            }
         }
     }
 
@@ -787,8 +928,121 @@ pub(crate) fn is_query_allowed(
 
 #[cfg(test)]
 mod tests {
-    use super::{exact_cache_key, is_query_allowed};
-    use crate::middleware::QueryAllowList;
+    use super::{exact_cache_key, execute_query_export, is_query_allowed};
+    use crate::GatewayState;
+    use crate::cache::QueryCache;
+    use crate::concurrency::TenantSemaphore;
+    use crate::config::GatewayConfig;
+    use crate::event::EventTriggerEngine;
+    use crate::middleware::{QueryAllowList, QueryComplexityGuard, RateLimiter};
+    use crate::policy::PolicyEngine;
+    use crate::schema::SchemaRegistry;
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use jsonwebtoken::Algorithm;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use qail_pg::{PgPool, PoolConfig};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::RwLock;
+    use tower::util::ServiceExt;
+
+    async fn build_test_state(
+        config: GatewayConfig,
+        allow_list: QueryAllowList,
+    ) -> Arc<GatewayState> {
+        let pool = PgPool::connect(
+            PoolConfig::new_dev("127.0.0.1", 5432, "qail", "qail")
+                .min_connections(0)
+                .max_connections(1)
+                .connect_timeout(Duration::from_millis(25))
+                .acquire_timeout(Duration::from_millis(25)),
+        )
+        .await
+        .expect("pool should initialize lazily with min_connections=0");
+
+        let explain_config = config.explain_config();
+        let explain_cache = qail_pg::explain::ExplainCache::new(explain_config.cache_ttl);
+        let tenant_semaphore = Arc::new(TenantSemaphore::with_limits(
+            config.max_concurrent_queries,
+            config.max_tenants,
+            Duration::from_secs(config.tenant_idle_timeout_secs),
+        ));
+        let db_backpressure = Arc::new(crate::db_backpressure::DbBackpressure::new(
+            config.db_max_waiters_global,
+            config.db_max_waiters_per_tenant,
+            config.max_tenants,
+        ));
+        let prometheus_handle = {
+            let recorder = PrometheusBuilder::new().build_recorder();
+            Arc::new(recorder.handle())
+        };
+        let txn_max = if config.txn_max_sessions > 0 {
+            config.txn_max_sessions
+        } else {
+            std::cmp::max(pool.max_connections() / 2, 2)
+        };
+
+        Arc::new(GatewayState {
+            pool,
+            policy_engine: PolicyEngine::new(),
+            event_engine: EventTriggerEngine::new(),
+            schema: SchemaRegistry::new(),
+            cache: QueryCache::new(config.cache_config()),
+            config: config.clone(),
+            rate_limiter: RateLimiter::new(config.rate_limit_rate, config.rate_limit_burst),
+            tenant_rate_limiter: RateLimiter::new(
+                config.tenant_rate_limit_rate,
+                config.tenant_rate_limit_burst,
+            ),
+            explain_cache,
+            explain_config,
+            tenant_semaphore,
+            db_backpressure,
+            user_operator_map: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "qdrant")]
+            qdrant_pool: None,
+            prometheus_handle,
+            complexity_guard: QueryComplexityGuard::new(
+                config.max_query_depth,
+                config.max_query_filters,
+                config.max_query_joins,
+            ),
+            allow_list,
+            rpc_allow_list: None,
+            rpc_signature_cache: moka::sync::Cache::builder()
+                .max_capacity(64)
+                .time_to_live(Duration::from_secs(60))
+                .build(),
+            parse_cache: moka::sync::Cache::builder()
+                .max_capacity(64)
+                .time_to_live(Duration::from_secs(60))
+                .build(),
+            idempotency_store: crate::idempotency::IdempotencyStore::production(),
+            jwks_store: None,
+            jwt_allowed_algorithms: Vec::<Algorithm>::new(),
+            blocked_tables: HashSet::new(),
+            allowed_tables: HashSet::new(),
+            transaction_manager: Arc::new(crate::transaction::TransactionSessionManager::new(
+                txn_max,
+                config.txn_session_timeout_secs,
+                config.txn_max_lifetime_secs,
+                config.txn_max_statements_per_session,
+            )),
+        })
+    }
+
+    fn parse_error_code(bytes: &[u8]) -> String {
+        let value: serde_json::Value = serde_json::from_slice(bytes).expect("valid JSON error");
+        value
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .expect("error code")
+            .to_string()
+    }
 
     #[test]
     fn cache_key_includes_filter_values() {
@@ -850,5 +1104,97 @@ mod tests {
         assert_eq!(depth, 0);
         assert_eq!(filters, 2);
         assert_eq!(joins, 1);
+    }
+
+    #[tokio::test]
+    async fn export_handler_rejects_empty_query() {
+        let _serial = crate::metrics::txn_test_serial_guard().await;
+        let mut config = GatewayConfig::default();
+        config.production_strict = false;
+
+        let state = build_test_state(config, QueryAllowList::new()).await;
+        let app = Router::new()
+            .route("/qail/export", post(execute_query_export))
+            .with_state(Arc::clone(&state));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/qail/export")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("   "))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should execute");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        assert_eq!(parse_error_code(&body), "EMPTY_QUERY");
+    }
+
+    #[tokio::test]
+    async fn export_handler_rejects_non_export_query() {
+        let _serial = crate::metrics::txn_test_serial_guard().await;
+        let mut config = GatewayConfig::default();
+        config.production_strict = false;
+
+        let state = build_test_state(config, QueryAllowList::new()).await;
+        let app = Router::new()
+            .route("/qail/export", post(execute_query_export))
+            .with_state(Arc::clone(&state));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/qail/export")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("get users"))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should execute");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        assert_eq!(parse_error_code(&body), "EXPORT_ONLY");
+    }
+
+    #[tokio::test]
+    async fn export_handler_enforces_allow_list_before_db_acquire() {
+        let _serial = crate::metrics::txn_test_serial_guard().await;
+        let mut config = GatewayConfig::default();
+        config.production_strict = false;
+        let mut allow_list = QueryAllowList::new();
+        allow_list.enable();
+
+        let state = build_test_state(config, allow_list).await;
+        let app = Router::new()
+            .route("/qail/export", post(execute_query_export))
+            .with_state(Arc::clone(&state));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/qail/export")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("export users fields id"))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should execute");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        assert_eq!(parse_error_code(&body), "QUERY_NOT_ALLOWED");
     }
 }

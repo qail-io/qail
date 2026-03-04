@@ -40,15 +40,30 @@ pub(crate) async fn apply_branch_overlay(
     pk_column: &str,
 ) {
     let sql = qail_pg::driver::branch_sql::read_overlay_sql(branch_name, table_name);
-    let overlay_rows = match conn.get_mut().simple_query(&sql).await {
-        Ok(rows) => rows,
-        Err(_) => return, // Overlay tables might not exist yet
+    let overlay_rows = match conn.get_mut() {
+        Ok(pg_conn) => match pg_conn.simple_query(&sql).await {
+            Ok(rows) => rows,
+            Err(_) => return, // Overlay tables might not exist yet
+        },
+        Err(_) => return,
     };
 
     for row in &overlay_rows {
-        let row_pk = row.get_string(0).unwrap_or_default();
-        let operation = row.get_string(1).unwrap_or_default();
-        let row_data_str = row.get_string(2).unwrap_or_default();
+        let row_pk = row
+            .try_get_by_name::<String>("row_pk")
+            .ok()
+            .or_else(|| row.get_string(0))
+            .unwrap_or_default();
+        let operation = row
+            .try_get_by_name::<String>("operation")
+            .ok()
+            .or_else(|| row.get_string(1))
+            .unwrap_or_default();
+        let row_data_str = row
+            .try_get_by_name::<String>("row_data")
+            .ok()
+            .or_else(|| row.get_string(2))
+            .unwrap_or_default();
 
         match operation.as_str() {
             "insert" => {
@@ -116,6 +131,7 @@ pub(crate) async fn redirect_to_overlay(
     let safe_data = qail_pg::driver::branch_sql::escape_literal(&data_str);
     let full_sql = sql.replace("$1", &format!("{}::jsonb", safe_data));
     conn.get_mut()
+        .map_err(|e| ApiError::internal(format!("Branch overlay write failed: {}", e)))?
         .execute_simple(&full_sql)
         .await
         .map_err(|e| ApiError::internal(format!("Branch overlay write failed: {}", e)))?;
@@ -166,44 +182,41 @@ pub(crate) async fn branch_create_handler(
 
     let parent = body.get("parent").and_then(|v| v.as_str());
 
-    let mut conn = match state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-    {
+    let mut conn = match state.acquire_with_auth_rls_guarded(&auth, None).await {
         Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Branch pool acquire error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Database connection unavailable"})),
-            )
-                .into_response();
-        }
+        Err(e) => return e.into_response(),
     };
 
     // Auto-bootstrap: create internal tables if they don't exist
     let ddl = qail_pg::driver::branch_sql::create_branch_tables_sql();
-    if let Err(e) = conn.get_mut().execute_simple(ddl).await {
+    if let Ok(pg_conn) = conn.get_mut()
+        && let Err(e) = pg_conn.execute_simple(ddl).await
+    {
         tracing::warn!("Branch DDL bootstrap (may already exist): {}", e);
     }
 
     let sql = qail_pg::driver::branch_sql::create_branch_sql(name, parent);
-    let result = match conn.get_mut().execute_simple(&sql).await {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(json!({"branch": name, "status": "created"})),
-        )
-            .into_response(),
+    let result = match conn.get_mut() {
+        Ok(pg_conn) => match pg_conn.execute_simple(&sql).await {
+            Ok(_) => (
+                StatusCode::CREATED,
+                Json(json!({"branch": name, "status": "created"})),
+            )
+                .into_response(),
+            Err(e) => {
+                tracing::error!("Failed to create branch '{}': {}", name, e);
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "Failed to create branch (may already exist)"})),
+                )
+                    .into_response()
+            }
+        },
         Err(e) => {
-            tracing::error!("Failed to create branch '{}': {}", name, e);
+            tracing::error!("Branch connection released unexpectedly: {}", e);
             (
-                StatusCode::CONFLICT,
-                Json(json!({"error": "Failed to create branch (may already exist)"})),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Database connection unavailable"})),
             )
                 .into_response()
         }
@@ -238,35 +251,30 @@ pub(crate) async fn branch_list_handler(
             .into_response();
     }
 
-    let mut conn = match state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-    {
+    let mut conn = match state.acquire_with_auth_rls_guarded(&auth, None).await {
         Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Branch pool acquire error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Database connection unavailable"})),
-            )
-                .into_response();
-        }
+        Err(e) => return e.into_response(),
     };
 
     let sql = qail_pg::driver::branch_sql::list_branches_sql();
-    let result = match conn.get_mut().simple_query(sql).await {
-        Ok(rows) => {
-            let branches: Vec<Value> = rows.iter().map(row_to_json).collect();
-            Json(json!({"branches": branches})).into_response()
-        }
-        Err(_) => {
-            // Tables may not exist yet
-            Json(json!({"branches": []})).into_response()
+    let result = match conn.get_mut() {
+        Ok(pg_conn) => match pg_conn.simple_query(sql).await {
+            Ok(rows) => {
+                let branches: Vec<Value> = rows.iter().map(row_to_json).collect();
+                Json(json!({"branches": branches})).into_response()
+            }
+            Err(_) => {
+                // Tables may not exist yet
+                Json(json!({"branches": []})).into_response()
+            }
+        },
+        Err(e) => {
+            tracing::error!("Branch connection released unexpectedly: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Database connection unavailable"})),
+            )
+                .into_response()
         }
     };
     conn.release().await;
@@ -300,34 +308,29 @@ pub(crate) async fn branch_delete_handler(
             .into_response();
     }
 
-    let mut conn = match state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-    {
+    let mut conn = match state.acquire_with_auth_rls_guarded(&auth, None).await {
         Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Branch pool acquire error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Database connection unavailable"})),
-            )
-                .into_response();
-        }
+        Err(e) => return e.into_response(),
     };
 
     let sql = qail_pg::driver::branch_sql::delete_branch_sql(&name);
-    let result = match conn.get_mut().execute_simple(&sql).await {
-        Ok(_) => Json(json!({"branch": name, "status": "deleted"})).into_response(),
+    let result = match conn.get_mut() {
+        Ok(pg_conn) => match pg_conn.execute_simple(&sql).await {
+            Ok(_) => Json(json!({"branch": name, "status": "deleted"})).into_response(),
+            Err(e) => {
+                tracing::error!("Failed to delete branch '{}': {}", name, e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to delete branch"})),
+                )
+                    .into_response()
+            }
+        },
         Err(e) => {
-            tracing::error!("Failed to delete branch '{}': {}", name, e);
+            tracing::error!("Branch connection released unexpectedly: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to delete branch"})),
+                Json(json!({"error": "Database connection unavailable"})),
             )
                 .into_response()
         }
@@ -364,128 +367,150 @@ pub(crate) async fn branch_merge_handler(
             .into_response();
     }
 
-    let mut conn = match state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-    {
+    let mut conn = match state.acquire_with_auth_rls_guarded(&auth, None).await {
         Ok(c) => c,
+        Err(e) => return e.into_response(),
+    };
+
+    // Get overlay stats before merge
+    let stats_sql = qail_pg::driver::branch_sql::branch_stats_sql(&name);
+    let stats = match conn.get_mut() {
+        Ok(pg_conn) => match pg_conn.simple_query(&stats_sql).await {
+            Ok(rows) => rows.iter().map(row_to_json).collect::<Vec<_>>(),
+            Err(_) => vec![],
+        },
+        Err(_) => vec![],
+    };
+
+    // Apply overlay rows to main tables — inside a transaction
+    match conn.get_mut() {
+        Ok(pg_conn) => {
+            if let Err(e) = pg_conn.execute_simple("BEGIN;").await {
+                tracing::error!("Branch merge transaction start failed: {}", e);
+                conn.release().await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to start merge transaction"})),
+                )
+                    .into_response();
+            }
+        }
         Err(e) => {
-            tracing::error!("Branch pool acquire error: {}", e);
+            tracing::error!("Branch connection released unexpectedly: {}", e);
+            conn.release().await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "Database connection unavailable"})),
             )
                 .into_response();
         }
-    };
-
-    // Get overlay stats before merge
-    let stats_sql = qail_pg::driver::branch_sql::branch_stats_sql(&name);
-    let stats = match conn.get_mut().simple_query(&stats_sql).await {
-        Ok(rows) => rows.iter().map(row_to_json).collect::<Vec<_>>(),
-        Err(_) => vec![],
-    };
-
-    // Apply overlay rows to main tables — inside a transaction
-    if let Err(e) = conn.get_mut().execute_simple("BEGIN;").await {
-        tracing::error!("Branch merge transaction start failed: {}", e);
-        conn.release().await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Failed to start merge transaction"})),
-        )
-            .into_response();
     }
 
     let overlay_sql = qail_pg::driver::branch_sql::merge_overlay_rows_sql(&name);
     let mut applied = 0u32;
     let mut errors: Vec<String> = Vec::new();
 
-    match conn.get_mut().simple_query(&overlay_sql).await {
-        Ok(overlay_rows) => {
-            for row in &overlay_rows {
-                let table = row.get_string(0).unwrap_or_default();
-                let row_pk = row.get_string(1).unwrap_or_default();
-                let operation = row.get_string(2).unwrap_or_default();
-                let row_data_str = row.get_string(3).unwrap_or_default();
+    match conn.get_mut() {
+        Ok(pg_conn) => match pg_conn.simple_query(&overlay_sql).await {
+            Ok(overlay_rows) => {
+                for row in &overlay_rows {
+                    let table = row
+                        .try_get_by_name::<String>("table_name")
+                        .ok()
+                        .or_else(|| row.get_string(0))
+                        .unwrap_or_default();
+                    let row_pk = row
+                        .try_get_by_name::<String>("row_pk")
+                        .ok()
+                        .or_else(|| row.get_string(1))
+                        .unwrap_or_default();
+                    let operation = row
+                        .try_get_by_name::<String>("operation")
+                        .ok()
+                        .or_else(|| row.get_string(2))
+                        .unwrap_or_default();
+                    let row_data_str = row
+                        .try_get_by_name::<String>("row_data")
+                        .ok()
+                        .or_else(|| row.get_string(3))
+                        .unwrap_or_default();
 
-                // Build a Qail AST command instead of raw SQL strings.
-                // This routes through AstEncoder → Extended Query Protocol,
-                // where all values are parameterized (never string-interpolated).
-                let cmd = match operation.as_str() {
-                    "insert" => {
-                        if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
-                            if let Some(obj) = val.as_object() {
-                                let mut q = qail_core::ast::Qail::add(&table);
-                                for (k, v) in obj {
-                                    q = q.set_value(k, json_to_qail_value(v));
+                    // Build a Qail AST command instead of raw SQL strings.
+                    // This routes through AstEncoder → Extended Query Protocol,
+                    // where all values are parameterized (never string-interpolated).
+                    let cmd = match operation.as_str() {
+                        "insert" => {
+                            if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
+                                if let Some(obj) = val.as_object() {
+                                    let mut q = qail_core::ast::Qail::add(&table);
+                                    for (k, v) in obj {
+                                        q = q.set_value(k, json_to_qail_value(v));
+                                    }
+                                    // Use empty conflict columns for DO NOTHING on any constraint
+                                    q = q.on_conflict_nothing::<String>(&[]);
+                                    Some(q)
+                                } else {
+                                    None
                                 }
-                                // Use empty conflict columns for DO NOTHING on any constraint
-                                q = q.on_conflict_nothing::<String>(&[]);
-                                Some(q)
                             } else {
                                 None
                             }
-                        } else {
-                            None
                         }
-                    }
-                    "update" => {
-                        if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
-                            if let Some(obj) = val.as_object() {
-                                let mut q = qail_core::ast::Qail::set(&table);
-                                for (k, v) in obj {
-                                    q = q.set_value(k, json_to_qail_value(v));
+                        "update" => {
+                            if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
+                                if let Some(obj) = val.as_object() {
+                                    let mut q = qail_core::ast::Qail::set(&table);
+                                    for (k, v) in obj {
+                                        q = q.set_value(k, json_to_qail_value(v));
+                                    }
+                                    // Use schema PK instead of hardcoded "id"
+                                    let pk_col = state
+                                        .schema
+                                        .table(&table)
+                                        .and_then(|t| t.primary_key.as_deref())
+                                        .unwrap_or("id");
+                                    q = q.eq(pk_col, row_pk.clone());
+                                    Some(q)
+                                } else {
+                                    None
                                 }
-                                // Use schema PK instead of hardcoded "id"
-                                let pk_col = state
-                                    .schema
-                                    .table(&table)
-                                    .and_then(|t| t.primary_key.as_deref())
-                                    .unwrap_or("id");
-                                q = q.eq(pk_col, row_pk.clone());
-                                Some(q)
                             } else {
                                 None
                             }
-                        } else {
-                            None
                         }
-                    }
-                    "delete" => {
-                        // Use schema PK instead of hardcoded "id"
-                        let pk_col = state
-                            .schema
-                            .table(&table)
-                            .and_then(|t| t.primary_key.as_deref())
-                            .unwrap_or("id");
-                        let q = qail_core::ast::Qail::del(&table).eq(pk_col, row_pk.clone());
-                        Some(q)
-                    }
-                    _ => None,
-                };
+                        "delete" => {
+                            // Use schema PK instead of hardcoded "id"
+                            let pk_col = state
+                                .schema
+                                .table(&table)
+                                .and_then(|t| t.primary_key.as_deref())
+                                .unwrap_or("id");
+                            let q = qail_core::ast::Qail::del(&table).eq(pk_col, row_pk.clone());
+                            Some(q)
+                        }
+                        _ => None,
+                    };
 
-                if let Some(qail_cmd) = cmd {
-                    match conn.fetch_all_uncached(&qail_cmd).await {
-                        Ok(_) => applied += 1,
-                        Err(e) => errors.push(format!("{}.{}: {}", table, row_pk, e)),
+                    if let Some(qail_cmd) = cmd {
+                        match conn.fetch_all_uncached(&qail_cmd).await {
+                            Ok(_) => applied += 1,
+                            Err(e) => errors.push(format!("{}.{}: {}", table, row_pk, e)),
+                        }
                     }
                 }
             }
-        }
-        Err(e) => {
-            errors.push(format!("Failed to read overlay: {}", e));
-        }
+            Err(e) => {
+                errors.push(format!("Failed to read overlay: {}", e));
+            }
+        },
+        Err(e) => errors.push(format!("Failed to access DB connection: {}", e)),
     }
 
     // Rollback on errors, commit on success
     if !errors.is_empty() {
-        let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
+        if let Ok(pg_conn) = conn.get_mut() {
+            let _ = pg_conn.execute_simple("ROLLBACK;").await;
+        }
         conn.release().await;
         return (
             StatusCode::CONFLICT,
@@ -496,39 +521,63 @@ pub(crate) async fn branch_merge_handler(
 
     // Mark as merged (inside the same transaction)
     let merge_sql = qail_pg::driver::branch_sql::mark_merged_sql(&name);
-    let result = match conn.get_mut().execute_simple(&merge_sql).await {
-        Ok(_) => {
-            // COMMIT the transaction — if this fails, the merge did not persist.
-            match conn.get_mut().execute_simple("COMMIT;").await {
-                Ok(_) => {
-                    let mut response = json!({
-                        "branch": name,
-                        "status": "merged",
-                        "applied": applied,
-                        "overlay_stats": stats,
-                    });
-                    if !errors.is_empty() {
-                        response["merge_errors"] = json!(errors);
+    let result = match conn.get_mut() {
+        Ok(pg_conn) => match pg_conn.execute_simple(&merge_sql).await {
+            Ok(_) => {
+                // COMMIT the transaction — if this fails, the merge did not persist.
+                match conn.get_mut() {
+                    Ok(pg_conn) => match pg_conn.execute_simple("COMMIT;").await {
+                        Ok(_) => {
+                            let mut response = json!({
+                                "branch": name,
+                                "status": "merged",
+                                "applied": applied,
+                                "overlay_stats": stats,
+                            });
+                            if !errors.is_empty() {
+                                response["merge_errors"] = json!(errors);
+                            }
+                            Json(response).into_response()
+                        }
+                        Err(e) => {
+                            tracing::error!("Branch merge COMMIT failed for '{}': {}", name, e);
+                            if let Ok(pg_conn) = conn.get_mut() {
+                                let _ = pg_conn.execute_simple("ROLLBACK;").await;
+                            }
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error": "Merge transaction failed to commit"})),
+                            )
+                                .into_response()
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!("Branch connection released unexpectedly: {}", e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "Database connection unavailable"})),
+                        )
+                            .into_response()
                     }
-                    Json(response).into_response()
-                }
-                Err(e) => {
-                    tracing::error!("Branch merge COMMIT failed for '{}': {}", name, e);
-                    let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": "Merge transaction failed to commit"})),
-                    )
-                        .into_response()
                 }
             }
-        }
+            Err(e) => {
+                if let Ok(pg_conn) = conn.get_mut() {
+                    let _ = pg_conn.execute_simple("ROLLBACK;").await;
+                }
+                tracing::error!("Failed to merge branch '{}': {}", name, e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to merge branch"})),
+                )
+                    .into_response()
+            }
+        },
         Err(e) => {
-            let _ = conn.get_mut().execute_simple("ROLLBACK;").await;
-            tracing::error!("Failed to merge branch '{}': {}", name, e);
+            tracing::error!("Branch connection released unexpectedly: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to merge branch"})),
+                Json(json!({"error": "Database connection unavailable"})),
             )
                 .into_response()
         }

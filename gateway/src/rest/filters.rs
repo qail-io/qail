@@ -11,18 +11,24 @@ use uuid::Uuid;
 /// contains only safe characters. Identifiers are written into SQL in non-parameterized
 /// positions (SELECT list, WHERE left-side, ORDER BY), so they MUST NOT contain SQL syntax.
 ///
-/// Allowed: alphanumeric, underscores, dots (for table.column), hyphens (for kebab-case).
+/// Allowed: dotted identifiers where each segment matches
+/// `[A-Za-z_][A-Za-z0-9_]*` (e.g. `users`, `public.users`).
 /// Rejected: quotes, semicolons, comments, parens, spaces, operators, etc.
 pub(crate) fn is_safe_identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 128
-        && s.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-'
-        })
-        // Must not start with a digit or hyphen
-        && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-')
-        // Must not contain SQL comment markers even though individual chars are allowed
-        && !s.contains("--")
+    if s.is_empty() || s.len() > 128 || s.contains("--") {
+        return false;
+    }
+    s.split('.').all(|segment| {
+        if segment.is_empty() || segment.len() > 63 {
+            return false;
+        }
+        let mut bytes = segment.bytes();
+        match bytes.next() {
+            Some(b) if b.is_ascii_alphabetic() || b == b'_' => {}
+            _ => return false,
+        }
+        bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    })
 }
 
 /// Parse filter operators from query string.
@@ -359,6 +365,22 @@ mod tests {
         } else {
             panic!("Expected Array value for IN filter");
         }
+    }
+
+    #[test]
+    fn test_identifier_guard_strict_segments() {
+        assert!(is_safe_identifier("users"));
+        assert!(is_safe_identifier("public.users"));
+        assert!(is_safe_identifier("_meta.v1_table"));
+
+        assert!(!is_safe_identifier(""));
+        assert!(!is_safe_identifier("1users"));
+        assert!(!is_safe_identifier("users-name"));
+        assert!(!is_safe_identifier("users--name"));
+        assert!(!is_safe_identifier("users..name"));
+        assert!(!is_safe_identifier(".users"));
+        assert!(!is_safe_identifier("users."));
+        assert!(!is_safe_identifier("users;drop"));
     }
 
     #[test]

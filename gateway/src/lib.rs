@@ -35,6 +35,7 @@ pub mod auth;
 pub mod cache;
 pub mod concurrency;
 pub mod config;
+pub mod db_backpressure;
 pub mod error;
 pub mod event;
 pub mod handler;
@@ -48,8 +49,16 @@ pub mod router;
 pub mod schema;
 pub mod server;
 pub mod tenant_guard;
+pub mod transaction;
 pub mod ws;
 
 pub use config::GatewayConfig;
 pub use error::GatewayError;
 pub use server::{Gateway, GatewayState};
+
+// Embeddable API — for use when embedding the gateway in another Axum app
+pub use auth::AuthContext;
+pub use policy::PolicyEngine;
+pub use rest::nested::expand_nested;
+pub use router::create_router;
+pub use schema::SchemaRegistry;

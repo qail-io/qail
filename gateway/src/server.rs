@@ -74,6 +74,8 @@ pub struct GatewayState {
     pub explain_config: qail_pg::explain::ExplainConfig,
     /// Per-tenant concurrency semaphore.
     pub tenant_semaphore: Arc<crate::concurrency::TenantSemaphore>,
+    /// DB acquire backpressure guard (global + per-tenant waiting caps).
+    pub db_backpressure: Arc<crate::db_backpressure::DbBackpressure>,
     /// Cache mapping user_id → operator_id for JWT tokens that lack operator_id.
     /// Loaded at startup from the users table.
     pub user_operator_map: Arc<RwLock<HashMap<String, String>>>,
@@ -99,6 +101,15 @@ pub struct GatewayState {
     pub jwks_store: Option<crate::jwks::JwksKeyStore>,
     /// Allowed JWT algorithms parsed from configuration.
     pub jwt_allowed_algorithms: Vec<Algorithm>,
+    /// Tables blocked from auto-REST endpoint generation.
+    /// Checked at route generation and as a runtime handler guard.
+    pub blocked_tables: HashSet<String>,
+    /// Tables allowed for auto-REST (whitelist mode). When non-empty,
+    /// ONLY these tables are exposed — all others are implicitly blocked.
+    /// Takes precedence over `blocked_tables`.
+    pub allowed_tables: HashSet<String>,
+    /// Transaction session manager for multi-statement transactions.
+    pub transaction_manager: Arc<crate::transaction::TransactionSessionManager>,
 }
 
 /// The QAIL Gateway server
@@ -208,7 +219,13 @@ impl Gateway {
             match conn.fetch_all_uncached(&cmd).await {
                 Ok(rows) => {
                     let db_tables: std::collections::HashSet<String> =
-                        rows.iter().filter_map(|row| row.get_string(0)).collect();
+                        rows.iter()
+                            .filter_map(|row| {
+                                row.try_get_by_name::<String>("table_name")
+                                    .ok()
+                                    .or_else(|| row.get_string(0))
+                            })
+                            .collect();
 
                     let mut missing = Vec::new();
                     for table in schema.table_names() {
@@ -296,6 +313,18 @@ impl Gateway {
             self.config.tenant_idle_timeout_secs
         );
 
+        let db_backpressure = Arc::new(crate::db_backpressure::DbBackpressure::new(
+            self.config.db_max_waiters_global,
+            self.config.db_max_waiters_per_tenant,
+            self.config.max_tenants,
+        ));
+        tracing::info!(
+            "DB acquire backpressure: global_waiters={}, per_tenant_waiters={}, tracked_tenants_cap={}",
+            self.config.db_max_waiters_global,
+            self.config.db_max_waiters_per_tenant,
+            self.config.max_tenants
+        );
+
         // Load user → operator_id mapping for JWT resolution
         let user_operator_map = Arc::new(RwLock::new(HashMap::new()));
         {
@@ -311,7 +340,16 @@ impl Gateway {
                 Ok(rows) => {
                     let mut map = user_operator_map.write().await;
                     for row in &rows {
-                        if let (Some(uid), Some(oid)) = (row.get_string(0), row.get_string(1))
+                        let uid = row
+                            .try_get_by_name::<String>("id")
+                            .ok()
+                            .or_else(|| row.get_string(0));
+                        let oid = row
+                            .try_get_by_name::<String>("operator_id")
+                            .ok()
+                            .or_else(|| row.get_string(1));
+
+                        if let (Some(uid), Some(oid)) = (uid, oid)
                             && !oid.is_empty()
                         {
                             map.insert(uid, oid);
@@ -425,6 +463,27 @@ impl Gateway {
         let jwt_allowed_algorithms =
             crate::auth::parse_allowed_algorithms(&self.config.jwt_allowed_algorithms)?;
 
+        // Transaction session manager
+        let txn_max_init = if self.config.txn_max_sessions > 0 {
+            self.config.txn_max_sessions
+        } else {
+            std::cmp::max(pool.max_connections() / 2, 2)
+        };
+        let txn_manager = Arc::new(crate::transaction::TransactionSessionManager::new(
+            txn_max_init,
+            self.config.txn_session_timeout_secs,
+            self.config.txn_max_lifetime_secs,
+            self.config.txn_max_statements_per_session,
+        ));
+        tracing::info!(
+            "Transaction sessions: max_sessions={}, idle_timeout={}s, max_lifetime={}s, max_statements={}",
+            txn_max_init,
+            self.config.txn_session_timeout_secs,
+            self.config.txn_max_lifetime_secs,
+            self.config.txn_max_statements_per_session
+        );
+        crate::transaction::spawn_reaper(Arc::clone(&txn_manager));
+
         self.state = Some(Arc::new(GatewayState {
             pool,
             policy_engine,
@@ -437,6 +496,7 @@ impl Gateway {
             explain_cache,
             explain_config: explain_cfg,
             tenant_semaphore,
+            db_backpressure,
             user_operator_map,
             #[cfg(feature = "qdrant")]
             qdrant_pool,
@@ -455,7 +515,24 @@ impl Gateway {
             idempotency_store: crate::idempotency::IdempotencyStore::production(),
             jwks_store,
             jwt_allowed_algorithms,
+            blocked_tables: self.config.blocked_tables.iter().cloned().collect(),
+            allowed_tables: self.config.allowed_tables.iter().cloned().collect(),
+            transaction_manager: txn_manager,
         }));
+
+        if !self.config.allowed_tables.is_empty() {
+            tracing::info!(
+                "SECURITY: allowlist mode — {} table(s) allowed for auto-REST: {}",
+                self.config.allowed_tables.len(),
+                self.config.allowed_tables.join(", ")
+            );
+        } else if !self.config.blocked_tables.is_empty() {
+            tracing::info!(
+                "SECURITY: {} table(s) blocked from auto-REST: {}",
+                self.config.blocked_tables.len(),
+                self.config.blocked_tables.join(", ")
+            );
+        }
 
         tracing::info!("Gateway initialized");
         Ok(())
@@ -593,6 +670,7 @@ impl Gateway {
         let addr = &self.config.bind_address;
         tracing::info!("🚀 QAIL Gateway starting on {}", addr);
         tracing::info!("   POST /qail     - Execute QAIL queries");
+        tracing::info!("   POST /qail/export - Stream COPY export queries");
         tracing::info!("   GET  /health   - Health check");
         tracing::info!("   GET  /api/*    - Auto-REST endpoints");
         if !self.custom_routes.is_empty() {
@@ -648,6 +726,356 @@ impl Gateway {
     }
 }
 
+impl GatewayState {
+    /// Create a `GatewayState` with an externally-provided pool (embedded mode).
+    ///
+    /// Use this when embedding the gateway router inside another Axum application
+    /// (e.g., workers) that already has its own `PgPool`. The gateway will share
+    /// the provided pool instead of creating a new one.
+    ///
+    /// This skips dev-mode safety and production-strict checks — the host app
+    /// is responsible for those.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let pool = PgPool::connect(config).await?;
+    /// let gw_config = GatewayConfig::default();
+    /// let gw_state = GatewayState::new_embedded(pool, gw_config).await?;
+    /// let gw_router = qail_gateway::create_router(Arc::new(gw_state), &[]);
+    /// ```
+    pub async fn new_embedded(pool: PgPool, config: GatewayConfig) -> Result<Self, GatewayError> {
+        tracing::info!("Initializing QAIL Gateway (embedded mode)...");
+
+        // Load policies
+        let mut policy_engine = PolicyEngine::new();
+        if let Some(ref policy_path) = config.policy_path
+            && let Ok(canonical) =
+                crate::config::validate_config_path(policy_path, config.config_root.as_deref())
+        {
+            tracing::info!("Loading policies from: {}", canonical.display());
+            policy_engine.load_from_file(canonical.to_str().unwrap_or(policy_path))?;
+        }
+
+        // Load schema
+        let mut schema = SchemaRegistry::new();
+        if let Some(ref schema_path) = config.schema_path
+            && let Ok(canonical) =
+                crate::config::validate_config_path(schema_path, config.config_root.as_deref())
+        {
+            tracing::info!("Loading schema from: {}", canonical.display());
+            schema.load_from_file(canonical.to_str().unwrap_or(schema_path))?;
+        }
+
+        // Schema drift verification
+        if !schema.table_names().is_empty() {
+            let mut conn = pool.acquire_system().await.map_err(|e| {
+                GatewayError::Database(format!("Schema verification connection failed: {}", e))
+            })?;
+            let cmd = qail_core::ast::Qail::get("information_schema.tables")
+                .columns(["table_name"])
+                .eq(
+                    "table_schema",
+                    qail_core::ast::Value::String("public".into()),
+                );
+            match conn.fetch_all_uncached(&cmd).await {
+                Ok(rows) => {
+                    let db_tables: std::collections::HashSet<String> =
+                        rows.iter()
+                            .filter_map(|row| {
+                                row.try_get_by_name::<String>("table_name")
+                                    .ok()
+                                    .or_else(|| row.get_string(0))
+                            })
+                            .collect();
+                    let mut missing = Vec::new();
+                    for table in schema.table_names() {
+                        if !db_tables.contains(table) {
+                            missing.push(table.to_string());
+                        }
+                    }
+                    if !missing.is_empty() {
+                        let msg = format!(
+                            "Schema drift detected! {} table(s) missing from database: {}",
+                            missing.len(),
+                            missing.join(", ")
+                        );
+                        tracing::error!("{}", msg);
+                        conn.release().await;
+                        return Err(GatewayError::Config(msg));
+                    }
+                    tracing::info!(
+                        "Schema verified: {} tables match ({} in DB)",
+                        schema.table_names().len(),
+                        db_tables.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Schema verification skipped (query failed): {}", e);
+                }
+            }
+            conn.release().await;
+        }
+
+        // Initialize cache
+        let cache = QueryCache::new(config.cache_config());
+
+        // Load event triggers
+        let mut event_engine = EventTriggerEngine::new();
+        if let Some(ref events_path) = config.events_path
+            && let Ok(canonical) =
+                crate::config::validate_config_path(events_path, config.config_root.as_deref())
+        {
+            event_engine
+                .load_from_file(canonical.to_str().unwrap_or(events_path))
+                .map_err(GatewayError::Config)?;
+        }
+
+        // Rate limiters
+        let rate_limiter = RateLimiter::new(config.rate_limit_rate, config.rate_limit_burst);
+        let tenant_rate_limiter = RateLimiter::new(
+            config.tenant_rate_limit_rate,
+            config.tenant_rate_limit_burst,
+        );
+
+        // EXPLAIN config
+        let explain_cfg = config.explain_config();
+        let explain_cache = qail_pg::explain::ExplainCache::new(explain_cfg.cache_ttl);
+
+        // Tenant concurrency
+        let tenant_semaphore = Arc::new(crate::concurrency::TenantSemaphore::with_limits(
+            config.max_concurrent_queries,
+            config.max_tenants,
+            std::time::Duration::from_secs(config.tenant_idle_timeout_secs),
+        ));
+        tenant_semaphore.start_sweeper();
+
+        let db_backpressure = Arc::new(crate::db_backpressure::DbBackpressure::new(
+            config.db_max_waiters_global,
+            config.db_max_waiters_per_tenant,
+            config.max_tenants,
+        ));
+
+        // Load user → operator_id mapping
+        let user_operator_map = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let token = qail_core::rls::SuperAdminToken::for_system_process("embedded_user_map");
+            let rls = qail_core::rls::RlsContext::super_admin(token);
+            let mut conn = pool.acquire_with_rls(rls).await.map_err(|e| {
+                GatewayError::Database(format!("User lookup connection failed: {}", e))
+            })?;
+            let cmd = qail_core::ast::Qail::get("users")
+                .columns(["id", "operator_id"])
+                .limit(10_000);
+            match conn.fetch_all_uncached(&cmd).await {
+                Ok(rows) => {
+                    let mut map = user_operator_map.write().await;
+                    for row in &rows {
+                        let uid = row
+                            .try_get_by_name::<String>("id")
+                            .ok()
+                            .or_else(|| row.get_string(0));
+                        let oid = row
+                            .try_get_by_name::<String>("operator_id")
+                            .ok()
+                            .or_else(|| row.get_string(1));
+
+                        if let (Some(uid), Some(oid)) = (uid, oid)
+                            && !oid.is_empty()
+                        {
+                            map.insert(uid, oid);
+                        }
+                    }
+                    tracing::info!(
+                        "Loaded {} user→operator mappings for JWT resolution",
+                        map.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Could not load user→operator map (non-fatal): {}", e);
+                }
+            }
+            conn.release().await;
+        }
+
+        // Qdrant (optional)
+        #[cfg(feature = "qdrant")]
+        let qdrant_pool = if let Some(ref qdrant_config) = config.qdrant {
+            let pool_config = qail_qdrant::PoolConfig::from_qail_config_ref(qdrant_config);
+            let pool = qail_qdrant::QdrantPool::new(pool_config)
+                .await
+                .map_err(|e| GatewayError::Database(format!("Qdrant pool init failed: {}", e)))?;
+            Some(pool)
+        } else {
+            None
+        };
+
+        // Prometheus metrics — in embedded mode, skip global recorder installation
+        // (the host app already has one). build_recorder() + handle() gives us
+        // a PrometheusHandle without calling set_global_recorder().
+        let prometheus_handle = {
+            let builder = metrics_exporter_prometheus::PrometheusBuilder::new()
+                .set_buckets(&[
+                    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+                ])
+                .map_err(|e| {
+                    GatewayError::Config(format!("Failed to set Prometheus buckets: {}", e))
+                })?;
+            let recorder = builder.build_recorder();
+            let handle = recorder.handle();
+            // Don't install recorder globally — workers already has its own.
+            // Just keep the handle for the GatewayState.
+            Arc::new(handle)
+        };
+
+        // Complexity guard
+        let complexity_guard = crate::middleware::QueryComplexityGuard::new(
+            config.max_query_depth,
+            config.max_query_filters,
+            config.max_query_joins,
+        );
+
+        // Query allow-list
+        let mut allow_list = crate::middleware::QueryAllowList::new();
+        if let Some(ref path) = config.allow_list_path
+            && let Ok(canonical) =
+                crate::config::validate_config_path(path, config.config_root.as_deref())
+        {
+            allow_list
+                .load_from_file(canonical.to_str().unwrap_or(path))
+                .map_err(|e| {
+                    GatewayError::Config(format!(
+                        "Failed to load allow-list from '{}': {}",
+                        path, e
+                    ))
+                })?;
+        }
+
+        // RPC allow-list
+        let rpc_allow_list = if let Some(ref path) = config.rpc_allowlist_path {
+            if let Ok(canonical) =
+                crate::config::validate_config_path(path, config.config_root.as_deref())
+            {
+                Some(load_rpc_allow_list(&canonical)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // JWKS key store
+        let jwks_store = if let Some(store) = crate::jwks::JwksKeyStore::from_env() {
+            match store.initial_fetch().await {
+                Ok(n) => {
+                    tracing::info!("JWKS: loaded {} keys from endpoint", n);
+                    store.start_refresh_task();
+                    Some(store)
+                }
+                Err(e) => {
+                    tracing::warn!("JWKS: initial fetch failed (non-fatal): {}", e);
+                    Some(store)
+                }
+            }
+        } else {
+            None
+        };
+
+        let jwt_allowed_algorithms =
+            crate::auth::parse_allowed_algorithms(&config.jwt_allowed_algorithms)?;
+
+        let blocked_tables: std::collections::HashSet<String> =
+            config.blocked_tables.iter().cloned().collect();
+        let allowed_tables: std::collections::HashSet<String> =
+            config.allowed_tables.iter().cloned().collect();
+
+        // Transaction session manager
+        let txn_max = if config.txn_max_sessions > 0 {
+            config.txn_max_sessions
+        } else {
+            std::cmp::max(pool.max_connections() / 2, 2)
+        };
+        let txn_manager = Arc::new(crate::transaction::TransactionSessionManager::new(
+            txn_max,
+            config.txn_session_timeout_secs,
+            config.txn_max_lifetime_secs,
+            config.txn_max_statements_per_session,
+        ));
+        tracing::info!(
+            "Embedded transaction sessions: max_sessions={}, idle_timeout={}s, max_lifetime={}s, max_statements={}",
+            txn_max,
+            config.txn_session_timeout_secs,
+            config.txn_max_lifetime_secs,
+            config.txn_max_statements_per_session
+        );
+        crate::transaction::spawn_reaper(Arc::clone(&txn_manager));
+
+        let state = GatewayState {
+            pool,
+            policy_engine,
+            event_engine,
+            schema,
+            cache,
+            config,
+            rate_limiter,
+            tenant_rate_limiter,
+            explain_cache,
+            explain_config: explain_cfg,
+            tenant_semaphore,
+            db_backpressure,
+            user_operator_map,
+            #[cfg(feature = "qdrant")]
+            qdrant_pool,
+            prometheus_handle,
+            complexity_guard,
+            allow_list,
+            rpc_allow_list,
+            rpc_signature_cache: moka::sync::Cache::builder()
+                .max_capacity(512)
+                .time_to_live(std::time::Duration::from_secs(300))
+                .build(),
+            parse_cache: moka::sync::Cache::builder()
+                .max_capacity(1024)
+                .time_to_live(std::time::Duration::from_secs(300))
+                .build(),
+            idempotency_store: crate::idempotency::IdempotencyStore::production(),
+            jwks_store,
+            jwt_allowed_algorithms,
+            blocked_tables,
+            allowed_tables,
+            transaction_manager: txn_manager,
+        };
+
+        if !state.allowed_tables.is_empty() {
+            tracing::info!(
+                "SECURITY: allowlist mode — {} table(s) allowed for auto-REST: {}",
+                state.allowed_tables.len(),
+                state
+                    .allowed_tables
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        } else if !state.blocked_tables.is_empty() {
+            tracing::info!(
+                "SECURITY: {} table(s) blocked from auto-REST: {}",
+                state.blocked_tables.len(),
+                state
+                    .blocked_tables
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        tracing::info!("Gateway (embedded) initialized");
+
+        Ok(state)
+    }
+}
+
 /// Wait for a shutdown signal (SIGTERM or Ctrl+C).
 ///
 /// Used with `axum::serve().with_graceful_shutdown()` to implement
@@ -657,17 +1085,23 @@ impl Gateway {
 /// 3. Return control to caller for pool cleanup
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %err, "Failed to install Ctrl+C handler");
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("Failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "Failed to install SIGTERM handler");
+                std::future::pending::<Option<()>>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]

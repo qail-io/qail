@@ -152,15 +152,7 @@ pub(crate) async fn rpc_contracts_handler(
         ));
     }
 
-    let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| crate::middleware::ApiError::from_pg_driver_error(&e, None))?;
+    let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
 
     let sql = r#"
         SELECT
@@ -201,19 +193,59 @@ pub(crate) async fn rpc_contracts_handler(
 
     let mut functions: Vec<Value> = Vec::with_capacity(rows.len());
     for row in &rows {
-        let schema_name = row.get_string(0).unwrap_or_default();
-        let function_name = row.get_string(1).unwrap_or_default();
-        let total_args = row.get_i32(2).unwrap_or(0).max(0) as usize;
-        let default_args = row.get_i32(3).unwrap_or(0).max(0) as usize;
-        let variadic = row.get_bool(4).unwrap_or(false);
-        let identity_args = row.get_string(7).unwrap_or_default();
-        let result_type = row.get_string(8).unwrap_or_default();
+        let schema_name = row
+            .try_get_by_name::<String>("schema_name")
+            .ok()
+            .or_else(|| row.get_string(0))
+            .unwrap_or_default();
+        let function_name = row
+            .try_get_by_name::<String>("function_name")
+            .ok()
+            .or_else(|| row.get_string(1))
+            .unwrap_or_default();
+        let total_args = row
+            .try_get_by_name::<i32>("total_args")
+            .ok()
+            .or_else(|| row.get_i32(2))
+            .unwrap_or(0)
+            .max(0) as usize;
+        let default_args = row
+            .try_get_by_name::<i32>("default_args")
+            .ok()
+            .or_else(|| row.get_i32(3))
+            .unwrap_or(0)
+            .max(0) as usize;
+        let variadic = row
+            .try_get_by_name::<bool>("is_variadic")
+            .ok()
+            .or_else(|| row.get_bool(4))
+            .unwrap_or(false);
+        let identity_args = row
+            .try_get_by_name::<String>("identity_args")
+            .ok()
+            .or_else(|| row.get_string(7))
+            .unwrap_or_default();
+        let result_type = row
+            .try_get_by_name::<String>("result_type")
+            .ok()
+            .or_else(|| row.get_string(8))
+            .unwrap_or_default();
 
         let arg_names: Vec<Option<String>> =
-            serde_json::from_str(&row.get_string(5).unwrap_or_else(|| "[]".to_string()))
+            serde_json::from_str(
+                &row.try_get_by_name::<String>("arg_names_json")
+                    .ok()
+                    .or_else(|| row.get_string(5))
+                    .unwrap_or_else(|| "[]".to_string()),
+            )
                 .unwrap_or_default();
         let arg_types: Vec<String> =
-            serde_json::from_str(&row.get_string(6).unwrap_or_else(|| "[]".to_string()))
+            serde_json::from_str(
+                &row.try_get_by_name::<String>("arg_types_json")
+                    .ok()
+                    .or_else(|| row.get_string(6))
+                    .unwrap_or_else(|| "[]".to_string()),
+            )
                 .unwrap_or_default();
 
         let mut args_json: Vec<Value> = Vec::with_capacity(total_args);
@@ -412,7 +444,8 @@ pub(crate) async fn openapi_spec_handler(
                                 "offset": {"type": "integer"},
                             }
                         }}}
-                    }
+                    },
+                    "503": {"$ref": "#/components/responses/PoolBackpressure"}
                 }
             },
             "post": {
@@ -427,6 +460,7 @@ pub(crate) async fn openapi_spec_handler(
                 ],
                 "responses": {
                     "201": {"description": "Created"},
+                    "503": {"$ref": "#/components/responses/PoolBackpressure"},
                 }
             }
         }));
@@ -441,7 +475,10 @@ pub(crate) async fn openapi_spec_handler(
                     "parameters": [
                         {"name": pk, "in": "path", "required": true, "schema": {"type": "string"}}
                     ],
-                    "responses": {"200": {"description": "Success"}}
+                    "responses": {
+                        "200": {"description": "Success"},
+                        "503": {"$ref": "#/components/responses/PoolBackpressure"}
+                    }
                 },
                 "patch": {
                     "summary": format!("Update {} by {}", name, pk),
@@ -452,7 +489,10 @@ pub(crate) async fn openapi_spec_handler(
                     "requestBody": {
                         "content": {"application/json": {"schema": {"$ref": format!("#/components/schemas/{}", name)}}}
                     },
-                    "responses": {"200": {"description": "Updated"}}
+                    "responses": {
+                        "200": {"description": "Updated"},
+                        "503": {"$ref": "#/components/responses/PoolBackpressure"}
+                    }
                 },
                 "delete": {
                     "summary": format!("Delete {} by {}", name, pk),
@@ -460,7 +500,10 @@ pub(crate) async fn openapi_spec_handler(
                     "parameters": [
                         {"name": pk, "in": "path", "required": true, "schema": {"type": "string"}}
                     ],
-                    "responses": {"204": {"description": "Deleted"}}
+                    "responses": {
+                        "204": {"description": "Deleted"},
+                        "503": {"$ref": "#/components/responses/PoolBackpressure"}
+                    }
                 }
             }));
         }
@@ -524,7 +567,8 @@ pub(crate) async fn openapi_spec_handler(
                         }
                     },
                     "400": {"description": "Invalid arguments or ambiguous overload"},
-                    "403": {"description": "Blocked by policy or RPC allow-list"}
+                    "403": {"description": "Blocked by policy or RPC allow-list"},
+                    "503": {"$ref": "#/components/responses/PoolBackpressure"}
                 }
             }
         }),
@@ -538,7 +582,8 @@ pub(crate) async fn openapi_spec_handler(
                 "tags": ["rpc", "devex"],
                 "responses": {
                     "200": {"description": "Success"},
-                    "401": {"description": "Authentication required"}
+                    "401": {"description": "Authentication required"},
+                    "503": {"$ref": "#/components/responses/PoolBackpressure"}
                 }
             }
         }),
@@ -549,11 +594,50 @@ pub(crate) async fn openapi_spec_handler(
         "info": {
             "title": "QAIL Gateway API",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Auto-generated REST API from QAIL schema"
+            "description": "Auto-generated REST API from QAIL schema. Under database acquire pressure, endpoints may return 503 POOL_BACKPRESSURE with Retry-After + x-qail-backpressure-* headers; clients should retry with exponential backoff and jitter."
         },
         "paths": paths,
         "components": {
             "schemas": schemas,
+            "headers": {
+                "RetryAfter": {
+                    "description": "Minimum wait (seconds) before retrying this request.",
+                    "schema": {"type": "integer", "minimum": 0},
+                    "example": 1
+                },
+                "XQailBackpressureScope": {
+                    "description": "Where shedding occurred.",
+                    "schema": {"type": "string", "enum": ["global", "tenant", "tenant_map", "unknown"]},
+                    "example": "tenant"
+                },
+                "XQailBackpressureReason": {
+                    "description": "Stable machine-readable reason for 503 shedding.",
+                    "schema": {"type": "string", "enum": ["global_waiters_exceeded", "tenant_waiters_exceeded", "tenant_tracker_saturated", "queue_saturated"]},
+                    "example": "tenant_waiters_exceeded"
+                }
+            },
+            "responses": {
+                "PoolBackpressure": {
+                    "description": "Database acquire queue is saturated. Respect Retry-After and retry with exponential backoff + jitter (full-jitter recommended).",
+                    "headers": {
+                        "Retry-After": {"$ref": "#/components/headers/RetryAfter"},
+                        "X-Qail-Backpressure-Scope": {"$ref": "#/components/headers/XQailBackpressureScope"},
+                        "X-Qail-Backpressure-Reason": {"$ref": "#/components/headers/XQailBackpressureReason"}
+                    },
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "code": {"type": "string", "example": "POOL_BACKPRESSURE"},
+                                    "message": {"type": "string", "example": "Tenant database acquire queue is saturated"}
+                                },
+                                "required": ["code", "message"]
+                            }
+                        }
+                    }
+                }
+            },
             "securitySchemes": {
                 "bearerAuth": {
                     "type": "http",
