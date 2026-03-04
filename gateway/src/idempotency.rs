@@ -11,12 +11,16 @@
 
 use axum::{
     body::Body,
-    http::{HeaderMap, Method, Request, StatusCode},
+    http::{
+        HeaderMap, Method, Request, StatusCode, Uri,
+        header::{CONTENT_TYPE, HeaderValue},
+    },
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -98,6 +102,29 @@ impl IdempotencyStore {
     }
 }
 
+fn lock_in_flight_set(
+    in_flight: &std::sync::Mutex<std::collections::HashSet<String>>,
+) -> std::sync::MutexGuard<'_, std::collections::HashSet<String>> {
+    match in_flight.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!(
+                "Idempotency in-flight lock poisoned; recovering inner state to stay available"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn json_response(status: StatusCode, body: &'static str) -> Response {
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+}
+
 /// RAII guard that removes an in-flight key when dropped.
 /// Ensures cleanup even on panic or tokio task cancellation.
 struct InFlightGuard {
@@ -107,7 +134,7 @@ struct InFlightGuard {
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.store_in_flight.lock().unwrap().remove(&self.key);
+        lock_in_flight_set(&self.store_in_flight).remove(&self.key);
     }
 }
 
@@ -124,6 +151,48 @@ fn extract_idempotency_key(request: &Request<Body>) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+fn canonical_query(query: Option<&str>) -> String {
+    let Some(raw) = query else {
+        return String::new();
+    };
+    if raw.is_empty() {
+        return String::new();
+    }
+
+    let mut pairs: Vec<(String, String)> = url::form_urlencoded::parse(raw.as_bytes())
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    pairs.sort_unstable();
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs)
+        .finish()
+}
+
+fn request_fingerprint(
+    method: &Method,
+    uri: &Uri,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> String {
+    let mut body_hasher = Sha256::new();
+    body_hasher.update(body);
+    let body_hash = body_hasher.finalize();
+
+    let ct = content_type.unwrap_or("").trim().to_ascii_lowercase();
+    let canonical = format!(
+        "{}|{}|{}|{}|{:x}",
+        method.as_str(),
+        uri.path(),
+        canonical_query(uri.query()),
+        ct,
+        body_hash
+    );
+
+    let mut fp_hasher = Sha256::new();
+    fp_hasher.update(canonical.as_bytes());
+    format!("{:x}", fp_hasher.finalize())
 }
 
 /// Extract tenant scope from validated auth context.
@@ -172,7 +241,8 @@ pub async fn idempotency_middleware(
 
     let tenant_scope = extract_tenant_scope(state.as_ref(), request.headers().clone()).await;
 
-    // SECURITY: Compute request fingerprint (method+path+query+body_hash) to detect key reuse
+    // SECURITY: Compute request fingerprint (method+path+query+content-type+body_hash)
+    // to detect key reuse
     // across different mutation routes, query variations, or different payloads.
     // Buffer the body, hash it, then reconstruct the request for downstream handlers.
     let (parts_req, body_req) = request.into_parts();
@@ -181,23 +251,21 @@ pub async fn idempotency_middleware(
         Err(_) => {
             // SECURITY: Body too large or read error — reject the request outright
             // rather than forwarding a mutation with an empty body.
-            return Response::builder()
-                .status(StatusCode::PAYLOAD_TOO_LARGE)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"error":"payload_too_large","message":"Request body exceeds 10MB limit for idempotent mutations"}"#
-                ))
-                .unwrap();
+            return json_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                r#"{"error":"payload_too_large","message":"Request body exceeds 10MB limit for idempotent mutations"}"#,
+            );
         }
     };
-    let body_hash = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        body_bytes_req.hash(&mut hasher);
-        hasher.finish()
-    };
-    let request_fingerprint = format!("{}:{}:{:x}", parts_req.method, parts_req.uri, body_hash);
+    let request_fingerprint = request_fingerprint(
+        &parts_req.method,
+        &parts_req.uri,
+        parts_req
+            .headers
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        &body_bytes_req,
+    );
     // Reconstruct the request with the buffered body for downstream handlers.
     let request = Request::from_parts(parts_req, Body::from(body_bytes_req));
 
@@ -214,13 +282,10 @@ pub async fn idempotency_middleware(
                 current = %request_fingerprint,
                 "Idempotency key fingerprint mismatch — key reuse across routes"
             );
-            return Response::builder()
-                .status(StatusCode::CONFLICT)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"error":"idempotency_key_conflict","message":"This idempotency key was already used for a different request (method or path mismatch). Use a new key."}"#
-                ))
-                .unwrap();
+            return json_response(
+                StatusCode::CONFLICT,
+                r#"{"error":"idempotency_key_conflict","message":"This idempotency key was already used for a different request fingerprint. Use a new key."}"#,
+            );
         }
 
         tracing::info!(
@@ -236,21 +301,21 @@ pub async fn idempotency_middleware(
     // If another request with the same key is already executing, return 409.
     let cache_key = IdempotencyStore::cache_key(&tenant_scope, &idempotency_key);
     {
-        let mut in_flight = state.idempotency_store.in_flight.lock().unwrap();
+        let mut in_flight = lock_in_flight_set(&state.idempotency_store.in_flight);
         if !in_flight.insert(cache_key.clone()) {
             tracing::warn!(
                 tenant_scope = %tenant_scope,
                 idempotency_key = %idempotency_key,
                 "Idempotency key in-flight — concurrent request rejected"
             );
-            return Response::builder()
-                .status(StatusCode::CONFLICT)
-                .header("content-type", "application/json")
-                .header("retry-after", "1")
-                .body(Body::from(
-                    r#"{"error":"idempotency_key_in_flight","message":"A request with this idempotency key is already being processed. Retry after completion."}"#
-                ))
-                .unwrap();
+            let mut response = json_response(
+                StatusCode::CONFLICT,
+                r#"{"error":"idempotency_key_in_flight","message":"A request with this idempotency key is already being processed. Retry after completion."}"#,
+            );
+            response
+                .headers_mut()
+                .insert("retry-after", HeaderValue::from_static("1"));
+            return response;
         }
     }
     // RAII guard: ensures in-flight key is removed even on panic or cancellation.
@@ -278,8 +343,10 @@ pub async fn idempotency_middleware(
                 "Failed to capture response body for idempotency cache — returning original status without caching"
             );
             let mut resp = Response::from_parts(parts, Body::empty());
-            resp.headers_mut()
-                .insert("x-idempotency-body-truncated", "true".parse().unwrap());
+            resp.headers_mut().insert(
+                "x-idempotency-body-truncated",
+                HeaderValue::from_static("true"),
+            );
             // _in_flight_guard will cleanup on drop here.
             return resp;
         }
@@ -336,7 +403,7 @@ fn build_response_from_cache(cached: CachedResponse) -> Response {
     // Mark as replayed for clients and observability
     response
         .headers_mut()
-        .insert("x-idempotency-replayed", "true".parse().unwrap());
+        .insert("x-idempotency-replayed", HeaderValue::from_static("true"));
     response
 }
 
@@ -492,5 +559,69 @@ mod tests {
                 .unwrap(),
             "true"
         );
+    }
+
+    #[test]
+    fn fingerprint_changes_with_body() {
+        let a = request_fingerprint(
+            &Method::POST,
+            &"/v1/orders?limit=10".parse::<Uri>().expect("valid uri"),
+            Some("application/json"),
+            br#"{"id":1}"#,
+        );
+        let b = request_fingerprint(
+            &Method::POST,
+            &"/v1/orders?limit=10".parse::<Uri>().expect("valid uri"),
+            Some("application/json"),
+            br#"{"id":2}"#,
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_changes_with_content_type() {
+        let uri = "/v1/orders".parse::<Uri>().expect("valid uri");
+        let json = request_fingerprint(&Method::POST, &uri, Some("application/json"), b"{}");
+        let form = request_fingerprint(
+            &Method::POST,
+            &uri,
+            Some("application/x-www-form-urlencoded"),
+            b"{}",
+        );
+        assert_ne!(json, form);
+    }
+
+    #[test]
+    fn fingerprint_canonicalizes_query_pair_order() {
+        let a = request_fingerprint(
+            &Method::POST,
+            &"/v1/orders?a=1&b=2".parse::<Uri>().expect("valid uri"),
+            Some("application/json"),
+            br#"{"id":1}"#,
+        );
+        let b = request_fingerprint(
+            &Method::POST,
+            &"/v1/orders?b=2&a=1".parse::<Uri>().expect("valid uri"),
+            Some("application/json"),
+            br#"{"id":1}"#,
+        );
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_changes_with_query_value() {
+        let a = request_fingerprint(
+            &Method::POST,
+            &"/v1/orders?a=1".parse::<Uri>().expect("valid uri"),
+            Some("application/json"),
+            br#"{"id":1}"#,
+        );
+        let b = request_fingerprint(
+            &Method::POST,
+            &"/v1/orders?a=2".parse::<Uri>().expect("valid uri"),
+            Some("application/json"),
+            br#"{"id":1}"#,
+        );
+        assert_ne!(a, b);
     }
 }

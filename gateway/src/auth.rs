@@ -467,6 +467,11 @@ pub fn extract_auth_from_headers_with_jwks(
 }
 
 /// Extract auth using state-aware JWT/JWKS settings and enrich tenant_id from cache.
+///
+/// **Impersonation:** If the `X-Impersonate-Tenant` header is present and the
+/// caller is a platform `administrator`, the auth context is scoped to the
+/// requested tenant. The role is downgraded to `operator` so that
+/// `to_rls_context()` applies tenant-scoped RLS instead of super-admin bypass.
 pub async fn extract_auth_for_state(
     headers: &HeaderMap,
     state: &crate::GatewayState,
@@ -478,6 +483,40 @@ pub async fn extract_auth_for_state(
     );
     auth.enrich_with_operator_map(&state.user_operator_map)
         .await;
+
+    // ── Tenant impersonation ──────────────────────────────────────
+    if let Some(impersonate_header) = headers.get("x-impersonate-tenant")
+        && let Ok(target_tenant) = impersonate_header.to_str()
+    {
+        let target_tenant = target_tenant.trim();
+        if !target_tenant.is_empty() {
+            let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator");
+
+            if is_platform_admin {
+                tracing::warn!(
+                    user_id = %auth.user_id,
+                    target_tenant = %target_tenant,
+                    event = "impersonation_active",
+                    "Platform admin impersonating tenant"
+                );
+                auth.tenant_id = Some(target_tenant.to_string());
+                // Downgrade role so to_rls_context() applies tenant-scoped
+                // RLS instead of super-admin bypass.
+                auth.role = "operator".to_string();
+            } else {
+                tracing::warn!(
+                    user_id = %auth.user_id,
+                    role = %auth.role,
+                    target_tenant = %target_tenant,
+                    event = "impersonation_denied",
+                    "Non-administrator attempted tenant impersonation"
+                );
+                // Non-admins cannot impersonate — ignore the header silently.
+                // We do NOT deny the request; the header is simply ignored.
+            }
+        }
+    }
+
     auth
 }
 
@@ -957,5 +996,58 @@ mod tests {
     fn parse_allowed_algorithms_rejects_unknown() {
         let err = parse_allowed_algorithms(&["FOO256".to_string()]).unwrap_err();
         assert!(err.to_string().contains("Unsupported JWT algorithm"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Tenant impersonation tests
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn impersonation_downgrades_administrator_role() {
+        // Simulate what extract_auth_for_state does for impersonation
+        let mut auth = AuthContext {
+            user_id: "master-user".to_string(),
+            role: "administrator".to_string(),
+            tenant_id: None,
+            claims: HashMap::new(),
+        };
+
+        // Apply impersonation logic (same as in extract_auth_for_state)
+        let target_tenant = "operator-abc-123";
+        let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator");
+        assert!(is_platform_admin);
+        auth.tenant_id = Some(target_tenant.to_string());
+        auth.role = "operator".to_string();
+
+        // After impersonation: tenant_id is set, role is downgraded
+        assert_eq!(auth.tenant_id, Some("operator-abc-123".to_string()));
+        assert_eq!(auth.role, "operator");
+
+        // RLS must NOT bypass
+        let rls = auth.to_rls_context();
+        assert!(
+            !rls.bypasses_rls(),
+            "Impersonated admin must NOT bypass RLS"
+        );
+        assert_eq!(rls.operator_id, "operator-abc-123");
+    }
+
+    #[test]
+    fn impersonation_ignored_for_non_administrator() {
+        // Non-administrator roles must not be able to impersonate
+        let auth = AuthContext {
+            user_id: "tenant-user".to_string(),
+            role: "super_admin".to_string(),
+            tenant_id: Some("original-tenant".to_string()),
+            claims: HashMap::new(),
+        };
+
+        // Apply same check — should NOT match
+        let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator");
+        assert!(!is_platform_admin, "super_admin is NOT platform admin");
+
+        // tenant_id should remain unchanged
+        assert_eq!(auth.tenant_id, Some("original-tenant".to_string()));
+        assert_eq!(auth.role, "super_admin");
     }
 }

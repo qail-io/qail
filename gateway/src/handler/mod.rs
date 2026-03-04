@@ -11,13 +11,17 @@ mod convert;
 #[cfg(feature = "qdrant")]
 mod qdrant;
 pub(crate) mod query;
+pub(crate) mod txn;
 
 // ── Public re-exports (preserves existing `crate::handler::*` paths) ──
 
 pub use admin::{health_check, health_check_internal, swagger_ui};
 pub use convert::row_to_json;
 pub(crate) use query::{clamp_query_limit, is_query_allowed};
-pub use query::{execute_batch, execute_query, execute_query_binary, execute_query_fast};
+pub use query::{
+    execute_batch, execute_query, execute_query_binary, execute_query_export, execute_query_fast,
+};
+pub use txn::{txn_begin, txn_commit, txn_query, txn_rollback, txn_savepoint};
 
 // ── Shared types ──
 

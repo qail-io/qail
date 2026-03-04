@@ -10,7 +10,10 @@
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{
+        HeaderMap, StatusCode,
+        header::{CONTENT_TYPE, HeaderValue},
+    },
     response::{IntoResponse, Json, Response},
 };
 use qail_core::ast::{AggregateFunc, Expr, JoinKind, Operator, Value as QailValue};
@@ -350,11 +353,29 @@ fn rpc_signature_lookup_sql(function_name: &RpcFunctionName) -> Result<String, A
 fn parse_rpc_signatures(rows: &[qail_pg::PgRow]) -> Result<Vec<RpcCallableSignature>, ApiError> {
     let mut signatures = Vec::with_capacity(rows.len());
     for row in rows {
-        let total_args = row.get_i32(0).unwrap_or(0).max(0) as usize;
-        let default_args = row.get_i32(1).unwrap_or(0).max(0) as usize;
-        let variadic = row.get_bool(2).unwrap_or(false);
+        let total_args = row
+            .try_get_by_name::<i32>("total_args")
+            .ok()
+            .or_else(|| row.get_i32(0))
+            .unwrap_or(0)
+            .max(0) as usize;
+        let default_args = row
+            .try_get_by_name::<i32>("default_args")
+            .ok()
+            .or_else(|| row.get_i32(1))
+            .unwrap_or(0)
+            .max(0) as usize;
+        let variadic = row
+            .try_get_by_name::<bool>("is_variadic")
+            .ok()
+            .or_else(|| row.get_bool(2))
+            .unwrap_or(false);
 
-        let raw_arg_names = row.get_string(3).unwrap_or_else(|| "[]".to_string());
+        let raw_arg_names = row
+            .try_get_by_name::<String>("arg_names_json")
+            .ok()
+            .or_else(|| row.get_string(3))
+            .unwrap_or_else(|| "[]".to_string());
         let mut arg_names: Vec<Option<String>> = serde_json::from_str(&raw_arg_names)
             .map_err(|e| ApiError::internal(format!("Invalid RPC arg name metadata: {}", e)))?;
         for name in &mut arg_names {
@@ -368,7 +389,11 @@ fn parse_rpc_signatures(rows: &[qail_pg::PgRow]) -> Result<Vec<RpcCallableSignat
             }
         }
 
-        let raw_arg_types = row.get_string(4).unwrap_or_else(|| "[]".to_string());
+        let raw_arg_types = row
+            .try_get_by_name::<String>("arg_types_json")
+            .ok()
+            .or_else(|| row.get_string(4))
+            .unwrap_or_else(|| "[]".to_string());
         let mut arg_types: Vec<String> = serde_json::from_str(&raw_arg_types)
             .map_err(|e| ApiError::internal(format!("Invalid RPC arg type metadata: {}", e)))?;
         arg_types = arg_types
@@ -393,8 +418,16 @@ fn parse_rpc_signatures(rows: &[qail_pg::PgRow]) -> Result<Vec<RpcCallableSignat
             variadic,
             arg_names,
             arg_types,
-            identity_args: row.get_string(5).unwrap_or_default(),
-            result_type: row.get_string(6).unwrap_or_default(),
+            identity_args: row
+                .try_get_by_name::<String>("identity_args")
+                .ok()
+                .or_else(|| row.get_string(5))
+                .unwrap_or_default(),
+            result_type: row
+                .try_get_by_name::<String>("result_type")
+                .ok()
+                .or_else(|| row.get_string(6))
+                .unwrap_or_default(),
         });
     }
 
@@ -689,7 +722,7 @@ async fn probe_rpc_overload_resolution(
 ) -> Result<(), qail_pg::PgError> {
     let stmt = next_rpc_probe_stmt_name();
     let probe = format!("PREPARE {} AS {}; DEALLOCATE {}", stmt, sql, stmt);
-    conn.execute_simple(&probe).await
+    conn.get_mut()?.execute_simple(&probe).await
 }
 
 fn map_probe_resolution_error(
@@ -853,15 +886,7 @@ pub(crate) async fn rpc_handler(
         }
     };
 
-    let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, None))?;
+    let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
 
     if let Err(err) =
         enforce_rpc_signature_contract(&state, &mut conn, &function, args.as_ref(), &sql).await
@@ -911,6 +936,29 @@ pub(crate) async fn rpc_handler(
     })))
 }
 
+/// SECURITY: Runtime guard — reject requests targeting inaccessible tables.
+/// Allowlist takes precedence: if set, only listed tables are allowed.
+/// Otherwise falls back to blocklist check.
+/// Belt-and-suspenders: routes for blocked tables are not registered,
+/// but this catches edge cases (e.g., expand references, nested routes).
+fn check_table_not_blocked(state: &GatewayState, table_name: &str) -> Result<(), ApiError> {
+    if !state.allowed_tables.is_empty() {
+        // Allowlist mode: only allow listed tables
+        if !state.allowed_tables.contains(table_name) {
+            return Err(ApiError::forbidden(format!(
+                "Table '{}' is not accessible via REST",
+                table_name
+            )));
+        }
+    } else if state.blocked_tables.contains(table_name) {
+        return Err(ApiError::forbidden(format!(
+            "Table '{}' is not accessible via REST",
+            table_name
+        )));
+    }
+    Ok(())
+}
+
 /// GET /api/{table} — list with pagination, sorting, filtering, column selection
 pub(crate) async fn list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -920,6 +968,7 @@ pub(crate) async fn list_handler(
 ) -> Result<Response, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     let _table = state
         .schema
@@ -998,6 +1047,9 @@ pub(crate) async fn list_handler(
             )));
         }
         for rel in relations {
+            // SECURITY: Block expand into blocked tables
+            check_table_not_blocked(&state, rel)?;
+
             // Try: this table references `rel` (forward: orders?expand=users)
             if let Some((fk_col, ref_col)) = state.schema.relation_for(&table_name, rel) {
                 let left = format!("{}.{}", table_name, fk_col);
@@ -1113,11 +1165,15 @@ pub(crate) async fn list_handler(
 
     // Check cache for simple read queries
     if can_cache && let Some(cached) = state.cache.get(&cache_key) {
-        return Ok(Response::builder()
-            .header("Content-Type", "application/json")
-            .header("X-Cache", "HIT")
-            .body(Body::from(cached))
-            .unwrap());
+        let mut response = Response::new(Body::from(cached));
+        *response.status_mut() = StatusCode::OK;
+        response
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        response
+            .headers_mut()
+            .insert("x-cache", HeaderValue::from_static("HIT"));
+        return Ok(response);
     }
 
     // ── Per-tenant concurrency guard ────────────────────────────────────
@@ -1137,14 +1193,8 @@ pub(crate) async fn list_handler(
 
     // Execute
     let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+        .acquire_with_auth_rls_guarded(&auth, Some(&table_name))
+        .await?;
 
     // ── EXPLAIN Pre-check ──────────────────────────────────────────────
     // Run EXPLAIN (FORMAT JSON) for queries with expand depth ≥ threshold
@@ -1242,9 +1292,14 @@ pub(crate) async fn list_handler(
             let decision = check_estimate(&estimate, &state.explain_config);
             if decision.is_rejected() {
                 let msg = decision.rejection_message().unwrap_or_default();
-                let detail = decision
-                    .rejection_detail()
-                    .expect("rejected decision always has detail");
+                let Some(detail) = decision.rejection_detail() else {
+                    tracing::error!(
+                        table = %table_name,
+                        "EXPLAIN pre-check rejected query without rejection detail"
+                    );
+                    conn.release().await;
+                    return Err(ApiError::internal("EXPLAIN pre-check rejected query"));
+                };
                 tracing::warn!(
                     table = %table_name,
                     cost = estimate.total_cost,
@@ -1330,10 +1385,13 @@ pub(crate) async fn list_handler(
             body.push_str(&serde_json::to_string(row).unwrap_or_default());
             body.push('\n');
         }
-        return Ok(Response::builder()
-            .header("Content-Type", "application/x-ndjson")
-            .body(Body::from(body))
-            .unwrap());
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-ndjson"),
+        );
+        return Ok(response);
     }
 
     let response_body = ListResponse {
@@ -1387,6 +1445,7 @@ pub(crate) async fn aggregate_handler(
         return Err(ApiError::not_found("aggregate route"));
     }
     let table_name = parts[1].to_string();
+    check_table_not_blocked(&state, &table_name)?;
 
     let _table = state
         .schema
@@ -1469,14 +1528,8 @@ pub(crate) async fn aggregate_handler(
 
     // Execute
     let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+        .acquire_with_auth_rls_guarded(&auth, Some(&table_name))
+        .await?;
 
     let rows = conn
         .fetch_all_uncached(&cmd)
@@ -1517,6 +1570,7 @@ pub(crate) async fn get_by_id_handler(
 ) -> Result<Json<SingleResponse>, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     // F5: Accept any PK type (UUID, text, integer, serial, etc.)
     // Let Postgres validate the value against the actual column type.
@@ -1551,14 +1605,8 @@ pub(crate) async fn get_by_id_handler(
 
     // Execute
     let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+        .acquire_with_auth_rls_guarded(&auth, Some(&table_name))
+        .await?;
 
     let rows = match conn.fetch_all_uncached(&cmd).await {
         Ok(rows) => rows,
@@ -1588,11 +1636,21 @@ pub(crate) async fn get_by_id_handler(
             ));
         }
         let sql = qail_pg::driver::branch_sql::read_overlay_sql(branch_name, &table_name);
-        if let Ok(overlay_rows) = conn.get_mut().simple_query(&sql).await {
+        if let Ok(pg_conn) = conn.get_mut()
+            && let Ok(overlay_rows) = pg_conn.simple_query(&sql).await
+        {
             for orow in &overlay_rows {
-                let row_pk = orow.get_string(0).unwrap_or_default();
+                let row_pk = orow
+                    .try_get_by_name::<String>("row_pk")
+                    .ok()
+                    .or_else(|| orow.get_string(0))
+                    .unwrap_or_default();
                 if row_pk == id {
-                    let operation = orow.get_string(1).unwrap_or_default();
+                    let operation = orow
+                        .try_get_by_name::<String>("operation")
+                        .ok()
+                        .or_else(|| orow.get_string(1))
+                        .unwrap_or_default();
                     match operation.as_str() {
                         "delete" => {
                             conn.release().await;
@@ -1602,7 +1660,11 @@ pub(crate) async fn get_by_id_handler(
                             )));
                         }
                         "update" | "insert" => {
-                            let row_data_str = orow.get_string(2).unwrap_or_default();
+                            let row_data_str = orow
+                                .try_get_by_name::<String>("row_data")
+                                .ok()
+                                .or_else(|| orow.get_string(2))
+                                .unwrap_or_default();
                             if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
                                 data = val;
                             }
@@ -1651,6 +1713,7 @@ pub(crate) async fn create_handler(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     let table = state
         .schema
@@ -1668,6 +1731,14 @@ pub(crate) async fn create_handler(
             .required_columns()
             .iter()
             .map(|c| c.name.clone())
+            // Skip tenant_column from required validation — it will be auto-injected
+            // from the auth context if not provided by the client.
+            .filter(|name| {
+                if auth.tenant_id.is_some() && name == &state.config.tenant_column {
+                    return false;
+                }
+                true
+            })
             .collect()
     };
 
@@ -1681,9 +1752,10 @@ pub(crate) async fn create_handler(
     // Detect batch vs single
     let is_batch = body.is_array();
     let objects: Vec<&serde_json::Map<String, Value>> = if is_batch {
-        body.as_array()
-            .unwrap()
-            .iter()
+        let arr = body
+            .as_array()
+            .ok_or_else(|| ApiError::parse_error("Expected JSON array body"))?;
+        arr.iter()
             .map(|v| {
                 v.as_object()
                     .ok_or_else(|| ApiError::parse_error("Batch items must be JSON objects"))
@@ -1711,6 +1783,18 @@ pub(crate) async fn create_handler(
             }
         }
     }
+    // SECURITY: Fail closed on invalid JSON keys instead of silently skipping.
+    // Skipping can produce unintended default-row inserts.
+    for obj in &objects {
+        for key in obj.keys() {
+            if !crate::rest::filters::is_safe_identifier(key) {
+                return Err(ApiError::parse_error(format!(
+                    "Invalid field name '{}' in create payload",
+                    key
+                )));
+            }
+        }
+    }
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers);
@@ -1722,14 +1806,8 @@ pub(crate) async fn create_handler(
 
     // Acquire connection
     let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+        .acquire_with_auth_rls_guarded(&auth, Some(&table_name))
+        .await?;
 
     // Branch CoW Write: redirect inserts to overlay table
     if let Some(branch_name) = branch_ctx.branch_name() {
@@ -1797,13 +1875,18 @@ pub(crate) async fn create_handler(
         let mut cmd = qail_core::ast::Qail::add(&table_name);
 
         for (key, value) in *obj {
-            // SECURITY: Validate JSON keys as safe identifiers before AST build.
-            if !crate::rest::filters::is_safe_identifier(key) {
-                tracing::warn!(key = %key, table = %table_name, "Create: JSON key rejected by identifier guard");
-                continue;
-            }
             let qail_val = json_to_qail_value(value);
             cmd = cmd.set_value(key, qail_val);
+        }
+
+        // Auto-inject tenant_id from auth context if not provided by client.
+        // This ensures multi-tenant tables get the correct tenant_id without
+        // requiring every frontend form to explicitly include it.
+        if let Some(ref tid) = auth.tenant_id {
+            let tc = &state.config.tenant_column;
+            if !obj.contains_key(tc) {
+                cmd = cmd.set_value(tc, QailValue::String(tid.clone()));
+            }
         }
 
         // Upsert support: explicit on_conflict param takes precedence
@@ -1861,10 +1944,10 @@ pub(crate) async fn create_handler(
         }
 
         // Apply RLS
-        state
-            .policy_engine
-            .apply_policies(&auth, &mut cmd)
-            .map_err(|e| ApiError::forbidden(e.to_string()))?;
+        if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
+            conn.release().await;
+            return Err(ApiError::forbidden(e.to_string()));
+        }
 
         let rows = match conn.fetch_all_uncached(&cmd).await {
             Ok(rows) => rows,
@@ -1937,6 +2020,7 @@ pub(crate) async fn update_handler(
 ) -> Result<Json<SingleResponse>, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     // F5: Accept any PK type
     if id.is_empty() {
@@ -1971,6 +2055,15 @@ pub(crate) async fn update_handler(
     if obj.is_empty() {
         return Err(ApiError::parse_error("No fields to update"));
     }
+    // SECURITY: Fail closed on invalid JSON keys instead of silently skipping.
+    for key in obj.keys() {
+        if !crate::rest::filters::is_safe_identifier(key) {
+            return Err(ApiError::parse_error(format!(
+                "Invalid field name '{}' in update payload",
+                key
+            )));
+        }
+    }
 
     // Build: set table { col1 = val1 } [pk = $id]
     let mut cmd = qail_core::ast::Qail::set(&table_name).filter(
@@ -1980,11 +2073,6 @@ pub(crate) async fn update_handler(
     );
 
     for (key, value) in obj {
-        // SECURITY: Validate JSON keys as safe identifiers before AST build.
-        if !crate::rest::filters::is_safe_identifier(key) {
-            tracing::warn!(key = %key, table = %table_name, "Update: JSON key rejected by identifier guard");
-            continue;
-        }
         let qail_val = json_to_qail_value(value);
         cmd = cmd.set_value(key, qail_val);
     }
@@ -2008,14 +2096,8 @@ pub(crate) async fn update_handler(
 
     // Execute
     let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+        .acquire_with_auth_rls_guarded(&auth, Some(&table_name))
+        .await?;
 
     // Branch CoW Write: redirect updates to overlay
     if let Some(branch_name) = branch_ctx.branch_name() {
@@ -2075,6 +2157,7 @@ pub(crate) async fn delete_handler(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     // F5: Accept any PK type
     if id.is_empty() {
@@ -2119,14 +2202,8 @@ pub(crate) async fn delete_handler(
 
     // Execute
     let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+        .acquire_with_auth_rls_guarded(&auth, Some(&table_name))
+        .await?;
 
     // Branch CoW Write: redirect deletes to overlay (tombstone)
     if let Some(branch_name) = branch_ctx.branch_name() {

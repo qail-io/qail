@@ -20,8 +20,9 @@ use tower_http::{
 
 use crate::GatewayState;
 use crate::handler::{
-    execute_batch, execute_query, execute_query_binary, execute_query_fast, health_check,
-    health_check_internal, swagger_ui,
+    execute_batch, execute_query, execute_query_binary, execute_query_export, execute_query_fast,
+    health_check, health_check_internal, swagger_ui, txn_begin, txn_commit, txn_query,
+    txn_rollback, txn_savepoint,
 };
 use crate::middleware::rate_limit_middleware;
 use crate::rest::auto_rest_routes;
@@ -58,6 +59,7 @@ pub fn create_router(
         .route("/docs", get(swagger_ui))
         // Query endpoints (Qail AST protocol)
         .route("/qail", post(execute_query))
+        .route("/qail/export", post(execute_query_export))
         .route("/qail/binary", post(execute_query_binary))
         .route("/qail/fast", post(execute_query_fast))
         .route("/qail/batch", post(execute_batch))
@@ -65,6 +67,12 @@ pub fn create_router(
         .route("/api/_batch", post(execute_batch))
         // WebSocket
         .route("/ws", get(ws_handler))
+        // Transaction session endpoints
+        .route("/txn/begin", post(txn_begin))
+        .route("/txn/query", post(txn_query))
+        .route("/txn/commit", post(txn_commit))
+        .route("/txn/rollback", post(txn_rollback))
+        .route("/txn/savepoint", post(txn_savepoint))
         // Merge auto-REST routes
         .merge(rest);
 

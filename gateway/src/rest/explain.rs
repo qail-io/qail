@@ -199,14 +199,8 @@ pub(crate) async fn explain_handler(
     let explain_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", sql);
 
     let mut conn = state
-        .pool
-        .acquire_with_rls_timeouts(
-            auth.to_rls_context(),
-            state.config.statement_timeout_ms,
-            state.config.lock_timeout_ms,
-        )
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
+        .acquire_with_auth_rls_guarded(&auth, Some(&table_name))
+        .await?;
 
     let raw_rows = match conn.query_raw_with_params(&explain_sql, &params_buf).await {
         Ok(rows) => {

@@ -672,9 +672,19 @@ impl ApiError {
         match self.code.as_str() {
             "RATE_LIMITED" => StatusCode::TOO_MANY_REQUESTS,
             "TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
-            "PARSE_ERROR" | "VALIDATION_ERROR" | "EMPTY_QUERY" | "EMPTY_BATCH" | "DECODE_ERROR"
-            | "UNSUPPORTED_ACTION" | "MISSING_VECTOR" => StatusCode::BAD_REQUEST,
-            "CONFLICT" => StatusCode::CONFLICT,
+            "PARSE_ERROR"
+            | "VALIDATION_ERROR"
+            | "EMPTY_QUERY"
+            | "EMPTY_BATCH"
+            | "DECODE_ERROR"
+            | "UNSUPPORTED_ACTION"
+            | "MISSING_VECTOR"
+            | "EXPORT_ONLY"
+            | "AST_VALIDATION_FAILED"
+            | "PAYLOAD_TOO_LARGE" => StatusCode::BAD_REQUEST,
+            "CONFLICT" | "TXN_SESSION_EXPIRED" | "TXN_STATEMENT_LIMIT" | "TXN_ABORTED" => {
+                StatusCode::CONFLICT
+            }
             "QUERY_ERROR" | "QDRANT_ERROR" | "TXN_ERROR" | "TENANT_BOUNDARY_VIOLATION" => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -682,9 +692,11 @@ impl ApiError {
             "UNAUTHORIZED" | "AUTH_DENIED" | "AUTH_REQUIRED" => StatusCode::UNAUTHORIZED,
             "FORBIDDEN" | "QUERY_NOT_ALLOWED" | "POLICY_DENIED" => StatusCode::FORBIDDEN,
             "NOT_FOUND" => StatusCode::NOT_FOUND,
-            "CONNECTION_ERROR" | "QDRANT_NOT_CONFIGURED" | "QDRANT_CONNECTION_ERROR" => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            "CONNECTION_ERROR"
+            | "POOL_BACKPRESSURE"
+            | "TXN_SESSION_LIMIT"
+            | "QDRANT_NOT_CONFIGURED"
+            | "QDRANT_CONNECTION_ERROR" => StatusCode::SERVICE_UNAVAILABLE,
             "BATCH_TOO_LARGE" => StatusCode::PAYLOAD_TOO_LARGE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -743,12 +755,35 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status_code();
         let is_rate_limited = self.code == "RATE_LIMITED";
+        let is_pool_backpressure = self.code == "POOL_BACKPRESSURE";
         let request_id = self.request_id.clone();
+        let message = self.message.clone();
         let mut response = (status, Json(self)).into_response();
 
         // P1-B: Add Retry-After header for rate-limited responses
         if is_rate_limited && let Ok(v) = "1".parse() {
             response.headers_mut().insert("retry-after", v);
+        }
+
+        // DB backpressure responses include retry and queue metadata so clients
+        // can apply smarter retry/backoff behavior per scope.
+        if is_pool_backpressure {
+            let (scope, reason, retry_after_secs) =
+                crate::db_backpressure::backpressure_response_metadata(&message);
+
+            if let Ok(v) = retry_after_secs.to_string().parse() {
+                response.headers_mut().insert("retry-after", v);
+            }
+            if let Ok(v) = scope.parse() {
+                response
+                    .headers_mut()
+                    .insert("x-qail-backpressure-scope", v);
+            }
+            if let Ok(v) = reason.parse() {
+                response
+                    .headers_mut()
+                    .insert("x-qail-backpressure-reason", v);
+            }
         }
 
         // P1-A: Echo request_id in response header for tracing
@@ -908,6 +943,10 @@ mod tests {
     fn error_code_conflict_is_409() {
         let err = ApiError::with_code("CONFLICT", "dup");
         assert_eq!(err.status_code(), StatusCode::CONFLICT);
+        let err = ApiError::with_code("TXN_SESSION_EXPIRED", "expired");
+        assert_eq!(err.status_code(), StatusCode::CONFLICT);
+        let err = ApiError::with_code("TXN_STATEMENT_LIMIT", "too many");
+        assert_eq!(err.status_code(), StatusCode::CONFLICT);
     }
 
     #[test]
@@ -961,6 +1000,7 @@ mod tests {
     fn error_code_connection_errors_are_503() {
         for code in [
             "CONNECTION_ERROR",
+            "POOL_BACKPRESSURE",
             "QDRANT_NOT_CONFIGURED",
             "QDRANT_CONNECTION_ERROR",
         ] {
@@ -972,6 +1012,57 @@ mod tests {
                 code
             );
         }
+    }
+
+    #[test]
+    fn pool_backpressure_response_includes_retry_and_metadata_headers() {
+        let err = ApiError::with_code(
+            "POOL_BACKPRESSURE",
+            crate::db_backpressure::POOL_BACKPRESSURE_MSG_TENANT,
+        );
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-qail-backpressure-scope")
+                .and_then(|v| v.to_str().ok()),
+            Some("tenant")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-qail-backpressure-reason")
+                .and_then(|v| v.to_str().ok()),
+            Some("tenant_waiters_exceeded")
+        );
+    }
+
+    #[test]
+    fn pool_backpressure_unknown_message_falls_back_to_unknown_metadata() {
+        let err = ApiError::with_code("POOL_BACKPRESSURE", "Queue saturated");
+        let response = err.into_response();
+        assert_eq!(
+            response
+                .headers()
+                .get("x-qail-backpressure-scope")
+                .and_then(|v| v.to_str().ok()),
+            Some("unknown")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-qail-backpressure-reason")
+                .and_then(|v| v.to_str().ok()),
+            Some("queue_saturated")
+        );
     }
 
     #[test]

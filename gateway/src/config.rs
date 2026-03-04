@@ -117,6 +117,18 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_tenants")]
     pub max_tenants: usize,
 
+    /// Maximum global number of requests allowed to wait for a DB connection.
+    /// Requests above this cap are shed immediately with 503.
+    /// Default: 2048.
+    #[serde(default = "default_db_max_waiters_global")]
+    pub db_max_waiters_global: usize,
+
+    /// Maximum number of waiting DB acquires allowed per tenant+user key.
+    /// Requests above this cap are shed immediately with 503.
+    /// Default: 64.
+    #[serde(default = "default_db_max_waiters_per_tenant")]
+    pub db_max_waiters_per_tenant: usize,
+
     /// Idle timeout for tenant semaphore entries in seconds (default: 300).
     /// Entries unused for this long are evicted by the background sweeper.
     #[serde(default = "default_tenant_idle_timeout")]
@@ -219,6 +231,41 @@ pub struct GatewayConfig {
     /// Applied to the connection pool. URL `?channel_binding=` overrides this.
     #[serde(default = "default_pg_channel_binding")]
     pub pg_channel_binding: String,
+
+    /// Tables to block from auto-REST endpoint generation.
+    /// Blocked tables will not have any CRUD routes, cannot be referenced
+    /// via `?expand=`, and cannot appear as nested route targets.
+    /// Use this to hide sensitive tables (e.g., `users`) from the HTTP API.
+    #[serde(default)]
+    pub blocked_tables: Vec<String>,
+
+    /// Tables to allow for auto-REST endpoint generation (whitelist mode).
+    /// When set, ONLY these tables are exposed — all others are blocked.
+    /// Takes precedence over `blocked_tables`.
+    #[serde(default)]
+    pub allowed_tables: Vec<String>,
+
+    /// Transaction session idle timeout in seconds (default: 30).
+    /// Sessions idle beyond this are rolled back and released.
+    #[serde(default = "default_txn_session_timeout")]
+    pub txn_session_timeout_secs: u64,
+
+    /// Maximum concurrent transaction sessions (default: 0 = pool_size / 2).
+    /// Prevents transaction starvation of the connection pool.
+    #[serde(default)]
+    pub txn_max_sessions: usize,
+
+    /// Maximum wall-clock lifetime of a transaction session in seconds.
+    /// Sessions older than this are terminated on next use.
+    /// Default: 900 (15 minutes).
+    #[serde(default = "default_txn_max_lifetime_secs")]
+    pub txn_max_lifetime_secs: u64,
+
+    /// Maximum number of statements allowed per transaction session.
+    /// Includes `/txn/query` and `/txn/savepoint`.
+    /// Default: 1000.
+    #[serde(default = "default_txn_max_statements_per_session")]
+    pub txn_max_statements_per_session: usize,
 }
 
 /// Per-role limit overrides. All fields optional — omitted fields
@@ -307,6 +354,12 @@ fn default_max_concurrent_queries() -> usize {
 fn default_max_tenants() -> usize {
     10_000
 }
+fn default_db_max_waiters_global() -> usize {
+    2048
+}
+fn default_db_max_waiters_per_tenant() -> usize {
+    64
+}
 fn default_tenant_idle_timeout() -> u64 {
     300
 }
@@ -336,6 +389,15 @@ fn default_pg_sslmode() -> String {
 }
 fn default_pg_channel_binding() -> String {
     "prefer".to_string()
+}
+fn default_txn_session_timeout() -> u64 {
+    30
+}
+fn default_txn_max_lifetime_secs() -> u64 {
+    900
+}
+fn default_txn_max_statements_per_session() -> usize {
+    1000
 }
 
 impl Default for GatewayConfig {
@@ -367,6 +429,8 @@ impl Default for GatewayConfig {
             explain_cache_ttl_secs: 300,
             max_concurrent_queries: 10,
             max_tenants: 10_000,
+            db_max_waiters_global: 2048,
+            db_max_waiters_per_tenant: 64,
             tenant_idle_timeout_secs: 300,
             max_batch_queries: 100,
             max_query_depth: 5,
@@ -387,6 +451,12 @@ impl Default for GatewayConfig {
             tenant_rate_limit_burst: 100,
             pg_sslmode: "prefer".to_string(),
             pg_channel_binding: "prefer".to_string(),
+            blocked_tables: Vec::new(),
+            allowed_tables: Vec::new(),
+            txn_session_timeout_secs: 30,
+            txn_max_sessions: 0,
+            txn_max_lifetime_secs: 900,
+            txn_max_statements_per_session: 1000,
         }
     }
 }
@@ -536,6 +606,8 @@ impl GatewayConfig {
             explain_cache_ttl_secs: 300,
             max_concurrent_queries: 10,
             max_tenants: 10_000,
+            db_max_waiters_global: 2048,
+            db_max_waiters_per_tenant: 64,
             tenant_idle_timeout_secs: 300,
             max_batch_queries: 100,
             max_query_depth: 5,
@@ -556,6 +628,20 @@ impl GatewayConfig {
             tenant_rate_limit_burst: 100,
             pg_sslmode: "prefer".to_string(),
             pg_channel_binding: "prefer".to_string(),
+            blocked_tables: qail
+                .gateway
+                .as_ref()
+                .and_then(|gw| gw.blocked_tables.clone())
+                .unwrap_or_default(),
+            allowed_tables: qail
+                .gateway
+                .as_ref()
+                .and_then(|gw| gw.allowed_tables.clone())
+                .unwrap_or_default(),
+            txn_session_timeout_secs: 30,
+            txn_max_sessions: 0,
+            txn_max_lifetime_secs: 900,
+            txn_max_statements_per_session: 1000,
         }
     }
 }

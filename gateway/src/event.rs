@@ -4,6 +4,7 @@
 //! Each trigger is a `{table, operation, webhook_url}` rule.
 //! Webhooks are fired asynchronously (`tokio::spawn`) with retry logic.
 
+use reqwest::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -41,6 +42,136 @@ fn default_retry_count() -> u32 {
 /// Serde default that returns `true`.
 fn default_true() -> bool {
     true
+}
+
+/// Safety caps for webhook delivery/config.
+const MAX_WEBHOOK_RETRIES: u32 = 10;
+const MAX_BACKOFF_EXPONENT: u32 = 10; // 2^10 = 1024s max delay step
+const MAX_WEBHOOK_HEADERS: usize = 32;
+const MAX_WEBHOOK_HEADER_NAME_LEN: usize = 128;
+const MAX_WEBHOOK_HEADER_VALUE_LEN: usize = 4096;
+
+/// Headers controlled by the gateway transport and must not be user-overridden.
+const RESERVED_WEBHOOK_HEADERS: &[&str] = &[
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "expect",
+    "upgrade",
+    "te",
+    "trailer",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "content-type",
+    "x-qail-trigger",
+];
+
+fn is_reserved_webhook_header(name: &str) -> bool {
+    RESERVED_WEBHOOK_HEADERS.contains(&name)
+}
+
+fn retry_delay(attempt: u32) -> Duration {
+    let exp = attempt.saturating_sub(1).min(MAX_BACKOFF_EXPONENT);
+    Duration::from_secs(1u64 << exp)
+}
+
+fn normalize_trigger(mut trigger: EventTrigger) -> Result<EventTrigger, String> {
+    if trigger.name.trim().is_empty() {
+        return Err("Trigger name must not be empty".to_string());
+    }
+    if trigger.table.trim().is_empty() {
+        return Err(format!(
+            "Trigger '{}' has empty table name",
+            trigger.name.trim()
+        ));
+    }
+    if trigger.operations.is_empty() {
+        return Err(format!(
+            "Trigger '{}' must specify at least one operation",
+            trigger.name.trim()
+        ));
+    }
+
+    validate_webhook_url(&trigger.webhook_url).map_err(|e| {
+        format!(
+            "Trigger '{}' invalid webhook_url: {}",
+            trigger.name.trim(),
+            e
+        )
+    })?;
+
+    if trigger.retry_count > MAX_WEBHOOK_RETRIES {
+        tracing::warn!(
+            trigger = %trigger.name,
+            requested = trigger.retry_count,
+            capped = MAX_WEBHOOK_RETRIES,
+            "Webhook retry_count exceeds cap; clamping"
+        );
+        trigger.retry_count = MAX_WEBHOOK_RETRIES;
+    }
+
+    if trigger.headers.len() > MAX_WEBHOOK_HEADERS {
+        return Err(format!(
+            "Trigger '{}' has too many headers ({} > {})",
+            trigger.name.trim(),
+            trigger.headers.len(),
+            MAX_WEBHOOK_HEADERS
+        ));
+    }
+
+    for (key, value) in &trigger.headers {
+        let key_trimmed = key.trim();
+        if key_trimmed.is_empty() {
+            return Err(format!(
+                "Trigger '{}' has empty header name",
+                trigger.name.trim()
+            ));
+        }
+        if key_trimmed.len() > MAX_WEBHOOK_HEADER_NAME_LEN {
+            return Err(format!(
+                "Trigger '{}' header '{}' exceeds max name length {}",
+                trigger.name.trim(),
+                key_trimmed,
+                MAX_WEBHOOK_HEADER_NAME_LEN
+            ));
+        }
+        let lower = key_trimmed.to_ascii_lowercase();
+        if is_reserved_webhook_header(&lower) {
+            return Err(format!(
+                "Trigger '{}' uses reserved header '{}'",
+                trigger.name.trim(),
+                key_trimmed
+            ));
+        }
+        if value.len() > MAX_WEBHOOK_HEADER_VALUE_LEN {
+            return Err(format!(
+                "Trigger '{}' header '{}' exceeds max value length {}",
+                trigger.name.trim(),
+                key_trimmed,
+                MAX_WEBHOOK_HEADER_VALUE_LEN
+            ));
+        }
+
+        HeaderName::from_bytes(key_trimmed.as_bytes()).map_err(|e| {
+            format!(
+                "Trigger '{}' has invalid header name '{}': {}",
+                trigger.name.trim(),
+                key_trimmed,
+                e
+            )
+        })?;
+        HeaderValue::from_str(value).map_err(|e| {
+            format!(
+                "Trigger '{}' has invalid header value for '{}': {}",
+                trigger.name.trim(),
+                key_trimmed,
+                e
+            )
+        })?;
+    }
+
+    Ok(trigger)
 }
 
 /// Payload sent to the webhook
@@ -113,6 +244,22 @@ pub struct EventTriggerEngine {
     webhook_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
+fn try_acquire_webhook_permit(
+    sem: &Arc<tokio::sync::Semaphore>,
+    trigger_name: &str,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    match Arc::clone(sem).try_acquire_owned() {
+        Ok(permit) => Some(permit),
+        Err(_) => {
+            tracing::warn!(
+                trigger = %trigger_name,
+                "Webhook dropped: concurrency limit reached"
+            );
+            None
+        }
+    }
+}
+
 impl Default for EventTriggerEngine {
     fn default() -> Self {
         Self {
@@ -124,27 +271,7 @@ impl Default for EventTriggerEngine {
 }
 
 impl EventTriggerEngine {
-    /// Create a new event trigger engine with a shared HTTP client.
-    pub fn new() -> Self {
-        Self {
-            triggers: Vec::new(),
-            client: Some(Arc::new(
-                reqwest::Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    // SECURITY: Disable redirects to prevent SSRF bypass via 301/302
-                    // to private/internal targets after DNS validation.
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .expect(
-                        "Failed to build webhook HTTP client — SSRF-hardened client is required",
-                    ),
-            )),
-            webhook_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
-        }
-    }
-
-    /// Register a trigger
-    pub fn add_trigger(&mut self, trigger: EventTrigger) {
+    fn add_validated_trigger(&mut self, trigger: EventTrigger) {
         tracing::info!(
             "Event trigger registered: {} on {}.{:?} → {}",
             trigger.name,
@@ -153,6 +280,42 @@ impl EventTriggerEngine {
             trigger.webhook_url
         );
         self.triggers.push(trigger);
+    }
+
+    /// Create a new event trigger engine with a shared HTTP client.
+    pub fn new() -> Self {
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            // SECURITY: Disable redirects to prevent SSRF bypass via 301/302
+            // to private/internal targets after DNS validation.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        {
+            Ok(client) => Some(Arc::new(client)),
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "Failed to build webhook HTTP client; event delivery disabled"
+                );
+                None
+            }
+        };
+
+        Self {
+            triggers: Vec::new(),
+            client,
+            webhook_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
+        }
+    }
+
+    /// Register a trigger
+    pub fn add_trigger(&mut self, trigger: EventTrigger) {
+        match normalize_trigger(trigger) {
+            Ok(valid) => self.add_validated_trigger(valid),
+            Err(e) => {
+                tracing::error!("Event trigger rejected: {}", e);
+            }
+        }
     }
 
     /// Load triggers from a YAML file
@@ -164,7 +327,8 @@ impl EventTriggerEngine {
             .map_err(|e| format!("Failed to parse event triggers: {}", e))?;
 
         for trigger in triggers {
-            self.add_trigger(trigger);
+            let valid = normalize_trigger(trigger)?;
+            self.add_validated_trigger(valid);
         }
         Ok(())
     }
@@ -225,19 +389,15 @@ impl EventTriggerEngine {
             let retry_count = trigger.retry_count;
             let trigger_name = trigger.name.clone();
             let sem = Arc::clone(&self.webhook_semaphore);
+            let permit = match try_acquire_webhook_permit(&sem, &trigger_name) {
+                Some(p) => p,
+                None => continue,
+            };
 
-            // SECURITY: Bounded concurrency — drop webhook if semaphore saturated.
+            // SECURITY: Bounded concurrency — acquire permit before spawning so
+            // overload doesn't create unbounded short-lived tasks.
             tokio::spawn(async move {
-                let _permit = match sem.try_acquire() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        tracing::warn!(
-                            trigger = %trigger_name,
-                            "Webhook dropped: concurrency limit reached"
-                        );
-                        return;
-                    }
-                };
+                let _permit = permit;
                 deliver_webhook(client, &url, &headers, &payload, retry_count, &trigger_name).await;
             });
         }
@@ -253,6 +413,16 @@ async fn deliver_webhook(
     max_retries: u32,
     trigger_name: &str,
 ) {
+    let capped_retries = max_retries.min(MAX_WEBHOOK_RETRIES);
+    if max_retries > capped_retries {
+        tracing::warn!(
+            trigger = %trigger_name,
+            requested = max_retries,
+            capped = capped_retries,
+            "Webhook retry_count exceeds runtime cap; clamping"
+        );
+    }
+
     // SECURITY (E4): Validate webhook URL to prevent SSRF.
     if let Err(reason) = validate_webhook_url(url) {
         tracing::error!(
@@ -335,10 +505,10 @@ async fn deliver_webhook(
         }
     }
 
-    for attempt in 0..=max_retries {
+    for attempt in 0..=capped_retries {
         if attempt > 0 {
-            // Exponential backoff: 1s, 2s, 4s, ...
-            let delay = Duration::from_secs(2u64.pow(attempt - 1));
+            // Exponential backoff with bounded exponent.
+            let delay = retry_delay(attempt);
             tracing::debug!(
                 "Event trigger '{}': retry {} after {:?}",
                 trigger_name,
@@ -354,7 +524,52 @@ async fn deliver_webhook(
             .header("x-qail-trigger", trigger_name);
 
         for (key, value) in headers {
-            req = req.header(key, value);
+            let key_trimmed = key.trim();
+            if key_trimmed.is_empty() {
+                tracing::warn!(
+                    trigger = %trigger_name,
+                    "Webhook header skipped: empty name"
+                );
+                continue;
+            }
+
+            let lower = key_trimmed.to_ascii_lowercase();
+            if is_reserved_webhook_header(&lower) {
+                tracing::warn!(
+                    trigger = %trigger_name,
+                    header = %key_trimmed,
+                    "Webhook header skipped: reserved name"
+                );
+                continue;
+            }
+
+            let header_name = match HeaderName::from_bytes(key_trimmed.as_bytes()) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(
+                        trigger = %trigger_name,
+                        header = %key_trimmed,
+                        error = %e,
+                        "Webhook header skipped: invalid header name"
+                    );
+                    continue;
+                }
+            };
+
+            let header_value = match HeaderValue::from_str(value) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        trigger = %trigger_name,
+                        header = %key_trimmed,
+                        error = %e,
+                        "Webhook header skipped: invalid header value"
+                    );
+                    continue;
+                }
+            };
+
+            req = req.header(header_name, header_value);
         }
 
         match req.json(payload).send().await {
@@ -376,7 +591,7 @@ async fn deliver_webhook(
                     status,
                     url,
                     attempt + 1,
-                    max_retries + 1,
+                    capped_retries + 1,
                 );
             }
             Err(e) => {
@@ -386,7 +601,7 @@ async fn deliver_webhook(
                     url,
                     e,
                     attempt + 1,
-                    max_retries + 1,
+                    capped_retries + 1,
                 );
             }
         }
@@ -500,6 +715,18 @@ fn reject_private_ip(ip: std::net::IpAddr) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn base_trigger() -> EventTrigger {
+        EventTrigger {
+            name: "t".to_string(),
+            table: "orders".to_string(),
+            operations: vec![OperationType::Create],
+            webhook_url: "https://example.com/hook".to_string(),
+            headers: HashMap::new(),
+            retry_count: 3,
+            enabled: true,
+        }
+    }
+
     #[test]
     fn test_trigger_matching() {
         let mut engine = EventTriggerEngine::default();
@@ -570,6 +797,59 @@ mod tests {
         assert!(json.contains("order_created"));
         assert!(json.contains("INSERT"));
         assert!(!json.contains("\"old\"")); // skip_serializing_if = None
+    }
+
+    #[test]
+    fn normalize_trigger_clamps_retry_count() {
+        let mut trigger = base_trigger();
+        trigger.retry_count = MAX_WEBHOOK_RETRIES + 100;
+        let normalized = normalize_trigger(trigger).expect("trigger should normalize");
+        assert_eq!(normalized.retry_count, MAX_WEBHOOK_RETRIES);
+    }
+
+    #[test]
+    fn normalize_trigger_rejects_reserved_header() {
+        let mut trigger = base_trigger();
+        trigger
+            .headers
+            .insert("Content-Type".to_string(), "application/json".to_string());
+        let err = normalize_trigger(trigger).expect_err("reserved header must be rejected");
+        assert!(err.contains("reserved header"));
+    }
+
+    #[test]
+    fn normalize_trigger_rejects_invalid_header_name() {
+        let mut trigger = base_trigger();
+        trigger
+            .headers
+            .insert("bad header".to_string(), "x".to_string());
+        let err = normalize_trigger(trigger).expect_err("invalid header name must be rejected");
+        assert!(err.contains("invalid header name"));
+    }
+
+    #[test]
+    fn retry_delay_is_bounded() {
+        assert_eq!(retry_delay(1), Duration::from_secs(1));
+        assert_eq!(retry_delay(2), Duration::from_secs(2));
+        assert_eq!(
+            retry_delay(MAX_BACKOFF_EXPONENT + 20),
+            Duration::from_secs(1u64 << MAX_BACKOFF_EXPONENT)
+        );
+    }
+
+    #[test]
+    fn webhook_permit_gate_sheds_when_full() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = try_acquire_webhook_permit(&sem, "t").expect("first permit should succeed");
+        assert!(
+            try_acquire_webhook_permit(&sem, "t").is_none(),
+            "second permit should be rejected while full"
+        );
+        drop(held);
+        assert!(
+            try_acquire_webhook_permit(&sem, "t").is_some(),
+            "permit should be available after release"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════
