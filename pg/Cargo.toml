@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 description = "Fastest async PostgreSQL driver - AST to wire protocol, optional io_uring on Linux"
 license = "Apache-2.0"
@@ -17,9 +17,11 @@ chrono = ["dep:chrono"]
 uuid = ["dep:uuid"]
 # Enable built-in Linux Kerberos/GSS provider for enterprise auth flows.
 enterprise-gssapi = []
+# Enable libpq benchmark/comparison examples (requires libpq C library)
+libpq = []
 
 [dependencies]
-qail-core = { version = "0.22.0", path = "../core" }
+qail-core = { version = "0.23.0", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 tokio = { version = "1.48.0", features = ["net", "io-util", "sync", "rt", "time"] }
@@ -64,3 +66,16 @@ proptest = "1.10.0"
 [[example]]
 name = "battle_qail_row"
 required-features = ["chrono", "uuid"]
+
+[[example]]
+name = "libpq_benchmark"
+required-features = ["libpq"]
+
+[[example]]
+name = "libpq_pool"
+required-features = ["libpq"]
+
+[[example]]
+name = "libpq_only"
+required-features = ["libpq"]
+

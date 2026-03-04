@@ -69,6 +69,81 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace -- -D warnings
 
+  core-syn-scanner:
+    name: qail-core syn-scanner drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core-syn-scanner
+      - name: Run qail-core tests with syn-scanner
+        run: cargo test -p qail-core --lib --features syn-scanner
+      - name: Clippy qail-core with syn-scanner
+        run: cargo clippy -p qail-core --features syn-scanner -- -D warnings
+
+  wire-fuzz:
+    name: qail-pg wire decode fuzz gate
+    runs-on: ubuntu-latest
+    env:
+      PROPTEST_CASES: 3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wire-fuzz
+      - name: Backend decoder panic-safety proptest
+        run: cargo test -p qail-pg --test wire_proptest backend_decode_never_panics
+      - name: Backend decoder mutation fuzz tests
+        run: cargo test -p qail-pg --test wire_decode_fuzz
+
+  io-uring:
+    name: qail-pg io_uring (Linux)
+    runs-on: ubuntu-latest
+    env:
+      QAIL_PG_IO_BACKEND: io_uring
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: io-uring-linux
+
+      - name: Check qail-pg with io_uring
+        run: cargo check -p qail-pg --features io_uring
+
+      - name: Unit tests qail-pg with io_uring
+        run: cargo test -p qail-pg --lib --features io_uring
+
+      - name: Clippy qail-pg with io_uring
+        run: cargo clippy -p qail-pg --features io_uring -- -D warnings
+
+      - name: Assert backend-labeled connect metrics are wired
+        run: |
+          grep -n 'qail_pg_connect_attempt_total' pg/src/driver/connection.rs
+          grep -n 'qail_pg_connect_duration_seconds' pg/src/driver/connection.rs
+          grep -n 'qail_pg_connect_success_total' pg/src/driver/connection.rs
+          grep -n 'qail_pg_connect_failure_total' pg/src/driver/connection.rs
+          grep -n '"transport" => ' pg/src/driver/connection.rs
+          grep -n '"backend" => ' pg/src/driver/connection.rs
+
+  panic-safety:
+    name: Panic Safety Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/check-panic-safety.sh
+
   fmt:
     name: Formatting
     runs-on: ubuntu-latest
