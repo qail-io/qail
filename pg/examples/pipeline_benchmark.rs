@@ -89,11 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut conn = PgConnection::connect("127.0.0.1", 5432, "orion", "qail_test_migration").await?;
 
     // Warmup
-    let _ = conn.pipeline_ast_cached(&batch).await?;
+    let _ = conn.pipeline_ast(&batch).await?;
 
     let start = Instant::now();
     for _ in 0..BATCH_ITERATIONS {
-        let _ = conn.pipeline_ast_cached(&batch).await?;
+        let _ = conn.pipeline_ast(&batch).await?;
     }
     let pipeline_time = start.elapsed().as_secs_f64() * 1000.0;
     let pipeline_qps = (BATCH_SIZE * BATCH_ITERATIONS) as f64 / (pipeline_time / 1000.0);
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handles.push(tokio::spawn(async move {
             let mut conn = pool_clone.acquire_system().await.unwrap();
             for _ in 0..BATCH_ITERATIONS {
-                let _ = conn.pipeline_ast_cached(&batch_clone).await;
+                let _ = conn.pipeline_ast(&batch_clone).await;
             }
         }));
     }

@@ -3,7 +3,7 @@
 //! Fuzz the PostgreSQL wire protocol encoder/decoder using proptest.
 //!
 //! Properties verified:
-//! 1. FrontendMessage::encode() always produces well-formed wire messages
+//! 1. FrontendMessage::encode_checked() always produces well-formed wire messages
 //! 2. BackendMessage::decode() never panics on arbitrary bytes
 //! 3. PgEncoder produces valid message boundaries (type + length + payload)
 
@@ -32,7 +32,11 @@ fn arb_frontend_message() -> impl Strategy<Value = FrontendMessage> {
     prop_oneof![
         // Startup
         (arb_pg_string(), arb_pg_string())
-            .prop_map(|(user, database)| FrontendMessage::Startup { user, database }),
+            .prop_map(|(user, database)| FrontendMessage::Startup {
+                user,
+                database,
+                startup_params: Vec::new(),
+            }),
         // Query (simple protocol)
         arb_pg_string().prop_map(FrontendMessage::Query),
         // Parse (extended protocol)
@@ -58,7 +62,7 @@ fn arb_frontend_message() -> impl Strategy<Value = FrontendMessage> {
                 params,
             }),
         // Execute
-        (arb_pg_string(), any::<i32>())
+        (arb_pg_string(), 0i32..=i32::MAX)
             .prop_map(|(portal, max_rows)| FrontendMessage::Execute { portal, max_rows }),
         // Sync
         Just(FrontendMessage::Sync),
@@ -77,7 +81,7 @@ fn arb_frontend_message() -> impl Strategy<Value = FrontendMessage> {
 }
 
 // ============================================================================
-// Property: FrontendMessage::encode() produces well-formed wire bytes
+// Property: FrontendMessage::encode_checked() produces well-formed wire bytes
 // ============================================================================
 
 proptest! {
@@ -88,8 +92,9 @@ proptest! {
     /// - Startup: length (4) + protocol_version (4) + params
     #[test]
     fn frontend_encode_valid_structure(msg in arb_frontend_message()) {
-        let bytes = msg.encode();
-        prop_assert!(!bytes.is_empty(), "Encoded message must not be empty");
+        let bytes = msg
+            .encode_checked()
+            .expect("safe generated frontend message must encode");
 
         match msg {
             FrontendMessage::Startup { .. } => {
@@ -134,7 +139,7 @@ proptest! {
     #[test]
     fn query_encode_null_terminated(sql in arb_pg_string()) {
         let msg = FrontendMessage::Query(sql);
-        let bytes = msg.encode();
+        let bytes = msg.encode_checked().expect("query must encode");
         // Last byte of payload must be 0x00 (null terminator)
         prop_assert_eq!(*bytes.last().unwrap(), 0u8, "Query must be null-terminated");
     }
@@ -147,7 +152,7 @@ proptest! {
         param_types in proptest::collection::vec(any::<u32>(), 0..4),
     ) {
         let msg = FrontendMessage::Parse { name: name.clone(), query: query.clone(), param_types: param_types.clone() };
-        let bytes = msg.encode();
+        let bytes = msg.encode_checked().expect("parse must encode");
 
         // Payload starts at byte 5 (after type + length)
         let payload = &bytes[5..];
@@ -219,13 +224,13 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
-    /// PgEncoder::encode_query_string produces valid SimpleQuery wire messages
+    /// PgEncoder::try_encode_query_string produces valid SimpleQuery wire messages
     #[test]
     fn pg_encoder_query_valid_wire(sql in arb_pg_string()) {
         use bytes::BytesMut;
         use qail_pg::protocol::encoder::PgEncoder;
 
-        let buf: BytesMut = PgEncoder::encode_query_string(&sql);
+        let buf: BytesMut = PgEncoder::try_encode_query_string(&sql).expect("safe sql must encode");
         let bytes = &buf[..];
 
         // Must start with 'Q'

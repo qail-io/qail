@@ -13,14 +13,14 @@ use qail_pg::protocol::encoder::{Param, PgEncoder};
 
 #[test]
 fn query_message_type_is_q() {
-    let bytes = PgEncoder::encode_query_string("SELECT 1");
+    let bytes = PgEncoder::try_encode_query_string("SELECT 1").unwrap();
     assert_eq!(bytes[0], b'Q', "Query message type must be 'Q'");
 }
 
 #[test]
 fn query_length_accuracy() {
     let sql = "SELECT * FROM users WHERE id = 42";
-    let bytes = PgEncoder::encode_query_string(sql);
+    let bytes = PgEncoder::try_encode_query_string(sql).unwrap();
     let declared_len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
     // declared_len = 4 (itself) + sql.len() + 1 (null terminator)
     assert_eq!(
@@ -38,7 +38,7 @@ fn query_length_accuracy() {
 
 #[test]
 fn query_null_terminator_present() {
-    let bytes = PgEncoder::encode_query_string("SELECT 1");
+    let bytes = PgEncoder::try_encode_query_string("SELECT 1").unwrap();
     assert_eq!(
         *bytes.last().unwrap(),
         0,
@@ -48,7 +48,7 @@ fn query_null_terminator_present() {
 
 #[test]
 fn query_empty_string() {
-    let bytes = PgEncoder::encode_query_string("");
+    let bytes = PgEncoder::try_encode_query_string("").unwrap();
     assert_eq!(bytes[0], b'Q');
     let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
     assert_eq!(len, 5, "Empty query: len = 4 (self) + 0 (sql) + 1 (null)");
@@ -82,7 +82,7 @@ fn sync_message_exact_bytes() {
 
 #[test]
 fn parse_message_structure() {
-    let bytes = PgEncoder::encode_parse("", "SELECT $1", &[]);
+    let bytes = PgEncoder::try_encode_parse("", "SELECT $1", &[]).unwrap();
     assert_eq!(bytes[0], b'P', "Parse message type must be 'P'");
     // After length, first byte should be 0 (unnamed statement null terminator)
     assert_eq!(
@@ -98,7 +98,7 @@ fn parse_message_structure() {
 
 #[test]
 fn parse_with_named_statement() {
-    let bytes = PgEncoder::encode_parse("my_stmt", "SELECT 1", &[]);
+    let bytes = PgEncoder::try_encode_parse("my_stmt", "SELECT 1", &[]).unwrap();
     assert_eq!(bytes[0], b'P');
     // Statement name "my_stmt" + null
     assert_eq!(&bytes[5..12], b"my_stmt");
@@ -107,7 +107,7 @@ fn parse_with_named_statement() {
 
 #[test]
 fn parse_with_param_types() {
-    let bytes = PgEncoder::encode_parse("", "SELECT $1", &[23]); // 23 = int4
+    let bytes = PgEncoder::try_encode_parse("", "SELECT $1", &[23]).unwrap(); // 23 = int4
     assert_eq!(bytes[0], b'P');
     // Should set param count to 1 and OID to 23
     let content = &bytes[5..];
@@ -210,7 +210,7 @@ fn bind_binary_data_param() {
 
 #[test]
 fn execute_message_structure() {
-    let bytes = PgEncoder::encode_execute("", 0);
+    let bytes = PgEncoder::try_encode_execute("", 0).unwrap();
     assert_eq!(bytes[0], b'E', "Execute type");
     let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
     assert_eq!(len, 9, "Execute len = 4 + 1(portal null) + 4(max_rows)");
@@ -221,7 +221,7 @@ fn execute_message_structure() {
 
 #[test]
 fn execute_with_row_limit() {
-    let bytes = PgEncoder::encode_execute("", 100);
+    let bytes = PgEncoder::try_encode_execute("", 100).unwrap();
     let max_rows = i32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
     assert_eq!(max_rows, 100, "Row limit must be 100");
 }
@@ -232,14 +232,14 @@ fn execute_with_row_limit() {
 
 #[test]
 fn describe_statement() {
-    let bytes = PgEncoder::encode_describe(false, "");
+    let bytes = PgEncoder::try_encode_describe(false, "").unwrap();
     assert_eq!(bytes[0], b'D', "Describe type");
     assert_eq!(bytes[5], b'S', "Describe Statement");
 }
 
 #[test]
 fn describe_portal() {
-    let bytes = PgEncoder::encode_describe(true, "");
+    let bytes = PgEncoder::try_encode_describe(true, "").unwrap();
     assert_eq!(bytes[0], b'D');
     assert_eq!(bytes[5], b'P', "Describe Portal");
 }
@@ -345,21 +345,11 @@ fn ultra_bind_too_many_params() {
 
 #[test]
 fn query_string_with_null_bytes() {
-    // SQL containing a null byte — the wire protocol null-terminates strings,
-    // so a null byte in SQL could truncate the query
+    // SQL containing a null byte must be rejected fail-closed to prevent
+    // query truncation at the wire protocol null terminator.
     let sql = "SELECT * FROM users\0; DROP TABLE orders";
-    let bytes = PgEncoder::encode_query_string(sql);
-    // The encoder currently sends the full bytes including \0
-    // The server will read up to the first \0 and ignore the rest
-    // This documents the behavior — ideally the transpiler prevents this upstream
-    assert_eq!(bytes[0], b'Q');
-    // Verify the length includes everything (it's passed as raw)
-    let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    assert_eq!(
-        len as usize,
-        4 + sql.len() + 1,
-        "Length includes null byte in SQL"
-    );
+    let bytes = PgEncoder::try_encode_query_string(sql).unwrap_err();
+    assert_eq!(bytes, EncodeError::NullByte);
 }
 
 // ============================================================================

@@ -36,7 +36,7 @@ fn main() {
         let sql = sample_cmd.to_sql();
 
         // Step 2: SQL string → wire bytes
-        let bytes = PgEncoder::encode_query_string(&sql);
+        let bytes = PgEncoder::try_encode_query_string(&sql).expect("encode must succeed");
         old_bytes_total += bytes.len();
     }
 

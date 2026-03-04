@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("2️⃣  Executing (Expecting Client-Side Error)...");
 
     // Use `query_pipeline` to access extended protocol logic
-    let result = conn.query_pipeline(&[(&sql, &params)]).await;
+    let result = conn.query_raw_with_params(&sql, &params).await;
 
     match result {
         Ok(_) => {

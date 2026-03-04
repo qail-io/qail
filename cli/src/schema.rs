@@ -126,13 +126,30 @@ pub fn check_schema(
                     println!("  {} No Qail queries found in {}", "ℹ".dimmed(), src);
                 } else {
                     // Run validation + RLS audit
-                    let errors = qail_core::build::validate_against_schema(&build_schema, &usages);
+                    let diagnostics = qail_core::build::validate_against_schema_diagnostics(
+                        &build_schema,
+                        &usages,
+                    );
 
                     // Separate schema errors from RLS warnings
-                    let schema_errors: Vec<_> =
-                        errors.iter().filter(|e| !e.contains("RLS AUDIT")).collect();
-                    let rls_warnings: Vec<_> =
-                        errors.iter().filter(|e| e.contains("RLS AUDIT")).collect();
+                    let schema_errors: Vec<_> = diagnostics
+                        .iter()
+                        .filter(|d| {
+                            matches!(
+                                d.kind,
+                                qail_core::build::ValidationDiagnosticKind::SchemaError
+                            )
+                        })
+                        .collect();
+                    let rls_warnings: Vec<_> = diagnostics
+                        .iter()
+                        .filter(|d| {
+                            matches!(
+                                d.kind,
+                                qail_core::build::ValidationDiagnosticKind::RlsWarning
+                            )
+                        })
+                        .collect();
 
                     // Query stats
                     let total_queries = usages.len();
@@ -155,7 +172,7 @@ pub fn check_schema(
                     } else {
                         println!("  {} {} schema error(s):", "✗".red(), schema_errors.len());
                         for err in &schema_errors {
-                            println!("    {}", err.red());
+                            println!("    {}", err.message.red());
                         }
                     }
 
@@ -192,8 +209,7 @@ pub fn check_schema(
                                 rls_warnings.len()
                             );
                             for warn in &rls_warnings {
-                                // Extract file:line from warning for clean display
-                                println!("    {}", warn.yellow());
+                                println!("    {}", warn.message.yellow());
                             }
                         }
                     }

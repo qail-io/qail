@@ -96,8 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================================================
     println!("\n━━━ TEST 2: TYPE VALIDATION ━━━");
 
-    // Test: TEXT cannot be primary key
-    let result = std::panic::catch_unwind(|| Column::new("bad_pk", ColumnType::Text).primary_key());
+    // Test: TEXT cannot be primary key (strict API)
+    let result = Column::new("bad_pk", ColumnType::Text).try_primary_key();
     match result {
         Err(_) => {
             println!("✅ Rejected TEXT as primary key type");
@@ -109,8 +109,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Test: JSONB cannot have UNIQUE constraint
-    let result = std::panic::catch_unwind(|| Column::new("bad_unique", ColumnType::Jsonb).unique());
+    // Test: JSONB cannot have UNIQUE constraint (strict API)
+    let result = Column::new("bad_unique", ColumnType::Jsonb).try_unique();
     match result {
         Err(_) => {
             println!("✅ Rejected UNIQUE on JSONB type");
@@ -123,9 +123,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Valid PK types should work
-    let _ = Column::new("uuid_pk", ColumnType::Uuid).primary_key();
-    let _ = Column::new("serial_pk", ColumnType::Serial).primary_key();
-    let _ = Column::new("int_pk", ColumnType::Int).primary_key();
+    let _ = Column::new("uuid_pk", ColumnType::Uuid)
+        .try_primary_key()
+        .expect("UUID should be valid primary key type");
+    let _ = Column::new("serial_pk", ColumnType::Serial)
+        .try_primary_key()
+        .expect("SERIAL should be valid primary key type");
+    let _ = Column::new("int_pk", ColumnType::Int)
+        .try_primary_key()
+        .expect("INT should be valid primary key type");
     println!("✅ UUID, SERIAL, INT allowed as primary keys");
     passed += 1;
 

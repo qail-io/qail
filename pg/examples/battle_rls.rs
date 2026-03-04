@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match pool.acquire_with_rls(ctx).await {
                     Ok(mut conn) => {
                         let q = Qail::get("generate_series(1,1)");
-                        match conn.pipeline_ast_fast(&[q]).await {
+                        match conn.pipeline_ast(&[q]).await {
                             Ok(_) => {
                                 latencies.push(t.elapsed());
                                 success.fetch_add(1, Ordering::Relaxed);

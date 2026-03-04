@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Do a fast query: SELECT 1
             // Use function-as-table syntax for robustness
             let q = Qail::get("generate_series(1,1)"); // Returns 1 row
-            conn.pipeline_ast_fast(&[q]).await.expect("Query failed");
+            conn.pipeline_ast(&[q]).await.expect("Query failed");
 
             counter.fetch_add(1, Ordering::SeqCst);
 

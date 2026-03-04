@@ -211,7 +211,7 @@ fn redteam_encode_bind_many_null_params() {
         statement: String::new(),
         params,
     };
-    let bytes = msg.encode();
+    let bytes = msg.encode_checked().expect("valid bind must encode");
     // Must not panic and must have correct structure
     assert_eq!(bytes[0], b'B');
     let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
@@ -221,7 +221,7 @@ fn redteam_encode_bind_many_null_params() {
 #[test]
 fn redteam_encode_query_empty_string() {
     let msg = FrontendMessage::Query(String::new());
-    let bytes = msg.encode();
+    let bytes = msg.encode_checked().expect("valid query must encode");
     assert_eq!(bytes[0], b'Q');
     // SQL "" + null terminator = 1 byte
     assert_eq!(*bytes.last().unwrap(), 0u8);
@@ -234,7 +234,7 @@ fn redteam_encode_parse_many_param_types() {
         query: "SELECT $1, $2, $3, $4, $5".to_string(),
         param_types: vec![23, 25, 700, 1043, 1184], // int4, text, float4, varchar, timestamptz
     };
-    let bytes = msg.encode();
+    let bytes = msg.encode_checked().expect("valid parse must encode");
     assert_eq!(bytes[0], b'P');
     let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
     assert_eq!(bytes.len(), len + 1);
@@ -369,13 +369,18 @@ fn tierx_error_response_huge_message() {
     }
 }
 
-/// FrontendMessage::Query with embedded NULL byte (should be caught by driver)
+/// FrontendMessage::Query with embedded NULL byte must fail closed.
 #[test]
 fn tierx_query_with_null_byte() {
     let msg = FrontendMessage::Query("SELECT 1\0; DROP TABLE users".to_string());
-    let bytes = msg.encode();
-    // Encoder should not panic — NULL byte handling is at the driver layer
-    assert_eq!(bytes[0], b'Q');
+    let err = msg
+        .encode_checked()
+        .expect_err("interior NUL must be rejected");
+    assert!(
+        err.to_string().contains("interior NUL"),
+        "unexpected encode error: {}",
+        err
+    );
 }
 
 /// Bind with 32767 (i16::MAX) params
@@ -387,7 +392,9 @@ fn tierx_bind_max_params() {
         statement: "bulk_stmt".to_string(),
         params,
     };
-    let bytes = msg.encode();
+    let bytes = msg
+        .encode_checked()
+        .expect("valid max-params bind must encode");
     assert_eq!(bytes[0], b'B');
     // Must not panic and must produce valid wire format
     let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
@@ -402,7 +409,7 @@ fn tierx_parse_empty_query() {
         query: String::new(),
         param_types: vec![],
     };
-    let bytes = msg.encode();
+    let bytes = msg.encode_checked().expect("valid parse must encode");
     assert_eq!(bytes[0], b'P');
     let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
     assert_eq!(bytes.len(), len + 1);

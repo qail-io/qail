@@ -216,11 +216,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let batches = TOTAL_QUERIES / BATCH_SIZE;
 
         // Warmup
-        let _ = conn.pipeline_ast_cached(&batch).await?;
+        let _ = conn.pipeline_ast(&batch).await?;
 
         let start = Instant::now();
         for _ in 0..batches {
-            let _ = conn.pipeline_ast_cached(&batch).await?;
+            let _ = conn.pipeline_ast(&batch).await?;
         }
         let elapsed = start.elapsed();
         let total = batches * BATCH_SIZE;
@@ -265,11 +265,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let batches = TOTAL_QUERIES / BATCH_SIZE;
 
-        let _ = conn.pipeline_ast_cached(&batch).await?;
+        let _ = conn.pipeline_ast(&batch).await?;
 
         let start = Instant::now();
         for _ in 0..batches {
-            let _ = conn.pipeline_ast_cached(&batch).await?;
+            let _ = conn.pipeline_ast(&batch).await?;
         }
         let elapsed = start.elapsed();
         let total = batches * BATCH_SIZE;
@@ -309,7 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handles.push(tokio::spawn(async move {
                 let mut conn = pool_clone.acquire_system().await.unwrap();
                 for _ in 0..batches_per_conn {
-                    let _ = conn.pipeline_ast_cached(&batch_clone).await;
+                    let _ = conn.pipeline_ast(&batch_clone).await;
                 }
             }));
         }
@@ -371,7 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handles.push(tokio::spawn(async move {
                 let mut conn = pool_clone.acquire_system().await.unwrap();
                 for _ in 0..batches_per_conn {
-                    let _ = conn.pipeline_ast_cached(&batch_clone).await;
+                    let _ = conn.pipeline_ast(&batch_clone).await;
                 }
             }));
         }
