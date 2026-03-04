@@ -25,6 +25,7 @@ use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -93,6 +94,14 @@ impl StatementCache {
         None
     }
 
+    pub(crate) fn remove(&mut self, key: &u64) -> Option<String> {
+        let removed = self.entries.remove(key);
+        if removed.is_some() {
+            self.order.retain(|k| k != key);
+        }
+        removed
+    }
+
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
@@ -137,6 +146,13 @@ static GSS_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Default timeout for TCP connect + PostgreSQL handshake.
 /// Prevents Slowloris DoS where a malicious server accepts TCP but never responds.
 pub(crate) const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CONNECT_TRANSPORT_PLAIN: &str = "plain";
+const CONNECT_TRANSPORT_TLS: &str = "tls";
+const CONNECT_TRANSPORT_MTLS: &str = "mtls";
+const CONNECT_TRANSPORT_GSSENC: &str = "gssenc";
+const CONNECT_BACKEND_TOKIO: &str = "tokio";
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+const CONNECT_BACKEND_IO_URING: &str = "io_uring";
 
 /// TLS configuration for mutual TLS (client certificate authentication).
 #[derive(Debug, Clone)]
@@ -177,6 +193,37 @@ struct ConnectParams<'a> {
     auth_settings: AuthSettings,
     gss_token_provider: Option<GssTokenProvider>,
     gss_token_provider_ex: Option<GssTokenProviderEx>,
+    startup_params: Vec<(String, String)>,
+}
+
+#[inline]
+fn has_logical_replication_startup_mode(startup_params: &[(String, String)]) -> bool {
+    startup_params.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("replication") && v.eq_ignore_ascii_case("database")
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupAuthFlow {
+    CleartextPassword,
+    Md5Password,
+    Scram { server_final_seen: bool },
+    EnterpriseGss { mechanism: EnterpriseAuthMechanism },
+}
+
+impl StartupAuthFlow {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CleartextPassword => "cleartext-password",
+            Self::Md5Password => "md5-password",
+            Self::Scram { .. } => "scram",
+            Self::EnterpriseGss { mechanism } => match mechanism {
+                EnterpriseAuthMechanism::KerberosV5 => "kerberos-v5",
+                EnterpriseAuthMechanism::GssApi => "gssapi",
+                EnterpriseAuthMechanism::Sspi => "sspi",
+            },
+        }
+    }
 }
 
 /// A raw PostgreSQL connection.
@@ -197,6 +244,20 @@ pub struct PgConnection {
     /// Buffer for asynchronous LISTEN/NOTIFY notifications.
     /// Populated by `recv()` when it encounters NotificationResponse messages.
     pub(crate) notifications: VecDeque<Notification>,
+    /// True while a logical replication CopyBoth stream is active.
+    pub(crate) replication_stream_active: bool,
+    /// True when StartupMessage was sent with `replication=database`.
+    pub(crate) replication_mode_enabled: bool,
+    /// Last seen wal_end from a replication XLogData frame.
+    pub(crate) last_replication_wal_end: Option<u64>,
+    /// Sticky fail-closed flag for uncertain protocol/I-O state.
+    /// Once set, the connection must not return to pool reuse.
+    pub(crate) io_desynced: bool,
+    /// Statement names scheduled for server-side `Close` on next write.
+    /// This keeps backend prepared state aligned with local LRU eviction.
+    pub(crate) pending_statement_closes: Vec<String>,
+    /// Reentrancy guard for pending-close drain path.
+    pub(crate) draining_statement_closes: bool,
 }
 
 impl PgConnection {
@@ -254,6 +315,7 @@ impl PgConnection {
             gss_token_provider,
             gss_token_provider_ex,
             auth,
+            startup_params,
         } = options;
 
         if mtls.is_some() && matches!(tls_mode, TlsMode::Disable) {
@@ -286,6 +348,7 @@ impl PgConnection {
                     auth_settings: auth,
                     gss_token_provider,
                     gss_token_provider_ex,
+                    startup_params: startup_params.clone(),
                 },
                 mtls_config,
             )
@@ -296,6 +359,8 @@ impl PgConnection {
         if gss_enc_mode != GssEncMode::Disable {
             match Self::try_gssenc_request(host, port).await {
                 Ok(GssEncNegotiationResult::Accepted(tcp_stream)) => {
+                    let connect_started = Instant::now();
+                    record_connect_attempt(CONNECT_TRANSPORT_GSSENC, CONNECT_BACKEND_TOKIO);
                     #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
                     {
                         let gssenc_fut = async {
@@ -314,10 +379,19 @@ impl PgConnection {
                                 process_id: 0,
                                 secret_key: 0,
                                 notifications: VecDeque::new(),
+                                replication_stream_active: false,
+                                replication_mode_enabled: has_logical_replication_startup_mode(
+                                    &startup_params,
+                                ),
+                                last_replication_wal_end: None,
+                                io_desynced: false,
+                                pending_statement_closes: Vec::new(),
+                                draining_statement_closes: false,
                             };
                             conn.send(FrontendMessage::Startup {
                                 user: user.to_string(),
                                 database: database.to_string(),
+                                startup_params: startup_params.clone(),
                             })
                             .await?;
                             conn.handle_startup(
@@ -330,24 +404,47 @@ impl PgConnection {
                             .await?;
                             Ok(conn)
                         };
-                        return tokio::time::timeout(DEFAULT_CONNECT_TIMEOUT, gssenc_fut)
-                            .await
-                            .map_err(|_| {
-                                PgError::Connection(format!(
-                                    "GSSENC connection timeout after {:?} \
+                        let result: PgResult<Self> =
+                            tokio::time::timeout(DEFAULT_CONNECT_TIMEOUT, gssenc_fut)
+                                .await
+                                .map_err(|_| {
+                                    PgError::Connection(format!(
+                                        "GSSENC connection timeout after {:?} \
                                  (handshake + auth)",
-                                    DEFAULT_CONNECT_TIMEOUT
-                                ))
-                            })?;
+                                        DEFAULT_CONNECT_TIMEOUT
+                                    ))
+                                })?;
+                        record_connect_result(
+                            CONNECT_TRANSPORT_GSSENC,
+                            CONNECT_BACKEND_TOKIO,
+                            &result,
+                            connect_started.elapsed(),
+                        );
+                        return result;
                     }
                     #[cfg(not(all(feature = "enterprise-gssapi", target_os = "linux")))]
                     {
                         let _ = tcp_stream;
-                        return Err(PgError::Connection(
+                        let err = PgError::Connection(
                             "Server accepted GSSENCRequest but GSSAPI encryption requires \
                              feature enterprise-gssapi on Linux"
                                 .to_string(),
-                        ));
+                        );
+                        metrics::histogram!(
+                            "qail_pg_connect_duration_seconds",
+                            "transport" => CONNECT_TRANSPORT_GSSENC,
+                            "backend" => CONNECT_BACKEND_TOKIO,
+                            "outcome" => "error"
+                        )
+                        .record(connect_started.elapsed().as_secs_f64());
+                        metrics::counter!(
+                            "qail_pg_connect_failure_total",
+                            "transport" => CONNECT_TRANSPORT_GSSENC,
+                            "backend" => CONNECT_BACKEND_TOKIO,
+                            "error_kind" => connect_error_kind(&err)
+                        )
+                        .increment(1);
+                        return Err(err);
                     }
                 }
                 Ok(GssEncNegotiationResult::Rejected)
@@ -386,6 +483,7 @@ impl PgConnection {
                     auth_settings: auth,
                     gss_token_provider,
                     gss_token_provider_ex,
+                    startup_params: startup_params.clone(),
                 })
                 .await
             }
@@ -400,6 +498,7 @@ impl PgConnection {
                         auth_settings: auth,
                         gss_token_provider,
                         gss_token_provider_ex,
+                        startup_params: startup_params.clone(),
                     },
                     tls_ca_cert_pem.as_deref(),
                 )
@@ -416,6 +515,7 @@ impl PgConnection {
                         auth_settings: auth,
                         gss_token_provider,
                         gss_token_provider_ex: gss_token_provider_ex.clone(),
+                        startup_params: startup_params.clone(),
                     },
                     tls_ca_cert_pem.as_deref(),
                 )
@@ -434,6 +534,7 @@ impl PgConnection {
                             auth_settings: auth,
                             gss_token_provider,
                             gss_token_provider_ex,
+                            startup_params: startup_params.clone(),
                         })
                         .await
                     }
@@ -543,12 +644,16 @@ impl PgConnection {
             auth_settings,
             gss_token_provider: None,
             gss_token_provider_ex: None,
+            startup_params: Vec::new(),
         })
         .await
     }
 
     async fn connect_with_password_and_auth_and_gss(params: ConnectParams<'_>) -> PgResult<Self> {
-        tokio::time::timeout(
+        let connect_started = Instant::now();
+        let attempt_backend = plain_connect_attempt_backend();
+        record_connect_attempt(CONNECT_TRANSPORT_PLAIN, attempt_backend);
+        let result = tokio::time::timeout(
             DEFAULT_CONNECT_TIMEOUT,
             Self::connect_with_password_inner(params),
         )
@@ -558,7 +663,18 @@ impl PgConnection {
                 "Connection timeout after {:?} (TCP connect + handshake)",
                 DEFAULT_CONNECT_TIMEOUT
             ))
-        })?
+        })?;
+        let backend = result
+            .as_ref()
+            .map(|conn| connect_backend_for_stream(&conn.stream))
+            .unwrap_or(attempt_backend);
+        record_connect_result(
+            CONNECT_TRANSPORT_PLAIN,
+            backend,
+            &result,
+            connect_started.elapsed(),
+        );
+        result
     }
 
     /// Inner connection logic without timeout wrapper.
@@ -572,15 +688,14 @@ impl PgConnection {
             auth_settings,
             gss_token_provider,
             gss_token_provider_ex,
+            startup_params,
         } = params;
+        let replication_mode_enabled = has_logical_replication_startup_mode(&startup_params);
         let addr = format!("{}:{}", host, port);
-        let tcp_stream = TcpStream::connect(&addr).await?;
-
-        // Disable Nagle's algorithm for lower latency
-        tcp_stream.set_nodelay(true)?;
+        let stream = Self::connect_plain_stream(&addr).await?;
 
         let mut conn = Self {
-            stream: PgStream::Tcp(tcp_stream),
+            stream,
             buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
             write_buf: BytesMut::with_capacity(BUFFER_CAPACITY), // 64KB write buffer
             sql_buf: BytesMut::with_capacity(512),
@@ -591,11 +706,18 @@ impl PgConnection {
             process_id: 0,
             secret_key: 0,
             notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
         };
 
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
+            startup_params,
         })
         .await?;
 
@@ -609,6 +731,38 @@ impl PgConnection {
         .await?;
 
         Ok(conn)
+    }
+
+    async fn connect_plain_stream(addr: &str) -> PgResult<PgStream> {
+        let tcp_stream = TcpStream::connect(addr).await?;
+        tcp_stream.set_nodelay(true)?;
+
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        {
+            if should_try_uring_plain() {
+                match super::uring::UringTcpStream::from_tokio(tcp_stream) {
+                    Ok(uring_stream) => {
+                        tracing::info!(
+                            addr = %addr,
+                            "qail-pg: using io_uring plain TCP transport"
+                        );
+                        return Ok(PgStream::Uring(uring_stream));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            addr = %addr,
+                            error = %e,
+                            "qail-pg: io_uring stream conversion failed; falling back to tokio TCP"
+                        );
+                        let fallback = TcpStream::connect(addr).await?;
+                        fallback.set_nodelay(true)?;
+                        return Ok(PgStream::Tcp(fallback));
+                    }
+                }
+            }
+        }
+
+        Ok(PgStream::Tcp(tcp_stream))
     }
 
     /// Connect to PostgreSQL server with TLS encryption.
@@ -652,6 +806,7 @@ impl PgConnection {
                 auth_settings,
                 gss_token_provider: None,
                 gss_token_provider_ex: None,
+                startup_params: Vec::new(),
             },
             ca_cert_pem,
         )
@@ -662,7 +817,9 @@ impl PgConnection {
         params: ConnectParams<'_>,
         ca_cert_pem: Option<&[u8]>,
     ) -> PgResult<Self> {
-        tokio::time::timeout(
+        let connect_started = Instant::now();
+        record_connect_attempt(CONNECT_TRANSPORT_TLS, CONNECT_BACKEND_TOKIO);
+        let result = tokio::time::timeout(
             DEFAULT_CONNECT_TIMEOUT,
             Self::connect_tls_inner(params, ca_cert_pem),
         )
@@ -672,7 +829,14 @@ impl PgConnection {
                 "TLS connection timeout after {:?}",
                 DEFAULT_CONNECT_TIMEOUT
             ))
-        })?
+        })?;
+        record_connect_result(
+            CONNECT_TRANSPORT_TLS,
+            CONNECT_BACKEND_TOKIO,
+            &result,
+            connect_started.elapsed(),
+        );
+        result
     }
 
     /// Inner TLS connection logic without timeout wrapper.
@@ -689,7 +853,9 @@ impl PgConnection {
             auth_settings,
             gss_token_provider,
             gss_token_provider_ex,
+            startup_params,
         } = params;
+        let replication_mode_enabled = has_logical_replication_startup_mode(&startup_params);
         use tokio::io::AsyncReadExt;
         use tokio_rustls::TlsConnector;
         use tokio_rustls::rustls::ClientConfig;
@@ -757,11 +923,18 @@ impl PgConnection {
             process_id: 0,
             secret_key: 0,
             notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
         };
 
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
+            startup_params,
         })
         .await?;
 
@@ -832,6 +1005,7 @@ impl PgConnection {
                 auth_settings,
                 gss_token_provider: None,
                 gss_token_provider_ex: None,
+                startup_params: Vec::new(),
             },
             config,
         )
@@ -842,7 +1016,9 @@ impl PgConnection {
         params: ConnectParams<'_>,
         config: TlsConfig,
     ) -> PgResult<Self> {
-        tokio::time::timeout(
+        let connect_started = Instant::now();
+        record_connect_attempt(CONNECT_TRANSPORT_MTLS, CONNECT_BACKEND_TOKIO);
+        let result = tokio::time::timeout(
             DEFAULT_CONNECT_TIMEOUT,
             Self::connect_mtls_inner(params, config),
         )
@@ -852,7 +1028,14 @@ impl PgConnection {
                 "mTLS connection timeout after {:?}",
                 DEFAULT_CONNECT_TIMEOUT
             ))
-        })?
+        })?;
+        record_connect_result(
+            CONNECT_TRANSPORT_MTLS,
+            CONNECT_BACKEND_TOKIO,
+            &result,
+            connect_started.elapsed(),
+        );
+        result
     }
 
     /// Inner mTLS connection logic without timeout wrapper.
@@ -866,7 +1049,9 @@ impl PgConnection {
             auth_settings,
             gss_token_provider,
             gss_token_provider_ex,
+            startup_params,
         } = params;
+        let replication_mode_enabled = has_logical_replication_startup_mode(&startup_params);
         use tokio::io::AsyncReadExt;
         use tokio_rustls::TlsConnector;
         use tokio_rustls::rustls::{
@@ -951,11 +1136,18 @@ impl PgConnection {
             process_id: 0,
             secret_key: 0,
             notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
         };
 
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
+            startup_params,
         })
         .await?;
 
@@ -995,11 +1187,18 @@ impl PgConnection {
             process_id: 0,
             secret_key: 0,
             notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
         };
 
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
+            startup_params: Vec::new(),
         })
         .await?;
 
@@ -1019,16 +1218,56 @@ impl PgConnection {
         gss_token_provider_ex: Option<GssTokenProviderEx>,
     ) -> PgResult<()> {
         let mut scram_client: Option<ScramClient> = None;
-        let mut gss_mechanism: Option<EnterpriseAuthMechanism> = None;
+        let mut startup_auth_flow: Option<StartupAuthFlow> = None;
+        let mut saw_auth_ok = false;
         let gss_session_id = GSS_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut gss_roundtrips: u32 = 0;
         const MAX_GSS_ROUNDTRIPS: u32 = 32;
 
         loop {
             let msg = self.recv().await?;
+            if saw_auth_ok
+                && matches!(
+                    &msg,
+                    BackendMessage::AuthenticationOk
+                        | BackendMessage::AuthenticationKerberosV5
+                        | BackendMessage::AuthenticationGSS
+                        | BackendMessage::AuthenticationGSSContinue(_)
+                        | BackendMessage::AuthenticationSSPI
+                        | BackendMessage::AuthenticationCleartextPassword
+                        | BackendMessage::AuthenticationMD5Password(_)
+                        | BackendMessage::AuthenticationSASL(_)
+                        | BackendMessage::AuthenticationSASLContinue(_)
+                        | BackendMessage::AuthenticationSASLFinal(_)
+                )
+            {
+                return Err(PgError::Protocol(
+                    "Received authentication challenge after AuthenticationOk".to_string(),
+                ));
+            }
             match msg {
-                BackendMessage::AuthenticationOk => {}
+                BackendMessage::AuthenticationOk => {
+                    if let Some(StartupAuthFlow::Scram {
+                        server_final_seen: false,
+                    }) = startup_auth_flow
+                    {
+                        return Err(PgError::Protocol(
+                            "Received AuthenticationOk before AuthenticationSASLFinal".to_string(),
+                        ));
+                    }
+                    saw_auth_ok = true;
+                }
                 BackendMessage::AuthenticationKerberosV5 => {
+                    if let Some(flow) = startup_auth_flow {
+                        return Err(PgError::Protocol(format!(
+                            "Received AuthenticationKerberosV5 while {} authentication is in progress",
+                            flow.label()
+                        )));
+                    }
+                    startup_auth_flow = Some(StartupAuthFlow::EnterpriseGss {
+                        mechanism: EnterpriseAuthMechanism::KerberosV5,
+                    });
+
                     if !auth_settings.allow_kerberos_v5 {
                         return Err(PgError::Auth(
                             "Server requested Kerberos V5 authentication, but Kerberos V5 is disabled by AuthSettings".to_string(),
@@ -1053,9 +1292,18 @@ impl PgConnection {
                     })?;
 
                     self.send(FrontendMessage::GSSResponse(token)).await?;
-                    gss_mechanism = Some(EnterpriseAuthMechanism::KerberosV5);
                 }
                 BackendMessage::AuthenticationGSS => {
+                    if let Some(flow) = startup_auth_flow {
+                        return Err(PgError::Protocol(format!(
+                            "Received AuthenticationGSS while {} authentication is in progress",
+                            flow.label()
+                        )));
+                    }
+                    startup_auth_flow = Some(StartupAuthFlow::EnterpriseGss {
+                        mechanism: EnterpriseAuthMechanism::GssApi,
+                    });
+
                     if !auth_settings.allow_gssapi {
                         return Err(PgError::Auth(
                             "Server requested GSSAPI authentication, but GSSAPI is disabled by AuthSettings".to_string(),
@@ -1080,9 +1328,18 @@ impl PgConnection {
                     })?;
 
                     self.send(FrontendMessage::GSSResponse(token)).await?;
-                    gss_mechanism = Some(EnterpriseAuthMechanism::GssApi);
                 }
                 BackendMessage::AuthenticationSSPI => {
+                    if let Some(flow) = startup_auth_flow {
+                        return Err(PgError::Protocol(format!(
+                            "Received AuthenticationSSPI while {} authentication is in progress",
+                            flow.label()
+                        )));
+                    }
+                    startup_auth_flow = Some(StartupAuthFlow::EnterpriseGss {
+                        mechanism: EnterpriseAuthMechanism::Sspi,
+                    });
+
                     if !auth_settings.allow_sspi {
                         return Err(PgError::Auth(
                             "Server requested SSPI authentication, but SSPI is disabled by AuthSettings".to_string(),
@@ -1107,7 +1364,6 @@ impl PgConnection {
                     })?;
 
                     self.send(FrontendMessage::GSSResponse(token)).await?;
-                    gss_mechanism = Some(EnterpriseAuthMechanism::Sspi);
                 }
                 BackendMessage::AuthenticationGSSContinue(server_token) => {
                     gss_roundtrips += 1;
@@ -1118,12 +1374,21 @@ impl PgConnection {
                         )));
                     }
 
-                    let mechanism = gss_mechanism.ok_or_else(|| {
-                        PgError::Auth(
-                            "Received GSSContinue without AuthenticationGSS/SSPI/KerberosV5 init"
-                                .to_string(),
-                        )
-                    })?;
+                    let mechanism = match startup_auth_flow {
+                        Some(StartupAuthFlow::EnterpriseGss { mechanism }) => mechanism,
+                        Some(flow) => {
+                            return Err(PgError::Protocol(format!(
+                                "Received AuthenticationGSSContinue while {} authentication is in progress",
+                                flow.label()
+                            )));
+                        }
+                        None => {
+                            return Err(PgError::Auth(
+                                "Received GSSContinue without AuthenticationGSS/SSPI/KerberosV5 init"
+                                    .to_string(),
+                            ));
+                        }
+                    };
 
                     if gss_token_provider.is_none() && gss_token_provider_ex.is_none() {
                         return Err(PgError::Auth(
@@ -1153,6 +1418,14 @@ impl PgConnection {
                     }
                 }
                 BackendMessage::AuthenticationCleartextPassword => {
+                    if let Some(flow) = startup_auth_flow {
+                        return Err(PgError::Protocol(format!(
+                            "Received AuthenticationCleartextPassword while {} authentication is in progress",
+                            flow.label()
+                        )));
+                    }
+                    startup_auth_flow = Some(StartupAuthFlow::CleartextPassword);
+
                     if !auth_settings.allow_cleartext_password {
                         return Err(PgError::Auth(
                             "Server requested cleartext authentication, but cleartext is disabled by AuthSettings"
@@ -1166,6 +1439,14 @@ impl PgConnection {
                         .await?;
                 }
                 BackendMessage::AuthenticationMD5Password(salt) => {
+                    if let Some(flow) = startup_auth_flow {
+                        return Err(PgError::Protocol(format!(
+                            "Received AuthenticationMD5Password while {} authentication is in progress",
+                            flow.label()
+                        )));
+                    }
+                    startup_auth_flow = Some(StartupAuthFlow::Md5Password);
+
                     if !auth_settings.allow_md5_password {
                         return Err(PgError::Auth(
                             "Server requested MD5 authentication, but MD5 is disabled by AuthSettings"
@@ -1180,6 +1461,16 @@ impl PgConnection {
                         .await?;
                 }
                 BackendMessage::AuthenticationSASL(mechanisms) => {
+                    if let Some(flow) = startup_auth_flow {
+                        return Err(PgError::Protocol(format!(
+                            "Received AuthenticationSASL while {} authentication is in progress",
+                            flow.label()
+                        )));
+                    }
+                    startup_auth_flow = Some(StartupAuthFlow::Scram {
+                        server_final_seen: false,
+                    });
+
                     if !auth_settings.allow_scram_sha_256 {
                         return Err(PgError::Auth(
                             "Server requested SCRAM authentication, but SCRAM is disabled by AuthSettings"
@@ -1214,6 +1505,31 @@ impl PgConnection {
                     scram_client = Some(client);
                 }
                 BackendMessage::AuthenticationSASLContinue(server_data) => {
+                    match startup_auth_flow {
+                        Some(StartupAuthFlow::Scram {
+                            server_final_seen: false,
+                        }) => {}
+                        Some(StartupAuthFlow::Scram {
+                            server_final_seen: true,
+                        }) => {
+                            return Err(PgError::Protocol(
+                                "Received AuthenticationSASLContinue after AuthenticationSASLFinal"
+                                    .to_string(),
+                            ));
+                        }
+                        Some(flow) => {
+                            return Err(PgError::Protocol(format!(
+                                "Received AuthenticationSASLContinue while {} authentication is in progress",
+                                flow.label()
+                            )));
+                        }
+                        None => {
+                            return Err(PgError::Auth(
+                                "Received SASL Continue without SASL init".to_string(),
+                            ));
+                        }
+                    }
+
                     let client = scram_client.as_mut().ok_or_else(|| {
                         PgError::Auth("Received SASL Continue without SASL init".to_string())
                     })?;
@@ -1226,29 +1542,79 @@ impl PgConnection {
                         .await?;
                 }
                 BackendMessage::AuthenticationSASLFinal(server_signature) => {
-                    if let Some(client) = scram_client.as_ref() {
-                        client.verify_server_final(&server_signature).map_err(|e| {
-                            PgError::Auth(format!("Server verification failed: {}", e))
-                        })?;
+                    match startup_auth_flow {
+                        Some(StartupAuthFlow::Scram {
+                            server_final_seen: false,
+                        }) => {
+                            startup_auth_flow = Some(StartupAuthFlow::Scram {
+                                server_final_seen: true,
+                            });
+                        }
+                        Some(StartupAuthFlow::Scram {
+                            server_final_seen: true,
+                        }) => {
+                            return Err(PgError::Protocol(
+                                "Received duplicate AuthenticationSASLFinal".to_string(),
+                            ));
+                        }
+                        Some(flow) => {
+                            return Err(PgError::Protocol(format!(
+                                "Received AuthenticationSASLFinal while {} authentication is in progress",
+                                flow.label()
+                            )));
+                        }
+                        None => {
+                            return Err(PgError::Auth(
+                                "Received SASL Final without SASL init".to_string(),
+                            ));
+                        }
+                    }
+
+                    let client = scram_client.as_ref().ok_or_else(|| {
+                        PgError::Auth("Received SASL Final without SASL init".to_string())
+                    })?;
+                    client
+                        .verify_server_final(&server_signature)
+                        .map_err(|e| PgError::Auth(format!("Server verification failed: {}", e)))?;
+                }
+                BackendMessage::ParameterStatus { .. } => {
+                    if !saw_auth_ok {
+                        return Err(PgError::Protocol(
+                            "Received ParameterStatus before AuthenticationOk".to_string(),
+                        ));
                     }
                 }
-                BackendMessage::ParameterStatus { .. } => {}
                 BackendMessage::BackendKeyData {
                     process_id,
                     secret_key,
                 } => {
+                    if !saw_auth_ok {
+                        return Err(PgError::Protocol(
+                            "Received BackendKeyData before AuthenticationOk".to_string(),
+                        ));
+                    }
                     self.process_id = process_id;
                     self.secret_key = secret_key;
                 }
                 BackendMessage::ReadyForQuery(TransactionStatus::Idle)
                 | BackendMessage::ReadyForQuery(TransactionStatus::InBlock)
                 | BackendMessage::ReadyForQuery(TransactionStatus::Failed) => {
+                    if !saw_auth_ok {
+                        return Err(PgError::Protocol(
+                            "Startup completed without AuthenticationOk".to_string(),
+                        ));
+                    }
                     return Ok(());
                 }
                 BackendMessage::ErrorResponse(err) => {
                     return Err(PgError::Connection(err.message));
                 }
-                _ => {}
+                BackendMessage::NoticeResponse(_) => {}
+                _ => {
+                    return Err(PgError::Protocol(
+                        "Unexpected backend message during startup".to_string(),
+                    ));
+                }
             }
         }
     }
@@ -1278,8 +1644,9 @@ impl PgConnection {
 
         // Send Terminate packet ('X')
         let terminate = PgEncoder::encode_terminate();
-        self.stream.write_all(&terminate).await?;
-        self.stream.flush().await?;
+        self.write_all_with_timeout(&terminate, "stream write")
+            .await?;
+        self.flush_with_timeout("stream flush").await?;
 
         Ok(())
     }
@@ -1299,14 +1666,17 @@ impl PgConnection {
     pub(crate) fn evict_prepared_if_full(&mut self) {
         if self.prepared_statements.len() >= Self::MAX_PREPARED_PER_CONN {
             // Pop the LRU entry from the cache
-            if let Some((_hash, evicted_name)) = self.stmt_cache.pop_lru() {
+            if let Some((evicted_hash, evicted_name)) = self.stmt_cache.pop_lru() {
                 self.prepared_statements.remove(&evicted_name);
+                self.column_info_cache.remove(&evicted_hash);
+                self.pending_statement_closes.push(evicted_name);
             } else {
                 // stmt_cache is empty but prepared_statements is full —
                 // shouldn't happen in normal flow, but handle defensively
                 // by clearing the oldest entry from the HashMap.
                 if let Some(key) = self.prepared_statements.keys().next().cloned() {
                     self.prepared_statements.remove(&key);
+                    self.pending_statement_closes.push(key);
                 }
             }
         }
@@ -1320,6 +1690,7 @@ impl PgConnection {
         self.stmt_cache.clear();
         self.prepared_statements.clear();
         self.column_info_cache.clear();
+        self.pending_statement_closes.clear();
     }
 }
 
@@ -1343,6 +1714,86 @@ fn generate_gss_token(
     }
 
     Err("No GSS token provider configured".to_string())
+}
+
+fn plain_connect_attempt_backend() -> &'static str {
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    {
+        if should_try_uring_plain() {
+            return CONNECT_BACKEND_IO_URING;
+        }
+    }
+    CONNECT_BACKEND_TOKIO
+}
+
+fn connect_backend_for_stream(stream: &PgStream) -> &'static str {
+    match stream {
+        PgStream::Tcp(_) => CONNECT_BACKEND_TOKIO,
+        #[cfg(all(target_os = "linux", feature = "io_uring"))]
+        PgStream::Uring(_) => CONNECT_BACKEND_IO_URING,
+        PgStream::Tls(_) => CONNECT_BACKEND_TOKIO,
+        #[cfg(unix)]
+        PgStream::Unix(_) => CONNECT_BACKEND_TOKIO,
+        #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+        PgStream::GssEnc(_) => CONNECT_BACKEND_TOKIO,
+    }
+}
+
+fn connect_error_kind(error: &PgError) -> &'static str {
+    match error {
+        PgError::Connection(_) => "connection",
+        PgError::Protocol(_) => "protocol",
+        PgError::Auth(_) => "auth",
+        PgError::Query(_) | PgError::QueryServer(_) => "query",
+        PgError::NoRows => "no_rows",
+        PgError::Io(_) => "io",
+        PgError::Encode(_) => "encode",
+        PgError::Timeout(_) => "timeout",
+        PgError::PoolExhausted { .. } => "pool_exhausted",
+        PgError::PoolClosed => "pool_closed",
+    }
+}
+
+fn record_connect_attempt(transport: &'static str, backend: &'static str) {
+    metrics::counter!(
+        "qail_pg_connect_attempt_total",
+        "transport" => transport,
+        "backend" => backend
+    )
+    .increment(1);
+}
+
+fn record_connect_result(
+    transport: &'static str,
+    backend: &'static str,
+    result: &PgResult<PgConnection>,
+    elapsed: std::time::Duration,
+) {
+    let outcome = if result.is_ok() { "success" } else { "error" };
+    metrics::histogram!(
+        "qail_pg_connect_duration_seconds",
+        "transport" => transport,
+        "backend" => backend,
+        "outcome" => outcome
+    )
+    .record(elapsed.as_secs_f64());
+
+    if let Err(error) = result {
+        metrics::counter!(
+            "qail_pg_connect_failure_total",
+            "transport" => transport,
+            "backend" => backend,
+            "error_kind" => connect_error_kind(error)
+        )
+        .increment(1);
+    } else {
+        metrics::counter!(
+            "qail_pg_connect_success_total",
+            "transport" => transport,
+            "backend" => backend
+        )
+        .increment(1);
+    }
 }
 
 fn select_scram_mechanism(
@@ -1431,6 +1882,13 @@ impl Drop for PgConnection {
                 // try_write is non-blocking
                 let _ = tcp.try_write(&terminate);
             }
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            PgStream::Uring(stream) => {
+                // io_uring transport uses blocking worker operations;
+                // terminate packet in Drop is not viable, but force socket
+                // shutdown so timed-out worker ops unblock promptly.
+                let _ = stream.abort_inflight();
+            }
             PgStream::Tls(_) => {
                 // TLS requires async write which we can't do in Drop.
                 // The TCP connection close will still notify the server.
@@ -1439,6 +1897,10 @@ impl Drop for PgConnection {
             #[cfg(unix)]
             PgStream::Unix(unix) => {
                 let _ = unix.try_write(&terminate);
+            }
+            #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+            PgStream::GssEnc(_) => {
+                // GSSENC requires async wrap+write; skip in Drop.
             }
         }
     }
@@ -1451,10 +1913,50 @@ pub(crate) fn parse_affected_rows(tag: &str) -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+fn should_try_uring_plain() -> bool {
+    super::io_backend::should_use_uring_plain_transport()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{md5_password_message, select_scram_mechanism};
     use crate::driver::ScramChannelBindingMode;
+    #[cfg(unix)]
+    use {
+        super::{PgConnection, StatementCache},
+        crate::driver::ColumnInfo,
+        crate::driver::stream::PgStream,
+        bytes::BytesMut,
+        std::collections::{HashMap, VecDeque},
+        std::num::NonZeroUsize,
+        std::sync::Arc,
+        tokio::net::UnixStream,
+    };
+
+    #[cfg(unix)]
+    fn test_conn() -> PgConnection {
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(2).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            secret_key: 0,
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        }
+    }
 
     #[test]
     fn test_md5_password_message_known_vector() {
@@ -1556,5 +2058,62 @@ mod tests {
         .unwrap();
         assert_eq!(mechanism, "SCRAM-SHA-256-PLUS");
         assert_eq!(selected_binding, Some(binding));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_evict_prepared_if_full_queues_server_close_and_clears_column_info() {
+        let mut conn = test_conn();
+        conn.stmt_cache = StatementCache::new(
+            NonZeroUsize::new(PgConnection::MAX_PREPARED_PER_CONN).expect("non-zero"),
+        );
+        for i in 0..PgConnection::MAX_PREPARED_PER_CONN {
+            let name = format!("s{}", i);
+            conn.prepared_statements
+                .insert(name.clone(), format!("SELECT {}", i));
+            conn.stmt_cache.put(i as u64, name);
+        }
+        conn.column_info_cache.insert(
+            0,
+            Arc::new(ColumnInfo {
+                name_to_index: HashMap::new(),
+                oids: Vec::new(),
+                formats: Vec::new(),
+            }),
+        );
+
+        conn.evict_prepared_if_full();
+
+        assert_eq!(
+            conn.prepared_statements.len(),
+            PgConnection::MAX_PREPARED_PER_CONN - 1
+        );
+        assert_eq!(conn.pending_statement_closes, vec!["s0".to_string()]);
+        assert!(!conn.column_info_cache.contains_key(&0));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_clear_prepared_statement_state_clears_pending_closes() {
+        let mut conn = test_conn();
+        conn.pending_statement_closes.push("s_dead".to_string());
+        conn.prepared_statements
+            .insert("s1".to_string(), "SELECT 1".to_string());
+        conn.stmt_cache.put(1, "s1".to_string());
+        conn.column_info_cache.insert(
+            1,
+            Arc::new(ColumnInfo {
+                name_to_index: HashMap::new(),
+                oids: Vec::new(),
+                formats: Vec::new(),
+            }),
+        );
+
+        conn.clear_prepared_statement_state();
+
+        assert!(conn.pending_statement_closes.is_empty());
+        assert!(conn.prepared_statements.is_empty());
+        assert_eq!(conn.stmt_cache.len(), 0);
+        assert!(conn.column_info_cache.is_empty());
     }
 }

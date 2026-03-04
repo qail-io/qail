@@ -1,8 +1,11 @@
 //! I/O Backend Auto-detection
 //!
-//! Automatically selects the best I/O backend:
-//! - Linux with io_uring feature: io_uring (fastest)
-//! - Otherwise: tokio (universal fallback)
+//! Reports active I/O backend and optional kernel capabilities.
+//!
+//! Current rollout:
+//! - Tokio remains the universal default.
+//! - On Linux with `io_uring` feature, plain TCP transport can use io_uring
+//!   (TLS/mTLS/GSSENC still use Tokio stream path).
 
 use std::sync::OnceLock;
 
@@ -11,7 +14,8 @@ use std::sync::OnceLock;
 pub enum IoBackend {
     /// Tokio-based async I/O (cross-platform default).
     Tokio,
-    /// Linux io_uring (kernel 5.1+, requires `io_uring` feature)
+    /// Linux io_uring capability (kernel 5.1+, requires `io_uring` feature).
+    /// Capability does not yet imply active transport path.
     #[cfg(all(target_os = "linux", feature = "io_uring"))]
     IoUring,
 }
@@ -28,28 +32,35 @@ impl std::fmt::Display for IoBackend {
 
 static DETECTED_BACKEND: OnceLock<IoBackend> = OnceLock::new();
 
-/// Detect the best available I/O backend for this system
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+fn probe_uring_support() -> Result<(), io_uring::IoUringBuilderError> {
+    io_uring::IoUring::new(32).map(|_| ())
+}
+
+/// Detect the preferred I/O backend used for plain TCP transport.
 pub fn detect() -> IoBackend {
     *DETECTED_BACKEND.get_or_init(|| {
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
-            // Try to create an io_uring instance to check kernel support
-            match io_uring::IoUring::new(32) {
+            if should_use_uring_plain_transport() {
+                tracing::info!("qail-pg: using io_uring backend for plain TCP transport");
+                return IoBackend::IoUring;
+            }
+            match probe_uring_support() {
                 Ok(_) => {
-                    eprintln!("[qail-pg] io_uring available, using high-performance backend");
-                    IoBackend::IoUring
+                    tracing::info!(
+                        "qail-pg: io_uring kernel support detected; using tokio backend by policy"
+                    );
                 }
                 Err(e) => {
-                    eprintln!("[qail-pg] io_uring not available ({e}), falling back to tokio");
-                    IoBackend::Tokio
+                    tracing::debug!(
+                        error = %e,
+                        "qail-pg: io_uring kernel support unavailable; using tokio backend"
+                    );
                 }
             }
         }
-
-        #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
-        {
-            IoBackend::Tokio
-        }
+        IoBackend::Tokio
     })
 }
 
@@ -58,7 +69,34 @@ pub fn detect() -> IoBackend {
 pub fn is_uring_available() -> bool {
     #[cfg(all(target_os = "linux", feature = "io_uring"))]
     {
-        matches!(detect(), IoBackend::IoUring)
+        probe_uring_support().is_ok()
+    }
+    #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
+    {
+        false
+    }
+}
+
+/// Returns `true` when plain TCP transport should use io_uring.
+///
+/// Policy:
+/// - `QAIL_PG_IO_BACKEND=tokio` → force tokio
+/// - `QAIL_PG_IO_BACKEND=io_uring` → force io_uring (requires availability)
+/// - unset/other → auto-enable io_uring when available
+#[inline]
+pub fn should_use_uring_plain_transport() -> bool {
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    {
+        let backend = std::env::var("QAIL_PG_IO_BACKEND")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if backend == "tokio" {
+            return false;
+        }
+        if backend == "io_uring" {
+            return probe_uring_support().is_ok();
+        }
+        probe_uring_support().is_ok()
     }
     #[cfg(not(all(target_os = "linux", feature = "io_uring")))]
     {

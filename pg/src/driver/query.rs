@@ -2,10 +2,91 @@
 //!
 //! This module provides query, query_cached, and execute_simple.
 
-use super::{PgConnection, PgError, PgResult};
+use super::{
+    PgConnection, PgError, PgResult,
+    extended_flow::{ExtendedFlowConfig, ExtendedFlowTracker},
+    is_ignorable_session_message, unexpected_backend_message,
+};
 use crate::protocol::{BackendMessage, PgEncoder};
 use bytes::BytesMut;
-use tokio::io::AsyncWriteExt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SimpleStatementState {
+    AwaitingResult,
+    InRowStream,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SimpleFlowTracker {
+    state: SimpleStatementState,
+    saw_completion: bool,
+}
+
+impl SimpleFlowTracker {
+    fn new() -> Self {
+        Self {
+            state: SimpleStatementState::AwaitingResult,
+            saw_completion: false,
+        }
+    }
+
+    fn on_row_description(&mut self, context: &'static str) -> PgResult<()> {
+        if self.state == SimpleStatementState::InRowStream {
+            return Err(PgError::Protocol(format!(
+                "{}: duplicate RowDescription before statement completion",
+                context
+            )));
+        }
+        self.state = SimpleStatementState::InRowStream;
+        self.saw_completion = false;
+        Ok(())
+    }
+
+    fn on_data_row(&self, context: &'static str) -> PgResult<()> {
+        if self.state != SimpleStatementState::InRowStream {
+            return Err(PgError::Protocol(format!(
+                "{}: DataRow before RowDescription",
+                context
+            )));
+        }
+        Ok(())
+    }
+
+    fn on_command_complete(&mut self) {
+        self.state = SimpleStatementState::AwaitingResult;
+        self.saw_completion = true;
+    }
+
+    fn on_empty_query_response(&mut self, context: &'static str) -> PgResult<()> {
+        if self.state == SimpleStatementState::InRowStream {
+            return Err(PgError::Protocol(format!(
+                "{}: EmptyQueryResponse during active row stream",
+                context
+            )));
+        }
+        self.saw_completion = true;
+        Ok(())
+    }
+
+    fn on_ready_for_query(&self, context: &'static str, error_pending: bool) -> PgResult<()> {
+        if error_pending {
+            return Ok(());
+        }
+        if self.state == SimpleStatementState::InRowStream {
+            return Err(PgError::Protocol(format!(
+                "{}: ReadyForQuery before CommandComplete",
+                context
+            )));
+        }
+        if !self.saw_completion {
+            return Err(PgError::Protocol(format!(
+                "{}: ReadyForQuery before completion",
+                context
+            )));
+        }
+        Ok(())
+    }
+}
 
 impl PgConnection {
     /// Execute a query with binary parameters (crate-internal).
@@ -31,14 +112,16 @@ impl PgConnection {
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
         let bytes = PgEncoder::encode_extended_query_with_result_format(sql, params, result_format)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        self.stream.write_all(&bytes).await?;
+        self.write_all_with_timeout(&bytes, "stream write").await?;
 
         let mut rows = Vec::new();
 
         let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(true));
 
         loop {
             let msg = self.recv().await?;
+            flow.validate(&msg, "extended-query execute", error.is_some())?;
             match msg {
                 BackendMessage::ParseComplete => {}
                 BackendMessage::BindComplete => {}
@@ -62,7 +145,10 @@ impl PgConnection {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message("extended-query execute", &other));
+                }
             }
         }
     }
@@ -94,9 +180,15 @@ impl PgConnection {
                 .await
             {
                 Ok(rows) => return Ok(rows),
-                Err(err) if !retried && err.is_prepared_statement_retryable() => {
+                Err(err)
+                    if !retried
+                        && (err.is_prepared_statement_retryable()
+                            || err.is_prepared_statement_already_exists()) =>
+                {
                     retried = true;
-                    self.clear_prepared_statement_state();
+                    if err.is_prepared_statement_retryable() {
+                        self.clear_prepared_statement_state();
+                    }
                 }
                 Err(err) => return Err(err),
             }
@@ -131,29 +223,59 @@ impl PgConnection {
             // unbounded memory growth from dynamic batch filters while
             // preserving hot statements (unlike the old nuclear `.clear()`).
             self.evict_prepared_if_full();
-            buf.extend(PgEncoder::encode_parse(&stmt_name, sql, &[]));
+            buf.extend(PgEncoder::try_encode_parse(&stmt_name, sql, &[])?);
             // Cache the SQL for debugging
             self.prepared_statements
                 .insert(stmt_name.clone(), sql.to_string());
         }
 
         // Use ULTRA-OPTIMIZED encoders - write directly to buffer
-        PgEncoder::encode_bind_to_with_result_format(&mut buf, &stmt_name, params, result_format)
-            .map_err(|e| PgError::Encode(e.to_string()))?;
+        if let Err(e) = PgEncoder::encode_bind_to_with_result_format(
+            &mut buf,
+            &stmt_name,
+            params,
+            result_format,
+        ) {
+            if is_new {
+                self.prepared_statements.remove(&stmt_name);
+            }
+            return Err(PgError::Encode(e.to_string()));
+        }
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
 
-        self.stream.write_all(&buf).await?;
+        if let Err(err) = self.write_all_with_timeout(&buf, "stream write").await {
+            if is_new {
+                self.prepared_statements.remove(&stmt_name);
+            }
+            return Err(err);
+        }
 
         let mut rows = Vec::new();
 
         let mut error: Option<PgError> = None;
+        let mut flow =
+            ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(is_new));
 
         loop {
-            let msg = self.recv().await?;
+            let msg = match self.recv().await {
+                Ok(msg) => msg,
+                Err(err) => {
+                    if is_new && !flow.saw_parse_complete() {
+                        self.prepared_statements.remove(&stmt_name);
+                    }
+                    return Err(err);
+                }
+            };
+            if let Err(err) = flow.validate(&msg, "extended-query cached execute", error.is_some()) {
+                if is_new && !flow.saw_parse_complete() {
+                    self.prepared_statements.remove(&stmt_name);
+                }
+                return Err(err);
+            }
             match msg {
                 BackendMessage::ParseComplete => {
-                    // Already cached in is_new block above
+                    // Already cached in is_new block above.
                 }
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
@@ -166,19 +288,43 @@ impl PgConnection {
                 BackendMessage::NoData => {}
                 BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
+                        if is_new
+                            && !flow.saw_parse_complete()
+                            && !err.is_prepared_statement_already_exists()
+                        {
+                            self.prepared_statements.remove(&stmt_name);
+                        }
                         return Err(err);
+                    }
+                    if is_new && !flow.saw_parse_complete() {
+                        self.prepared_statements.remove(&stmt_name);
+                        return Err(PgError::Protocol(
+                            "Cache miss query reached ReadyForQuery without ParseComplete"
+                                .to_string(),
+                        ));
                     }
                     return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
                     if error.is_none() {
-                        error = Some(PgError::QueryServer(err.into()));
-                        // Invalidate cache to prevent "prepared statement does not exist"
-                        // on next retry.
-                        self.prepared_statements.remove(&stmt_name);
+                        let query_err = PgError::QueryServer(err.into());
+                        if !query_err.is_prepared_statement_already_exists() {
+                            // Invalidate cache to prevent stale local mapping after parse failure.
+                            self.prepared_statements.remove(&stmt_name);
+                        }
+                        error = Some(query_err);
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    if is_new && !flow.saw_parse_complete() {
+                        self.prepared_statements.remove(&stmt_name);
+                    }
+                    return Err(unexpected_backend_message(
+                        "extended-query cached execute",
+                        &other,
+                    ));
+                }
             }
         }
     }
@@ -196,19 +342,26 @@ impl PgConnection {
 
     /// Execute a simple SQL statement (no parameters).
     pub async fn execute_simple(&mut self, sql: &str) -> PgResult<()> {
-        let bytes = PgEncoder::encode_query_string(sql);
-        self.stream.write_all(&bytes).await?;
+        let bytes = PgEncoder::try_encode_query_string(sql)?;
+        self.write_all_with_timeout(&bytes, "stream write").await?;
 
         let mut error: Option<PgError> = None;
+        let mut flow = SimpleFlowTracker::new();
 
         loop {
             let msg = self.recv().await?;
             match msg {
-                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::CommandComplete(_) => {
+                    flow.on_command_complete();
+                }
+                BackendMessage::EmptyQueryResponse => {
+                    flow.on_empty_query_response("simple-query execute")?;
+                }
                 BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
                         return Err(err);
                     }
+                    flow.on_ready_for_query("simple-query execute", error.is_some())?;
                     return Ok(());
                 }
                 BackendMessage::ErrorResponse(err) => {
@@ -216,7 +369,10 @@ impl PgConnection {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message("simple-query execute", &other));
+                }
             }
         }
     }
@@ -234,20 +390,23 @@ impl PgConnection {
         /// Simple Query Protocol has no streaming; all rows are buffered in memory.
         const MAX_SIMPLE_QUERY_ROWS: usize = 10_000;
 
-        let bytes = PgEncoder::encode_query_string(sql);
-        self.stream.write_all(&bytes).await?;
+        let bytes = PgEncoder::try_encode_query_string(sql)?;
+        self.write_all_with_timeout(&bytes, "stream write").await?;
 
         let mut rows: Vec<super::PgRow> = Vec::new();
         let mut column_info: Option<Arc<super::ColumnInfo>> = None;
         let mut error: Option<PgError> = None;
+        let mut flow = SimpleFlowTracker::new();
 
         loop {
             let msg = self.recv().await?;
             match msg {
                 BackendMessage::RowDescription(fields) => {
+                    flow.on_row_description("simple-query read")?;
                     column_info = Some(Arc::new(super::ColumnInfo::from_fields(&fields)));
                 }
                 BackendMessage::DataRow(data) => {
+                    flow.on_data_row("simple-query read")?;
                     if error.is_none() {
                         if rows.len() >= MAX_SIMPLE_QUERY_ROWS {
                             if error.is_none() {
@@ -265,11 +424,19 @@ impl PgConnection {
                         }
                     }
                 }
-                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::CommandComplete(_) => {
+                    flow.on_command_complete();
+                    column_info = None;
+                }
+                BackendMessage::EmptyQueryResponse => {
+                    flow.on_empty_query_response("simple-query read")?;
+                    column_info = None;
+                }
                 BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
                         return Err(err);
                     }
+                    flow.on_ready_for_query("simple-query read", error.is_some())?;
                     return Ok(rows);
                 }
                 BackendMessage::ErrorResponse(err) => {
@@ -277,7 +444,10 @@ impl PgConnection {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message("simple-query read", &other));
+                }
             }
         }
     }
@@ -327,14 +497,16 @@ impl PgConnection {
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
 
-        self.stream.write_all(&buf).await?;
+        self.write_all_with_timeout(&buf, "stream write").await?;
 
         let mut rows = Vec::new();
 
         let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
 
         loop {
             let msg = self.recv().await?;
+            flow.validate(&msg, "prepared single execute", error.is_some())?;
             match msg {
                 BackendMessage::BindComplete => {}
                 BackendMessage::RowDescription(_) => {}
@@ -356,7 +528,13 @@ impl PgConnection {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message(
+                        "prepared single execute",
+                        &other,
+                    ));
+                }
             }
         }
     }

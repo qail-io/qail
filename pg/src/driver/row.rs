@@ -1,9 +1,10 @@
 //! PostgreSQL Row Helpers
 //!
 //! Provides convenient methods to extract typed values from row data.
-//! PostgreSQL Simple Query protocol returns all values as text format.
+//! Supports both text and binary result formats when column metadata is available.
 
 use super::PgRow;
+use crate::types::{FromPg, TypeError};
 
 /// Trait for types that can be constructed from a database row.
 ///
@@ -16,9 +17,13 @@ use super::PgRow;
 ///     
 ///     fn from_row(row: &PgRow) -> Self {
 ///         User {
-///             id: row.uuid_typed(0).unwrap_or_default(),
-///             name: row.text(1),
-///             email: row.get_string(2),
+///             // Metadata-aware decoders (OID + text/binary format).
+///             id: row
+///                 .try_get_by_name::<qail_pg::Uuid>("id")
+///                 .map(|v| v.0)
+///                 .unwrap_or_default(),
+///             name: row.try_get_by_name::<String>("name").unwrap_or_default(),
+///             email: row.try_get_by_name::<String>("email").unwrap_or_default(),
 ///         }
 ///     }
 /// }
@@ -37,6 +42,74 @@ pub trait QailRow: Sized {
 }
 
 impl PgRow {
+    /// Decode a non-null column into any `FromPg` type using backend OID/format metadata.
+    ///
+    /// Returns:
+    /// - `TypeError::UnexpectedNull` if the column value is NULL
+    /// - `TypeError::InvalidData` if the column index is out of bounds or metadata is missing
+    /// - other `TypeError` variants from the target decoder
+    pub fn try_get<T: FromPg>(&self, idx: usize) -> Result<T, TypeError> {
+        let cell = self.columns.get(idx).ok_or_else(|| {
+            TypeError::InvalidData(format!("Column index {} out of bounds", idx))
+        })?;
+
+        let bytes = cell.as_deref().ok_or(TypeError::UnexpectedNull)?;
+        let (oid, format) = self.column_type_meta(idx)?;
+        T::from_pg(bytes, oid, format)
+    }
+
+    /// Decode a possibly-null column into `Option<T>` using backend OID/format metadata.
+    ///
+    /// Returns `Ok(None)` when the column is SQL NULL.
+    pub fn try_get_opt<T: FromPg>(&self, idx: usize) -> Result<Option<T>, TypeError> {
+        let cell = self.columns.get(idx).ok_or_else(|| {
+            TypeError::InvalidData(format!("Column index {} out of bounds", idx))
+        })?;
+
+        match cell {
+            None => Ok(None),
+            Some(bytes) => {
+                let (oid, format) = self.column_type_meta(idx)?;
+                Ok(Some(T::from_pg(bytes, oid, format)?))
+            }
+        }
+    }
+
+    /// Decode a non-null column by name into any `FromPg` type.
+    pub fn try_get_by_name<T: FromPg>(&self, name: &str) -> Result<T, TypeError> {
+        let idx = self.column_index(name).ok_or_else(|| {
+            TypeError::InvalidData(format!("Unknown column name '{}'", name))
+        })?;
+        self.try_get(idx)
+    }
+
+    /// Decode a possibly-null column by name into `Option<T>`.
+    pub fn try_get_opt_by_name<T: FromPg>(&self, name: &str) -> Result<Option<T>, TypeError> {
+        let idx = self.column_index(name).ok_or_else(|| {
+            TypeError::InvalidData(format!("Unknown column name '{}'", name))
+        })?;
+        self.try_get_opt(idx)
+    }
+
+    fn column_type_meta(&self, idx: usize) -> Result<(u32, i16), TypeError> {
+        let info = self.column_info.as_ref().ok_or_else(|| {
+            TypeError::InvalidData(
+                "Column metadata unavailable; use query APIs that preserve RowDescription"
+                    .to_string(),
+            )
+        })?;
+
+        let oid = info
+            .oids
+            .get(idx)
+            .copied()
+            .ok_or_else(|| TypeError::InvalidData(format!("Missing OID for column {}", idx)))?;
+        let format = info.formats.get(idx).copied().ok_or_else(|| {
+            TypeError::InvalidData(format!("Missing format code for column {}", idx))
+        })?;
+        Ok((oid, format))
+    }
+
     /// Get a column value as String.
     /// Returns None if the value is NULL or invalid UTF-8.
     pub fn get_string(&self, idx: usize) -> Option<String> {
@@ -48,24 +121,36 @@ impl PgRow {
 
     /// Get a column value as i32.
     pub fn get_i32(&self, idx: usize) -> Option<i32> {
+        if self.column_info.is_some() && let Ok(v) = self.try_get::<i32>(idx) {
+            return Some(v);
+        }
         let bytes = self.columns.get(idx)?.as_ref()?;
         std::str::from_utf8(bytes).ok()?.parse().ok()
     }
 
     /// Get a column value as i64.
     pub fn get_i64(&self, idx: usize) -> Option<i64> {
+        if self.column_info.is_some() && let Ok(v) = self.try_get::<i64>(idx) {
+            return Some(v);
+        }
         let bytes = self.columns.get(idx)?.as_ref()?;
         std::str::from_utf8(bytes).ok()?.parse().ok()
     }
 
     /// Get a column value as f64.
     pub fn get_f64(&self, idx: usize) -> Option<f64> {
+        if self.column_info.is_some() && let Ok(v) = self.try_get::<f64>(idx) {
+            return Some(v);
+        }
         let bytes = self.columns.get(idx)?.as_ref()?;
         std::str::from_utf8(bytes).ok()?.parse().ok()
     }
 
     /// Get a column value as bool.
     pub fn get_bool(&self, idx: usize) -> Option<bool> {
+        if self.column_info.is_some() && let Ok(v) = self.try_get::<bool>(idx) {
+            return Some(v);
+        }
         let bytes = self.columns.get(idx)?.as_ref()?;
         let s = std::str::from_utf8(bytes).ok()?;
         match s {
@@ -182,6 +267,10 @@ impl PgRow {
     /// Handles PostgreSQL timestamp formats automatically.
     #[cfg(feature = "chrono")]
     pub fn datetime(&self, idx: usize) -> Option<chrono::DateTime<chrono::Utc>> {
+        if let Ok(dt) = self.try_get::<chrono::DateTime<chrono::Utc>>(idx) {
+            return Some(dt);
+        }
+
         let s = self.get_timestamp(idx)?;
         // Try parsing various PostgreSQL timestamp formats
         chrono::DateTime::parse_from_rfc3339(&s.replace(' ', "T"))
@@ -198,8 +287,10 @@ impl PgRow {
     /// Parse UUID column as uuid::Uuid type.
     #[cfg(feature = "uuid")]
     pub fn uuid_typed(&self, idx: usize) -> Option<uuid::Uuid> {
-        self.get_uuid(idx)
-            .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+        self.try_get::<uuid::Uuid>(idx).ok().or_else(|| {
+            self.get_uuid(idx)
+                .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+        })
     }
 
     // ==================== GET BY COLUMN NAME ====================
@@ -307,6 +398,20 @@ impl PgRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::types::oid;
+    use crate::types::{Json, Uuid};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn single_col_info(name: &str, oid: u32, format: i16) -> Arc<super::super::ColumnInfo> {
+        let mut name_to_index = HashMap::new();
+        name_to_index.insert(name.to_string(), 0);
+        Arc::new(super::super::ColumnInfo {
+            name_to_index,
+            oids: vec![oid],
+            formats: vec![format],
+        })
+    }
 
     #[test]
     fn test_get_string() {
@@ -364,5 +469,110 @@ mod tests {
         assert!(!row.is_null(0));
         assert!(row.is_null(1));
         assert!(row.is_null(99)); // Out of bounds
+    }
+
+    #[test]
+    fn test_try_get_i64_binary() {
+        let row = PgRow {
+            columns: vec![Some(42i64.to_be_bytes().to_vec())],
+            column_info: Some(single_col_info("count", oid::INT8, 1)),
+        };
+
+        let value: i64 = row.try_get(0).unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn test_try_get_i64_text_by_name() {
+        let row = PgRow {
+            columns: vec![Some(b"123".to_vec())],
+            column_info: Some(single_col_info("total", oid::INT8, 0)),
+        };
+
+        let value: i64 = row.try_get_by_name("total").unwrap();
+        assert_eq!(value, 123);
+    }
+
+    #[test]
+    fn test_try_get_opt_null() {
+        let row = PgRow {
+            columns: vec![None],
+            column_info: Some(single_col_info("maybe_count", oid::INT8, 1)),
+        };
+
+        let value: Option<i64> = row.try_get_opt(0).unwrap();
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn test_try_get_unexpected_null() {
+        let row = PgRow {
+            columns: vec![None],
+            column_info: Some(single_col_info("required_count", oid::INT8, 1)),
+        };
+
+        assert!(matches!(
+            row.try_get::<i64>(0),
+            Err(TypeError::UnexpectedNull)
+        ));
+    }
+
+    #[test]
+    fn test_try_get_uuid_binary() {
+        let uuid_bytes: [u8; 16] = [
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
+        let row = PgRow {
+            columns: vec![Some(uuid_bytes.to_vec())],
+            column_info: Some(single_col_info("id", oid::UUID, 1)),
+        };
+
+        let value: Uuid = row.try_get(0).unwrap();
+        assert_eq!(value.0, "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_try_get_jsonb_binary() {
+        let mut bytes = vec![1u8];
+        bytes.extend_from_slice(br#"{"ok":true}"#);
+        let row = PgRow {
+            columns: vec![Some(bytes)],
+            column_info: Some(single_col_info("meta", oid::JSONB, 1)),
+        };
+
+        let value: Json = row.try_get(0).unwrap();
+        assert_eq!(value.0, r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn test_try_get_requires_column_metadata() {
+        let row = PgRow {
+            columns: vec![Some(b"42".to_vec())],
+            column_info: None,
+        };
+
+        assert!(matches!(
+            row.try_get::<i64>(0),
+            Err(TypeError::InvalidData(msg)) if msg.contains("metadata")
+        ));
+    }
+
+    #[test]
+    fn test_get_i64_uses_metadata_binary() {
+        let row = PgRow {
+            columns: vec![Some(777i64.to_be_bytes().to_vec())],
+            column_info: Some(single_col_info("v", oid::INT8, 1)),
+        };
+        assert_eq!(row.get_i64(0), Some(777));
+    }
+
+    #[test]
+    fn test_get_bool_uses_metadata_binary() {
+        let row = PgRow {
+            columns: vec![Some(vec![1u8])],
+            column_info: Some(single_col_info("flag", oid::BOOL, 1)),
+        };
+        assert_eq!(row.get_bool(0), Some(true));
     }
 }
