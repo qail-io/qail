@@ -24,8 +24,8 @@ A high-performance PostgreSQL driver that speaks the wire protocol directly. No 
 
 ```toml
 [dependencies]
-qail-pg = "0.13.1"
-qail-core = "0.13.1"
+qail-pg = "0.23.0"
+qail-core = "0.23.0"
 ```
 
 ## Quick Start

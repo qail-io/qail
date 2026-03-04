@@ -26,12 +26,6 @@ test_on_acquire = false
 default_role = "app_user"
 super_admin_role = "super_admin"
 
-[redis]
-host = "127.0.0.1"
-port = 6379
-max_connections = 10
-password = "${REDIS_PASSWORD:-}"
-
 [qdrant]
 url = "http://localhost:6333"
 grpc = "localhost:6334"
@@ -95,7 +89,6 @@ These env vars always override their TOML counterparts, regardless of `${VAR}` e
 | Env Var | Overrides |
 |---------|-----------|
 | `DATABASE_URL` | `[postgres].url` |
-| `REDIS_URL` | `[redis].host` + `port` |
 | `QDRANT_URL` | `[qdrant].url` |
 | `QAIL_BIND` | `[gateway].bind` |
 
@@ -120,17 +113,6 @@ use qail_pg::driver::pool::PoolConfig;
 let qail = QailConfig::load()?;                       // reads ./qail.toml
 let pg_config = PoolConfig::from_qail_config(&qail)?;  // parse postgres section
 let pool = PgPool::connect(pg_config).await?;
-```
-
-### Redis
-
-```rust
-use qail_redis::pool::PoolConfig as RedisPoolConfig;
-
-let qail = QailConfig::load()?;
-if let Some(config) = RedisPoolConfig::from_qail_config(&qail) {
-    let pool = RedisPool::new(config).await?;
-}
 ```
 
 ### Qdrant
@@ -160,7 +142,6 @@ let gw = GatewayConfig::from_qail_config(&qail);
 | `[project]` | Yes | Project name, mode (`postgres`/`qdrant`/`hybrid`), schema path |
 | `[postgres]` | Yes | Database URL and pool tuning |
 | `[postgres.rls]` | No | RLS role names |
-| `[redis]` | No | Redis connection settings |
 | `[qdrant]` | No | Qdrant REST + gRPC endpoints |
 | `[gateway]` | No | HTTP server bind, CORS, cache |
 | `[[sync]]` | No | Vector sync rules (hybrid mode) |

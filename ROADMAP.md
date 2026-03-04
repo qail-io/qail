@@ -4,6 +4,16 @@
 
 ---
 
+## Current Priorities (March 2026)
+
+1. Wire-protocol hardening and panic-path elimination in hot decode/IO paths.
+2. Validator/syn unification and stronger cross-file N+1 + schema drift detection.
+3. Migration safety defaults (destructive-change opt-ins, shadow receipts, lock-risk gates).
+
+The sections below are a historical milestone log of completed and deferred roadmap phases.
+
+---
+
 ## 1. First-Class Relations ✅
 
 ### Phase 1: Runtime Registry ✅ (v0.15.0)
