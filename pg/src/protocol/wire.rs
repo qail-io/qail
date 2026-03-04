@@ -3,6 +3,12 @@
 //! Implementation of the PostgreSQL Frontend/Backend Protocol.
 //! Reference: <https://www.postgresql.org/docs/current/protocol-message-formats.html>
 
+/// Maximum backend frame length accepted by the decoder.
+///
+/// Mirrors driver-side guards to keep standalone `BackendMessage::decode`
+/// usage fail-closed against oversized frames.
+const MAX_BACKEND_FRAME_LEN: usize = 64 * 1024 * 1024;
+
 /// Frontend (client → server) message types
 #[derive(Debug, Clone)]
 pub enum FrontendMessage {
@@ -12,6 +18,8 @@ pub enum FrontendMessage {
         user: String,
         /// Target database name.
         database: String,
+        /// Additional startup parameters (e.g. `replication=database`).
+        startup_params: Vec<(String, String)>,
     },
     /// Password response (MD5 or cleartext).
     PasswordMessage(String),
@@ -138,6 +146,13 @@ pub enum BackendMessage {
         /// Per-column format codes.
         column_formats: Vec<u8>,
     },
+    /// Copy both response (used by streaming replication).
+    CopyBothResponse {
+        /// Overall format: 0 = text, 1 = binary.
+        format: u8,
+        /// Per-column format codes.
+        column_formats: Vec<u8>,
+    },
     /// Raw COPY data chunk from the server.
     CopyData(Vec<u8>),
     /// COPY transfer complete.
@@ -207,88 +222,181 @@ pub struct ErrorFields {
     pub hint: Option<String>,
 }
 
-impl FrontendMessage {
-    /// Encode message to bytes for sending over the wire.
-    pub fn encode(&self) -> Vec<u8> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrontendEncodeError {
+    InteriorNul(&'static str),
+    MessageTooLarge(usize),
+    TooManyParams(usize),
+    InvalidMaxRows(i32),
+    InvalidStartupParam(String),
+}
+
+impl std::fmt::Display for FrontendEncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FrontendMessage::Startup { user, database } => {
+            Self::InteriorNul(field) => write!(f, "field `{}` contains interior NUL byte", field),
+            Self::MessageTooLarge(len) => write!(f, "message too large for wire length: {}", len),
+            Self::TooManyParams(n) => write!(f, "too many params for i16 wire count: {}", n),
+            Self::InvalidMaxRows(v) => write!(f, "invalid Execute max_rows (must be >= 0): {}", v),
+            Self::InvalidStartupParam(msg) => write!(f, "invalid startup parameter: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for FrontendEncodeError {}
+
+impl FrontendMessage {
+    #[inline]
+    fn has_nul(s: &str) -> bool {
+        s.as_bytes().contains(&0)
+    }
+
+    #[inline]
+    fn content_len_to_wire_len(content_len: usize) -> Result<i32, FrontendEncodeError> {
+        let total = content_len
+            .checked_add(4)
+            .ok_or(FrontendEncodeError::MessageTooLarge(usize::MAX))?;
+        i32::try_from(total).map_err(|_| FrontendEncodeError::MessageTooLarge(total))
+    }
+
+    /// Fallible encoder that returns explicit reason on invalid input.
+    pub fn encode_checked(&self) -> Result<Vec<u8>, FrontendEncodeError> {
+        match self {
+            FrontendMessage::Startup {
+                user,
+                database,
+                startup_params,
+            } => {
+                if Self::has_nul(user) {
+                    return Err(FrontendEncodeError::InteriorNul("user"));
+                }
+                if Self::has_nul(database) {
+                    return Err(FrontendEncodeError::InteriorNul("database"));
+                }
+                let mut seen_startup_keys = std::collections::HashSet::new();
                 let mut buf = Vec::new();
-                // Protocol version 3.0
                 buf.extend_from_slice(&196608i32.to_be_bytes());
-                // Parameters
                 buf.extend_from_slice(b"user\0");
                 buf.extend_from_slice(user.as_bytes());
                 buf.push(0);
                 buf.extend_from_slice(b"database\0");
                 buf.extend_from_slice(database.as_bytes());
                 buf.push(0);
-                buf.push(0); // Terminator
+                for (key, value) in startup_params {
+                    let key_trimmed = key.trim();
+                    if key_trimmed.is_empty() {
+                        return Err(FrontendEncodeError::InvalidStartupParam(
+                            "key must not be empty".to_string(),
+                        ));
+                    }
+                    let key_lc = key_trimmed.to_ascii_lowercase();
+                    if key_lc == "user" || key_lc == "database" {
+                        return Err(FrontendEncodeError::InvalidStartupParam(format!(
+                            "reserved key '{}'",
+                            key_trimmed
+                        )));
+                    }
+                    if !seen_startup_keys.insert(key_lc) {
+                        return Err(FrontendEncodeError::InvalidStartupParam(format!(
+                            "duplicate key '{}'",
+                            key_trimmed
+                        )));
+                    }
+                    if Self::has_nul(key) {
+                        return Err(FrontendEncodeError::InteriorNul("startup_param_key"));
+                    }
+                    if Self::has_nul(value) {
+                        return Err(FrontendEncodeError::InteriorNul("startup_param_value"));
+                    }
+                    buf.extend_from_slice(key.as_bytes());
+                    buf.push(0);
+                    buf.extend_from_slice(value.as_bytes());
+                    buf.push(0);
+                }
+                buf.push(0);
 
-                // Prepend length (includes length itself)
-                let len = (buf.len() + 4) as i32;
+                let len = Self::content_len_to_wire_len(buf.len())?;
                 let mut result = len.to_be_bytes().to_vec();
                 result.extend(buf);
-                result
+                Ok(result)
             }
             FrontendMessage::Query(sql) => {
+                if Self::has_nul(sql) {
+                    return Err(FrontendEncodeError::InteriorNul("sql"));
+                }
                 let mut buf = Vec::new();
                 buf.push(b'Q');
-                let content = format!("{}\0", sql);
-                let len = (content.len() + 4) as i32;
+                let mut content = Vec::with_capacity(sql.len() + 1);
+                content.extend_from_slice(sql.as_bytes());
+                content.push(0);
+                let len = Self::content_len_to_wire_len(content.len())?;
                 buf.extend_from_slice(&len.to_be_bytes());
-                buf.extend_from_slice(content.as_bytes());
-                buf
+                buf.extend_from_slice(&content);
+                Ok(buf)
             }
-            FrontendMessage::Terminate => {
-                vec![b'X', 0, 0, 0, 4]
-            }
+            FrontendMessage::Terminate => Ok(vec![b'X', 0, 0, 0, 4]),
             FrontendMessage::SASLInitialResponse { mechanism, data } => {
+                if Self::has_nul(mechanism) {
+                    return Err(FrontendEncodeError::InteriorNul("mechanism"));
+                }
+                if data.len() > i32::MAX as usize {
+                    return Err(FrontendEncodeError::MessageTooLarge(data.len()));
+                }
                 let mut buf = Vec::new();
-                buf.push(b'p'); // SASLInitialResponse uses 'p'
+                buf.push(b'p');
 
                 let mut content = Vec::new();
                 content.extend_from_slice(mechanism.as_bytes());
-                content.push(0); // null-terminated mechanism
-                content.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                content.push(0);
+                let data_len = i32::try_from(data.len())
+                    .map_err(|_| FrontendEncodeError::MessageTooLarge(data.len()))?;
+                content.extend_from_slice(&data_len.to_be_bytes());
                 content.extend_from_slice(data);
 
-                let len = (content.len() + 4) as i32;
+                let len = Self::content_len_to_wire_len(content.len())?;
                 buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(&content);
-                buf
+                Ok(buf)
             }
-            FrontendMessage::SASLResponse(data) => {
+            FrontendMessage::SASLResponse(data) | FrontendMessage::GSSResponse(data) => {
+                if data.len() > i32::MAX as usize {
+                    return Err(FrontendEncodeError::MessageTooLarge(data.len()));
+                }
                 let mut buf = Vec::new();
                 buf.push(b'p');
-
-                let len = (data.len() + 4) as i32;
+                let len = Self::content_len_to_wire_len(data.len())?;
                 buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(data);
-                buf
-            }
-            FrontendMessage::GSSResponse(data) => {
-                let mut buf = Vec::new();
-                buf.push(b'p');
-
-                let len = (data.len() + 4) as i32;
-                buf.extend_from_slice(&len.to_be_bytes());
-                buf.extend_from_slice(data);
-                buf
+                Ok(buf)
             }
             FrontendMessage::PasswordMessage(password) => {
+                if Self::has_nul(password) {
+                    return Err(FrontendEncodeError::InteriorNul("password"));
+                }
                 let mut buf = Vec::new();
                 buf.push(b'p');
-                let content = format!("{}\0", password);
-                let len = (content.len() + 4) as i32;
+                let mut content = Vec::with_capacity(password.len() + 1);
+                content.extend_from_slice(password.as_bytes());
+                content.push(0);
+                let len = Self::content_len_to_wire_len(content.len())?;
                 buf.extend_from_slice(&len.to_be_bytes());
-                buf.extend_from_slice(content.as_bytes());
-                buf
+                buf.extend_from_slice(&content);
+                Ok(buf)
             }
             FrontendMessage::Parse {
                 name,
                 query,
                 param_types,
             } => {
+                if Self::has_nul(name) {
+                    return Err(FrontendEncodeError::InteriorNul("name"));
+                }
+                if Self::has_nul(query) {
+                    return Err(FrontendEncodeError::InteriorNul("query"));
+                }
+                if param_types.len() > i16::MAX as usize {
+                    return Err(FrontendEncodeError::TooManyParams(param_types.len()));
+                }
                 let mut buf = Vec::new();
                 buf.push(b'P');
 
@@ -297,21 +405,40 @@ impl FrontendMessage {
                 content.push(0);
                 content.extend_from_slice(query.as_bytes());
                 content.push(0);
-                content.extend_from_slice(&(param_types.len() as i16).to_be_bytes());
+                let param_count = i16::try_from(param_types.len())
+                    .map_err(|_| FrontendEncodeError::TooManyParams(param_types.len()))?;
+                content.extend_from_slice(&param_count.to_be_bytes());
                 for oid in param_types {
                     content.extend_from_slice(&oid.to_be_bytes());
                 }
 
-                let len = (content.len() + 4) as i32;
+                let len = Self::content_len_to_wire_len(content.len())?;
                 buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(&content);
-                buf
+                Ok(buf)
             }
             FrontendMessage::Bind {
                 portal,
                 statement,
                 params,
             } => {
+                if Self::has_nul(portal) {
+                    return Err(FrontendEncodeError::InteriorNul("portal"));
+                }
+                if Self::has_nul(statement) {
+                    return Err(FrontendEncodeError::InteriorNul("statement"));
+                }
+                if params.len() > i16::MAX as usize {
+                    return Err(FrontendEncodeError::TooManyParams(params.len()));
+                }
+                if let Some(too_large) = params
+                    .iter()
+                    .flatten()
+                    .find(|p| p.len() > i32::MAX as usize)
+                {
+                    return Err(FrontendEncodeError::MessageTooLarge(too_large.len()));
+                }
+
                 let mut buf = Vec::new();
                 buf.push(b'B');
 
@@ -320,64 +447,75 @@ impl FrontendMessage {
                 content.push(0);
                 content.extend_from_slice(statement.as_bytes());
                 content.push(0);
-                // Format codes (0 = all text)
                 content.extend_from_slice(&0i16.to_be_bytes());
-                // Parameter count
-                content.extend_from_slice(&(params.len() as i16).to_be_bytes());
+                let param_count = i16::try_from(params.len())
+                    .map_err(|_| FrontendEncodeError::TooManyParams(params.len()))?;
+                content.extend_from_slice(&param_count.to_be_bytes());
                 for param in params {
                     match param {
                         Some(data) => {
-                            content.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                            let data_len = i32::try_from(data.len())
+                                .map_err(|_| FrontendEncodeError::MessageTooLarge(data.len()))?;
+                            content.extend_from_slice(&data_len.to_be_bytes());
                             content.extend_from_slice(data);
                         }
                         None => content.extend_from_slice(&(-1i32).to_be_bytes()),
                     }
                 }
-                // Result format codes (0 = all text)
                 content.extend_from_slice(&0i16.to_be_bytes());
 
-                let len = (content.len() + 4) as i32;
+                let len = Self::content_len_to_wire_len(content.len())?;
                 buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(&content);
-                buf
+                Ok(buf)
             }
             FrontendMessage::Execute { portal, max_rows } => {
+                if Self::has_nul(portal) {
+                    return Err(FrontendEncodeError::InteriorNul("portal"));
+                }
+                if *max_rows < 0 {
+                    return Err(FrontendEncodeError::InvalidMaxRows(*max_rows));
+                }
                 let mut buf = Vec::new();
                 buf.push(b'E');
-
                 let mut content = Vec::new();
                 content.extend_from_slice(portal.as_bytes());
                 content.push(0);
                 content.extend_from_slice(&max_rows.to_be_bytes());
-
-                let len = (content.len() + 4) as i32;
+                let len = Self::content_len_to_wire_len(content.len())?;
                 buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(&content);
-                buf
+                Ok(buf)
             }
-            FrontendMessage::Sync => {
-                vec![b'S', 0, 0, 0, 4]
-            }
+            FrontendMessage::Sync => Ok(vec![b'S', 0, 0, 0, 4]),
             FrontendMessage::CopyFail(msg) => {
+                if Self::has_nul(msg) {
+                    return Err(FrontendEncodeError::InteriorNul("copy_fail"));
+                }
                 let mut buf = Vec::new();
                 buf.push(b'f');
-                let content = format!("{}\0", msg);
-                let len = (content.len() + 4) as i32;
+                let mut content = Vec::with_capacity(msg.len() + 1);
+                content.extend_from_slice(msg.as_bytes());
+                content.push(0);
+                let len = Self::content_len_to_wire_len(content.len())?;
                 buf.extend_from_slice(&len.to_be_bytes());
-                buf.extend_from_slice(content.as_bytes());
-                buf
+                buf.extend_from_slice(&content);
+                Ok(buf)
             }
             FrontendMessage::Close { is_portal, name } => {
+                if Self::has_nul(name) {
+                    return Err(FrontendEncodeError::InteriorNul("name"));
+                }
                 let mut buf = Vec::new();
                 buf.push(b'C');
                 let type_byte = if *is_portal { b'P' } else { b'S' };
                 let mut content = vec![type_byte];
                 content.extend_from_slice(name.as_bytes());
                 content.push(0);
-                let len = (content.len() + 4) as i32;
+                let len = Self::content_len_to_wire_len(content.len())?;
                 buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(&content);
-                buf
+                Ok(buf)
             }
         }
     }
@@ -398,12 +536,22 @@ impl BackendMessage {
         if len < 4 {
             return Err(format!("Invalid message length: {} (minimum is 4)", len));
         }
+        if len > MAX_BACKEND_FRAME_LEN {
+            return Err(format!(
+                "Message too large: {} bytes (max {})",
+                len, MAX_BACKEND_FRAME_LEN
+            ));
+        }
 
-        if buf.len() < len + 1 {
+        let frame_len = len
+            .checked_add(1)
+            .ok_or_else(|| "Message length overflow".to_string())?;
+
+        if buf.len() < frame_len {
             return Err("Incomplete message".to_string());
         }
 
-        let payload = &buf[5..len + 1];
+        let payload = &buf[5..frame_len];
 
         let message = match msg_type {
             b'R' => Self::decode_auth(payload)?,
@@ -414,23 +562,59 @@ impl BackendMessage {
             b'D' => Self::decode_data_row(payload)?,
             b'C' => Self::decode_command_complete(payload)?,
             b'E' => Self::decode_error_response(payload)?,
-            b'1' => BackendMessage::ParseComplete,
-            b'2' => BackendMessage::BindComplete,
-            b'3' => BackendMessage::CloseComplete,
-            b'n' => BackendMessage::NoData,
-            b's' => BackendMessage::PortalSuspended,
+            b'1' => {
+                if !payload.is_empty() {
+                    return Err("ParseComplete must have empty payload".to_string());
+                }
+                BackendMessage::ParseComplete
+            }
+            b'2' => {
+                if !payload.is_empty() {
+                    return Err("BindComplete must have empty payload".to_string());
+                }
+                BackendMessage::BindComplete
+            }
+            b'3' => {
+                if !payload.is_empty() {
+                    return Err("CloseComplete must have empty payload".to_string());
+                }
+                BackendMessage::CloseComplete
+            }
+            b'n' => {
+                if !payload.is_empty() {
+                    return Err("NoData must have empty payload".to_string());
+                }
+                BackendMessage::NoData
+            }
+            b's' => {
+                if !payload.is_empty() {
+                    return Err("PortalSuspended must have empty payload".to_string());
+                }
+                BackendMessage::PortalSuspended
+            }
             b't' => Self::decode_parameter_description(payload)?,
             b'G' => Self::decode_copy_in_response(payload)?,
             b'H' => Self::decode_copy_out_response(payload)?,
+            b'W' => Self::decode_copy_both_response(payload)?,
             b'd' => BackendMessage::CopyData(payload.to_vec()),
-            b'c' => BackendMessage::CopyDone,
+            b'c' => {
+                if !payload.is_empty() {
+                    return Err("CopyDone must have empty payload".to_string());
+                }
+                BackendMessage::CopyDone
+            }
             b'A' => Self::decode_notification_response(payload)?,
-            b'I' => BackendMessage::EmptyQueryResponse,
+            b'I' => {
+                if !payload.is_empty() {
+                    return Err("EmptyQueryResponse must have empty payload".to_string());
+                }
+                BackendMessage::EmptyQueryResponse
+            }
             b'N' => BackendMessage::NoticeResponse(Self::parse_error_fields(payload)?),
             _ => return Err(format!("Unknown message type: {}", msg_type as char)),
         };
 
-        Ok((message, len + 1))
+        Ok((message, frame_len))
     }
 
     fn decode_auth(payload: &[u8]) -> Result<Self, String> {
@@ -439,36 +623,86 @@ impl BackendMessage {
         }
         let auth_type = i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         match auth_type {
-            0 => Ok(BackendMessage::AuthenticationOk),
-            2 => Ok(BackendMessage::AuthenticationKerberosV5),
-            3 => Ok(BackendMessage::AuthenticationCleartextPassword),
+            0 => {
+                if payload.len() != 4 {
+                    return Err(format!(
+                        "AuthenticationOk invalid payload length: {}",
+                        payload.len()
+                    ));
+                }
+                Ok(BackendMessage::AuthenticationOk)
+            }
+            2 => {
+                if payload.len() != 4 {
+                    return Err(format!(
+                        "AuthenticationKerberosV5 invalid payload length: {}",
+                        payload.len()
+                    ));
+                }
+                Ok(BackendMessage::AuthenticationKerberosV5)
+            }
+            3 => {
+                if payload.len() != 4 {
+                    return Err(format!(
+                        "AuthenticationCleartextPassword invalid payload length: {}",
+                        payload.len()
+                    ));
+                }
+                Ok(BackendMessage::AuthenticationCleartextPassword)
+            }
             5 => {
-                if payload.len() < 8 {
+                if payload.len() != 8 {
                     return Err("MD5 auth payload too short (need salt)".to_string());
                 }
-                // SAFETY: Length is verified on the check above (payload.len() < 8 returns Err).
-                let salt: [u8; 4] = payload[4..8]
-                    .try_into()
-                    .expect("salt slice is exactly 4 bytes");
+                let mut salt = [0u8; 4];
+                salt.copy_from_slice(&payload[4..8]);
                 Ok(BackendMessage::AuthenticationMD5Password(salt))
             }
-            7 => Ok(BackendMessage::AuthenticationGSS),
+            7 => {
+                if payload.len() != 4 {
+                    return Err(format!(
+                        "AuthenticationGSS invalid payload length: {}",
+                        payload.len()
+                    ));
+                }
+                Ok(BackendMessage::AuthenticationGSS)
+            }
             8 => Ok(BackendMessage::AuthenticationGSSContinue(
                 payload[4..].to_vec(),
             )),
-            9 => Ok(BackendMessage::AuthenticationSSPI),
+            9 => {
+                if payload.len() != 4 {
+                    return Err(format!(
+                        "AuthenticationSSPI invalid payload length: {}",
+                        payload.len()
+                    ));
+                }
+                Ok(BackendMessage::AuthenticationSSPI)
+            }
             10 => {
                 // SASL - parse mechanism list
                 let mut mechanisms = Vec::new();
                 let mut pos = 4;
-                while pos < payload.len() && payload[pos] != 0 {
+                while pos < payload.len() {
+                    if payload[pos] == 0 {
+                        break; // list terminator
+                    }
                     let end = payload[pos..]
                         .iter()
                         .position(|&b| b == 0)
                         .map(|p| pos + p)
-                        .unwrap_or(payload.len());
+                        .ok_or("SASL mechanism list missing null terminator")?;
                     mechanisms.push(String::from_utf8_lossy(&payload[pos..end]).to_string());
                     pos = end + 1;
+                }
+                if pos >= payload.len() {
+                    return Err("SASL mechanism list missing final terminator".to_string());
+                }
+                if pos + 1 != payload.len() {
+                    return Err("SASL mechanism list has trailing bytes".to_string());
+                }
+                if mechanisms.is_empty() {
+                    return Err("SASL mechanism list is empty".to_string());
                 }
                 Ok(BackendMessage::AuthenticationSASL(mechanisms))
             }
@@ -489,16 +723,30 @@ impl BackendMessage {
     }
 
     fn decode_parameter_status(payload: &[u8]) -> Result<Self, String> {
-        let parts: Vec<&[u8]> = payload.split(|&b| b == 0).collect();
-        let empty: &[u8] = b"";
+        let name_end = payload
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or("ParameterStatus missing name terminator")?;
+        let value_start = name_end + 1;
+        if value_start > payload.len() {
+            return Err("ParameterStatus missing value".to_string());
+        }
+        let value_end_rel = payload[value_start..]
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or("ParameterStatus missing value terminator")?;
+        let value_end = value_start + value_end_rel;
+        if value_end + 1 != payload.len() {
+            return Err("ParameterStatus has trailing bytes".to_string());
+        }
         Ok(BackendMessage::ParameterStatus {
-            name: String::from_utf8_lossy(parts.first().unwrap_or(&empty)).to_string(),
-            value: String::from_utf8_lossy(parts.get(1).unwrap_or(&empty)).to_string(),
+            name: String::from_utf8_lossy(&payload[..name_end]).to_string(),
+            value: String::from_utf8_lossy(&payload[value_start..value_end]).to_string(),
         })
     }
 
     fn decode_backend_key(payload: &[u8]) -> Result<Self, String> {
-        if payload.len() < 8 {
+        if payload.len() != 8 {
             return Err("BackendKeyData payload too short".to_string());
         }
         Ok(BackendMessage::BackendKeyData {
@@ -508,7 +756,7 @@ impl BackendMessage {
     }
 
     fn decode_ready_for_query(payload: &[u8]) -> Result<Self, String> {
-        if payload.is_empty() {
+        if payload.len() != 1 {
             return Err("ReadyForQuery payload empty".to_string());
         }
         let status = match payload[0] {
@@ -578,6 +826,9 @@ impl BackendMessage {
             pos += 4;
 
             let format = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+            if !(0..=1).contains(&format) {
+                return Err(format!("RowDescription invalid format code: {}", format));
+            }
             pos += 2;
 
             fields.push(FieldDescription {
@@ -589,6 +840,10 @@ impl BackendMessage {
                 type_modifier,
                 format,
             });
+        }
+
+        if pos != payload.len() {
+            return Err("RowDescription has trailing bytes".to_string());
         }
 
         Ok(BackendMessage::RowDescription(fields))
@@ -632,8 +887,11 @@ impl BackendMessage {
                 // NULL value
                 columns.push(None);
             } else {
+                if len < -1 {
+                    return Err(format!("DataRow invalid column length: {}", len));
+                }
                 let len = len as usize;
-                if pos + len > payload.len() {
+                if len > payload.len().saturating_sub(pos) {
                     return Err("DataRow column data truncated".to_string());
                 }
                 let data = payload[pos..pos + len].to_vec();
@@ -642,13 +900,22 @@ impl BackendMessage {
             }
         }
 
+        if pos != payload.len() {
+            return Err("DataRow has trailing bytes".to_string());
+        }
+
         Ok(BackendMessage::DataRow(columns))
     }
 
     fn decode_command_complete(payload: &[u8]) -> Result<Self, String> {
-        let tag = String::from_utf8_lossy(payload)
-            .trim_end_matches('\0')
-            .to_string();
+        if payload.last().copied() != Some(0) {
+            return Err("CommandComplete missing null terminator".to_string());
+        }
+        let tag_bytes = &payload[..payload.len() - 1];
+        if tag_bytes.contains(&0) {
+            return Err("CommandComplete contains interior null byte".to_string());
+        }
+        let tag = String::from_utf8_lossy(tag_bytes).to_string();
         Ok(BackendMessage::CommandComplete(tag))
     }
 
@@ -659,12 +926,19 @@ impl BackendMessage {
     }
 
     fn parse_error_fields(payload: &[u8]) -> Result<ErrorFields, String> {
+        if payload.last().copied() != Some(0) {
+            return Err("ErrorResponse missing final terminator".to_string());
+        }
         let mut fields = ErrorFields::default();
         let mut i = 0;
         while i < payload.len() && payload[i] != 0 {
             let field_type = payload[i];
             i += 1;
-            let end = payload[i..].iter().position(|&b| b == 0).unwrap_or(0) + i;
+            let end = payload[i..]
+                .iter()
+                .position(|&b| b == 0)
+                .map(|p| p + i)
+                .ok_or("ErrorResponse field missing null terminator")?;
             let value = String::from_utf8_lossy(&payload[i..end]).to_string();
             i = end + 1;
 
@@ -677,50 +951,85 @@ impl BackendMessage {
                 _ => {}
             }
         }
+        if i + 1 != payload.len() {
+            return Err("ErrorResponse has trailing bytes after terminator".to_string());
+        }
         Ok(fields)
     }
 
     fn decode_parameter_description(payload: &[u8]) -> Result<Self, String> {
         if payload.len() < 2 {
-            return Ok(BackendMessage::ParameterDescription(vec![]));
+            return Err("ParameterDescription payload too short".to_string());
         }
         let raw_count = i16::from_be_bytes([payload[0], payload[1]]);
         if raw_count < 0 {
             return Err(format!("ParameterDescription invalid count: {}", raw_count));
         }
         let count = raw_count as usize;
+        let expected_len = 2 + count * 4;
+        if payload.len() < expected_len {
+            return Err(format!(
+                "ParameterDescription truncated: expected {} bytes, got {}",
+                expected_len,
+                payload.len()
+            ));
+        }
         let mut oids = Vec::with_capacity(count);
         let mut pos = 2;
         for _ in 0..count {
-            if pos + 4 <= payload.len() {
-                oids.push(u32::from_be_bytes([
-                    payload[pos],
-                    payload[pos + 1],
-                    payload[pos + 2],
-                    payload[pos + 3],
-                ]));
-                pos += 4;
-            }
+            oids.push(u32::from_be_bytes([
+                payload[pos],
+                payload[pos + 1],
+                payload[pos + 2],
+                payload[pos + 3],
+            ]));
+            pos += 4;
+        }
+        if pos != payload.len() {
+            return Err("ParameterDescription has trailing bytes".to_string());
         }
         Ok(BackendMessage::ParameterDescription(oids))
     }
 
     fn decode_copy_in_response(payload: &[u8]) -> Result<Self, String> {
-        if payload.is_empty() {
-            return Err("Empty CopyInResponse payload".to_string());
+        if payload.len() < 3 {
+            return Err("CopyInResponse payload too short".to_string());
         }
         let format = payload[0];
+        if format > 1 {
+            return Err(format!(
+                "CopyInResponse invalid overall format code: {}",
+                format
+            ));
+        }
         let num_columns = if payload.len() >= 3 {
             let raw = i16::from_be_bytes([payload[1], payload[2]]);
-            if raw < 0 { 0usize } else { raw as usize }
+            if raw < 0 {
+                return Err(format!(
+                    "CopyInResponse invalid negative column count: {}",
+                    raw
+                ));
+            }
+            raw as usize
         } else {
             0
         };
-        let column_formats: Vec<u8> = if payload.len() > 3 && num_columns > 0 {
-            payload[3..].iter().take(num_columns).copied().collect()
-        } else {
-            vec![]
-        };
+        let mut column_formats = Vec::with_capacity(num_columns);
+        let mut pos = 3usize;
+        for _ in 0..num_columns {
+            if pos + 2 > payload.len() {
+                return Err("CopyInResponse truncated column format list".to_string());
+            }
+            let raw = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+            if !(0..=1).contains(&raw) {
+                return Err(format!("CopyInResponse invalid format code: {}", raw));
+            }
+            column_formats.push(raw as u8);
+            pos += 2;
+        }
+        if pos != payload.len() {
+            return Err("CopyInResponse has trailing bytes".to_string());
+        }
         Ok(BackendMessage::CopyInResponse {
             format,
             column_formats,
@@ -728,22 +1037,90 @@ impl BackendMessage {
     }
 
     fn decode_copy_out_response(payload: &[u8]) -> Result<Self, String> {
-        if payload.is_empty() {
-            return Err("Empty CopyOutResponse payload".to_string());
+        if payload.len() < 3 {
+            return Err("CopyOutResponse payload too short".to_string());
         }
         let format = payload[0];
+        if format > 1 {
+            return Err(format!(
+                "CopyOutResponse invalid overall format code: {}",
+                format
+            ));
+        }
         let num_columns = if payload.len() >= 3 {
             let raw = i16::from_be_bytes([payload[1], payload[2]]);
-            if raw < 0 { 0usize } else { raw as usize }
+            if raw < 0 {
+                return Err(format!(
+                    "CopyOutResponse invalid negative column count: {}",
+                    raw
+                ));
+            }
+            raw as usize
         } else {
             0
         };
-        let column_formats: Vec<u8> = if payload.len() > 3 && num_columns > 0 {
-            payload[3..].iter().take(num_columns).copied().collect()
-        } else {
-            vec![]
-        };
+        let mut column_formats = Vec::with_capacity(num_columns);
+        let mut pos = 3usize;
+        for _ in 0..num_columns {
+            if pos + 2 > payload.len() {
+                return Err("CopyOutResponse truncated column format list".to_string());
+            }
+            let raw = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+            if !(0..=1).contains(&raw) {
+                return Err(format!("CopyOutResponse invalid format code: {}", raw));
+            }
+            column_formats.push(raw as u8);
+            pos += 2;
+        }
+        if pos != payload.len() {
+            return Err("CopyOutResponse has trailing bytes".to_string());
+        }
         Ok(BackendMessage::CopyOutResponse {
+            format,
+            column_formats,
+        })
+    }
+
+    fn decode_copy_both_response(payload: &[u8]) -> Result<Self, String> {
+        if payload.len() < 3 {
+            return Err("CopyBothResponse payload too short".to_string());
+        }
+        let format = payload[0];
+        if format > 1 {
+            return Err(format!(
+                "CopyBothResponse invalid overall format code: {}",
+                format
+            ));
+        }
+        let num_columns = if payload.len() >= 3 {
+            let raw = i16::from_be_bytes([payload[1], payload[2]]);
+            if raw < 0 {
+                return Err(format!(
+                    "CopyBothResponse invalid negative column count: {}",
+                    raw
+                ));
+            }
+            raw as usize
+        } else {
+            0
+        };
+        let mut column_formats = Vec::with_capacity(num_columns);
+        let mut pos = 3usize;
+        for _ in 0..num_columns {
+            if pos + 2 > payload.len() {
+                return Err("CopyBothResponse truncated column format list".to_string());
+            }
+            let raw = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+            if !(0..=1).contains(&raw) {
+                return Err(format!("CopyBothResponse invalid format code: {}", raw));
+            }
+            column_formats.push(raw as u8);
+            pos += 2;
+        }
+        if pos != payload.len() {
+            return Err("CopyBothResponse has trailing bytes".to_string());
+        }
+        Ok(BackendMessage::CopyBothResponse {
             format,
             column_formats,
         })
@@ -771,8 +1148,11 @@ impl BackendMessage {
         let payload_end = remaining
             .iter()
             .position(|&b| b == 0)
-            .unwrap_or(remaining.len());
+            .ok_or("NotificationResponse: missing payload null terminator")?;
         let notification_payload = String::from_utf8_lossy(&remaining[..payload_end]).to_string();
+        if i + payload_end + 1 != payload.len() {
+            return Err("NotificationResponse has trailing bytes".to_string());
+        }
 
         Ok(BackendMessage::NotificationResponse {
             process_id,
@@ -826,6 +1206,14 @@ mod tests {
     }
 
     #[test]
+    fn decode_oversized_message_returns_error() {
+        let mut buf = vec![b'D'];
+        buf.extend_from_slice(&((MAX_BACKEND_FRAME_LEN as u32) + 1).to_be_bytes());
+        let err = BackendMessage::decode(&buf).unwrap_err();
+        assert!(err.contains("Message too large"));
+    }
+
+    #[test]
     fn decode_unknown_message_type_returns_error() {
         let buf = wire_msg(b'@', &[0]);
         let result = BackendMessage::decode(&buf);
@@ -841,6 +1229,18 @@ mod tests {
         let (msg, consumed) = BackendMessage::decode(&buf).unwrap();
         assert!(matches!(msg, BackendMessage::AuthenticationOk));
         assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn decode_auth_ok_with_trailing_bytes_returns_error() {
+        let mut payload = 0i32.to_be_bytes().to_vec();
+        payload.push(0xAA);
+        let buf = wire_msg(b'R', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("invalid payload length")
+        );
     }
 
     #[test]
@@ -951,6 +1351,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn decode_auth_sasl_truncated_mechanism_list_returns_error() {
+        let mut payload = 10i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"SCRAM-SHA-256"); // missing null terminator(s)
+        let buf = wire_msg(b'R', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("terminator")
+        );
+    }
+
+    #[test]
+    fn decode_auth_sasl_trailing_bytes_after_terminator_returns_error() {
+        let mut payload = 10i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"SCRAM-SHA-256\0\0X");
+        let buf = wire_msg(b'R', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("trailing bytes")
+        );
+    }
+
     // ========== ReadyForQuery tests ==========
 
     #[test]
@@ -996,6 +1420,16 @@ mod tests {
             BackendMessage::decode(&buf)
                 .unwrap_err()
                 .contains("Unknown transaction")
+        );
+    }
+
+    #[test]
+    fn decode_ready_for_query_with_trailing_bytes_returns_error() {
+        let buf = wire_msg(b'Z', b"II");
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("payload")
         );
     }
 
@@ -1056,6 +1490,18 @@ mod tests {
     }
 
     #[test]
+    fn decode_data_row_invalid_negative_length_returns_error() {
+        let mut payload = 1i16.to_be_bytes().to_vec();
+        payload.extend_from_slice(&(-2i32).to_be_bytes());
+        let buf = wire_msg(b'D', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("invalid column length")
+        );
+    }
+
+    #[test]
     fn decode_data_row_truncated_column_data() {
         let mut payload = 1i16.to_be_bytes().to_vec();
         // Claims 100 bytes of data but payload ends immediately
@@ -1065,6 +1511,20 @@ mod tests {
             BackendMessage::decode(&buf)
                 .unwrap_err()
                 .contains("truncated")
+        );
+    }
+
+    #[test]
+    fn decode_data_row_trailing_bytes_returns_error() {
+        let mut payload = 1i16.to_be_bytes().to_vec();
+        payload.extend_from_slice(&1i32.to_be_bytes());
+        payload.push(b'x');
+        payload.push(0xAA); // trailing garbage
+        let buf = wire_msg(b'D', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("trailing")
         );
     }
 
@@ -1145,6 +1605,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn decode_row_description_with_trailing_bytes_returns_error() {
+        let mut payload = 0i16.to_be_bytes().to_vec();
+        payload.push(0xAA);
+        let buf = wire_msg(b'T', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("trailing")
+        );
+    }
+
+    #[test]
+    fn decode_row_description_invalid_format_code_returns_error() {
+        let mut payload = 1i16.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"id\0"); // name
+        payload.extend_from_slice(&0u32.to_be_bytes()); // table_oid
+        payload.extend_from_slice(&0i16.to_be_bytes()); // column_attr
+        payload.extend_from_slice(&23u32.to_be_bytes()); // type_oid
+        payload.extend_from_slice(&4i16.to_be_bytes()); // type_size
+        payload.extend_from_slice(&(-1i32).to_be_bytes()); // type_modifier
+        payload.extend_from_slice(&7i16.to_be_bytes()); // invalid format
+        let buf = wire_msg(b'T', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("invalid format code")
+        );
+    }
+
     // ========== BackendKeyData tests ==========
 
     #[test]
@@ -1211,6 +1701,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn decode_error_response_missing_final_terminator_returns_error() {
+        let payload = vec![b'S', b'E', b'R', b'R', b'O', b'R'];
+        let buf = wire_msg(b'E', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("missing final terminator")
+        );
+    }
+
     // ========== CommandComplete tests ==========
 
     #[test]
@@ -1223,6 +1724,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn decode_command_complete_missing_null_returns_error() {
+        let buf = wire_msg(b'C', b"INSERT 0 1");
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("missing null")
+        );
+    }
+
+    #[test]
+    fn decode_command_complete_interior_null_returns_error() {
+        let buf = wire_msg(b'C', b"INSERT\0junk\0");
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("interior null")
+        );
+    }
+
     // ========== Simple type tests ==========
 
     #[test]
@@ -1233,10 +1754,47 @@ mod tests {
     }
 
     #[test]
+    fn decode_parse_complete_with_payload_returns_error() {
+        let buf = wire_msg(b'1', &[0xAA]);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("ParseComplete")
+        );
+    }
+
+    #[test]
     fn decode_bind_complete() {
         let buf = wire_msg(b'2', &[]);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
         assert!(matches!(msg, BackendMessage::BindComplete));
+    }
+
+    #[test]
+    fn decode_bind_complete_with_payload_returns_error() {
+        let buf = wire_msg(b'2', &[0xAA]);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("BindComplete")
+        );
+    }
+
+    #[test]
+    fn decode_close_complete() {
+        let buf = wire_msg(b'3', &[]);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::CloseComplete));
+    }
+
+    #[test]
+    fn decode_close_complete_with_payload_returns_error() {
+        let buf = wire_msg(b'3', &[0xAA]);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("CloseComplete")
+        );
     }
 
     #[test]
@@ -1247,6 +1805,12 @@ mod tests {
     }
 
     #[test]
+    fn decode_no_data_with_payload_returns_error() {
+        let buf = wire_msg(b'n', &[0xAA]);
+        assert!(BackendMessage::decode(&buf).unwrap_err().contains("NoData"));
+    }
+
+    #[test]
     fn decode_portal_suspended() {
         let buf = wire_msg(b's', &[]);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
@@ -1254,10 +1818,30 @@ mod tests {
     }
 
     #[test]
+    fn decode_portal_suspended_with_payload_returns_error() {
+        let buf = wire_msg(b's', &[0xAA]);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("PortalSuspended")
+        );
+    }
+
+    #[test]
     fn decode_empty_query_response() {
         let buf = wire_msg(b'I', &[]);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
         assert!(matches!(msg, BackendMessage::EmptyQueryResponse));
+    }
+
+    #[test]
+    fn decode_empty_query_response_with_payload_returns_error() {
+        let buf = wire_msg(b'I', &[0xAA]);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("EmptyQueryResponse")
+        );
     }
 
     // ========== NotificationResponse tests ==========
@@ -1293,25 +1877,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decode_notification_missing_payload_terminator_returns_error() {
+        let mut payload = 1i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(b"my_channel\0");
+        payload.extend_from_slice(b"hello world"); // no final null terminator
+        let buf = wire_msg(b'A', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("payload null terminator")
+        );
+    }
+
     // ========== CopyInResponse / CopyOutResponse tests ==========
 
     #[test]
     fn decode_copy_in_response_empty_payload() {
         let buf = wire_msg(b'G', &[]);
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Empty"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("too short")
+        );
     }
 
     #[test]
     fn decode_copy_out_response_empty_payload() {
         let buf = wire_msg(b'H', &[]);
-        assert!(BackendMessage::decode(&buf).unwrap_err().contains("Empty"));
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("too short")
+        );
     }
 
     #[test]
     fn decode_copy_in_response_text_format() {
         let mut payload = vec![0u8]; // text format
         payload.extend_from_slice(&1i16.to_be_bytes()); // 1 column
-        payload.push(0); // column format: text
+        payload.extend_from_slice(&0i16.to_be_bytes()); // column format: text
         let buf = wire_msg(b'G', &payload);
         let (msg, _) = BackendMessage::decode(&buf).unwrap();
         match msg {
@@ -1324,6 +1929,143 @@ mod tests {
             }
             _ => panic!("Expected CopyInResponse"),
         }
+    }
+
+    #[test]
+    fn decode_copy_in_response_truncated_column_formats_returns_error() {
+        let mut payload = vec![0u8]; // text format
+        payload.extend_from_slice(&1i16.to_be_bytes()); // claims 1 column
+        payload.push(0u8); // only half of i16 format code
+        let buf = wire_msg(b'G', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("truncated column format")
+        );
+    }
+
+    #[test]
+    fn decode_copy_in_response_invalid_overall_format_returns_error() {
+        let mut payload = vec![2u8]; // invalid overall format (must be 0 or 1)
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        let buf = wire_msg(b'G', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("invalid overall format")
+        );
+    }
+
+    #[test]
+    fn decode_copy_in_response_invalid_column_format_returns_error() {
+        let mut payload = vec![0u8];
+        payload.extend_from_slice(&1i16.to_be_bytes());
+        payload.extend_from_slice(&2i16.to_be_bytes()); // invalid per-column format
+        let buf = wire_msg(b'G', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("invalid format code")
+        );
+    }
+
+    #[test]
+    fn decode_copy_out_response_trailing_bytes_returns_error() {
+        let mut payload = vec![0u8];
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.push(0xAA); // trailing garbage
+        let buf = wire_msg(b'H', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("trailing")
+        );
+    }
+
+    #[test]
+    fn decode_copy_both_response_binary_format() {
+        let mut payload = vec![1u8]; // binary format
+        payload.extend_from_slice(&2i16.to_be_bytes()); // 2 columns
+        payload.extend_from_slice(&1i16.to_be_bytes()); // column 1 binary
+        payload.extend_from_slice(&0i16.to_be_bytes()); // column 2 text
+        let buf = wire_msg(b'W', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::CopyBothResponse {
+                format,
+                column_formats,
+            } => {
+                assert_eq!(format, 1);
+                assert_eq!(column_formats, vec![1, 0]);
+            }
+            _ => panic!("Expected CopyBothResponse"),
+        }
+    }
+
+    #[test]
+    fn decode_copy_both_response_invalid_column_format_returns_error() {
+        let mut payload = vec![0u8];
+        payload.extend_from_slice(&1i16.to_be_bytes());
+        payload.extend_from_slice(&2i16.to_be_bytes()); // invalid per-column format
+        let buf = wire_msg(b'W', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("CopyBothResponse invalid format code")
+        );
+    }
+
+    #[test]
+    fn decode_copy_done_with_payload_returns_error() {
+        let buf = wire_msg(b'c', &[0xAA]);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("CopyDone")
+        );
+    }
+
+    #[test]
+    fn decode_parameter_status_missing_terminator_returns_error() {
+        let buf = wire_msg(b'S', b"client_encoding");
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("missing name terminator")
+        );
+    }
+
+    #[test]
+    fn decode_parameter_status_trailing_bytes_returns_error() {
+        let payload = b"client_encoding\0UTF8\0X";
+        let buf = wire_msg(b'S', payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("trailing")
+        );
+    }
+
+    #[test]
+    fn decode_parameter_description_short_payload_returns_error() {
+        let buf = wire_msg(b't', &[0u8]);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("payload too short")
+        );
+    }
+
+    #[test]
+    fn decode_parameter_description_truncated_returns_error() {
+        let mut payload = 2i16.to_be_bytes().to_vec(); // claims 2 params => needs 8 bytes
+        payload.extend_from_slice(&23u32.to_be_bytes()); // only 1 OID provided
+        let buf = wire_msg(b't', &payload);
+        assert!(
+            BackendMessage::decode(&buf)
+                .unwrap_err()
+                .contains("ParameterDescription truncated")
+        );
     }
 
     // ========== Message consumed length test ==========
@@ -1353,14 +2095,14 @@ mod tests {
     #[test]
     fn encode_sync() {
         let msg = FrontendMessage::Sync;
-        let encoded = msg.encode();
+        let encoded = msg.encode_checked().unwrap();
         assert_eq!(encoded, vec![b'S', 0, 0, 0, 4]);
     }
 
     #[test]
     fn encode_gss_response() {
         let msg = FrontendMessage::GSSResponse(vec![1, 2, 3, 4]);
-        let encoded = msg.encode();
+        let encoded = msg.encode_checked().unwrap();
         assert_eq!(encoded[0], b'p');
         let len = i32::from_be_bytes([encoded[1], encoded[2], encoded[3], encoded[4]]);
         assert_eq!(len, 8);
@@ -1368,9 +2110,96 @@ mod tests {
     }
 
     #[test]
+    fn encode_query_with_interior_nul_returns_error() {
+        let msg = FrontendMessage::Query("select 1\0drop table x".to_string());
+        assert!(msg.encode_checked().is_err());
+    }
+
+    #[test]
+    fn encode_parse_too_many_param_types_returns_error() {
+        let msg = FrontendMessage::Parse {
+            name: "".to_string(),
+            query: "select 1".to_string(),
+            param_types: vec![0u32; 32768],
+        };
+        assert!(msg.encode_checked().is_err());
+    }
+
+    #[test]
+    fn encode_bind_too_many_params_returns_error() {
+        let msg = FrontendMessage::Bind {
+            portal: "".to_string(),
+            statement: "".to_string(),
+            params: vec![None; 32768],
+        };
+        assert!(msg.encode_checked().is_err());
+    }
+
+    #[test]
+    fn encode_execute_negative_max_rows_returns_error() {
+        let msg = FrontendMessage::Execute {
+            portal: "".to_string(),
+            max_rows: -1,
+        };
+        assert!(msg.encode_checked().is_err());
+    }
+
+    #[test]
+    fn encode_startup_with_interior_nul_returns_error() {
+        let msg = FrontendMessage::Startup {
+            user: "user\0x".to_string(),
+            database: "db".to_string(),
+            startup_params: Vec::new(),
+        };
+        assert!(msg.encode_checked().is_err());
+    }
+
+    #[test]
+    fn encode_startup_with_extra_params() {
+        let msg = FrontendMessage::Startup {
+            user: "alice".to_string(),
+            database: "app".to_string(),
+            startup_params: vec![("replication".to_string(), "database".to_string())],
+        };
+        let encoded = msg.encode_checked().unwrap();
+        assert_eq!(&encoded[4..8], &196608i32.to_be_bytes());
+        assert!(encoded.windows("user\0alice\0".len()).any(|w| w == b"user\0alice\0"));
+        assert!(encoded.windows("database\0app\0".len()).any(|w| w == b"database\0app\0"));
+        assert!(
+            encoded
+                .windows("replication\0database\0".len())
+                .any(|w| w == b"replication\0database\0")
+        );
+        assert_eq!(encoded.last().copied(), Some(0));
+    }
+
+    #[test]
+    fn encode_startup_with_reserved_param_key_returns_error() {
+        let msg = FrontendMessage::Startup {
+            user: "alice".to_string(),
+            database: "app".to_string(),
+            startup_params: vec![("user".to_string(), "mallory".to_string())],
+        };
+        assert!(msg.encode_checked().is_err());
+    }
+
+    #[test]
+    fn encode_startup_with_duplicate_param_keys_returns_error() {
+        let msg = FrontendMessage::Startup {
+            user: "alice".to_string(),
+            database: "app".to_string(),
+            startup_params: vec![
+                ("application_name".to_string(), "a".to_string()),
+                ("APPLICATION_NAME".to_string(), "b".to_string()),
+            ],
+        };
+        assert!(msg.encode_checked().is_err());
+    }
+
+    #[test]
     fn encode_terminate() {
         let msg = FrontendMessage::Terminate;
-        let encoded = msg.encode();
+        let encoded = msg.encode_checked().unwrap();
         assert_eq!(encoded, vec![b'X', 0, 0, 0, 4]);
     }
 }

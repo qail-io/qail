@@ -15,6 +15,8 @@ pub enum EncodeError {
     TooManyParameters(usize),
     /// A single parameter or message exceeds i32::MAX bytes.
     MessageTooLarge(usize),
+    /// Execute `max_rows` must be non-negative (0 means unlimited).
+    InvalidMaxRows(i32),
     /// Action not supported by the AST-native encoder (e.g. Listen, Search).
     UnsupportedAction(Action),
     /// A Value::Function/expression contains SQL injection markers.
@@ -40,6 +42,9 @@ impl fmt::Display for EncodeError {
                     size,
                     i32::MAX
                 )
+            }
+            EncodeError::InvalidMaxRows(v) => {
+                write!(f, "Invalid Execute max_rows: {} (must be >= 0)", v)
             }
             EncodeError::UnsupportedAction(action) => {
                 write!(f, "Unsupported action {:?} in AST-native encoder", action)

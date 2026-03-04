@@ -7,6 +7,8 @@
 //! let rows = driver.fetch_all(&Qail::get("users").limit(10)).await?;
 //! ```
 
+#![deny(deprecated)]
+
 pub mod driver;
 pub mod protocol;
 pub mod types;
@@ -19,9 +21,12 @@ pub use driver::gss::{
 };
 pub use driver::{
     AuthSettings, ConnectOptions, EnterpriseAuthMechanism, GssEncMode, GssTokenProvider,
-    GssTokenProviderEx, GssTokenRequest, Notification, PgConnection, PgDriver, PgDriverBuilder,
-    PgError, PgPool, PgResult, PgRow, PgServerError, PoolConfig, PoolStats, PooledConnection,
-    QailRow, QueryResult, ResultFormat, ScramChannelBindingMode, TlsConfig, TlsMode,
+    GssTokenProviderEx, GssTokenRequest, IdentifySystem, Notification, PgConnection, PgDriver,
+    PgDriverBuilder, PgError, PgPool, PgResult, PgRow, PgServerError, PoolConfig, PoolStats,
+    PooledConnection, QailRow, QueryResult, ReplicationKeepalive, ReplicationOption,
+    ReplicationSlotInfo, ReplicationStreamMessage, ReplicationStreamStart, ReplicationXLogData,
+    ResultFormat, ScramChannelBindingMode, TlsConfig, TlsMode,
+    spawn_pool_maintenance,
 };
 pub use protocol::PgEncoder;
 pub use types::{

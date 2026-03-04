@@ -160,7 +160,7 @@ impl ScramClient {
         self.salted_password = Some(salted_password.clone());
 
         // Compute keys
-        let client_key = self.hmac(&salted_password, b"Client Key");
+        let client_key = self.hmac(&salted_password, b"Client Key")?;
         let stored_key = Self::sha256(&client_key);
 
         let client_first_bare = self.client_first_message_bare();
@@ -173,7 +173,7 @@ impl ScramClient {
         self.auth_message = Some(auth_message.clone());
 
         // Compute proof
-        let client_signature = self.hmac(&stored_key, auth_message.as_bytes());
+        let client_signature = self.hmac(&stored_key, auth_message.as_bytes())?;
         let client_proof: Vec<u8> = client_key
             .iter()
             .zip(client_signature.iter())
@@ -206,8 +206,8 @@ impl ScramClient {
             .ok_or("Missing salted password")?;
         let auth_message = self.auth_message.as_ref().ok_or("Missing auth message")?;
 
-        let server_key = self.hmac(salted_password, b"Server Key");
-        let computed_signature = self.hmac(&server_key, auth_message.as_bytes());
+        let server_key = self.hmac(salted_password, b"Server Key")?;
+        let computed_signature = self.hmac(&server_key, auth_message.as_bytes())?;
 
         if computed_signature != expected_signature {
             return Err("Server signature verification failed".to_string());
@@ -223,11 +223,11 @@ impl ScramClient {
         output.to_vec()
     }
 
-    fn hmac(&self, key: &[u8], data: &[u8]) -> Vec<u8> {
-        // SAFETY: HMAC-SHA256 accepts any key length — new_from_slice cannot fail.
-        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key size");
+    fn hmac(&self, key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+        let mut mac = HmacSha256::new_from_slice(key)
+            .map_err(|_| "HMAC init failed for SCRAM-SHA-256".to_string())?;
         mac.update(data);
-        mac.finalize().into_bytes().to_vec()
+        Ok(mac.finalize().into_bytes().to_vec())
     }
 
     fn sha256(data: &[u8]) -> Vec<u8> {

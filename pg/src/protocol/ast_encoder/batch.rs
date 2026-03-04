@@ -10,6 +10,47 @@ use super::dml::{encode_delete, encode_export, encode_insert, encode_select, enc
 use crate::protocol::EncodeError;
 
 #[inline(always)]
+fn validate_sql_bytes(sql: &[u8]) -> Result<(), EncodeError> {
+    if sql.contains(&0) {
+        return Err(EncodeError::NullByte);
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn checked_i16_count(count: usize) -> Result<i16, EncodeError> {
+    i16::try_from(count).map_err(|_| EncodeError::TooManyParameters(count))
+}
+
+#[inline(always)]
+fn checked_i32_len(len: usize) -> Result<i32, EncodeError> {
+    i32::try_from(len).map_err(|_| EncodeError::MessageTooLarge(len))
+}
+
+#[inline(always)]
+fn checked_wire_len(content_len: usize) -> Result<i32, EncodeError> {
+    let total = content_len
+        .checked_add(4)
+        .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+    checked_i32_len(total)
+}
+
+#[inline(always)]
+fn params_wire_size(params: &[Option<Vec<u8>>]) -> Result<usize, EncodeError> {
+    params.iter().try_fold(0usize, |acc, p| {
+        let data_len = p.as_ref().map_or(0, |v| v.len());
+        if data_len > i32::MAX as usize {
+            return Err(EncodeError::MessageTooLarge(data_len));
+        }
+        let field_size = 4usize
+            .checked_add(data_len)
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        acc.checked_add(field_size)
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))
+    })
+}
+
+#[inline(always)]
 fn result_format_wire_len(result_format: i16) -> usize {
     if result_format == 0 { 2 } else { 4 }
 }
@@ -43,14 +84,20 @@ pub fn build_extended_query_with_result_format(
     if params.len() > i16::MAX as usize {
         return Err(EncodeError::TooManyParameters(params.len()));
     }
+    validate_sql_bytes(sql)?;
 
-    let params_size: usize = params
-        .iter()
-        .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
-        .sum();
+    let params_size = params_wire_size(params)?;
     let result_formats_size = result_format_wire_len(result_format);
     // Extra 6 bytes for Describe message ('D' + len + 'P' + null)
-    let total_size = 9 + sql.len() + (11 + params_size + result_formats_size) + 6 + 10 + 5;
+    let total_size = 9usize
+        .checked_add(sql.len())
+        .and_then(|v| v.checked_add(11))
+        .and_then(|v| v.checked_add(params_size))
+        .and_then(|v| v.checked_add(result_formats_size))
+        .and_then(|v| v.checked_add(6))
+        .and_then(|v| v.checked_add(10))
+        .and_then(|v| v.checked_add(5))
+        .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
 
     let mut buf = BytesMut::with_capacity(total_size);
     build_extended_query_into_with_result_format(&mut buf, sql, params, result_format)?;
@@ -85,21 +132,33 @@ pub fn build_extended_query_into_with_result_format(
     if params.len() > i16::MAX as usize {
         return Err(EncodeError::TooManyParameters(params.len()));
     }
+    validate_sql_bytes(sql)?;
 
-    let params_size: usize = params
-        .iter()
-        .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
-        .sum();
+    let params_size = params_wire_size(params)?;
     let result_formats_size = result_format_wire_len(result_format);
     // Extra 6 bytes for Describe message ('D' + len + 'P' + null)
-    let total_size = 9 + sql.len() + (11 + params_size + result_formats_size) + 6 + 10 + 5;
+    let total_size = 9usize
+        .checked_add(sql.len())
+        .and_then(|v| v.checked_add(11))
+        .and_then(|v| v.checked_add(params_size))
+        .and_then(|v| v.checked_add(result_formats_size))
+        .and_then(|v| v.checked_add(6))
+        .and_then(|v| v.checked_add(10))
+        .and_then(|v| v.checked_add(5))
+        .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+    let param_count = checked_i16_count(params.len())?;
 
     buf.clear();
     buf.reserve(total_size);
 
     // ===== PARSE =====
     buf.extend_from_slice(b"P");
-    let parse_len = (1 + sql.len() + 1 + 2 + 4) as i32;
+    let parse_content_len = 1usize
+        .checked_add(sql.len())
+        .and_then(|v| v.checked_add(1))
+        .and_then(|v| v.checked_add(2))
+        .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+    let parse_len = checked_wire_len(parse_content_len)?;
     buf.extend_from_slice(&parse_len.to_be_bytes());
     buf.extend_from_slice(&[0]); // Unnamed statement
     buf.extend_from_slice(sql);
@@ -108,17 +167,25 @@ pub fn build_extended_query_into_with_result_format(
 
     // ===== BIND =====
     buf.extend_from_slice(b"B");
-    let bind_len = (1 + 1 + 2 + 2 + params_size + result_formats_size + 4) as i32;
+    let bind_content_len = 1usize
+        .checked_add(1)
+        .and_then(|v| v.checked_add(2))
+        .and_then(|v| v.checked_add(2))
+        .and_then(|v| v.checked_add(params_size))
+        .and_then(|v| v.checked_add(result_formats_size))
+        .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+    let bind_len = checked_wire_len(bind_content_len)?;
     buf.extend_from_slice(&bind_len.to_be_bytes());
     buf.extend_from_slice(&[0]); // Unnamed portal
     buf.extend_from_slice(&[0]); // Unnamed statement
     buf.extend_from_slice(&0i16.to_be_bytes()); // Format codes
-    buf.extend_from_slice(&(params.len() as i16).to_be_bytes());
+    buf.extend_from_slice(&param_count.to_be_bytes());
     for param in params {
         match param {
             None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
             Some(data) => {
-                buf.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                let data_len = checked_i32_len(data.len())?;
+                buf.extend_from_slice(&data_len.to_be_bytes());
                 buf.extend_from_slice(data);
             }
         }
@@ -193,14 +260,18 @@ pub fn encode_batch_with_result_format(
         }?;
 
         let sql_bytes = sql_buf.freeze();
-        let params_size: usize = params
-            .iter()
-            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
-            .sum();
+        validate_sql_bytes(&sql_bytes)?;
+        let params_size = params_wire_size(&params)?;
+        let param_count = checked_i16_count(params.len())?;
 
         // PARSE
         total_buf.extend_from_slice(b"P");
-        let parse_len = (1 + sql_bytes.len() + 1 + 2 + 4) as i32;
+        let parse_content_len = 1usize
+            .checked_add(sql_bytes.len())
+            .and_then(|v| v.checked_add(1))
+            .and_then(|v| v.checked_add(2))
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        let parse_len = checked_wire_len(parse_content_len)?;
         total_buf.extend_from_slice(&parse_len.to_be_bytes());
         total_buf.extend_from_slice(&[0]);
         total_buf.extend_from_slice(&sql_bytes);
@@ -209,17 +280,25 @@ pub fn encode_batch_with_result_format(
 
         // BIND
         total_buf.extend_from_slice(b"B");
-        let bind_len = (1 + 1 + 2 + 2 + params_size + result_formats_size + 4) as i32;
+        let bind_content_len = 1usize
+            .checked_add(1)
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(params_size))
+            .and_then(|v| v.checked_add(result_formats_size))
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        let bind_len = checked_wire_len(bind_content_len)?;
         total_buf.extend_from_slice(&bind_len.to_be_bytes());
         total_buf.extend_from_slice(&[0]);
         total_buf.extend_from_slice(&[0]);
         total_buf.extend_from_slice(&0i16.to_be_bytes());
-        total_buf.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        total_buf.extend_from_slice(&param_count.to_be_bytes());
         for param in &params {
             match param {
                 None => total_buf.extend_from_slice(&(-1i32).to_be_bytes()),
                 Some(data) => {
-                    total_buf.extend_from_slice(&(data.len() as i32).to_be_bytes());
+                    let data_len = checked_i32_len(data.len())?;
+                    total_buf.extend_from_slice(&data_len.to_be_bytes());
                     total_buf.extend_from_slice(data);
                 }
             }
@@ -280,9 +359,14 @@ pub fn encode_batch_simple(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
         total_buf.extend_from_slice(b";");
     }
 
+    if total_buf[5..].contains(&0) {
+        return Err(EncodeError::NullByte);
+    }
+
     total_buf.extend_from_slice(&[0]);
 
-    let msg_len = (total_buf.len() - 1) as i32;
+    let msg_len = i32::try_from(total_buf.len() - 1)
+        .map_err(|_| EncodeError::MessageTooLarge(total_buf.len() - 1))?;
     total_buf[1..5].copy_from_slice(&msg_len.to_be_bytes());
 
     Ok(total_buf)
