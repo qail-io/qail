@@ -5,7 +5,7 @@
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-qail.rs-blue)](https://qail.rs/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.20.5-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.23.0-green)](CHANGELOG.md)
 
 ---
 

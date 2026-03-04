@@ -23,7 +23,7 @@ QAIL builds queries as an Abstract Syntax Tree that compiles directly to databas
 
 ```toml
 [dependencies]
-qail-core = "0.13.1"
+qail-core = "0.23.0"
 ```
 
 ## Quick Start
@@ -86,4 +86,3 @@ MIT
 ## 🤝 Contributing & Support
 
 We welcome issue reports on GitHub! Please provide detailed descriptions to help us reproduce and fix the problem. We aim to address critical issues within 1-5 business days.
-

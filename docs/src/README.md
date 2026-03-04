@@ -16,7 +16,8 @@ QAIL compiles typed query ASTs directly to database wire protocols. No SQL strin
 |------|----------|-----------|--------|
 | **1** | **SQL-AST** | **PostgreSQL** | `qail-pg` — Native wire protocol, AST-to-bytes |
 | **2** | **Vector-AST** | **Qdrant** | `qail-qdrant` — gRPC + REST, vector search |
-| **3** | **KV-Command** | **Redis** | `qail-redis` — Native RESP3 protocol |
+
+> Redis support (`qail-redis`) was removed in `v0.20.0`.
 
 ### ❌ Not Supported
 * **Oracle, SQL Server, MySQL:** Proprietary/Closed protocols.
@@ -38,7 +39,7 @@ let mut driver = PgDriver::connect("localhost", 5432, "user", "db").await?;
 let rows = driver.query(&cmd).await?;
 ```
 
-## Current Status (~80% Production Ready)
+## Current Status (Production Ready, Actively Hardened)
 
 | Feature | Status |
 |---------|--------|

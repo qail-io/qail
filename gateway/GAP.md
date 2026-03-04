@@ -1,3 +1,7 @@
+## Historical Gap Analysis (Archived Snapshot)
+
+This file is a historical planning snapshot. For current priorities, use `ROADMAP.md`.
+
 ## Gap Analysis — Qail Gateway vs Hasura
 
 **Current: ~90% feature parity** (excluding GraphQL — Qail AST is the replacement)
