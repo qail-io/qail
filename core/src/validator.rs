@@ -205,6 +205,20 @@ impl Validator {
             return Ok(());
         }
 
+        // Skip SQL expressions — these are not plain column names.
+        // Covers: COUNT(*), id::text, leg_ids[1], brand_name AS alias,
+        //         count(distinct x), EXCLUDED.col, NOW(), etc.
+        if column.contains('(')
+            || column.contains('[')
+            || column.contains("::")
+            || column.contains(" AS ")
+            || column.contains(" as ")
+            || column.starts_with("distinct ")
+            || column.starts_with("DISTINCT ")
+        {
+            return Ok(());
+        }
+
         // Qualified names like "table.column" — validate against the referenced table
         if column.contains('.') {
             let parts: Vec<&str> = column.split('.').collect();
@@ -284,6 +298,13 @@ impl Validator {
             return Ok(());
         }
 
+        // Value::Array is used with IN/NOT IN operators — the array is a container
+        // of elements whose type should match the column, not the array itself.
+        // Skip type validation for arrays (the element types are checked at runtime).
+        if matches!(value, Value::Array(_)) {
+            return Ok(());
+        }
+
         // Map Value variant to its type name
         let value_type = match value {
             Value::Bool(_) => "BOOLEAN",
@@ -291,7 +312,6 @@ impl Validator {
             Value::Float(_) => "FLOAT",
             Value::String(_) => "TEXT",
             Value::Uuid(_) => "UUID",
-            Value::Array(_) => "ARRAY",
             Value::Column(_) => return Ok(()), // Column reference, type checked elsewhere
             Value::Interval { .. } => "INTERVAL",
             Value::Timestamp(_) => "TIMESTAMP",
@@ -340,9 +360,16 @@ impl Validator {
             return true;
         }
 
-        // Float family
+        // Float family — includes "DOUBLE PRECISION" which is how PG stores f64
         let float_types = [
-            "FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DECIMAL", "NUMERIC", "REAL",
+            "FLOAT",
+            "FLOAT4",
+            "FLOAT8",
+            "DOUBLE",
+            "DOUBLE PRECISION",
+            "DECIMAL",
+            "NUMERIC",
+            "REAL",
         ];
         if float_types.contains(&expected.as_str())
             && (value_type == "FLOAT" || value_type == "INT")
@@ -395,7 +422,14 @@ impl Validator {
             errors.push(e);
         }
 
+        // Collect aliases from the SELECT column list so that order_by / having
+        // references to computed aliases (e.g. count().alias("route_count"))
+        // are not flagged as column-not-found errors.
+        let mut aliases: Vec<String> = Vec::new();
         for col in &cmd.columns {
+            if let Expr::Aliased { alias, .. } = col {
+                aliases.push(alias.clone());
+            }
             if let Some(name) = Self::extract_column_name(col)
                 && let Err(e) = self.validate_column(&cmd.table, &name)
             {
@@ -404,8 +438,18 @@ impl Validator {
         }
 
         for cage in &cmd.cages {
+            // Skip column validation for Sort cages — ORDER BY can reference
+            // aliases from column_expr (e.g. count().alias("route_count")),
+            // which may not exist as physical columns in the primary table.
+            if matches!(cage.kind, crate::ast::CageKind::Sort(_)) {
+                continue;
+            }
             for cond in &cage.conditions {
                 if let Some(name) = Self::extract_column_name(&cond.left) {
+                    // Skip validation for columns that match a computed alias
+                    if aliases.iter().any(|a| a == &name) {
+                        continue;
+                    }
                     // For join conditions, column might be qualified (table.column)
                     if name.contains('.') {
                         let parts: Vec<&str> = name.split('.').collect();

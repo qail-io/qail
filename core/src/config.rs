@@ -249,6 +249,20 @@ pub struct GatewayConfig {
     /// Prevents query explosion from unbounded LEFT JOINs.
     #[serde(default = "default_max_expand_depth")]
     pub max_expand_depth: usize,
+
+    /// Tables to block from auto-REST endpoint generation.
+    /// Blocked tables will not have any CRUD routes, cannot be referenced
+    /// via `?expand=`, and cannot appear as nested route targets.
+    /// Use this to hide sensitive tables (e.g., `users`) from the HTTP API.
+    #[serde(default)]
+    pub blocked_tables: Option<Vec<String>>,
+
+    /// Tables to allow for auto-REST endpoint generation (whitelist mode).
+    /// When set, ONLY these tables are exposed — all others are blocked.
+    /// This is a fail-closed approach: new tables must be explicitly allowed.
+    /// Takes precedence over `blocked_tables` if both are set.
+    #[serde(default)]
+    pub allowed_tables: Option<Vec<String>>,
 }
 
 fn default_bind() -> String {

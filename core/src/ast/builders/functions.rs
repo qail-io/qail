@@ -144,7 +144,9 @@ impl ConcatBuilder {
         }
 
         let mut iter = self.exprs.into_iter();
-        let first = iter.next().unwrap();
+        let Some(first) = iter.next() else {
+            return text("");
+        };
 
         let result = iter.fold(first, |acc, expr| Expr::Binary {
             left: Box::new(acc),

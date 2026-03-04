@@ -977,6 +977,24 @@ impl Table {
 }
 
 impl Column {
+    fn primary_key_type_error(&self) -> String {
+        format!(
+            "Column '{}' of type {} cannot be a primary key. \
+             Valid PK types: UUID, SERIAL, BIGSERIAL, INT, BIGINT",
+            self.name,
+            self.data_type.name()
+        )
+    }
+
+    fn unique_type_error(&self) -> String {
+        format!(
+            "Column '{}' of type {} cannot have UNIQUE constraint. \
+             JSONB and BYTEA types do not support standard indexing.",
+            self.name,
+            self.data_type.name()
+        )
+    }
+
     /// Create a new column with compile-time type validation.
     pub fn new(name: impl Into<String>, data_type: ColumnType) -> Self {
         Self {
@@ -1000,34 +1018,56 @@ impl Column {
 
     /// Set as primary key with compile-time validation.
     /// Validates that the column type can be a primary key.
-    /// Panics at runtime if type doesn't support PK (caught in tests).
+    ///
+    /// This method is fail-soft: invalid type combinations are allowed to
+    /// continue without panicking so production callers cannot crash on
+    /// dynamic schema input. Use [`Column::try_primary_key`] for strict mode.
     pub fn primary_key(mut self) -> Self {
         if !self.data_type.can_be_primary_key() {
-            panic!(
-                "Column '{}' of type {} cannot be a primary key. \
-                 Valid PK types: UUID, SERIAL, BIGSERIAL, INT, BIGINT",
-                self.name,
-                self.data_type.name()
-            );
+            #[cfg(debug_assertions)]
+            eprintln!("QAIL: {}", self.primary_key_type_error());
         }
         self.primary_key = true;
         self.nullable = false;
         self
     }
 
+    /// Strict variant of [`Column::primary_key`].
+    ///
+    /// Returns an error instead of panicking when type policy disallows PK.
+    pub fn try_primary_key(mut self) -> Result<Self, String> {
+        if !self.data_type.can_be_primary_key() {
+            return Err(self.primary_key_type_error());
+        }
+        self.primary_key = true;
+        self.nullable = false;
+        Ok(self)
+    }
+
     /// Set as unique with compile-time validation.
     /// Validates that the column type supports indexing.
+    ///
+    /// This method is fail-soft: invalid type combinations are allowed to
+    /// continue without panicking so production callers cannot crash on
+    /// dynamic schema input. Use [`Column::try_unique`] for strict mode.
     pub fn unique(mut self) -> Self {
         if !self.data_type.supports_indexing() {
-            panic!(
-                "Column '{}' of type {} cannot have UNIQUE constraint. \
-                 JSONB and BYTEA types do not support standard indexing.",
-                self.name,
-                self.data_type.name()
-            );
+            #[cfg(debug_assertions)]
+            eprintln!("QAIL: {}", self.unique_type_error());
         }
         self.unique = true;
         self
+    }
+
+    /// Strict variant of [`Column::unique`].
+    ///
+    /// Returns an error instead of panicking when type policy disallows UNIQUE.
+    pub fn try_unique(mut self) -> Result<Self, String> {
+        if !self.data_type.supports_indexing() {
+            return Err(self.unique_type_error());
+        }
+        self.unique = true;
+        Ok(self)
     }
 
     /// Set a DEFAULT value expression.
@@ -1636,17 +1676,32 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "cannot be a primary key")]
-    fn test_invalid_primary_key_type() {
-        // TEXT cannot be a primary key
-        Column::new("data", ColumnType::Text).primary_key();
+    fn test_invalid_primary_key_type_strict() {
+        let err = Column::new("data", ColumnType::Text)
+            .try_primary_key()
+            .expect_err("TEXT should be rejected by strict PK policy");
+        assert!(err.contains("cannot be a primary key"));
     }
 
     #[test]
-    #[should_panic(expected = "cannot have UNIQUE")]
-    fn test_invalid_unique_type() {
-        // JSONB cannot have standard unique index
-        Column::new("data", ColumnType::Jsonb).unique();
+    fn test_invalid_primary_key_type_fail_soft() {
+        let col = Column::new("data", ColumnType::Text).primary_key();
+        assert!(col.primary_key);
+        assert!(!col.nullable);
+    }
+
+    #[test]
+    fn test_invalid_unique_type_strict() {
+        let err = Column::new("data", ColumnType::Jsonb)
+            .try_unique()
+            .expect_err("JSONB should be rejected by strict UNIQUE policy");
+        assert!(err.contains("cannot have UNIQUE"));
+    }
+
+    #[test]
+    fn test_invalid_unique_type_fail_soft() {
+        let col = Column::new("data", ColumnType::Jsonb).unique();
+        assert!(col.unique);
     }
 
     #[test]

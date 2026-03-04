@@ -239,7 +239,7 @@ pub fn parse_operator(input: &str) -> IResult<&str, Operator> {
     .parse(input)
 }
 
-/// Parse action keyword: get, set, del, add, make, cnt
+/// Parse action keyword: get, export, set, del, add, make, cnt
 pub fn parse_action(input: &str) -> IResult<&str, (Action, bool)> {
     alt((
         // get distinct
@@ -249,6 +249,8 @@ pub fn parse_action(input: &str) -> IResult<&str, (Action, bool)> {
         ),
         // get
         value((Action::Get, false), tag_no_case("get")),
+        // export
+        value((Action::Export, false), tag_no_case("export")),
         // cnt / count (must come before general keywords)
         alt((
             value((Action::Cnt, false), tag_no_case("count")),

@@ -401,16 +401,20 @@ impl ToSqlParameterized for Qail {
             {
                 if next == ':' {
                     result.push(':');
-                    // SAFETY: peek() above confirmed a char exists, so next() is infallible
-                    result.push(chars.next().unwrap());
+                    if let Some(double_colon) = chars.next() {
+                        result.push(double_colon);
+                    }
                     continue;
                 }
                 if next.is_ascii_alphabetic() || next == '_' {
                     let mut param_name = String::new();
                     while let Some(&ch) = chars.peek() {
                         if ch.is_ascii_alphanumeric() || ch == '_' {
-                            // SAFETY: peek() above confirmed a char exists, so next() is infallible
-                            param_name.push(chars.next().unwrap());
+                            if let Some(param_ch) = chars.next() {
+                                param_name.push(param_ch);
+                            } else {
+                                break;
+                            }
                         } else {
                             break;
                         }

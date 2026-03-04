@@ -180,17 +180,19 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     let type_str = parts[1];
 
     // Try standard type first, then check enum types
-    let data_type: ColumnType = type_str.parse().unwrap_or_else(|_| {
-        // Check if it's a known enum type
-        if let Some(et) = enum_types.iter().find(|e| e.name == type_str) {
-            ColumnType::Enum {
-                name: et.name.clone(),
-                values: et.values.clone(),
+    let data_type: ColumnType = match type_str.parse() {
+        Ok(t) => t,
+        Err(_) => {
+            if let Some(et) = enum_types.iter().find(|e| e.name == type_str) {
+                ColumnType::Enum {
+                    name: et.name.clone(),
+                    values: et.values.clone(),
+                }
+            } else {
+                return Err(format!("Unknown column type '{}' for column '{}'", type_str, name));
             }
-        } else {
-            ColumnType::Text // fallback
         }
-    });
+    };
 
     let mut col = Column::new(&name, data_type);
 
@@ -198,8 +200,9 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
     while i < parts.len() {
         match parts[i] {
             "primary_key" => {
-                col.primary_key = true;
-                col.nullable = false;
+                col = col
+                    .try_primary_key()
+                    .map_err(|e| format!("{} (column '{}')", e, name))?;
             }
             "not_null" => {
                 col.nullable = false;
@@ -208,7 +211,9 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 col.nullable = true;
             }
             "unique" => {
-                col.unique = true;
+                col = col
+                    .try_unique()
+                    .map_err(|e| format!("{} (column '{}')", e, name))?;
             }
             "default" => {
                 if i + 1 < parts.len() {
@@ -480,8 +485,11 @@ fn parse_sequence<'a, I: Iterator<Item = &'a str>>(
         .trim();
 
     if rest.contains('{') {
-        // SAFETY: split() always yields at least one element
-        let name = rest.split('{').next().unwrap().trim();
+        let name = rest
+            .split('{')
+            .next()
+            .ok_or_else(|| "sequence name is missing before '{'".to_string())?
+            .trim();
         let mut seq = Sequence::new(name);
 
         let mut tokens_str = rest.split('{').nth(1).unwrap_or("").to_string();
@@ -562,8 +570,11 @@ fn parse_enum<'a, I: Iterator<Item = &'a str>>(
         .trim();
 
     if rest.contains('{') {
-        // SAFETY: split() always yields at least one element
-        let name = rest.split('{').next().unwrap().trim();
+        let name = rest
+            .split('{')
+            .next()
+            .ok_or_else(|| "enum name is missing before '{'".to_string())?
+            .trim();
 
         let mut values_str = rest.split('{').nth(1).unwrap_or("").to_string();
 
@@ -1697,5 +1708,38 @@ index idx_booking_orders_user on booking_orders (user_id)
         assert!(table.force_rls);
         assert_eq!(table.columns.len(), 21);
         assert_eq!(schema.indexes.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_rejects_invalid_primary_key_type() {
+        let input = r#"
+table bad_pk {
+  id text primary_key
+}
+"#;
+        let err = parse_qail(input).expect_err("TEXT primary key should be rejected");
+        assert!(err.contains("cannot be a primary key"));
+    }
+
+    #[test]
+    fn test_parse_rejects_invalid_unique_type() {
+        let input = r#"
+table bad_unique {
+  payload jsonb unique
+}
+"#;
+        let err = parse_qail(input).expect_err("JSONB unique should be rejected");
+        assert!(err.contains("cannot have UNIQUE"));
+    }
+
+    #[test]
+    fn test_parse_rejects_unknown_column_type() {
+        let input = r#"
+table bad_type {
+  data mysterytype
+}
+"#;
+        let err = parse_qail(input).expect_err("unknown type should be rejected");
+        assert!(err.contains("Unknown column type"));
     }
 }
