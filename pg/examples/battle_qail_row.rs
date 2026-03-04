@@ -35,12 +35,14 @@ impl QailRow for TestMessage {
 
     fn from_row(row: &PgRow) -> Self {
         TestMessage {
-            id: row.uuid_typed(0).unwrap_or_default(),
-            phone_number: row.text(1),
-            direction: row.text(2),
-            content: row.get_string(3),
-            status: row.text(4),
-            created_at: row.datetime(5).unwrap_or_else(Utc::now),
+            id: row.try_get_by_name::<Uuid>("id").unwrap_or_default(),
+            phone_number: row
+                .try_get_by_name::<String>("phone_number")
+                .unwrap_or_default(),
+            direction: row.try_get_by_name::<String>("direction").unwrap_or_default(),
+            content: row.try_get_opt_by_name::<String>("content").ok().flatten(),
+            status: row.try_get_by_name::<String>("status").unwrap_or_default(),
+            created_at: row.datetime_by_name("created_at").unwrap_or_else(Utc::now),
         }
     }
 }
@@ -60,9 +62,9 @@ impl QailRow for SimpleOrder {
 
     fn from_row(row: &PgRow) -> Self {
         SimpleOrder {
-            id: row.uuid_typed(0).unwrap_or_default(),
-            status: row.text(1),
-            total_fare: row.int(2),
+            id: row.try_get_by_name::<Uuid>("id").unwrap_or_default(),
+            status: row.try_get_by_name::<String>("status").unwrap_or_default(),
+            total_fare: row.try_get_by_name::<i64>("total_fare").unwrap_or(0),
         }
     }
 }

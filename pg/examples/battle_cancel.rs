@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // SELECT * FROM pg_sleep(5)
         let sleep_q = Qail::get("pg_sleep(5)");
         // This should return an Error::QueryCancelled
-        let result = conn.pipeline_ast_fast(&[sleep_q]).await;
+        let result = conn.pipeline_ast(&[sleep_q]).await;
         (conn, result)
     });
 
@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("4️⃣  Checking connection health...");
     // SELECT * FROM generate_series(1,1) -> returns 1 row
     let check_q = Qail::get("generate_series(1,1)");
-    match conn.pipeline_ast_fast(&[check_q]).await {
+    match conn.pipeline_ast(&[check_q]).await {
         Ok(_) => println!("   ✅ PASS: Connection is ready for next query!"),
         Err(e) => {
             println!("   ❌ FAIL: Connection died after cancel. Error: {:?}", e);

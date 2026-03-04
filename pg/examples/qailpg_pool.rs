@@ -1,6 +1,7 @@
 //! QAIL-pg Pool + Pipeline 60-second benchmark
 //! 10 connections running pipelined queries in parallel
 
+use qail_core::ast::Qail;
 use qail_pg::{PgPool, PoolConfig};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,13 +32,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_rows = Arc::new(AtomicUsize::new(0));
     let start = Instant::now();
 
-    let params_batch: Vec<Vec<Option<Vec<u8>>>> = (1..=BATCH_SIZE)
+    let batch_cmds: Vec<Qail> = (1..=BATCH_SIZE)
         .map(|i| {
-            let limit = ((i % 10) + 1).to_string();
-            vec![Some(limit.into_bytes())]
+            Qail::raw_sql(format!(
+                "SELECT id, name FROM harbors LIMIT {}",
+                (i % 10) + 1
+            ))
         })
         .collect();
-    let params_batch = Arc::new(params_batch);
+    let batch_cmds = Arc::new(batch_cmds);
 
     let mut tasks = JoinSet::new();
 
@@ -46,20 +49,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pool = pool.clone();
         let total_queries = Arc::clone(&total_queries);
         let total_rows = Arc::clone(&total_rows);
-        let params_batch = Arc::clone(&params_batch);
+        let batch_cmds = Arc::clone(&batch_cmds);
 
         tasks.spawn(async move {
             let mut conn = pool.acquire_system().await.unwrap();
-            let stmt = conn
-                .prepare("SELECT id, name FROM harbors LIMIT $1")
-                .await
-                .unwrap();
 
             while start.elapsed() < TARGET_DURATION {
-                let results = conn
-                    .pipeline_prepared_results(&stmt, &params_batch)
-                    .await
-                    .unwrap();
+                let results = conn.pipeline_ast(&batch_cmds).await.unwrap();
 
                 let mut batch_rows = 0;
                 for result_set in &results {

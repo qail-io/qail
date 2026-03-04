@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     for _ in 0..BATCHES {
-        conn.pipeline_ast_cached(&simple_cmds).await?;
+        conn.pipeline_ast(&simple_cmds).await?;
     }
     let simple_elapsed = start.elapsed();
     let simple_qps = TOTAL_QUERIES as f64 / simple_elapsed.as_secs_f64();
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     for _ in 0..BATCHES {
-        conn.pipeline_ast_cached(&where_cmds).await?;
+        conn.pipeline_ast(&where_cmds).await?;
     }
     let where_elapsed = start.elapsed();
     let where_qps = TOTAL_QUERIES as f64 / where_elapsed.as_secs_f64();
@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     for _ in 0..BATCHES {
-        conn.pipeline_ast_cached(&order_cmds).await?;
+        conn.pipeline_ast(&order_cmds).await?;
     }
     let order_elapsed = start.elapsed();
     let order_qps = TOTAL_QUERIES as f64 / order_elapsed.as_secs_f64();
@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     for _ in 0..BATCHES {
-        conn.pipeline_ast_cached(&many_col_cmds).await?;
+        conn.pipeline_ast(&many_col_cmds).await?;
     }
     let many_elapsed = start.elapsed();
     let many_qps = TOTAL_QUERIES as f64 / many_elapsed.as_secs_f64();

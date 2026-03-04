@@ -47,8 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Execute using CACHED prepared statement pipeline
-        let count = conn.pipeline_ast_cached(&cmds).await?;
-        successful_queries += count;
+        let results = conn.pipeline_ast(&cmds).await?;
+        successful_queries += results.len();
     }
 
     let elapsed = start.elapsed();

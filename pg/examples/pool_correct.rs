@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for _ in 0..1000 {
         let mut conn = pool.acquire_system().await?;
-        conn.pipeline_ast_fast(&[query.clone()]).await?;
+        conn.pipeline_ast(&[query.clone()]).await?;
         drop(conn);
     }
 
