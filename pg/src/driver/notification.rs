@@ -9,9 +9,11 @@
 //! - `poll_notifications()` — drain buffered notifications (non-blocking)
 //! - `recv_notification()` — block-wait for the next notification
 
-use super::{PgConnection, PgResult};
+use super::{
+    PgConnection, PgResult, io::MAX_MESSAGE_SIZE, is_ignorable_session_message,
+    unexpected_backend_message,
+};
 use crate::protocol::PgEncoder;
-use tokio::io::AsyncWriteExt;
 
 /// A notification received from PostgreSQL LISTEN/NOTIFY.
 #[derive(Debug, Clone)]
@@ -65,7 +67,6 @@ impl PgConnection {
     /// Useful for a dedicated LISTEN connection in a background task.
     pub async fn recv_notification(&mut self) -> PgResult<Notification> {
         use crate::protocol::BackendMessage;
-        use tokio::io::AsyncReadExt;
 
         // Return buffered notification immediately if available
         if let Some(n) = self.notifications.pop_front() {
@@ -73,8 +74,8 @@ impl PgConnection {
         }
 
         // Send empty query to flush any pending notifications from server
-        let bytes = PgEncoder::encode_query_string("");
-        self.stream.write_all(&bytes).await?;
+        let bytes = PgEncoder::try_encode_query_string("")?;
+        self.write_all_with_timeout(&bytes, "stream write").await?;
 
         // Read messages — use recv() for the initial empty query response
         // (which completes quickly), then switch to no-timeout reads
@@ -88,6 +89,20 @@ impl PgConnection {
                     self.buffer[3],
                     self.buffer[4],
                 ]) as usize;
+
+                if msg_len < 4 {
+                    return Err(super::PgError::Protocol(format!(
+                        "Invalid message length: {} (minimum 4)",
+                        msg_len
+                    )));
+                }
+
+                if msg_len > MAX_MESSAGE_SIZE {
+                    return Err(super::PgError::Protocol(format!(
+                        "Message too large: {} bytes (max {})",
+                        msg_len, MAX_MESSAGE_SIZE
+                    )));
+                }
 
                 if self.buffer.len() > msg_len {
                     let msg_bytes = self.buffer.split_to(msg_len + 1);
@@ -107,6 +122,9 @@ impl PgConnection {
                             });
                         }
                         BackendMessage::EmptyQueryResponse => continue,
+                        BackendMessage::NoticeResponse(_) => continue,
+                        BackendMessage::ParameterStatus { .. } => continue,
+                        BackendMessage::CommandComplete(_) => continue,
                         BackendMessage::ReadyForQuery(_) => {
                             got_ready = true;
                             // Check buffer for notifications that arrived with this batch
@@ -115,7 +133,13 @@ impl PgConnection {
                             }
                             continue;
                         }
-                        _ => continue,
+                        BackendMessage::ErrorResponse(err) => {
+                            return Err(super::PgError::QueryServer(err.into()));
+                        }
+                        msg if is_ignorable_session_message(&msg) => continue,
+                        other => {
+                            return Err(unexpected_backend_message("listen/notify wait", &other));
+                        }
                     }
                 }
             }
@@ -127,12 +151,14 @@ impl PgConnection {
             }
 
             if got_ready {
-                // No timeout — LISTEN connections idle for hours, that's fine
-                let n = self
-                    .stream
-                    .read_buf(&mut self.buffer)
-                    .await
-                    .map_err(|e| super::PgError::Connection(format!("Read error: {e}")))?;
+                // LISTEN connections can stay idle for hours (empty buffer),
+                // but a partially buffered backend frame should still timeout
+                // to fail-closed on slowloris-style partial writes.
+                let n = if self.buffer.is_empty() {
+                    self.read_without_timeout().await?
+                } else {
+                    self.read_with_timeout().await?
+                };
                 if n == 0 {
                     return Err(super::PgError::Connection("Connection closed".to_string()));
                 }

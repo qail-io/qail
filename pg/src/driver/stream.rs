@@ -15,6 +15,9 @@ use tokio_rustls::client::TlsStream;
 pub enum PgStream {
     Tcp(TcpStream),
     Tls(Box<TlsStream<TcpStream>>),
+    /// Linux io_uring plain TCP transport (phase 1 rollout).
+    #[cfg(all(target_os = "linux", feature = "io_uring"))]
+    Uring(super::uring::UringTcpStream),
     /// Unix domain socket connection
     #[cfg(unix)]
     Unix(UnixStream),
@@ -32,6 +35,11 @@ impl AsyncRead for PgStream {
         match self.get_mut() {
             PgStream::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
             PgStream::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            PgStream::Uring(_) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "io_uring stream read via AsyncRead is unsupported; use PgConnection helpers",
+            ))),
             #[cfg(unix)]
             PgStream::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
@@ -49,6 +57,11 @@ impl AsyncWrite for PgStream {
         match self.get_mut() {
             PgStream::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
             PgStream::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            PgStream::Uring(_) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "io_uring stream write via AsyncWrite is unsupported; use PgConnection helpers",
+            ))),
             #[cfg(unix)]
             PgStream::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
@@ -60,6 +73,8 @@ impl AsyncWrite for PgStream {
         match self.get_mut() {
             PgStream::Tcp(stream) => Pin::new(stream).poll_flush(cx),
             PgStream::Tls(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            PgStream::Uring(_) => Poll::Ready(Ok(())),
             #[cfg(unix)]
             PgStream::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
@@ -71,6 +86,8 @@ impl AsyncWrite for PgStream {
         match self.get_mut() {
             PgStream::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
             PgStream::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(all(target_os = "linux", feature = "io_uring"))]
+            PgStream::Uring(_) => Poll::Ready(Ok(())),
             #[cfg(unix)]
             PgStream::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]

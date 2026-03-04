@@ -6,6 +6,8 @@
 use super::{
     AuthSettings, ConnectOptions, GssEncMode, GssTokenProvider, GssTokenProviderEx, PgConnection,
     PgError, PgResult, ResultFormat, ScramChannelBindingMode, TlsConfig, TlsMode,
+    extended_flow::{ExtendedFlowConfig, ExtendedFlowTracker},
+    is_ignorable_session_message, unexpected_backend_message,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -583,6 +585,116 @@ pub struct PoolStats {
     pub total_created: usize,
 }
 
+const POOL_CHURN_THRESHOLD: usize = 24;
+const POOL_CHURN_WINDOW: Duration = Duration::from_secs(15);
+const POOL_CHURN_COOLDOWN: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone)]
+struct PoolChurnState {
+    window_started_at: Instant,
+    failure_count: usize,
+    open_until: Option<Instant>,
+}
+
+fn pool_churn_registry() -> &'static std::sync::Mutex<HashMap<String, PoolChurnState>> {
+    static REGISTRY: OnceLock<std::sync::Mutex<HashMap<String, PoolChurnState>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn pool_churn_key(config: &PoolConfig) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        config.host, config.port, config.user, config.database
+    )
+}
+
+fn pool_churn_remaining_open(config: &PoolConfig) -> Option<Duration> {
+    let now = Instant::now();
+    let key = pool_churn_key(config);
+    let Ok(mut registry) = pool_churn_registry().lock() else {
+        return None;
+    };
+    let state = registry.get_mut(&key)?;
+    let until = state.open_until?;
+    if until > now {
+        return Some(until.duration_since(now));
+    }
+    state.open_until = None;
+    state.failure_count = 0;
+    state.window_started_at = now;
+    None
+}
+
+fn record_pool_connection_destroy(reason: &'static str) {
+    metrics::counter!("qail_pg_pool_connection_destroyed_total", "reason" => reason).increment(1);
+}
+
+fn pool_churn_record_destroy(config: &PoolConfig, reason: &'static str) {
+    record_pool_connection_destroy(reason);
+
+    let now = Instant::now();
+    let key = pool_churn_key(config);
+    let Ok(mut registry) = pool_churn_registry().lock() else {
+        return;
+    };
+    let state = registry
+        .entry(key.clone())
+        .or_insert_with(|| PoolChurnState {
+            window_started_at: now,
+            failure_count: 0,
+            open_until: None,
+        });
+
+    if let Some(until) = state.open_until {
+        if until > now {
+            return;
+        }
+        state.open_until = None;
+        state.failure_count = 0;
+        state.window_started_at = now;
+    }
+
+    if now.duration_since(state.window_started_at) > POOL_CHURN_WINDOW {
+        state.window_started_at = now;
+        state.failure_count = 0;
+    }
+
+    state.failure_count += 1;
+    if state.failure_count >= POOL_CHURN_THRESHOLD {
+        metrics::counter!("qail_pg_pool_churn_circuit_open_total").increment(1);
+        state.open_until = Some(now + POOL_CHURN_COOLDOWN);
+        state.failure_count = 0;
+        state.window_started_at = now;
+        tracing::warn!(
+            host = %config.host,
+            port = config.port,
+            user = %config.user,
+            db = %config.database,
+            threshold = POOL_CHURN_THRESHOLD as u64,
+            cooldown_ms = POOL_CHURN_COOLDOWN.as_millis() as u64,
+            "pool_connection_churn_circuit_opened"
+        );
+    }
+}
+
+fn decrement_active_count_saturating(counter: &AtomicUsize) {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current == 0 {
+            return;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 /// A pooled connection with creation timestamp for idle tracking.
 struct PooledConn {
     conn: PgConnection,
@@ -599,6 +711,7 @@ pub struct PooledConnection {
     conn: Option<PgConnection>,
     pool: Arc<PgPoolInner>,
     rls_dirty: bool,
+    created_at: Instant,
 }
 
 impl PooledConnection {
@@ -618,14 +731,18 @@ impl PooledConnection {
             .ok_or_else(|| PgError::Connection("Connection already released back to pool".into()))
     }
 
+    /// Get a shared reference to the underlying connection.
+    ///
+    /// Returns an error if the connection has already been released.
+    pub fn get(&self) -> PgResult<&PgConnection> {
+        self.conn_ref()
+    }
+
     /// Get a mutable reference to the underlying connection.
-    /// Panics if the connection has been released (use `conn_mut()` for fallible access).
-    pub fn get_mut(&mut self) -> &mut PgConnection {
-        // SAFETY: Connection is always Some while PooledConnection is in use.
-        // Only becomes None after release() or Drop, after which no methods should be called.
-        self.conn
-            .as_mut()
-            .expect("Connection should always be present")
+    ///
+    /// Returns an error if the connection has already been released.
+    pub fn get_mut(&mut self) -> PgResult<&mut PgConnection> {
+        self.conn_mut()
     }
 
     /// Get a token to cancel the currently running query.
@@ -658,21 +775,99 @@ impl PooledConnection {
     /// ```
     pub async fn release(mut self) {
         if let Some(mut conn) = self.conn.take() {
+            if conn.is_io_desynced() {
+                tracing::warn!(
+                    host = %self.pool.config.host,
+                    port = self.pool.config.port,
+                    user = %self.pool.config.user,
+                    db = %self.pool.config.database,
+                    "pool_release_desynced: dropping connection due to prior I/O/protocol desync"
+                );
+                decrement_active_count_saturating(&self.pool.active_count);
+                self.pool.semaphore.add_permits(1);
+                pool_churn_record_destroy(&self.pool.config, "release_desynced");
+                return;
+            }
             // COMMIT the transaction opened by acquire_with_rls.
             // Transaction-local set_config values auto-reset on COMMIT,
             // so no explicit RLS cleanup is needed.
             // Prepared statements survive — they are NOT transaction-scoped.
-            if let Err(e) = conn.execute_simple(super::rls::reset_sql()).await {
-                eprintln!(
-                    "[CRITICAL] pool_release_failed: COMMIT failed — \
-                     dropping connection to prevent state leak: {}",
-                    e
+            let reset_timeout = self.pool.config.connect_timeout;
+            if let Err(e) = execute_simple_with_timeout(
+                &mut conn,
+                super::rls::reset_sql(),
+                reset_timeout,
+                "pool release reset/COMMIT",
+            )
+            .await
+            {
+                tracing::error!(
+                    host = %self.pool.config.host,
+                    port = self.pool.config.port,
+                    user = %self.pool.config.user,
+                    db = %self.pool.config.database,
+                    timeout_ms = reset_timeout.as_millis() as u64,
+                    error = %e,
+                    "pool_release_failed: reset/COMMIT failed; dropping connection to prevent state leak"
                 );
+                decrement_active_count_saturating(&self.pool.active_count);
+                self.pool.semaphore.add_permits(1);
+                pool_churn_record_destroy(&self.pool.config, "release_reset_failed");
                 return; // Connection destroyed — not returned to pool
             }
 
-            self.pool.return_connection(conn).await;
+            self.pool.return_connection(conn, self.created_at).await;
         }
+    }
+
+    // ==================== TRANSACTION CONTROL ====================
+
+    /// Begin an explicit transaction on this pooled connection.
+    ///
+    /// Use this when you need multi-statement atomicity beyond the
+    /// implicit transaction created by `acquire_with_rls()`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut conn = pool.acquire_with_rls(ctx).await?;
+    /// conn.begin().await?;
+    /// conn.execute(&insert1).await?;
+    /// conn.execute(&insert2).await?;
+    /// conn.commit().await?;
+    /// conn.release().await;
+    /// ```
+    pub async fn begin(&mut self) -> PgResult<()> {
+        self.conn_mut()?.begin_transaction().await
+    }
+
+    /// Commit the current transaction.
+    /// Makes all changes since `begin()` permanent.
+    pub async fn commit(&mut self) -> PgResult<()> {
+        self.conn_mut()?.commit().await
+    }
+
+    /// Rollback the current transaction.
+    /// Discards all changes since `begin()`.
+    pub async fn rollback(&mut self) -> PgResult<()> {
+        self.conn_mut()?.rollback().await
+    }
+
+    /// Create a named savepoint within the current transaction.
+    /// Use `rollback_to()` to return to this savepoint.
+    pub async fn savepoint(&mut self, name: &str) -> PgResult<()> {
+        self.conn_mut()?.savepoint(name).await
+    }
+
+    /// Rollback to a previously created savepoint.
+    /// Discards changes since the savepoint, but keeps the transaction open.
+    pub async fn rollback_to(&mut self, name: &str) -> PgResult<()> {
+        self.conn_mut()?.rollback_to(name).await
+    }
+
+    /// Release a savepoint (free resources).
+    /// After release, the savepoint cannot be rolled back to.
+    pub async fn release_savepoint(&mut self, name: &str) -> PgResult<()> {
+        self.conn_mut()?.release_savepoint(name).await
     }
 
     /// Execute a QAIL command and fetch all rows (UNCACHED).
@@ -701,6 +896,65 @@ impl PooledConnection {
         conn.query(sql, params).await
     }
 
+    /// Export data using AST-native COPY TO STDOUT and collect parsed rows.
+    pub async fn copy_export(&mut self, cmd: &qail_core::ast::Qail) -> PgResult<Vec<Vec<String>>> {
+        self.conn_mut()?.copy_export(cmd).await
+    }
+
+    /// Stream AST-native COPY TO STDOUT chunks with bounded memory usage.
+    pub async fn copy_export_stream_raw<F, Fut>(
+        &mut self,
+        cmd: &qail_core::ast::Qail,
+        on_chunk: F,
+    ) -> PgResult<()>
+    where
+        F: FnMut(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = PgResult<()>>,
+    {
+        self.conn_mut()?.copy_export_stream_raw(cmd, on_chunk).await
+    }
+
+    /// Stream AST-native COPY TO STDOUT rows with bounded memory usage.
+    pub async fn copy_export_stream_rows<F>(
+        &mut self,
+        cmd: &qail_core::ast::Qail,
+        on_row: F,
+    ) -> PgResult<()>
+    where
+        F: FnMut(Vec<String>) -> PgResult<()>,
+    {
+        self.conn_mut()?.copy_export_stream_rows(cmd, on_row).await
+    }
+
+    /// Export a table using COPY TO STDOUT and collect raw bytes.
+    pub async fn copy_export_table(&mut self, table: &str, columns: &[String]) -> PgResult<Vec<u8>> {
+        let quote_ident = |ident: &str| -> String {
+            format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
+        };
+        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let sql = format!("COPY {} ({}) TO STDOUT", quote_ident(table), cols.join(", "));
+        self.conn_mut()?.copy_out_raw(&sql).await
+    }
+
+    /// Stream a table export using COPY TO STDOUT with bounded memory usage.
+    pub async fn copy_export_table_stream<F, Fut>(
+        &mut self,
+        table: &str,
+        columns: &[String],
+        on_chunk: F,
+    ) -> PgResult<()>
+    where
+        F: FnMut(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = PgResult<()>>,
+    {
+        let quote_ident = |ident: &str| -> String {
+            format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
+        };
+        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let sql = format!("COPY {} ({}) TO STDOUT", quote_ident(table), cols.join(", "));
+        self.conn_mut()?.copy_out_raw_stream(&sql, on_chunk).await
+    }
+
     /// Execute a QAIL command and fetch all rows (UNCACHED) with explicit result format.
     pub async fn fetch_all_uncached_with_format(
         &mut self,
@@ -726,9 +980,11 @@ impl PooledConnection {
         let mut rows: Vec<super::PgRow> = Vec::new();
         let mut column_info: Option<Arc<ColumnInfo>> = None;
         let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_describe_portal_execute());
 
         loop {
             let msg = conn.recv().await?;
+            flow.validate(&msg, "pool fetch_all execute", error.is_some())?;
             match msg {
                 crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
@@ -743,6 +999,7 @@ impl PooledConnection {
                         });
                     }
                 }
+                crate::protocol::BackendMessage::NoData => {}
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
@@ -755,7 +1012,10 @@ impl PooledConnection {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message("pool fetch_all execute", &other));
+                }
             }
         }
     }
@@ -794,33 +1054,41 @@ impl PooledConnection {
 
         let mut rows: Vec<super::PgRow> = Vec::with_capacity(32);
         let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(true));
 
         loop {
             let res = conn.recv_with_data_fast().await;
             match res {
-                Ok((msg_type, data)) => match msg_type {
-                    b'D' => {
-                        if error.is_none()
-                            && let Some(columns) = data
-                        {
-                            rows.push(super::PgRow {
-                                columns,
-                                column_info: None,
-                            });
+                Ok((msg_type, data)) => {
+                    flow.validate_msg_type(msg_type, "pool fetch_all_fast execute", error.is_some())?;
+                    match msg_type {
+                        b'D' => {
+                            if error.is_none()
+                                && let Some(columns) = data
+                            {
+                                rows.push(super::PgRow {
+                                    columns,
+                                    column_info: None,
+                                });
+                            }
                         }
-                    }
-                    b'Z' => {
-                        if let Some(err) = error {
-                            return Err(err);
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(rows);
                         }
-                        return Ok(rows);
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 Err(e) => {
-                    if error.is_none() {
-                        error = Some(e);
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        if error.is_none() {
+                            error = Some(e);
+                        }
+                        continue;
                     }
+                    return Err(e);
                 }
             }
         }
@@ -851,15 +1119,60 @@ impl PooledConnection {
                 .await
             {
                 Ok(rows) => return Ok(rows),
-                Err(err) if !retried && err.is_prepared_statement_retryable() => {
+                Err(err)
+                    if !retried
+                        && (err.is_prepared_statement_retryable()
+                            || err.is_prepared_statement_already_exists()) =>
+                {
                     retried = true;
-                    if let Some(conn) = self.conn.as_mut() {
+                    if err.is_prepared_statement_retryable()
+                        && let Some(conn) = self.conn.as_mut()
+                    {
                         conn.clear_prepared_statement_state();
                     }
                 }
                 Err(err) => return Err(err),
             }
         }
+    }
+
+    /// Execute a QAIL command and decode rows into typed structs (CACHED, text format).
+    pub async fn fetch_typed<T: super::row::QailRow>(
+        &mut self,
+        cmd: &qail_core::ast::Qail,
+    ) -> PgResult<Vec<T>> {
+        self.fetch_typed_with_format(cmd, ResultFormat::Text).await
+    }
+
+    /// Execute a QAIL command and decode rows into typed structs with explicit result format.
+    ///
+    /// Use [`ResultFormat::Binary`] for binary wire values; row decoders should use
+    /// metadata-aware helpers like `PgRow::try_get()` / `try_get_by_name()`.
+    pub async fn fetch_typed_with_format<T: super::row::QailRow>(
+        &mut self,
+        cmd: &qail_core::ast::Qail,
+        result_format: ResultFormat,
+    ) -> PgResult<Vec<T>> {
+        let rows = self.fetch_all_cached_with_format(cmd, result_format).await?;
+        Ok(rows.iter().map(T::from_row).collect())
+    }
+
+    /// Execute a QAIL command and decode one typed row (CACHED, text format).
+    pub async fn fetch_one_typed<T: super::row::QailRow>(
+        &mut self,
+        cmd: &qail_core::ast::Qail,
+    ) -> PgResult<Option<T>> {
+        self.fetch_one_typed_with_format(cmd, ResultFormat::Text).await
+    }
+
+    /// Execute a QAIL command and decode one typed row with explicit result format.
+    pub async fn fetch_one_typed_with_format<T: super::row::QailRow>(
+        &mut self,
+        cmd: &qail_core::ast::Qail,
+        result_format: ResultFormat,
+    ) -> PgResult<Option<T>> {
+        let rows = self.fetch_all_cached_with_format(cmd, result_format).await?;
+        Ok(rows.first().map(T::from_row))
     }
 
     async fn fetch_all_cached_with_format_once(
@@ -934,8 +1247,8 @@ impl PooledConnection {
             let sql_str = std::str::from_utf8(&conn.sql_buf).unwrap_or("");
 
             use crate::protocol::PgEncoder;
-            let parse_msg = PgEncoder::encode_parse(&name, sql_str, &[]);
-            let describe_msg = PgEncoder::encode_describe(false, &name);
+            let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
+            let describe_msg = PgEncoder::try_encode_describe(false, &name)?;
             conn.write_buf.extend_from_slice(&parse_msg);
             conn.write_buf.extend_from_slice(&describe_msg);
 
@@ -954,29 +1267,65 @@ impl PooledConnection {
         };
 
         use crate::protocol::PgEncoder;
-        PgEncoder::encode_bind_to_with_result_format(
+        if let Err(e) = PgEncoder::encode_bind_to_with_result_format(
             &mut conn.write_buf,
             &stmt_name,
             &conn.params_buf,
             result_format.as_wire_code(),
-        )
-        .map_err(|e| PgError::Encode(e.to_string()))?;
+        ) {
+            if is_cache_miss {
+                conn.stmt_cache.remove(&sql_hash);
+                conn.prepared_statements.remove(&stmt_name);
+                conn.column_info_cache.remove(&sql_hash);
+            }
+            return Err(PgError::Encode(e.to_string()));
+        }
         PgEncoder::encode_execute_to(&mut conn.write_buf);
         PgEncoder::encode_sync_to(&mut conn.write_buf);
 
-        conn.flush_write_buf().await?;
+        if let Err(err) = conn.flush_write_buf().await {
+            if is_cache_miss {
+                conn.stmt_cache.remove(&sql_hash);
+                conn.prepared_statements.remove(&stmt_name);
+                conn.column_info_cache.remove(&sql_hash);
+            }
+            return Err(err);
+        }
 
         let cached_column_info = conn.column_info_cache.get(&sql_hash).cloned();
 
         let mut rows: Vec<super::PgRow> = Vec::with_capacity(32);
         let mut column_info: Option<Arc<ColumnInfo>> = cached_column_info;
         let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(
+            ExtendedFlowConfig::parse_describe_statement_bind_execute(is_cache_miss),
+        );
 
         loop {
-            let msg = conn.recv().await?;
+            let msg = match conn.recv().await {
+                Ok(msg) => msg,
+                Err(err) => {
+                    if is_cache_miss && !flow.saw_parse_complete() {
+                        conn.stmt_cache.remove(&sql_hash);
+                        conn.prepared_statements.remove(&stmt_name);
+                        conn.column_info_cache.remove(&sql_hash);
+                    }
+                    return Err(err);
+                }
+            };
+            if let Err(err) =
+                flow.validate(&msg, "pool fetch_all_cached execute", error.is_some())
+            {
+                if is_cache_miss && !flow.saw_parse_complete() {
+                    conn.stmt_cache.remove(&sql_hash);
+                    conn.prepared_statements.remove(&stmt_name);
+                    conn.column_info_cache.remove(&sql_hash);
+                }
+                return Err(err);
+            }
             match msg {
-                crate::protocol::BackendMessage::ParseComplete
-                | crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::ParseComplete => {}
+                crate::protocol::BackendMessage::BindComplete => {}
                 crate::protocol::BackendMessage::ParameterDescription(_) => {}
                 crate::protocol::BackendMessage::RowDescription(fields) => {
                     let info = Arc::new(ColumnInfo::from_fields(&fields));
@@ -996,7 +1345,24 @@ impl PooledConnection {
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
+                        if is_cache_miss
+                            && !flow.saw_parse_complete()
+                            && !err.is_prepared_statement_already_exists()
+                        {
+                            conn.stmt_cache.remove(&sql_hash);
+                            conn.prepared_statements.remove(&stmt_name);
+                            conn.column_info_cache.remove(&sql_hash);
+                        }
                         return Err(err);
+                    }
+                    if is_cache_miss && !flow.saw_parse_complete() {
+                        conn.stmt_cache.remove(&sql_hash);
+                        conn.prepared_statements.remove(&stmt_name);
+                        conn.column_info_cache.remove(&sql_hash);
+                        return Err(PgError::Protocol(
+                            "Cache miss query reached ReadyForQuery without ParseComplete"
+                                .to_string(),
+                        ));
                     }
                     return Ok(rows);
                 }
@@ -1005,7 +1371,18 @@ impl PooledConnection {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    if is_cache_miss && !flow.saw_parse_complete() {
+                        conn.stmt_cache.remove(&sql_hash);
+                        conn.prepared_statements.remove(&stmt_name);
+                        conn.column_info_cache.remove(&sql_hash);
+                    }
+                    return Err(unexpected_backend_message(
+                        "pool fetch_all_cached execute",
+                        &other,
+                    ));
+                }
             }
         }
     }
@@ -1051,9 +1428,15 @@ impl PooledConnection {
                 .await
             {
                 Ok(rows) => return Ok(rows),
-                Err(err) if !retried && err.is_prepared_statement_retryable() => {
+                Err(err)
+                    if !retried
+                        && (err.is_prepared_statement_retryable()
+                            || err.is_prepared_statement_already_exists()) =>
+                {
                     retried = true;
-                    if let Some(conn) = self.conn.as_mut() {
+                    if err.is_prepared_statement_retryable()
+                        && let Some(conn) = self.conn.as_mut()
+                    {
                         conn.clear_prepared_statement_state();
                         let _ = conn.execute_simple("ROLLBACK").await;
                     }
@@ -1139,7 +1522,7 @@ impl PooledConnection {
         // ── Prepend RLS Simple Query message ─────────────────────────
         // This is the key optimization: RLS setup bytes go first in the
         // same buffer as the query messages.
-        let rls_msg = crate::protocol::PgEncoder::encode_query_string(rls_sql);
+        let rls_msg = crate::protocol::PgEncoder::try_encode_query_string(rls_sql)?;
         conn.write_buf.extend_from_slice(&rls_msg);
 
         // ── Then append the query messages (same as fetch_all_cached) ──
@@ -1153,8 +1536,8 @@ impl PooledConnection {
             let sql_str = std::str::from_utf8(&conn.sql_buf).unwrap_or("");
 
             use crate::protocol::PgEncoder;
-            let parse_msg = PgEncoder::encode_parse(&name, sql_str, &[]);
-            let describe_msg = PgEncoder::encode_describe(false, &name);
+            let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
+            let describe_msg = PgEncoder::try_encode_describe(false, &name)?;
             conn.write_buf.extend_from_slice(&parse_msg);
             conn.write_buf.extend_from_slice(&describe_msg);
 
@@ -1172,18 +1555,31 @@ impl PooledConnection {
         };
 
         use crate::protocol::PgEncoder;
-        PgEncoder::encode_bind_to_with_result_format(
+        if let Err(e) = PgEncoder::encode_bind_to_with_result_format(
             &mut conn.write_buf,
             &stmt_name,
             &conn.params_buf,
             result_format.as_wire_code(),
-        )
-        .map_err(|e| PgError::Encode(e.to_string()))?;
+        ) {
+            if is_cache_miss {
+                conn.stmt_cache.remove(&sql_hash);
+                conn.prepared_statements.remove(&stmt_name);
+                conn.column_info_cache.remove(&sql_hash);
+            }
+            return Err(PgError::Encode(e.to_string()));
+        }
         PgEncoder::encode_execute_to(&mut conn.write_buf);
         PgEncoder::encode_sync_to(&mut conn.write_buf);
 
         // ── Single write_all for RLS + Query ────────────────────────
-        conn.flush_write_buf().await?;
+        if let Err(err) = conn.flush_write_buf().await {
+            if is_cache_miss {
+                conn.stmt_cache.remove(&sql_hash);
+                conn.prepared_statements.remove(&stmt_name);
+                conn.column_info_cache.remove(&sql_hash);
+            }
+            return Err(err);
+        }
 
         // Mark connection as RLS-dirty (needs COMMIT on release)
         self.rls_dirty = true;
@@ -1193,7 +1589,17 @@ impl PooledConnection {
         // set_config results and BEGIN/SET LOCAL responses are all here.
         let mut rls_error: Option<PgError> = None;
         loop {
-            let msg = conn.recv().await?;
+            let msg = match conn.recv().await {
+                Ok(msg) => msg,
+                Err(err) => {
+                    if is_cache_miss {
+                        conn.stmt_cache.remove(&sql_hash);
+                        conn.prepared_statements.remove(&stmt_name);
+                        conn.column_info_cache.remove(&sql_hash);
+                    }
+                    return Err(err);
+                }
+            };
             match msg {
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     // RLS setup done — break to Extended Query phase
@@ -1208,7 +1614,13 @@ impl PooledConnection {
                     }
                 }
                 // CommandComplete, DataRow (from set_config), RowDescription — ignore
-                _ => {}
+                crate::protocol::BackendMessage::CommandComplete(_)
+                | crate::protocol::BackendMessage::DataRow(_)
+                | crate::protocol::BackendMessage::RowDescription(_)
+                | crate::protocol::BackendMessage::ParseComplete
+                | crate::protocol::BackendMessage::BindComplete => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => return Err(unexpected_backend_message("pool rls setup", &other)),
             }
         }
 
@@ -1218,12 +1630,37 @@ impl PooledConnection {
         let mut rows: Vec<super::PgRow> = Vec::with_capacity(32);
         let mut column_info: Option<std::sync::Arc<ColumnInfo>> = cached_column_info;
         let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(
+            ExtendedFlowConfig::parse_describe_statement_bind_execute(is_cache_miss),
+        );
 
         loop {
-            let msg = conn.recv().await?;
+            let msg = match conn.recv().await {
+                Ok(msg) => msg,
+                Err(err) => {
+                    if is_cache_miss && !flow.saw_parse_complete() {
+                        conn.stmt_cache.remove(&sql_hash);
+                        conn.prepared_statements.remove(&stmt_name);
+                        conn.column_info_cache.remove(&sql_hash);
+                    }
+                    return Err(err);
+                }
+            };
+            if let Err(err) = flow.validate(
+                &msg,
+                "pool fetch_all_with_rls execute",
+                error.is_some(),
+            ) {
+                if is_cache_miss && !flow.saw_parse_complete() {
+                    conn.stmt_cache.remove(&sql_hash);
+                    conn.prepared_statements.remove(&stmt_name);
+                    conn.column_info_cache.remove(&sql_hash);
+                }
+                return Err(err);
+            }
             match msg {
-                crate::protocol::BackendMessage::ParseComplete
-                | crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::ParseComplete => {}
+                crate::protocol::BackendMessage::BindComplete => {}
                 crate::protocol::BackendMessage::ParameterDescription(_) => {}
                 crate::protocol::BackendMessage::RowDescription(fields) => {
                     let info = std::sync::Arc::new(ColumnInfo::from_fields(&fields));
@@ -1243,7 +1680,24 @@ impl PooledConnection {
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
+                        if is_cache_miss
+                            && !flow.saw_parse_complete()
+                            && !err.is_prepared_statement_already_exists()
+                        {
+                            conn.stmt_cache.remove(&sql_hash);
+                            conn.prepared_statements.remove(&stmt_name);
+                            conn.column_info_cache.remove(&sql_hash);
+                        }
                         return Err(err);
+                    }
+                    if is_cache_miss && !flow.saw_parse_complete() {
+                        conn.stmt_cache.remove(&sql_hash);
+                        conn.prepared_statements.remove(&stmt_name);
+                        conn.column_info_cache.remove(&sql_hash);
+                        return Err(PgError::Protocol(
+                            "Cache miss query reached ReadyForQuery without ParseComplete"
+                                .to_string(),
+                        ));
                     }
                     return Ok(rows);
                 }
@@ -1252,7 +1706,18 @@ impl PooledConnection {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    if is_cache_miss && !flow.saw_parse_complete() {
+                        conn.stmt_cache.remove(&sql_hash);
+                        conn.prepared_statements.remove(&stmt_name);
+                        conn.column_info_cache.remove(&sql_hash);
+                    }
+                    return Err(unexpected_backend_message(
+                        "pool fetch_all_with_rls execute",
+                        &other,
+                    ));
+                }
             }
         }
     }
@@ -1286,7 +1751,7 @@ impl PooledConnection {
         let sql = cmd.to_sql();
         let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
 
-        let rows = self.simple_query(&explain_sql).await?;
+        let rows = self.conn_mut()?.simple_query(&explain_sql).await?;
 
         // PostgreSQL returns the JSON plan as a single text column across one or more rows
         let mut json_output = String::new();
@@ -1299,6 +1764,37 @@ impl PooledConnection {
         }
 
         Ok(super::explain::parse_explain_json(&json_output))
+    }
+
+    // ─── LISTEN / NOTIFY delegation ─────────────────────────────────
+
+    /// Subscribe to a PostgreSQL notification channel.
+    ///
+    /// Delegates to [`PgConnection::listen`].
+    pub async fn listen(&mut self, channel: &str) -> PgResult<()> {
+        self.conn_mut()?.listen(channel).await
+    }
+
+    /// Unsubscribe from a PostgreSQL notification channel.
+    ///
+    /// Delegates to [`PgConnection::unlisten`].
+    pub async fn unlisten(&mut self, channel: &str) -> PgResult<()> {
+        self.conn_mut()?.unlisten(channel).await
+    }
+
+    /// Unsubscribe from all notification channels.
+    ///
+    /// Delegates to [`PgConnection::unlisten_all`].
+    pub async fn unlisten_all(&mut self) -> PgResult<()> {
+        self.conn_mut()?.unlisten_all().await
+    }
+
+    /// Wait for the next notification, blocking until one arrives.
+    ///
+    /// Delegates to [`PgConnection::recv_notification`].
+    /// Useful for dedicated LISTEN connections in background tasks.
+    pub async fn recv_notification(&mut self) -> PgResult<super::notification::Notification> {
+        self.conn_mut()?.recv_notification().await
     }
 }
 
@@ -1318,42 +1814,20 @@ impl Drop for PooledConnection {
             // reduce pool capacity until all slots are consumed.
             //
             // The `conn` field is dropped here, closing the TCP socket.
-            eprintln!(
-                "[WARN] pool_connection_leaked: PooledConnection dropped without release() — \
-                 connection destroyed to prevent state leak (rls_dirty={}). \
-                 Use conn.release().await for deterministic cleanup.",
-                self.rls_dirty
+            tracing::warn!(
+                host = %self.pool.config.host,
+                port = self.pool.config.port,
+                user = %self.pool.config.user,
+                db = %self.pool.config.database,
+                rls_dirty = self.rls_dirty,
+                "pool_connection_leaked: dropped without release(); connection destroyed to prevent state leak"
             );
-            // Decrement active count so pool can create a replacement
-            self.pool
-                .active_count
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            decrement_active_count_saturating(&self.pool.active_count);
             // Return the semaphore permit so the pool slot can be reused.
             // Without this, each leaked connection permanently reduces capacity.
             self.pool.semaphore.add_permits(1);
+            pool_churn_record_destroy(&self.pool.config, "dropped_without_release");
         }
-    }
-}
-
-impl std::ops::Deref for PooledConnection {
-    type Target = PgConnection;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: Connection is always Some while PooledConnection is alive and in use.
-        // Only becomes None after release() consumes self, or during Drop.
-        self.conn
-            .as_ref()
-            .expect("PooledConnection::deref called after release — this is a bug")
-    }
-}
-
-impl std::ops::DerefMut for PooledConnection {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: Connection is always Some while PooledConnection is alive and in use.
-        // Only becomes None after release() consumes self, or during Drop.
-        self.conn
-            .as_mut()
-            .expect("PooledConnection::deref_mut called after release — this is a bug")
     }
 }
 
@@ -1374,11 +1848,49 @@ struct PgPoolInner {
     hot_statements: std::sync::RwLock<std::collections::HashMap<u64, (String, String)>>,
 }
 
+fn handle_hot_preprepare_message(
+    msg: &crate::protocol::BackendMessage,
+    parse_complete_count: &mut usize,
+    error: &mut Option<PgError>,
+) -> PgResult<bool> {
+    match msg {
+        crate::protocol::BackendMessage::ParseComplete => {
+            *parse_complete_count += 1;
+            Ok(false)
+        }
+        crate::protocol::BackendMessage::ErrorResponse(err) => {
+            if error.is_none() {
+                *error = Some(PgError::QueryServer(err.clone().into()));
+            }
+            Ok(false)
+        }
+        crate::protocol::BackendMessage::ReadyForQuery(_) => Ok(true),
+        msg if is_ignorable_session_message(msg) => Ok(false),
+        other => Err(unexpected_backend_message("pool hot pre-prepare", other)),
+    }
+}
+
 impl PgPoolInner {
-    async fn return_connection(&self, conn: PgConnection) {
-        self.active_count.fetch_sub(1, Ordering::Relaxed);
+    async fn return_connection(&self, conn: PgConnection, created_at: Instant) {
+        decrement_active_count_saturating(&self.active_count);
+
+        if conn.is_io_desynced() {
+            tracing::warn!(
+                host = %self.config.host,
+                port = self.config.port,
+                user = %self.config.user,
+                db = %self.config.database,
+                "pool_return_desynced: dropping connection due to prior I/O/protocol desync"
+            );
+            record_pool_connection_destroy("pool_desynced_drop");
+            self.semaphore.add_permits(1);
+            pool_churn_record_destroy(&self.config, "return_desynced");
+            return;
+        }
 
         if self.closed.load(Ordering::Relaxed) {
+            record_pool_connection_destroy("pool_closed_drop");
+            self.semaphore.add_permits(1);
             return;
         }
 
@@ -1386,32 +1898,44 @@ impl PgPoolInner {
         if connections.len() < self.config.max_connections {
             connections.push(PooledConn {
                 conn,
-                created_at: Instant::now(),
+                created_at,
                 last_used: Instant::now(),
             });
+        } else {
+            record_pool_connection_destroy("pool_overflow_drop");
         }
 
         self.semaphore.add_permits(1);
     }
 
     /// Get a healthy connection from the pool, or None if pool is empty.
-    async fn get_healthy_connection(&self) -> Option<PgConnection> {
+    async fn get_healthy_connection(&self) -> Option<PooledConn> {
         let mut connections = self.connections.lock().await;
 
         while let Some(pooled) = connections.pop() {
             if pooled.last_used.elapsed() > self.config.idle_timeout {
-                // Connection is stale, drop it
+                tracing::debug!(
+                    idle_secs = pooled.last_used.elapsed().as_secs(),
+                    timeout_secs = self.config.idle_timeout.as_secs(),
+                    "pool_checkout_evict: connection exceeded idle timeout"
+                );
+                record_pool_connection_destroy("idle_timeout_evict");
                 continue;
             }
 
             if let Some(max_life) = self.config.max_lifetime
                 && pooled.created_at.elapsed() > max_life
             {
-                // Connection exceeded max lifetime, recycle it
+                tracing::debug!(
+                    age_secs = pooled.created_at.elapsed().as_secs(),
+                    max_lifetime_secs = max_life.as_secs(),
+                    "pool_checkout_evict: connection exceeded max lifetime"
+                );
+                record_pool_connection_destroy("max_lifetime_evict");
                 continue;
             }
 
-            return Some(pooled.conn);
+            return Some(pooled);
         }
 
         None
@@ -1449,6 +1973,8 @@ impl PgPool {
 
     /// Create a new connection pool.
     pub async fn connect(config: PoolConfig) -> PgResult<Self> {
+        validate_pool_config(&config)?;
+
         // Semaphore starts with max_connections permits
         let semaphore = Semaphore::new(config.max_connections);
 
@@ -1496,37 +2022,71 @@ impl PgPool {
             return Err(PgError::PoolClosed);
         }
 
+        if let Some(remaining) = pool_churn_remaining_open(&self.inner.config) {
+            metrics::counter!("qail_pg_pool_churn_circuit_reject_total").increment(1);
+            tracing::warn!(
+                host = %self.inner.config.host,
+                port = self.inner.config.port,
+                user = %self.inner.config.user,
+                db = %self.inner.config.database,
+                remaining_ms = remaining.as_millis() as u64,
+                "pool_connection_churn_circuit_open"
+            );
+            return Err(PgError::PoolExhausted {
+                max: self.inner.config.max_connections,
+            });
+        }
+
         // Wait for available slot with timeout
         let acquire_timeout = self.inner.config.acquire_timeout;
-        let permit = tokio::time::timeout(acquire_timeout, self.inner.semaphore.acquire())
-            .await
-            .map_err(|_| {
-                PgError::Timeout(format!(
-                    "pool acquire after {}s ({} max connections)",
-                    acquire_timeout.as_secs(),
-                    self.inner.config.max_connections
-                ))
-            })?
-            .map_err(|_| PgError::PoolClosed)?;
+        let permit =
+            match tokio::time::timeout(acquire_timeout, self.inner.semaphore.acquire()).await {
+                Ok(permit) => permit.map_err(|_| PgError::PoolClosed)?,
+                Err(_) => {
+                    metrics::counter!("qail_pg_pool_acquire_timeouts_total").increment(1);
+                    return Err(PgError::Timeout(format!(
+                        "pool acquire after {}s ({} max connections)",
+                        acquire_timeout.as_secs(),
+                        self.inner.config.max_connections
+                    )));
+                }
+            };
+
+        if self.inner.closed.load(Ordering::Relaxed) {
+            return Err(PgError::PoolClosed);
+        }
 
         // Try to get existing healthy connection
-        let mut conn = if let Some(conn) = self.inner.get_healthy_connection().await {
-            conn
-        } else {
-            let conn = Self::create_connection(&self.inner.config).await?;
-            self.inner.total_created.fetch_add(1, Ordering::Relaxed);
-            conn
-        };
+        let (mut conn, mut created_at) =
+            if let Some(pooled) = self.inner.get_healthy_connection().await {
+                (pooled.conn, pooled.created_at)
+            } else {
+                let conn = Self::create_connection(&self.inner.config).await?;
+                self.inner.total_created.fetch_add(1, Ordering::Relaxed);
+                (conn, Instant::now())
+            };
 
         if self.inner.config.test_on_acquire
-            && let Err(e) = conn.execute_simple("SELECT 1").await
+            && let Err(e) = execute_simple_with_timeout(
+                &mut conn,
+                "SELECT 1",
+                self.inner.config.connect_timeout,
+                "pool checkout health check",
+            )
+            .await
         {
-            eprintln!(
-                "[WARN] pool_health_check_failed: checkout probe failed, creating replacement connection: {}",
-                e
+            tracing::warn!(
+                host = %self.inner.config.host,
+                port = self.inner.config.port,
+                user = %self.inner.config.user,
+                db = %self.inner.config.database,
+                error = %e,
+                "pool_health_check_failed: checkout probe failed, creating replacement connection"
             );
+            pool_churn_record_destroy(&self.inner.config, "health_check_failed");
             conn = Self::create_connection(&self.inner.config).await?;
             self.inner.total_created.fetch_add(1, Ordering::Relaxed);
+            created_at = Instant::now();
         }
 
         // Pre-prepare hot statements that this connection doesn't have yet.
@@ -1546,19 +2106,65 @@ impl PgPool {
             use crate::protocol::PgEncoder;
             let mut buf = bytes::BytesMut::new();
             for (_, name, sql) in &missing {
-                let parse_msg = PgEncoder::encode_parse(name, sql, &[]);
+                let parse_msg = PgEncoder::try_encode_parse(name, sql, &[])?;
                 buf.extend_from_slice(&parse_msg);
             }
             PgEncoder::encode_sync_to(&mut buf);
-            if conn.send_bytes(&buf).await.is_ok() {
-                // Drain responses (ParseComplete + ReadyForQuery)
-                loop {
-                    match conn.recv().await {
-                        Ok(crate::protocol::BackendMessage::ReadyForQuery(_)) => break,
-                        Ok(_) => continue,
-                        Err(_) => break,
+            let preprepare_timeout = self.inner.config.connect_timeout;
+            let preprepare_result: PgResult<()> = match tokio::time::timeout(
+                preprepare_timeout,
+                async {
+                    conn.send_bytes(&buf).await?;
+                    // Drain responses and fail closed on any parse error.
+                    let mut parse_complete_count = 0usize;
+                    let mut parse_error: Option<PgError> = None;
+                    loop {
+                        let msg = conn.recv().await?;
+                        if handle_hot_preprepare_message(
+                            &msg,
+                            &mut parse_complete_count,
+                            &mut parse_error,
+                        )? {
+                            if let Some(err) = parse_error {
+                                return Err(err);
+                            }
+                            if parse_complete_count != missing.len() {
+                                return Err(PgError::Protocol(format!(
+                                    "hot pre-prepare completed with {} ParseComplete messages (expected {})",
+                                    parse_complete_count,
+                                    missing.len()
+                                )));
+                            }
+                            break;
+                        }
                     }
-                }
+                    Ok::<(), PgError>(())
+                },
+            )
+            .await
+            {
+                Ok(res) => res,
+                Err(_) => Err(PgError::Timeout(format!(
+                    "hot statement pre-prepare timeout after {:?} (pool config connect_timeout)",
+                    preprepare_timeout
+                ))),
+            };
+
+            if let Err(e) = preprepare_result {
+                tracing::warn!(
+                    host = %self.inner.config.host,
+                    port = self.inner.config.port,
+                    user = %self.inner.config.user,
+                    db = %self.inner.config.database,
+                    timeout_ms = preprepare_timeout.as_millis() as u64,
+                    error = %e,
+                    "pool_hot_prepare_failed: replacing connection to avoid handing out uncertain protocol state"
+                );
+                pool_churn_record_destroy(&self.inner.config, "hot_prepare_failed");
+                conn = Self::create_connection(&self.inner.config).await?;
+                self.inner.total_created.fetch_add(1, Ordering::Relaxed);
+                created_at = Instant::now();
+            } else {
                 // Register in local cache
                 for (hash, name, sql) in &missing {
                     conn.stmt_cache.put(*hash, name.clone());
@@ -1575,6 +2181,7 @@ impl PgPool {
             conn: Some(conn),
             pool: self.inner.clone(),
             rls_dirty: false,
+            created_at,
         })
     }
 
@@ -1602,8 +2209,23 @@ impl PgPool {
 
         // Set RLS context on the raw connection
         let sql = super::rls::context_to_sql(&ctx);
-        let pg_conn = conn.get_mut();
-        pg_conn.execute_simple(&sql).await?;
+        let pg_conn = conn.get_mut()?;
+        if let Err(e) = execute_simple_with_timeout(
+            pg_conn,
+            &sql,
+            self.inner.config.connect_timeout,
+            "pool acquire_with_rls setup",
+        )
+        .await
+        {
+            // Attempt recovery ROLLBACK to salvage the connection rather than
+            // letting Drop destroy it (which wastes a TCP connection).
+            if let Ok(pg_conn) = conn.get_mut() {
+                let _ = pg_conn.execute_simple("ROLLBACK").await;
+            }
+            conn.release().await;
+            return Err(e);
+        }
 
         // Mark dirty so Drop resets context before pool return
         conn.rls_dirty = true;
@@ -1625,8 +2247,21 @@ impl PgPool {
 
         // Set RLS context + statement_timeout atomically
         let sql = super::rls::context_to_sql_with_timeout(&ctx, timeout_ms);
-        let pg_conn = conn.get_mut();
-        pg_conn.execute_simple(&sql).await?;
+        let pg_conn = conn.get_mut()?;
+        if let Err(e) = execute_simple_with_timeout(
+            pg_conn,
+            &sql,
+            self.inner.config.connect_timeout,
+            "pool acquire_with_rls_timeout setup",
+        )
+        .await
+        {
+            if let Ok(pg_conn) = conn.get_mut() {
+                let _ = pg_conn.execute_simple("ROLLBACK").await;
+            }
+            conn.release().await;
+            return Err(e);
+        }
 
         // Mark dirty so Drop resets context + timeout before pool return
         conn.rls_dirty = true;
@@ -1650,8 +2285,21 @@ impl PgPool {
 
         let sql =
             super::rls::context_to_sql_with_timeouts(&ctx, statement_timeout_ms, lock_timeout_ms);
-        let pg_conn = conn.get_mut();
-        pg_conn.execute_simple(&sql).await?;
+        let pg_conn = conn.get_mut()?;
+        if let Err(e) = execute_simple_with_timeout(
+            pg_conn,
+            &sql,
+            self.inner.config.connect_timeout,
+            "pool acquire_with_rls_timeouts setup",
+        )
+        .await
+        {
+            if let Ok(pg_conn) = conn.get_mut() {
+                let _ = pg_conn.execute_simple("ROLLBACK").await;
+            }
+            conn.release().await;
+            return Err(e);
+        }
 
         conn.rls_dirty = true;
 
@@ -1710,8 +2358,21 @@ impl PgPool {
 
         if let Some(branch_name) = ctx.branch_name() {
             let sql = super::branch_sql::branch_context_sql(branch_name);
-            let pg_conn = conn.get_mut();
-            pg_conn.execute_simple(&sql).await?;
+            let pg_conn = conn.get_mut()?;
+            if let Err(e) = execute_simple_with_timeout(
+                pg_conn,
+                &sql,
+                self.inner.config.connect_timeout,
+                "pool acquire_with_branch setup",
+            )
+            .await
+            {
+                if let Ok(pg_conn) = conn.get_mut() {
+                    let _ = pg_conn.execute_simple("ROLLBACK").await;
+                }
+                conn.release().await;
+                return Err(e);
+            }
             conn.rls_dirty = true; // Reuse dirty flag for auto-reset
         }
 
@@ -1736,12 +2397,16 @@ impl PgPool {
     /// Get comprehensive pool statistics.
     pub async fn stats(&self) -> PoolStats {
         let idle = self.inner.connections.lock().await.len();
+        let active = self.inner.active_count.load(Ordering::Relaxed);
+        let used_slots = self
+            .inner
+            .config
+            .max_connections
+            .saturating_sub(self.inner.semaphore.available_permits());
         PoolStats {
-            active: self.inner.active_count.load(Ordering::Relaxed),
+            active,
             idle,
-            pending: self.inner.config.max_connections
-                - self.inner.semaphore.available_permits()
-                - self.active_count(),
+            pending: used_slots.saturating_sub(active),
             max_size: self.inner.config.max_connections,
             total_created: self.inner.total_created.load(Ordering::Relaxed),
         }
@@ -1753,11 +2418,46 @@ impl PgPool {
     }
 
     /// Close the pool gracefully.
+    ///
+    /// Rejects new acquires immediately, then waits up to `acquire_timeout`
+    /// for in-flight connections to be released before dropping idle
+    /// connections. Connections released after closure are destroyed by
+    /// `return_connection` and not returned to the idle queue.
     pub async fn close(&self) {
+        self.close_graceful(self.inner.config.acquire_timeout).await;
+    }
+
+    /// Close the pool gracefully with an explicit drain timeout.
+    pub async fn close_graceful(&self, drain_timeout: Duration) {
         self.inner.closed.store(true, Ordering::Relaxed);
+        // Wake blocked acquires immediately so shutdown doesn't wait on acquire_timeout.
+        self.inner.semaphore.close();
+
+        let deadline = Instant::now() + drain_timeout;
+        loop {
+            let active = self.inner.active_count.load(Ordering::Relaxed);
+            if active == 0 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    active_connections = active,
+                    timeout_ms = drain_timeout.as_millis() as u64,
+                    "pool_close_drain_timeout: forcing idle cleanup while active connections remain"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
 
         let mut connections = self.inner.connections.lock().await;
+        let dropped_idle = connections.len();
         connections.clear();
+        tracing::info!(
+            dropped_idle_connections = dropped_idle,
+            active_connections = self.inner.active_count.load(Ordering::Relaxed),
+            "pool_closed"
+        );
     }
 
     /// Create a new connection using the pool configuration.
@@ -1779,6 +2479,7 @@ impl PgPool {
             gss_token_provider: config.gss_token_provider,
             gss_token_provider_ex: config.gss_token_provider_ex.clone(),
             auth: config.auth_settings,
+            startup_params: Vec::new(),
         };
 
         if let Some(remaining) = gss_circuit_remaining_open(config) {
@@ -1799,17 +2500,30 @@ impl PgPool {
 
         let mut attempt = 0usize;
         loop {
-            match PgConnection::connect_with_options(
-                &config.host,
-                config.port,
-                &config.user,
-                &config.database,
-                config.password.as_deref(),
-                options.clone(),
+            let connect_result = tokio::time::timeout(
+                config.connect_timeout,
+                PgConnection::connect_with_options(
+                    &config.host,
+                    config.port,
+                    &config.user,
+                    &config.database,
+                    config.password.as_deref(),
+                    options.clone(),
+                ),
             )
-            .await
-            {
+            .await;
+
+            let connect_result = match connect_result {
+                Ok(result) => result,
+                Err(_) => Err(PgError::Timeout(format!(
+                    "connect timeout after {:?} (pool config connect_timeout)",
+                    config.connect_timeout
+                ))),
+            };
+
+            match connect_result {
                 Ok(conn) => {
+                    metrics::counter!("qail_pg_pool_connect_success_total").increment(1);
                     gss_circuit_record_success(config);
                     return Ok(conn);
                 }
@@ -1831,6 +2545,7 @@ impl PgPool {
                     attempt += 1;
                 }
                 Err(err) => {
+                    metrics::counter!("qail_pg_pool_connect_failures_total").increment(1);
                     if should_track_gss_circuit_error(config, &err) {
                         metrics::counter!("qail_pg_gss_connect_failures_total").increment(1);
                         gss_circuit_record_failure(config);
@@ -1838,6 +2553,144 @@ impl PgPool {
                     return Err(err);
                 }
             }
+        }
+    }
+
+    /// Run one maintenance cycle: evict stale idle connections and backfill
+    /// to `min_connections`. Called periodically by `spawn_pool_maintenance`.
+    pub async fn maintain(&self) {
+        if self.inner.closed.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Phase 1: Evict idle and expired connections from the pool.
+        let evicted = {
+            let mut connections = self.inner.connections.lock().await;
+            let before = connections.len();
+            connections.retain(|pooled| {
+                if pooled.last_used.elapsed() > self.inner.config.idle_timeout {
+                    record_pool_connection_destroy("idle_sweep_evict");
+                    return false;
+                }
+                if let Some(max_life) = self.inner.config.max_lifetime
+                    && pooled.created_at.elapsed() > max_life
+                {
+                    record_pool_connection_destroy("lifetime_sweep_evict");
+                    return false;
+                }
+                true
+            });
+            before - connections.len()
+        };
+
+        if evicted > 0 {
+            tracing::debug!(evicted, "pool_maintenance: evicted stale idle connections");
+        }
+
+        // Phase 2: Backfill to min_connections if below threshold.
+        let min = self.inner.config.min_connections;
+        if min == 0 {
+            return;
+        }
+
+        let idle_count = self.inner.connections.lock().await.len();
+        if idle_count >= min {
+            return;
+        }
+
+        let deficit = min - idle_count;
+        let mut created = 0usize;
+        for _ in 0..deficit {
+            match Self::create_connection(&self.inner.config).await {
+                Ok(conn) => {
+                    self.inner.total_created.fetch_add(1, Ordering::Relaxed);
+                    let mut connections = self.inner.connections.lock().await;
+                    if connections.len() < self.inner.config.max_connections {
+                        connections.push(PooledConn {
+                            conn,
+                            created_at: Instant::now(),
+                            last_used: Instant::now(),
+                        });
+                        created += 1;
+                    } else {
+                        // Pool filled by concurrent acquires; stop backfill.
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "pool_maintenance: backfill connection failed");
+                    break; // Transient failure — retry next cycle.
+                }
+            }
+        }
+
+        if created > 0 {
+            tracing::debug!(
+                created,
+                min_connections = min,
+                "pool_maintenance: backfilled idle connections"
+            );
+        }
+    }
+}
+
+/// Spawn a background task that periodically maintains pool health.
+///
+/// Runs every `idle_timeout / 2` (min 5s): evicts stale idle connections and
+/// backfills to `min_connections`. Call once after `PgPool::connect`.
+pub fn spawn_pool_maintenance(pool: PgPool) {
+    let interval_secs = std::cmp::max(pool.inner.config.idle_timeout.as_secs() / 2, 5);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        loop {
+            interval.tick().await;
+            if pool.is_closed() {
+                break;
+            }
+            pool.maintain().await;
+        }
+    });
+}
+
+fn validate_pool_config(config: &PoolConfig) -> PgResult<()> {
+    if config.max_connections == 0 {
+        return Err(PgError::Connection(
+            "Invalid PoolConfig: max_connections must be >= 1".to_string(),
+        ));
+    }
+    if config.min_connections > config.max_connections {
+        return Err(PgError::Connection(format!(
+            "Invalid PoolConfig: min_connections ({}) must be <= max_connections ({})",
+            config.min_connections, config.max_connections
+        )));
+    }
+    if config.acquire_timeout.is_zero() {
+        return Err(PgError::Connection(
+            "Invalid PoolConfig: acquire_timeout must be > 0".to_string(),
+        ));
+    }
+    if config.connect_timeout.is_zero() {
+        return Err(PgError::Connection(
+            "Invalid PoolConfig: connect_timeout must be > 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn execute_simple_with_timeout(
+    conn: &mut PgConnection,
+    sql: &str,
+    timeout: Duration,
+    operation: &str,
+) -> PgResult<()> {
+    match tokio::time::timeout(timeout, conn.execute_simple(sql)).await {
+        Ok(result) => result,
+        Err(_) => {
+            conn.mark_io_desynced();
+            Err(PgError::Timeout(format!(
+                "{} timeout after {:?} (pool config connect_timeout)",
+                operation, timeout
+            )))
         }
     }
 }
@@ -2186,6 +3039,265 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_pool_config_rejects_zero_max_connections() {
+        let config = PoolConfig::new("localhost", 5432, "user", "db")
+            .max_connections(0)
+            .min_connections(0);
+        let err = validate_pool_config(&config).expect_err("expected invalid max_connections");
+        assert!(err.to_string().contains("max_connections must be >= 1"));
+    }
+
+    #[test]
+    fn test_validate_pool_config_rejects_min_greater_than_max() {
+        let config = PoolConfig::new("localhost", 5432, "user", "db")
+            .max_connections(2)
+            .min_connections(3);
+        let err = validate_pool_config(&config).expect_err("expected invalid min/max");
+        assert!(
+            err.to_string()
+                .contains("min_connections (3) must be <= max_connections (2)")
+        );
+    }
+
+    #[test]
+    fn test_validate_pool_config_rejects_zero_acquire_timeout() {
+        let config =
+            PoolConfig::new("localhost", 5432, "user", "db").acquire_timeout(Duration::ZERO);
+        let err = validate_pool_config(&config).expect_err("expected invalid acquire_timeout");
+        assert!(err.to_string().contains("acquire_timeout must be > 0"));
+    }
+
+    #[test]
+    fn test_validate_pool_config_rejects_zero_connect_timeout() {
+        let config =
+            PoolConfig::new("localhost", 5432, "user", "db").connect_timeout(Duration::ZERO);
+        let err = validate_pool_config(&config).expect_err("expected invalid connect_timeout");
+        assert!(err.to_string().contains("connect_timeout must be > 0"));
+    }
+
+    #[tokio::test]
+    async fn test_close_graceful_waits_for_active_connections_to_drain() {
+        let pool = PgPool::connect(
+            PoolConfig::new_dev("localhost", 5432, "user", "db")
+                .min_connections(0)
+                .max_connections(1),
+        )
+        .await
+        .expect("pool should initialize without dialing with min_connections=0");
+
+        pool.inner.active_count.store(1, Ordering::Relaxed);
+        let pool_clone = pool.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            pool_clone.inner.active_count.store(0, Ordering::Relaxed);
+        });
+
+        let started = Instant::now();
+        pool.close_graceful(Duration::from_millis(200)).await;
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "close_graceful should wait for active connections to drain"
+        );
+        assert!(pool.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_close_graceful_unblocks_waiting_acquire() {
+        let pool = PgPool::connect(
+            PoolConfig::new_dev("localhost", 5432, "user", "db")
+                .min_connections(0)
+                .max_connections(1),
+        )
+        .await
+        .expect("pool should initialize without dialing with min_connections=0");
+
+        let permit = pool
+            .inner
+            .semaphore
+            .acquire()
+            .await
+            .expect("semaphore permit");
+        permit.forget();
+
+        let pool_clone = pool.clone();
+        let waiter = tokio::spawn(async move { pool_clone.acquire_raw().await });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        pool.close_graceful(Duration::from_millis(200)).await;
+
+        let res = tokio::time::timeout(Duration::from_millis(200), waiter)
+            .await
+            .expect("waiting acquire should unblock quickly after close")
+            .expect("join handle");
+        assert!(matches!(res, Err(PgError::PoolClosed)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_release_drops_desynced_connection_without_commit() {
+        use crate::driver::stream::PgStream;
+        use crate::driver::connection::StatementCache;
+        use bytes::BytesMut;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        let conn = PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(16).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            secret_key: 0,
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: true,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        };
+
+        let pool = PgPool::connect(
+            PoolConfig::new_dev("localhost", 5432, "user", "db")
+                .min_connections(0)
+                .max_connections(1),
+        )
+        .await
+        .expect("pool init");
+
+        // Simulate an acquired slot: consume one permit and mark active.
+        let permit = pool
+            .inner
+            .semaphore
+            .acquire()
+            .await
+            .expect("semaphore permit");
+        permit.forget();
+        pool.inner.active_count.store(1, Ordering::Relaxed);
+
+        let pooled = PooledConnection {
+            conn: Some(conn),
+            pool: pool.inner.clone(),
+            rls_dirty: true,
+            created_at: Instant::now(),
+        };
+        pooled.release().await;
+
+        assert_eq!(pool.inner.active_count.load(Ordering::Relaxed), 0);
+        assert_eq!(pool.inner.semaphore.available_permits(), 1);
+        assert_eq!(pool.inner.connections.lock().await.len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_execute_simple_with_timeout_marks_connection_desynced() {
+        use crate::driver::connection::StatementCache;
+        use crate::driver::stream::PgStream;
+        use bytes::BytesMut;
+        use std::collections::{HashMap, VecDeque};
+        use std::num::NonZeroUsize;
+        use tokio::net::UnixStream;
+
+        let (unix_stream, _peer) = UnixStream::pair().expect("unix stream pair");
+        let mut conn = PgConnection {
+            stream: PgStream::Unix(unix_stream),
+            buffer: BytesMut::with_capacity(1024),
+            write_buf: BytesMut::with_capacity(1024),
+            sql_buf: BytesMut::with_capacity(256),
+            params_buf: Vec::new(),
+            prepared_statements: HashMap::new(),
+            stmt_cache: StatementCache::new(NonZeroUsize::new(16).expect("non-zero")),
+            column_info_cache: HashMap::new(),
+            process_id: 0,
+            secret_key: 0,
+            notifications: VecDeque::new(),
+            replication_stream_active: false,
+            replication_mode_enabled: false,
+            last_replication_wal_end: None,
+            io_desynced: false,
+            pending_statement_closes: Vec::new(),
+            draining_statement_closes: false,
+        };
+
+        let err = execute_simple_with_timeout(
+            &mut conn,
+            "SELECT 1",
+            Duration::from_millis(1),
+            "unit-test timeout",
+        )
+        .await
+        .expect_err("expected timeout");
+        assert!(matches!(err, PgError::Timeout(_)));
+        assert!(conn.is_io_desynced());
+    }
+
+    #[test]
+    fn test_hot_preprepare_message_tracks_parse_complete_and_ready() {
+        let mut parse_complete_count = 0usize;
+        let mut error: Option<PgError> = None;
+
+        let done = handle_hot_preprepare_message(
+            &crate::protocol::BackendMessage::ParseComplete,
+            &mut parse_complete_count,
+            &mut error,
+        )
+        .expect("parse complete accepted");
+        assert!(!done);
+        assert_eq!(parse_complete_count, 1);
+        assert!(error.is_none());
+
+        let done = handle_hot_preprepare_message(
+            &crate::protocol::BackendMessage::ReadyForQuery(crate::protocol::TransactionStatus::Idle),
+            &mut parse_complete_count,
+            &mut error,
+        )
+        .expect("ready accepted");
+        assert!(done);
+    }
+
+    #[test]
+    fn test_hot_preprepare_message_captures_error() {
+        let mut parse_complete_count = 0usize;
+        let mut error: Option<PgError> = None;
+        let err_fields = crate::protocol::ErrorFields {
+            severity: "ERROR".to_string(),
+            code: "42601".to_string(),
+            message: "syntax error".to_string(),
+            detail: None,
+            hint: None,
+        };
+
+        let done = handle_hot_preprepare_message(
+            &crate::protocol::BackendMessage::ErrorResponse(err_fields),
+            &mut parse_complete_count,
+            &mut error,
+        )
+        .expect("error response accepted for drain");
+        assert!(!done);
+        assert_eq!(parse_complete_count, 0);
+        assert!(matches!(error, Some(PgError::QueryServer(_))));
+    }
+
+    #[test]
+    fn test_hot_preprepare_message_rejects_unexpected_data_row() {
+        let mut parse_complete_count = 0usize;
+        let mut error: Option<PgError> = None;
+        let err = handle_hot_preprepare_message(
+            &crate::protocol::BackendMessage::DataRow(vec![]),
+            &mut parse_complete_count,
+            &mut error,
+        )
+        .expect_err("unexpected DataRow should fail");
+        assert!(err.to_string().contains("Unexpected backend message"));
+    }
+
+    #[test]
     fn test_parse_pg_url_strips_query_string() {
         let (host, port, user, db, password) = parse_pg_url(
             "postgresql://alice:secret@db.internal:5433/app?sslmode=require&channel_binding=require",
@@ -2408,6 +3520,44 @@ mod tests {
 
         gss_circuit_record_success(&config);
         assert!(gss_circuit_remaining_open(&config).is_none());
+    }
+
+    fn unique_pool_host(prefix: &str) -> String {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{}.{}", prefix, id)
+    }
+
+    #[test]
+    fn test_decrement_active_count_saturating() {
+        let counter = AtomicUsize::new(0);
+        decrement_active_count_saturating(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+        counter.store(2, Ordering::Relaxed);
+        decrement_active_count_saturating(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        decrement_active_count_saturating(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        decrement_active_count_saturating(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_pool_churn_circuit_opens_after_threshold() {
+        let host = unique_pool_host("pool-churn");
+        let config = PoolConfig::new(&host, 5432, "user", "db");
+
+        assert!(pool_churn_remaining_open(&config).is_none());
+        for _ in 0..POOL_CHURN_THRESHOLD {
+            pool_churn_record_destroy(&config, "unit_test_churn");
+        }
+        assert!(pool_churn_remaining_open(&config).is_some());
+
+        // Cleanup isolated registry state for this test key.
+        if let Ok(mut registry) = pool_churn_registry().lock() {
+            registry.remove(&pool_churn_key(&config));
+        }
     }
 
     #[test]

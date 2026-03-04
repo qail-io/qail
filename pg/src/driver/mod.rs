@@ -14,6 +14,7 @@
 //! - `pipeline.rs` - High-performance pipelining (275k q/s)
 //! - `cancel.rs` - Query cancellation
 //! - `notification.rs` - LISTEN/NOTIFY support
+//! - `replication.rs` - Replication control-plane commands
 //! - `io_backend.rs` - Runtime I/O backend detection
 
 pub mod branch_sql;
@@ -24,6 +25,7 @@ mod cursor;
 pub mod explain;
 #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
 pub mod gss;
+mod extended_flow;
 mod io;
 pub mod io_backend;
 pub mod notification;
@@ -31,10 +33,13 @@ mod pipeline;
 mod pool;
 mod prepared;
 mod query;
+mod replication;
 pub mod rls;
 mod row;
 mod stream;
 mod transaction;
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+mod uring;
 
 pub use cancel::CancelToken;
 pub use connection::PgConnection;
@@ -42,8 +47,12 @@ pub use connection::TlsConfig;
 pub(crate) use connection::{CANCEL_REQUEST_CODE, parse_affected_rows};
 pub use io_backend::{IoBackend, backend_name, detect as detect_io_backend};
 pub use notification::Notification;
-pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection};
+pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection, spawn_pool_maintenance};
 pub use prepared::PreparedStatement;
+pub use replication::{
+    IdentifySystem, ReplicationKeepalive, ReplicationOption, ReplicationSlotInfo,
+    ReplicationStreamMessage, ReplicationStreamStart, ReplicationXLogData,
+};
 pub use rls::RlsContext;
 pub use row::QailRow;
 
@@ -232,6 +241,22 @@ impl PgError {
         message.contains("cached plan must be replanned")
     }
 
+    /// True when server reports the prepared statement name already exists.
+    ///
+    /// This typically means local cache eviction drifted from server state
+    /// (e.g. local entry dropped while backend statement still exists).
+    /// Callers can retry once without Parse after preserving local mapping.
+    pub fn is_prepared_statement_already_exists(&self) -> bool {
+        let Some(err) = self.server_error() else {
+            return false;
+        };
+        if !err.code.eq_ignore_ascii_case("42P05") {
+            return false;
+        }
+        let message = err.message.to_ascii_lowercase();
+        message.contains("prepared statement") && message.contains("already exists")
+    }
+
     /// True when the error is a transient server condition that may succeed
     /// on retry. Covers serialization failures, deadlocks, standby
     /// unavailability, connection exceptions, and prepared-statement staleness.
@@ -281,6 +306,44 @@ impl PgError {
 
 /// Result type for PostgreSQL operations.
 pub type PgResult<T> = Result<T, PgError>;
+
+#[inline]
+pub(crate) fn is_ignorable_session_message(msg: &crate::protocol::BackendMessage) -> bool {
+    matches!(
+        msg,
+        crate::protocol::BackendMessage::NoticeResponse(_)
+            | crate::protocol::BackendMessage::ParameterStatus { .. }
+    )
+}
+
+#[inline]
+pub(crate) fn unexpected_backend_message(
+    phase: &str,
+    msg: &crate::protocol::BackendMessage,
+) -> PgError {
+    PgError::Protocol(format!(
+        "Unexpected backend message during {} phase: {:?}",
+        phase, msg
+    ))
+}
+
+#[inline]
+pub(crate) fn is_ignorable_session_msg_type(msg_type: u8) -> bool {
+    matches!(msg_type, b'N' | b'S')
+}
+
+#[inline]
+pub(crate) fn unexpected_backend_msg_type(phase: &str, msg_type: u8) -> PgError {
+    let printable = if msg_type.is_ascii_graphic() {
+        msg_type as char
+    } else {
+        '?'
+    };
+    PgError::Protocol(format!(
+        "Unexpected backend message type during {} phase: byte={} char={}",
+        phase, msg_type, printable
+    ))
+}
 
 /// Result of a query that returns rows (SELECT/GET).
 #[derive(Debug, Clone)]
@@ -513,6 +576,9 @@ pub struct ConnectOptions {
     pub gss_token_provider_ex: Option<GssTokenProviderEx>,
     /// Password-auth policy.
     pub auth: AuthSettings,
+    /// Additional startup parameters sent in StartupMessage.
+    /// Example: `replication=database` for logical replication mode.
+    pub startup_params: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for ConnectOptions {
@@ -534,7 +600,31 @@ impl std::fmt::Debug for ConnectOptions {
                 &self.gss_token_provider_ex.as_ref().map(|_| "<configured>"),
             )
             .field("auth", &self.auth)
+            .field("startup_params_count", &self.startup_params.len())
             .finish()
+    }
+}
+
+impl ConnectOptions {
+    /// Add a startup parameter.
+    ///
+    /// Example: `opts.with_startup_param("application_name", "qail-repl")`.
+    pub fn with_startup_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = key.into();
+        let value = value.into();
+        self.startup_params
+            .retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
+        self.startup_params.push((key, value));
+        self
+    }
+
+    /// Enable logical replication startup mode (`replication=database`).
+    pub fn with_logical_replication(mut self) -> Self {
+        self.startup_params
+            .retain(|(k, _)| !k.eq_ignore_ascii_case("replication"));
+        self.startup_params
+            .push(("replication".to_string(), "database".to_string()));
+        self
     }
 }
 
@@ -613,6 +703,41 @@ impl PgDriver {
         Ok(Self::new(connection))
     }
 
+    /// Connect in logical replication mode (`replication=database`).
+    ///
+    /// This enables replication commands such as `IDENTIFY_SYSTEM` and
+    /// `CREATE_REPLICATION_SLOT`.
+    pub async fn connect_logical_replication(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+    ) -> PgResult<Self> {
+        let options = ConnectOptions::default().with_logical_replication();
+        Self::connect_with_options(host, port, user, database, password, options).await
+    }
+
+    /// Connect with explicit options and force logical replication mode.
+    pub async fn connect_logical_replication_with_options(
+        host: &str,
+        port: u16,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+        options: ConnectOptions,
+    ) -> PgResult<Self> {
+        Self::connect_with_options(
+            host,
+            port,
+            user,
+            database,
+            password,
+            options.with_logical_replication(),
+        )
+        .await
+    }
+
     /// Connect using DATABASE_URL environment variable.
     ///
     /// Parses the URL format: `postgresql://user:password@host:port/database`
@@ -654,7 +779,7 @@ impl PgDriver {
             pool::apply_url_query_params(&mut pool_cfg, query, &host)?;
         }
 
-        let opts = ConnectOptions {
+        let mut opts = ConnectOptions {
             tls_mode: pool_cfg.tls_mode,
             gss_enc_mode: pool_cfg.gss_enc_mode,
             tls_ca_cert_pem: pool_cfg.tls_ca_cert_pem,
@@ -662,7 +787,35 @@ impl PgDriver {
             gss_token_provider: pool_cfg.gss_token_provider,
             gss_token_provider_ex: pool_cfg.gss_token_provider_ex,
             auth: pool_cfg.auth_settings,
+            startup_params: Vec::new(),
         };
+
+        // Startup parameters not owned by PoolConfig parser.
+        if let Some(query) = url.split('?').nth(1) {
+            for pair in query.split('&') {
+                let mut kv = pair.splitn(2, '=');
+                let key = kv.next().unwrap_or_default().trim();
+                let value = kv.next().unwrap_or_default().trim();
+                if key.eq_ignore_ascii_case("replication") {
+                    let replication_mode = if value.eq_ignore_ascii_case("database") {
+                        "database"
+                    } else if value.eq_ignore_ascii_case("true")
+                        || value.eq_ignore_ascii_case("on")
+                        || value == "1"
+                    {
+                        // Canonicalize legacy truthy values to PostgreSQL's
+                        // logical-replication mode value.
+                        "database"
+                    } else {
+                        return Err(PgError::Connection(format!(
+                            "Invalid replication startup mode '{}': expected database|true|on|1",
+                            value
+                        )));
+                    };
+                    opts = opts.with_startup_param("replication", replication_mode);
+                }
+            }
+        }
 
         Self::connect_with_options(&host, port, &user, &database, password.as_deref(), opts).await
     }
@@ -825,7 +978,7 @@ impl PgDriver {
         self.fetch_all_cached_with_format(cmd, result_format).await
     }
 
-    /// Execute a QAIL command and fetch all rows as a typed struct.
+    /// Execute a QAIL command and fetch all rows as a typed struct (text format).
     /// Requires the target type to implement `QailRow` trait.
     ///
     /// # Example
@@ -833,14 +986,36 @@ impl PgDriver {
     /// let users: Vec<User> = driver.fetch_typed::<User>(&query).await?;
     /// ```
     pub async fn fetch_typed<T: row::QailRow>(&mut self, cmd: &Qail) -> PgResult<Vec<T>> {
-        let rows = self.fetch_all(cmd).await?;
+        self.fetch_typed_with_format(cmd, ResultFormat::Text).await
+    }
+
+    /// Execute a QAIL command and fetch all rows as a typed struct with explicit result format.
+    ///
+    /// Use [`ResultFormat::Binary`] to get binary wire values; row decoding should use
+    /// metadata-aware accessors such as `PgRow::try_get()` / `try_get_by_name()`.
+    pub async fn fetch_typed_with_format<T: row::QailRow>(
+        &mut self,
+        cmd: &Qail,
+        result_format: ResultFormat,
+    ) -> PgResult<Vec<T>> {
+        let rows = self.fetch_all_with_format(cmd, result_format).await?;
         Ok(rows.iter().map(T::from_row).collect())
     }
 
-    /// Execute a QAIL command and fetch a single row as a typed struct.
+    /// Execute a QAIL command and fetch a single row as a typed struct (text format).
     /// Returns None if no rows are returned.
     pub async fn fetch_one_typed<T: row::QailRow>(&mut self, cmd: &Qail) -> PgResult<Option<T>> {
-        let rows = self.fetch_all(cmd).await?;
+        self.fetch_one_typed_with_format(cmd, ResultFormat::Text)
+            .await
+    }
+
+    /// Execute a QAIL command and fetch a single row as a typed struct with explicit result format.
+    pub async fn fetch_one_typed_with_format<T: row::QailRow>(
+        &mut self,
+        cmd: &Qail,
+        result_format: ResultFormat,
+    ) -> PgResult<Option<T>> {
+        let rows = self.fetch_all_with_format(cmd, result_format).await?;
         Ok(rows.first().map(T::from_row))
     }
 
@@ -877,9 +1052,14 @@ impl PgDriver {
         let mut column_info: Option<Arc<ColumnInfo>> = None;
 
         let mut error: Option<PgError> = None;
+        let mut flow =
+            extended_flow::ExtendedFlowTracker::new(
+                extended_flow::ExtendedFlowConfig::parse_bind_describe_portal_execute(),
+            );
 
         loop {
             let msg = self.connection.recv().await?;
+            flow.validate(&msg, "driver fetch_all execute", error.is_some())?;
             match msg {
                 crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
@@ -894,6 +1074,7 @@ impl PgDriver {
                         });
                     }
                 }
+                crate::protocol::BackendMessage::NoData => {}
                 crate::protocol::BackendMessage::CommandComplete(_) => {}
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
@@ -906,7 +1087,13 @@ impl PgDriver {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message(
+                        "driver fetch_all execute",
+                        &other,
+                    ));
+                }
             }
         }
     }
@@ -941,49 +1128,44 @@ impl PgDriver {
         // Collect results using FAST receiver
         let mut rows: Vec<PgRow> = Vec::with_capacity(32);
         let mut error: Option<PgError> = None;
+        let mut flow = extended_flow::ExtendedFlowTracker::new(
+            extended_flow::ExtendedFlowConfig::parse_bind_execute(true),
+        );
 
         loop {
             let res = self.connection.recv_with_data_fast().await;
             match res {
                 Ok((msg_type, data)) => {
+                    flow.validate_msg_type(msg_type, "driver fetch_all_fast execute", error.is_some())?;
                     match msg_type {
                         b'D' => {
-                            // DataRow
                             if error.is_none()
                                 && let Some(columns) = data
                             {
                                 rows.push(PgRow {
                                     columns,
-                                    column_info: None, // Skip metadata for speed
+                                    column_info: None,
                                 });
                             }
                         }
                         b'Z' => {
-                            // ReadyForQuery
                             if let Some(err) = error {
                                 return Err(err);
                             }
                             return Ok(rows);
                         }
-                        _ => {} // 1, 2, C, T - skip Parse/Bind/CommandComplete/RowDescription
+                        _ => {}
                     }
                 }
                 Err(e) => {
-                    // recv_with_data_fast returns Err on ErrorResponse automatically.
-                    // We need to capture it and continue draining.
-                    // BUT recv_with_data_fast doesn't return the error *message type* if it fails.
-                    // It returns PgError::Query(msg).
-                    // So we capture the error, but we must continue RECVing until ReadyForQuery.
-                    // However, recv_with_data_fast will KEEP returning Err(Query) if the buffer has E?
-                    // No, recv_with_data_fast consumes the E message before returning Err.
-
-                    if error.is_none() {
-                        error = Some(e);
+                    // QueryServer means backend sent ErrorResponse; keep draining to ReadyForQuery.
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        if error.is_none() {
+                            error = Some(e);
+                        }
+                        continue;
                     }
-                    // Continue loop to drain until ReadyForQuery...
-                    // BUT wait, does recv_with_data_fast handle the *rest* of the stream?
-                    // If we call it again, it will read the NEXT message.
-                    // So we just continue.
+                    return Err(e);
                 }
             }
         }
@@ -1021,9 +1203,15 @@ impl PgDriver {
                 .await
             {
                 Ok(rows) => return Ok(rows),
-                Err(err) if !retried && err.is_prepared_statement_retryable() => {
+                Err(err)
+                    if !retried
+                        && (err.is_prepared_statement_retryable()
+                            || err.is_prepared_statement_already_exists()) =>
+                {
                     retried = true;
-                    self.connection.clear_prepared_statement_state();
+                    if err.is_prepared_statement_retryable() {
+                        self.connection.clear_prepared_statement_state();
+                    }
                 }
                 Err(err) => return Err(err),
             }
@@ -1111,8 +1299,8 @@ impl PgDriver {
 
             // Buffer Parse + Describe(Statement) for first call
             use crate::protocol::PgEncoder;
-            let parse_msg = PgEncoder::encode_parse(&name, sql_str, &[]);
-            let describe_msg = PgEncoder::encode_describe(false, &name);
+            let parse_msg = PgEncoder::try_encode_parse(&name, sql_str, &[])?;
+            let describe_msg = PgEncoder::try_encode_describe(false, &name)?;
             self.connection.write_buf.extend_from_slice(&parse_msg);
             self.connection.write_buf.extend_from_slice(&describe_msg);
 
@@ -1126,18 +1314,31 @@ impl PgDriver {
 
         // Append Bind + Execute + Sync to same buffer
         use crate::protocol::PgEncoder;
-        PgEncoder::encode_bind_to_with_result_format(
+        if let Err(e) = PgEncoder::encode_bind_to_with_result_format(
             &mut self.connection.write_buf,
             &stmt_name,
             &self.connection.params_buf,
             result_format.as_wire_code(),
-        )
-        .map_err(|e| PgError::Encode(e.to_string()))?;
+        ) {
+            if is_cache_miss {
+                self.connection.stmt_cache.remove(&sql_hash);
+                self.connection.prepared_statements.remove(&stmt_name);
+                self.connection.column_info_cache.remove(&sql_hash);
+            }
+            return Err(PgError::Encode(e.to_string()));
+        }
         PgEncoder::encode_execute_to(&mut self.connection.write_buf);
         PgEncoder::encode_sync_to(&mut self.connection.write_buf);
 
         // Single write_all syscall for all messages
-        self.connection.flush_write_buf().await?;
+        if let Err(err) = self.connection.flush_write_buf().await {
+            if is_cache_miss {
+                self.connection.stmt_cache.remove(&sql_hash);
+                self.connection.prepared_statements.remove(&stmt_name);
+                self.connection.column_info_cache.remove(&sql_hash);
+            }
+            return Err(err);
+        }
 
         // On cache hit, use the previously cached ColumnInfo
         let cached_column_info = self.connection.column_info_cache.get(&sql_hash).cloned();
@@ -1145,12 +1346,38 @@ impl PgDriver {
         let mut rows: Vec<PgRow> = Vec::with_capacity(32);
         let mut column_info: Option<Arc<ColumnInfo>> = cached_column_info;
         let mut error: Option<PgError> = None;
+        let mut flow = extended_flow::ExtendedFlowTracker::new(
+            extended_flow::ExtendedFlowConfig::parse_describe_statement_bind_execute(is_cache_miss),
+        );
 
         loop {
-            let msg = self.connection.recv().await?;
+            let msg = match self.connection.recv().await {
+                Ok(msg) => msg,
+                Err(err) => {
+                    if is_cache_miss && !flow.saw_parse_complete() {
+                        self.connection.stmt_cache.remove(&sql_hash);
+                        self.connection.prepared_statements.remove(&stmt_name);
+                        self.connection.column_info_cache.remove(&sql_hash);
+                    }
+                    return Err(err);
+                }
+            };
+            if let Err(err) = flow.validate(
+                &msg,
+                "driver fetch_all_cached execute",
+                error.is_some(),
+            ) {
+                if is_cache_miss && !flow.saw_parse_complete() {
+                    self.connection.stmt_cache.remove(&sql_hash);
+                    self.connection.prepared_statements.remove(&stmt_name);
+                    self.connection.column_info_cache.remove(&sql_hash);
+                }
+                return Err(err);
+            }
             match msg {
-                crate::protocol::BackendMessage::ParseComplete
-                | crate::protocol::BackendMessage::BindComplete => {}
+                crate::protocol::BackendMessage::ParseComplete => {
+                }
+                crate::protocol::BackendMessage::BindComplete => {}
                 crate::protocol::BackendMessage::ParameterDescription(_) => {
                     // Sent after Describe(Statement) — ignore
                 }
@@ -1178,7 +1405,24 @@ impl PgDriver {
                 }
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     if let Some(err) = error {
+                        if is_cache_miss
+                            && !flow.saw_parse_complete()
+                            && !err.is_prepared_statement_already_exists()
+                        {
+                            self.connection.stmt_cache.remove(&sql_hash);
+                            self.connection.prepared_statements.remove(&stmt_name);
+                            self.connection.column_info_cache.remove(&sql_hash);
+                        }
                         return Err(err);
+                    }
+                    if is_cache_miss && !flow.saw_parse_complete() {
+                        self.connection.stmt_cache.remove(&sql_hash);
+                        self.connection.prepared_statements.remove(&stmt_name);
+                        self.connection.column_info_cache.remove(&sql_hash);
+                        return Err(PgError::Protocol(
+                            "Cache miss query reached ReadyForQuery without ParseComplete"
+                                .to_string(),
+                        ));
                     }
                     return Ok(rows);
                 }
@@ -1191,7 +1435,18 @@ impl PgDriver {
                         error = Some(query_err);
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    if is_cache_miss && !flow.saw_parse_complete() {
+                        self.connection.stmt_cache.remove(&sql_hash);
+                        self.connection.prepared_statements.remove(&stmt_name);
+                        self.connection.column_info_cache.remove(&sql_hash);
+                    }
+                    return Err(unexpected_backend_message(
+                        "driver fetch_all_cached execute",
+                        &other,
+                    ));
+                }
             }
         }
     }
@@ -1211,14 +1466,20 @@ impl PgDriver {
 
         let mut affected = 0u64;
         let mut error: Option<PgError> = None;
+        let mut flow =
+            extended_flow::ExtendedFlowTracker::new(
+                extended_flow::ExtendedFlowConfig::parse_bind_describe_portal_execute(),
+            );
 
         loop {
             let msg = self.connection.recv().await?;
+            flow.validate(&msg, "driver execute mutation", error.is_some())?;
             match msg {
                 crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
                 crate::protocol::BackendMessage::RowDescription(_) => {}
                 crate::protocol::BackendMessage::DataRow(_) => {}
+                crate::protocol::BackendMessage::NoData => {}
                 crate::protocol::BackendMessage::CommandComplete(tag) => {
                     if error.is_none()
                         && let Some(n) = tag.split_whitespace().last()
@@ -1237,7 +1498,13 @@ impl PgDriver {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message(
+                        "driver execute mutation",
+                        &other,
+                    ));
+                }
             }
         }
     }
@@ -1270,9 +1537,14 @@ impl PgDriver {
         let mut columns: Vec<String> = Vec::new();
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
         let mut error: Option<PgError> = None;
+        let mut flow =
+            extended_flow::ExtendedFlowTracker::new(
+                extended_flow::ExtendedFlowConfig::parse_bind_describe_portal_execute(),
+            );
 
         loop {
             let msg = self.connection.recv().await?;
+            flow.validate(&msg, "driver query_ast", error.is_some())?;
             match msg {
                 crate::protocol::BackendMessage::ParseComplete
                 | crate::protocol::BackendMessage::BindComplete => {}
@@ -1301,7 +1573,8 @@ impl PgDriver {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => return Err(unexpected_backend_message("driver query_ast", &other)),
             }
         }
     }
@@ -1517,7 +1790,7 @@ impl PgDriver {
         use tokio::io::AsyncWriteExt;
 
         // Use simple query protocol (no prepared statements)
-        let msg = PgEncoder::encode_query_string(sql);
+        let msg = PgEncoder::try_encode_query_string(sql)?;
         self.connection.stream.write_all(&msg).await?;
 
         let mut rows: Vec<PgRow> = Vec::new();
@@ -1551,7 +1824,8 @@ impl PgDriver {
                         error = Some(PgError::QueryServer(err.into()));
                     }
                 }
-                _ => {}
+                msg if is_ignorable_session_message(&msg) => {}
+                other => return Err(unexpected_backend_message("driver fetch_raw", &other)),
             }
         }
     }
@@ -1667,10 +1941,51 @@ impl PgDriver {
         table: &str,
         columns: &[String],
     ) -> PgResult<Vec<u8>> {
-        let cols = columns.join(", ");
-        let sql = format!("COPY {} ({}) TO STDOUT", table, cols);
+        let quote_ident = |ident: &str| -> String {
+            format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
+        };
+        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let sql = format!("COPY {} ({}) TO STDOUT", quote_ident(table), cols.join(", "));
 
         self.connection.copy_out_raw(&sql).await
+    }
+
+    /// Stream table export using COPY TO STDOUT with bounded memory usage.
+    ///
+    /// Chunks are forwarded directly from PostgreSQL to `on_chunk`.
+    pub async fn copy_export_table_stream<F, Fut>(
+        &mut self,
+        table: &str,
+        columns: &[String],
+        on_chunk: F,
+    ) -> PgResult<()>
+    where
+        F: FnMut(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = PgResult<()>>,
+    {
+        let quote_ident = |ident: &str| -> String {
+            format!("\"{}\"", ident.replace('\0', "").replace('"', "\"\""))
+        };
+        let cols: Vec<String> = columns.iter().map(|c| quote_ident(c)).collect();
+        let sql = format!("COPY {} ({}) TO STDOUT", quote_ident(table), cols.join(", "));
+        self.connection.copy_out_raw_stream(&sql, on_chunk).await
+    }
+
+    /// Stream an AST-native `Qail::Export` command as raw COPY chunks.
+    pub async fn copy_export_cmd_stream<F, Fut>(&mut self, cmd: &Qail, on_chunk: F) -> PgResult<()>
+    where
+        F: FnMut(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = PgResult<()>>,
+    {
+        self.connection.copy_export_stream_raw(cmd, on_chunk).await
+    }
+
+    /// Stream an AST-native `Qail::Export` command as parsed text rows.
+    pub async fn copy_export_cmd_stream_rows<F>(&mut self, cmd: &Qail, on_row: F) -> PgResult<()>
+    where
+        F: FnMut(Vec<String>) -> PgResult<()>,
+    {
+        self.connection.copy_export_stream_rows(cmd, on_row).await
     }
 
     /// Stream large result sets using PostgreSQL cursors.
@@ -1851,6 +2166,33 @@ impl PgDriverBuilder {
         self
     }
 
+    /// Add a custom StartupMessage parameter.
+    ///
+    /// Example: `.startup_param("application_name", "qail-replica")`
+    pub fn startup_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = key.into();
+        let value = value.into();
+        self.connect_options
+            .startup_params
+            .retain(|(existing, _)| !existing.eq_ignore_ascii_case(&key));
+        self.connect_options.startup_params.push((key, value));
+        self
+    }
+
+    /// Enable logical replication startup mode (`replication=database`).
+    ///
+    /// This is required before issuing commands like `IDENTIFY_SYSTEM` or
+    /// `CREATE_REPLICATION_SLOT` on a replication connection.
+    pub fn logical_replication(mut self) -> Self {
+        self.connect_options
+            .startup_params
+            .retain(|(k, _)| !k.eq_ignore_ascii_case("replication"));
+        self.connect_options
+            .startup_params
+            .push(("replication".to_string(), "database".to_string()));
+        self
+    }
+
     /// Connect to PostgreSQL using the configured parameters.
     pub async fn connect(self) -> PgResult<PgDriver> {
         let host = self.host.unwrap_or_else(|| "127.0.0.1".to_string());
@@ -1924,6 +2266,18 @@ mod tests {
     fn unrelated_server_error_is_not_retryable() {
         let err = server_error("23505", "duplicate key value violates unique constraint");
         assert!(!err.is_prepared_statement_retryable());
+    }
+
+    #[test]
+    fn prepared_statement_already_exists_is_detected() {
+        let err = server_error("42P05", "prepared statement \"s1\" already exists");
+        assert!(err.is_prepared_statement_already_exists());
+    }
+
+    #[test]
+    fn prepared_statement_already_exists_non_matching_code_is_not_detected() {
+        let err = server_error("26000", "prepared statement \"s1\" already exists");
+        assert!(!err.is_prepared_statement_already_exists());
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -2229,5 +2583,87 @@ mod tests {
         let (_, _, _, db, _) =
             super::PgDriver::parse_database_url("postgresql://user@host:5432/cleandb").unwrap();
         assert_eq!(db, "cleandb");
+    }
+
+    #[test]
+    fn connect_options_with_logical_replication_replaces_existing_key() {
+        let opts = super::ConnectOptions::default()
+            .with_startup_param("Replication", "true")
+            .with_startup_param("application_name", "qail")
+            .with_logical_replication();
+
+        assert!(
+            opts.startup_params
+                .iter()
+                .any(|(k, v)| k == "replication" && v == "database")
+        );
+        assert_eq!(
+            opts.startup_params
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("replication"))
+                .count(),
+            1
+        );
+        assert!(
+            opts.startup_params
+                .iter()
+                .any(|(k, v)| k == "application_name" && v == "qail")
+        );
+    }
+
+    #[test]
+    fn builder_logical_replication_sets_startup_param() {
+        let builder = super::PgDriverBuilder::new().logical_replication();
+        assert!(
+            builder
+                .connect_options
+                .startup_params
+                .iter()
+                .any(|(k, v)| k == "replication" && v == "database")
+        );
+    }
+
+    #[test]
+    fn connect_options_with_startup_param_replaces_existing_case_insensitively() {
+        let opts = super::ConnectOptions::default()
+            .with_startup_param("Application_Name", "qail-a")
+            .with_startup_param("application_name", "qail-b");
+
+        assert_eq!(
+            opts.startup_params
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("application_name"))
+                .count(),
+            1
+        );
+        assert!(
+            opts.startup_params
+                .iter()
+                .any(|(k, v)| k == "application_name" && v == "qail-b")
+        );
+    }
+
+    #[test]
+    fn builder_startup_param_replaces_existing_case_insensitively() {
+        let builder = super::PgDriverBuilder::new()
+            .startup_param("Application_Name", "qail-a")
+            .startup_param("application_name", "qail-b");
+
+        assert_eq!(
+            builder
+                .connect_options
+                .startup_params
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("application_name"))
+                .count(),
+            1
+        );
+        assert!(
+            builder
+                .connect_options
+                .startup_params
+                .iter()
+                .any(|(k, v)| k == "application_name" && v == "qail-b")
+        );
     }
 }

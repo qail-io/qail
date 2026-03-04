@@ -882,7 +882,11 @@ impl GssEncStream {
 
     /// Drive pending write to completion.
     fn poll_flush_pending_write(&mut self, cx: &mut TaskContext<'_>) -> Poll<io::Result<usize>> {
-        let pw = self.pending_write.as_mut().expect("no pending write");
+        let Some(pw) = self.pending_write.as_mut() else {
+            return Poll::Ready(Err(io::Error::other(
+                "GSSENC: flush called without pending write",
+            )));
+        };
         while pw.written < pw.data.len() {
             match Pin::new(&mut self.tcp).poll_write(cx, &pw.data[pw.written..]) {
                 Poll::Ready(Ok(n)) => {
