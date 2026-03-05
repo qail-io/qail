@@ -1,9 +1,9 @@
 //! Main apply entry point — migrate_apply.
 
-use super::types::{ApplyPhase, BackfillRun, MigrateDirection, MigrationFile, MigrationPhase};
-use super::discovery::{discover_migrations, phase_rank};
-use super::backfill::{parse_backfill_spec, run_chunked_backfill, enforce_contract_safety};
+use super::backfill::{enforce_contract_safety, parse_backfill_spec, run_chunked_backfill};
 use super::codegen::parse_qail_to_sql;
+use super::discovery::{discover_migrations, phase_rank};
+use super::types::{ApplyPhase, BackfillRun, MigrateDirection, MigrationFile, MigrationPhase};
 use crate::colors::*;
 use crate::migrations::{
     MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
@@ -291,4 +291,3 @@ pub async fn migrate_apply(
     }
     Ok(())
 }
-

@@ -1,7 +1,7 @@
 //! Authentication and security types: ScramChannelBindingMode, EnterpriseAuthMechanism,
 //! GssTokenProvider, GssTokenRequest, AuthSettings, TlsMode, GssEncMode, ConnectOptions.
 
-pub use super::connection::TlsConfig;
+use super::connection::TlsConfig;
 use std::sync::Arc;
 
 /// SCRAM channel-binding policy during SASL negotiation.

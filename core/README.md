@@ -3,7 +3,7 @@
 **The AST-native query builder** — No SQL strings, no ORM magic, just type-safe expressions.
 
 [![Crates.io](https://img.shields.io/crates/v/qail-core.svg)](https://crates.io/crates/qail-core)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## Why AST-Native?
 
@@ -23,7 +23,7 @@ QAIL builds queries as an Abstract Syntax Tree that compiles directly to databas
 
 ```toml
 [dependencies]
-qail-core = "0.23.0"
+qail-core = "0.24.0"
 ```
 
 ## Quick Start
@@ -81,7 +81,7 @@ cast(col("amount"), "float8")
 
 ## License
 
-MIT
+Apache-2.0
 
 ## 🤝 Contributing & Support
 

@@ -1,11 +1,13 @@
 //! Free helper functions — GSS token gen, metrics, MD5 password, SCRAM selection, Drop.
 
-use super::types::{PgConnection, CONNECT_BACKEND_TOKIO};
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
 use super::types::CONNECT_BACKEND_IO_URING;
+use super::types::{CONNECT_BACKEND_TOKIO, PgConnection};
 use crate::driver::stream::PgStream;
-use crate::driver::{EnterpriseAuthMechanism, GssTokenProvider, GssTokenProviderEx, GssTokenRequest, PgError, PgResult, ScramChannelBindingMode};
-
+use crate::driver::{
+    EnterpriseAuthMechanism, GssTokenProvider, GssTokenProviderEx, GssTokenRequest, PgError,
+    PgResult, ScramChannelBindingMode,
+};
 
 pub(super) fn generate_gss_token(
     session_id: u64,

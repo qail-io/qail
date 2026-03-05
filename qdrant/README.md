@@ -53,4 +53,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## License
 
-MIT
+Apache-2.0

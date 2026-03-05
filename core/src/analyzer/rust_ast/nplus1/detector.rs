@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use syn::visit::Visit;
 
-use super::types::*;
 use super::patterns::*;
+use super::types::*;
 
 pub(super) struct NPlusOneDetector {
     file: String,

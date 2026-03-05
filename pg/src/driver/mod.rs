@@ -46,8 +46,10 @@ mod types;
 mod uring;
 
 // ── Public API ──────────────────────────────────────────────────────
-// Types flow through cleanly — no per-item listing needed.
-pub use auth_types::*;
+pub use auth_types::{
+    AuthSettings, ConnectOptions, EnterpriseAuthMechanism, GssEncMode, GssTokenProvider,
+    GssTokenProviderEx, GssTokenRequest, ScramChannelBindingMode, TlsMode,
+};
 pub use builder::PgDriverBuilder;
 pub use cancel::CancelToken;
 pub use connection::{PgConnection, TlsConfig};
@@ -61,7 +63,11 @@ pub use replication::{
 };
 pub use rls::RlsContext;
 pub use row::QailRow;
-pub use types::*;
+pub use types::{ColumnInfo, PgError, PgResult, PgRow, PgServerError, QueryResult, ResultFormat};
 
 // ── Crate-internal re-exports ───────────────────────────────────────
 pub(crate) use connection::{CANCEL_REQUEST_CODE, parse_affected_rows};
+pub(crate) use types::{
+    is_ignorable_session_message, is_ignorable_session_msg_type, unexpected_backend_message,
+    unexpected_backend_msg_type,
+};

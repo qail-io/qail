@@ -2,7 +2,6 @@
 
 use super::types::*;
 
-
 impl FrontendMessage {
     #[inline]
     fn has_nul(s: &str) -> bool {

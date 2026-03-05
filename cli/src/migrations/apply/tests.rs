@@ -2,10 +2,10 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::MigrationPhase;
-    use super::super::discovery::{detect_phase, normalize_group_key, parse_drop_targets};
     use super::super::backfill::{parse_backfill_spec, split_schema_table};
     use super::super::codegen::parse_qail_to_sql;
+    use super::super::discovery::{detect_phase, normalize_group_key, parse_drop_targets};
+    use super::super::types::MigrationPhase;
 
     #[test]
     fn test_parse_booking_to_sql() {

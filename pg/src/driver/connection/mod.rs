@@ -12,10 +12,12 @@
 mod connect;
 mod helpers;
 mod startup;
-pub(crate) mod types;
 #[cfg(test)]
 mod tests;
+pub(crate) mod types;
 
-pub use types::{PgConnection, TlsConfig};
 pub(crate) use helpers::parse_affected_rows;
-pub(crate) use types::{CANCEL_REQUEST_CODE, StatementCache};
+pub(crate) use types::CANCEL_REQUEST_CODE;
+#[cfg(test)]
+pub(crate) use types::StatementCache;
+pub use types::{PgConnection, TlsConfig};

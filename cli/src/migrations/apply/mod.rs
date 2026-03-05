@@ -14,9 +14,9 @@ mod backfill;
 mod codegen;
 mod discovery;
 mod execute;
-pub(crate) mod types;
 #[cfg(test)]
 mod tests;
+pub(crate) mod types;
 
-pub use types::{ApplyPhase, MigrateDirection};
 pub use execute::migrate_apply;
+pub use types::{ApplyPhase, MigrateDirection};

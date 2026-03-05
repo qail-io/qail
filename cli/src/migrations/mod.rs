@@ -28,8 +28,8 @@ mod verify;
 mod watch;
 
 pub use analyze::migrate_analyze;
-pub use apply::{ApplyPhase, MigrateDirection};
 pub use apply::migrate_apply;
+pub use apply::{ApplyPhase, MigrateDirection};
 pub use create::migrate_create;
 pub use down::migrate_down;
 pub use plan::migrate_plan;

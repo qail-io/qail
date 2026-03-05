@@ -10,8 +10,11 @@
 
 mod backend;
 mod frontend;
-mod types;
 #[cfg(test)]
 mod tests;
+mod types;
 
-pub use types::*;
+pub use types::{
+    BackendMessage, ErrorFields, FieldDescription, FrontendEncodeError, FrontendMessage,
+    TransactionStatus,
+};

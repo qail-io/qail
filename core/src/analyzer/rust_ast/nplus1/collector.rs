@@ -6,7 +6,9 @@
 use std::collections::{HashMap, HashSet};
 use syn::visit::Visit;
 
-use super::patterns::{is_query_exec_method, resolve_called_path, current_module_path_from_segments, impl_context_key};
+use super::patterns::{
+    current_module_path_from_segments, impl_context_key, is_query_exec_method, resolve_called_path,
+};
 
 #[derive(Default, Clone)]
 pub(super) struct FunctionCallInfo {
@@ -19,7 +21,9 @@ pub(super) struct QueryFunctionIndex {
     pub(super) paths: HashSet<String>,
 }
 
-pub(super) fn compute_query_index_from_infos(infos: &HashMap<String, FunctionCallInfo>) -> QueryFunctionIndex {
+pub(super) fn compute_query_index_from_infos(
+    infos: &HashMap<String, FunctionCallInfo>,
+) -> QueryFunctionIndex {
     let mut query_paths: HashSet<String> = infos
         .iter()
         .filter_map(|(name, info)| info.direct_query_exec.then_some(name.clone()))

@@ -1,14 +1,17 @@
 //! Chunked backfill system and contract safety enforcement.
 
-use super::types::{BackfillRun, BackfillSpec, BACKFILL_CHECKPOINT_TABLE_SCHEMA};
 use super::discovery::{is_valid_ident, parse_drop_targets, quote_ident};
+use super::types::{BACKFILL_CHECKPOINT_TABLE_SCHEMA, BackfillRun, BackfillSpec};
 use crate::colors::*;
 use anyhow::{Context, Result, anyhow, bail};
 use qail_core::analyzer::{CodebaseScanner, QueryType};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub(super) fn parse_backfill_spec(content: &str, default_chunk_size: usize) -> Result<Option<BackfillSpec>> {
+pub(super) fn parse_backfill_spec(
+    content: &str,
+    default_chunk_size: usize,
+) -> Result<Option<BackfillSpec>> {
     let mut entries = BTreeMap::<String, String>::new();
 
     for line in content.lines() {

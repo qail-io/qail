@@ -17,4 +17,7 @@ pub use auth::ScramClient;
 pub use copy_encoder::{encode_copy_batch, encode_copy_value};
 pub use encoder::PgEncoder;
 pub use types::{is_array_oid, oid, oid_to_name};
-pub use wire::*;
+pub use wire::{
+    BackendMessage, ErrorFields, FieldDescription, FrontendEncodeError, FrontendMessage,
+    TransactionStatus,
+};

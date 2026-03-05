@@ -144,7 +144,10 @@ pub(super) fn quote_ident(segment: &str) -> String {
 /// Otherwise falls back to blocklist check.
 /// Belt-and-suspenders: routes for blocked tables are not registered,
 /// but this catches edge cases (e.g., expand references, nested routes).
-pub(super) fn check_table_not_blocked(state: &GatewayState, table_name: &str) -> Result<(), ApiError> {
+pub(super) fn check_table_not_blocked(
+    state: &GatewayState,
+    table_name: &str,
+) -> Result<(), ApiError> {
     if !state.allowed_tables.is_empty() {
         // Allowlist mode: only allow listed tables
         if !state.allowed_tables.contains(table_name) {
