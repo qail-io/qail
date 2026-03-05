@@ -35,6 +35,8 @@ pub mod syn_analyzer;
 #[allow(dead_code)]
 #[path = "../analyzer/rust_ast/nplus1/mod.rs"]
 mod syn_nplus1;
+/// Build-time no-raw-SQL policy detector.
+mod sql_guard;
 /// Validation pipeline.
 mod validate;
 
