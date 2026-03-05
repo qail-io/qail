@@ -29,6 +29,7 @@ mod tests;
 mod types;
 
 // ── Public API ──────────────────────────────────────────────────────
+#[allow(unused_imports)]
 pub use types::{NPlusOneCode, NPlusOneDiagnostic, NPlusOneSeverity};
 
 use std::collections::HashMap;

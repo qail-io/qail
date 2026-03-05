@@ -1,4 +1,4 @@
-//! Validation pipeline: schema validation, RLS audit, N+1 detection.
+//! Validation pipeline: schema validation, RLS audit, N+1 detection, SQL policy.
 
 use std::path::Path;
 
@@ -335,6 +335,59 @@ fn run_nplus1_checks(scan_roots: &[String]) {
     }
 }
 
+/// Run raw SQL policy check.
+///
+/// Controlled by environment variables:
+/// - `QAIL_SQL`: `off` (default) | `warn` | `deny`
+/// - `QAIL_SQL_MAX_WARNINGS`: max warnings before truncation (default 50)
+fn run_sql_policy_checks(scan_roots: &[String]) {
+    println!("cargo:rerun-if-env-changed=QAIL_SQL");
+    println!("cargo:rerun-if-env-changed=QAIL_SQL_MAX_WARNINGS");
+
+    let mode = std::env::var("QAIL_SQL").unwrap_or_else(|_| "off".to_string());
+    if mode == "off" || mode == "false" || mode == "0" {
+        return;
+    }
+
+    let max_warnings: usize = std::env::var("QAIL_SQL_MAX_WARNINGS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+
+    let mut all = Vec::new();
+    for root in scan_roots {
+        all.extend(super::sql_guard::detect_sql_usage_in_dir(Path::new(root)));
+    }
+
+    if all.is_empty() {
+        println!("cargo:warning=QAIL: SQL policy scan clean ✓");
+        return;
+    }
+
+    let total = all.len();
+    let shown = total.min(max_warnings);
+
+    for diag in all.iter().take(shown) {
+        println!(
+            "cargo:warning=QAIL SQL {}: {}:{}:{}: {}",
+            diag.code, diag.file, diag.line, diag.column, diag.message
+        );
+    }
+    if total > shown {
+        println!(
+            "cargo:warning=QAIL SQL: ... and {} more (set QAIL_SQL_MAX_WARNINGS to see all)",
+            total - shown
+        );
+    }
+
+    if mode == "deny" {
+        fail_build(format!(
+            "QAIL SQL policy failed with {} diagnostic(s). Migrate raw SQL to QAIL DSL or set QAIL_SQL=warn",
+            total
+        ));
+    }
+}
+
 /// Build validation entrypoint for build.rs.
 /// Failures are reported via `cargo:warning` and process exit code 1.
 pub fn validate() {
@@ -386,6 +439,7 @@ pub fn validate() {
 
                     // ── N+1 detection ──────────────────────────────────────
                     run_nplus1_checks(&scan_roots);
+                    run_sql_policy_checks(&scan_roots);
                 }
                 Err(e) => {
                     fail_build(format!("QAIL: Failed to parse schema source: {}", e));
@@ -470,6 +524,7 @@ pub fn validate() {
 
                     // ── N+1 detection ──────────────────────────────────────
                     run_nplus1_checks(&scan_roots);
+                    run_sql_policy_checks(&scan_roots);
                 }
                 Err(e) => {
                     fail_build(format!("QAIL: Failed to parse schema after pull: {}", e));
