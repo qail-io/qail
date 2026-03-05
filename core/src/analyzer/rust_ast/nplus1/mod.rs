@@ -20,13 +20,13 @@
 //! }
 //! ```
 
-mod types;
-mod patterns;
-mod suppressions;
 mod collector;
 mod detector;
+mod patterns;
+mod suppressions;
 #[cfg(test)]
 mod tests;
+mod types;
 
 // ── Public API ──────────────────────────────────────────────────────
 pub use types::{NPlusOneCode, NPlusOneDiagnostic, NPlusOneSeverity};
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 
-use collector::{FunctionQueryCollector, compute_query_index_from_infos, FunctionCallInfo};
+use collector::{FunctionCallInfo, FunctionQueryCollector, compute_query_index_from_infos};
 use detector::NPlusOneDetector;
 use suppressions::parse_suppressions;
 

@@ -3,7 +3,7 @@
 **Schema-first database toolkit** — Pull, diff, migrate, validate.
 
 [![Crates.io](https://img.shields.io/crates/v/qail.svg)](https://crates.io/crates/qail)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 > [!CAUTION]
 > **Beta Software**: QAIL is currently in **beta**. The API is stabilizing and is battle-tested in production. Breaking changes may still occur between minor versions.
@@ -96,9 +96,8 @@ table orders (
 
 ## License
 
-MIT
+Apache-2.0
 
 ## 🤝 Contributing & Support
 
 We welcome issue reports on GitHub! Please provide detailed descriptions to help us reproduce and fix the problem. We aim to address critical issues within 1-5 business days.
-

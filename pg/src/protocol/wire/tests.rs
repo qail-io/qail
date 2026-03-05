@@ -2,8 +2,8 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::*;
     use super::super::backend::MAX_BACKEND_FRAME_LEN;
+    use super::super::*;
 
     /// Helper: build a raw wire message from type byte + payload.
     fn wire_msg(msg_type: u8, payload: &[u8]) -> Vec<u8> {

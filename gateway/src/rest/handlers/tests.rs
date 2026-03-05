@@ -1,13 +1,12 @@
 //! Handler unit tests.
 
-
 #[cfg(test)]
 mod tests {
     use super::super::rpc::{
         RpcFunctionName, build_rpc_sql, enforce_rpc_name_contract, matches_positional_signature,
         select_matching_rpc_signature, signature_matches_call as signature_matches,
     };
-    use super::super::{primary_sort_for_cursor, parse_prefer_header};
+    use super::super::{parse_prefer_header, primary_sort_for_cursor};
     use crate::server::RpcCallableSignature;
     use serde_json::json;
     use std::collections::HashSet;

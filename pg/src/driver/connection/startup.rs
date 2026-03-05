@@ -1,12 +1,14 @@
 //! Startup handshake — authentication, parameter negotiation, prepared stmt mgmt.
 
-use super::types::{PgConnection, StartupAuthFlow, GSS_SESSION_COUNTER};
-use super::helpers::{generate_gss_token, select_scram_mechanism, md5_password_message};
-use crate::driver::{AuthSettings, EnterpriseAuthMechanism, GssTokenProvider, GssTokenProviderEx, PgError, PgResult};
+use super::helpers::{generate_gss_token, md5_password_message, select_scram_mechanism};
+use super::types::{GSS_SESSION_COUNTER, PgConnection, StartupAuthFlow};
+use crate::driver::stream::PgStream;
+use crate::driver::{
+    AuthSettings, EnterpriseAuthMechanism, GssTokenProvider, GssTokenProviderEx, PgError, PgResult,
+};
 use crate::protocol::{BackendMessage, FrontendMessage, ScramClient, TransactionStatus};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
-use crate::driver::stream::PgStream;
 
 impl PgConnection {
     /// Handle startup sequence (auth + params).

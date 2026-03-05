@@ -1,7 +1,7 @@
 //! Suppression comment parsing for N+1 lint rules.
 
-use std::collections::HashSet;
 use super::types::{NPlusOneCode, Suppressions};
+use std::collections::HashSet;
 
 pub(super) fn parse_suppressions(source: &str) -> Suppressions {
     let mut suppressions = HashSet::new();

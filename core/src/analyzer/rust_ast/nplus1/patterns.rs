@@ -1,6 +1,5 @@
 //! Query execution patterns, iterator/wait detection, and path resolution helpers.
 
-
 use syn::parse::Parser;
 use syn::visit::Visit;
 
@@ -254,7 +253,10 @@ pub(super) fn current_module_path_from_segments(segments: &[String]) -> String {
 
 /// Resolve a called function path expression into an absolute `crate::...` path
 /// when possible.
-pub(super) fn resolve_called_path(path: &syn::Path, current_module_segments: &[String]) -> Option<String> {
+pub(super) fn resolve_called_path(
+    path: &syn::Path,
+    current_module_segments: &[String],
+) -> Option<String> {
     let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
     if segs.is_empty() {
         return None;

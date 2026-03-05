@@ -3,7 +3,7 @@
 **PostgreSQL driver for QAIL - native wire protocol**
 
 [![Crates.io](https://img.shields.io/crates/v/qail-pg.svg)](https://crates.io/crates/qail-pg)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 A high-performance PostgreSQL driver that speaks the wire protocol directly. No SQL strings, no SQL injection - just pure AST-to-wire encoding.
 
@@ -24,8 +24,8 @@ A high-performance PostgreSQL driver that speaks the wire protocol directly. No 
 
 ```toml
 [dependencies]
-qail-pg = "0.23.0"
-qail-core = "0.23.0"
+qail-pg = "0.24.0"
+qail-core = "0.24.0"
 ```
 
 ## Quick Start
@@ -156,7 +156,7 @@ cast(col("amount"), "float8")
 
 ## License
 
-MIT
+Apache-2.0
 
 ## 🤝 Contributing & Support
 

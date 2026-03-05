@@ -1,8 +1,12 @@
 //! PgDriverBuilder — ergonomic builder pattern for PgDriver connections.
 
-use super::auth_types::*;
+use super::auth_types::{
+    AuthSettings, ConnectOptions, GssEncMode, GssTokenProvider, GssTokenProviderEx,
+    ScramChannelBindingMode, TlsMode,
+};
 use super::core::PgDriver;
-use super::types::*;
+use super::types::{PgError, PgResult};
+use crate::driver::connection::TlsConfig;
 
 // ============================================================================
 // Connection Builder

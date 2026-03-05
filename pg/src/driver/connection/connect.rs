@@ -1,20 +1,19 @@
 //! Connection establishment — connect_*, TLS, mTLS, Unix socket.
 
-use super::types::{
-    PgConnection, ConnectParams, GssEncNegotiationResult,
-    TlsConfig, BUFFER_CAPACITY, DEFAULT_CONNECT_TIMEOUT,
-    SSL_REQUEST, GSSENC_REQUEST, STMT_CACHE_CAPACITY,
-    CONNECT_TRANSPORT_PLAIN, CONNECT_TRANSPORT_TLS, CONNECT_TRANSPORT_MTLS, CONNECT_TRANSPORT_GSSENC,
-    CONNECT_BACKEND_TOKIO, has_logical_replication_startup_mode, StatementCache,
+#[cfg(all(target_os = "linux", feature = "io_uring"))]
+use super::helpers::should_try_uring_plain;
+use super::helpers::{
+    connect_backend_for_stream, connect_error_kind, plain_connect_attempt_backend,
+    record_connect_attempt, record_connect_result,
 };
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
 use super::types::CONNECT_BACKEND_IO_URING;
-use super::helpers::{
-    record_connect_attempt, record_connect_result, connect_backend_for_stream,
-    plain_connect_attempt_backend, connect_error_kind,
+use super::types::{
+    BUFFER_CAPACITY, CONNECT_BACKEND_TOKIO, CONNECT_TRANSPORT_GSSENC, CONNECT_TRANSPORT_MTLS,
+    CONNECT_TRANSPORT_PLAIN, CONNECT_TRANSPORT_TLS, ConnectParams, DEFAULT_CONNECT_TIMEOUT,
+    GSSENC_REQUEST, GssEncNegotiationResult, PgConnection, SSL_REQUEST, STMT_CACHE_CAPACITY,
+    StatementCache, TlsConfig, has_logical_replication_startup_mode,
 };
-#[cfg(all(target_os = "linux", feature = "io_uring"))]
-use super::helpers::should_try_uring_plain;
 use crate::driver::stream::PgStream;
 use crate::driver::{AuthSettings, ConnectOptions, GssEncMode, PgError, PgResult, TlsMode};
 use crate::protocol::wire::FrontendMessage;
@@ -24,7 +23,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-
 
 impl PgConnection {
     /// Connect to PostgreSQL server without authentication (trust mode).
