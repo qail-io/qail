@@ -628,10 +628,9 @@ async fn driver_fetch_all_uncached_rejects_data_before_bind() {
         sock.flush().await.unwrap();
     });
 
-    let mut driver =
-        PgDriver::connect_with_password("127.0.0.1", port, "test_user", "test_db", "")
-            .await
-            .unwrap();
+    let mut driver = PgDriver::connect_with_password("127.0.0.1", port, "test_user", "test_db", "")
+        .await
+        .unwrap();
 
     let err = match driver.fetch_all_uncached(&Qail::get("users")).await {
         Ok(_) => panic!("expected protocol error"),
@@ -668,10 +667,9 @@ async fn driver_fetch_all_fast_rejects_data_before_bind() {
         sock.flush().await.unwrap();
     });
 
-    let mut driver =
-        PgDriver::connect_with_password("127.0.0.1", port, "test_user", "test_db", "")
-            .await
-            .unwrap();
+    let mut driver = PgDriver::connect_with_password("127.0.0.1", port, "test_user", "test_db", "")
+        .await
+        .unwrap();
 
     let err = match driver.fetch_all_fast(&Qail::get("users")).await {
         Ok(_) => panic!("expected protocol error"),
@@ -709,10 +707,9 @@ async fn driver_fetch_all_fast_rejects_ready_before_completion() {
         sock.flush().await.unwrap();
     });
 
-    let mut driver =
-        PgDriver::connect_with_password("127.0.0.1", port, "test_user", "test_db", "")
-            .await
-            .unwrap();
+    let mut driver = PgDriver::connect_with_password("127.0.0.1", port, "test_user", "test_db", "")
+        .await
+        .unwrap();
 
     let err = match driver.fetch_all_fast(&Qail::get("users")).await {
         Ok(_) => panic!("expected protocol error"),

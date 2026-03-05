@@ -1,0 +1,294 @@
+//! Pooled connection wrapper: struct, accessors, RLS cleanup, transaction control,
+//! COPY export, pipeline, LISTEN/NOTIFY delegation, and Drop.
+
+use super::churn::{decrement_active_count_saturating, pool_churn_record_destroy};
+use super::lifecycle::{PgPoolInner, execute_simple_with_timeout};
+use crate::driver::{PgConnection, PgError, PgResult};
+use std::sync::Arc;
+use std::time::Instant;
+
+/// A pooled connection with creation timestamp for idle tracking.
+pub(super) struct PooledConn {
+    pub(super) conn: PgConnection,
+    pub(super) created_at: Instant,
+    pub(super) last_used: Instant,
+}
+
+/// A pooled connection that returns to the pool when dropped.
+///
+/// When `rls_dirty` is true (set by `acquire_with_rls`), the connection
+/// will automatically reset RLS session variables before returning to
+/// the pool. This prevents cross-tenant data leakage.
+pub struct PooledConnection {
+    pub(super) conn: Option<PgConnection>,
+    pub(super) pool: Arc<PgPoolInner>,
+    pub(super) rls_dirty: bool,
+    pub(super) created_at: Instant,
+}
+
+impl PooledConnection {
+    /// Get a reference to the underlying connection, returning an error
+    /// if the connection has already been released.
+    pub(super) fn conn_ref(&self) -> PgResult<&PgConnection> {
+        self.conn
+            .as_ref()
+            .ok_or_else(|| PgError::Connection("Connection already released back to pool".into()))
+    }
+
+    /// Get a mutable reference to the underlying connection, returning an error
+    /// if the connection has already been released.
+    pub(super) fn conn_mut(&mut self) -> PgResult<&mut PgConnection> {
+        self.conn
+            .as_mut()
+            .ok_or_else(|| PgError::Connection("Connection already released back to pool".into()))
+    }
+
+    /// Get a shared reference to the underlying connection.
+    ///
+    /// Returns an error if the connection has already been released.
+    pub fn get(&self) -> PgResult<&PgConnection> {
+        self.conn_ref()
+    }
+
+    /// Get a mutable reference to the underlying connection.
+    ///
+    /// Returns an error if the connection has already been released.
+    pub fn get_mut(&mut self) -> PgResult<&mut PgConnection> {
+        self.conn_mut()
+    }
+
+    /// Get a token to cancel the currently running query.
+    pub fn cancel_token(&self) -> PgResult<crate::driver::CancelToken> {
+        let conn = self.conn_ref()?;
+        let (process_id, secret_key) = conn.get_cancel_key();
+        Ok(crate::driver::CancelToken {
+            host: self.pool.config.host.clone(),
+            port: self.pool.config.port,
+            process_id,
+            secret_key,
+        })
+    }
+
+    /// Deterministic connection cleanup and pool return.
+    ///
+    /// This is the **correct** way to return a connection to the pool.
+    /// COMMITs the transaction (which auto-resets transaction-local RLS
+    /// session variables) and returns the connection to the pool with
+    /// prepared statement caches intact.
+    ///
+    /// If cleanup fails, the connection is destroyed (not returned to pool).
+    ///
+    /// # Usage
+    /// ```ignore
+    /// let mut conn = pool.acquire_with_rls(ctx).await?;
+    /// let result = conn.fetch_all_cached(&cmd).await;
+    /// conn.release().await; // COMMIT + return to pool
+    /// result
+    /// ```
+    pub async fn release(mut self) {
+        if let Some(mut conn) = self.conn.take() {
+            if conn.is_io_desynced() {
+                tracing::warn!(
+                    host = %self.pool.config.host,
+                    port = self.pool.config.port,
+                    user = %self.pool.config.user,
+                    db = %self.pool.config.database,
+                    "pool_release_desynced: dropping connection due to prior I/O/protocol desync"
+                );
+                decrement_active_count_saturating(&self.pool.active_count);
+                self.pool.semaphore.add_permits(1);
+                pool_churn_record_destroy(&self.pool.config, "release_desynced");
+                return;
+            }
+            // COMMIT the transaction opened by acquire_with_rls.
+            // Transaction-local set_config values auto-reset on COMMIT,
+            // so no explicit RLS cleanup is needed.
+            // Prepared statements survive — they are NOT transaction-scoped.
+            let reset_timeout = self.pool.config.connect_timeout;
+            if let Err(e) = execute_simple_with_timeout(
+                &mut conn,
+                crate::driver::rls::reset_sql(),
+                reset_timeout,
+                "pool release reset/COMMIT",
+            )
+            .await
+            {
+                tracing::error!(
+                    host = %self.pool.config.host,
+                    port = self.pool.config.port,
+                    user = %self.pool.config.user,
+                    db = %self.pool.config.database,
+                    timeout_ms = reset_timeout.as_millis() as u64,
+                    error = %e,
+                    "pool_release_failed: reset/COMMIT failed; dropping connection to prevent state leak"
+                );
+                decrement_active_count_saturating(&self.pool.active_count);
+                self.pool.semaphore.add_permits(1);
+                pool_churn_record_destroy(&self.pool.config, "release_reset_failed");
+                return; // Connection destroyed — not returned to pool
+            }
+
+            self.pool.return_connection(conn, self.created_at).await;
+        }
+    }
+
+    // ==================== TRANSACTION CONTROL ====================
+
+    /// Begin an explicit transaction on this pooled connection.
+    ///
+    /// Use this when you need multi-statement atomicity beyond the
+    /// implicit transaction created by `acquire_with_rls()`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut conn = pool.acquire_with_rls(ctx).await?;
+    /// conn.begin().await?;
+    /// conn.execute(&insert1).await?;
+    /// conn.execute(&insert2).await?;
+    /// conn.commit().await?;
+    /// conn.release().await;
+    /// ```
+    pub async fn begin(&mut self) -> PgResult<()> {
+        self.conn_mut()?.begin_transaction().await
+    }
+
+    /// Commit the current transaction.
+    /// Makes all changes since `begin()` permanent.
+    pub async fn commit(&mut self) -> PgResult<()> {
+        self.conn_mut()?.commit().await
+    }
+
+    /// Rollback the current transaction.
+    /// Discards all changes since `begin()`.
+    pub async fn rollback(&mut self) -> PgResult<()> {
+        self.conn_mut()?.rollback().await
+    }
+
+    /// Create a named savepoint within the current transaction.
+    /// Use `rollback_to()` to return to this savepoint.
+    pub async fn savepoint(&mut self, name: &str) -> PgResult<()> {
+        self.conn_mut()?.savepoint(name).await
+    }
+
+    /// Rollback to a previously created savepoint.
+    /// Discards changes since the savepoint, but keeps the transaction open.
+    pub async fn rollback_to(&mut self, name: &str) -> PgResult<()> {
+        self.conn_mut()?.rollback_to(name).await
+    }
+
+    /// Release a savepoint (free resources).
+    /// After release, the savepoint cannot be rolled back to.
+    pub async fn release_savepoint(&mut self, name: &str) -> PgResult<()> {
+        self.conn_mut()?.release_savepoint(name).await
+    }
+
+    /// Execute multiple QAIL commands in a single PG pipeline round-trip.
+    ///
+    /// Sends all queries as Parse+Bind+Execute in one write, receives all
+    /// responses in one read. Returns raw column data per query per row.
+    ///
+    /// This is the fastest path for batch operations — amortizes TCP
+    /// overhead across N queries into a single syscall pair.
+    pub async fn pipeline_ast(
+        &mut self,
+        cmds: &[qail_core::ast::Qail],
+    ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
+        let conn = self.conn_mut()?;
+        conn.pipeline_ast(cmds).await
+    }
+
+    /// Run `EXPLAIN (FORMAT JSON)` on a Qail command and return cost estimates.
+    ///
+    /// Uses `simple_query` under the hood — no additional round-trips beyond
+    /// the single EXPLAIN statement. Returns `None` if parsing fails or
+    /// the EXPLAIN output is unexpected.
+    pub async fn explain_estimate(
+        &mut self,
+        cmd: &qail_core::ast::Qail,
+    ) -> PgResult<Option<crate::driver::explain::ExplainEstimate>> {
+        use qail_core::transpiler::ToSql;
+
+        let sql = cmd.to_sql();
+        let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
+
+        let rows = self.conn_mut()?.simple_query(&explain_sql).await?;
+
+        // PostgreSQL returns the JSON plan as a single text column across one or more rows
+        let mut json_output = String::new();
+        for row in &rows {
+            if let Some(Some(val)) = row.columns.first()
+                && let Ok(text) = std::str::from_utf8(val)
+            {
+                json_output.push_str(text);
+            }
+        }
+
+        Ok(crate::driver::explain::parse_explain_json(&json_output))
+    }
+
+    // ─── LISTEN / NOTIFY delegation ─────────────────────────────────
+
+    /// Subscribe to a PostgreSQL notification channel.
+    ///
+    /// Delegates to [`PgConnection::listen`].
+    pub async fn listen(&mut self, channel: &str) -> PgResult<()> {
+        self.conn_mut()?.listen(channel).await
+    }
+
+    /// Unsubscribe from a PostgreSQL notification channel.
+    ///
+    /// Delegates to [`PgConnection::unlisten`].
+    pub async fn unlisten(&mut self, channel: &str) -> PgResult<()> {
+        self.conn_mut()?.unlisten(channel).await
+    }
+
+    /// Unsubscribe from all notification channels.
+    ///
+    /// Delegates to [`PgConnection::unlisten_all`].
+    pub async fn unlisten_all(&mut self) -> PgResult<()> {
+        self.conn_mut()?.unlisten_all().await
+    }
+
+    /// Wait for the next notification, blocking until one arrives.
+    ///
+    /// Delegates to [`PgConnection::recv_notification`].
+    /// Useful for dedicated LISTEN connections in background tasks.
+    pub async fn recv_notification(
+        &mut self,
+    ) -> PgResult<crate::driver::notification::Notification> {
+        self.conn_mut()?.recv_notification().await
+    }
+}
+
+impl Drop for PooledConnection {
+    fn drop(&mut self) {
+        if self.conn.is_some() {
+            // Safety net: connection was NOT released via `release()`.
+            // This happens when:
+            //   - Handler panicked
+            //   - Early return without calling release()
+            //   - Missed release() call (programming error)
+            //
+            // We DESTROY the connection (don't return to pool) to prevent
+            // dirty session state from being reused. But we MUST return the
+            // semaphore permit so the pool can create a replacement connection
+            // on the next acquire. Without this, leaked connections permanently
+            // reduce pool capacity until all slots are consumed.
+            //
+            // The `conn` field is dropped here, closing the TCP socket.
+            tracing::warn!(
+                host = %self.pool.config.host,
+                port = self.pool.config.port,
+                user = %self.pool.config.user,
+                db = %self.pool.config.database,
+                rls_dirty = self.rls_dirty,
+                "pool_connection_leaked: dropped without release(); connection destroyed to prevent state leak"
+            );
+            decrement_active_count_saturating(&self.pool.active_count);
+            // Return the semaphore permit so the pool slot can be reused.
+            // Without this, each leaked connection permanently reduces capacity.
+            self.pool.semaphore.add_permits(1);
+            pool_churn_record_destroy(&self.pool.config, "dropped_without_release");
+        }
+    }
+}

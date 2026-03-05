@@ -112,8 +112,7 @@ async fn connect_replication_mode(port: u16) -> PgConnection {
 
 async fn assert_no_frontend_frame(sock: &mut TcpStream) {
     let mut first_byte = [0u8; 1];
-    if let Ok(Ok(_)) = timeout(Duration::from_millis(250), sock.read_exact(&mut first_byte)).await
-    {
+    if let Ok(Ok(_)) = timeout(Duration::from_millis(250), sock.read_exact(&mut first_byte)).await {
         panic!(
             "unexpected frontend frame type '{}' while operation should be blocked locally",
             first_byte[0] as char
@@ -198,7 +197,8 @@ async fn start_logical_replication_rejects_second_start() {
 
         // If client mistakenly sends a second START_REPLICATION, avoid hanging.
         let mut first_byte = [0u8; 1];
-        if let Ok(Ok(_)) = timeout(Duration::from_millis(250), sock.read_exact(&mut first_byte)).await
+        if let Ok(Ok(_)) =
+            timeout(Duration::from_millis(250), sock.read_exact(&mut first_byte)).await
         {
             let msg_type = first_byte[0];
             let mut len_buf = [0u8; 4];
@@ -513,7 +513,8 @@ async fn start_logical_replication_rejects_binary_copyboth_format() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("unsupported CopyBothResponse format"),
+        err.to_string()
+            .contains("unsupported CopyBothResponse format"),
         "unexpected error: {}",
         err
     );
@@ -554,7 +555,8 @@ async fn start_logical_replication_rejects_nonempty_copyboth_columns() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("unexpected CopyBothResponse column formats"),
+        err.to_string()
+            .contains("unexpected CopyBothResponse column formats"),
         "unexpected error: {}",
         err
     );
@@ -707,7 +709,10 @@ async fn drop_slot_requires_replication_mode() {
     });
 
     let mut conn = connect_plain(port).await;
-    let err = conn.drop_replication_slot("slot_a", false).await.unwrap_err();
+    let err = conn
+        .drop_replication_slot("slot_a", false)
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("replication=database"),
         "unexpected error: {}",
@@ -745,7 +750,8 @@ async fn identify_system_rejected_while_stream_active_without_sending_query() {
 
     let err = conn.identify_system().await.unwrap_err();
     assert!(
-        err.to_string().contains("cannot run while replication stream is active"),
+        err.to_string()
+            .contains("cannot run while replication stream is active"),
         "unexpected error: {}",
         err
     );
@@ -784,7 +790,8 @@ async fn create_slot_rejected_while_stream_active_without_sending_query() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("cannot run while replication stream is active"),
+        err.to_string()
+            .contains("cannot run while replication stream is active"),
         "unexpected error: {}",
         err
     );
@@ -818,9 +825,13 @@ async fn drop_slot_rejected_while_stream_active_without_sending_query() {
         .await
         .unwrap();
 
-    let err = conn.drop_replication_slot("slot_b", false).await.unwrap_err();
+    let err = conn
+        .drop_replication_slot("slot_b", false)
+        .await
+        .unwrap_err();
     assert!(
-        err.to_string().contains("cannot run while replication stream is active"),
+        err.to_string()
+            .contains("cannot run while replication stream is active"),
         "unexpected error: {}",
         err
     );

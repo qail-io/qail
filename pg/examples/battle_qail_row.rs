@@ -39,7 +39,9 @@ impl QailRow for TestMessage {
             phone_number: row
                 .try_get_by_name::<String>("phone_number")
                 .unwrap_or_default(),
-            direction: row.try_get_by_name::<String>("direction").unwrap_or_default(),
+            direction: row
+                .try_get_by_name::<String>("direction")
+                .unwrap_or_default(),
             content: row.try_get_opt_by_name::<String>("content").ok().flatten(),
             status: row.try_get_by_name::<String>("status").unwrap_or_default(),
             created_at: row.datetime_by_name("created_at").unwrap_or_else(Utc::now),

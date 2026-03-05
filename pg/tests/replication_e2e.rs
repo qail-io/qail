@@ -85,7 +85,8 @@ async fn wait_for_pg(host: &str, port: u16, timeout: Duration) -> Result<(), Str
     let start = std::time::Instant::now();
     let mut last_err = String::new();
     while start.elapsed() < timeout {
-        match PgConnection::connect_with_password(host, port, USER, DATABASE, Some(PASSWORD)).await {
+        match PgConnection::connect_with_password(host, port, USER, DATABASE, Some(PASSWORD)).await
+        {
             Ok(_) => return Ok(()),
             Err(e) => {
                 last_err = e.to_string();
@@ -136,9 +137,7 @@ async fn logical_replication_receives_xlog_data() -> Result<(), Box<dyn std::err
     })?;
 
     let host_port = pick_free_port();
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_millis();
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
     let container = format!("qail-repl-e2e-{}-{}", std::process::id(), ts);
 
     run_cmd(
@@ -220,15 +219,10 @@ async fn logical_replication_receives_xlog_data() -> Result<(), Box<dyn std::err
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
     let marker_sql = marker.replace('\'', "''");
-    let mut writer = PgConnection::connect_with_password(
-        "127.0.0.1",
-        host_port,
-        USER,
-        DATABASE,
-        Some(PASSWORD),
-    )
-    .await
-    .map_err(|e| format!("writer connect failed: {}", e))?;
+    let mut writer =
+        PgConnection::connect_with_password("127.0.0.1", host_port, USER, DATABASE, Some(PASSWORD))
+            .await
+            .map_err(|e| format!("writer connect failed: {}", e))?;
     writer
         .execute_simple(&format!(
             "INSERT INTO {} (payload) VALUES ('{}')",

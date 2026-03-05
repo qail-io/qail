@@ -139,7 +139,10 @@ impl ExtendedFlowTracker {
                     ));
                 }
                 if self.saw_bind_complete {
-                    return Err(violation(context, "ParameterDescription after BindComplete"));
+                    return Err(violation(
+                        context,
+                        "ParameterDescription after BindComplete",
+                    ));
                 }
                 if self.saw_completion {
                     return Err(violation(context, "ParameterDescription after completion"));
@@ -225,7 +228,10 @@ impl ExtendedFlowTracker {
                     return Err(violation(context, "ReadyForQuery before BindComplete"));
                 }
                 if self.cfg.require_completion_on_success && !self.saw_completion {
-                    return Err(violation(context, "ReadyForQuery before completion message"));
+                    return Err(violation(
+                        context,
+                        "ReadyForQuery before completion message",
+                    ));
                 }
                 return Ok(());
             }
@@ -324,8 +330,13 @@ mod tests {
     #[test]
     fn parse_bind_execute_rejects_bind_before_parse() {
         let mut tracker = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(true));
-        let err = tracker.validate(&bind_complete(), "ctx", false).unwrap_err();
-        assert!(err.to_string().contains("BindComplete before ParseComplete"));
+        let err = tracker
+            .validate(&bind_complete(), "ctx", false)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("BindComplete before ParseComplete")
+        );
     }
 
     #[test]

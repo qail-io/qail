@@ -4,7 +4,7 @@
 //! detecting raw SQL patterns, and generating QAIL equivalents.
 
 mod detector;
-mod nplus1;
+pub(crate) mod nplus1;
 pub mod query_extractor;
 pub mod transformer;
 pub mod utils;

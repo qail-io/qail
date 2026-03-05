@@ -218,14 +218,14 @@ impl Gateway {
 
             match conn.fetch_all_uncached(&cmd).await {
                 Ok(rows) => {
-                    let db_tables: std::collections::HashSet<String> =
-                        rows.iter()
-                            .filter_map(|row| {
-                                row.try_get_by_name::<String>("table_name")
-                                    .ok()
-                                    .or_else(|| row.get_string(0))
-                            })
-                            .collect();
+                    let db_tables: std::collections::HashSet<String> = rows
+                        .iter()
+                        .filter_map(|row| {
+                            row.try_get_by_name::<String>("table_name")
+                                .ok()
+                                .or_else(|| row.get_string(0))
+                        })
+                        .collect();
 
                     let mut missing = Vec::new();
                     for table in schema.table_names() {
@@ -780,14 +780,14 @@ impl GatewayState {
                 );
             match conn.fetch_all_uncached(&cmd).await {
                 Ok(rows) => {
-                    let db_tables: std::collections::HashSet<String> =
-                        rows.iter()
-                            .filter_map(|row| {
-                                row.try_get_by_name::<String>("table_name")
-                                    .ok()
-                                    .or_else(|| row.get_string(0))
-                            })
-                            .collect();
+                    let db_tables: std::collections::HashSet<String> = rows
+                        .iter()
+                        .filter_map(|row| {
+                            row.try_get_by_name::<String>("table_name")
+                                .ok()
+                                .or_else(|| row.get_string(0))
+                        })
+                        .collect();
                     let mut missing = Vec::new();
                     for table in schema.table_names() {
                         if !db_tables.contains(table) {
