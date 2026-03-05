@@ -1,3 +1,0 @@
-module Qail {
-    header "/Users/orion/qail.rs/sdk/swift/.build/arm64-apple-macosx/debug/Qail.build/include/Qail-Swift.h"
-}
