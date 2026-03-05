@@ -6,16 +6,16 @@ use crate::ast::Expr;
 
 const INVALID_JSON_SOURCE_IDENT: &str = "__qail_invalid_json_source__";
 
-fn json_source_or_invalid(expr: Expr, method: &str) -> String {
+fn json_source_or_invalid(expr: Expr, _method: &str) -> String {
     match expr {
         Expr::Named(name) => name,
         Expr::Aliased { name, .. } => name,
         Expr::JsonAccess { column, .. } => column,
-        other => {
+        _other => {
             #[cfg(debug_assertions)]
             eprintln!(
                 "QAIL: {}() expects a column-like expression, got {:?}; using fallback identifier {}",
-                method, other, INVALID_JSON_SOURCE_IDENT
+                _method, _other, INVALID_JSON_SOURCE_IDENT
             );
             INVALID_JSON_SOURCE_IDENT.to_string()
         }
