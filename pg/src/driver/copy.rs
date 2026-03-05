@@ -421,11 +421,7 @@ impl PgConnection {
     ///
     /// Chunks are forwarded as they arrive from PostgreSQL, so memory usage
     /// stays bounded by network frame size and callback processing.
-    pub async fn copy_export_stream_raw<F, Fut>(
-        &mut self,
-        cmd: &Qail,
-        on_chunk: F,
-    ) -> PgResult<()>
+    pub async fn copy_export_stream_raw<F, Fut>(&mut self, cmd: &Qail, on_chunk: F) -> PgResult<()>
     where
         F: FnMut(Vec<u8>) -> Fut,
         Fut: Future<Output = PgResult<()>>,
@@ -558,9 +554,8 @@ mod tests {
     #[test]
     fn callback_error_bubbles_from_row_drainer() {
         let mut pending = Vec::new();
-        let mut on_row = |_row: Vec<String>| -> PgResult<()> {
-            Err(PgError::Query("fail".to_string()))
-        };
+        let mut on_row =
+            |_row: Vec<String>| -> PgResult<()> { Err(PgError::Query("fail".to_string())) };
 
         let err = drain_copy_text_rows(&mut pending, b"a\tb\n", &mut on_row).unwrap_err();
         assert!(matches!(err, PgError::Query(msg) if msg == "fail"));

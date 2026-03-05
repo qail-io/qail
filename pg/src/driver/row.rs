@@ -49,9 +49,10 @@ impl PgRow {
     /// - `TypeError::InvalidData` if the column index is out of bounds or metadata is missing
     /// - other `TypeError` variants from the target decoder
     pub fn try_get<T: FromPg>(&self, idx: usize) -> Result<T, TypeError> {
-        let cell = self.columns.get(idx).ok_or_else(|| {
-            TypeError::InvalidData(format!("Column index {} out of bounds", idx))
-        })?;
+        let cell = self
+            .columns
+            .get(idx)
+            .ok_or_else(|| TypeError::InvalidData(format!("Column index {} out of bounds", idx)))?;
 
         let bytes = cell.as_deref().ok_or(TypeError::UnexpectedNull)?;
         let (oid, format) = self.column_type_meta(idx)?;
@@ -62,9 +63,10 @@ impl PgRow {
     ///
     /// Returns `Ok(None)` when the column is SQL NULL.
     pub fn try_get_opt<T: FromPg>(&self, idx: usize) -> Result<Option<T>, TypeError> {
-        let cell = self.columns.get(idx).ok_or_else(|| {
-            TypeError::InvalidData(format!("Column index {} out of bounds", idx))
-        })?;
+        let cell = self
+            .columns
+            .get(idx)
+            .ok_or_else(|| TypeError::InvalidData(format!("Column index {} out of bounds", idx)))?;
 
         match cell {
             None => Ok(None),
@@ -77,17 +79,17 @@ impl PgRow {
 
     /// Decode a non-null column by name into any `FromPg` type.
     pub fn try_get_by_name<T: FromPg>(&self, name: &str) -> Result<T, TypeError> {
-        let idx = self.column_index(name).ok_or_else(|| {
-            TypeError::InvalidData(format!("Unknown column name '{}'", name))
-        })?;
+        let idx = self
+            .column_index(name)
+            .ok_or_else(|| TypeError::InvalidData(format!("Unknown column name '{}'", name)))?;
         self.try_get(idx)
     }
 
     /// Decode a possibly-null column by name into `Option<T>`.
     pub fn try_get_opt_by_name<T: FromPg>(&self, name: &str) -> Result<Option<T>, TypeError> {
-        let idx = self.column_index(name).ok_or_else(|| {
-            TypeError::InvalidData(format!("Unknown column name '{}'", name))
-        })?;
+        let idx = self
+            .column_index(name)
+            .ok_or_else(|| TypeError::InvalidData(format!("Unknown column name '{}'", name)))?;
         self.try_get_opt(idx)
     }
 
@@ -121,7 +123,9 @@ impl PgRow {
 
     /// Get a column value as i32.
     pub fn get_i32(&self, idx: usize) -> Option<i32> {
-        if self.column_info.is_some() && let Ok(v) = self.try_get::<i32>(idx) {
+        if self.column_info.is_some()
+            && let Ok(v) = self.try_get::<i32>(idx)
+        {
             return Some(v);
         }
         let bytes = self.columns.get(idx)?.as_ref()?;
@@ -130,7 +134,9 @@ impl PgRow {
 
     /// Get a column value as i64.
     pub fn get_i64(&self, idx: usize) -> Option<i64> {
-        if self.column_info.is_some() && let Ok(v) = self.try_get::<i64>(idx) {
+        if self.column_info.is_some()
+            && let Ok(v) = self.try_get::<i64>(idx)
+        {
             return Some(v);
         }
         let bytes = self.columns.get(idx)?.as_ref()?;
@@ -139,7 +145,9 @@ impl PgRow {
 
     /// Get a column value as f64.
     pub fn get_f64(&self, idx: usize) -> Option<f64> {
-        if self.column_info.is_some() && let Ok(v) = self.try_get::<f64>(idx) {
+        if self.column_info.is_some()
+            && let Ok(v) = self.try_get::<f64>(idx)
+        {
             return Some(v);
         }
         let bytes = self.columns.get(idx)?.as_ref()?;
@@ -148,7 +156,9 @@ impl PgRow {
 
     /// Get a column value as bool.
     pub fn get_bool(&self, idx: usize) -> Option<bool> {
-        if self.column_info.is_some() && let Ok(v) = self.try_get::<bool>(idx) {
+        if self.column_info.is_some()
+            && let Ok(v) = self.try_get::<bool>(idx)
+        {
             return Some(v);
         }
         let bytes = self.columns.get(idx)?.as_ref()?;

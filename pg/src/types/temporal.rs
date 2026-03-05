@@ -111,7 +111,12 @@ impl FromPg for chrono::DateTime<chrono::Utc> {
             } else {
                 chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
                     .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f"))
-                    .map(|naive| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc))
+                    .map(|naive| {
+                        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                            naive,
+                            chrono::Utc,
+                        )
+                    })
                     .map_err(|e| TypeError::InvalidData(format!("Invalid timestamp: {}", e)))
             }
         }
@@ -454,8 +459,8 @@ mod tests {
     #[cfg(feature = "chrono")]
     #[test]
     fn test_chrono_datetime_to_pg_binary() {
-        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(1_704_067_200, 123_456_000)
-            .unwrap();
+        let dt =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_704_067_200, 123_456_000).unwrap();
         let (bytes, oid_val, format) = dt.to_pg();
         assert_eq!(oid_val, oid::TIMESTAMPTZ);
         assert_eq!(format, 1);

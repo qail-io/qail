@@ -193,10 +193,7 @@ impl FastExtendedFlowTracker {
                 if self.cfg.no_data_counts_as_completion {
                     self.complete_current();
                 } else if !self.cfg.allow_no_data_nonterminal {
-                    return Err(PgError::Protocol(format!(
-                        "{}: unexpected NoData",
-                        context
-                    )));
+                    return Err(PgError::Protocol(format!("{}: unexpected NoData", context)));
                 }
             }
             b'C' => {
@@ -534,12 +531,14 @@ impl PgConnection {
         loop {
             match self.recv_msg_type_fast().await {
                 Ok(msg_type) => {
-                    let event =
-                        match flow.validate_msg_type(msg_type, "pipeline_ast_fast", error.is_some())
-                        {
-                            Ok(event) => event,
-                            Err(err) => return return_with_desync(self, err),
-                        };
+                    let event = match flow.validate_msg_type(
+                        msg_type,
+                        "pipeline_ast_fast",
+                        error.is_some(),
+                    ) {
+                        Ok(event) => event,
+                        Err(err) => return return_with_desync(self, err),
+                    };
                     match event {
                         FastPipelineEvent::Continue => {}
                         FastPipelineEvent::ReadyForQuery => {
@@ -628,12 +627,14 @@ impl PgConnection {
         loop {
             match self.recv_msg_type_fast().await {
                 Ok(msg_type) => {
-                    let event =
-                        match flow.validate_msg_type(msg_type, "pipeline_simple_fast", error.is_some())
-                        {
-                            Ok(event) => event,
-                            Err(err) => return return_with_desync(self, err),
-                        };
+                    let event = match flow.validate_msg_type(
+                        msg_type,
+                        "pipeline_simple_fast",
+                        error.is_some(),
+                    ) {
+                        Ok(event) => event,
+                        Err(err) => return return_with_desync(self, err),
+                    };
                     match event {
                         FastPipelineEvent::Continue => {}
                         FastPipelineEvent::ReadyForQuery => {
@@ -1005,9 +1006,11 @@ impl PgConnection {
         loop {
             match self.recv_with_data_fast().await {
                 Ok((msg_type, data)) => {
-                    if let Err(err) =
-                        flow.validate_msg_type(msg_type, "pipeline_prepared_results", error.is_some())
-                    {
+                    if let Err(err) = flow.validate_msg_type(
+                        msg_type,
+                        "pipeline_prepared_results",
+                        error.is_some(),
+                    ) {
                         return return_with_desync(self, err);
                     }
                     match msg_type {

@@ -231,22 +231,20 @@ pub(crate) async fn rpc_contracts_handler(
             .or_else(|| row.get_string(8))
             .unwrap_or_default();
 
-        let arg_names: Vec<Option<String>> =
-            serde_json::from_str(
-                &row.try_get_by_name::<String>("arg_names_json")
-                    .ok()
-                    .or_else(|| row.get_string(5))
-                    .unwrap_or_else(|| "[]".to_string()),
-            )
-                .unwrap_or_default();
-        let arg_types: Vec<String> =
-            serde_json::from_str(
-                &row.try_get_by_name::<String>("arg_types_json")
-                    .ok()
-                    .or_else(|| row.get_string(6))
-                    .unwrap_or_else(|| "[]".to_string()),
-            )
-                .unwrap_or_default();
+        let arg_names: Vec<Option<String>> = serde_json::from_str(
+            &row.try_get_by_name::<String>("arg_names_json")
+                .ok()
+                .or_else(|| row.get_string(5))
+                .unwrap_or_else(|| "[]".to_string()),
+        )
+        .unwrap_or_default();
+        let arg_types: Vec<String> = serde_json::from_str(
+            &row.try_get_by_name::<String>("arg_types_json")
+                .ok()
+                .or_else(|| row.get_string(6))
+                .unwrap_or_else(|| "[]".to_string()),
+        )
+        .unwrap_or_default();
 
         let mut args_json: Vec<Value> = Vec::with_capacity(total_args);
         for idx in 0..total_args {

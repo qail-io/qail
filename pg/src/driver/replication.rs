@@ -327,11 +327,10 @@ fn parse_copy_data_message(payload: &[u8]) -> PgResult<ReplicationStreamMessage>
                     payload.len()
                 )));
             }
-            let wal_end = u64::from_be_bytes(
-                payload[1..9]
-                    .try_into()
-                    .map_err(|_| PgError::Protocol("Invalid keepalive wal_end bytes".to_string()))?,
-            );
+            let wal_end =
+                u64::from_be_bytes(payload[1..9].try_into().map_err(|_| {
+                    PgError::Protocol("Invalid keepalive wal_end bytes".to_string())
+                })?);
             let server_time_micros = i64::from_be_bytes(
                 payload[9..17]
                     .try_into()
@@ -776,8 +775,8 @@ mod tests {
             })
             .collect();
 
-        let err = build_start_logical_replication_sql("slot_main", "0/16B6C50", &options)
-            .unwrap_err();
+        let err =
+            build_start_logical_replication_sql("slot_main", "0/16B6C50", &options).unwrap_err();
         assert!(err.to_string().contains("too many replication options"));
     }
 
@@ -787,8 +786,8 @@ mod tests {
             key: "proto_version".to_string(),
             value: "1\0oops".to_string(),
         }];
-        let err = build_start_logical_replication_sql("slot_main", "0/16B6C50", &options)
-            .unwrap_err();
+        let err =
+            build_start_logical_replication_sql("slot_main", "0/16B6C50", &options).unwrap_err();
         assert!(err.to_string().contains("contains NUL byte"));
     }
 
@@ -798,8 +797,8 @@ mod tests {
             key: "publication_names".to_string(),
             value: "x".repeat(MAX_REPLICATION_OPTION_VALUE_BYTES + 1),
         }];
-        let err = build_start_logical_replication_sql("slot_main", "0/16B6C50", &options)
-            .unwrap_err();
+        let err =
+            build_start_logical_replication_sql("slot_main", "0/16B6C50", &options).unwrap_err();
         assert!(err.to_string().contains("value too large"));
     }
 
@@ -909,7 +908,10 @@ mod tests {
     fn parse_copy_data_unknown_tag_rejected() {
         let payload = vec![b'x', 1, 2, 3];
         let err = parse_copy_data_message(&payload).unwrap_err();
-        assert!(err.to_string().contains("Unsupported replication CopyData tag"));
+        assert!(
+            err.to_string()
+                .contains("Unsupported replication CopyData tag")
+        );
     }
 
     #[test]

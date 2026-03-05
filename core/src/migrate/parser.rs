@@ -189,7 +189,10 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     values: et.values.clone(),
                 }
             } else {
-                return Err(format!("Unknown column type '{}' for column '{}'", type_str, name));
+                return Err(format!(
+                    "Unknown column type '{}' for column '{}'",
+                    type_str, name
+                ));
             }
         }
     };

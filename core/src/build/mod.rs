@@ -32,9 +32,8 @@ pub mod schema;
 pub mod syn_analyzer;
 /// Syn-based N+1 detector used when `syn-scanner` is enabled without full `analyzer`.
 #[cfg(feature = "syn-scanner")]
-#[allow(dead_code)]
-#[path = "../analyzer/rust_ast/nplus1.rs"]
-mod syn_nplus1;
+#[allow(dead_code, unused_imports)]
+use crate::analyzer::rust_ast::nplus1 as syn_nplus1;
 /// Validation pipeline.
 mod validate;
 

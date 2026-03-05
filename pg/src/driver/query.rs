@@ -254,8 +254,7 @@ impl PgConnection {
         let mut rows = Vec::new();
 
         let mut error: Option<PgError> = None;
-        let mut flow =
-            ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(is_new));
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(is_new));
 
         loop {
             let msg = match self.recv().await {
@@ -267,7 +266,8 @@ impl PgConnection {
                     return Err(err);
                 }
             };
-            if let Err(err) = flow.validate(&msg, "extended-query cached execute", error.is_some()) {
+            if let Err(err) = flow.validate(&msg, "extended-query cached execute", error.is_some())
+            {
                 if is_new && !flow.saw_parse_complete() {
                     self.prepared_statements.remove(&stmt_name);
                 }

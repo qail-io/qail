@@ -31,12 +31,11 @@ fn arb_param() -> impl Strategy<Value = Option<Vec<u8>>> {
 fn arb_frontend_message() -> impl Strategy<Value = FrontendMessage> {
     prop_oneof![
         // Startup
-        (arb_pg_string(), arb_pg_string())
-            .prop_map(|(user, database)| FrontendMessage::Startup {
-                user,
-                database,
-                startup_params: Vec::new(),
-            }),
+        (arb_pg_string(), arb_pg_string()).prop_map(|(user, database)| FrontendMessage::Startup {
+            user,
+            database,
+            startup_params: Vec::new(),
+        }),
         // Query (simple protocol)
         arb_pg_string().prop_map(FrontendMessage::Query),
         // Parse (extended protocol)
