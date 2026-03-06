@@ -167,6 +167,7 @@ impl Default for GatewayConfig {
             max_query_joins: 10,
             qdrant: None,
             tenant_column: "operator_id".to_string(),
+            tenant_guard_exempt_tables: Vec::new(),
             allow_list_path: None,
             binary_requires_allow_list: true,
             rpc_require_schema_qualified: false,

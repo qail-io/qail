@@ -980,7 +980,9 @@ impl Column {
     fn primary_key_type_error(&self) -> String {
         format!(
             "Column '{}' of type {} cannot be a primary key. \
-             Valid PK types: UUID, SERIAL, BIGSERIAL, INT, BIGINT",
+             Valid PK types: scalar/indexable types \
+             (UUID, TEXT, VARCHAR, INT, BIGINT, SERIAL, BIGSERIAL, BOOLEAN, FLOAT, DECIMAL, \
+             TIMESTAMP, TIMESTAMPTZ, DATE, TIME, ENUM, INET, CIDR, MACADDR)",
             self.name,
             self.data_type.name()
         )
@@ -1677,15 +1679,15 @@ mod tests {
 
     #[test]
     fn test_invalid_primary_key_type_strict() {
-        let err = Column::new("data", ColumnType::Text)
+        let err = Column::new("data", ColumnType::Jsonb)
             .try_primary_key()
-            .expect_err("TEXT should be rejected by strict PK policy");
+            .expect_err("JSONB should be rejected by strict PK policy");
         assert!(err.contains("cannot be a primary key"));
     }
 
     #[test]
     fn test_invalid_primary_key_type_fail_soft() {
-        let col = Column::new("data", ColumnType::Text).primary_key();
+        let col = Column::new("data", ColumnType::Jsonb).primary_key();
         assert!(col.primary_key);
         assert!(!col.nullable);
     }

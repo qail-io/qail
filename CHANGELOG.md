@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.1] - 2026-03-06
+
+### Added
+
+- **Core (build validation):** function-scoped SuperAdmin audit in syn scanner with one-shot `// qail:allow(super_admin)` suppression bound to the next Qail call.
+- **Core (tests):** expanded syn-scanner and RLS audit regression coverage for drift gate, allow-comment semantics, and explicit tenant-scope checks.
+- **CI:** new dependency review workflow for pull requests.
+
+### Changed
+
+- **Core (RLS audit):** explicit tenant scope matcher tightened to `tenant_id` only for super-admin safety diagnostics.
+- **Core (diagnostics):** duplicate schema/RLS build diagnostics are now deduplicated before emission.
+- **Docs:** refreshed README and auth/RLS documentation to align with current architecture and hardening behavior.
+- **Gateway/PG:** hardening and configuration refinements across cache defaults, connection/session lifecycle, and RLS plumbing.
+
+### Removed
+
+- **CI:** removed deferred `publish-wasm` workflow while wasm publishing remains out of scope.
+
 ## [0.21.0] - 2026-01-24
 
 ### Breaking Changes ⚠️

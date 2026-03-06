@@ -1717,11 +1717,24 @@ index idx_booking_orders_user on booking_orders (user_id)
     fn test_parse_rejects_invalid_primary_key_type() {
         let input = r#"
 table bad_pk {
-  id text primary_key
+  id jsonb primary_key
 }
 "#;
-        let err = parse_qail(input).expect_err("TEXT primary key should be rejected");
+        let err = parse_qail(input).expect_err("JSONB primary key should be rejected");
         assert!(err.contains("cannot be a primary key"));
+    }
+
+    #[test]
+    fn test_parse_accepts_date_primary_key_type() {
+        let input = r#"
+table daily_stats {
+  date date primary_key
+}
+"#;
+        let schema = parse_qail(input).expect("DATE primary key should be accepted");
+        let table = &schema.tables["daily_stats"];
+        assert_eq!(table.columns.len(), 1);
+        assert!(table.columns[0].primary_key);
     }
 
     #[test]

@@ -160,6 +160,13 @@ pub struct GatewayConfig {
     #[serde(default = "default_tenant_column")]
     pub tenant_column: String,
 
+    /// Tables exempt from the tenant boundary guard.
+    /// Cross-tenant by design — e.g., resellers see other tenants' pricing
+    /// via active contracts. RLS still applies; the guard simply won't treat
+    /// cross-tenant rows as a violation for these tables.
+    #[serde(default)]
+    pub tenant_guard_exempt_tables: Vec<String>,
+
     /// Path to query allow-list file (one pattern per line). Optional.
     /// When set, only pre-approved query patterns are executed.
     #[serde(default)]

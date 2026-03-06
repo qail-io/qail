@@ -8,7 +8,7 @@ Full API documentation is generated from source code.
 |-------|-------------|------|
 | `qail-core` | AST, Builder, Parser | [docs.rs](https://docs.rs/qail-core) |
 | `qail-pg` | PostgreSQL driver | [docs.rs](https://docs.rs/qail-pg) |
-| `qail-wasm` | WASM bindings | [npm](https://npmjs.com/package/qail-wasm) |
+| `qail-wasm` | WASM bindings | Deferred (not currently published) |
 
 ## Generate Local Docs
 

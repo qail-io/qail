@@ -510,6 +510,16 @@ impl PgPool {
         self.acquire_with_rls(ctx).await
     }
 
+    /// Acquire a connection scoped to global/platform rows.
+    ///
+    /// Shorthand for `acquire_with_rls(RlsContext::global())`.
+    /// Use this for shared reference data (for example: currencies, ports,
+    /// vessel types) stored as `tenant_id IS NULL`.
+    pub async fn acquire_global(&self) -> PgResult<PooledConnection> {
+        self.acquire_with_rls(qail_core::rls::RlsContext::global())
+            .await
+    }
+
     /// Acquire a connection scoped to a specific tenant.
     ///
     /// Shorthand for `acquire_with_rls(RlsContext::tenant(tenant_id))`.

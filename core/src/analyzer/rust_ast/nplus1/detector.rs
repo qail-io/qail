@@ -113,7 +113,20 @@ impl NPlusOneDetector {
         }
     }
 
+    fn is_batch_chunk_iterable(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::MethodCall(method) = expr else {
+            return false;
+        };
+        matches!(
+            method.method.to_string().as_str(),
+            "chunks" | "chunks_mut" | "array_chunks" | "rchunks" | "rchunks_mut"
+        )
+    }
+
     fn classify_for_loop_kind(&self, iterable: &syn::Expr) -> LoopKind {
+        if self.is_batch_chunk_iterable(iterable) {
+            return LoopKind::BoundedWork;
+        }
         match self.bounded_collection_len(iterable) {
             Some(len) if len <= SMALL_BOUNDED_LOOP_MAX => LoopKind::BoundedWork,
             _ => LoopKind::Work,

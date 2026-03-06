@@ -566,6 +566,74 @@ async fn process(mut rx: Rx, ids: Vec<Uuid>, conn: &mut Conn) {
 }
 
 #[test]
+fn collect_commands_in_loop_then_execute_once_not_flagged() {
+    let source = r#"
+async fn process(conn: &mut Conn, ids: Vec<Uuid>) {
+    let mut cmds = Vec::new();
+    for id in &ids {
+        let cmd = Qail::set("users").eq("id", id).set_value("active", true);
+        cmds.push(cmd);
+    }
+    conn.pipeline_ast(&cmds).await.unwrap();
+}
+"#;
+    let diags = detect_n_plus_one_in_file("test.rs", source);
+    assert!(
+        diags.is_empty(),
+        "Collect-then-execute-once pattern should not trigger N+1 diagnostics, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn spawned_collect_then_single_pipeline_not_flagged() {
+    let source = r#"
+async fn process(conn: &mut Conn, makes: Vec<String>) {
+    let mut handles = Vec::new();
+    for make in &makes {
+        let make = make.clone();
+        handles.push(tokio::spawn(async move {
+            let mut cmds = Vec::new();
+            cmds.push(Qail::add("car_models").set_value("make", make.as_str()));
+            cmds
+        }));
+    }
+
+    let mut all_cmds = Vec::new();
+    for handle in handles {
+        let mut cmds = handle.await.unwrap();
+        all_cmds.append(&mut cmds);
+    }
+
+    conn.pipeline_ast(&all_cmds).await.unwrap();
+}
+"#;
+    let diags = detect_n_plus_one_in_file("test.rs", source);
+    assert!(
+        diags.is_empty(),
+        "Spawned collect + single execute should not trigger N+1 diagnostics, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn chunked_pipeline_loop_not_flagged_as_n_plus_one() {
+    let source = r#"
+async fn process(conn: &mut Conn, cmds: Vec<Qail>) {
+    for chunk in cmds.chunks(1000) {
+        conn.pipeline_ast(chunk).await.unwrap();
+    }
+}
+"#;
+    let diags = detect_n_plus_one_in_file("test.rs", source);
+    assert!(
+        diags.is_empty(),
+        "Chunked batch loop should not trigger N+1 diagnostics, got: {:?}",
+        diags
+    );
+}
+
+#[test]
 fn n1003_does_not_propagate_by_short_name() {
     let source = r#"
 mod helpers {

@@ -387,18 +387,27 @@ pub(crate) async fn list_handler(
     let _rows = rows?;
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
-    if let Some(ref tenant_id) = auth.tenant_id {
-        let _proof = crate::tenant_guard::verify_tenant_boundary(
-            &data,
-            tenant_id,
-            &state.config.tenant_column,
-            &table_name,
-            "rest_list",
-        )
-        .map_err(|v| {
-            tracing::error!("{}", v);
-            ApiError::internal("Data integrity error")
-        })?;
+    // Skip guard for tables that are cross-tenant by design (e.g.,
+    // resellers need to see other tenants' pricing via active contracts).
+    let is_exempt = state
+        .config
+        .tenant_guard_exempt_tables
+        .iter()
+        .any(|t| t == &table_name);
+    if !is_exempt {
+        if let Some(ref tenant_id) = auth.tenant_id {
+            let _proof = crate::tenant_guard::verify_tenant_boundary(
+                &data,
+                tenant_id,
+                &state.config.tenant_column,
+                &table_name,
+                "rest_list",
+            )
+            .map_err(|v| {
+                tracing::error!("{}", v);
+                ApiError::internal("Data integrity error")
+            })?;
+        }
     }
 
     let count = data.len();

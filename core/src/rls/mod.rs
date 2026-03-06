@@ -19,6 +19,10 @@
 //! let token = SuperAdminToken::for_system_process("example");
 //! let admin = RlsContext::super_admin(token);
 //! assert!(admin.bypasses_rls());
+//!
+//! // Global context — scopes to platform rows (tenant_id IS NULL)
+//! let global = RlsContext::global();
+//! assert!(global.is_global());
 //! ```
 
 /// Tenant context for multi-tenant data isolation.
@@ -31,7 +35,7 @@ pub mod tenant;
 /// An opaque token that authorizes RLS bypass.
 ///
 /// Create via one of the named constructors:
-/// - [`SuperAdminToken::for_system_process`] — cron, startup, reference-data
+/// - [`SuperAdminToken::for_system_process`] — cron, startup, cross-tenant internals
 /// - [`SuperAdminToken::for_webhook`] — inbound callbacks
 /// - [`SuperAdminToken::for_auth`] — login, register, token refresh
 ///
@@ -52,9 +56,9 @@ pub struct SuperAdminToken {
 impl SuperAdminToken {
     /// Issue a token for a system/background process.
     ///
-    /// Use for cron jobs, startup introspection, and public reference-data
-    /// endpoints (vessel types, locations, currency) that need cross-tenant
-    /// reads but have no user session.
+    /// Use for cron jobs, startup introspection, and internal cross-tenant
+    /// maintenance paths. For shared/public reference data, prefer
+    /// [`RlsContext::global()`] instead of bypass.
     ///
     /// The `_reason` parameter documents intent at the call site
     /// (e.g. `"cron::check_expired_holds"`). Drivers like `qail-pg`
@@ -104,6 +108,10 @@ pub struct RlsContext {
     /// Only `super_admin(token)` can set this to true, and that requires
     /// a `SuperAdminToken` which emits an audit log on creation.
     is_super_admin: bool,
+
+    /// When true, the context is explicitly scoped to global/platform rows
+    /// (`tenant_id IS NULL`) rather than tenant-specific rows.
+    is_global: bool,
 }
 
 impl RlsContext {
@@ -114,6 +122,7 @@ impl RlsContext {
             operator_id: tenant_id.to_string(), // backward compat
             agent_id: tenant_id.to_string(),    // backward compat
             is_super_admin: false,
+            is_global: false,
         }
     }
 
@@ -125,6 +134,7 @@ impl RlsContext {
             operator_id: operator_id.to_string(),
             agent_id: String::new(),
             is_super_admin: false,
+            is_global: false,
         }
     }
 
@@ -136,6 +146,7 @@ impl RlsContext {
             operator_id: String::new(),
             agent_id: agent_id.to_string(),
             is_super_admin: false,
+            is_global: false,
         }
     }
 
@@ -147,6 +158,21 @@ impl RlsContext {
             operator_id: operator_id.to_string(),
             agent_id: agent_id.to_string(),
             is_super_admin: false,
+            is_global: false,
+        }
+    }
+
+    /// Create a global context scoped to platform rows (`tenant_id IS NULL`).
+    ///
+    /// This is not a bypass: it applies explicit global scoping in AST injection
+    /// and exposes `app.is_global=true` for policy usage at the database layer.
+    pub fn global() -> Self {
+        Self {
+            tenant_id: String::new(),
+            operator_id: String::new(),
+            agent_id: String::new(),
+            is_super_admin: false,
+            is_global: true,
         }
     }
 
@@ -164,6 +190,7 @@ impl RlsContext {
             operator_id: nil.clone(),
             agent_id: nil,
             is_super_admin: true,
+            is_global: false,
         }
     }
 
@@ -177,6 +204,7 @@ impl RlsContext {
             operator_id: String::new(),
             agent_id: String::new(),
             is_super_admin: false,
+            is_global: false,
         }
     }
 
@@ -199,12 +227,19 @@ impl RlsContext {
     pub fn bypasses_rls(&self) -> bool {
         self.is_super_admin
     }
+
+    /// Returns true if this context is explicitly scoped to global rows.
+    pub fn is_global(&self) -> bool {
+        self.is_global
+    }
 }
 
 impl std::fmt::Display for RlsContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_super_admin {
             write!(f, "RlsContext(super_admin)")
+        } else if self.is_global {
+            write!(f, "RlsContext(global)")
         } else if !self.tenant_id.is_empty() {
             write!(f, "RlsContext(tenant={})", self.tenant_id)
         } else {
@@ -300,6 +335,18 @@ mod tests {
         assert!(!ctx.has_operator());
         assert!(!ctx.has_agent());
         assert!(!ctx.bypasses_rls());
+        assert!(!ctx.is_global());
+    }
+
+    #[test]
+    fn test_global_context() {
+        let ctx = RlsContext::global();
+        assert!(!ctx.has_tenant());
+        assert!(!ctx.has_operator());
+        assert!(!ctx.has_agent());
+        assert!(!ctx.bypasses_rls());
+        assert!(ctx.is_global());
+        assert_eq!(ctx.to_string(), "RlsContext(global)");
     }
 
     #[test]

@@ -20,9 +20,8 @@ cargo install qail
 
 ## JavaScript/TypeScript (WASM)
 
-```bash
-npm install qail-wasm
-```
+WASM packaging is currently deferred until the platform reaches production-ready status.
+Use Rust crates and CLI for now.
 
 ## Verify Installation
 
