@@ -510,13 +510,11 @@ fn demo(ctx: &RlsContext) {
         .expect("expected syn usage for Qail::get(\"orders\")");
 
     assert_eq!(usage.cmd.joins.len(), 1);
-    assert!(
-        usage
-            .cmd
-            .cages
-            .iter()
-            .any(|c| matches!(c.kind, crate::ast::CageKind::Partition))
-    );
+    assert!(usage
+        .cmd
+        .cages
+        .iter()
+        .any(|c| matches!(c.kind, crate::ast::CageKind::Partition)));
     assert_eq!(usage.cmd.having.len(), 1);
     assert!(usage.has_rls);
 }
@@ -856,8 +854,27 @@ fn demo(ctx: &RlsContext) {
     let emitted = emit_qail_usages_from_syn_source("drift.rs", source);
     let parsed = extract_syn_usages_from_source(source);
 
-    let mut expected_rows = parsed
-        .iter()
+    let mut best_by_key: std::collections::HashMap<
+        (usize, usize, String, String),
+        super::syn_analyzer::SynParsedUsage,
+    > = std::collections::HashMap::new();
+    for parsed_usage in parsed {
+        let key = (
+            parsed_usage.line,
+            parsed_usage.column,
+            parsed_usage.action.clone(),
+            parsed_usage.table.clone(),
+        );
+        match best_by_key.get(&key) {
+            Some(existing) if existing.score >= parsed_usage.score => {}
+            _ => {
+                best_by_key.insert(key, parsed_usage);
+            }
+        }
+    }
+
+    let mut expected_rows = best_by_key
+        .values()
         .map(|p| {
             (
                 p.line,
@@ -893,6 +910,159 @@ fn demo() {
     let emitted = emit_qail_usages_from_syn_source("allow.rs", source);
     assert!(!emitted.is_empty());
     assert!(emitted.iter().all(|u| !u.file_uses_super_admin));
+}
+
+#[cfg(feature = "syn-scanner")]
+#[test]
+fn test_syn_emit_usage_allow_comment_applies_to_next_qail_call_only() {
+    let source = r#"
+fn demo() {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    // qail:allow(super_admin)
+    let _q1 = Qail::get("orders").column("id");
+    let _q2 = Qail::get("orders").column("status");
+}
+"#;
+    let mut emitted = emit_qail_usages_from_syn_source("allow_once.rs", source)
+        .into_iter()
+        .filter(|u| u.table == "orders")
+        .collect::<Vec<_>>();
+    emitted.sort_by_key(|u| (u.line, u.column));
+    assert!(
+        emitted.len() >= 2,
+        "expected at least two Qail usages, got {}",
+        emitted.len()
+    );
+    assert!(!emitted[0].file_uses_super_admin);
+    assert!(emitted[1].file_uses_super_admin);
+}
+
+#[cfg(feature = "syn-scanner")]
+#[test]
+fn test_super_admin_audit_warns_without_explicit_tenant_scope() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let source = r#"
+fn demo() {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::get("orders").columns(["id"]);
+}
+"#;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "qail_build_sa_scope_warn_{}_{}",
+        std::process::id(),
+        unique
+    ));
+    std::fs::create_dir_all(&root).expect("create temp root");
+    let file = root.join("sa_no_scope.rs");
+    std::fs::write(&file, source).expect("write source");
+    let usages = scan_source_files(root.to_str().expect("utf8 temp path"));
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(diagnostics.iter().any(|d| {
+        matches!(d.kind, ValidationDiagnosticKind::RlsWarning)
+            && d.message.contains("no explicit tenant scope")
+    }));
+}
+
+#[cfg(feature = "syn-scanner")]
+#[test]
+fn test_super_admin_audit_accepts_tenant_id_is_null_scope() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let source = r#"
+fn demo() {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::get("orders")
+        .columns(["id"])
+        .is_null("tenant_id");
+}
+"#;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "qail_build_sa_scope_null_{}_{}",
+        std::process::id(),
+        unique
+    ));
+    std::fs::create_dir_all(&root).expect("create temp root");
+    let file = root.join("sa_is_null_scope.rs");
+    std::fs::write(&file, source).expect("write source");
+    let usages = scan_source_files(root.to_str().expect("utf8 temp path"));
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(!diagnostics
+        .iter()
+        .any(|d| d.message.contains("no explicit tenant scope")));
+}
+
+#[cfg(feature = "syn-scanner")]
+#[test]
+fn test_super_admin_audit_accepts_tenant_id_eq_scope() {
+    let schema = Schema::parse(
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let source = r#"
+fn demo() {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::get("orders")
+        .columns(["id"])
+        .eq("tenant_id", "00000000-0000-0000-0000-000000000000");
+}
+"#;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "qail_build_sa_scope_eq_{}_{}",
+        std::process::id(),
+        unique
+    ));
+    std::fs::create_dir_all(&root).expect("create temp root");
+    let file = root.join("sa_eq_scope.rs");
+    std::fs::write(&file, source).expect("write source");
+    let usages = scan_source_files(root.to_str().expect("utf8 temp path"));
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(!diagnostics
+        .iter()
+        .any(|d| d.message.contains("no explicit tenant scope")));
 }
 
 #[cfg(feature = "syn-scanner")]

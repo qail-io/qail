@@ -110,18 +110,25 @@ pub(crate) async fn aggregate_handler(
     let data: Vec<Value> = rows.iter().map(row_to_json).collect();
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
-    if let Some(ref tenant_id) = auth.tenant_id {
-        let _proof = crate::tenant_guard::verify_tenant_boundary(
-            &data,
-            tenant_id,
-            &state.config.tenant_column,
-            &table_name,
-            "rest_aggregate",
-        )
-        .map_err(|v| {
-            tracing::error!("{}", v);
-            ApiError::internal("Data integrity error")
-        })?;
+    let is_exempt = state
+        .config
+        .tenant_guard_exempt_tables
+        .iter()
+        .any(|t| t == &table_name);
+    if !is_exempt {
+        if let Some(ref tenant_id) = auth.tenant_id {
+            let _proof = crate::tenant_guard::verify_tenant_boundary(
+                &data,
+                tenant_id,
+                &state.config.tenant_column,
+                &table_name,
+                "rest_aggregate",
+            )
+            .map_err(|v| {
+                tracing::error!("{}", v);
+                ApiError::internal("Data integrity error")
+            })?;
+        }
     }
 
     let count = data.len();

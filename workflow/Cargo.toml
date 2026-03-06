@@ -1,6 +1,6 @@
 [package]
 name = "qail-workflow"
-version = "0.24.0"
+version = "0.24.1"
 edition = "2024"
 description = "Declarative state machine workflows for QAIL"
 license = "Apache-2.0"
@@ -9,7 +9,7 @@ keywords = ["qail", "workflow", "state-machine", "orchestration"]
 categories = ["asynchronous"]
 
 [dependencies]
-qail-core = { path = "../core", version = "0.24.0" }
+qail-core = { path = "../core", version = "0.24.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"

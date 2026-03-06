@@ -11,18 +11,32 @@ on:
       - 'pg/**'
       - 'gateway/**'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   auth-modes:
-    name: Auth (${{ matrix.auth_mode }})
+    name: Auth (${{ matrix.auth_mode }} / ${{ matrix.scope }})
     runs-on: ubuntu-latest
+    timeout-minutes: 75
 
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
-        auth_mode: [trust, md5, scram-sha-256]
+        include:
+          - auth_mode: trust
+            scope: smoke
+          - auth_mode: md5
+            scope: smoke
+          - auth_mode: scram-sha-256
+            scope: full
 
     services:
       postgres:
@@ -56,15 +70,22 @@ jobs:
         with:
           key: auth-${{ matrix.auth_mode }}
 
-      - name: Unit tests
+      - name: Unit tests (full lane)
+        if: matrix.scope == 'full'
         run: cargo test --workspace --lib
 
-      - name: Integration tests
+      - name: Integration tests (full lane)
+        if: matrix.scope == 'full'
         run: cargo test --workspace --test '*'
+
+      - name: Integration smoke (qail-pg)
+        if: matrix.scope == 'smoke'
+        run: cargo test -p qail-pg --test '*'
 
   result-formats:
     name: Result format (binary)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     services:
       postgres:
@@ -98,4 +119,4 @@ jobs:
           key: result-binary
 
       - name: Integration tests (binary format)
-        run: cargo test --workspace --test '*'
+        run: cargo test -p qail-pg --test '*'

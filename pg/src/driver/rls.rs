@@ -16,15 +16,33 @@ pub use qail_core::rls::RlsContext;
 /// **Security**: GUC values are sanitized to prevent SQL injection via
 /// crafted JWT claims (e.g., `operator_id: "'; DROP TABLE users; --"`).
 pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
-    let t_id = sanitize_guc_value(&ctx.tenant_id);
-    let op_id = sanitize_guc_value(&ctx.operator_id);
-    let ag_id = sanitize_guc_value(&ctx.agent_id);
+    let nil_uuid = "00000000-0000-0000-0000-000000000000";
+    let t_id_raw = if ctx.is_global() && ctx.tenant_id.is_empty() {
+        nil_uuid
+    } else {
+        &ctx.tenant_id
+    };
+    let op_id_raw = if ctx.is_global() && ctx.operator_id.is_empty() {
+        nil_uuid
+    } else {
+        &ctx.operator_id
+    };
+    let ag_id_raw = if ctx.is_global() && ctx.agent_id.is_empty() {
+        nil_uuid
+    } else {
+        &ctx.agent_id
+    };
+    let t_id = sanitize_guc_value(t_id_raw);
+    let op_id = sanitize_guc_value(op_id_raw);
+    let ag_id = sanitize_guc_value(ag_id_raw);
+    let is_global = if ctx.is_global() { "true" } else { "false" };
     format!(
-        "BEGIN; \
+        "BEGIN; SET LOCAL app.is_global = '{}'; \
          SELECT set_config('app.current_tenant_id', '{}', true), \
                 set_config('app.current_operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
+        is_global,
         t_id,
         op_id,
         ag_id,
@@ -49,9 +67,26 @@ pub(crate) fn context_to_sql_with_timeouts(
     statement_timeout_ms: u32,
     lock_timeout_ms: u32,
 ) -> String {
-    let t_id = sanitize_guc_value(&ctx.tenant_id);
-    let op_id = sanitize_guc_value(&ctx.operator_id);
-    let ag_id = sanitize_guc_value(&ctx.agent_id);
+    let nil_uuid = "00000000-0000-0000-0000-000000000000";
+    let t_id_raw = if ctx.is_global() && ctx.tenant_id.is_empty() {
+        nil_uuid
+    } else {
+        &ctx.tenant_id
+    };
+    let op_id_raw = if ctx.is_global() && ctx.operator_id.is_empty() {
+        nil_uuid
+    } else {
+        &ctx.operator_id
+    };
+    let ag_id_raw = if ctx.is_global() && ctx.agent_id.is_empty() {
+        nil_uuid
+    } else {
+        &ctx.agent_id
+    };
+    let t_id = sanitize_guc_value(t_id_raw);
+    let op_id = sanitize_guc_value(op_id_raw);
+    let ag_id = sanitize_guc_value(ag_id_raw);
+    let is_global = if ctx.is_global() { "true" } else { "false" };
 
     let lock_clause = if lock_timeout_ms > 0 {
         format!(" SET LOCAL lock_timeout = {};", lock_timeout_ms)
@@ -60,14 +95,15 @@ pub(crate) fn context_to_sql_with_timeouts(
     };
 
     format!(
-        "BEGIN; \
-         SET LOCAL statement_timeout = {};{} \
+        "BEGIN; SET LOCAL statement_timeout = {};{} \
+         SET LOCAL app.is_global = '{}'; \
          SELECT set_config('app.current_tenant_id', '{}', true), \
                 set_config('app.current_operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         statement_timeout_ms,
         lock_clause,
+        is_global,
         t_id,
         op_id,
         ag_id,
@@ -119,6 +155,7 @@ mod tests {
         assert!(sql.contains("'abc-123'"));
         assert!(sql.contains("app.current_tenant_id"));
         assert!(sql.contains("app.current_operator_id"));
+        assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
         assert!(sql.contains("'false'")); // is_super_admin
     }
 
@@ -127,7 +164,17 @@ mod tests {
         let token = SuperAdminToken::for_system_process("test_super_admin_sql");
         let ctx = RlsContext::super_admin(token);
         let sql = context_to_sql(&ctx);
+        assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
         assert!(sql.contains("'true'")); // is_super_admin
+    }
+
+    #[test]
+    fn test_context_to_sql_global_context() {
+        let ctx = RlsContext::global();
+        let sql = context_to_sql(&ctx);
+        assert!(sql.contains("SET LOCAL app.is_global = 'true'"));
+        assert!(sql.contains("00000000-0000-0000-0000-000000000000"));
+        assert!(sql.contains("'false'")); // is_super_admin remains false
     }
 
     #[test]
@@ -226,6 +273,7 @@ mod tests {
             sql.contains("lock_timeout = 5000"),
             "lock_timeout must be set when > 0"
         );
+        assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
     }
 
     #[test]

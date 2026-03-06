@@ -117,18 +117,21 @@ The gateway maps `AuthContext` → `RlsContext` for Postgres-native RLS:
 
 | AuthContext field | RLS session variable | PostgreSQL usage |
 |---|---|---|
-| `tenant_id` | `app.operator_id` | `current_setting('app.operator_id')` |
-| `claims["agent_id"]` | `app.agent_id` | `current_setting('app.agent_id')` |
-| `role == "super_admin" \| "Administrator"` | Super admin bypass | Skips RLS entirely |
+| `tenant_id` | `app.current_tenant_id` + `app.current_operator_id` | `current_setting('app.current_operator_id')` |
+| `claims["agent_id"]` | `app.current_agent_id` | `current_setting('app.current_agent_id')` |
+| `role == "administrator" \| "Administrator"` | Super admin bypass | Skips RLS entirely |
 
 ### How It's Applied
 
 ```sql
 -- Pipelined in a single roundtrip (no extra latency)
 BEGIN;
-SET LOCAL statement_timeout = '5000';
-SELECT set_config('app.operator_id', 'op-123', true);
-SELECT set_config('app.agent_id', '', true);
+SET LOCAL statement_timeout = 5000;
+SET LOCAL app.is_global = 'false';
+SELECT set_config('app.current_tenant_id', 'op-123', true),
+       set_config('app.current_operator_id', 'op-123', true),
+       set_config('app.current_agent_id', '', true),
+       set_config('app.is_super_admin', 'false', true);
 
 -- Your query runs here (same roundtrip)
 SELECT id, name FROM users WHERE active = true;
@@ -162,7 +165,7 @@ Runtime: auth.enrich_with_operator_map(&cache) fills in tenant_id
 CREATE POLICY tenant_isolation ON orders
   FOR ALL
   TO app_user
-  USING (operator_id = current_setting('app.operator_id')::uuid);
+  USING (operator_id = current_setting('app.current_operator_id')::uuid);
 ```
 
 ### Agent-scoped access
@@ -172,10 +175,10 @@ CREATE POLICY agent_orders ON orders
   FOR SELECT
   TO app_user
   USING (
-    operator_id = current_setting('app.operator_id')::uuid
+    operator_id = current_setting('app.current_operator_id')::uuid
     AND (
-      current_setting('app.agent_id') = ''
-      OR agent_id = current_setting('app.agent_id')::uuid
+      current_setting('app.current_agent_id') = ''
+      OR agent_id = current_setting('app.current_agent_id')::uuid
     )
   );
 ```
@@ -186,7 +189,7 @@ CREATE POLICY agent_orders ON orders
 policy tenant_isolation on orders
   for all
   to app_user
-  using $$ operator_id = current_setting('app.operator_id')::uuid $$
+  using $$ operator_id = current_setting('app.current_operator_id')::uuid $$
 ```
 
 ---
@@ -209,7 +212,7 @@ policy tenant_isolation on orders
 
 ## 7. Security Guarantees
 
-- **No RLS bypass via JWT claims** — `is_super_admin` in JWT extra claims is ignored; only `role == "super_admin" | "Administrator"` grants bypass
+- **No RLS bypass via JWT claims** — `is_super_admin` in JWT extra claims is ignored; only `role == "administrator" | "Administrator"` grants bypass
 - **Integer tenant_id rejected** — `tenant_id: 42` causes full JWT parse failure, not silent coercion
 - **Empty sub detected** — `sub: ""` correctly fails `is_authenticated()`
 - **FinanceAdmin scoped** — Finance roles do NOT bypass RLS; use database-level policies

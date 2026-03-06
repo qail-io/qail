@@ -23,6 +23,7 @@ pub(crate) struct SynParsedUsage {
     pub(crate) is_dynamic_table: bool,
     pub(crate) cmd: crate::ast::Qail,
     pub(crate) has_rls: bool,
+    pub(crate) scope_uses_super_admin: bool,
     pub(crate) score: usize,
 }
 
@@ -122,14 +123,15 @@ fn scan_syn_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
 }
 
 pub(crate) fn emit_qail_usages_from_syn_source(file: &str, source: &str) -> Vec<QailUsage> {
-    let file_has_allow_super_admin = source.contains("// qail:allow(super_admin)");
-    let file_uses_super_admin =
-        !file_has_allow_super_admin && source.contains("for_system_process(");
+    let allow_lines = collect_super_admin_allow_lines(source);
     let file_cte_names = collect_file_cte_aliases(source);
+    let parsed_usages = dedupe_syn_usages(extract_syn_usages_from_source(source));
+    let allow_indices = bind_allow_comments_to_next_usage(&parsed_usages, &allow_lines);
 
     let mut out = Vec::new();
-    for parsed in extract_syn_usages_from_source(source) {
+    for (idx, parsed) in parsed_usages.into_iter().enumerate() {
         let columns = collect_columns_from_cmd(&parsed.cmd);
+        let allow_super_admin = allow_indices.contains(&idx);
         out.push(QailUsage {
             file: file.to_string(),
             line: parsed.line,
@@ -140,10 +142,80 @@ pub(crate) fn emit_qail_usages_from_syn_source(file: &str, source: &str) -> Vec<
             action: parsed.action.clone(),
             is_cte_ref: file_cte_names.contains(&parsed.table),
             has_rls: parsed.has_rls,
-            file_uses_super_admin,
+            file_uses_super_admin: parsed.scope_uses_super_admin && !allow_super_admin,
         });
     }
     out
+}
+
+fn dedupe_syn_usages(usages: Vec<SynParsedUsage>) -> Vec<SynParsedUsage> {
+    let mut best_by_key: HashMap<(usize, usize, String, String), SynParsedUsage> = HashMap::new();
+    for usage in usages {
+        let key = (
+            usage.line,
+            usage.column,
+            usage.action.clone(),
+            usage.table.clone(),
+        );
+        match best_by_key.get(&key) {
+            Some(existing) if existing.score >= usage.score => {}
+            _ => {
+                best_by_key.insert(key, usage);
+            }
+        }
+    }
+    let mut deduped: Vec<SynParsedUsage> = best_by_key.into_values().collect();
+    deduped.sort_by(|a, b| {
+        (a.line, a.column, &a.action, &a.table).cmp(&(b.line, b.column, &b.action, &b.table))
+    });
+    deduped
+}
+
+fn collect_super_admin_allow_lines(source: &str) -> std::collections::HashSet<usize> {
+    source
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            if line.contains("// qail:allow(super_admin)") {
+                Some(idx + 1)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn bind_allow_comments_to_next_usage(
+    usages: &[SynParsedUsage],
+    allow_lines: &std::collections::HashSet<usize>,
+) -> std::collections::HashSet<usize> {
+    let mut allowed = std::collections::HashSet::new();
+    if allow_lines.is_empty() {
+        return allowed;
+    }
+
+    let mut sorted_allows: Vec<usize> = allow_lines.iter().copied().collect();
+    sorted_allows.sort_unstable();
+
+    let mut usage_positions: Vec<(usize, usize, usize)> = usages
+        .iter()
+        .enumerate()
+        .map(|(idx, usage)| (usage.line, usage.column, idx))
+        .collect();
+    usage_positions.sort_unstable();
+
+    let mut usage_cursor = 0usize;
+    for allow_line in sorted_allows {
+        while usage_cursor < usage_positions.len() && usage_positions[usage_cursor].0 < allow_line {
+            usage_cursor += 1;
+        }
+        if usage_cursor < usage_positions.len() {
+            allowed.insert(usage_positions[usage_cursor].2);
+            usage_cursor += 1;
+        }
+    }
+
+    allowed
 }
 
 fn collect_file_cte_aliases(source: &str) -> std::collections::HashSet<String> {
@@ -251,6 +323,8 @@ pub(crate) fn extract_syn_usages_from_source(source: &str) -> Vec<SynParsedUsage
         usages: Vec<SynParsedUsage>,
         /// Track variable names bound to Qail chains: var_name → index into usages
         bindings: HashMap<String, usize>,
+        /// Stack of function/method-level super-admin usage flags.
+        super_admin_scopes: Vec<bool>,
     }
 
     impl SynQailVisitor {
@@ -258,7 +332,23 @@ pub(crate) fn extract_syn_usages_from_source(source: &str) -> Vec<SynParsedUsage
             Self {
                 usages: Vec::new(),
                 bindings: HashMap::new(),
+                super_admin_scopes: Vec::new(),
             }
+        }
+
+        fn current_scope_uses_super_admin(&self) -> bool {
+            self.super_admin_scopes.last().copied().unwrap_or(false)
+        }
+
+        fn with_function_scope<F>(&mut self, uses_super_admin: bool, mut visit: F)
+        where
+            F: FnMut(&mut Self),
+        {
+            let saved_bindings = std::mem::take(&mut self.bindings);
+            self.super_admin_scopes.push(uses_super_admin);
+            visit(self);
+            self.super_admin_scopes.pop();
+            self.bindings = saved_bindings;
         }
 
         /// Try to parse a method chain whose receiver is a known Qail variable.
@@ -301,6 +391,8 @@ pub(crate) fn extract_syn_usages_from_source(source: &str) -> Vec<SynParsedUsage
             // Case 1: RHS is a full Qail chain (e.g. Qail::get("x").eq("y", v))
             if let Some(parsed) = parse_qail_chain_from_expr(init_expr) {
                 let idx = self.usages.len();
+                let mut parsed = parsed;
+                parsed.scope_uses_super_admin = self.current_scope_uses_super_admin();
                 self.usages.push(parsed);
                 self.bindings.insert(var_name.to_string(), idx);
                 return;
@@ -328,6 +420,20 @@ pub(crate) fn extract_syn_usages_from_source(source: &str) -> Vec<SynParsedUsage
     }
 
     impl<'ast> Visit<'ast> for SynQailVisitor {
+        fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+            let uses_super_admin = block_uses_for_system_process(&node.block);
+            self.with_function_scope(uses_super_admin, |this| {
+                syn::visit::visit_block(this, &node.block);
+            });
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            let uses_super_admin = block_uses_for_system_process(&node.block);
+            self.with_function_scope(uses_super_admin, |this| {
+                syn::visit::visit_block(this, &node.block);
+            });
+        }
+
         fn visit_expr(&mut self, node: &'ast syn::Expr) {
             // Handle assignment: cmd = cmd.eq("col", v) or cmd = Qail::get("x")
             if let syn::Expr::Assign(assign) = node {
@@ -345,6 +451,8 @@ pub(crate) fn extract_syn_usages_from_source(source: &str) -> Vec<SynParsedUsage
 
             // Normal chain detection (direct chains like Qail::get("x").eq("y", v))
             if let Some(parsed) = parse_qail_chain_from_expr(node) {
+                let mut parsed = parsed;
+                parsed.scope_uses_super_admin = self.current_scope_uses_super_admin();
                 self.usages.push(parsed);
             }
             syn::visit::visit_expr(self, node);
@@ -373,6 +481,35 @@ pub(crate) fn extract_syn_usages_from_source(source: &str) -> Vec<SynParsedUsage
     // were also pushed. The build_syn_usage_index deduplicates by score,
     // so we can just return all usages and let the index pick the best.
     visitor.usages
+}
+
+fn block_uses_for_system_process(block: &syn::Block) -> bool {
+    struct Finder {
+        found: bool,
+    }
+
+    impl<'ast> Visit<'ast> for Finder {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if self.found {
+                return;
+            }
+            if let syn::Expr::Path(path_expr) = &*node.func
+                && path_expr
+                    .path
+                    .segments
+                    .iter()
+                    .any(|segment| segment.ident == "for_system_process")
+            {
+                self.found = true;
+                return;
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+
+    let mut finder = Finder { found: false };
+    finder.visit_block(block);
+    finder.found
 }
 
 fn parse_qail_chain_from_expr(expr: &syn::Expr) -> Option<SynParsedUsage> {
@@ -412,6 +549,7 @@ fn parse_qail_chain_from_expr(expr: &syn::Expr) -> Option<SynParsedUsage> {
                     is_dynamic_table: ctor.is_dynamic_table,
                     cmd,
                     has_rls,
+                    scope_uses_super_admin: false,
                     score,
                 });
             }

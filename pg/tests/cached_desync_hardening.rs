@@ -494,6 +494,39 @@ async fn execute_simple_rejects_ready_before_completion() {
 }
 
 #[tokio::test]
+async fn execute_simple_accepts_row_stream_then_completion() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let (msg_type, payload) = read_frontend_frame(&mut sock).await;
+        assert_eq!(msg_type, b'Q');
+        assert!(payload.ends_with(&[0]));
+
+        // Execute path must tolerate row-producing simple statements and keep draining.
+        sock.write_all(&row_description_zero_cols()).await.unwrap();
+        sock.write_all(&data_row_zero_cols()).await.unwrap();
+        sock.write_all(&command_complete("SELECT 1")).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let mut conn =
+        PgConnection::connect_with_password("127.0.0.1", port, "test_user", "test_db", None)
+            .await
+            .unwrap();
+
+    conn.execute_simple("SELECT set_config('a','b',true)").await.unwrap();
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn simple_query_rejects_duplicate_row_description_before_completion() {
     let (listener, port) = mock_listener().await;
 

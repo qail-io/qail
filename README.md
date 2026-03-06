@@ -123,11 +123,13 @@ qail types schema.qail > src/generated/schema.rs # Typed codegen
 | IDOR | Must check per endpoint | **Tenant isolation built into protocol** |
 
 ```rust
-// RLS: four scope constructors for real-world SaaS
+// RLS: five scope constructors for real-world SaaS
 let ctx = RlsContext::operator(op_id);              // Single operator
 let ctx = RlsContext::agent(agent_id);              // Single agent
 let ctx = RlsContext::operator_and_agent(op, ag);   // Agent within operator
-let ctx = RlsContext::super_admin();                // Full access
+let ctx = RlsContext::global();                     // Shared data (tenant_id IS NULL)
+let token = SuperAdminToken::for_system_process("admin");
+let ctx = RlsContext::super_admin(token);           // Full bypass (internal only)
 
 // Every query is automatically scoped
 Qail::get("bookings").with_rls(&ctx)  // ← no manual WHERE needed

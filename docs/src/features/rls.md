@@ -23,7 +23,7 @@ One missed `WHERE` clause = cross-tenant data leak. In a codebase with 200+ quer
 QAIL solves this at the driver level:
 
 ```rust
-use qail_core::rls::RlsContext;
+use qail_core::rls::{RlsContext, SuperAdminToken};
 
 // Create context from authenticated session
 let ctx = RlsContext::operator(operator_id);
@@ -34,7 +34,7 @@ let query = Qail::get("bookings")
     .with_rls(&ctx);  // ← RLS injected at AST level
 
 // Generated SQL: SELECT ... FROM bookings
-// But the connection has: SET app.operator_id = '<uuid>'
+// But the connection sets app.current_operator_id/app.current_agent_id
 // PostgreSQL RLS policy handles the rest
 ```
 
@@ -45,7 +45,8 @@ let query = Qail::get("bookings")
 | `RlsContext::operator(id)` | Single operator | Operator dashboard |
 | `RlsContext::agent(id)` | Single agent | Agent portal |
 | `RlsContext::operator_and_agent(op, ag)` | Both | Agent within operator |
-| `RlsContext::super_admin()` | Bypasses RLS | Platform admin |
+| `RlsContext::global()` | Shared/global rows (`tenant_id IS NULL`) | Public/reference data |
+| `RlsContext::super_admin(token)` | Bypasses RLS | Internal platform-only ops |
 
 ## Query Methods
 
@@ -56,7 +57,12 @@ ctx.has_operator();   // true
 ctx.has_agent();      // true
 ctx.bypasses_rls();   // false
 
-let admin = RlsContext::super_admin();
+let global = RlsContext::global();
+global.is_global();   // true
+global.bypasses_rls();// false
+
+let token = SuperAdminToken::for_system_process("admin_task");
+let admin = RlsContext::super_admin(token);
 admin.bypasses_rls(); // true
 ```
 
@@ -71,14 +77,14 @@ admin.bypasses_rls(); // true
 │  AST Builder adds RLS context to query            │
 │       ↓                                           │
 │  PgDriver::execute()                              │
-│  ├─ set_config('app.current_operator_id', '<uuid>', false) │
-│  ├─ set_config('app.current_agent_id', '<uuid>', false)    │
+│  ├─ set_config('app.current_operator_id', '<uuid>', true)  │
+│  ├─ set_config('app.current_agent_id', '<uuid>', true)     │
 │  └─ Execute query on SAME connection                       │
 │       ↓                                           │
 │  PostgreSQL RLS Policy                            │
 │  CREATE POLICY tenant_isolation ON bookings       │
 │    USING (operator_id = current_setting(          │
-│           'app.operator_id')::uuid)              │
+│           'app.current_operator_id')::uuid)       │
 │       ↓                                           │
 │  Only matching rows returned                      │
 └─────────────────────────────────────────────────┘

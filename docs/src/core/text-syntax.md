@@ -1,6 +1,6 @@
 # Text Syntax
 
-For CLI, LSP, and WASM playground. Parses to AST internally.
+For CLI and LSP usage. Parses to AST internally.
 
 ## Keywords
 

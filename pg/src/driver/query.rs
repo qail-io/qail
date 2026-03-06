@@ -351,6 +351,15 @@ impl PgConnection {
         loop {
             let msg = self.recv().await?;
             match msg {
+                BackendMessage::RowDescription(_) => {
+                    // Some callers use execute_simple() with session-shaping SQL that
+                    // can legally return rows (e.g., SELECT set_config(...)).
+                    // Drain and ignore row data while preserving protocol ordering checks.
+                    flow.on_row_description("simple-query execute")?;
+                }
+                BackendMessage::DataRow(_) => {
+                    flow.on_data_row("simple-query execute")?;
+                }
                 BackendMessage::CommandComplete(_) => {
                     flow.on_command_complete();
                 }

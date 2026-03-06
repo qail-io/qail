@@ -100,11 +100,29 @@ impl ColumnType {
     }
 
     /// Check if this type can be a primary key.
-    /// Compile-time validation: TEXT, JSONB, BYTEA cannot be PKs.
+    /// Compile-time validation: PKs must be scalar/indexable types.
+    /// Container/blob-like types (JSONB, BYTEA, ARRAY, RANGE, INTERVAL) are rejected.
     pub const fn can_be_primary_key(&self) -> bool {
         matches!(
             self,
-            Self::Uuid | Self::Serial | Self::BigSerial | Self::Int | Self::BigInt
+            Self::Uuid
+                | Self::Text
+                | Self::Varchar(_)
+                | Self::Int
+                | Self::BigInt
+                | Self::Serial
+                | Self::BigSerial
+                | Self::Bool
+                | Self::Float
+                | Self::Decimal(_)
+                | Self::Timestamp
+                | Self::Timestamptz
+                | Self::Date
+                | Self::Time
+                | Self::Enum { .. }
+                | Self::Cidr
+                | Self::Inet
+                | Self::MacAddr
         )
     }
 
@@ -197,10 +215,14 @@ mod tests {
     #[test]
     fn test_can_be_primary_key() {
         assert!(ColumnType::Uuid.can_be_primary_key());
+        assert!(ColumnType::Text.can_be_primary_key());
+        assert!(ColumnType::Varchar(Some(32)).can_be_primary_key());
         assert!(ColumnType::Serial.can_be_primary_key());
         assert!(ColumnType::Int.can_be_primary_key());
-        assert!(!ColumnType::Text.can_be_primary_key());
+        assert!(ColumnType::Date.can_be_primary_key());
         assert!(!ColumnType::Jsonb.can_be_primary_key());
+        assert!(!ColumnType::Bytea.can_be_primary_key());
+        assert!(!ColumnType::Array(Box::new(ColumnType::Int)).can_be_primary_key());
     }
 
     #[test]

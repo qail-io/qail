@@ -1,9 +1,45 @@
 //! Validation pipeline: schema validation, RLS audit, N+1 detection, SQL policy.
 
 use std::path::Path;
+use std::collections::HashSet;
 
 use super::scanner::{QailUsage, scan_source_files};
 use super::schema::Schema;
+
+fn has_explicit_tenant_scope(cmd: &crate::ast::Qail) -> bool {
+    cmd.cages.iter().any(|cage| {
+        matches!(
+            cage.kind,
+            crate::ast::CageKind::Filter | crate::ast::CageKind::Payload
+        ) && cage
+            .conditions
+            .iter()
+            .any(is_explicit_tenant_scope_condition)
+    })
+}
+
+fn is_explicit_tenant_scope_condition(cond: &crate::ast::Condition) -> bool {
+    let crate::ast::Expr::Named(raw_left) = &cond.left else {
+        return false;
+    };
+    if !is_tenant_identifier(raw_left) {
+        return false;
+    }
+    matches!(
+        cond.op,
+        crate::ast::Operator::Eq | crate::ast::Operator::IsNull
+    )
+}
+
+fn is_tenant_identifier(raw_ident: &str) -> bool {
+    let without_cast = raw_ident.split("::").next().unwrap_or(raw_ident).trim();
+    let last_segment = without_cast.rsplit('.').next().unwrap_or(without_cast);
+    let normalized = last_segment
+        .trim_matches('"')
+        .trim_matches('`')
+        .to_ascii_lowercase();
+    normalized == "tenant_id"
+}
 
 /// Validation diagnostic category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +106,13 @@ pub fn validate_against_schema_diagnostics(
     }
 
     let mut diagnostics = Vec::new();
+    let mut seen_diagnostics: HashSet<String> = HashSet::new();
+    let mut push_unique = |diag: ValidationDiagnostic| {
+        let key = format!("{:?}|{}", diag.kind, diag.message);
+        if seen_diagnostics.insert(key) {
+            diagnostics.push(diag);
+        }
+    };
     let query_ir = super::query_ir::build_query_ir(usages);
 
     for query in query_ir {
@@ -91,7 +134,7 @@ pub fn validate_against_schema_diagnostics(
             Ok(()) => {}
             Err(validation_errors) => {
                 for e in validation_errors {
-                    diagnostics.push(ValidationDiagnostic::schema_error(format!(
+                    push_unique(ValidationDiagnostic::schema_error(format!(
                         "{}:{}: {}",
                         query.file, query.line, e
                     )));
@@ -101,7 +144,7 @@ pub fn validate_against_schema_diagnostics(
 
         // RLS Audit: warn if query targets RLS-enabled table without .with_rls()
         if schema.is_rls_table(&query.table) && !query.has_rls {
-            diagnostics.push(ValidationDiagnostic::rls_warning(format!(
+            push_unique(ValidationDiagnostic::rls_warning(format!(
                 "{}:{}: ⚠️ RLS AUDIT: Qail::{}(\"{}\") has no .with_rls() — table has RLS enabled, query may leak tenant data",
                 query.file, query.line, query.action.to_lowercase(), query.table
             )));
@@ -116,10 +159,11 @@ pub fn validate_against_schema_diagnostics(
                 .table(&query.table)
                 .map(|t| t.has_column("tenant_id"))
                 .unwrap_or(false);
-            if table_has_tenant_id {
-                diagnostics.push(ValidationDiagnostic::rls_warning(format!(
+            if table_has_tenant_id && !has_explicit_tenant_scope(&query.cmd) {
+                push_unique(ValidationDiagnostic::rls_warning(format!(
                     "{}:{}: ⚠️ RLS AUDIT: Qail::{}(\"{}\") in file using SuperAdminToken::for_system_process() \
-   — query may bypass tenant isolation. Use claims-based scoping or add `// qail:allow(super_admin)` if intentional.",
+   — query has no explicit tenant scope (`tenant_id = ...` or `tenant_id IS NULL`) and may bypass tenant isolation. \
+Use claims-based scoping, `RlsContext::global()` for shared data, or add explicit tenant scope. If intentional, add `// qail:allow(super_admin)`.",
                     query.file, query.line, query.action.to_lowercase(), query.table
                 )));
             }

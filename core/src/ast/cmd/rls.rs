@@ -31,14 +31,15 @@
 //! ```
 
 use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
-use crate::rls::RlsContext;
 use crate::rls::tenant::lookup_tenant_column;
+use crate::rls::RlsContext;
 
 impl Qail {
     /// Apply tenant-scope isolation based on the query action.
     ///
     /// - **GET/SET/DEL** → injects `WHERE operator_id = $value`
     /// - **ADD/Upsert** → auto-sets `operator_id` in payload
+    /// - **Global context** → injects `tenant_col IS NULL` (or payload `tenant_col = NULL`)
     /// - **Super admins** → no-op (bypasses isolation)
     /// - **Unregistered tables** → no-op (not a tenant table)
     /// - **DDL/etc** → no-op
@@ -53,13 +54,23 @@ impl Qail {
             return self;
         }
 
-        if !ctx.has_operator() {
-            return self;
-        }
-
         let Some(tenant_col) = lookup_tenant_column(&self.table) else {
             return self;
         };
+
+        if ctx.is_global() {
+            return match self.action {
+                Action::Get | Action::Set | Action::Del | Action::Over | Action::Gen => {
+                    self.scope_to_global(&tenant_col)
+                }
+                Action::Add | Action::Upsert | Action::Put => self.scope_insert_global(&tenant_col),
+                _ => self,
+            };
+        }
+
+        if !ctx.has_operator() {
+            return self;
+        }
 
         match self.action {
             // Read / Update / Delete → inject WHERE filter
@@ -106,6 +117,33 @@ impl Qail {
         self
     }
 
+    /// Inject a `WHERE tenant_col IS NULL` filter for global/platform reads.
+    fn scope_to_global(mut self, tenant_col: &str) -> Self {
+        let condition = Condition {
+            left: Expr::Named(tenant_col.to_string()),
+            op: Operator::IsNull,
+            value: Value::Null,
+            is_array_unnest: false,
+        };
+
+        let existing = self
+            .cages
+            .iter_mut()
+            .find(|c| matches!(c.kind, CageKind::Filter));
+
+        if let Some(cage) = existing {
+            cage.conditions.push(condition);
+        } else {
+            self.cages.push(Cage {
+                kind: CageKind::Filter,
+                conditions: vec![condition],
+                logical_op: LogicalOp::And,
+            });
+        }
+
+        self
+    }
+
     /// Auto-set `operator_id` in INSERT/UPSERT payload.
     ///
     /// Adds the tenant column to the Payload cage so the operator_id
@@ -119,6 +157,33 @@ impl Qail {
         };
 
         // Try to append to existing payload cage
+        let existing = self
+            .cages
+            .iter_mut()
+            .find(|c| matches!(c.kind, CageKind::Payload));
+
+        if let Some(cage) = existing {
+            cage.conditions.push(condition);
+        } else {
+            self.cages.push(Cage {
+                kind: CageKind::Payload,
+                conditions: vec![condition],
+                logical_op: LogicalOp::And,
+            });
+        }
+
+        self
+    }
+
+    /// Auto-set `tenant_col = NULL` in INSERT/UPSERT payload for global rows.
+    fn scope_insert_global(mut self, tenant_col: &str) -> Self {
+        let condition = Condition {
+            left: Expr::Named(tenant_col.to_string()),
+            op: Operator::Eq,
+            value: Value::Null,
+            is_array_unnest: false,
+        };
+
         let existing = self
             .cages
             .iter_mut()
@@ -300,6 +365,55 @@ mod tests {
         assert!(
             filter.is_none(),
             "Agent-only should not inject operator filter"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_global_injects_is_null_filter() {
+        register_tenant_table("_rls_global_get_orders", "tenant_id");
+
+        let ctx = RlsContext::global();
+        let query = Qail::get("_rls_global_get_orders").with_rls(&ctx);
+
+        let filter = query
+            .cages
+            .iter()
+            .find(|c| matches!(c.kind, CageKind::Filter));
+        assert!(filter.is_some(), "Expected filter cage for global scope");
+
+        let conditions = &filter.expect("filter cage").conditions;
+        assert!(
+            conditions.iter().any(|c| {
+                matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                    && c.op == Operator::IsNull
+                    && matches!(&c.value, Value::Null)
+            }),
+            "Expected tenant_id IS NULL condition"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_global_injects_null_payload_on_add() {
+        register_tenant_table("_rls_global_add_catalog", "tenant_id");
+
+        let ctx = RlsContext::global();
+        let query = Qail::add("_rls_global_add_catalog")
+            .set_value("name", "item")
+            .with_rls(&ctx);
+
+        let payload = query
+            .cages
+            .iter()
+            .find(|c| matches!(c.kind, CageKind::Payload));
+        assert!(payload.is_some(), "Expected payload cage");
+
+        let conditions = &payload.expect("payload cage").conditions;
+        assert!(
+            conditions.iter().any(|c| {
+                matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                    && matches!(&c.value, Value::Null)
+            }),
+            "Expected tenant_id = NULL in payload"
         );
     }
 }
