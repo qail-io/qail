@@ -70,6 +70,7 @@ impl Qail {
             from_tables: vec![],
             using_tables: vec![],
             lock_mode: None,
+            skip_locked: false,
             fetch: None,
             default_values: false,
             overriding: None,

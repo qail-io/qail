@@ -110,6 +110,14 @@ impl Qail {
         self
     }
 
+    /// FOR UPDATE SKIP LOCKED row lock.
+    /// Used for concurrent job claiming (e.g. outbox dispatch).
+    pub fn for_update_skip_locked(mut self) -> Self {
+        self.lock_mode = Some(LockMode::Update);
+        self.skip_locked = true;
+        self
+    }
+
     /// FOR NO KEY UPDATE row lock.
     pub fn for_no_key_update(mut self) -> Self {
         self.lock_mode = Some(LockMode::NoKeyUpdate);
