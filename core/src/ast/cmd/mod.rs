@@ -71,6 +71,9 @@ pub struct Qail {
     /// Row locking (FOR UPDATE / FOR SHARE).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock_mode: Option<LockMode>,
+    /// SKIP LOCKED modifier for row locking (FOR UPDATE SKIP LOCKED).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_locked: bool,
     /// FETCH FIRST n ROWS [ONLY|WITH TIES].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch: Option<(u64, bool)>,
@@ -194,6 +197,7 @@ impl Default for Qail {
             from_tables: vec![],
             using_tables: vec![],
             lock_mode: None,
+            skip_locked: false,
             fetch: None,
             default_values: false,
             overriding: None,

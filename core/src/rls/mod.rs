@@ -112,6 +112,10 @@ pub struct RlsContext {
     /// When true, the context is explicitly scoped to global/platform rows
     /// (`tenant_id IS NULL`) rather than tenant-specific rows.
     is_global: bool,
+
+    /// The authenticated user's UUID for user-scoped DB policies.
+    /// Empty string means no user scope. Set via `RlsContext::user()`.
+    user_id: String,
 }
 
 impl RlsContext {
@@ -123,6 +127,7 @@ impl RlsContext {
             agent_id: tenant_id.to_string(),    // backward compat
             is_super_admin: false,
             is_global: false,
+            user_id: String::new(),
         }
     }
 
@@ -135,6 +140,7 @@ impl RlsContext {
             agent_id: String::new(),
             is_super_admin: false,
             is_global: false,
+            user_id: String::new(),
         }
     }
 
@@ -147,6 +153,7 @@ impl RlsContext {
             agent_id: agent_id.to_string(),
             is_super_admin: false,
             is_global: false,
+            user_id: String::new(),
         }
     }
 
@@ -159,6 +166,7 @@ impl RlsContext {
             agent_id: agent_id.to_string(),
             is_super_admin: false,
             is_global: false,
+            user_id: String::new(),
         }
     }
 
@@ -173,6 +181,7 @@ impl RlsContext {
             agent_id: String::new(),
             is_super_admin: false,
             is_global: true,
+            user_id: String::new(),
         }
     }
 
@@ -191,6 +200,7 @@ impl RlsContext {
             agent_id: nil,
             is_super_admin: true,
             is_global: false,
+            user_id: String::new(),
         }
     }
 
@@ -205,6 +215,23 @@ impl RlsContext {
             agent_id: String::new(),
             is_super_admin: false,
             is_global: false,
+            user_id: String::new(),
+        }
+    }
+
+    /// Create a user-scoped context for authenticated end-user operations.
+    ///
+    /// Sets `app.current_user_id` so that DB policies can enforce
+    /// row-level isolation by user (e.g. `user_id = get_current_user_id()`).
+    /// Does NOT bypass tenant isolation or grant super-admin.
+    pub fn user(user_id: &str) -> Self {
+        Self {
+            tenant_id: String::new(),
+            operator_id: String::new(),
+            agent_id: String::new(),
+            is_super_admin: false,
+            is_global: false,
+            user_id: user_id.to_string(),
         }
     }
 
@@ -221,6 +248,16 @@ impl RlsContext {
     /// Returns true if this context has an agent scope.
     pub fn has_agent(&self) -> bool {
         !self.agent_id.is_empty()
+    }
+
+    /// Returns true if this context has a user scope.
+    pub fn has_user(&self) -> bool {
+        !self.user_id.is_empty()
+    }
+
+    /// Returns the user ID for this context (empty if none).
+    pub fn user_id(&self) -> &str {
+        &self.user_id
     }
 
     /// Returns true if this context bypasses tenant isolation.
@@ -378,5 +415,35 @@ mod tests {
         // All tokens are structurally identical
         assert_eq!(a, b);
         assert_eq!(b, c);
+    }
+
+    #[test]
+    fn test_user_context() {
+        let ctx = RlsContext::user("550e8400-e29b-41d4-a716-446655440000");
+        assert!(!ctx.has_tenant());
+        assert!(!ctx.has_operator());
+        assert!(!ctx.has_agent());
+        assert!(!ctx.bypasses_rls());
+        assert!(!ctx.is_global());
+        assert!(ctx.has_user());
+        assert_eq!(ctx.user_id(), "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_user_context_display() {
+        let ctx = RlsContext::user("u-123");
+        assert_eq!(ctx.to_string(), "RlsContext(none)");
+        // user context doesn't have tenant, so Display falls through to "none"
+        // (user_id is an orthogonal axis, not a tenant scope)
+    }
+
+    #[test]
+    fn test_other_constructors_have_no_user() {
+        assert!(!RlsContext::tenant("t-1").has_user());
+        assert!(!RlsContext::operator("o-1").has_user());
+        assert!(!RlsContext::global().has_user());
+        assert!(!RlsContext::empty().has_user());
+        let token = SuperAdminToken::for_auth("test");
+        assert!(!RlsContext::super_admin(token).has_user());
     }
 }

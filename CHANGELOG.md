@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.2] - 2026-03-07
+
+### Added
+
+- **Core (AST):** `skip_locked` flag on `Qail` — `FOR UPDATE SKIP LOCKED` clause in SELECT transpiler for safe concurrent claim patterns.
+- **Core (RLS):** `RlsContext::user(user_id)` constructor — user-scoped context that sets `app.current_user_id` for row-level isolation by authenticated end-user.
+- **Core (RLS):** `has_user()` and `user_id()` query methods on `RlsContext`.
+- **Core (tests):** 3 new tests — user context creation, display semantics, and no-user-in-other-constructors invariant.
+- **PG (RLS):** `context_to_sql` and `context_to_sql_with_timeouts` now emit `set_config('app.current_user_id', ...)` for user-scoped DB policies.
+- **PG (tests):** 3 new tests — user context SQL emission, empty user_id handling, and SQL injection sanitization for user_id.
+
+### Changed
+
+- **Core (RLS):** All existing `RlsContext` constructors (`tenant`, `operator`, `agent`, `super_admin`, `global`, `empty`, `operator_and_agent`) now initialize `user_id` to empty string for backwards compatibility.
+
 ## [0.24.1] - 2026-03-06
 
 ### Added

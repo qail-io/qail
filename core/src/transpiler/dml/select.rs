@@ -605,6 +605,9 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
             LockMode::Share => sql.push_str(" FOR SHARE"),
             LockMode::KeyShare => sql.push_str(" FOR KEY SHARE"),
         }
+        if cmd.skip_locked {
+            sql.push_str(" SKIP LOCKED");
+        }
     }
 
     sql

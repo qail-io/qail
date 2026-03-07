@@ -35,14 +35,21 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
     let t_id = sanitize_guc_value(t_id_raw);
     let op_id = sanitize_guc_value(op_id_raw);
     let ag_id = sanitize_guc_value(ag_id_raw);
+    let u_id = if ctx.user_id().is_empty() {
+        String::new()
+    } else {
+        sanitize_guc_value(ctx.user_id())
+    };
     let is_global = if ctx.is_global() { "true" } else { "false" };
     format!(
         "BEGIN; SET LOCAL app.is_global = '{}'; \
-         SELECT set_config('app.current_tenant_id', '{}', true), \
+         SELECT set_config('app.current_user_id', '{}', true), \
+                set_config('app.current_tenant_id', '{}', true), \
                 set_config('app.current_operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         is_global,
+        u_id,
         t_id,
         op_id,
         ag_id,
@@ -86,6 +93,11 @@ pub(crate) fn context_to_sql_with_timeouts(
     let t_id = sanitize_guc_value(t_id_raw);
     let op_id = sanitize_guc_value(op_id_raw);
     let ag_id = sanitize_guc_value(ag_id_raw);
+    let u_id = if ctx.user_id().is_empty() {
+        String::new()
+    } else {
+        sanitize_guc_value(ctx.user_id())
+    };
     let is_global = if ctx.is_global() { "true" } else { "false" };
 
     let lock_clause = if lock_timeout_ms > 0 {
@@ -97,13 +109,15 @@ pub(crate) fn context_to_sql_with_timeouts(
     format!(
         "BEGIN; SET LOCAL statement_timeout = {};{} \
          SET LOCAL app.is_global = '{}'; \
-         SELECT set_config('app.current_tenant_id', '{}', true), \
+         SELECT set_config('app.current_user_id', '{}', true), \
+                set_config('app.current_tenant_id', '{}', true), \
                 set_config('app.current_operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         statement_timeout_ms,
         lock_clause,
         is_global,
+        u_id,
         t_id,
         op_id,
         ag_id,
@@ -175,6 +189,40 @@ mod tests {
         assert!(sql.contains("SET LOCAL app.is_global = 'true'"));
         assert!(sql.contains("00000000-0000-0000-0000-000000000000"));
         assert!(sql.contains("'false'")); // is_super_admin remains false
+    }
+
+    #[test]
+    fn test_context_to_sql_user_context() {
+        let ctx = RlsContext::user("550e8400-e29b-41d4-a716-446655440000");
+        let sql = context_to_sql(&ctx);
+        assert!(
+            sql.contains("set_config('app.current_user_id', '550e8400-e29b-41d4-a716-446655440000'"),
+            "user_id must be set in session SQL"
+        );
+        assert!(sql.contains("'false'")); // is_super_admin remains false
+        assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
+    }
+
+    #[test]
+    fn test_context_to_sql_user_empty() {
+        // Empty user_id → empty string in session var
+        let ctx = RlsContext::empty();
+        let sql = context_to_sql(&ctx);
+        assert!(
+            sql.contains("set_config('app.current_user_id', ''"),
+            "empty user_id emits empty string"
+        );
+    }
+
+    #[test]
+    fn redteam_user_id_sanitized() {
+        let ctx = RlsContext::user("'; DROP TABLE users; --");
+        let sql = context_to_sql(&ctx);
+        assert!(
+            !sql.contains("'; DROP"),
+            "user_id injection must be sanitized"
+        );
+        assert!(sql.contains("app.current_user_id"));
     }
 
     #[test]
