@@ -35,11 +35,12 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
     let t_id = sanitize_guc_value(t_id_raw);
     let op_id = sanitize_guc_value(op_id_raw);
     let ag_id = sanitize_guc_value(ag_id_raw);
-    let u_id = if ctx.user_id().is_empty() {
-        String::new()
+    let u_id_raw = if ctx.user_id().is_empty() {
+        nil_uuid
     } else {
-        sanitize_guc_value(ctx.user_id())
+        ctx.user_id()
     };
+    let u_id = sanitize_guc_value(u_id_raw);
     let is_global = if ctx.is_global() { "true" } else { "false" };
     format!(
         "BEGIN; SET LOCAL app.is_global = '{}'; \
@@ -93,11 +94,12 @@ pub(crate) fn context_to_sql_with_timeouts(
     let t_id = sanitize_guc_value(t_id_raw);
     let op_id = sanitize_guc_value(op_id_raw);
     let ag_id = sanitize_guc_value(ag_id_raw);
-    let u_id = if ctx.user_id().is_empty() {
-        String::new()
+    let u_id_raw = if ctx.user_id().is_empty() {
+        nil_uuid
     } else {
-        sanitize_guc_value(ctx.user_id())
+        ctx.user_id()
     };
+    let u_id = sanitize_guc_value(u_id_raw);
     let is_global = if ctx.is_global() { "true" } else { "false" };
 
     let lock_clause = if lock_timeout_ms > 0 {
@@ -205,12 +207,12 @@ mod tests {
 
     #[test]
     fn test_context_to_sql_user_empty() {
-        // Empty user_id → empty string in session var
+        // Empty user_id → nil UUID in session var (safe for ::uuid policy casts)
         let ctx = RlsContext::empty();
         let sql = context_to_sql(&ctx);
         assert!(
-            sql.contains("set_config('app.current_user_id', ''"),
-            "empty user_id emits empty string"
+            sql.contains("set_config('app.current_user_id', '00000000-0000-0000-0000-000000000000'"),
+            "empty user_id emits nil UUID to avoid ::uuid cast failures"
         );
     }
 

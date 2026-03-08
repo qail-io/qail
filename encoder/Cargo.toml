@@ -1,6 +1,6 @@
 [package]
 name = "qail-encoder"
-version = "0.24.2"
+version = "0.24.3"
 edition = "2024"
 description = "QAIL Encoder - Lightweight wire protocol encoding (no I/O, no TLS)"
 license = "Apache-2.0"
@@ -10,8 +10,8 @@ repository = "https://github.com/qail-io/qail"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-qail-core = { path = "../core", version = "0.24.2" }
-qail-pg = { path = "../pg", version = "0.24.2", default-features = false, optional = true }
+qail-core = { path = "../core", version = "0.24.3" }
+qail-pg = { path = "../pg", version = "0.24.3", default-features = false, optional = true }
 
 [features]
 default = []
