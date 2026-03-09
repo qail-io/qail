@@ -3,9 +3,9 @@
 > **From your app to PostgreSQL wire bytes — one typed AST, zero application SQL strings, built-in tenant isolation.**
 
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
-[![Docs](https://img.shields.io/badge/docs-qail.rs-blue)](https://qail.rs/docs)
+[![Docs](https://img.shields.io/badge/docs-dev.qail.io-blue)](https://dev.qail.io/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.24.4-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.24.5-green)](CHANGELOG.md)
 
 ---
 
@@ -317,10 +317,10 @@ qail_pg::spawn_pool_maintenance(pool.clone());
 
 ## Documentation
 
-- 📖 [Full Documentation](https://qail.rs/docs)
-- 📊 [Benchmarks](https://qail.rs/benchmarks)
+- 📖 [Full Documentation](https://dev.qail.io/docs)
+- 📊 [Benchmarks](https://dev.qail.io/benchmarks)
 - 📋 [Changelog](CHANGELOG.md)
-- 💡 [The Manifesto](https://qail.rs/philosophy)
+- 💡 [The Manifesto](https://dev.qail.io/philosophy)
 
 ---
 
@@ -330,5 +330,5 @@ Apache-2.0 © 2025-2026 Qail Contributors
 
 <p align="center">
   <strong>Built with 🦀 Rust</strong><br>
-  <a href="https://qail.rs">qail.rs</a>
+  <a href="https://dev.qail.io">dev.qail.io</a>
 </p>

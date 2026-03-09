@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.5] - 2026-03-09
+
+### Changed
+
+- **Versioning:** Bumped Rust crates to `0.24.5` (`qail-core`, `qail-pg`, `qail-gateway`, `qail`, `qail-qdrant`, `qail-workflow`, `qail-encoder`, `qail-lsp`).
+- **Docs domain:** Updated crate and CLI doc links from `qail.rs`/`qail.io` to `dev.qail.io` for developer-facing docs.
+- **README snippets:** Updated installation version examples to `0.24.5` across workspace READMEs.
+
 ## [0.24.4] - 2026-03-09
 
 ### Changed
