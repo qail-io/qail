@@ -1,6 +1,6 @@
 # qail-core
 
-**The AST-native query builder** — No SQL strings, no ORM magic, just type-safe expressions.
+**The AST-native query builder** — No application SQL string building, no ORM magic, just type-safe expressions.
 
 [![Crates.io](https://img.shields.io/crates/v/qail-core.svg)](https://crates.io/crates/qail-core)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -11,9 +11,13 @@
 |----------|--------------|--------------|
 | **String-based** | SQL as strings | Requires parameterization |
 | **ORM** | Macros generate SQL | Compile-time safe |
-| **AST-Native** (QAIL) | Typed AST → Wire protocol | **Structurally safe** |
+| **AST-Native** (QAIL) | Typed AST → Protocol bytes | **Structurally safe** |
 
-QAIL builds queries as an Abstract Syntax Tree that compiles directly to database wire protocol. There's no SQL string generation step—safety is built into the design.
+QAIL builds queries as an Abstract Syntax Tree that compiles directly to protocol bytes.
+
+- **SQL string** = text query assembled in application code.
+- **SQL bytes** = protocol frames + typed values emitted from AST.
+- **Scope** = QAIL removes app-side SQL interpolation on the AST path.
 
 ## Installation
 
@@ -23,7 +27,7 @@ QAIL builds queries as an Abstract Syntax Tree that compiles directly to databas
 
 ```toml
 [dependencies]
-qail-core = "0.24.0"
+qail-core = "0.24.4"
 ```
 
 ## Quick Start

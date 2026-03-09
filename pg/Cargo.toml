@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.24.3"
+version = "0.24.4"
 edition = "2024"
 description = "Fastest async PostgreSQL driver - AST to wire protocol, optional io_uring on Linux"
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ enterprise-gssapi = []
 libpq = []
 
 [dependencies]
-qail-core = { version = "0.24.3", path = "../core" }
+qail-core = { version = "0.24.4", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 tokio = { version = "1.48.0", features = ["net", "io-util", "sync", "rt", "time"] }
@@ -78,4 +78,3 @@ required-features = ["libpq"]
 [[example]]
 name = "libpq_only"
 required-features = ["libpq"]
-

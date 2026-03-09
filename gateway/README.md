@@ -15,13 +15,19 @@ Auto-REST + WebSocket gateway for QAIL with direct PostgreSQL execution via `qai
 - Query allow-list + complexity limits
 - EXPLAIN and observability endpoints
 
+## Query Input Modes
+
+- `POST /qail` accepts **text DSL** input (string request body).
+- `POST /qail/binary` accepts **binary AST** payloads (no text-SQL interpolation path).
+- Both paths execute through `qail-pg`; use binary mode when you want strict AST-only semantics end-to-end.
+
 ## Installation
 
 ```toml
 [dependencies]
-qail-gateway = "0.24.0"
-qail-core = "0.24.0"
-qail-pg = "0.24.0"
+qail-gateway = "0.24.4"
+qail-core = "0.24.4"
+qail-pg = "0.24.4"
 ```
 
 ## Quick Start

@@ -1,11 +1,11 @@
 # Qail — Application-to-Database Pipeline with Compile-Time Safety
 
-> **From your app to PostgreSQL wire bytes — one typed AST, zero strings, built-in tenant isolation.**
+> **From your app to PostgreSQL wire bytes — one typed AST, zero application SQL strings, built-in tenant isolation.**
 
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-qail.rs-blue)](https://qail.rs/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.24.0-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.24.4-green)](CHANGELOG.md)
 
 ---
 
@@ -21,15 +21,23 @@ These aren't edge cases. They're the *default* outcome of string-based SQL.
 
 ## The Fix
 
-Qail is a **native AST PostgreSQL pipeline**. Instead of passing SQL strings, you work with a typed Abstract Syntax Tree that compiles directly to PostgreSQL wire protocol bytes.
+Qail is a **native AST PostgreSQL pipeline**. Instead of writing ad-hoc SQL strings in application code, you build a typed Abstract Syntax Tree that compiles to PostgreSQL wire protocol bytes.
 
 ```rust
 // String-based (every other driver): parse → plan → execute
 sqlx::query!("SELECT id, email FROM users WHERE active = $1", true)
 
-// Qail: AST → binary wire bytes → execute (no parsing, no injection surface)
+// Qail: AST → protocol bytes → server parse/plan/execute
+// (no app-side SQL interpolation surface)
 Qail::get("users").columns(["id", "email"]).eq("active", true)
 ```
+
+### SQL String vs SQL Bytes (Exact Meaning)
+
+- **SQL string**: query text assembled in app code (manual concatenation/interpolation, dynamic formatting, etc.).
+- **SQL bytes**: frontend/backend protocol frames and typed bind-value bytes emitted by the driver.
+- **Qail claim**: "no SQL strings" means no **application-level string interpolation path** on the AST flow.
+- **PostgreSQL behavior**: PostgreSQL still performs normal parse/plan/execute on received statements (or reuses prepared plans).
 
 **N+1 is structurally discouraged by design and enforced by build-time detection.** The AST guides you to `.join()` (no implicit lazy-loading path), and validator/lint rules catch looped query patterns before production.
 
@@ -117,7 +125,7 @@ qail types schema.qail > src/generated/schema.rs # Typed codegen
 
 | Threat | String SQL | Qail |
 |--------|-----------|------|
-| SQL injection | Possible (one mistake) | **Prevented on AST path** (binary AST, no string interpolation) |
+| SQL injection | Possible (one mistake) | **Prevented on AST path** (no app-side SQL interpolation) |
 | Tenant data leak | Missing WHERE clause | **RLS injected automatically** |
 | Query abuse | Unbounded depth/joins | **AST validates at compile time** |
 | IDOR | Must check per endpoint | **Tenant isolation built into protocol** |

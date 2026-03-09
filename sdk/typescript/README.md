@@ -45,6 +45,12 @@ await qail.update('users')
 await qail.delete('users').exec('uuid-123');
 ```
 
+## String vs Structured Modes
+
+- Default builder calls (`from`, `where`, `insert`, `update`) send structured REST parameters.
+- `query()` and `batch()` are explicit text-DSL modes.
+- For strict AST-only execution, pair this SDK with gateway binary/allow-list policies.
+
 ## Query Builder API
 
 ### Select (from)

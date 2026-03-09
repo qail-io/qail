@@ -5,7 +5,38 @@
 [![Crates.io](https://img.shields.io/crates/v/qail-pg.svg)](https://crates.io/crates/qail-pg)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-A high-performance PostgreSQL driver that speaks the wire protocol directly. No SQL strings, no SQL injection - just pure AST-to-wire encoding.
+A high-performance PostgreSQL driver that speaks the wire protocol directly. AST-first execution with no application-level SQL string interpolation on the safe path.
+
+## SQL String vs SQL Bytes
+
+- **SQL string**: text query built in app code (format/concat/interpolate).
+- **SQL bytes**: PostgreSQL frontend/backend protocol bytes (`Parse`, `Bind`, `Execute`, result frames) and encoded bind values.
+- **What qail-pg does**: compiles QAIL AST into protocol messages and typed values.
+- **What PostgreSQL still does**: server-side parse/plan/execute is still normal PostgreSQL behavior.
+
+## Inspect Real Wire Bytes
+
+Run the built-in demo:
+
+```bash
+cargo run -p qail-pg --example wire_bytes_demo
+```
+
+For:
+
+```rust
+Qail::get("users")
+    .select_all()
+    .filter("active", Eq, true)
+```
+
+you will see:
+
+- SQL view: `SELECT * FROM users WHERE active = $1`
+- bind param `$1`: `74` (`'t'` for boolean true)
+- wire frames: `Parse (P) + Bind (B) + Describe (D) + Execute (E) + Sync (S)`
+
+This shows the exact protocol-byte path used by the driver.
 
 ## Features
 
@@ -24,8 +55,8 @@ A high-performance PostgreSQL driver that speaks the wire protocol directly. No 
 
 ```toml
 [dependencies]
-qail-pg = "0.24.0"
-qail-core = "0.24.0"
+qail-pg = "0.24.4"
+qail-core = "0.24.4"
 ```
 
 ## Quick Start

@@ -2,13 +2,20 @@
 
 > **The AST-Native Query Compiler with Built-in Row-Level Security**
 
-QAIL compiles typed query ASTs directly to database wire protocols. No SQL strings. No injection surface. Built-in multi-tenant data isolation via RLS. The only Rust PostgreSQL driver with AST-level tenant injection.
+QAIL compiles typed query ASTs directly to database wire protocols. No application-level SQL string interpolation on the AST path. Built-in multi-tenant data isolation via RLS. The only Rust PostgreSQL driver with AST-level tenant injection.
 
 ## Philosophy: AST = Meaning
 
 > **If a database doesn't let us encode semantic intent, we don't fake it.**
 
-QAIL compiles typed query ASTs directly to database wire protocols. No SQL strings. No injection surface.
+QAIL compiles typed query ASTs directly to database wire protocols with typed value encoding.
+
+## SQL String vs SQL Bytes
+
+- **SQL string**: text query assembled in application code.
+- **SQL bytes**: PostgreSQL protocol message bytes (`Parse`/`Bind`/`Execute` and results) plus encoded bind values.
+- **QAIL guarantee**: AST flow removes app-side SQL interpolation as an injection surface.
+- **PostgreSQL behavior**: server parse/plan/execute still applies normally.
 
 ### Supported Databases
 
@@ -75,22 +82,22 @@ let rows = driver.query(&cmd).await?;
 | Materialized Views | ✅ |
 | Row-Level Security (RLS) | ✅ |
 | Multi-Tenant Isolation | ✅ |
-| TypedQail<T> Relations | ✅ |
+| `TypedQail<T>` Relations | ✅ |
 | Protected Columns | ✅ |
 | LISTEN/NOTIFY/UNLISTEN | ✅ |
 
-> **Note:** QAIL's AST-native design eliminates SQL injection by construction — no strings, no injection surface. Query plan caching (`prepare()`, `pipeline_prepared_fast()`) is purely a PostgreSQL performance optimization, not a security measure.
+> **Note:** QAIL's AST-native design eliminates app-side SQL interpolation on the AST path. Query plan caching (`prepare()`, `pipeline_prepared_fast()`) is a PostgreSQL performance optimization, not the primary security boundary.
 
 ## Why Some SQL Features Don't Exist in QAIL
 
-QAIL speaks **AST**, not SQL strings. Many traditional SQL "security features" are solutions to string-based problems that don't exist in an AST-native world:
+QAIL is **AST-first**, not SQL-string-first. Many traditional SQL "security features" exist to mitigate string-construction risks that AST pipelines avoid by design:
 
 | SQL Feature | Why It Exists | QAIL Replacement |
 |-------------|---------------|------------------|
-| **Parameterized Queries** | Prevent string injection | Not needed — `Value::Param` is a typed AST node, not a string hole |
-| **Prepared Statements** (for security) | Separate SQL from data | Not needed — AST has no SQL text to inject into |
-| **Query Escaping** | Sanitize user input | Not needed — values are typed (`Value::Text`, `Value::Int`), never interpolated |
-| **SQL Validators** | Detect malformed queries | Not needed — invalid AST won't compile |
+| **Parameterized Queries** | Prevent string injection | Built in — `Value::Param` is a typed AST node, not a string hole |
+| **Prepared Statements** (for security) | Separate SQL from data | Not primary defense — AST already separates structure from data |
+| **Query Escaping** | Sanitize user input | Not primary path — values are typed (`Value::Text`, `Value::Int`) |
+| **SQL Validators** | Detect malformed queries | AST validation + build-time checks handle this path |
 
 ### The AST Guarantee
 

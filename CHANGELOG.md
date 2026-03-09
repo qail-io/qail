@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.4] - 2026-03-09
+
+### Changed
+
+- **Versioning:** Bumped Rust crates to `0.24.4` (`qail-core`, `qail-pg`, `qail-gateway`, `qail`, `qail-qdrant`, `qail-workflow`, `qail-encoder`, `qail-lsp`).
+- **Docs:** Standardized "SQL string vs SQL bytes" wording across workspace READMEs and docs to clarify:
+  - "No SQL strings" means no app-side SQL interpolation on the AST path.
+  - PostgreSQL still performs normal server-side parse/plan/execute.
+- **Web docs:** Updated qail-web copy to use simpler language for AST-path safety and protocol semantics.
+
 ## [0.24.2] - 2026-03-07
 
 ### Added

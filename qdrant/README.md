@@ -6,7 +6,9 @@ QAIL driver for Qdrant vector database.
 
 ## Overview
 
-AST-native Rust driver for Qdrant vector search. Uses the same QAIL builder pattern as `qail-pg`, encoding directly to Qdrant's REST API.
+AST-native Rust driver for Qdrant vector search. Uses the same QAIL builder pattern as `qail-pg`, encoding directly to Qdrant REST payload bytes.
+
+> This crate does not use SQL. "SQL bytes vs SQL strings" terminology only applies to PostgreSQL crates (`qail-core` + `qail-pg`).
 
 ## Features
 

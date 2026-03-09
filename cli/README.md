@@ -58,6 +58,12 @@ qail repl
 SELECT id, name FROM users WHERE active = true
 ```
 
+## SQL String vs SQL Bytes
+
+- `qail repl` shows SQL text for inspection/debugging.
+- Runtime execution with `qail-pg` is AST-first and protocol-byte based.
+- In other words: SQL text is a tooling view here, not the required authoring model for app code.
+
 ## Schema Format
 
 QAIL uses a concise, version-controlled schema format:
