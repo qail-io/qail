@@ -1,0 +1,11 @@
+table bookings {
+  id uuid primary_key default gen_random_uuid()
+  tenant_id uuid not_null references tenants(id) on_delete cascade
+  user_id uuid not_null references users(id) on_delete cascade
+  status text not_null default 'pending'
+  total_cents bigint not_null
+  travel_date date not_null
+  created_at timestamptz not_null default now()
+}
+
+index idx_bookings_tenant_date on bookings (tenant_id,travel_date)

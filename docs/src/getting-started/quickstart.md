@@ -72,3 +72,23 @@ qail pull postgres://user:pass@localhost/db > schema.qail
 qail diff old.qail new.qail
 qail migrate up old.qail:new.qail postgres://...
 ```
+
+## Schema Layout Examples (Single vs Modular)
+
+Use the built-in samples in this repository:
+
+- Single file: `examples/schema/single/schema.qail`
+- Modular directory: `examples/schema/modular/schema/`
+
+Try them:
+
+```bash
+qail check examples/schema/single/schema.qail
+qail check examples/schema/modular/schema
+qail check examples/schema/modular/schema.qail
+```
+
+The modular sample includes `schema/_order.qail` with strict manifest mode:
+
+- `-- qail: strict-manifest`
+- every discovered module must be listed (directly or through listed directories)

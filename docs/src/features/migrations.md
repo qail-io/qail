@@ -33,6 +33,20 @@ table users {
 rename users.username -> users.name
 ```
 
+### Single File vs Modular Directory
+
+Qail supports both:
+
+- **Single file**: `schema.qail`
+- **Modular**: `schema/*.qail` (recursive), optional `schema/_order.qail`
+
+Modular schema is useful when one file becomes very large. If `_order.qail` exists, listed modules load first; in strict mode, every module must be listed.
+
+Repository examples:
+
+- `examples/schema/single/schema.qail`
+- `examples/schema/modular/schema/`
+
 ## Workflow
 
 ### 1. Pull Current Schema
@@ -170,4 +184,3 @@ qail migrate status postgres://...
 # │ 001      │ qail_queue         │ 2026-02-01 10:00:00 │ a3b8d1...    │
 # └──────────┴────────────────────┴─────────────────────┴──────────────┘
 ```
-

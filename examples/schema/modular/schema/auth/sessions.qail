@@ -1,0 +1,10 @@
+table sessions {
+  id uuid primary_key default gen_random_uuid()
+  tenant_id uuid not_null references tenants(id) on_delete cascade
+  user_id uuid not_null references users(id) on_delete cascade
+  refresh_token text unique not_null
+  expires_at timestamptz not_null
+  created_at timestamptz not_null default now()
+}
+
+index idx_sessions_tenant_user on sessions (tenant_id,user_id)

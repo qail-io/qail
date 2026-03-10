@@ -149,6 +149,12 @@ qail check schema.qail
 #   Tables: 80 | Columns: 1110 | Indexes: 287
 #   ✓ 82 primary key(s)
 
+# Validate modular schema directory
+qail check schema/
+
+# Fallback mode: if schema.qail is missing, sibling schema/ is used
+qail check schema.qail
+
 # Check migration safety
 qail check old.qail:new.qail
 # ✓ Both schemas are valid

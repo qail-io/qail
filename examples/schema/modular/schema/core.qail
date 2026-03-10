@@ -1,0 +1,9 @@
+extension "pgcrypto"
+
+table tenants {
+  id uuid primary_key default gen_random_uuid()
+  slug text unique not_null
+  name text not_null
+  active bool not_null default true
+  created_at timestamptz not_null default now()
+}

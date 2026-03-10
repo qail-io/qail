@@ -1,0 +1,12 @@
+table users {
+  id uuid primary_key default gen_random_uuid()
+  tenant_id uuid not_null references tenants(id) on_delete cascade
+  email text unique not_null
+  full_name text not_null
+  role text not_null default 'member'
+  created_at timestamptz not_null default now()
+  enable_rls
+  force_rls
+}
+
+unique index idx_users_tenant_email on users (tenant_id,email)

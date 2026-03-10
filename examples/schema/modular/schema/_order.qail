@@ -1,0 +1,4 @@
+-- qail: strict-manifest
+core.qail
+auth/
+booking/
