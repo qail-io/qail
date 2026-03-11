@@ -301,13 +301,10 @@ fn detect_sql_in_file(path: &Path) -> Vec<SqlUsageDiagnostic> {
     let Ok(source) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let out = syn_impl::detect_in_source(&path.display().to_string(), &source);
-
-    #[cfg(not(feature = "analyzer"))]
-    let out = out;
-
     #[cfg(feature = "analyzer")]
-    let mut out = out;
+    let mut out = syn_impl::detect_in_source(&path.display().to_string(), &source);
+    #[cfg(not(feature = "analyzer"))]
+    let out = syn_impl::detect_in_source(&path.display().to_string(), &source);
 
     #[cfg(feature = "analyzer")]
     {

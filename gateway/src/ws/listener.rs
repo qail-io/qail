@@ -12,10 +12,17 @@ use super::{
 
 async fn release_listener_conn(conn: &mut Option<qail_pg::PooledConnection>) {
     if let Some(mut c) = conn.take() {
-        if let Err(e) = c.unlisten_all().await {
-            tracing::debug!("WS listener cleanup UNLISTEN failed: {}", e);
+        match c.unlisten_all().await {
+            Ok(()) => {
+                c.release().await;
+            }
+            Err(e) => {
+                // Fail closed: LISTEN state is session-level. If cleanup fails,
+                // dropping the pooled wrapper destroys the backend connection
+                // instead of returning a potentially subscribed socket to pool.
+                tracing::warn!("WS listener cleanup UNLISTEN failed, dropping conn: {}", e);
+            }
         }
-        c.release().await;
     }
 }
 
@@ -35,6 +42,13 @@ async fn ensure_listener_conn(
 
     for channel in channels {
         if let Err(e) = c.listen(channel).await {
+            if let Err(cleanup_err) = c.unlisten_all().await {
+                tracing::debug!(
+                    "WS listener partial LISTEN cleanup failed before release: {}",
+                    cleanup_err
+                );
+                return Err(format!("LISTEN failed: {}", e));
+            }
             c.release().await;
             return Err(format!("LISTEN failed: {}", e));
         }
@@ -94,11 +108,9 @@ pub(super) async fn run_listener_session(
                 cmd = control_rx.recv() => {
                     match cmd {
                         Some(ListenControl::Listen { channel, reply }) => {
-                            if channels.contains(&channel) {
-                                let _ = reply.send(Ok(()));
-                            } else {
-                                let _ = reply.send(Err("Notification channel unavailable".to_string()));
-                            }
+                            let _ = channel; // keep command shape explicit for future diagnostics.
+                            // Connection is currently unavailable; don't claim success.
+                            let _ = reply.send(Err("Notification channel unavailable".to_string()));
                         }
                         Some(ListenControl::Unlisten { channel, reply }) => {
                             channels.remove(&channel);
@@ -136,8 +148,20 @@ pub(super) async fn run_listener_session(
                                 channels.remove(&channel);
                                 tracing::warn!("WS listener LISTEN failed: {}", e);
                                 let _ = reply.send(Err("Subscribe failed".to_string()));
+                                release_listener_conn(&mut conn).await;
                             } else {
-                                let _ = reply.send(Ok(()));
+                                if reply.send(Ok(())).is_err() {
+                                    // Caller timed out/cancelled; roll back LISTEN to avoid
+                                    // ghost subscriptions not tracked by connection state.
+                                    channels.remove(&channel);
+                                    if let Err(e) = c.unlisten(&channel).await {
+                                        tracing::warn!(
+                                            "WS listener rollback UNLISTEN failed after dropped reply: {}",
+                                            e
+                                        );
+                                        let _ = c.unlisten_all().await;
+                                    }
+                                }
                             }
                         }
                         Some(ListenControl::Unlisten { channel, reply }) => {
@@ -145,6 +169,7 @@ pub(super) async fn run_listener_session(
                             if let Err(e) = c.unlisten(&channel).await {
                                 tracing::warn!("WS listener UNLISTEN failed: {}", e);
                                 let _ = reply.send(Err("Unsubscribe failed".to_string()));
+                                release_listener_conn(&mut conn).await;
                             } else {
                                 let _ = reply.send(Ok(()));
                             }
@@ -210,7 +235,19 @@ pub(super) async fn run_listener_session(
                     channels.insert(channel.clone());
                     match ensure_listener_conn(&state, &mut conn, &channels).await {
                         Ok(()) => {
-                            let _ = reply.send(Ok(()));
+                            if reply.send(Ok(())).is_err() {
+                                // Caller timed out/cancelled; roll back state and backend LISTEN.
+                                channels.remove(&channel);
+                                if let Some(c) = conn.as_mut()
+                                    && let Err(e) = c.unlisten(&channel).await
+                                {
+                                    tracing::warn!(
+                                        "WS listener rollback UNLISTEN failed after dropped reply: {}",
+                                        e
+                                    );
+                                    let _ = c.unlisten_all().await;
+                                }
+                            }
                         }
                         Err(_) => {
                             channels.remove(&channel);

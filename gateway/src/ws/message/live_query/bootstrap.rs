@@ -13,6 +13,10 @@ use super::super::super::{
 };
 use super::poller::{LiveQueryPollerConfig, spawn_live_query_poller};
 
+fn exceeds_live_query_task_limit(task_count: usize, replacing_existing: bool) -> bool {
+    !replacing_existing && task_count >= WS_MAX_SUBSCRIPTIONS_PER_CONNECTION
+}
+
 pub(super) async fn subscribe_and_spawn_live_query(
     table: &str,
     interval_ms: u64,
@@ -27,6 +31,22 @@ pub(super) async fn subscribe_and_spawn_live_query(
         Some(tid) if !tid.is_empty() => format!("{}_qail_table_{}", tid, table),
         _ => format!("qail_table_{}", table),
     };
+
+    // Enforce per-connection poller cap before mutating LISTEN/refcount state.
+    if exceeds_live_query_task_limit(
+        conn_state.live_query_tasks.len(),
+        conn_state.live_query_tasks.contains_key(table),
+    ) {
+        let _ = tx
+            .send(WsServerMessage::Error {
+                message: format!(
+                    "LiveQuery limit reached (max {} per connection)",
+                    WS_MAX_SUBSCRIPTIONS_PER_CONNECTION
+                ),
+            })
+            .await;
+        return;
+    }
 
     let previous_channel = conn_state.live_query_channels.get(table).cloned();
     if let Some(prev_channel) = previous_channel.as_ref()
@@ -80,20 +100,6 @@ pub(super) async fn subscribe_and_spawn_live_query(
         increment_channel_refcount(conn_state, &notify_channel);
     }
 
-    if conn_state.live_query_tasks.len() >= WS_MAX_SUBSCRIPTIONS_PER_CONNECTION
-        && !conn_state.live_query_tasks.contains_key(table)
-    {
-        let _ = tx
-            .send(WsServerMessage::Error {
-                message: format!(
-                    "LiveQuery limit reached (max {} per connection)",
-                    WS_MAX_SUBSCRIPTIONS_PER_CONNECTION
-                ),
-            })
-            .await;
-        return;
-    }
-
     let poll_interval = if interval_ms > 0 {
         Some(std::time::Duration::from_millis(
             interval_ms.max(WS_MIN_LIVE_QUERY_INTERVAL_MS),
@@ -132,4 +138,33 @@ pub(super) async fn subscribe_and_spawn_live_query(
     conn_state
         .live_query_channels
         .insert(table.to_string(), notify_channel);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limit_check_rejects_new_task_at_cap() {
+        assert!(exceeds_live_query_task_limit(
+            WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
+            false
+        ));
+    }
+
+    #[test]
+    fn limit_check_allows_replacing_existing_task_at_cap() {
+        assert!(!exceeds_live_query_task_limit(
+            WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
+            true
+        ));
+    }
+
+    #[test]
+    fn limit_check_allows_new_task_below_cap() {
+        assert!(!exceeds_live_query_task_limit(
+            WS_MAX_SUBSCRIPTIONS_PER_CONNECTION.saturating_sub(1),
+            false
+        ));
+    }
 }

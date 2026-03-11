@@ -217,7 +217,10 @@ impl QailLanguageServer {
             return Ok(Some(actions));
         }
 
-        let docs = self.documents.read().unwrap();
+        let docs = self
+            .documents
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(content) = docs.get(uri.as_str()) else {
             return Ok(Some(actions));
         };

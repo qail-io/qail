@@ -215,13 +215,19 @@ impl std::ops::Deref for PooledConnection {
     type Target = QdrantDriver;
 
     fn deref(&self) -> &Self::Target {
-        self.driver.as_ref().expect("driver taken after drop")
+        match self.driver.as_ref() {
+            Some(driver) => driver,
+            None => unreachable!("driver taken after drop"),
+        }
     }
 }
 
 impl std::ops::DerefMut for PooledConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.driver.as_mut().expect("driver taken after drop")
+        match self.driver.as_mut() {
+            Some(driver) => driver,
+            None => unreachable!("driver taken after drop"),
+        }
     }
 }
 
