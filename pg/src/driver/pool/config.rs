@@ -375,6 +375,15 @@ pub(crate) fn apply_url_query_params(
                 }
                 gss_service = value.to_string();
             }
+            // libpq alias for kerberos service principal name component.
+            "krbsrvname" => {
+                if value.is_empty() {
+                    return Err(PgError::Connection(
+                        "gss_service must not be empty".to_string(),
+                    ));
+                }
+                gss_service = value.to_string();
+            }
             "gss_target" => {
                 if value.is_empty() {
                     return Err(PgError::Connection(
@@ -383,6 +392,26 @@ pub(crate) fn apply_url_query_params(
                 }
                 gss_target = Some(value.to_string());
             }
+            // libpq alias for GSS target hostname override.
+            "gsshostname" => {
+                if value.is_empty() {
+                    return Err(PgError::Connection(
+                        "gss_target must not be empty".to_string(),
+                    ));
+                }
+                gss_target = Some(value.to_string());
+            }
+            // libpq compatibility knob; accepted values are validated but
+            // provider selection remains controlled by qail `gss_provider`.
+            "gsslib" => match value.trim().to_ascii_lowercase().as_str() {
+                "gssapi" | "sspi" => {}
+                _ => {
+                    return Err(PgError::Connection(format!(
+                        "Invalid gsslib value: {} (expected gssapi or sspi)",
+                        value
+                    )));
+                }
+            },
             "gss_connect_retries" => {
                 let retries = value.parse::<usize>().map_err(|_| {
                     PgError::Connection(format!("Invalid gss_connect_retries value: {}", value))

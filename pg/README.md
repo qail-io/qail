@@ -55,8 +55,8 @@ This shows the exact protocol-byte path used by the driver.
 
 ```toml
 [dependencies]
-qail-pg = "0.24.5"
-qail-core = "0.24.5"
+qail-pg = "0.24.6"
+qail-core = "0.24.6"
 ```
 
 ## Quick Start

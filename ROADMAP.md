@@ -9,8 +9,20 @@
 1. Wire-protocol hardening and panic-path elimination in hot decode/IO paths.
 2. Validator/syn unification and stronger cross-file N+1 + schema drift detection.
 3. Migration safety defaults (destructive-change opt-ins, shadow receipts, lock-risk gates).
+4. Enterprise PostgreSQL auth/protocol parity planning (SCM, SSPI, SCRAM channel-binding correctness).
 
 The sections below are a historical milestone log of completed and deferred roadmap phases.
+
+---
+
+## Enterprise PostgreSQL Parity (Planned)
+
+- [x] v0.24.6 compatibility baseline:
+  - Decode PostgreSQL auth code `6` (`AuthenticationSCMCredential`) explicitly.
+  - Add libpq URL aliases (`krbsrvname`, `gsshostname`, `gsslib`) in parser.
+- [ ] True SCM credential auth implementation (Unix ancillary credential passing).
+- [ ] Native SSPI provider implementation (Windows-first deep integration).
+- [ ] Full RFC-accurate `tls-server-end-point` hash algorithm selection for SCRAM channel binding.
 
 ---
 

@@ -479,6 +479,52 @@ mod tests {
     }
 
     #[test]
+    fn test_from_qail_config_rejects_empty_krbsrvname_alias() {
+        let mut qail = qail_core::config::QailConfig::default();
+        qail.postgres.url = "postgres://alice:secret@db.internal:5432/app?krbsrvname=".to_string();
+
+        let err = match PoolConfig::from_qail_config(&qail) {
+            Ok(_) => panic!("expected empty krbsrvname alias error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("gss_service must not be empty"));
+    }
+
+    #[test]
+    fn test_from_qail_config_rejects_empty_gsshostname_alias() {
+        let mut qail = qail_core::config::QailConfig::default();
+        qail.postgres.url = "postgres://alice:secret@db.internal:5432/app?gsshostname=".to_string();
+
+        let err = match PoolConfig::from_qail_config(&qail) {
+            Ok(_) => panic!("expected empty gsshostname alias error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("gss_target must not be empty"));
+    }
+
+    #[test]
+    fn test_from_qail_config_accepts_valid_gsslib_values() {
+        let mut qail = qail_core::config::QailConfig::default();
+        qail.postgres.url = "postgres://alice:secret@db.internal:5432/app?gsslib=gssapi".to_string();
+        assert!(PoolConfig::from_qail_config(&qail).is_ok());
+
+        qail.postgres.url = "postgres://alice:secret@db.internal:5432/app?gsslib=sspi".to_string();
+        assert!(PoolConfig::from_qail_config(&qail).is_ok());
+    }
+
+    #[test]
+    fn test_from_qail_config_rejects_invalid_gsslib_value() {
+        let mut qail = qail_core::config::QailConfig::default();
+        qail.postgres.url = "postgres://alice:secret@db.internal:5432/app?gsslib=kerberos".to_string();
+
+        let err = match PoolConfig::from_qail_config(&qail) {
+            Ok(_) => panic!("expected invalid gsslib error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("Invalid gsslib value"));
+    }
+
+    #[test]
     fn test_from_qail_config_parses_gss_retry_settings() {
         let mut qail = qail_core::config::QailConfig::default();
         qail.postgres.url =

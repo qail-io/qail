@@ -83,6 +83,11 @@ pub enum BackendMessage {
     AuthenticationKerberosV5,
     /// Server requests GSSAPI authentication.
     AuthenticationGSS,
+    /// Server requests SCM credential auth (Unix-domain peer credential exchange).
+    ///
+    /// PostgreSQL auth code `6`. This is typically used with local Unix sockets
+    /// and requires ancillary credential passing at the socket layer.
+    AuthenticationSCMCredential,
     /// Server sends GSSAPI/SSPI continuation token.
     AuthenticationGSSContinue(Vec<u8>),
     /// Server requests SSPI authentication.

@@ -35,6 +35,7 @@ impl PgConnection {
                     BackendMessage::AuthenticationOk
                         | BackendMessage::AuthenticationKerberosV5
                         | BackendMessage::AuthenticationGSS
+                        | BackendMessage::AuthenticationSCMCredential
                         | BackendMessage::AuthenticationGSSContinue(_)
                         | BackendMessage::AuthenticationSSPI
                         | BackendMessage::AuthenticationCleartextPassword
@@ -131,6 +132,18 @@ impl PgConnection {
                     })?;
 
                     self.send(FrontendMessage::GSSResponse(token)).await?;
+                }
+                BackendMessage::AuthenticationSCMCredential => {
+                    if let Some(flow) = startup_auth_flow {
+                        return Err(PgError::Protocol(format!(
+                            "Received AuthenticationSCMCredential while {} authentication is in progress",
+                            flow.label()
+                        )));
+                    }
+                    return Err(PgError::Auth(
+                        "Server requested SCM credential authentication (auth code 6). This driver currently does not support Unix-socket credential passing; use SCRAM, GSS/SSPI, or password auth for this connection."
+                            .to_string(),
+                    ));
                 }
                 BackendMessage::AuthenticationSSPI => {
                     if let Some(flow) = startup_auth_flow {

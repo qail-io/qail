@@ -121,6 +121,14 @@ mod tests {
     }
 
     #[test]
+    fn decode_auth_scm_credential() {
+        let payload = 6i32.to_be_bytes();
+        let buf = wire_msg(b'R', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        assert!(matches!(msg, BackendMessage::AuthenticationSCMCredential));
+    }
+
+    #[test]
     fn decode_auth_sspi() {
         let payload = 9i32.to_be_bytes();
         let buf = wire_msg(b'R', &payload);

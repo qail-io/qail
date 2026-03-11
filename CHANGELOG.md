@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.6] - 2026-03-11
+
+### Added
+
+- **PG wire/auth:** Added PostgreSQL auth code `6` (`AuthenticationSCMCredential`) decode support and explicit startup error guidance when SCM credential auth is requested.
+- **PG URL compatibility:** Added libpq-style GSS URL aliases in pool config parsing:
+  - `krbsrvname` (alias of `gss_service`)
+  - `gsshostname` (alias of `gss_target`)
+  - `gsslib` (`gssapi` / `sspi` validation)
+- **Tests:** Added regression coverage for SCM auth decode and new GSS URL alias parsing.
+
+### Changed
+
+- **Versioning:** Bumped Rust crates to `0.24.6` (`qail-core`, `qail-pg`, `qail-gateway`, `qail`, `qail-qdrant`, `qail-workflow`, `qail-encoder`, `qail-lsp`).
+- **README snippets:** Updated installation version examples and root version badge to `0.24.6`.
+- **Roadmap:** Added explicit deferred enterprise parity phases (SCM credential auth, native SSPI provider, RFC-accurate `tls-server-end-point` hash selection).
+
 ## [0.24.5] - 2026-03-09
 
 ### Changed

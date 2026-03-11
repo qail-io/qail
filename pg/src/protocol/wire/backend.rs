@@ -145,6 +145,15 @@ impl BackendMessage {
                 salt.copy_from_slice(&payload[4..8]);
                 Ok(BackendMessage::AuthenticationMD5Password(salt))
             }
+            6 => {
+                if payload.len() != 4 {
+                    return Err(format!(
+                        "AuthenticationSCMCredential invalid payload length: {}",
+                        payload.len()
+                    ));
+                }
+                Ok(BackendMessage::AuthenticationSCMCredential)
+            }
             7 => {
                 if payload.len() != 4 {
                     return Err(format!(
