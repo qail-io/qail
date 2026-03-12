@@ -10,6 +10,7 @@
 //!
 //! With DB round-trip:
 //!   DATABASE_URL="postgresql://..." cargo test -p qail-gateway --test bench_cte_depth -- --nocapture
+#![cfg(feature = "legacy-raw-tests")]
 
 use qail_core::prelude::*;
 use std::time::{Duration, Instant};

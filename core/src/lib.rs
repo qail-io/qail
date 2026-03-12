@@ -57,6 +57,7 @@ pub mod prelude {
     pub use crate::ast::builders::{
         // Extension traits
         ExprExt,
+        add_expr,
         all,
         and,
         and3,
@@ -87,6 +88,7 @@ pub mod prelude {
         gte,
         ilike,
         in_list,
+        inc,
         int,
         interval,
         is_in,

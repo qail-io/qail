@@ -1,10 +1,11 @@
 //! Chunked backfill system and contract safety enforcement.
 
-use super::discovery::{is_valid_ident, parse_drop_targets, quote_ident};
-use super::types::{BACKFILL_CHECKPOINT_TABLE_SCHEMA, BackfillRun, BackfillSpec};
+use super::discovery::{is_valid_ident, parse_drop_targets};
+use super::types::{BackfillRun, BackfillSpec, BackfillTransform};
 use crate::colors::*;
 use anyhow::{Context, Result, anyhow, bail};
 use qail_core::analyzer::{CodebaseScanner, QueryType};
+use qail_core::ast::{Action, Constraint, Expr, JoinKind, Qail};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -61,10 +62,42 @@ pub(super) fn parse_backfill_spec(
     let pk_column = entries
         .remove("pk")
         .ok_or_else(|| anyhow!("Missing backfill directive: -- @backfill.pk: <pk_column>"))?;
-    let set_clause = entries
-        .remove("set")
-        .ok_or_else(|| anyhow!("Missing backfill directive: -- @backfill.set: <col = expr>"))?;
-    let where_clause = entries.remove("where");
+    let (set_column, source_column, transform) = if entries.contains_key("set") {
+        if entries.contains_key("set_column")
+            || entries.contains_key("set_source")
+            || entries.contains_key("set_transform")
+        {
+            bail!(
+                "Use either legacy -- @backfill.set or structured set directives (-- @backfill.set_column / set_source / set_transform), not both"
+            );
+        }
+        let set_clause = entries
+            .remove("set")
+            .ok_or_else(|| anyhow!("Missing backfill directive: -- @backfill.set: <col = expr>"))?;
+        parse_set_clause(&set_clause)?
+    } else {
+        let set_column = entries.remove("set_column").ok_or_else(|| {
+            anyhow!("Missing backfill directive: -- @backfill.set_column: <column>")
+        })?;
+        let source_column = entries.remove("set_source").ok_or_else(|| {
+            anyhow!("Missing backfill directive: -- @backfill.set_source: <column>")
+        })?;
+        let transform = parse_transform(
+            entries
+                .remove("set_transform")
+                .as_deref()
+                .unwrap_or("identity"),
+        )?;
+        (set_column, source_column, transform)
+    };
+
+    let where_null_column = if let Some(raw_where_null) = entries.remove("where_null") {
+        parse_where_null(&raw_where_null)?
+    } else if let Some(raw_where) = entries.remove("where") {
+        parse_where_is_null(&raw_where)?
+    } else {
+        None
+    };
 
     let chunk_size = if let Some(raw_chunk) = entries.remove("chunk_size") {
         raw_chunk
@@ -89,23 +122,172 @@ pub(super) fn parse_backfill_spec(
     if !is_valid_ident(&pk_column) {
         bail!("Invalid -- @backfill.pk identifier '{}'", pk_column);
     }
-    if set_clause.trim().is_empty() {
-        bail!("-- @backfill.set cannot be empty");
+    if !is_valid_ident(&set_column) {
+        bail!("Invalid backfill set target column '{}'", set_column);
+    }
+    if !is_valid_ident(&source_column) {
+        bail!("Invalid backfill set source column '{}'", source_column);
+    }
+    if let Some(where_col) = &where_null_column
+        && !is_valid_ident(where_col)
+    {
+        bail!("Invalid backfill where_null column '{}'", where_col);
     }
 
     Ok(Some(BackfillSpec {
         table,
         pk_column,
-        set_clause,
-        where_clause,
+        set_column,
+        source_column,
+        transform,
+        where_null_column,
         chunk_size: chunk_size.max(1),
     }))
 }
 
+fn parse_set_clause(raw: &str) -> Result<(String, String, BackfillTransform)> {
+    let (lhs, rhs) = raw
+        .split_once('=')
+        .ok_or_else(|| anyhow!("Invalid -- @backfill.set format. Expected '<col> = <expr>'"))?;
+    let target = lhs.trim().to_string();
+    let expr = rhs.trim();
+
+    if expr.is_empty() {
+        bail!("Invalid -- @backfill.set: expression cannot be empty");
+    }
+
+    if is_valid_ident(expr) {
+        return Ok((target, expr.to_string(), BackfillTransform::Identity));
+    }
+
+    let open = expr
+        .find('(')
+        .ok_or_else(|| anyhow!("Unsupported -- @backfill.set expression '{}'", expr))?;
+    let close = expr
+        .rfind(')')
+        .ok_or_else(|| anyhow!("Unsupported -- @backfill.set expression '{}'", expr))?;
+    if close != expr.len() - 1 {
+        bail!("Unsupported -- @backfill.set expression '{}'", expr);
+    }
+
+    let func = expr[..open].trim().to_ascii_lowercase();
+    let arg = expr[open + 1..close].trim().to_string();
+    if !is_valid_ident(&arg) {
+        bail!(
+            "Unsupported -- @backfill.set argument '{}': expected identifier",
+            arg
+        );
+    }
+
+    let transform = parse_transform(&func)?;
+    Ok((target, arg, transform))
+}
+
+fn parse_transform(raw: &str) -> Result<BackfillTransform> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "identity" | "copy" => Ok(BackfillTransform::Identity),
+        "lower" => Ok(BackfillTransform::Lower),
+        "upper" => Ok(BackfillTransform::Upper),
+        "trim" => Ok(BackfillTransform::Trim),
+        other => bail!(
+            "Unsupported backfill transform '{}'. Allowed: identity, lower, upper, trim",
+            other
+        ),
+    }
+}
+
+fn parse_where_null(raw: &str) -> Result<Option<String>> {
+    let col = raw.trim();
+    if col.is_empty() {
+        return Ok(None);
+    }
+    if !is_valid_ident(col) {
+        bail!("Invalid -- @backfill.where_null identifier '{}'", col);
+    }
+    Ok(Some(col.to_string()))
+}
+
+fn parse_where_is_null(raw: &str) -> Result<Option<String>> {
+    let parts: Vec<&str> = raw.split_whitespace().collect();
+    if parts.len() == 3
+        && parts[1].eq_ignore_ascii_case("is")
+        && parts[2].eq_ignore_ascii_case("null")
+    {
+        return parse_where_null(parts[0]);
+    }
+    bail!(
+        "Unsupported -- @backfill.where expression '{}'. Use '<column> IS NULL' or -- @backfill.where_null: <column>",
+        raw
+    )
+}
+
 async fn ensure_backfill_checkpoint_table(pg: &mut qail_pg::PgDriver) -> Result<()> {
-    pg.execute_raw(BACKFILL_CHECKPOINT_TABLE_SCHEMA)
+    let exists_cmd = Qail::get("information_schema.tables")
+        .column("1")
+        .where_eq("table_schema", "public")
+        .where_eq("table_name", "_qail_backfill_checkpoints")
+        .limit(1);
+    let exists = pg
+        .fetch_all(&exists_cmd)
         .await
-        .context("Failed to ensure _qail_backfill_checkpoints table")?;
+        .context("Failed to inspect _qail_backfill_checkpoints table")?;
+    if exists.is_empty() {
+        let create_cmd = Qail {
+            action: Action::Make,
+            table: "_qail_backfill_checkpoints".to_string(),
+            columns: vec![
+                Expr::Def {
+                    name: "migration_version".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "table_name".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "pk_column".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "last_pk".to_string(),
+                    data_type: "bigint".to_string(),
+                    constraints: vec![Constraint::Default("0".to_string())],
+                },
+                Expr::Def {
+                    name: "chunk_size".to_string(),
+                    data_type: "int".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "rows_processed".to_string(),
+                    data_type: "bigint".to_string(),
+                    constraints: vec![Constraint::Default("0".to_string())],
+                },
+                Expr::Def {
+                    name: "started_at".to_string(),
+                    data_type: "timestamptz".to_string(),
+                    constraints: vec![Constraint::Default("now()".to_string())],
+                },
+                Expr::Def {
+                    name: "updated_at".to_string(),
+                    data_type: "timestamptz".to_string(),
+                    constraints: vec![Constraint::Default("now()".to_string())],
+                },
+                Expr::Def {
+                    name: "finished_at".to_string(),
+                    data_type: "timestamptz".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+            ],
+            ..Default::default()
+        };
+        pg.execute(&create_cmd)
+            .await
+            .context("Failed to ensure _qail_backfill_checkpoints table")?;
+    }
     Ok(())
 }
 
@@ -124,28 +306,18 @@ async fn ensure_integer_backfill_pk(
     pk_column: &str,
 ) -> Result<()> {
     let (schema, table_name) = split_schema_table(table);
-    let schema_escaped = schema.replace('\'', "''");
-    let table_escaped = table_name.replace('\'', "''");
-    let pk_escaped = pk_column.replace('\'', "''");
-    let sql = format!(
-        r#"
-        SELECT format_type(a.atttypid, a.atttypmod) AS typ
-        FROM pg_attribute a
-        JOIN pg_class c ON c.oid = a.attrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = '{schema}'
-          AND c.relname = '{table}'
-          AND a.attname = '{pk}'
-          AND a.attnum > 0
-          AND NOT a.attisdropped
-        LIMIT 1
-        "#,
-        schema = schema_escaped,
-        table = table_escaped,
-        pk = pk_escaped
-    );
+    let cmd = Qail::get("pg_attribute a")
+        .column("format_type(a.atttypid, a.atttypmod) AS typ")
+        .join(JoinKind::Inner, "pg_class c", "c.oid", "a.attrelid")
+        .join(JoinKind::Inner, "pg_namespace n", "n.oid", "c.relnamespace")
+        .where_eq("n.nspname", schema)
+        .where_eq("c.relname", table_name)
+        .where_eq("a.attname", pk_column)
+        .gt("a.attnum", 0)
+        .where_eq("a.attisdropped", false)
+        .limit(1);
 
-    let rows = pg.fetch_raw(&sql).await.map_err(|e| {
+    let rows = pg.fetch_all(&cmd).await.map_err(|e| {
         anyhow!(
             "Failed to inspect backfill PK column '{}.{}': {}",
             table,
@@ -185,31 +357,22 @@ pub(super) async fn run_chunked_backfill(
     ensure_backfill_checkpoint_table(pg).await?;
     ensure_integer_backfill_pk(pg, &spec.table, &spec.pk_column).await?;
 
-    let migration_escaped = migration_version.replace('\'', "''");
-    let table_escaped = spec.table.replace('\'', "''");
-    let pk_escaped = spec.pk_column.replace('\'', "''");
-
-    let init_sql = format!(
-        "INSERT INTO _qail_backfill_checkpoints \
-         (migration_version, table_name, pk_column, chunk_size) \
-         VALUES ('{mig}', '{table}', '{pk}', {chunk}) \
-         ON CONFLICT (migration_version) DO NOTHING",
-        mig = migration_escaped,
-        table = table_escaped,
-        pk = pk_escaped,
-        chunk = spec.chunk_size
-    );
-    pg.execute_raw(&init_sql)
+    let init_cmd = Qail::add("_qail_backfill_checkpoints")
+        .set_value("migration_version", migration_version)
+        .set_value("table_name", spec.table.as_str())
+        .set_value("pk_column", spec.pk_column.as_str())
+        .set_value("chunk_size", spec.chunk_size as i64)
+        .on_conflict_nothing(&["migration_version"]);
+    pg.execute(&init_cmd)
         .await
         .context("Failed to initialize backfill checkpoint")?;
 
-    let status_sql = format!(
-        "SELECT last_pk, rows_processed, finished_at IS NOT NULL \
-         FROM _qail_backfill_checkpoints WHERE migration_version = '{}'",
-        migration_escaped
-    );
+    let status_cmd = Qail::get("_qail_backfill_checkpoints")
+        .columns(["last_pk", "rows_processed", "finished_at"])
+        .where_eq("migration_version", migration_version)
+        .limit(1);
     let status_rows = pg
-        .fetch_raw(&status_sql)
+        .fetch_all(&status_cmd)
         .await
         .context("Failed to read backfill checkpoint")?;
     let Some(status_row) = status_rows.first() else {
@@ -221,7 +384,7 @@ pub(super) async fn run_chunked_backfill(
 
     let mut last_pk = status_row.get_i64(0).unwrap_or(0);
     let mut rows_updated = status_row.get_i64(1).unwrap_or(0);
-    let already_finished = status_row.get_bool(2).unwrap_or(false);
+    let already_finished = status_row.get_string(2).is_some();
     if already_finished {
         println!(
             "{}",
@@ -250,51 +413,53 @@ pub(super) async fn run_chunked_backfill(
         );
     }
 
-    let table_ident = quote_ident(&spec.table);
-    let pk_ident = quote_ident(&spec.pk_column);
-    let where_sql = spec.where_clause.as_deref().unwrap_or("TRUE");
+    let set_expr = build_set_expr(spec);
 
     let mut chunks = 0i64;
     loop {
-        let chunk_sql = format!(
-            r#"
-            WITH batch AS (
-                SELECT {pk} AS pk
-                FROM {table}
-                WHERE {pk} > {last_pk}
-                  AND ({where_clause})
-                ORDER BY {pk}
-                LIMIT {chunk}
-            ),
-            updated AS (
-                UPDATE {table} AS t
-                SET {set_clause}
-                FROM batch
-                WHERE t.{pk} = batch.pk
-                RETURNING batch.pk
-            )
-            SELECT COALESCE(MAX(pk), {last_pk})::bigint AS max_pk,
-                   COUNT(*)::bigint AS updated_rows
-            FROM updated
-            "#,
-            pk = pk_ident,
-            table = table_ident,
-            last_pk = last_pk,
-            where_clause = where_sql,
-            chunk = spec.chunk_size,
-            set_clause = spec.set_clause,
-        );
+        let mut batch_cmd = Qail::get(spec.table.as_str())
+            .column(spec.pk_column.as_str())
+            .gt(spec.pk_column.as_str(), last_pk)
+            .order_asc(spec.pk_column.as_str())
+            .limit(spec.chunk_size as i64);
 
-        let rows = pg
-            .fetch_raw(&chunk_sql)
+        if let Some(where_null_col) = &spec.where_null_column {
+            batch_cmd = batch_cmd.is_null(where_null_col.as_str());
+        }
+
+        let batch_rows = pg
+            .fetch_all(&batch_cmd)
             .await
             .map_err(|e| anyhow!("Chunked backfill execution failed: {}", e))?;
-        let Some(row) = rows.first() else {
-            bail!("Chunked backfill returned no status row");
-        };
+        if batch_rows.is_empty() {
+            break;
+        }
 
-        let next_pk = row.get_i64(0).unwrap_or(last_pk);
-        let updated = row.get_i64(1).unwrap_or(0);
+        let mut batch_ids = Vec::<i64>::with_capacity(batch_rows.len());
+        for row in &batch_rows {
+            if let Some(pk) = row.get_i64(0) {
+                batch_ids.push(pk);
+            }
+        }
+        if batch_ids.is_empty() {
+            bail!(
+                "Chunked backfill could not extract integer PK values for '{}.{}'",
+                spec.table,
+                spec.pk_column
+            );
+        }
+
+        let next_pk = *batch_ids.iter().max().unwrap_or(&last_pk);
+
+        let update_cmd = Qail::set(spec.table.as_str())
+            .set_value(spec.set_column.as_str(), set_expr.clone())
+            .in_vals(spec.pk_column.as_str(), batch_ids)
+            .returning([spec.pk_column.as_str()]);
+        let updated_rows = pg
+            .fetch_all(&update_cmd)
+            .await
+            .map_err(|e| anyhow!("Chunked backfill update failed: {}", e))?;
+        let updated = updated_rows.len() as i64;
         if updated <= 0 {
             break;
         }
@@ -303,28 +468,23 @@ pub(super) async fn run_chunked_backfill(
         rows_updated = rows_updated.saturating_add(updated);
         chunks += 1;
 
-        let checkpoint_sql = format!(
-            "UPDATE _qail_backfill_checkpoints \
-             SET last_pk = {last_pk}, rows_processed = {rows}, updated_at = now() \
-             WHERE migration_version = '{mig}'",
-            last_pk = last_pk,
-            rows = rows_updated,
-            mig = migration_escaped
-        );
-        pg.execute_raw(&checkpoint_sql)
+        let checkpoint_cmd = Qail::set("_qail_backfill_checkpoints")
+            .set_value("last_pk", last_pk)
+            .set_value("rows_processed", rows_updated)
+            .set_value("updated_at", qail_core::ast::builders::now())
+            .where_eq("migration_version", migration_version);
+        pg.execute(&checkpoint_cmd)
             .await
             .context("Failed to update backfill checkpoint")?;
     }
 
-    let finish_sql = format!(
-        "UPDATE _qail_backfill_checkpoints \
-         SET finished_at = now(), updated_at = now(), rows_processed = {rows}, last_pk = {last_pk} \
-         WHERE migration_version = '{mig}'",
-        rows = rows_updated,
-        last_pk = last_pk,
-        mig = migration_escaped
-    );
-    pg.execute_raw(&finish_sql)
+    let finish_cmd = Qail::set("_qail_backfill_checkpoints")
+        .set_value("finished_at", qail_core::ast::builders::now())
+        .set_value("updated_at", qail_core::ast::builders::now())
+        .set_value("rows_processed", rows_updated)
+        .set_value("last_pk", last_pk)
+        .where_eq("migration_version", migration_version);
+    pg.execute(&finish_cmd)
         .await
         .context("Failed to finalize backfill checkpoint")?;
 
@@ -333,6 +493,28 @@ pub(super) async fn run_chunked_backfill(
         rows_updated,
         chunks,
     })
+}
+
+fn build_set_expr(spec: &BackfillSpec) -> Expr {
+    let src = Expr::Named(spec.source_column.clone());
+    match spec.transform {
+        BackfillTransform::Identity => src,
+        BackfillTransform::Lower => Expr::FunctionCall {
+            name: "LOWER".to_string(),
+            args: vec![src],
+            alias: None,
+        },
+        BackfillTransform::Upper => Expr::FunctionCall {
+            name: "UPPER".to_string(),
+            args: vec![src],
+            alias: None,
+        },
+        BackfillTransform::Trim => Expr::FunctionCall {
+            name: "TRIM".to_string(),
+            args: vec![src],
+            alias: None,
+        },
+    }
 }
 
 pub(super) fn enforce_contract_safety(

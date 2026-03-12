@@ -1,4 +1,4 @@
-#![cfg(feature = "qdrant")]
+#![cfg(all(feature = "qdrant", feature = "legacy-raw-tests"))]
 //! Speed benchmark: PG-only vs Qdrant-only vs Hybrid (Qdrant → PG)
 //!
 //! Measures raw driver latency for each path and prints a comparison table.

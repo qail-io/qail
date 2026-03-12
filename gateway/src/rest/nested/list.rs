@@ -163,20 +163,18 @@ pub(crate) async fn nested_list_handler(
         .tenant_guard_exempt_tables
         .iter()
         .any(|t| t == &child_table);
-    if !is_exempt {
-        if let Some(ref tenant_id) = auth.tenant_id {
-            let _proof = crate::tenant_guard::verify_tenant_boundary(
-                &data,
-                tenant_id,
-                &state.config.tenant_column,
-                &child_table,
-                "rest_nested_list",
-            )
-            .map_err(|v| {
-                tracing::error!("{}", v);
-                crate::middleware::ApiError::internal("Data integrity error")
-            })?;
-        }
+    if !is_exempt && let Some(ref tenant_id) = auth.tenant_id {
+        let _proof = crate::tenant_guard::verify_tenant_boundary(
+            &data,
+            tenant_id,
+            &state.config.tenant_column,
+            &child_table,
+            "rest_nested_list",
+        )
+        .map_err(|v| {
+            tracing::error!("{}", v);
+            crate::middleware::ApiError::internal("Data integrity error")
+        })?;
     }
 
     let count = data.len();

@@ -1,6 +1,6 @@
 use super::super::RpcFunctionName;
 use super::matcher::{format_signature_brief, select_matching_rpc_signature};
-use super::parse::{parse_rpc_signatures, rpc_signature_lookup_sql};
+use super::parse::{parse_rpc_signatures, rpc_signature_lookup_cmd};
 use crate::GatewayState;
 use crate::middleware::ApiError;
 use crate::server::RpcCallableSignature;
@@ -73,8 +73,7 @@ pub(in super::super) async fn enforce_rpc_signature_contract(
         cached
     } else {
         crate::metrics::record_rpc_signature_cache_miss();
-        let sql = rpc_signature_lookup_sql(function_name)?;
-        let cmd = qail_core::ast::Qail::raw_sql(sql);
+        let cmd = rpc_signature_lookup_cmd(function_name)?;
         let rows = conn
             .fetch_all_uncached(&cmd)
             .await

@@ -17,6 +17,7 @@ fn exceeds_live_query_task_limit(task_count: usize, replacing_existing: bool) ->
     !replacing_existing && task_count >= WS_MAX_SUBSCRIPTIONS_PER_CONNECTION
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn subscribe_and_spawn_live_query(
     table: &str,
     interval_ms: u64,

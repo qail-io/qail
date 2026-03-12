@@ -208,29 +208,6 @@ impl Qail {
         self.filter(column, Operator::ILike, pattern)
     }
 
-    /// Add a raw SQL boolean expression to the WHERE clause.
-    ///
-    /// Use this for complex predicates that can't be expressed through the
-    /// standard filter methods (e.g. date arithmetic with `MAKE_INTERVAL`,
-    /// `NOW()`, multi-column comparisons, etc.).
-    ///
-    /// The expression must evaluate to a boolean in PostgreSQL.
-    ///
-    /// # Example
-    /// ```ignore
-    /// Qail::get("orders")
-    ///     .raw_where("created_at > NOW() - INTERVAL '24 hours'")
-    ///     .raw_where("(status = 'active' OR priority > 5)")
-    /// ```
-    pub fn raw_where(self, sql: impl Into<String>) -> Self {
-        self.filter_cond(Condition {
-            left: Expr::Raw(sql.into()),
-            op: Operator::IsNotNull,
-            value: Value::Null,
-            is_array_unnest: false,
-        })
-    }
-
     /// Filter: does `text` contain any element from `array_column`?
     ///
     /// Generates an `EXISTS (SELECT 1 FROM unnest(array_column) _el WHERE ...)`

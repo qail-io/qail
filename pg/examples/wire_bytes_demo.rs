@@ -74,7 +74,5 @@ fn main() {
     println!("\nWire bytes ({} total):", wire.len());
     print_frames(&wire);
 
-    println!(
-        "\nMessage flow: Parse (P) + Bind (B) + Describe (D) + Execute (E) + Sync (S)"
-    );
+    println!("\nMessage flow: Parse (P) + Bind (B) + Describe (D) + Execute (E) + Sync (S)");
 }

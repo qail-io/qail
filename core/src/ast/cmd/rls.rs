@@ -31,8 +31,8 @@
 //! ```
 
 use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
-use crate::rls::tenant::lookup_tenant_column;
 use crate::rls::RlsContext;
+use crate::rls::tenant::lookup_tenant_column;
 
 impl Qail {
     /// Apply tenant-scope isolation based on the query action.

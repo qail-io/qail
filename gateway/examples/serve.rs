@@ -66,14 +66,13 @@ fn load_config() -> anyhow::Result<GatewayConfig> {
 
             // Set config_root to the directory containing the config file,
             // if not explicitly configured. This enables manifest writing.
-            if config.config_root.is_none() {
-                if let Some(parent) = path
+            if config.config_root.is_none()
+                && let Some(parent) = path
                     .canonicalize()
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
-                {
-                    config.config_root = Some(parent);
-                }
+            {
+                config.config_root = Some(parent);
             }
 
             break;
@@ -93,14 +92,14 @@ fn load_config() -> anyhow::Result<GatewayConfig> {
     if let Ok(path) = std::env::var("POLICY_PATH") {
         config.policy_path = Some(path);
     }
-    if let Ok(rate) = std::env::var("RATE_LIMIT_RATE") {
-        if let Ok(r) = rate.parse::<f64>() {
-            config.rate_limit_rate = r;
-            config.rate_limit_burst = std::env::var("RATE_LIMIT_BURST")
-                .ok()
-                .and_then(|b| b.parse().ok())
-                .unwrap_or((r * 2.0) as u32);
-        }
+    if let Ok(rate) = std::env::var("RATE_LIMIT_RATE")
+        && let Ok(r) = rate.parse::<f64>()
+    {
+        config.rate_limit_rate = r;
+        config.rate_limit_burst = std::env::var("RATE_LIMIT_BURST")
+            .ok()
+            .and_then(|b| b.parse().ok())
+            .unwrap_or((r * 2.0) as u32);
     }
 
     Ok(config)

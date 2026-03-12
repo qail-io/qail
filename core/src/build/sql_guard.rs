@@ -45,12 +45,7 @@ mod syn_impl {
                 }
             }
 
-            fn push_diag(
-                &mut self,
-                code: &'static str,
-                message: String,
-                span: proc_macro2::Span,
-            ) {
+            fn push_diag(&mut self, code: &'static str, message: String, span: proc_macro2::Span) {
                 let start = span.start();
                 let key = (start.line, start.column + 1, code);
                 if !self.seen.insert(key) {

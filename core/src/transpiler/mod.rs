@@ -377,6 +377,12 @@ impl ToSql for Qail {
             Action::SessionReset => {
                 format!("RESET {}", self.table)
             }
+            Action::CreateDatabase => {
+                format!("CREATE DATABASE {}", self.table)
+            }
+            Action::DropDatabase => {
+                format!("DROP DATABASE IF EXISTS {}", self.table)
+            }
         }
     }
 }

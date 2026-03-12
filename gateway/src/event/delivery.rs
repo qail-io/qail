@@ -37,63 +37,62 @@ pub(super) async fn deliver_webhook(
 
     if let Ok(parsed) = url::Url::parse(url)
         && let Some(host) = parsed.host_str()
+        && host.parse::<std::net::IpAddr>().is_err()
     {
-        if host.parse::<std::net::IpAddr>().is_err() {
-            let port = parsed
-                .port()
-                .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
-            let addr_str = format!("{}:{}", host, port);
-            match tokio::net::lookup_host(&addr_str).await {
-                Ok(addrs) => {
-                    let addrs_vec: Vec<std::net::SocketAddr> = addrs.collect();
-                    if addrs_vec.is_empty() {
-                        tracing::error!(
-                            trigger = %trigger_name,
-                            url = %url,
-                            "Webhook DNS returned no addresses"
-                        );
-                        return;
-                    }
-                    for addr in &addrs_vec {
-                        if let Err(reason) = reject_private_ip(addr.ip()) {
-                            tracing::error!(
-                                trigger = %trigger_name,
-                                url = %url,
-                                resolved_ip = %addr.ip(),
-                                reason = %reason,
-                                "Webhook DNS resolves to private IP (SSRF protection)"
-                            );
-                            return;
-                        }
-                    }
-                    let pinned_addr = addrs_vec[0];
-                    let pinned_client = match reqwest::Client::builder()
-                        .timeout(Duration::from_secs(30))
-                        .redirect(reqwest::redirect::Policy::none())
-                        .resolve(host, pinned_addr)
-                        .build()
-                    {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                url = %url,
-                                "Webhook SSRF-pinned client build failed — aborting delivery"
-                            );
-                            return;
-                        }
-                    };
-                    client = Arc::new(pinned_client);
-                }
-                Err(e) => {
+        let port = parsed
+            .port()
+            .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+        let addr_str = format!("{}:{}", host, port);
+        match tokio::net::lookup_host(&addr_str).await {
+            Ok(addrs) => {
+                let addrs_vec: Vec<std::net::SocketAddr> = addrs.collect();
+                if addrs_vec.is_empty() {
                     tracing::error!(
                         trigger = %trigger_name,
                         url = %url,
-                        error = %e,
-                        "Webhook DNS resolution failed"
+                        "Webhook DNS returned no addresses"
                     );
                     return;
                 }
+                for addr in &addrs_vec {
+                    if let Err(reason) = reject_private_ip(addr.ip()) {
+                        tracing::error!(
+                            trigger = %trigger_name,
+                            url = %url,
+                            resolved_ip = %addr.ip(),
+                            reason = %reason,
+                            "Webhook DNS resolves to private IP (SSRF protection)"
+                        );
+                        return;
+                    }
+                }
+                let pinned_addr = addrs_vec[0];
+                let pinned_client = match reqwest::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .resolve(host, pinned_addr)
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            url = %url,
+                            "Webhook SSRF-pinned client build failed — aborting delivery"
+                        );
+                        return;
+                    }
+                };
+                client = Arc::new(pinned_client);
+            }
+            Err(e) => {
+                tracing::error!(
+                    trigger = %trigger_name,
+                    url = %url,
+                    error = %e,
+                    "Webhook DNS resolution failed"
+                );
+                return;
             }
         }
     }

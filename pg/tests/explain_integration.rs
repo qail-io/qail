@@ -12,6 +12,7 @@
 //! Note: Uses `qail_user` (superuser) because EXPLAIN requires SELECT permission
 //! on the target tables. The `qail_app` role is an operator-level app user
 //! with restricted grants.
+#![cfg(feature = "legacy-raw-examples")]
 
 use qail_core::ast::{JoinKind, Qail};
 use qail_core::rls::RlsContext;

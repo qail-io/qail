@@ -142,6 +142,10 @@ pub enum Action {
     SessionShow,
     /// RESET session variable.
     SessionReset,
+    /// CREATE DATABASE.
+    CreateDatabase,
+    /// DROP DATABASE.
+    DropDatabase,
 }
 
 impl std::fmt::Display for Action {
@@ -216,6 +220,8 @@ impl std::fmt::Display for Action {
             Action::SessionSet => write!(f, "SESSION_SET"),
             Action::SessionShow => write!(f, "SESSION_SHOW"),
             Action::SessionReset => write!(f, "SESSION_RESET"),
+            Action::CreateDatabase => write!(f, "CREATE_DATABASE"),
+            Action::DropDatabase => write!(f, "DROP_DATABASE"),
         }
     }
 }

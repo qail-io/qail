@@ -1,6 +1,6 @@
 [package]
 name = "qail-pg"
-version = "0.24.6"
+version = "0.25.0"
 edition = "2024"
 description = "Fastest async PostgreSQL driver - AST to wire protocol, optional io_uring on Linux"
 license = "Apache-2.0"
@@ -9,6 +9,9 @@ readme = "README.md"
 
 [features]
 default = []
+# Archived examples/tests that still reference removed raw APIs.
+# Keep disabled in normal builds.
+legacy-raw-examples = []
 # Enable io_uring for maximum performance (Linux native builds only, NOT cross-compilation)
 io_uring = ["tokio-uring", "io-uring"]
 # Enable chrono DateTime parsing in PgRow::datetime()
@@ -21,7 +24,7 @@ enterprise-gssapi = []
 libpq = []
 
 [dependencies]
-qail-core = { version = "0.24.6", path = "../core" }
+qail-core = { version = "0.25.0", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
 tokio = { version = "1.48.0", features = ["net", "io-util", "sync", "rt", "time"] }
@@ -78,3 +81,135 @@ required-features = ["libpq"]
 [[example]]
 name = "libpq_only"
 required-features = ["libpq"]
+
+[[example]]
+name = "array_3d_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "battle_chatty"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "battle_comparison"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "battle_fuzz"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "battle_math"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "battle_network"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "battle_oom"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "battle_pipeline"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "battle_stack"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "battle_zombie"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "buffer_stress"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "cache_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "chaos_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "complex_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "copy_benchmark"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "cte_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "data_safety_stress_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "deep_stress_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "expr_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "io_benchmark"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "migration_battle_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "null_byte_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "pipeline_benchmark"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "pipeline_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "pool_analysis"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "pool_exhaustion_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "pool_pipeline_bench"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "pool_starvation"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "rls_isolation_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "torture_real"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "torture_test"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "triad_demo"
+required-features = ["legacy-raw-examples"]
+
+[[example]]
+name = "zombie_test"
+required-features = ["legacy-raw-examples"]

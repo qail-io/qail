@@ -51,14 +51,14 @@ impl RateLimiter {
         let now = Instant::now();
         let mut buckets = self.buckets.write().await;
 
-        if !buckets.contains_key(key) && buckets.len() >= self.max_buckets {
-            if let Some(oldest_key) = buckets
+        if !buckets.contains_key(key)
+            && buckets.len() >= self.max_buckets
+            && let Some(oldest_key) = buckets
                 .iter()
                 .min_by_key(|(_, b)| b.last_update)
                 .map(|(k, _)| k.clone())
-            {
-                buckets.remove(&oldest_key);
-            }
+        {
+            buckets.remove(&oldest_key);
         }
 
         let bucket = buckets

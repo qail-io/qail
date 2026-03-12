@@ -1,10 +1,10 @@
 # PostgreSQL Driver
 
-The `qail-pg` crate provides a **native PostgreSQL driver** with AST-native wire protocol encoding. It communicates directly with Postgres at the wire level — no libpq, no ORM, no SQL strings.
+The `qail-pg` crate provides a **native PostgreSQL driver** with AST-native wire protocol encoding. It communicates directly with Postgres at the wire level — no libpq, no ORM, and no app-side SQL interpolation on the AST path.
 
 ## Features
 
-- **AST-Native** — Direct AST to wire protocol, no SQL strings
+- **AST-Native** — Direct AST to wire protocol on the primary query path
 - **Zero-Alloc** — Reusable buffers, no heap allocation per query
 - **LRU Statement Cache** — Bounded cache (100 max), auto-evicts
 - **SSL/TLS** — Full TLS with mutual TLS (mTLS) support
@@ -329,6 +329,7 @@ let rows = driver.pipeline_ast(&commands).await?;
 
 ```rust
 use qail_pg::{PgPool, PoolConfig};
+use qail_core::Qail;
 
 let config = PoolConfig::new("localhost", 5432, "user", "db")
     .password("secret")
@@ -341,7 +342,8 @@ let pool = PgPool::connect(config).await?;
 
 // Acquire connection (return deterministically with release())
 let mut conn = pool.acquire().await?;
-conn.simple_query("SELECT 1").await?;
+let probe = Qail::get("users").columns(["id"]).limit(1);
+let _ = conn.fetch_all(&probe).await?;
 conn.release().await;
 
 // Check idle count
@@ -498,14 +500,13 @@ Available `get_by_name` methods:
 
 ---
 
-## ⚠️ Raw SQL (Discouraged)
+## ✅ AST-Only Driver
 
-`execute_raw` exists for legacy compatibility but **violates AST-native philosophy**.
+Raw SQL helper APIs (`execute_raw`, `fetch_raw`) were removed.
 
 ```rust
-// ❌ Avoid
-driver.execute_raw("BEGIN").await?;
-
-// ✅ Prefer AST-native
-conn.begin_transaction().await?;
+// ✅ Use AST-native transaction APIs
+driver.begin().await?;
+// ... execute QAIL commands ...
+driver.commit().await?;
 ```

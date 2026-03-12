@@ -203,7 +203,6 @@ fn test_non_recursive_cte_qail_valid() {
     assert_eq!(cmd.ctes.len(), 1);
     assert_eq!(cmd.ctes[0].name, "summary");
     assert_eq!(cmd.ctes[0].base_query.table, "orders");
-    assert!(!cmd.ctes[0].base_query.is_raw_sql());
 }
 
 // ─── Recursive with column aliases ───────────────────────────────────

@@ -1,4 +1,5 @@
 use axum::{extract::State, response::Json};
+use qail_core::ast::{Expr, Operator, Qail, Value as AstValue};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -23,36 +24,38 @@ pub(crate) async fn rpc_contracts_handler(
 
     let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
 
-    let sql = r#"
-        SELECT
-            n.nspname AS schema_name,
-            p.proname AS function_name,
-            p.pronargs::int4 AS total_args,
-            p.pronargdefaults::int4 AS default_args,
-            (p.provariadic <> 0) AS is_variadic,
-            COALESCE((
-                SELECT jsonb_agg(NULLIF(BTRIM(arg_name), '') ORDER BY ord)
-                FROM unnest((COALESCE(p.proargnames, ARRAY[]::text[]))[1:p.pronargs])
-                     WITH ORDINALITY AS names(arg_name, ord)
-            ), '[]'::jsonb)::text AS arg_names_json,
-            COALESCE((
-                SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord)
-                FROM unnest(
-                    CASE
-                        WHEN p.pronargs = 0 THEN ARRAY[]::oid[]
-                        ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[]
-                    END
-                ) WITH ORDINALITY AS args(arg_oid, ord)
-            ), '[]'::jsonb)::text AS arg_types_json,
-            pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args,
-            pg_catalog.pg_get_function_result(p.oid) AS result_type
-        FROM pg_catalog.pg_proc p
-        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-        ORDER BY n.nspname, p.proname, p.oid
-        LIMIT 5000
-    "#;
-    let cmd = qail_core::ast::Qail::raw_sql(sql.to_string());
+    let cmd = Qail::get("pg_catalog.pg_proc p")
+        .columns_expr(vec![
+            Expr::Named("n.nspname AS schema_name".to_string()),
+            Expr::Named("p.proname AS function_name".to_string()),
+            Expr::Named("p.pronargs::int4 AS total_args".to_string()),
+            Expr::Named("p.pronargdefaults::int4 AS default_args".to_string()),
+            Expr::Named("(p.provariadic <> 0) AS is_variadic".to_string()),
+            Expr::Named(
+                "COALESCE((SELECT jsonb_agg(NULLIF(BTRIM(arg_name), '') ORDER BY ord) FROM unnest((COALESCE(p.proargnames, ARRAY[]::text[]))[1:p.pronargs]) WITH ORDINALITY AS names(arg_name, ord)), '[]'::jsonb)::text AS arg_names_json".to_string(),
+            ),
+            Expr::Named(
+                "COALESCE((SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord) FROM unnest(CASE WHEN p.pronargs = 0 THEN ARRAY[]::oid[] ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] END) WITH ORDINALITY AS args(arg_oid, ord)), '[]'::jsonb)::text AS arg_types_json".to_string(),
+            ),
+            Expr::Named(
+                "pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args"
+                    .to_string(),
+            ),
+            Expr::Named("pg_catalog.pg_get_function_result(p.oid) AS result_type".to_string()),
+        ])
+        .inner_join("pg_catalog.pg_namespace n", "n.oid", "p.pronamespace")
+        .filter(
+            "n.nspname",
+            Operator::NotIn,
+            AstValue::Array(vec![
+                AstValue::String("pg_catalog".to_string()),
+                AstValue::String("information_schema".to_string()),
+            ]),
+        )
+        .order_asc("n.nspname")
+        .order_asc("p.proname")
+        .order_asc("p.oid")
+        .limit(5000);
     let rows = conn
         .fetch_all_uncached(&cmd)
         .await

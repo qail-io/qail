@@ -1,7 +1,7 @@
 //! Main apply entry point — migrate_apply.
 
 use super::backfill::{enforce_contract_safety, parse_backfill_spec, run_chunked_backfill};
-use super::codegen::parse_qail_to_sql;
+use super::codegen::{commands_to_sql, parse_qail_to_commands_strict};
 use super::discovery::{discover_migrations, phase_rank};
 use super::types::{ApplyPhase, BackfillRun, MigrateDirection, MigrationFile, MigrationPhase};
 use crate::colors::*;
@@ -10,7 +10,7 @@ use crate::migrations::{
     write_migration_receipt,
 };
 use crate::util::parse_pg_url;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use qail_core::prelude::Qail;
 use std::fs;
 
@@ -193,8 +193,6 @@ pub async fn migrate_apply(
             mig.phase
         );
 
-        // Parse .qail content and generate SQL
-        let sql = parse_qail_to_sql(&content);
         let started_ms = now_epoch_ms();
 
         let (executed_sql_for_receipt, checksum_input, backfill_result) =
@@ -213,15 +211,19 @@ pub async fn migrate_apply(
                     ));
                     (content.clone(), content.clone(), backfill_result)
                 } else {
-                    let sql = sql.context("Failed to parse backfill migration as QAIL")?;
-                    pg.execute_raw(&sql)
+                    let cmds = parse_qail_to_commands_strict(&content)
+                        .context("Failed to compile backfill migration to AST commands")?;
+                    let sql = commands_to_sql(&cmds);
+                    execute_migration_commands(&mut pg, &cmds, &mig.display_name)
                         .await
                         .context(format!("Failed to execute migration {}", mig.display_name))?;
                     risk_summary.push_str(";chunked_backfill=false");
                     (sql.clone(), sql, BackfillRun::default())
                 }
             } else {
-                let sql = sql.context("Failed to parse migration as QAIL")?;
+                let cmds = parse_qail_to_commands_strict(&content)
+                    .context("Failed to compile migration to AST commands")?;
+                let sql = commands_to_sql(&cmds);
 
                 if matches!(direction, MigrateDirection::Up)
                     && mig.phase == MigrationPhase::Contract
@@ -234,7 +236,7 @@ pub async fn migrate_apply(
                     )?;
                 }
 
-                pg.execute_raw(&sql)
+                execute_migration_commands(&mut pg, &cmds, &mig.display_name)
                     .await
                     .context(format!("Failed to execute migration {}", mig.display_name))?;
                 (sql.clone(), sql, BackfillRun::default())
@@ -289,5 +291,39 @@ pub async fn migrate_apply(
     if applied == 0 && skipped > 0 {
         println!("\n{}", "✓ Database is up to date.".green().bold());
     }
+    Ok(())
+}
+
+async fn execute_migration_commands(
+    pg: &mut qail_pg::PgDriver,
+    cmds: &[Qail],
+    migration_name: &str,
+) -> Result<()> {
+    if cmds.is_empty() {
+        return Ok(());
+    }
+
+    pg.begin()
+        .await
+        .map_err(|e| anyhow!("Failed to begin migration transaction: {}", e))?;
+
+    for (idx, cmd) in cmds.iter().enumerate() {
+        if let Err(err) = pg.execute(cmd).await {
+            let _ = pg.rollback().await;
+            return Err(anyhow!(
+                "Migration command {} failed in '{}': action={:?} table='{}' error={}",
+                idx + 1,
+                migration_name,
+                cmd.action,
+                cmd.table,
+                err
+            ));
+        }
+    }
+
+    pg.commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit migration transaction: {}", e))?;
+
     Ok(())
 }

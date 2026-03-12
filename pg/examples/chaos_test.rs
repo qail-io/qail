@@ -386,7 +386,7 @@ async fn main() {
         "╠══════════════════════════════════════════════════════════════════════════════════════════╣"
     );
 
-    let mut all = vec![&s1, &s2, &s3];
+    let mut all = [&s1, &s2, &s3];
     all.sort_by(|a, b| b.throughput_qps.partial_cmp(&a.throughput_qps).unwrap());
 
     for (i, s) in all.iter().enumerate() {

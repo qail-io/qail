@@ -10,7 +10,7 @@
 
 use crate::colors::*;
 use anyhow::{Result, anyhow};
-use qail_core::ast::Qail;
+use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_pg::driver::PgDriver;
 
 use crate::sql_gen::cmd_to_sql;
@@ -61,27 +61,108 @@ impl ShadowState {
 
 /// Ensure _qail_shadow_state table exists in primary database
 async fn ensure_shadow_state_table(driver: &mut PgDriver) -> Result<()> {
-    let sql = r#"
-        CREATE TABLE IF NOT EXISTS _qail_shadow_state (
-            id SERIAL PRIMARY KEY,
-            shadow_name TEXT NOT NULL,
-            primary_url TEXT NOT NULL,
-            diff_cmds TEXT NOT NULL,
-            diff_checksum TEXT,
-            old_schema_path TEXT,
-            new_schema_path TEXT,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            status TEXT DEFAULT 'pending'
-        )
-    "#;
-    driver
-        .execute_raw(sql)
+    let exists_cmd = Qail::get("information_schema.tables")
+        .column("1")
+        .where_eq("table_schema", "public")
+        .where_eq("table_name", "_qail_shadow_state")
+        .limit(1);
+    let exists = driver
+        .fetch_all(&exists_cmd)
         .await
-        .map_err(|e| anyhow!("Failed to create shadow state table: {}", e))?;
-    driver
-        .execute_raw("ALTER TABLE _qail_shadow_state ADD COLUMN IF NOT EXISTS diff_checksum TEXT")
-        .await
-        .map_err(|e| anyhow!("Failed to migrate shadow state table: {}", e))?;
+        .map_err(|e| anyhow!("Failed to check shadow state table: {}", e))?;
+
+    if exists.is_empty() {
+        let create_cmd = Qail {
+            action: Action::Make,
+            table: "_qail_shadow_state".to_string(),
+            columns: vec![
+                Expr::Def {
+                    name: "id".to_string(),
+                    data_type: "serial".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "shadow_name".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "primary_url".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "diff_cmds".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "diff_checksum".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "old_schema_path".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "new_schema_path".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "created_at".to_string(),
+                    data_type: "timestamptz".to_string(),
+                    constraints: vec![
+                        Constraint::Nullable,
+                        Constraint::Default("now()".to_string()),
+                    ],
+                },
+                Expr::Def {
+                    name: "status".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![
+                        Constraint::Nullable,
+                        Constraint::Default("'pending'".to_string()),
+                    ],
+                },
+            ],
+            ..Default::default()
+        };
+        driver
+            .execute(&create_cmd)
+            .await
+            .map_err(|e| anyhow!("Failed to create shadow state table: {}", e))?;
+    } else {
+        // Backward compatibility for older installs missing diff_checksum.
+        let diff_col_exists = Qail::get("information_schema.columns")
+            .column("1")
+            .where_eq("table_schema", "public")
+            .where_eq("table_name", "_qail_shadow_state")
+            .where_eq("column_name", "diff_checksum")
+            .limit(1);
+        let rows = driver
+            .fetch_all(&diff_col_exists)
+            .await
+            .map_err(|e| anyhow!("Failed to inspect shadow state columns: {}", e))?;
+        if rows.is_empty() {
+            let alter_cmd = Qail {
+                action: Action::Mod,
+                table: "_qail_shadow_state".to_string(),
+                columns: vec![Expr::Def {
+                    name: "diff_checksum".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                }],
+                ..Default::default()
+            };
+            driver
+                .execute(&alter_cmd)
+                .await
+                .map_err(|e| anyhow!("Failed to migrate shadow state table: {}", e))?;
+        }
+    }
     Ok(())
 }
 
@@ -111,21 +192,20 @@ async fn save_shadow_state(
     let diff_checksum = diff_cmds_checksum(diff_cmds);
 
     // Clear any existing pending state
-    let clear_sql = "DELETE FROM _qail_shadow_state WHERE status IN ('pending', 'verified')";
-    let _ = driver.execute_raw(clear_sql).await;
+    let clear_cmd = Qail::del("_qail_shadow_state").in_vals("status", ["pending", "verified"]);
+    let _ = driver.execute(&clear_cmd).await;
 
     // Insert new state
-    let insert_sql = format!(
-        "INSERT INTO _qail_shadow_state (shadow_name, primary_url, diff_cmds, diff_checksum, old_schema_path, new_schema_path, status) VALUES ('{}', '{}', '{}', '{}', '{}', '{}', 'verified')",
-        state.shadow_name,
-        state.primary_url.replace('\'', "''"),
-        diff_json.replace('\'', "''"),
-        diff_checksum,
-        old_path.replace('\'', "''"),
-        new_path.replace('\'', "''")
-    );
+    let insert_cmd = Qail::add("_qail_shadow_state")
+        .set_value("shadow_name", state.shadow_name.as_str())
+        .set_value("primary_url", state.primary_url.as_str())
+        .set_value("diff_cmds", diff_json)
+        .set_value("diff_checksum", diff_checksum)
+        .set_value("old_schema_path", old_path)
+        .set_value("new_schema_path", new_path)
+        .set_value("status", "verified");
     driver
-        .execute_raw(&insert_sql)
+        .execute(&insert_cmd)
         .await
         .map_err(|e| anyhow!("Failed to save shadow state: {}", e))?;
 
@@ -189,12 +269,11 @@ async fn load_shadow_state(driver: &mut PgDriver) -> Result<Option<(ShadowState,
 
 /// Update shadow state status (pending → promoted/aborted)
 async fn update_shadow_state_status(driver: &mut PgDriver, new_status: &str) -> Result<()> {
-    let sql = format!(
-        "UPDATE _qail_shadow_state SET status = '{}' WHERE status IN ('pending', 'verified')",
-        new_status
-    );
+    let sql = Qail::set("_qail_shadow_state")
+        .set_value("status", new_status)
+        .in_vals("status", ["pending", "verified"]);
     driver
-        .execute_raw(&sql)
+        .execute(&sql)
         .await
         .map_err(|e| anyhow!("Failed to update shadow state: {}", e))?;
     Ok(())
@@ -660,10 +739,10 @@ pub async fn create_shadow_database(primary_url: &str) -> Result<ShadowState> {
     if !existing.is_empty() {
         println!("    {} Shadow database already exists", "⚠".yellow());
     } else {
-        // Note: CREATE DATABASE cannot be in a transaction, using bootstrap DDL
-        let create_ddl = format!("CREATE DATABASE {}", state.shadow_name);
+        // Note: CREATE DATABASE cannot be in a transaction.
+        let create_db = Qail::create_database(state.shadow_name.clone());
         admin_driver
-            .execute_raw(&create_ddl)
+            .execute(&create_db)
             .await
             .map_err(|e| anyhow!("Failed to create shadow database: {}", e))?;
 
@@ -932,7 +1011,7 @@ pub async fn promote_shadow(primary_url: &str) -> Result<()> {
 
     // BEGIN transaction for atomic rollback
     primary_driver
-        .execute_raw("BEGIN")
+        .begin()
         .await
         .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
@@ -950,7 +1029,7 @@ pub async fn promote_shadow(primary_url: &str) -> Result<()> {
     if migration_failed {
         // ROLLBACK on failure - atomic rollback!
         primary_driver
-            .execute_raw("ROLLBACK")
+            .rollback()
             .await
             .map_err(|e| anyhow!("Failed to rollback: {}", e))?;
         println!(
@@ -962,7 +1041,7 @@ pub async fn promote_shadow(primary_url: &str) -> Result<()> {
 
     // COMMIT on success
     primary_driver
-        .execute_raw("COMMIT")
+        .commit()
         .await
         .map_err(|e| anyhow!("Failed to commit: {}", e))?;
 
@@ -984,9 +1063,9 @@ pub async fn promote_shadow(primary_url: &str) -> Result<()> {
             .map_err(|e| anyhow!("Failed to connect to postgres: {}", e))?
     };
 
-    let drop_ddl = format!("DROP DATABASE IF EXISTS {}", state.shadow_name);
+    let drop_db = Qail::drop_database(state.shadow_name.clone());
     admin_driver
-        .execute_raw(&drop_ddl)
+        .execute(&drop_db)
         .await
         .map_err(|e| anyhow!("Failed to drop shadow: {}", e))?;
     println!("    {} Shadow database dropped", "✓".green());
@@ -1027,9 +1106,9 @@ pub async fn abort_shadow(primary_url: &str) -> Result<()> {
 
     println!("  Dropping shadow database: {}", state.shadow_name.yellow());
 
-    let drop_ddl = format!("DROP DATABASE IF EXISTS {}", state.shadow_name);
+    let drop_db = Qail::drop_database(state.shadow_name.clone());
     admin_driver
-        .execute_raw(&drop_ddl)
+        .execute(&drop_db)
         .await
         .map_err(|e| anyhow!("Failed to drop shadow: {}", e))?;
 

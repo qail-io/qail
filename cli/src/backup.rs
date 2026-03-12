@@ -4,7 +4,7 @@
 
 use crate::colors::*;
 use anyhow::{Result, anyhow};
-use qail_core::ast::{Action, Expr, Operator, Qail};
+use qail_core::ast::{Action, Constraint, Expr, Operator, Qail};
 use qail_pg::driver::PgDriver;
 use std::path::PathBuf;
 
@@ -431,10 +431,73 @@ pub fn data_snapshots_ddl() -> String {
 
 /// Ensure data snapshots table exists
 pub async fn ensure_snapshots_table(driver: &mut PgDriver) -> Result<()> {
-    driver
-        .execute_raw(&data_snapshots_ddl())
+    let exists_cmd = Qail::get("information_schema.tables")
+        .column("1")
+        .where_eq("table_schema", "public")
+        .where_eq("table_name", "_qail_data_snapshots")
+        .limit(1);
+    let exists = driver
+        .fetch_all(&exists_cmd)
         .await
-        .map_err(|e| anyhow!("Failed to create data snapshots table: {}", e))?;
+        .map_err(|e| anyhow!("Failed to check data snapshots table: {}", e))?;
+
+    if exists.is_empty() {
+        let cmd = Qail {
+            action: Action::Make,
+            table: "_qail_data_snapshots".to_string(),
+            columns: vec![
+                Expr::Def {
+                    name: "id".to_string(),
+                    data_type: "serial".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "migration_version".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "table_name".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "column_name".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "row_id".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "value_json".to_string(),
+                    data_type: "jsonb".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "snapshot_type".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "created_at".to_string(),
+                    data_type: "timestamptz".to_string(),
+                    constraints: vec![
+                        Constraint::Nullable,
+                        Constraint::Default("now()".to_string()),
+                    ],
+                },
+            ],
+            ..Default::default()
+        };
+        driver
+            .execute(&cmd)
+            .await
+            .map_err(|e| anyhow!("Failed to create data snapshots table: {}", e))?;
+    }
+
     Ok(())
 }
 

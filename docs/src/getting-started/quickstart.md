@@ -3,7 +3,7 @@
 ## Connect to PostgreSQL
 
 ```rust
-use qail_pg::driver::PgDriver;
+use qail_pg::PgDriver;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,16 +24,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Execute Your First Query
 
 ```rust
-use qail_core::ast::{QailCmd, Operator};
+use qail_core::Qail;
+use qail_core::ast::Operator;
 
 // Build a SELECT query
-let cmd = QailCmd::get("users")
+let cmd = Qail::get("users")
     .columns(["id", "email"])
     .filter("active", Operator::Eq, true)
     .limit(10);
 
 // Execute
-let rows = driver.query(&cmd).await?;
+let rows = driver.fetch_all(&cmd).await?;
 
 for row in rows {
     let id: i32 = row.get("id")?;
@@ -46,6 +47,7 @@ for row in rows {
 
 ```rust
 use qail_pg::driver::{PgPool, PoolConfig};
+use qail_core::Qail;
 
 let config = PoolConfig::new("localhost", 5432, "user", "db")
     .password("secret")
@@ -55,7 +57,8 @@ let pool = PgPool::connect(config).await?;
 
 // Acquire connection from pool
 let mut conn = pool.acquire().await?;
-conn.simple_query("SELECT 1").await?;
+let probe = Qail::get("users").columns(["id"]).limit(1);
+let _rows = conn.fetch_all(&probe).await?;
 // Connection automatically returned when dropped
 ```
 

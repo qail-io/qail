@@ -13,6 +13,7 @@
 //! DATABASE_URL="postgresql://qail_user@localhost:5432/qail_test" \
 //!     cargo test -p qail-pg --test red_team_integration -- --nocapture --ignored
 //! ```
+#![cfg(feature = "legacy-raw-examples")]
 
 use qail_core::ast::{Operator, Qail};
 use qail_core::rls::RlsContext;

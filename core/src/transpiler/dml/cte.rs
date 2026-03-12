@@ -62,22 +62,7 @@ pub fn build_single_cte(cte: &CTEDef, dialect: Dialect) -> String {
 
     sql.push_str(" AS (");
 
-    // Base query - check if it's raw SQL passthrough
-    // Raw SQL is stored when table contains SQL keywords and columns are empty/star
-    let is_raw_sql = cte
-        .base_query
-        .columns
-        .iter()
-        .all(|c| matches!(c, Expr::Star))
-        && (cte.base_query.table.to_lowercase().starts_with("select ")
-            || cte.base_query.table.to_lowercase().contains(" from "));
-
-    if is_raw_sql {
-        // Pass through raw SQL directly
-        sql.push_str(&cte.base_query.table);
-    } else {
-        sql.push_str(&build_select(&cte.base_query, dialect));
-    }
+    sql.push_str(&build_select(&cte.base_query, dialect));
 
     // Recursive part (if RECURSIVE)
     if cte.recursive

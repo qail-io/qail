@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sql_len = sql_buf.len();
     let msg_len = (4 + sql_len + 1) as i32;
     let mut wire_bytes = BytesMut::with_capacity(1 + 4 + sql_len + 1);
-    wire_bytes.extend_from_slice(&[b'Q']);
+    wire_bytes.extend_from_slice(b"Q");
     wire_bytes.extend_from_slice(&msg_len.to_be_bytes());
     wire_bytes.extend_from_slice(&sql_buf);
     wire_bytes.extend_from_slice(&[0]);

@@ -337,19 +337,11 @@ async fn smoke_read_checks(
     }
 
     for table in &smoke_tables {
-        let sql = format!(
-            "SELECT 1 FROM {}.{} LIMIT 1",
-            quote_ident("public"),
-            quote_ident(table)
-        );
-        driver.fetch_raw(&sql).await.map_err(|e| {
-            anyhow!(
-                "Smoke query failed on table '{}': {} (query: {})",
-                table,
-                e,
-                sql
-            )
-        })?;
+        let cmd = Qail::get(table).column("1").limit(1);
+        driver
+            .fetch_all(&cmd)
+            .await
+            .map_err(|e| anyhow!("Smoke query failed on table '{}': {}", table, e))?;
     }
 
     Ok(())
@@ -373,10 +365,6 @@ fn normalize_ident(s: &str) -> String {
         .trim_matches('"')
         .replace('\"', "")
         .to_ascii_lowercase()
-}
-
-fn quote_ident(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 fn normalize_policy_cmd(s: &str) -> String {

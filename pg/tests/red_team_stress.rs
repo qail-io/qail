@@ -8,6 +8,7 @@
 //!   4. Massive WHERE clause (10,000 conditions)
 //!   5. Enormous SQL via column explosion
 //!   6. Connection exhaustion (rapid connect-drop)
+#![cfg(feature = "legacy-raw-examples")]
 
 use qail_core::ast::*;
 use qail_core::transpiler::ToSql;

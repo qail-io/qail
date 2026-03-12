@@ -26,7 +26,9 @@ mod name;
 mod signature;
 
 pub(crate) use handler::rpc_handler;
-pub(super) use name::{RpcFunctionName, build_rpc_sql, enforce_rpc_name_contract};
+pub(super) use name::{
+    RpcFunctionName, build_rpc_call_target, build_rpc_sql, enforce_rpc_name_contract,
+};
 #[cfg(test)]
 pub(super) use signature::{
     matches_positional_signature, select_matching_rpc_signature, signature_matches_call,

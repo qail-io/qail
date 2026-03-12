@@ -1,5 +1,5 @@
 //! PgDriver operations: transaction control, batch execution, statement timeout,
-//! RLS context, pipeline, legacy/raw SQL, COPY bulk/export, and cursor streaming.
+//! RLS context, pipeline, COPY bulk/export, and cursor streaming.
 
 use super::core::PgDriver;
 use super::prepared::PreparedStatement;
@@ -91,13 +91,14 @@ impl PgDriver {
     /// driver.set_statement_timeout(30_000).await?; // 30 seconds
     /// ```
     pub async fn set_statement_timeout(&mut self, ms: u32) -> PgResult<()> {
-        self.execute_raw(&format!("SET statement_timeout = {}", ms))
-            .await
+        let cmd = Qail::session_set("statement_timeout", ms.to_string());
+        self.execute(&cmd).await.map(|_| ())
     }
 
     /// Reset statement timeout to default (no limit).
     pub async fn reset_statement_timeout(&mut self) -> PgResult<()> {
-        self.execute_raw("RESET statement_timeout").await
+        let cmd = Qail::session_reset("statement_timeout");
+        self.execute(&cmd).await.map(|_| ())
     }
 
     // ==================== RLS (MULTI-TENANT) ====================
@@ -119,7 +120,12 @@ impl PgDriver {
     /// ```
     pub async fn set_rls_context(&mut self, ctx: rls::RlsContext) -> PgResult<()> {
         let sql = rls::context_to_sql(&ctx);
-        self.execute_raw(&sql).await?;
+        if sql.as_bytes().contains(&0) {
+            return Err(crate::PgError::Protocol(
+                "SQL contains NULL byte (0x00) which is invalid in PostgreSQL".to_string(),
+            ));
+        }
+        self.connection.execute_simple(&sql).await?;
         self.rls_context = Some(ctx);
         Ok(())
     }
@@ -129,7 +135,13 @@ impl PgDriver {
     /// After clearing, all RLS-protected queries will return zero rows
     /// (empty operator_id matches nothing).
     pub async fn clear_rls_context(&mut self) -> PgResult<()> {
-        self.execute_raw(rls::reset_sql()).await?;
+        let sql = rls::reset_sql();
+        if sql.as_bytes().contains(&0) {
+            return Err(crate::PgError::Protocol(
+                "SQL contains NULL byte (0x00) which is invalid in PostgreSQL".to_string(),
+            ));
+        }
+        self.connection.execute_simple(sql).await?;
         self.rls_context = None;
         Ok(())
     }
@@ -187,76 +199,6 @@ impl PgDriver {
         self.connection
             .pipeline_prepared_fast(stmt, params_batch)
             .await
-    }
-
-    // ==================== LEGACY/BOOTSTRAP ====================
-
-    /// Execute a raw SQL string.
-    /// ⚠️ **Discouraged**: Violates AST-native philosophy.
-    /// Use for bootstrap DDL only (e.g., migration table creation).
-    /// For transactions, use `begin()`, `commit()`, `rollback()`.
-    pub async fn execute_raw(&mut self, sql: &str) -> PgResult<()> {
-        // Reject literal NULL bytes - they corrupt PostgreSQL connection state
-        if sql.as_bytes().contains(&0) {
-            return Err(crate::PgError::Protocol(
-                "SQL contains NULL byte (0x00) which is invalid in PostgreSQL".to_string(),
-            ));
-        }
-        self.connection.execute_simple(sql).await
-    }
-
-    /// Execute a raw SQL query and return rows.
-    /// ⚠️ **Discouraged**: Violates AST-native philosophy.
-    /// Use for bootstrap/admin queries only.
-    pub async fn fetch_raw(&mut self, sql: &str) -> PgResult<Vec<PgRow>> {
-        if sql.as_bytes().contains(&0) {
-            return Err(crate::PgError::Protocol(
-                "SQL contains NULL byte (0x00) which is invalid in PostgreSQL".to_string(),
-            ));
-        }
-
-        use crate::protocol::PgEncoder;
-        use tokio::io::AsyncWriteExt;
-
-        // Use simple query protocol (no prepared statements)
-        let msg = PgEncoder::try_encode_query_string(sql)?;
-        self.connection.stream.write_all(&msg).await?;
-
-        let mut rows: Vec<PgRow> = Vec::new();
-        let mut column_info: Option<std::sync::Arc<ColumnInfo>> = None;
-
-        let mut error: Option<PgError> = None;
-
-        loop {
-            let msg = self.connection.recv().await?;
-            match msg {
-                crate::protocol::BackendMessage::RowDescription(fields) => {
-                    column_info = Some(std::sync::Arc::new(ColumnInfo::from_fields(&fields)));
-                }
-                crate::protocol::BackendMessage::DataRow(data) => {
-                    if error.is_none() {
-                        rows.push(PgRow {
-                            columns: data,
-                            column_info: column_info.clone(),
-                        });
-                    }
-                }
-                crate::protocol::BackendMessage::CommandComplete(_) => {}
-                crate::protocol::BackendMessage::ReadyForQuery(_) => {
-                    if let Some(err) = error {
-                        return Err(err);
-                    }
-                    return Ok(rows);
-                }
-                crate::protocol::BackendMessage::ErrorResponse(err) => {
-                    if error.is_none() {
-                        error = Some(PgError::QueryServer(err.into()));
-                    }
-                }
-                msg if is_ignorable_session_message(&msg) => {}
-                other => return Err(unexpected_backend_message("driver fetch_raw", &other)),
-            }
-        }
     }
 
     /// Bulk insert data using PostgreSQL COPY protocol (AST-native).

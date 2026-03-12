@@ -613,9 +613,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test GROUP BY with COUNT(*) - SQL check only (execution has column qualification issue)
     {
         let q = Qail::get("qail_test")
-            .columns(&["name"])
+            .columns(["name"])
             .column_expr(count().alias("cnt"))
-            .group_by(&["name"])
+            .group_by(["name"])
             .limit(5);
         let sql = q.to_sql();
         if sql.contains("GROUP BY") && sql.contains("name") {
@@ -632,7 +632,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let q = Qail::get("harbors")
             .column("name")
             .column_expr(count().alias("cnt"))
-            .group_by(&["name"])
+            .group_by(["name"])
             .limit(5);
         let sql = q.to_sql();
         if sql.contains("GROUP BY") && sql.contains("COUNT(*)") {
@@ -649,7 +649,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let q = Qail::get("harbors")
             .column("name")
             .column_expr(count().alias("cnt"))
-            .group_by(&["name"])
+            .group_by(["name"])
             .having_cond(gt("cnt", 0))
             .limit(5);
         let sql = q.to_sql();
@@ -673,7 +673,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_sql!(
         "DISTINCT ON",
         Qail::get("harbors")
-            .distinct_on(&["name"])
+            .distinct_on(["name"])
             .column("name")
             .limit(5),
         "DISTINCT ON"
@@ -713,7 +713,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let q = Qail::set("harbors")
             .set_value("name", "Updated")
-            .update_from(&["qail_test"])
+            .update_from(["qail_test"])
             .filter_cond(eq("harbors.id", 1));
         let sql = q.to_sql();
         if sql.contains("FROM") && sql.contains("qail_test") {
@@ -728,7 +728,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test DELETE...USING (multi-table delete)
     {
         let q = Qail::del("harbors")
-            .delete_using(&["qail_test"])
+            .delete_using(["qail_test"])
             .filter_cond(eq("harbors.id", 1));
         let sql = q.to_sql();
         if sql.contains("USING") && sql.contains("qail_test") {

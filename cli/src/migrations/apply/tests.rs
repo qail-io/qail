@@ -1,11 +1,12 @@
 //! Apply module tests.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::backfill::{parse_backfill_spec, split_schema_table};
-    use super::super::codegen::parse_qail_to_sql;
+    use super::super::codegen::{parse_qail_to_commands_strict, parse_qail_to_sql};
     use super::super::discovery::{detect_phase, normalize_group_key, parse_drop_targets};
-    use super::super::types::MigrationPhase;
+    use super::super::types::{BackfillTransform, MigrationPhase};
 
     #[test]
     fn test_parse_booking_to_sql() {
@@ -103,6 +104,60 @@ index idx_orders_status on orders (status)
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_basic() {
+        let input = r#"
+table users (
+    id uuid primary_key,
+    name text not null
+) enable_rls
+
+index idx_users_name on users (name)
+"#;
+        let cmds = parse_qail_to_commands_strict(input).expect("strict compile should succeed");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::Make)),
+            "should include CREATE TABLE"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::Index)),
+            "should include CREATE INDEX"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::AlterEnableRls)),
+            "should include ENABLE RLS"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::AlterForceRls)),
+            "should include FORCE RLS"
+        );
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_rejects_policies() {
+        let input = r#"
+table users (
+    id uuid primary_key
+) enable_rls
+
+policy users_isolation on users
+    for all
+    using (tenant_id = current_setting('app.current_tenant_id')::uuid)
+"#;
+
+        let err = parse_qail_to_commands_strict(input).expect_err("policies must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("polic"),
+            "error should mention policies, got: {}",
+            msg
+        );
+    }
+
+    #[test]
     fn test_detect_phase_from_name() {
         assert_eq!(
             detect_phase("20260101010101_add_users.expand.up.qail"),
@@ -146,9 +201,11 @@ index idx_orders_status on orders (status)
             .expect("spec should exist");
         assert_eq!(spec.table, "users");
         assert_eq!(spec.pk_column, "id");
+        assert_eq!(spec.set_column, "name_ci");
+        assert_eq!(spec.source_column, "name");
+        assert!(matches!(spec.transform, BackfillTransform::Lower));
         assert_eq!(spec.chunk_size, 2048);
-        assert!(spec.set_clause.contains("lower(name)"));
-        assert_eq!(spec.where_clause.as_deref(), Some("name_ci IS NULL"));
+        assert_eq!(spec.where_null_column.as_deref(), Some("name_ci"));
     }
 
     #[test]
@@ -250,6 +307,8 @@ ALTER TABLE users ADD COLUMN name_ci text;
             .expect("should parse ok with # comments")
             .expect("should have a spec");
         assert_eq!(spec.table, "users");
-        assert_eq!(spec.set_clause, "email_lower = lower(email)");
+        assert_eq!(spec.set_column, "email_lower");
+        assert_eq!(spec.source_column, "email");
+        assert!(matches!(spec.transform, BackfillTransform::Lower));
     }
 }

@@ -1,6 +1,7 @@
 //! Handler unit tests.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::rpc::{
         RpcFunctionName, build_rpc_sql, enforce_rpc_name_contract, matches_positional_signature,

@@ -149,18 +149,16 @@ pub(super) async fn run_listener_session(
                                 tracing::warn!("WS listener LISTEN failed: {}", e);
                                 let _ = reply.send(Err("Subscribe failed".to_string()));
                                 release_listener_conn(&mut conn).await;
-                            } else {
-                                if reply.send(Ok(())).is_err() {
-                                    // Caller timed out/cancelled; roll back LISTEN to avoid
-                                    // ghost subscriptions not tracked by connection state.
-                                    channels.remove(&channel);
-                                    if let Err(e) = c.unlisten(&channel).await {
-                                        tracing::warn!(
-                                            "WS listener rollback UNLISTEN failed after dropped reply: {}",
-                                            e
-                                        );
-                                        let _ = c.unlisten_all().await;
-                                    }
+                            } else if reply.send(Ok(())).is_err() {
+                                // Caller timed out/cancelled; roll back LISTEN to avoid
+                                // ghost subscriptions not tracked by connection state.
+                                channels.remove(&channel);
+                                if let Err(e) = c.unlisten(&channel).await {
+                                    tracing::warn!(
+                                        "WS listener rollback UNLISTEN failed after dropped reply: {}",
+                                        e
+                                    );
+                                    let _ = c.unlisten_all().await;
                                 }
                             }
                         }

@@ -66,11 +66,21 @@ pub(super) struct MigrationFile {
 }
 
 #[derive(Debug, Clone)]
+pub(super) enum BackfillTransform {
+    Identity,
+    Lower,
+    Upper,
+    Trim,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct BackfillSpec {
     pub(super) table: String,
     pub(super) pk_column: String,
-    pub(super) set_clause: String,
-    pub(super) where_clause: Option<String>,
+    pub(super) set_column: String,
+    pub(super) source_column: String,
+    pub(super) transform: BackfillTransform,
+    pub(super) where_null_column: Option<String>,
     pub(super) chunk_size: usize,
 }
 
@@ -80,20 +90,6 @@ pub(super) struct BackfillRun {
     pub(super) rows_updated: i64,
     pub(super) chunks: i64,
 }
-
-pub(super) const BACKFILL_CHECKPOINT_TABLE_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS _qail_backfill_checkpoints (
-    migration_version varchar(255) primary key,
-    table_name varchar(255) not null,
-    pk_column varchar(255) not null,
-    last_pk bigint not null default 0,
-    chunk_size integer not null,
-    rows_processed bigint not null default 0,
-    started_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
-    finished_at timestamptz
-)
-"#;
 
 /// Direction for migration
 #[derive(Clone, Copy)]

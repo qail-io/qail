@@ -26,7 +26,7 @@ Quick reference: "I want to do X → use Y."
 | Get rows back | `driver.fetch_all(&cmd)` |
 | Get exactly one row | `driver.fetch_one(&cmd)` |
 | Run a mutation (INSERT/UPDATE/DELETE) | `driver.execute(&cmd)` |
-| Run a raw SQL string (discouraged) | `driver.execute_raw("...")` |
+| Use SQL text anyway (outside `qail-pg`) | `tokio-postgres` / `sqlx` for that service |
 
 ---
 

@@ -3,7 +3,7 @@
 //! These helpers make QAIL simpler than raw SQL for analytics queries.
 //! All shortcuts are AST-native - no raw SQL strings!
 
-use super::{binary, case_when, cast, col, count_filter, now_minus};
+use super::{binary, case_when, cast, col, count_filter, int, now_minus};
 use crate::ast::BinaryOp;
 use crate::ast::{Condition, Expr, Operator, Value};
 
@@ -31,6 +31,27 @@ pub fn and_expr(left: impl Into<Expr>, right: impl Into<Expr>) -> Expr {
         right: Box::new(right.into()),
         alias: None,
     }
+}
+
+/// Numeric/string addition expression (left + right).
+///
+/// # Example
+/// ```ignore
+/// add_expr(col("total_quantity"), int(5))
+/// ```
+pub fn add_expr(left: impl Into<Expr>, right: impl Into<Expr>) -> Expr {
+    binary(left, BinaryOp::Add, right).build()
+}
+
+/// Increment a numeric column by an integer amount.
+///
+/// # Example
+/// ```ignore
+/// // total_quantity = total_quantity + 5
+/// ("total_quantity", inc("usage_daily_rollups.total_quantity", 5))
+/// ```
+pub fn inc(column: impl AsRef<str>, by: i64) -> Expr {
+    add_expr(col(column.as_ref()), int(by))
 }
 
 /// Create a "column IS NOT NULL" expression
@@ -247,5 +268,29 @@ mod tests {
         let builder = percentage("delivered", "sent");
         let expr = builder.alias("rate");
         assert!(matches!(expr, Expr::Case { alias: Some(a), .. } if a == "rate"));
+    }
+
+    #[test]
+    fn test_add_expr() {
+        let expr = add_expr(col("a"), int(2));
+        assert!(matches!(
+            expr,
+            Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_inc() {
+        let expr = inc("counter", 1);
+        assert!(matches!(
+            expr,
+            Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ));
     }
 }

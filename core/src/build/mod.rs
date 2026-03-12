@@ -27,16 +27,16 @@ mod query_ir;
 pub mod scanner;
 /// Schema types and parsing.
 pub mod schema;
+/// Build-time no-raw-SQL policy detector.
+mod sql_guard;
 /// Syn-based AST analyzer (requires `syn-scanner` feature).
 #[cfg(feature = "syn-scanner")]
 pub mod syn_analyzer;
 /// Syn-based N+1 detector used when `syn-scanner` is enabled without full `analyzer`.
-#[cfg(feature = "syn-scanner")]
+#[cfg(all(feature = "syn-scanner", not(feature = "analyzer")))]
 #[allow(dead_code)]
 #[path = "../analyzer/rust_ast/nplus1/mod.rs"]
 mod syn_nplus1;
-/// Build-time no-raw-SQL policy detector.
-mod sql_guard;
 /// Validation pipeline.
 mod validate;
 

@@ -89,8 +89,8 @@ pub use ext::ExprExt;
 
 // Shortcuts (ergonomic helpers)
 pub use shortcuts::{
-    all, and, and_expr, and3, count_where, count_where_all, exists, in_list, is_not_null_expr,
-    is_null_expr, not_exists, or_expr, percentage, recent, recent_col, subquery,
+    add_expr, all, and, and_expr, and3, count_where, count_where_all, exists, in_list, inc,
+    is_not_null_expr, is_null_expr, not_exists, or_expr, percentage, recent, recent_col, subquery,
 };
 
 #[cfg(test)]

@@ -65,15 +65,24 @@ pub(super) async fn build_pool(config: &GatewayConfig) -> Result<PgPool, Gateway
 pub(super) async fn verify_schema_drift(
     pool: &PgPool,
     schema: &SchemaRegistry,
+    statement_timeout_ms: u32,
+    lock_timeout_ms: u32,
 ) -> Result<(), GatewayError> {
     if schema.table_names().is_empty() {
         return Ok(());
     }
 
     tracing::info!("Verifying schema against database...");
-    let mut conn = pool.acquire_system().await.map_err(|e| {
-        GatewayError::Database(format!("Schema verification connection failed: {}", e))
-    })?;
+    let mut conn = pool
+        .acquire_with_rls_timeouts(
+            qail_core::rls::RlsContext::empty(),
+            statement_timeout_ms,
+            lock_timeout_ms,
+        )
+        .await
+        .map_err(|e| {
+            GatewayError::Database(format!("Schema verification connection failed: {}", e))
+        })?;
 
     let cmd = qail_core::ast::Qail::get("information_schema.tables")
         .columns(["table_name"])
@@ -144,13 +153,15 @@ pub(super) fn load_event_engine(
 pub(super) async fn load_user_operator_map(
     pool: &PgPool,
     process_name: &str,
+    statement_timeout_ms: u32,
+    lock_timeout_ms: u32,
 ) -> Result<Arc<RwLock<HashMap<String, String>>>, GatewayError> {
     let user_operator_map = Arc::new(RwLock::new(HashMap::new()));
 
     let token = qail_core::rls::SuperAdminToken::for_system_process(process_name);
     let rls = qail_core::rls::RlsContext::super_admin(token);
     let mut conn = pool
-        .acquire_with_rls(rls)
+        .acquire_with_rls_timeouts(rls, statement_timeout_ms, lock_timeout_ms)
         .await
         .map_err(|e| GatewayError::Database(format!("User lookup connection failed: {}", e)))?;
 

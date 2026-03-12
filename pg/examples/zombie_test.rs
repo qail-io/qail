@@ -34,9 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Verify lock is released
     println!("  Verifying lock cleanup...");
-    let _lock_check = check_driver.execute_raw(
-        "SELECT COUNT(*) FROM pg_locks WHERE relation::regclass::text = 'zombie_test' AND mode = 'AccessExclusiveLock'"
-    ).await?;
+    check_driver
+        .execute_raw(
+            "SELECT COUNT(*) FROM pg_locks WHERE relation::regclass::text = 'zombie_test' AND mode = 'AccessExclusiveLock'",
+        )
+        .await?;
 
     // If we can take a new lock, the old one is gone
     let mut verify_driver = PgDriver::connect("localhost", 5432, "orion", "postgres").await?;

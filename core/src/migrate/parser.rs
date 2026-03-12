@@ -18,6 +18,7 @@
 //! ```
 
 use super::policy::{PolicyTarget, RlsPolicy};
+use super::policy_parser::parse_policy_expr;
 use super::schema::{
     CheckConstraint, CheckExpr, Column, Comment, EnumType, Extension, FkAction, Grant, Index,
     MigrationHint, MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind, Schema,
@@ -1140,10 +1141,10 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
             let after_keyword = trimmed.strip_prefix(keyword).unwrap_or("").trim();
 
             let body = extract_dollar_body(after_keyword, lines)?;
-            // Store as raw SQL — the gateway only needs table/column metadata
-            // for auto-REST routing; typed expression parsing is done by the
-            // migration diff engine via parse_policy_expr() when needed.
-            let expr = Expr::Raw(body);
+            let expr = match parse_policy_expr(&body) {
+                Ok(expr) => expr,
+                Err(_e) => Expr::Named(body.clone()),
+            };
 
             if is_using {
                 policy.using = Some(expr);
@@ -1735,6 +1736,32 @@ table daily_stats {
         let table = &schema.tables["daily_stats"];
         assert_eq!(table.columns.len(), 1);
         assert!(table.columns[0].primary_key);
+    }
+
+    #[test]
+    fn test_parse_policy_fallback_keeps_unsupported_expression() {
+        let input = r#"
+table seo_comparisons {
+  id uuid primary_key
+}
+
+policy seo_comparisons_admin on seo_comparisons for all
+  using $$ status = 'cancelled'::text $$
+"#;
+
+        let schema = parse_qail(input).expect("policy parser should fall back to raw expr");
+        let policy = schema
+            .policies
+            .iter()
+            .find(|p| p.name == "seo_comparisons_admin")
+            .expect("policy missing");
+
+        match policy.using.as_ref() {
+            Some(Expr::Named(expr)) => {
+                assert!(expr.contains("status = 'cancelled'::text"));
+            }
+            other => panic!("expected fallback Expr::Named, got {:?}", other),
+        }
     }
 
     #[test]

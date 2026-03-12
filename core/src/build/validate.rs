@@ -1,7 +1,7 @@
 //! Validation pipeline: schema validation, RLS audit, N+1 detection, SQL policy.
 
-use std::path::Path;
 use std::collections::HashSet;
+use std::path::Path;
 
 use super::scanner::{QailUsage, scan_source_files};
 use super::schema::Schema;
@@ -146,7 +146,10 @@ pub fn validate_against_schema_diagnostics(
         if schema.is_rls_table(&query.table) && !query.has_rls {
             push_unique(ValidationDiagnostic::rls_warning(format!(
                 "{}:{}: ⚠️ RLS AUDIT: Qail::{}(\"{}\") has no .with_rls() — table has RLS enabled, query may leak tenant data",
-                query.file, query.line, query.action.to_lowercase(), query.table
+                query.file,
+                query.line,
+                query.action.to_lowercase(),
+                query.table
             )));
         }
 
@@ -164,7 +167,10 @@ pub fn validate_against_schema_diagnostics(
                     "{}:{}: ⚠️ RLS AUDIT: Qail::{}(\"{}\") in file using SuperAdminToken::for_system_process() \
    — query has no explicit tenant scope (`tenant_id = ...` or `tenant_id IS NULL`) and may bypass tenant isolation. \
 Use claims-based scoping, `RlsContext::global()` for shared data, or add explicit tenant scope. If intentional, add `// qail:allow(super_admin)`.",
-                    query.file, query.line, query.action.to_lowercase(), query.table
+                    query.file,
+                    query.line,
+                    query.action.to_lowercase(),
+                    query.table
                 )));
             }
         }

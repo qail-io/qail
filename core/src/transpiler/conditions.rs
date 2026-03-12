@@ -102,14 +102,6 @@ pub trait ConditionToSql {
 impl ConditionToSql for Condition {
     /// Convert condition to SQL string.
     fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&Qail>) -> String {
-        // raw_where() pattern: Expr::Raw + IsNotNull + Null → emit raw SQL as-is
-        if let Expr::Raw(sql) = &self.left
-            && self.op == Operator::IsNotNull
-            && matches!(&self.value, Value::Null)
-        {
-            return sql.clone();
-        }
-
         let col = match &self.left {
             Expr::Named(name) => {
                 if name.starts_with('{') && name.ends_with('}') {
@@ -302,14 +294,6 @@ impl ConditionToSql for Condition {
         context: Option<&Qail>,
         params: &mut ParamContext,
     ) -> String {
-        // raw_where() pattern: Expr::Raw + IsNotNull + Null → emit raw SQL as-is
-        if let Expr::Raw(sql) = &self.left
-            && self.op == Operator::IsNotNull
-            && matches!(&self.value, Value::Null)
-        {
-            return sql.clone();
-        }
-
         let col = match &self.left {
             Expr::Named(name) => {
                 if name.starts_with('{') && name.ends_with('}') {

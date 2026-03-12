@@ -61,6 +61,17 @@ pub(crate) async fn rpc_handler(
         "text"
     };
 
+    let call_target = match build_rpc_call_target(&function, args.as_ref()) {
+        Ok(target) => target,
+        Err(err) => {
+            crate::metrics::record_rpc_call(
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                false,
+                result_format_label,
+            );
+            return Err(err);
+        }
+    };
     let sql = match build_rpc_sql(&function, args.as_ref()) {
         Ok(sql) => sql,
         Err(err) => {
@@ -93,7 +104,7 @@ pub(crate) async fn rpc_handler(
         return Err(err);
     }
 
-    let cmd = qail_core::ast::Qail::raw_sql(sql);
+    let cmd = qail_core::ast::Qail::get(call_target);
 
     let rows = match conn
         .fetch_all_uncached_with_format(&cmd, result_format)

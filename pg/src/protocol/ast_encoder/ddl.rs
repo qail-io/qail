@@ -400,6 +400,18 @@ pub fn encode_session_reset(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(cmd.table.as_bytes());
 }
 
+/// Encode CREATE DATABASE name.
+pub fn encode_create_database(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"CREATE DATABASE ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}
+
+/// Encode DROP DATABASE IF EXISTS name.
+pub fn encode_drop_database(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"DROP DATABASE IF EXISTS ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}
+
 // ── Pub/Sub commands ───────────────────────────────────────────────
 
 /// Encode LISTEN "channel".

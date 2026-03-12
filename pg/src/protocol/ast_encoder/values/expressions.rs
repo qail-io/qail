@@ -445,7 +445,6 @@ fn encode_column_expr_inner(
                 buf.extend_from_slice(a.as_bytes());
             }
         }
-        Expr::Raw(sql) => buf.extend_from_slice(sql.as_bytes()),
         Expr::Def {
             name,
             data_type,
@@ -572,15 +571,6 @@ pub fn encode_conditions(
     for (i, cond) in conditions.iter().enumerate() {
         if i > 0 {
             buf.extend_from_slice(b" AND ");
-        }
-
-        // raw_where() pattern: Expr::Raw + IsNotNull + Null → emit raw SQL as-is
-        if matches!(&cond.left, Expr::Raw(_))
-            && cond.op == Operator::IsNotNull
-            && matches!(&cond.value, Value::Null)
-        {
-            encode_expr(&cond.left, buf);
-            continue;
         }
 
         if cond.is_array_unnest {

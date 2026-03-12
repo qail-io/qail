@@ -123,21 +123,19 @@ pub(crate) async fn get_by_id_handler(
         .tenant_guard_exempt_tables
         .iter()
         .any(|t| t == &table_name);
-    if !is_exempt {
-        if let Some(ref tenant_id) = auth.tenant_id {
-            let single = vec![data.clone()];
-            let _proof = crate::tenant_guard::verify_tenant_boundary(
-                &single,
-                tenant_id,
-                &state.config.tenant_column,
-                &table_name,
-                "rest_get_by_id",
-            )
-            .map_err(|v| {
-                tracing::error!("{}", v);
-                ApiError::internal("Data integrity error")
-            })?;
-        }
+    if !is_exempt && let Some(ref tenant_id) = auth.tenant_id {
+        let single = vec![data.clone()];
+        let _proof = crate::tenant_guard::verify_tenant_boundary(
+            &single,
+            tenant_id,
+            &state.config.tenant_column,
+            &table_name,
+            "rest_get_by_id",
+        )
+        .map_err(|v| {
+            tracing::error!("{}", v);
+            ApiError::internal("Data integrity error")
+        })?;
     }
 
     Ok(Json(SingleResponse { data }))

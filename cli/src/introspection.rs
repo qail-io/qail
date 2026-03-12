@@ -737,8 +737,28 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             }
         };
 
-        let using_expr = qual.map(|s| parse_policy_expr(&s));
-        let with_check_expr = with_check.map(|s| parse_policy_expr(&s));
+        let using_expr = match qual {
+            Some(s) => Some(parse_policy_expr(&s).map_err(|e| {
+                anyhow!(
+                    "Failed to parse USING expression for policy '{}' on '{}': {}",
+                    name,
+                    table,
+                    e
+                )
+            })?),
+            None => None,
+        };
+        let with_check_expr = match with_check {
+            Some(s) => Some(parse_policy_expr(&s).map_err(|e| {
+                anyhow!(
+                    "Failed to parse WITH CHECK expression for policy '{}' on '{}': {}",
+                    name,
+                    table,
+                    e
+                )
+            })?),
+            None => None,
+        };
 
         let mut policy = RlsPolicy::create(&name, &table);
         policy.target = target;

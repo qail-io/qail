@@ -9,6 +9,7 @@ use super::super::super::{ListenControl, WsConnectionState, WsServerMessage};
 use super::bootstrap::subscribe_and_spawn_live_query;
 use super::validate::prepare_and_send_initial_snapshot;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_live_query(
     qail: String,
     table: String,

@@ -24,7 +24,13 @@ impl Gateway {
         let cache = crate::cache::QueryCache::new(cache_config);
 
         let pool = build_pool(&self.config).await?;
-        verify_schema_drift(&pool, &schema).await?;
+        verify_schema_drift(
+            &pool,
+            &schema,
+            self.config.statement_timeout_ms,
+            self.config.lock_timeout_ms,
+        )
+        .await?;
 
         let event_engine = load_event_engine(&self.config)?;
 
@@ -81,7 +87,13 @@ impl Gateway {
             self.config.max_tenants
         );
 
-        let user_operator_map = load_user_operator_map(&pool, "startup_user_map").await?;
+        let user_operator_map = load_user_operator_map(
+            &pool,
+            "startup_user_map",
+            self.config.statement_timeout_ms,
+            self.config.lock_timeout_ms,
+        )
+        .await?;
 
         #[cfg(feature = "qdrant")]
         let qdrant_pool = if let Some(ref qdrant_config) = self.config.qdrant {

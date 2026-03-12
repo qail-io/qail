@@ -34,10 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let batch_cmds: Vec<Qail> = (1..=BATCH_SIZE)
         .map(|i| {
-            Qail::raw_sql(format!(
-                "SELECT id, name FROM harbors LIMIT {}",
-                (i % 10) + 1
-            ))
+            Qail::get("harbors")
+                .columns(["id", "name"])
+                .limit(((i % 10) + 1) as i64)
         })
         .collect();
     let batch_cmds = Arc::new(batch_cmds);

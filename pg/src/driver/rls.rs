@@ -198,7 +198,9 @@ mod tests {
         let ctx = RlsContext::user("550e8400-e29b-41d4-a716-446655440000");
         let sql = context_to_sql(&ctx);
         assert!(
-            sql.contains("set_config('app.current_user_id', '550e8400-e29b-41d4-a716-446655440000'"),
+            sql.contains(
+                "set_config('app.current_user_id', '550e8400-e29b-41d4-a716-446655440000'"
+            ),
             "user_id must be set in session SQL"
         );
         assert!(sql.contains("'false'")); // is_super_admin remains false
@@ -211,7 +213,9 @@ mod tests {
         let ctx = RlsContext::empty();
         let sql = context_to_sql(&ctx);
         assert!(
-            sql.contains("set_config('app.current_user_id', '00000000-0000-0000-0000-000000000000'"),
+            sql.contains(
+                "set_config('app.current_user_id', '00000000-0000-0000-0000-000000000000'"
+            ),
             "empty user_id emits nil UUID to avoid ::uuid cast failures"
         );
     }

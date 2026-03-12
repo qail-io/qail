@@ -2,46 +2,36 @@ use super::super::RpcFunctionName;
 use super::types::normalize_pg_type_name;
 use crate::middleware::ApiError;
 use crate::server::RpcCallableSignature;
+use qail_core::ast::{Expr, Qail};
 
-pub(super) fn rpc_signature_lookup_sql(
-    function_name: &RpcFunctionName,
-) -> Result<String, ApiError> {
+pub(super) fn rpc_signature_lookup_cmd(function_name: &RpcFunctionName) -> Result<Qail, ApiError> {
     let Some((schema, function)) = function_name.schema_and_name() else {
         return Err(ApiError::parse_error(
             "rpc_signature_check requires schema-qualified function names",
         ));
     };
 
-    let schema_literal = schema.replace('\'', "''");
-    let function_literal = function.replace('\'', "''");
-
-    Ok(format!(
-        "SELECT \
-            p.pronargs::int4 AS total_args, \
-            p.pronargdefaults::int4 AS default_args, \
-            (p.provariadic <> 0) AS is_variadic, \
-            COALESCE((\
-                SELECT jsonb_agg(NULLIF(BTRIM(arg_name), '') ORDER BY ord) \
-                FROM unnest((COALESCE(p.proargnames, ARRAY[]::text[]))[1:p.pronargs]) \
-                     WITH ORDINALITY AS names(arg_name, ord) \
-            ), '[]'::jsonb)::text AS arg_names_json, \
-            COALESCE((\
-                SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord) \
-                FROM unnest(\
-                    CASE \
-                        WHEN p.pronargs = 0 THEN ARRAY[]::oid[] \
-                        ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] \
-                    END\
-                ) WITH ORDINALITY AS args(arg_oid, ord) \
-            ), '[]'::jsonb)::text AS arg_types_json, \
-            pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args, \
-            pg_catalog.pg_get_function_result(p.oid) AS result_type \
-        FROM pg_catalog.pg_proc p \
-        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-        WHERE n.nspname = '{}' AND p.proname = '{}' \
-        ORDER BY p.oid",
-        schema_literal, function_literal
-    ))
+    Ok(Qail::get("pg_catalog.pg_proc p")
+        .columns_expr(vec![
+            Expr::Named("p.pronargs::int4 AS total_args".to_string()),
+            Expr::Named("p.pronargdefaults::int4 AS default_args".to_string()),
+            Expr::Named("(p.provariadic <> 0) AS is_variadic".to_string()),
+            Expr::Named(
+                "COALESCE((SELECT jsonb_agg(NULLIF(BTRIM(arg_name), '') ORDER BY ord) FROM unnest((COALESCE(p.proargnames, ARRAY[]::text[]))[1:p.pronargs]) WITH ORDINALITY AS names(arg_name, ord)), '[]'::jsonb)::text AS arg_names_json".to_string(),
+            ),
+            Expr::Named(
+                "COALESCE((SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord) FROM unnest(CASE WHEN p.pronargs = 0 THEN ARRAY[]::oid[] ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] END) WITH ORDINALITY AS args(arg_oid, ord)), '[]'::jsonb)::text AS arg_types_json".to_string(),
+            ),
+            Expr::Named(
+                "pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args"
+                    .to_string(),
+            ),
+            Expr::Named("pg_catalog.pg_get_function_result(p.oid) AS result_type".to_string()),
+        ])
+        .inner_join("pg_catalog.pg_namespace n", "n.oid", "p.pronamespace")
+        .eq("n.nspname", schema)
+        .eq("p.proname", function)
+        .order_asc("p.oid"))
 }
 
 pub(super) fn parse_rpc_signatures(

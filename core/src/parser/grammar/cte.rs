@@ -302,9 +302,6 @@ pub fn parse_qail_strict(sql: &str) -> Result<Qail, &'static str> {
             if !remaining.trim().is_empty() {
                 return Err("partial parse — trailing input");
             }
-            if cmd.is_raw_sql() {
-                return Err("raw SQL not allowed in strict mode");
-            }
             Ok(cmd)
         }
         Err(_) => Err("QAIL parse failed"),

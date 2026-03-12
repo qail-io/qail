@@ -245,11 +245,11 @@ async fn pipeline_ast_cached_unexpected_backend_invalidates_cache() {
             .await
             .unwrap();
 
-    let first_cmd = Qail::raw_sql("SELECT 1");
+    let first_cmd = Qail::get("(SELECT 1) qail_test_subq");
     let err = conn.pipeline_ast_cached(&[first_cmd]).await.unwrap_err();
     assert!(err.to_string().contains("pipeline_ast_cached"));
 
-    let second_cmd = Qail::raw_sql("SELECT 1");
+    let second_cmd = Qail::get("(SELECT 1) qail_test_subq");
     let completed = conn.pipeline_ast_cached(&[second_cmd]).await.unwrap();
     assert_eq!(completed, 1);
 
@@ -297,11 +297,11 @@ async fn pipeline_ast_cached_parsecomplete_mismatch_invalidates_cache() {
             .await
             .unwrap();
 
-    let first_cmd = Qail::raw_sql("SELECT 1");
+    let first_cmd = Qail::get("(SELECT 1) qail_test_subq");
     let err = conn.pipeline_ast_cached(&[first_cmd]).await.unwrap_err();
     assert!(err.to_string().contains("ParseComplete mismatch"));
 
-    let second_cmd = Qail::raw_sql("SELECT 1");
+    let second_cmd = Qail::get("(SELECT 1) qail_test_subq");
     let completed = conn.pipeline_ast_cached(&[second_cmd]).await.unwrap();
     assert_eq!(completed, 1);
 
@@ -521,7 +521,9 @@ async fn execute_simple_accepts_row_stream_then_completion() {
             .await
             .unwrap();
 
-    conn.execute_simple("SELECT set_config('a','b',true)").await.unwrap();
+    conn.execute_simple("SELECT set_config('a','b',true)")
+        .await
+        .unwrap();
 
     server.await.unwrap();
 }
@@ -785,7 +787,7 @@ async fn pipeline_ast_fast_rejects_data_before_bind() {
             .unwrap();
 
     let err = conn
-        .pipeline_ast_fast(&[Qail::raw_sql("SELECT 1")])
+        .pipeline_ast_fast(&[Qail::get("(SELECT 1) qail_test_subq")])
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -824,7 +826,7 @@ async fn pipeline_ast_rejects_data_before_bind() {
             .unwrap();
 
     let err = conn
-        .pipeline_ast(&[Qail::raw_sql("SELECT 1")])
+        .pipeline_ast(&[Qail::get("(SELECT 1) qail_test_subq")])
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -903,7 +905,7 @@ async fn pipeline_simple_fast_rejects_data_before_row_description() {
             .unwrap();
 
     let err = conn
-        .pipeline_simple_fast(&[Qail::raw_sql("SELECT 1")])
+        .pipeline_simple_fast(&[Qail::get("(SELECT 1) qail_test_subq")])
         .await
         .unwrap_err();
     let msg = err.to_string();

@@ -1,6 +1,7 @@
 //! Pool unit tests.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::driver::pool::churn::*;
     use crate::driver::pool::config::*;
@@ -505,7 +506,8 @@ mod tests {
     #[test]
     fn test_from_qail_config_accepts_valid_gsslib_values() {
         let mut qail = qail_core::config::QailConfig::default();
-        qail.postgres.url = "postgres://alice:secret@db.internal:5432/app?gsslib=gssapi".to_string();
+        qail.postgres.url =
+            "postgres://alice:secret@db.internal:5432/app?gsslib=gssapi".to_string();
         assert!(PoolConfig::from_qail_config(&qail).is_ok());
 
         qail.postgres.url = "postgres://alice:secret@db.internal:5432/app?gsslib=sspi".to_string();
@@ -515,7 +517,8 @@ mod tests {
     #[test]
     fn test_from_qail_config_rejects_invalid_gsslib_value() {
         let mut qail = qail_core::config::QailConfig::default();
-        qail.postgres.url = "postgres://alice:secret@db.internal:5432/app?gsslib=kerberos".to_string();
+        qail.postgres.url =
+            "postgres://alice:secret@db.internal:5432/app?gsslib=kerberos".to_string();
 
         let err = match PoolConfig::from_qail_config(&qail) {
             Ok(_) => panic!("expected invalid gsslib error"),

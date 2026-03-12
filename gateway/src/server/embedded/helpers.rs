@@ -40,14 +40,23 @@ pub(super) fn load_schema_registry(config: &GatewayConfig) -> Result<SchemaRegis
 pub(super) async fn verify_schema_drift(
     pool: &PgPool,
     schema: &SchemaRegistry,
+    statement_timeout_ms: u32,
+    lock_timeout_ms: u32,
 ) -> Result<(), GatewayError> {
     if schema.table_names().is_empty() {
         return Ok(());
     }
 
-    let mut conn = pool.acquire_system().await.map_err(|e| {
-        GatewayError::Database(format!("Schema verification connection failed: {}", e))
-    })?;
+    let mut conn = pool
+        .acquire_with_rls_timeouts(
+            qail_core::rls::RlsContext::empty(),
+            statement_timeout_ms,
+            lock_timeout_ms,
+        )
+        .await
+        .map_err(|e| {
+            GatewayError::Database(format!("Schema verification connection failed: {}", e))
+        })?;
     let cmd = qail_core::ast::Qail::get("information_schema.tables")
         .columns(["table_name"])
         .eq(
@@ -111,12 +120,14 @@ pub(super) fn load_event_engine(
 
 pub(super) async fn load_user_operator_map(
     pool: &PgPool,
+    statement_timeout_ms: u32,
+    lock_timeout_ms: u32,
 ) -> Result<Arc<RwLock<HashMap<String, String>>>, GatewayError> {
     let user_operator_map = Arc::new(RwLock::new(HashMap::new()));
     let token = qail_core::rls::SuperAdminToken::for_system_process("embedded_user_map");
     let rls = qail_core::rls::RlsContext::super_admin(token);
     let mut conn = pool
-        .acquire_with_rls(rls)
+        .acquire_with_rls_timeouts(rls, statement_timeout_ms, lock_timeout_ms)
         .await
         .map_err(|e| GatewayError::Database(format!("User lookup connection failed: {}", e)))?;
     let cmd = qail_core::ast::Qail::get("users")
@@ -183,12 +194,11 @@ pub(super) fn load_allow_list(config: &GatewayConfig) -> Result<QueryAllowList, 
 pub(super) fn load_rpc_allow_list_from_config(
     config: &GatewayConfig,
 ) -> Result<Option<HashSet<String>>, GatewayError> {
-    if let Some(ref path) = config.rpc_allowlist_path {
-        if let Ok(canonical) =
+    if let Some(ref path) = config.rpc_allowlist_path
+        && let Ok(canonical) =
             crate::config::validate_config_path(path, config.config_root.as_deref())
-        {
-            return Ok(Some(load_rpc_allow_list(&canonical)?));
-        }
+    {
+        return Ok(Some(load_rpc_allow_list(&canonical)?));
     }
     Ok(None)
 }

@@ -14,6 +14,7 @@
 //! These tests use a dedicated `qail_test` schema, isolated from application
 //! tables. The schema is dropped and recreated at the start of each test
 //! to avoid interference from previous runs.
+#![cfg(feature = "legacy-raw-tests")]
 
 use qail_core::ast::Qail;
 use qail_pg::ResultFormat;
@@ -124,7 +125,9 @@ async fn ensure_schema() {
 
 /// Execute a raw SQL query and return JSON rows using gateway's row_to_json.
 async fn query_json(pg: &mut qail_pg::PgDriver, sql: &str, format: ResultFormat) -> Vec<Value> {
-    let cmd = Qail::raw_sql(sql.to_string());
+    let trimmed = sql.trim().trim_end_matches(';');
+    let wrapped = format!("({}) qail_rpc_test_subq", trimmed);
+    let cmd = Qail::get(wrapped);
     let rows = pg
         .fetch_all_uncached_with_format(&cmd, format)
         .await

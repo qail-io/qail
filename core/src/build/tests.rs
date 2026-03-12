@@ -510,11 +510,13 @@ fn demo(ctx: &RlsContext) {
         .expect("expected syn usage for Qail::get(\"orders\")");
 
     assert_eq!(usage.cmd.joins.len(), 1);
-    assert!(usage
-        .cmd
-        .cages
-        .iter()
-        .any(|c| matches!(c.kind, crate::ast::CageKind::Partition)));
+    assert!(
+        usage
+            .cmd
+            .cages
+            .iter()
+            .any(|c| matches!(c.kind, crate::ast::CageKind::Partition))
+    );
     assert_eq!(usage.cmd.having.len(), 1);
     assert!(usage.has_rls);
 }
@@ -811,9 +813,10 @@ fn normalized_columns_from_cmd(cmd: &crate::ast::Qail) -> Vec<String> {
 }
 
 #[cfg(feature = "syn-scanner")]
-fn normalize_usage_rows(
-    usages: &[QailUsage],
-) -> Vec<(usize, usize, String, String, bool, bool, bool, Vec<String>)> {
+type NormalizedUsageRow = (usize, usize, String, String, bool, bool, bool, Vec<String>);
+
+#[cfg(feature = "syn-scanner")]
+fn normalize_usage_rows(usages: &[QailUsage]) -> Vec<NormalizedUsageRow> {
     let mut rows = usages
         .iter()
         .map(|u| {
@@ -1017,9 +1020,11 @@ fn demo() {
     let _ = std::fs::remove_file(&file);
     let _ = std::fs::remove_dir_all(&root);
 
-    assert!(!diagnostics
-        .iter()
-        .any(|d| d.message.contains("no explicit tenant scope")));
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("no explicit tenant scope"))
+    );
 }
 
 #[cfg(feature = "syn-scanner")]
@@ -1060,9 +1065,11 @@ fn demo() {
     let _ = std::fs::remove_file(&file);
     let _ = std::fs::remove_dir_all(&root);
 
-    assert!(!diagnostics
-        .iter()
-        .any(|d| d.message.contains("no explicit tenant scope")));
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("no explicit tenant scope"))
+    );
 }
 
 #[cfg(feature = "syn-scanner")]

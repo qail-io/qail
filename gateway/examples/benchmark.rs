@@ -4,7 +4,7 @@
 //! Then run: cargo run -p qail-gateway --example benchmark --release
 
 use qail_core::ast::Qail;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const ITERATIONS: usize = 1000;
 

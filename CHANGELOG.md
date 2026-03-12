@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-03-12
+
+### Breaking Changes ⚠️
+
+- **Raw SQL string APIs removed from runtime path (AST-only by default):**
+  - `qail-core`: removed `Qail::raw_sql(...)`, `Qail::is_raw_sql()`, `Qail::raw_where(...)`, and raw helper `Qail::nextval(...)`.
+  - `qail-pg`: removed `PgDriver::execute_raw(...)` and `PgDriver::fetch_raw(...)`.
+  - `qail-pg` AST encoder no longer supports raw SQL pass-through via `Qail::is_raw_sql()`.
+- **Migration guidance:**
+  - Use AST-native builders (`Qail::get/add/set/del`, typed expressions, joins, filters) instead of string SQL.
+  - Use session AST commands (`Qail::session_set`, `Qail::session_reset`, etc.) for connection/session settings.
+  - Legacy examples that still rely on removed raw APIs are now gated behind `legacy-raw-examples` and disabled by default.
+
+### Added
+
+- **Regression guards:** added repository tests to prevent reintroducing removed raw SQL APIs:
+  - `core/tests/no_raw_apis.rs`
+  - `pg/tests/raw_usage_guard.rs`
+  - `cli/tests/raw_usage_allowlist.rs`
+
+### Changed
+
+- **Versioning:** bumped Rust crates to `0.25.0` (`qail-core`, `qail-pg`, `qail-gateway`, `qail`, `qail-qdrant`, `qail-workflow`, `qail-encoder`, `qail-lsp`).
+- **README snippets:** updated installation examples and version badges to `0.25.0` across workspace READMEs.
+
 ## [0.24.6] - 2026-03-11
 
 ### Added

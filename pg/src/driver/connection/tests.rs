@@ -1,6 +1,7 @@
 //! Connection unit tests.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::helpers::{md5_password_message, select_scram_mechanism};
     use crate::driver::ScramChannelBindingMode;

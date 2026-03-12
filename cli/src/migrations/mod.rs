@@ -43,6 +43,7 @@ pub use up::migrate_up;
 #[cfg(feature = "watch")]
 pub use watch::watch_schema;
 
+use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_core::parser::schema::Schema;
 use qail_pg::PgDriver;
 use std::path::{Path, PathBuf};
@@ -133,7 +134,107 @@ pub fn migration_table_ddl() -> String {
 
 /// Ensure migration table exists and has the latest receipt columns.
 pub async fn ensure_migration_table(driver: &mut PgDriver) -> anyhow::Result<()> {
-    driver.execute_raw(&migration_table_ddl()).await?;
+    let exists_cmd = Qail::get("information_schema.tables")
+        .column("1")
+        .where_eq("table_schema", "public")
+        .where_eq("table_name", "_qail_migrations")
+        .limit(1);
+    let exists = driver.fetch_all(&exists_cmd).await?;
+
+    if exists.is_empty() {
+        let cmd = Qail {
+            action: Action::Make,
+            table: "_qail_migrations".to_string(),
+            columns: vec![
+                Expr::Def {
+                    name: "id".to_string(),
+                    data_type: "serial".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "version".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![Constraint::Unique],
+                },
+                Expr::Def {
+                    name: "name".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "applied_at".to_string(),
+                    data_type: "timestamptz".to_string(),
+                    constraints: vec![
+                        Constraint::Nullable,
+                        Constraint::Default("now()".to_string()),
+                    ],
+                },
+                Expr::Def {
+                    name: "checksum".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "sql_up".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "sql_down".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "git_sha".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "qail_version".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "actor".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "started_at_ms".to_string(),
+                    data_type: "bigint".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "finished_at_ms".to_string(),
+                    data_type: "bigint".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "duration_ms".to_string(),
+                    data_type: "bigint".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "affected_rows_est".to_string(),
+                    data_type: "bigint".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "risk_summary".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "shadow_checksum".to_string(),
+                    data_type: "varchar".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+            ],
+            ..Default::default()
+        };
+        driver.execute(&cmd).await?;
+    }
+
     ensure_migration_receipt_columns(driver).await?;
     Ok(())
 }

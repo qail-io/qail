@@ -25,13 +25,6 @@ pub fn encode_select(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
-    // Raw SQL passthrough: if the command was created via Qail::raw_sql(),
-    // write the SQL string verbatim instead of generating SELECT ... FROM ...
-    if cmd.is_raw_sql() {
-        buf.extend_from_slice(cmd.table.as_bytes());
-        return Ok(());
-    }
-
     // CTE prefix
     encode_cte_prefix(cmd, buf, params)?;
 
@@ -295,14 +288,7 @@ fn encode_single_cte(
 
     buf.extend_from_slice(b" AS (");
 
-    // Encode base query — check for raw SQL passthrough first.
-    // Raw SQL is stored when the CTE body couldn't be parsed as QAIL
-    // (e.g. complex SQL, VALUES lists, recursive anchors).
-    if cte.base_query.is_raw_sql() {
-        buf.extend_from_slice(cte.base_query.table.as_bytes());
-    } else {
-        encode_select(&cte.base_query, buf, params)?;
-    }
+    encode_select(&cte.base_query, buf, params)?;
 
     // Recursive part (UNION ALL)
     if cte.recursive
@@ -513,7 +499,7 @@ pub fn encode_export(
 
 /// Encode a WHERE clause that supports both AND and OR filter cages.
 ///
-/// - AND conditions (from `.eq()`, `.filter()`, `.raw_where()`, etc.)
+/// - AND conditions (from `.eq()`, `.filter()`, etc.)
 ///   are joined with `AND`.
 /// - OR conditions (from `.or_filter()`) are grouped into a single
 ///   parenthesized `(c1 OR c2 OR ... OR cN)` block, appended with `AND`.

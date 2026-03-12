@@ -417,7 +417,6 @@ impl Formatter {
                     write!(self.buffer, " as {}", a)?;
                 }
             }
-            Expr::Raw(sql) => write!(self.buffer, "{}", sql)?,
         }
         Ok(())
     }

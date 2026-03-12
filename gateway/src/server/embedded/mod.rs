@@ -32,7 +32,13 @@ impl GatewayState {
 
         let policy_engine = helpers::load_policy_engine(&config)?;
         let schema = helpers::load_schema_registry(&config)?;
-        helpers::verify_schema_drift(&pool, &schema).await?;
+        helpers::verify_schema_drift(
+            &pool,
+            &schema,
+            config.statement_timeout_ms,
+            config.lock_timeout_ms,
+        )
+        .await?;
 
         let cache = QueryCache::new(config.cache_config());
         let event_engine = helpers::load_event_engine(&config)?;
@@ -59,7 +65,12 @@ impl GatewayState {
             config.max_tenants,
         ));
 
-        let user_operator_map = helpers::load_user_operator_map(&pool).await?;
+        let user_operator_map = helpers::load_user_operator_map(
+            &pool,
+            config.statement_timeout_ms,
+            config.lock_timeout_ms,
+        )
+        .await?;
 
         #[cfg(feature = "qdrant")]
         let qdrant_pool = if let Some(ref qdrant_config) = config.qdrant {

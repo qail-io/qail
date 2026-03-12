@@ -159,11 +159,13 @@ fn parse_error_code(bytes: &[u8]) -> String {
 #[tokio::test]
 async fn txn_query_returns_conflict_when_session_lifetime_exceeded() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
-    let mut config = GatewayConfig::default();
-    config.production_strict = false;
-    config.txn_max_sessions = 4;
-    config.txn_max_lifetime_secs = 1;
-    config.txn_max_statements_per_session = 100;
+    let config = GatewayConfig {
+        production_strict: false,
+        txn_max_sessions: 4,
+        txn_max_lifetime_secs: 1,
+        txn_max_statements_per_session: 100,
+        ..GatewayConfig::default()
+    };
 
     let state = build_test_state(config).await;
     state
@@ -204,11 +206,13 @@ async fn txn_query_returns_conflict_when_session_lifetime_exceeded() {
 #[tokio::test]
 async fn txn_savepoint_returns_conflict_when_statement_limit_exceeded() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
-    let mut config = GatewayConfig::default();
-    config.production_strict = false;
-    config.txn_max_sessions = 4;
-    config.txn_max_lifetime_secs = 600;
-    config.txn_max_statements_per_session = 1;
+    let config = GatewayConfig {
+        production_strict: false,
+        txn_max_sessions: 4,
+        txn_max_lifetime_secs: 600,
+        txn_max_statements_per_session: 1,
+        ..GatewayConfig::default()
+    };
 
     let state = build_test_state(config).await;
     state

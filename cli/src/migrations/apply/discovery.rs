@@ -50,14 +50,6 @@ pub(super) fn normalize_group_key(name: &str) -> String {
     base
 }
 
-pub(super) fn quote_ident(ident: &str) -> String {
-    ident
-        .split('.')
-        .map(|p| format!("\"{}\"", p.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
 pub(super) fn is_valid_ident(ident: &str) -> bool {
     let mut parts = ident.split('.');
     let mut seen = false;

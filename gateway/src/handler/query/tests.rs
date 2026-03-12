@@ -178,8 +178,10 @@ fn query_complexity_with_joins() {
 #[tokio::test]
 async fn export_handler_rejects_empty_query() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
-    let mut config = GatewayConfig::default();
-    config.production_strict = false;
+    let config = GatewayConfig {
+        production_strict: false,
+        ..GatewayConfig::default()
+    };
 
     let state = build_test_state(config, QueryAllowList::new()).await;
     let app = Router::new()
@@ -208,8 +210,10 @@ async fn export_handler_rejects_empty_query() {
 #[tokio::test]
 async fn export_handler_rejects_non_export_query() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
-    let mut config = GatewayConfig::default();
-    config.production_strict = false;
+    let config = GatewayConfig {
+        production_strict: false,
+        ..GatewayConfig::default()
+    };
 
     let state = build_test_state(config, QueryAllowList::new()).await;
     let app = Router::new()
@@ -238,8 +242,10 @@ async fn export_handler_rejects_non_export_query() {
 #[tokio::test]
 async fn export_handler_enforces_allow_list_before_db_acquire() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
-    let mut config = GatewayConfig::default();
-    config.production_strict = false;
+    let config = GatewayConfig {
+        production_strict: false,
+        ..GatewayConfig::default()
+    };
     let mut allow_list = QueryAllowList::new();
     allow_list.enable();
 

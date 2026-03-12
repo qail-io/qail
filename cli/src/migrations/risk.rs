@@ -2,7 +2,7 @@
 
 use crate::colors::*;
 use anyhow::{Result, anyhow};
-use qail_core::ast::{Action, Qail};
+use qail_core::ast::{Action, JoinKind, Qail};
 use qail_pg::driver::PgDriver;
 use std::collections::HashMap;
 
@@ -190,28 +190,20 @@ fn risk_reason(level: LockLevel, stats: TableStats, score: u8) -> Option<String>
 }
 
 async fn fetch_table_stats(driver: &mut PgDriver, table: &str) -> Result<TableStats> {
-    let table_escaped = table.replace('\'', "''");
-    let sql = format!(
-        r#"
-        SELECT
-            COALESCE(c.reltuples, 0)::bigint AS est_rows,
-            COALESCE(pg_total_relation_size(c.oid), 0)::bigint AS total_bytes
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public'
-          AND c.relname = '{table_escaped}'
-          AND c.relkind IN ('r', 'p', 'm')
-        LIMIT 1
-        "#
-    );
-
+    let cmd = Qail::get("pg_class c")
+        .columns(["c.reltuples", "pg_total_relation_size(c.oid)"])
+        .join(JoinKind::Inner, "pg_namespace n", "n.oid", "c.relnamespace")
+        .where_eq("n.nspname", "public")
+        .where_eq("c.relname", table)
+        .in_vals("c.relkind", ["r", "p", "m"])
+        .limit(1);
     let rows = driver
-        .fetch_raw(&sql)
+        .fetch_all(&cmd)
         .await
         .map_err(|e| anyhow!("Failed lock-risk stats query for table '{}': {}", table, e))?;
 
     if let Some(row) = rows.first() {
-        let est_rows = row.get_i64(0).unwrap_or(0);
+        let est_rows = row.get_f64(0).unwrap_or(0.0).max(0.0).round() as i64;
         let total_bytes = row.get_i64(1).unwrap_or(0);
         return Ok(TableStats {
             est_rows,

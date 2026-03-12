@@ -1,21 +1,10 @@
 //! Migration receipt metadata + persistence.
 
 use anyhow::{Result, anyhow};
+use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_pg::PgDriver;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const RECEIPT_ALTER_SQL: &[&str] = &[
-    "ALTER TABLE _qail_migrations ADD COLUMN IF NOT EXISTS git_sha VARCHAR(64)",
-    "ALTER TABLE _qail_migrations ADD COLUMN IF NOT EXISTS qail_version VARCHAR(32)",
-    "ALTER TABLE _qail_migrations ADD COLUMN IF NOT EXISTS actor VARCHAR(255)",
-    "ALTER TABLE _qail_migrations ADD COLUMN IF NOT EXISTS started_at_ms BIGINT",
-    "ALTER TABLE _qail_migrations ADD COLUMN IF NOT EXISTS finished_at_ms BIGINT",
-    "ALTER TABLE _qail_migrations ADD COLUMN IF NOT EXISTS duration_ms BIGINT",
-    "ALTER TABLE _qail_migrations ADD COLUMN IF NOT EXISTS affected_rows_est BIGINT",
-    "ALTER TABLE _qail_migrations ADD COLUMN IF NOT EXISTS risk_summary TEXT",
-    "ALTER TABLE _qail_migrations ADD COLUMN IF NOT EXISTS shadow_checksum VARCHAR(64)",
-];
 
 #[derive(Debug, Clone)]
 pub struct MigrationReceipt {
@@ -35,11 +24,47 @@ pub struct MigrationReceipt {
 }
 
 pub async fn ensure_migration_receipt_columns(driver: &mut PgDriver) -> Result<()> {
-    for stmt in RECEIPT_ALTER_SQL {
-        driver.execute_raw(stmt).await.map_err(|e| {
+    let columns: &[(&str, &str)] = &[
+        ("git_sha", "text"),
+        ("qail_version", "text"),
+        ("actor", "text"),
+        ("started_at_ms", "bigint"),
+        ("finished_at_ms", "bigint"),
+        ("duration_ms", "bigint"),
+        ("affected_rows_est", "bigint"),
+        ("risk_summary", "text"),
+        ("shadow_checksum", "text"),
+    ];
+
+    for (name, ty) in columns {
+        let exists_cmd = Qail::get("information_schema.columns")
+            .column("1")
+            .where_eq("table_schema", "public")
+            .where_eq("table_name", "_qail_migrations")
+            .where_eq("column_name", *name)
+            .limit(1);
+        let rows = driver
+            .fetch_all(&exists_cmd)
+            .await
+            .map_err(|e| anyhow!("Failed to check migration receipt column '{}': {}", name, e))?;
+        if !rows.is_empty() {
+            continue;
+        }
+
+        let alter_cmd = Qail {
+            action: Action::Mod,
+            table: "_qail_migrations".to_string(),
+            columns: vec![Expr::Def {
+                name: (*name).to_string(),
+                data_type: (*ty).to_string(),
+                constraints: vec![Constraint::Nullable],
+            }],
+            ..Default::default()
+        };
+        driver.execute(&alter_cmd).await.map_err(|e| {
             anyhow!(
-                "Failed to ensure migration receipt column via '{}': {}",
-                stmt,
+                "Failed to ensure migration receipt column '{}': {}",
+                name,
                 e
             )
         })?;
@@ -51,27 +76,29 @@ pub async fn write_migration_receipt(
     driver: &mut PgDriver,
     receipt: &MigrationReceipt,
 ) -> Result<()> {
-    let insert_sql = format!(
-        "INSERT INTO _qail_migrations \
-         (version, name, checksum, sql_up, git_sha, qail_version, actor, started_at_ms, finished_at_ms, duration_ms, affected_rows_est, risk_summary, shadow_checksum) \
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
-        sql_opt_str(Some(&receipt.version)),
-        sql_opt_str(Some(&receipt.name)),
-        sql_opt_str(Some(&receipt.checksum)),
-        sql_opt_str(Some(&receipt.sql_up)),
-        sql_opt_str(receipt.git_sha.as_deref()),
-        sql_opt_str(Some(&receipt.qail_version)),
-        sql_opt_str(receipt.actor.as_deref()),
-        sql_opt_i64(receipt.started_at_ms),
-        sql_opt_i64(receipt.finished_at_ms),
-        sql_opt_i64(receipt.duration_ms),
-        sql_opt_i64(receipt.affected_rows_est),
-        sql_opt_str(receipt.risk_summary.as_deref()),
-        sql_opt_str(receipt.shadow_checksum.as_deref()),
-    );
+    let insert_cmd = Qail::add("_qail_migrations")
+        .set_value("version", receipt.version.as_str())
+        .set_value("name", receipt.name.as_str())
+        .set_value("checksum", receipt.checksum.as_str())
+        .set_value("sql_up", receipt.sql_up.as_str())
+        .set_opt("git_sha", receipt.git_sha.as_deref())
+        .set_value("qail_version", receipt.qail_version.as_str())
+        .set_opt("actor", receipt.actor.as_deref())
+        .set_opt("started_at_ms", receipt.started_at_ms)
+        .set_opt("finished_at_ms", receipt.finished_at_ms)
+        .set_opt("duration_ms", receipt.duration_ms)
+        .set_opt("affected_rows_est", receipt.affected_rows_est)
+        .set_opt(
+            "risk_summary",
+            receipt.risk_summary.as_deref(),
+        )
+        .set_opt(
+            "shadow_checksum",
+            receipt.shadow_checksum.as_deref(),
+        );
 
     driver
-        .execute_raw(&insert_sql)
+        .execute(&insert_cmd)
         .await
         .map_err(|e| anyhow!("Failed to write migration receipt: {}", e))?;
     Ok(())
@@ -132,16 +159,4 @@ pub fn runtime_git_sha() -> Option<String> {
     }
 
     None
-}
-
-fn sql_opt_str(v: Option<&str>) -> String {
-    match v {
-        Some(s) => format!("'{}'", s.replace('\'', "''")),
-        None => "NULL".to_string(),
-    }
-}
-
-fn sql_opt_i64(v: Option<i64>) -> String {
-    v.map(|n| n.to_string())
-        .unwrap_or_else(|| "NULL".to_string())
 }

@@ -5,6 +5,8 @@
 
 use crate::colors::*;
 use anyhow::Result;
+use qail_core::ast::builders::{binary, col, count, now, now_minus};
+use qail_core::ast::{BinaryOp, Operator, Qail, Value};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -519,30 +521,27 @@ fn parse_postgres_url(url: &str) -> Result<(String, u16, String, String, Option<
 }
 
 async fn fetch_pending_items(pg: &mut qail_pg::PgDriver, limit: u32) -> Result<Vec<QueueItem>> {
-    // ATOMIC FETCH: Skip Locked pattern for concurrency-safe multi-worker deployments.
-    // This UPDATE atomically:
-    // 1. Selects pending items with FOR UPDATE SKIP LOCKED (prevents race conditions)
-    // 2. Sets status to 'processing' and timestamps
-    // 3. Returns the claimed items in one round-trip
-    let sql = format!(
-        r#"
-        UPDATE _qail_queue
-        SET status = 'processing', processed_at = NOW()
-        WHERE id IN (
-            SELECT id
-            FROM _qail_queue
-            WHERE status = 'pending'
-              AND retry_count < 5  -- Poison Pill protection: skip jobs that failed too many times
-            ORDER BY id ASC
-            LIMIT {}
-            FOR UPDATE SKIP LOCKED
-        )
-        RETURNING id, ref_table, ref_id, operation, payload
-        "#,
-        limit
-    );
+    // Atomic claim using UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING ...
+    // This prevents worker races under concurrent consumers.
+    let claim_subquery = Qail::get("_qail_queue")
+        .column("id")
+        .where_eq("status", "pending")
+        .lt("retry_count", 5) // Poison-pill protection
+        .order_asc("id")
+        .limit(limit as i64)
+        .for_update_skip_locked();
 
-    let rows = pg.fetch_raw(&sql).await?;
+    let claim_cmd = Qail::set("_qail_queue")
+        .set_value("status", "processing")
+        .set_value("processed_at", now())
+        .filter(
+            "id",
+            Operator::In,
+            Value::Subquery(Box::new(claim_subquery)),
+        )
+        .returning(["id", "ref_table", "ref_id", "operation", "payload"]);
+
+    let rows = pg.fetch_all(&claim_cmd).await?;
 
     let items: Vec<QueueItem> = rows
         .iter()
@@ -578,12 +577,12 @@ async fn process_item(
             // Always fetch FRESH data from the source table to prevent time-travel bugs.
 
             let trigger_col = rule.trigger_column.as_deref().unwrap_or("description");
-            let fetch_sql = format!(
-                "SELECT {} FROM {} WHERE id = {}",
-                trigger_col, item.ref_table, item.ref_id
-            );
+            let fetch_cmd = Qail::get(item.ref_table.as_str())
+                .column(trigger_col)
+                .where_eq("id", item.ref_id.as_str())
+                .limit(1);
 
-            match pg.fetch_raw(&fetch_sql).await {
+            match pg.fetch_all(&fetch_cmd).await {
                 Ok(rows) if !rows.is_empty() => {
                     // Row exists - extract fresh text and upsert
                     let text = rows[0]
@@ -630,21 +629,22 @@ async fn process_item(
 }
 
 async fn mark_processed(pg: &mut qail_pg::PgDriver, id: i64) -> Result<()> {
-    let sql = format!(
-        "UPDATE _qail_queue SET status = 'processed', processed_at = NOW() WHERE id = {}",
-        id
-    );
-    pg.execute_raw(&sql).await?;
+    let cmd = Qail::set("_qail_queue")
+        .set_value("status", "processed")
+        .set_value("processed_at", now())
+        .where_eq("id", id);
+    pg.execute(&cmd).await?;
     Ok(())
 }
 
 async fn mark_failed(pg: &mut qail_pg::PgDriver, id: i64, error: &str) -> Result<()> {
-    let escaped_error = error.replace('\'', "''");
-    let sql = format!(
-        "UPDATE _qail_queue SET status = 'failed', retry_count = retry_count + 1, error_message = '{}' WHERE id = {}",
-        escaped_error, id
-    );
-    pg.execute_raw(&sql).await?;
+    let retry_plus_one = binary(col("retry_count"), BinaryOp::Add, 1).build();
+    let cmd = Qail::set("_qail_queue")
+        .set_value("status", "failed")
+        .set_value("retry_count", retry_plus_one)
+        .set_value("error_message", error)
+        .where_eq("id", id);
+    pg.execute(&cmd).await?;
     Ok(())
 }
 
@@ -653,25 +653,25 @@ async fn mark_failed(pg: &mut qail_pg::PgDriver, id: i64, error: &str) -> Result
 async fn recover_stale_jobs(pg: &mut qail_pg::PgDriver) -> Result<u64> {
     // Reset jobs that have been 'processing' for more than 10 minutes
     // These are likely from crashed workers
-    let sql = r#"
-        UPDATE _qail_queue 
-        SET status = 'pending', retry_count = retry_count + 1 
-        WHERE status = 'processing' 
-          AND processed_at < NOW() - INTERVAL '10 minutes'
-    "#;
-
-    pg.execute_raw(sql).await?;
+    let retry_plus_one = binary(col("retry_count"), BinaryOp::Add, 1).build();
+    let recover_cmd = Qail::set("_qail_queue")
+        .set_value("status", "pending")
+        .set_value("retry_count", retry_plus_one)
+        .where_eq("status", "processing")
+        .lt("processed_at", now_minus("10 minutes"));
+    pg.execute(&recover_cmd).await?;
 
     // Count how many were recovered (for logging)
-    let count_sql = r#"
-        SELECT COUNT(*) as count FROM _qail_queue 
-        WHERE status = 'pending' 
-          AND retry_count > 0 
-          AND processed_at >= NOW() - INTERVAL '1 minute'
-    "#;
-
-    let rows = pg.fetch_raw(count_sql).await.unwrap_or_default();
-    let recovered = rows.first().and_then(|r| r.get_i64(0)).unwrap_or(0) as u64;
+    let count_cmd = Qail::get("_qail_queue")
+        .select_expr(count().alias("count"))
+        .where_eq("status", "pending")
+        .gt("retry_count", 0)
+        .gte("processed_at", now_minus("1 minute"));
+    let rows = pg.fetch_all(&count_cmd).await.unwrap_or_default();
+    let recovered = rows
+        .first()
+        .and_then(|r| r.get_i64_by_name("count").or_else(|| r.get_i64(0)))
+        .unwrap_or(0) as u64;
 
     Ok(recovered)
 }

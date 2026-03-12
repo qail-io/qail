@@ -59,7 +59,6 @@ fn check_ident(field: &str, value: &str) -> Result<(), SanitizeError> {
 /// Validate an `Expr` node for unsafe patterns.
 ///
 /// - `Expr::Named` must be a safe identifier.
-/// - `Expr::Raw` is rejected outright (binary path must not carry raw SQL).
 /// - Recursive variants (Cast, Binary, etc.) are validated recursively.
 fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
     match expr {
@@ -115,11 +114,6 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             }
             Ok(())
         }
-        Expr::Raw(_) => Err(SanitizeError {
-            field: field.to_string(),
-            value: "(raw SQL)".to_string(),
-            reason: "Expr::Raw is not allowed in binary AST".to_string(),
-        }),
         Expr::Literal(_) => Ok(()),
         Expr::JsonAccess {
             column,
@@ -278,7 +272,7 @@ fn check_value(field: &str, value: &Value) -> Result<(), SanitizeError> {
 /// Validate a `Qail` AST from an untrusted source.
 ///
 /// Checks all identifier fields against the parser grammar (`[a-zA-Z0-9_.]`)
-/// and rejects dangerous constructs like `Expr::Raw` and procedural actions.
+/// and rejects dangerous procedural actions.
 ///
 /// # Errors
 ///
@@ -294,15 +288,6 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
             });
         }
         _ => {}
-    }
-
-    // ── Raw SQL pass-through ─────────────────────────────────────────
-    if cmd.is_raw_sql() {
-        return Err(SanitizeError {
-            field: "table".to_string(),
-            value: "(raw SQL)".to_string(),
-            reason: "raw SQL pass-through is not allowed via binary AST".to_string(),
-        });
     }
 
     // ── Table name ───────────────────────────────────────────────────
@@ -417,20 +402,6 @@ mod tests {
         let cmd = Qail::get("users; DROP TABLE users; --");
         let err = validate_ast(&cmd).unwrap_err();
         assert_eq!(err.field, "table");
-    }
-
-    #[test]
-    fn raw_sql_rejected() {
-        let cmd = Qail::raw_sql("SELECT 1");
-        let err = validate_ast(&cmd).unwrap_err();
-        assert_eq!(err.field, "table");
-    }
-
-    #[test]
-    fn raw_expr_rejected() {
-        let cmd = Qail::get("users").columns_expr(vec![Expr::Raw("NOW()".to_string())]);
-        let err = validate_ast(&cmd).unwrap_err();
-        assert!(err.reason.contains("Raw"));
     }
 
     #[test]

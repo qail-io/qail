@@ -46,13 +46,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 2: With minimal query
     println!();
     println!("  Test 2: With query (SELECT 1 via pipeline)");
-    let query = Qail::raw_sql("SELECT 1");
+    let query = Qail::get("(SELECT 1 AS one) qail_pool_probe");
 
     let start = std::time::Instant::now();
 
     for _ in 0..1000 {
         let mut conn = pool.acquire_system().await?;
-        conn.pipeline_ast(&[query.clone()]).await?;
+        conn.pipeline_ast(std::slice::from_ref(&query)).await?;
         drop(conn);
     }
 

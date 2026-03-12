@@ -153,6 +153,7 @@ impl Metrics {
     }
 }
 
+#[allow(dead_code)]
 struct Stats {
     label: String,
     qps: f64,

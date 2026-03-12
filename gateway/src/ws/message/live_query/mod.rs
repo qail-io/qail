@@ -13,6 +13,7 @@ use crate::auth::AuthContext;
 
 use super::super::{ListenControl, WsConnectionState, WsServerMessage};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_live_query(
     qail: String,
     table: String,

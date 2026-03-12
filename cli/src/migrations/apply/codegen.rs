@@ -1,9 +1,13 @@
 //! .qail → SQL code generation.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
+use qail_core::ast::{Action, Constraint, Expr, IndexDef, Qail};
 use qail_core::migrate::parse_qail;
-use qail_core::migrate::schema::{FkAction, GrantAction};
+use qail_core::migrate::schema::FkAction;
+#[cfg(test)]
+use qail_core::migrate::schema::GrantAction;
 use qail_core::parser::schema::Schema;
+use qail_core::transpiler::ToSql;
 
 /// Parse a .qail schema file and generate SQL DDL.
 ///
@@ -15,6 +19,7 @@ use qail_core::parser::schema::Schema;
 /// - Paren-based: handled by `Schema::parse()` + `schema.to_sql()` —
 ///   the established "schema.qail" format with `enable_rls` annotations.
 /// - Fallback: `parse_functions_and_triggers()` for raw function/trigger blocks.
+#[cfg(test)]
 pub(super) fn parse_qail_to_sql(content: &str) -> Result<String> {
     // Detect format: look for `table <name> {` vs `table <name> (`
     let uses_braces = content.lines().any(|line| {
@@ -54,7 +59,241 @@ pub(super) fn parse_qail_to_sql(content: &str) -> Result<String> {
     }
 }
 
+/// Parse a `.qail` migration into strictly AST-executable commands.
+///
+/// This compiler intentionally fails on constructs that do not yet have
+/// first-class AST/wire support in the migration executor, rather than
+/// silently falling back to raw SQL execution.
+pub(super) fn parse_qail_to_commands_strict(content: &str) -> Result<Vec<Qail>> {
+    let uses_braces = content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("table ") && trimmed.ends_with('{')
+    });
+
+    if uses_braces {
+        let schema = parse_qail(content).map_err(|e| anyhow!(e))?;
+        return compile_migrate_schema_strict(&schema);
+    }
+
+    if let Ok(schema) = Schema::parse(content) {
+        return compile_parser_schema_strict(&schema);
+    }
+
+    if let Ok(schema) = parse_qail(content) {
+        return compile_migrate_schema_strict(&schema);
+    }
+
+    bail!("Could not parse migration into strict AST commands")
+}
+
+/// Render compiled commands back to SQL text (for receipts/checksums/guards).
+pub(super) fn commands_to_sql(cmds: &[Qail]) -> String {
+    cmds.iter()
+        .map(|cmd| cmd.to_sql())
+        .collect::<Vec<_>>()
+        .join(";\n")
+}
+
+fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) -> Result<Vec<Qail>> {
+    let mut unsupported = Vec::new();
+    if !schema.migrations.is_empty() {
+        unsupported.push("migration hints");
+    }
+    if !schema.extensions.is_empty() {
+        unsupported.push("extensions");
+    }
+    if !schema.comments.is_empty() {
+        unsupported.push("comments");
+    }
+    if !schema.sequences.is_empty() {
+        unsupported.push("sequences");
+    }
+    if !schema.enums.is_empty() {
+        unsupported.push("enums");
+    }
+    if !schema.views.is_empty() {
+        unsupported.push("views");
+    }
+    if !schema.functions.is_empty() {
+        unsupported.push("functions");
+    }
+    if !schema.triggers.is_empty() {
+        unsupported.push("triggers");
+    }
+    if !schema.grants.is_empty() {
+        unsupported.push("grants/revokes");
+    }
+    if !schema.policies.is_empty() {
+        unsupported.push("rls policies");
+    }
+    if !schema.resources.is_empty() {
+        unsupported.push("resources");
+    }
+    if schema
+        .tables
+        .values()
+        .any(|t| !t.multi_column_fks.is_empty())
+    {
+        unsupported.push("multi-column foreign keys");
+    }
+    if schema.tables.values().any(|t| {
+        t.columns.iter().any(|c| {
+            c.check.is_some()
+                || c.generated.is_some()
+                || c.foreign_key.as_ref().is_some_and(|fk| {
+                    fk.on_delete != FkAction::NoAction
+                        || fk.on_update != FkAction::NoAction
+                        || !matches!(
+                            fk.deferrable,
+                            qail_core::migrate::schema::Deferrable::NotDeferrable
+                        )
+                })
+        })
+    }) {
+        unsupported.push("advanced column constraints");
+    }
+
+    if !unsupported.is_empty() {
+        bail!(
+            "Strict AST migration compiler does not support: {}",
+            unsupported.join(", ")
+        );
+    }
+
+    let mut cmds = qail_core::migrate::schema::schema_to_commands(schema);
+
+    // Preserve schema-level RLS toggles for CREATE TABLE blocks.
+    let mut table_names: Vec<&String> = schema.tables.keys().collect();
+    table_names.sort();
+    for table_name in table_names {
+        if let Some(table) = schema.tables.get(table_name) {
+            if table.enable_rls {
+                cmds.push(Qail {
+                    action: Action::AlterEnableRls,
+                    table: table_name.clone(),
+                    ..Default::default()
+                });
+            }
+            if table.force_rls {
+                cmds.push(Qail {
+                    action: Action::AlterForceRls,
+                    table: table_name.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    if cmds.is_empty() {
+        bail!("No executable AST commands found in migration");
+    }
+
+    Ok(cmds)
+}
+
+fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
+    if !schema.policies.is_empty() {
+        bail!("Strict AST migration compiler does not support parser-schema policies yet");
+    }
+
+    let mut cmds = Vec::<Qail>::new();
+
+    for table in &schema.tables {
+        let mut cols = Vec::<Expr>::new();
+        for col in &table.columns {
+            if col.type_params.is_some() {
+                bail!(
+                    "Strict AST migration compiler does not support parameterized type '{}({:?})' on {}.{} yet",
+                    col.typ,
+                    col.type_params,
+                    table.name,
+                    col.name
+                );
+            }
+            if col.is_array {
+                bail!(
+                    "Strict AST migration compiler does not support array type '{}[]' on {}.{} yet",
+                    col.typ,
+                    table.name,
+                    col.name
+                );
+            }
+            if col.check.is_some() {
+                bail!(
+                    "Strict AST migration compiler does not support CHECK constraints on {}.{} yet",
+                    table.name,
+                    col.name
+                );
+            }
+
+            let mut constraints = Vec::new();
+            if col.primary_key {
+                constraints.push(Constraint::PrimaryKey);
+            }
+            if col.nullable {
+                constraints.push(Constraint::Nullable);
+            }
+            if col.unique {
+                constraints.push(Constraint::Unique);
+            }
+            if let Some(default) = &col.default_value {
+                constraints.push(Constraint::Default(default.clone()));
+            }
+            if let Some(reference) = &col.references {
+                constraints.push(Constraint::References(reference.clone()));
+            }
+
+            cols.push(Expr::Def {
+                name: col.name.clone(),
+                data_type: col.typ.clone(),
+                constraints,
+            });
+        }
+
+        cmds.push(Qail {
+            action: Action::Make,
+            table: table.name.clone(),
+            columns: cols,
+            ..Default::default()
+        });
+
+        if table.enable_rls {
+            cmds.push(Qail {
+                action: Action::AlterEnableRls,
+                table: table.name.clone(),
+                ..Default::default()
+            });
+            // Parser-schema `enable_rls` historically expands to ENABLE + FORCE.
+            cmds.push(Qail {
+                action: Action::AlterForceRls,
+                table: table.name.clone(),
+                ..Default::default()
+            });
+        }
+    }
+
+    for idx in &schema.indexes {
+        cmds.push(Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: idx.name.clone(),
+                table: idx.table.clone(),
+                columns: idx.columns.clone(),
+                unique: idx.unique,
+                index_type: None,
+            }),
+            ..Default::default()
+        });
+    }
+
+    if cmds.is_empty() {
+        bail!("No executable AST commands found in migration");
+    }
+    Ok(cmds)
+}
+
 /// Generate SQL DDL from a fully-parsed migrate Schema.
+#[cfg(test)]
 fn migrate_schema_to_sql(schema: &qail_core::migrate::schema::Schema) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -207,6 +446,7 @@ fn migrate_schema_to_sql(schema: &qail_core::migrate::schema::Schema) -> String 
 }
 
 /// Convert FkAction to SQL string
+#[cfg(test)]
 fn fk_action_sql(action: &FkAction) -> &'static str {
     match action {
         FkAction::NoAction => "NO ACTION",
@@ -218,6 +458,7 @@ fn fk_action_sql(action: &FkAction) -> &'static str {
 }
 
 /// Parse function and trigger definitions from .qail format
+#[cfg(test)]
 fn parse_functions_and_triggers(content: &str) -> Result<String> {
     let mut sql_parts = Vec::new();
     let mut current_block = String::new();
@@ -308,6 +549,7 @@ fn parse_functions_and_triggers(content: &str) -> Result<String> {
 }
 
 /// Parse an index line: index idx_name on table (col1, col2)
+#[cfg(test)]
 fn parse_index_line(line: &str) -> Result<String> {
     // index idx_qail_queue_poll on _qail_queue (status, id)
     let parts: Vec<&str> = line.split_whitespace().collect();
@@ -331,6 +573,7 @@ fn parse_index_line(line: &str) -> Result<String> {
 }
 
 /// Extract a complete table block from content
+#[cfg(test)]
 fn extract_table_block(content: &str, start_line: &str) -> Result<String> {
     let mut result = String::new();
     let mut found = false;
@@ -355,6 +598,7 @@ fn extract_table_block(content: &str, start_line: &str) -> Result<String> {
 }
 
 /// Translate a QAIL function block to PL/pgSQL
+#[cfg(test)]
 fn translate_function(block: &str) -> Result<String> {
     // function _qail_products_notify() returns trigger { ... }
     let mut sql = String::new();
@@ -395,6 +639,7 @@ fn translate_function(block: &str) -> Result<String> {
 }
 
 /// Translate QAIL function body to PL/pgSQL
+#[cfg(test)]
 fn translate_function_body(body: &str) -> String {
     let mut sql = String::new();
 
@@ -435,6 +680,7 @@ fn translate_function_body(body: &str) -> String {
 }
 
 /// Translate a QAIL trigger definition to SQL
+#[cfg(test)]
 fn translate_trigger(block: &str) -> Result<String> {
     // trigger qail_sync_products
     //   after insert or update or delete on products

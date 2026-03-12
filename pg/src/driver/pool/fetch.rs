@@ -626,49 +626,42 @@ impl PooledConnection {
         conn.params_buf.clear();
 
         // Encode SQL + params to reusable buffers
-        if cmd.is_raw_sql() {
-            // Raw SQL pass-through: write verbatim, RLS context already set above
-            conn.sql_buf.clear();
-            conn.params_buf.clear();
-            conn.sql_buf.extend_from_slice(cmd.table.as_bytes());
-        } else {
-            match cmd.action {
-                qail_core::ast::Action::Get | qail_core::ast::Action::With => {
-                    crate::protocol::ast_encoder::dml::encode_select(
-                        cmd,
-                        &mut conn.sql_buf,
-                        &mut conn.params_buf,
-                    )?;
-                }
-                qail_core::ast::Action::Add => {
-                    crate::protocol::ast_encoder::dml::encode_insert(
-                        cmd,
-                        &mut conn.sql_buf,
-                        &mut conn.params_buf,
-                    )?;
-                }
-                qail_core::ast::Action::Set => {
-                    crate::protocol::ast_encoder::dml::encode_update(
-                        cmd,
-                        &mut conn.sql_buf,
-                        &mut conn.params_buf,
-                    )?;
-                }
-                qail_core::ast::Action::Del => {
-                    crate::protocol::ast_encoder::dml::encode_delete(
-                        cmd,
-                        &mut conn.sql_buf,
-                        &mut conn.params_buf,
-                    )?;
-                }
-                _ => {
-                    // Fallback: RLS setup must happen synchronously for unsupported actions
-                    conn.execute_simple(rls_sql).await?;
-                    self.rls_dirty = true;
-                    return self
-                        .fetch_all_uncached_with_format(cmd, result_format)
-                        .await;
-                }
+        match cmd.action {
+            qail_core::ast::Action::Get | qail_core::ast::Action::With => {
+                crate::protocol::ast_encoder::dml::encode_select(
+                    cmd,
+                    &mut conn.sql_buf,
+                    &mut conn.params_buf,
+                )?;
+            }
+            qail_core::ast::Action::Add => {
+                crate::protocol::ast_encoder::dml::encode_insert(
+                    cmd,
+                    &mut conn.sql_buf,
+                    &mut conn.params_buf,
+                )?;
+            }
+            qail_core::ast::Action::Set => {
+                crate::protocol::ast_encoder::dml::encode_update(
+                    cmd,
+                    &mut conn.sql_buf,
+                    &mut conn.params_buf,
+                )?;
+            }
+            qail_core::ast::Action::Del => {
+                crate::protocol::ast_encoder::dml::encode_delete(
+                    cmd,
+                    &mut conn.sql_buf,
+                    &mut conn.params_buf,
+                )?;
+            }
+            _ => {
+                // Fallback: RLS setup must happen synchronously for unsupported actions
+                conn.execute_simple(rls_sql).await?;
+                self.rls_dirty = true;
+                return self
+                    .fetch_all_uncached_with_format(cmd, result_format)
+                    .await;
             }
         }
 

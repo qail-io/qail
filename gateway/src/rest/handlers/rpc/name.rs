@@ -84,6 +84,14 @@ pub(in super::super) fn build_rpc_sql(
     function_name: &RpcFunctionName,
     args: Option<&Value>,
 ) -> Result<String, ApiError> {
+    let call_target = build_rpc_call_target(function_name, args)?;
+    Ok(format!("SELECT * FROM {}", call_target))
+}
+
+pub(in super::super) fn build_rpc_call_target(
+    function_name: &RpcFunctionName,
+    args: Option<&Value>,
+) -> Result<String, ApiError> {
     let function_sql = function_name.quoted();
 
     let args_sql = match args {
@@ -119,9 +127,9 @@ pub(in super::super) fn build_rpc_sql(
     };
 
     if args_sql.is_empty() {
-        Ok(format!("SELECT * FROM {}()", function_sql))
+        Ok(format!("{}()", function_sql))
     } else {
-        Ok(format!("SELECT * FROM {}({})", function_sql, args_sql))
+        Ok(format!("{}({})", function_sql, args_sql))
     }
 }
 

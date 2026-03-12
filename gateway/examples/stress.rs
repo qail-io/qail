@@ -120,7 +120,7 @@ impl PhaseMetrics {
             total, ok, err_4xx, err_5xx, err_net
         );
 
-        if h.len() > 0 {
+        if !h.is_empty() {
             println!(
                 "  Latency:  p50={:.1}ms | p95={:.1}ms | p99={:.1}ms | max={:.1}ms",
                 h.value_at_quantile(0.50) as f64 / 1000.0,
@@ -489,19 +489,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(format!("{}/metrics", config.base_url))
         .send()
         .await
+        && resp.status().is_success()
+        && let Ok(body) = resp.text().await
     {
-        if resp.status().is_success() {
-            if let Ok(body) = resp.text().await {
-                println!();
-                println!("  📊 Prometheus Metrics (selection):");
-                for line in body.lines() {
-                    if line.starts_with("qail_queries_total")
-                        || line.starts_with("qail_pool_")
-                        || line.starts_with("qail_query_duration")
-                    {
-                        println!("     {}", line);
-                    }
-                }
+        println!();
+        println!("  📊 Prometheus Metrics (selection):");
+        for line in body.lines() {
+            if line.starts_with("qail_queries_total")
+                || line.starts_with("qail_pool_")
+                || line.starts_with("qail_query_duration")
+            {
+                println!("     {}", line);
             }
         }
     }

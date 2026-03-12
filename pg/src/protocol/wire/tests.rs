@@ -1,6 +1,7 @@
 //! Wire protocol tests.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::backend::MAX_BACKEND_FRAME_LEN;
     use super::super::*;

@@ -83,7 +83,7 @@ fn main() {
         ("GET 10 filters", {
             let mut q = Qail::get("users");
             for i in 0..10 {
-                q = q.filter(&format!("f{}", i), Operator::Eq, Value::Int(i));
+                q = q.filter(format!("f{}", i), Operator::Eq, Value::Int(i));
             }
             q
         }),

@@ -968,13 +968,6 @@ fn parse_expr_node(expr: &syn::Expr) -> Option<crate::ast::Expr> {
                     .and_then(parse_string_from_expr)
                     .map(crate::ast::Expr::Named);
             }
-            if tail == "Raw" && segments.len() >= 2 && segments[segments.len() - 2] == "Expr" {
-                return call
-                    .args
-                    .first()
-                    .and_then(parse_string_from_expr)
-                    .map(crate::ast::Expr::Raw);
-            }
             if tail == "col" {
                 return call
                     .args

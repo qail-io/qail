@@ -141,14 +141,6 @@ fn test_array_elem_contained_in_text_parameterized() {
 }
 
 #[test]
-fn test_nextval_constructor() {
-    use crate::ast::Qail;
-    let cmd = Qail::nextval("invoice_number_seq");
-    assert!(cmd.is_raw_sql());
-    assert_eq!(cmd.table, "select nextval('invoice_number_seq') as seq");
-}
-
-#[test]
 fn test_left_join() {
     use crate::ast::*;
     let mut cmd = Qail::get("users");
