@@ -36,6 +36,7 @@ mod tests {
         assert_eq!(config.idle_timeout, Duration::from_secs(600));
         assert_eq!(config.acquire_timeout, Duration::from_secs(30));
         assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.leaked_cleanup_queue, 64);
         assert!(config.password.is_none());
         assert_eq!(config.tls_mode, TlsMode::Prefer);
         assert!(config.tls_ca_cert_pem.is_none());
@@ -148,6 +149,7 @@ mod tests {
             .acquire_timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_secs(3))
             .max_lifetime(Duration::from_secs(3600))
+            .leaked_cleanup_queue(32)
             .gss_connect_retries(4)
             .gss_retry_base_delay(Duration::from_millis(250))
             .gss_circuit_breaker_threshold(12)
@@ -163,6 +165,7 @@ mod tests {
         assert_eq!(config.acquire_timeout, Duration::from_secs(5));
         assert_eq!(config.connect_timeout, Duration::from_secs(3));
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(3600)));
+        assert_eq!(config.leaked_cleanup_queue, 32);
         assert_eq!(config.gss_connect_retries, 4);
         assert_eq!(config.gss_retry_base_delay, Duration::from_millis(250));
         assert_eq!(config.gss_circuit_breaker_threshold, 12);
@@ -206,6 +209,16 @@ mod tests {
             PoolConfig::new("localhost", 5432, "user", "db").connect_timeout(Duration::ZERO);
         let err = validate_pool_config(&config).expect_err("expected invalid connect_timeout");
         assert!(err.to_string().contains("connect_timeout must be > 0"));
+    }
+
+    #[test]
+    fn test_validate_pool_config_rejects_zero_leaked_cleanup_queue() {
+        let config = PoolConfig::new("localhost", 5432, "user", "db").leaked_cleanup_queue(0);
+        let err = validate_pool_config(&config).expect_err("expected invalid leaked_cleanup_queue");
+        assert!(
+            err.to_string()
+                .contains("leaked_cleanup_queue must be >= 1")
+        );
     }
 
     #[tokio::test]

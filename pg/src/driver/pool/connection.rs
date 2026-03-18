@@ -5,6 +5,7 @@ use super::churn::{decrement_active_count_saturating, pool_churn_record_destroy}
 use super::lifecycle::{PgPoolInner, execute_simple_with_timeout};
 use crate::driver::{PgConnection, PgError, PgResult};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 /// A pooled connection with creation timestamp for idle tracking.
@@ -14,11 +15,11 @@ pub(super) struct PooledConn {
     pub(super) last_used: Instant,
 }
 
-/// A pooled connection that returns to the pool when dropped.
+/// A pooled connection handle.
 ///
-/// When `rls_dirty` is true (set by `acquire_with_rls`), the connection
-/// will automatically reset RLS session variables before returning to
-/// the pool. This prevents cross-tenant data leakage.
+/// Use [`PooledConnection::release`] for deterministic reset+return behavior.
+/// If dropped without `release()`, the pool performs best-effort bounded async
+/// cleanup; on any uncertainty it destroys the connection (fail-closed).
 pub struct PooledConnection {
     pub(super) conn: Option<PgConnection>,
     pub(super) pool: Arc<PgPoolInner>,
@@ -262,33 +263,120 @@ impl PooledConnection {
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
-        if self.conn.is_some() {
+        if let Some(mut conn) = self.conn.take() {
             // Safety net: connection was NOT released via `release()`.
-            // This happens when:
-            //   - Handler panicked
-            //   - Early return without calling release()
-            //   - Missed release() call (programming error)
+            // Best-effort strategy:
+            // 1) If connection is already desynced, destroy immediately.
+            // 2) Else, queue bounded async reset+return cleanup.
+            // 3) If cleanup queue/runtime unavailable, destroy.
             //
-            // We DESTROY the connection (don't return to pool) to prevent
-            // dirty session state from being reused. But we MUST return the
-            // semaphore permit so the pool can create a replacement connection
-            // on the next acquire. Without this, leaked connections permanently
-            // reduce pool capacity until all slots are consumed.
-            //
-            // The `conn` field is dropped here, closing the TCP socket.
+            // This preserves security (fail-closed) while reducing churn under
+            // accidental early-returns in handler code.
             tracing::warn!(
                 host = %self.pool.config.host,
                 port = self.pool.config.port,
                 user = %self.pool.config.user,
                 db = %self.pool.config.database,
                 rls_dirty = self.rls_dirty,
-                "pool_connection_leaked: dropped without release(); connection destroyed to prevent state leak"
+                "pool_connection_leaked: dropped without release()"
             );
-            decrement_active_count_saturating(&self.pool.active_count);
-            // Return the semaphore permit so the pool slot can be reused.
-            // Without this, each leaked connection permanently reduces capacity.
-            self.pool.semaphore.add_permits(1);
-            pool_churn_record_destroy(&self.pool.config, "dropped_without_release");
+            if conn.is_io_desynced() {
+                tracing::warn!(
+                    host = %self.pool.config.host,
+                    port = self.pool.config.port,
+                    user = %self.pool.config.user,
+                    db = %self.pool.config.database,
+                    "pool_connection_leaked_desynced: destroying immediately"
+                );
+                decrement_active_count_saturating(&self.pool.active_count);
+                self.pool.semaphore.add_permits(1);
+                pool_churn_record_destroy(&self.pool.config, "dropped_without_release_desynced");
+                return;
+            }
+
+            let mut inflight = self.pool.leaked_cleanup_inflight.load(Ordering::Relaxed);
+            let max_inflight = self.pool.config.leaked_cleanup_queue;
+            loop {
+                if inflight >= max_inflight {
+                    tracing::warn!(
+                        host = %self.pool.config.host,
+                        port = self.pool.config.port,
+                        user = %self.pool.config.user,
+                        db = %self.pool.config.database,
+                        max_inflight,
+                        "pool_connection_leaked_cleanup_queue_full: destroying connection"
+                    );
+                    decrement_active_count_saturating(&self.pool.active_count);
+                    self.pool.semaphore.add_permits(1);
+                    pool_churn_record_destroy(
+                        &self.pool.config,
+                        "dropped_without_release_cleanup_queue_full",
+                    );
+                    return;
+                }
+
+                match self.pool.leaked_cleanup_inflight.compare_exchange_weak(
+                    inflight,
+                    inflight + 1,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => inflight = actual,
+                }
+            }
+
+            let pool = self.pool.clone();
+            let created_at = self.created_at;
+            let reset_timeout = pool.config.connect_timeout;
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(async move {
+                        let cleanup_ok = execute_simple_with_timeout(
+                            &mut conn,
+                            crate::driver::rls::reset_sql(),
+                            reset_timeout,
+                            "pool leaked cleanup reset/COMMIT",
+                        )
+                        .await
+                        .is_ok();
+
+                        if cleanup_ok && !conn.is_io_desynced() {
+                            pool.return_connection(conn, created_at).await;
+                        } else {
+                            tracing::warn!(
+                                host = %pool.config.host,
+                                port = pool.config.port,
+                                user = %pool.config.user,
+                                db = %pool.config.database,
+                                timeout_ms = reset_timeout.as_millis() as u64,
+                                "pool_connection_leaked_cleanup_failed: destroying connection"
+                            );
+                            decrement_active_count_saturating(&pool.active_count);
+                            pool.semaphore.add_permits(1);
+                            pool_churn_record_destroy(
+                                &pool.config,
+                                "dropped_without_release_cleanup_failed",
+                            );
+                        }
+
+                        pool.leaked_cleanup_inflight.fetch_sub(1, Ordering::AcqRel);
+                    });
+                }
+                Err(_) => {
+                    pool.leaked_cleanup_inflight.fetch_sub(1, Ordering::AcqRel);
+                    tracing::warn!(
+                        host = %pool.config.host,
+                        port = pool.config.port,
+                        user = %pool.config.user,
+                        db = %pool.config.database,
+                        "pool_connection_leaked_no_runtime: destroying connection"
+                    );
+                    decrement_active_count_saturating(&pool.active_count);
+                    pool.semaphore.add_permits(1);
+                    pool_churn_record_destroy(&pool.config, "dropped_without_release_no_runtime");
+                }
+            }
         }
     }
 }

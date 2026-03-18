@@ -25,7 +25,8 @@ pub use driver::{
     PgDriverBuilder, PgError, PgPool, PgResult, PgRow, PgServerError, PoolConfig, PoolStats,
     PooledConnection, QailRow, QueryResult, ReplicationKeepalive, ReplicationOption,
     ReplicationSlotInfo, ReplicationStreamMessage, ReplicationStreamStart, ReplicationXLogData,
-    ResultFormat, ScramChannelBindingMode, TlsConfig, TlsMode, spawn_pool_maintenance,
+    ResultFormat, ScopedPoolFuture, ScramChannelBindingMode, TlsConfig, TlsMode, scope,
+    spawn_pool_maintenance,
 };
 pub use protocol::PgEncoder;
 pub use types::{

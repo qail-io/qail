@@ -55,7 +55,10 @@ pub use cancel::CancelToken;
 pub use connection::{PgConnection, TlsConfig};
 pub use core::PgDriver;
 pub use notification::Notification;
-pub use pool::{PgPool, PoolConfig, PoolStats, PooledConnection, spawn_pool_maintenance};
+pub use pool::{
+    PgPool, PoolConfig, PoolStats, PooledConnection, ScopedPoolFuture, scope,
+    spawn_pool_maintenance,
+};
 pub use prepared::PreparedStatement;
 pub use replication::{
     IdentifySystem, ReplicationKeepalive, ReplicationOption, ReplicationSlotInfo,

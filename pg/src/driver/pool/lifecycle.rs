@@ -1,6 +1,7 @@
 //! Pool lifecycle: PgPoolInner, PgPool core (connect, maintain, close),
 //! hot statement pre-prepare, and connection creation.
 
+use super::ScopedPoolFuture;
 use super::churn::{
     PoolStats, decrement_active_count_saturating, pool_churn_record_destroy,
     pool_churn_remaining_open, record_pool_connection_destroy,
@@ -29,6 +30,7 @@ pub(super) struct PgPoolInner {
     pub(super) closed: AtomicBool,
     pub(super) active_count: AtomicUsize,
     pub(super) total_created: AtomicUsize,
+    pub(super) leaked_cleanup_inflight: AtomicUsize,
     /// Global registry of frequently-used prepared statements.
     /// Maps sql_hash → (stmt_name, sql_text).
     /// New connections pre-prepare these on checkout for instant cache hits.
@@ -184,6 +186,7 @@ impl PgPool {
             closed: AtomicBool::new(false),
             active_count: AtomicUsize::new(0),
             total_created: AtomicUsize::new(initial_count),
+            leaked_cleanup_inflight: AtomicUsize::new(0),
             hot_statements: std::sync::RwLock::new(std::collections::HashMap::new()),
         });
 
@@ -420,6 +423,44 @@ impl PgPool {
         Ok(conn)
     }
 
+    /// Scoped connection helper that guarantees `release()` after closure execution.
+    ///
+    /// Prefer this over manual `acquire_with_rls()` in normal request handlers.
+    pub async fn with_rls<T, F>(&self, ctx: qail_core::rls::RlsContext, f: F) -> PgResult<T>
+    where
+        F: for<'a> FnOnce(&'a mut PooledConnection) -> ScopedPoolFuture<'a, T>,
+    {
+        let mut conn = self.acquire_with_rls(ctx).await?;
+        let out = f(&mut conn).await;
+        conn.release().await;
+        out
+    }
+
+    /// Scoped helper for system-level operations (`RlsContext::empty()`).
+    pub async fn with_system<T, F>(&self, f: F) -> PgResult<T>
+    where
+        F: for<'a> FnOnce(&'a mut PooledConnection) -> ScopedPoolFuture<'a, T>,
+    {
+        self.with_rls(qail_core::rls::RlsContext::empty(), f).await
+    }
+
+    /// Scoped helper for global/platform row access (`tenant_id IS NULL`).
+    pub async fn with_global<T, F>(&self, f: F) -> PgResult<T>
+    where
+        F: for<'a> FnOnce(&'a mut PooledConnection) -> ScopedPoolFuture<'a, T>,
+    {
+        self.with_rls(qail_core::rls::RlsContext::global(), f).await
+    }
+
+    /// Scoped helper for single-tenant access.
+    pub async fn with_tenant<T, F>(&self, tenant_id: &str, f: F) -> PgResult<T>
+    where
+        F: for<'a> FnOnce(&'a mut PooledConnection) -> ScopedPoolFuture<'a, T>,
+    {
+        self.with_rls(qail_core::rls::RlsContext::tenant(tenant_id), f)
+            .await
+    }
+
     /// Acquire a connection with RLS context AND statement timeout.
     ///
     /// Like `acquire_with_rls()`, but also sets `statement_timeout` to prevent
@@ -454,6 +495,22 @@ impl PgPool {
         conn.rls_dirty = true;
 
         Ok(conn)
+    }
+
+    /// Scoped connection helper that guarantees `release()` after closure execution.
+    pub async fn with_rls_timeout<T, F>(
+        &self,
+        ctx: qail_core::rls::RlsContext,
+        timeout_ms: u32,
+        f: F,
+    ) -> PgResult<T>
+    where
+        F: for<'a> FnOnce(&'a mut PooledConnection) -> ScopedPoolFuture<'a, T>,
+    {
+        let mut conn = self.acquire_with_rls_timeout(ctx, timeout_ms).await?;
+        let out = f(&mut conn).await;
+        conn.release().await;
+        out
     }
 
     /// Acquire a connection with RLS context, statement timeout, AND lock timeout.
@@ -494,6 +551,25 @@ impl PgPool {
         conn.rls_dirty = true;
 
         Ok(conn)
+    }
+
+    /// Scoped connection helper that guarantees `release()` after closure execution.
+    pub async fn with_rls_timeouts<T, F>(
+        &self,
+        ctx: qail_core::rls::RlsContext,
+        statement_timeout_ms: u32,
+        lock_timeout_ms: u32,
+        f: F,
+    ) -> PgResult<T>
+    where
+        F: for<'a> FnOnce(&'a mut PooledConnection) -> ScopedPoolFuture<'a, T>,
+    {
+        let mut conn = self
+            .acquire_with_rls_timeouts(ctx, statement_timeout_ms, lock_timeout_ms)
+            .await?;
+        let out = f(&mut conn).await;
+        conn.release().await;
+        out
     }
 
     /// Acquire a connection for system-level operations (no tenant context).
@@ -872,6 +948,11 @@ pub(super) fn validate_pool_config(config: &PoolConfig) -> PgResult<()> {
     if config.connect_timeout.is_zero() {
         return Err(PgError::Connection(
             "Invalid PoolConfig: connect_timeout must be > 0".to_string(),
+        ));
+    }
+    if config.leaked_cleanup_queue == 0 {
+        return Err(PgError::Connection(
+            "Invalid PoolConfig: leaked_cleanup_queue must be >= 1".to_string(),
         ));
     }
     Ok(())

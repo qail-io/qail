@@ -42,6 +42,11 @@ pub struct PoolConfig {
     pub connect_timeout: Duration,
     /// Optional maximum lifetime of any connection in the pool.
     pub max_lifetime: Option<Duration>,
+    /// Maximum number of leaked-connection cleanup tasks that may run concurrently.
+    ///
+    /// When a `PooledConnection` is dropped without calling `release()`, the pool
+    /// can attempt async reset-and-return. This bound prevents unbounded cleanup fanout.
+    pub leaked_cleanup_queue: usize,
     /// When `true`, run a health check (`SELECT 1`) before handing out a connection.
     pub test_on_acquire: bool,
     /// TLS mode for new connections.
@@ -95,6 +100,7 @@ impl PoolConfig {
             acquire_timeout: Duration::from_secs(30), // 30 seconds
             connect_timeout: Duration::from_secs(10), // 10 seconds
             max_lifetime: None,                     // No limit by default
+            leaked_cleanup_queue: 64,               // Bounded cleanup fanout
             test_on_acquire: false,                 // Disabled by default for performance
             tls_mode: TlsMode::Prefer,
             tls_ca_cert_pem: None,
@@ -161,6 +167,14 @@ impl PoolConfig {
     /// Set maximum lifetime of a connection before recycling.
     pub fn max_lifetime(mut self, lifetime: Duration) -> Self {
         self.max_lifetime = Some(lifetime);
+        self
+    }
+
+    /// Set max concurrent leaked-connection cleanup tasks.
+    ///
+    /// Values <= 1 force strict fallback-destroy behavior under burst leaks.
+    pub fn leaked_cleanup_queue(mut self, max: usize) -> Self {
+        self.leaked_cleanup_queue = max;
         self
     }
 

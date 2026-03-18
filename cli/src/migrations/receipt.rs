@@ -88,14 +88,8 @@ pub async fn write_migration_receipt(
         .set_opt("finished_at_ms", receipt.finished_at_ms)
         .set_opt("duration_ms", receipt.duration_ms)
         .set_opt("affected_rows_est", receipt.affected_rows_est)
-        .set_opt(
-            "risk_summary",
-            receipt.risk_summary.as_deref(),
-        )
-        .set_opt(
-            "shadow_checksum",
-            receipt.shadow_checksum.as_deref(),
-        );
+        .set_opt("risk_summary", receipt.risk_summary.as_deref())
+        .set_opt("shadow_checksum", receipt.shadow_checksum.as_deref());
 
     driver
         .execute(&insert_cmd)
