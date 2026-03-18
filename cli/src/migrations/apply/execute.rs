@@ -13,6 +13,7 @@ use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
 use qail_core::prelude::Qail;
 use std::fs;
+use std::collections::HashMap;
 
 /// Apply all pending migrations from the migrations/ folder.
 ///
@@ -75,16 +76,20 @@ pub async fn migrate_apply(
         .await
         .context("Failed to create _qail_migrations table")?;
 
-    // Query already-applied migration versions
-    let status_cmd = Qail::get("_qail_migrations").columns(vec!["version"]);
+    // Query already-applied migration versions + checksums
+    let status_cmd = Qail::get("_qail_migrations").columns(vec!["version", "checksum"]);
 
-    let applied_versions: Vec<String> = match pg.query_ast(&status_cmd).await {
+    let mut applied_migrations: HashMap<String, String> = match pg.query_ast(&status_cmd).await {
         Ok(result) => result
             .rows
             .iter()
-            .filter_map(|row| row.first().and_then(|v| v.clone()))
+            .filter_map(|row| {
+                let version = row.first().and_then(|v| v.as_ref())?;
+                let checksum = row.get(1).and_then(|v| v.as_ref())?;
+                Some((version.clone(), checksum.clone()))
+            })
             .collect(),
-        Err(_) => Vec::new(), // Table may not exist yet
+        Err(_) => HashMap::new(), // Table may not exist yet
     };
 
     // Phase prerequisite check: when running --phase backfill or --phase contract,
@@ -103,7 +108,7 @@ pub async fn migrate_apply(
         for mig in &migrations {
             if let Some(group_files) = groups.get(&mig.group_key) {
                 // Already applied — no need to check prerequisites
-                if applied_versions.iter().any(|v| v == &mig.display_name) {
+                if applied_migrations.contains_key(&mig.display_name) {
                     continue;
                 }
 
@@ -121,7 +126,7 @@ pub async fn migrate_apply(
                         .collect();
 
                     for prereq in &prereq_files {
-                        if !applied_versions.iter().any(|v| v == &prereq.display_name) {
+                        if !applied_migrations.contains_key(&prereq.display_name) {
                             bail!(
                                 "Phase prerequisite not met for '{}': \
                                  {} phase '{}' has not been applied yet. \
@@ -162,18 +167,6 @@ pub async fn migrate_apply(
         }
         current_phase = mig.phase;
 
-        // Use display_name as the migration version key
-        if applied_versions.iter().any(|v| v == &mig.display_name) {
-            println!(
-                "  {} {} {}",
-                "‒".dimmed(),
-                mig.display_name.dimmed(),
-                "(already applied)".dimmed()
-            );
-            skipped += 1;
-            continue;
-        }
-
         print!(
             "  {} {} [{}]... ",
             "→".cyan(),
@@ -194,32 +187,18 @@ pub async fn migrate_apply(
         );
 
         let started_ms = now_epoch_ms();
-        let (cmds, executed_sql_for_receipt, checksum_input, backfill_result) =
+        let mut chunked_backfill_spec = None;
+        let (cmds, executed_sql_for_receipt, checksum_input) =
             if matches!(direction, MigrateDirection::Up) && mig.phase == MigrationPhase::Backfill {
                 if let Some(spec) = parse_backfill_spec(&content, backfill_chunk_size)? {
-                    let backfill_result = run_chunked_backfill(&mut pg, &mig.display_name, &spec)
-                        .await
-                        .with_context(|| {
-                            format!("Failed to run chunked backfill {}", mig.display_name)
-                        })?;
-                    risk_summary.push_str(&format!(
-                        ";chunked_backfill=true;rows_updated={};chunks={};resumed={}",
-                        backfill_result.rows_updated,
-                        backfill_result.chunks,
-                        backfill_result.resumed
-                    ));
-                    (
-                        Vec::new(),
-                        content.clone(),
-                        content.clone(),
-                        backfill_result,
-                    )
+                    chunked_backfill_spec = Some(spec);
+                    (Vec::new(), content.clone(), content.clone())
                 } else {
                     let cmds = parse_qail_to_commands_strict(&content)
                         .context("Failed to compile backfill migration to AST commands")?;
                     let sql = commands_to_sql(&cmds);
                     risk_summary.push_str(";chunked_backfill=false");
-                    (cmds, sql.clone(), sql, BackfillRun::default())
+                    (cmds, sql.clone(), sql)
                 }
             } else {
                 let cmds = parse_qail_to_commands_strict(&content)
@@ -237,8 +216,38 @@ pub async fn migrate_apply(
                     )?;
                 }
 
-                (cmds, sql.clone(), sql, BackfillRun::default())
+                (cmds, sql.clone(), sql)
             };
+
+        let expected_checksum = crate::time::md5_hex(&checksum_input);
+        if let Some(stored_checksum) = applied_migrations.get(&mig.display_name) {
+            ensure_applied_checksum_matches(
+                &mig.display_name,
+                stored_checksum,
+                &expected_checksum,
+            )?;
+            println!(
+                "  {} {} {}",
+                "‒".dimmed(),
+                mig.display_name.dimmed(),
+                "(already applied)".dimmed()
+            );
+            skipped += 1;
+            continue;
+        }
+
+        let backfill_result = if let Some(spec) = chunked_backfill_spec {
+            let backfill_result = run_chunked_backfill(&mut pg, &mig.display_name, &spec)
+                .await
+                .with_context(|| format!("Failed to run chunked backfill {}", mig.display_name))?;
+            risk_summary.push_str(&format!(
+                ";chunked_backfill=true;rows_updated={};chunks={};resumed={}",
+                backfill_result.rows_updated, backfill_result.chunks, backfill_result.resumed
+            ));
+            backfill_result
+        } else {
+            BackfillRun::default()
+        };
 
         let affected_rows_est = if backfill_result.rows_updated > 0 {
             Some(backfill_result.rows_updated)
@@ -257,6 +266,8 @@ pub async fn migrate_apply(
         )
         .await
         .context(format!("Failed to apply migration {}", mig.display_name))?;
+
+        applied_migrations.insert(mig.display_name.clone(), expected_checksum);
 
         println!("{}", "✓".green());
         applied += 1;
@@ -360,4 +371,41 @@ async fn apply_commands_and_record_receipt_atomic(
         .map_err(|e| anyhow!("Failed to commit migration transaction: {}", e))?;
 
     Ok(())
+}
+
+fn ensure_applied_checksum_matches(
+    version: &str,
+    stored_checksum: &str,
+    expected_checksum: &str,
+) -> Result<()> {
+    if stored_checksum == expected_checksum {
+        return Ok(());
+    }
+    bail!(
+        "Migration checksum drift detected for '{}': stored={}, current={}. \
+         Refusing to skip. Rename the migration or reconcile _qail_migrations before re-running.",
+        version,
+        stored_checksum,
+        expected_checksum
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_applied_checksum_matches;
+
+    #[test]
+    fn applied_checksum_match_passes() {
+        assert!(ensure_applied_checksum_matches("001_init.up.qail", "abc", "abc").is_ok());
+    }
+
+    #[test]
+    fn applied_checksum_mismatch_fails() {
+        let err = ensure_applied_checksum_matches("001_init.up.qail", "abc", "def")
+            .expect_err("mismatch must fail");
+        assert!(
+            err.to_string().contains("checksum drift"),
+            "error should mention checksum drift"
+        );
+    }
 }

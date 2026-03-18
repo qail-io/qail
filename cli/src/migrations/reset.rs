@@ -28,9 +28,6 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
 
     let empty_schema = Default::default();
 
-    // Phase 1: Diff target → empty (generates DROP statements)
-    let drop_cmds = diff_schemas(&target_schema, &empty_schema);
-
     // Phase 2: Diff empty → target (generates CREATE statements)
     let create_cmds = diff_schemas(&empty_schema, &target_schema);
 
@@ -46,10 +43,13 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
 
-    // Ensure migration table exists
-    ensure_migration_table(&mut driver)
+    // Build DROP plan from live schema to avoid leaving drift objects behind.
+    let live_schema = crate::shadow::introspect_schema(&mut driver)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to bootstrap migration table: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to introspect live schema: {}", e))?;
+
+    // Phase 1: Diff live → empty (generates DROP statements for current DB state)
+    let drop_cmds = diff_schemas(&live_schema, &empty_schema);
 
     // === Phase 1: DROP everything ===
     if drop_cmds.is_empty() {
@@ -130,14 +130,13 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
         }
 
         // Record migration
+        ensure_migration_table(&mut driver)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to bootstrap migration table: {}", e))?;
+
         let version = crate::time::timestamp_version();
         let name = format!("reset_{}", version);
-        let checksum = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            target_content.hash(&mut hasher);
-            format!("{:x}", hasher.finish())
-        };
+        let checksum = crate::time::md5_hex(&target_content);
         let finished_ms = now_epoch_ms();
         let receipt = MigrationReceipt {
             version: version.clone(),

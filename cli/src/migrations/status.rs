@@ -113,8 +113,11 @@ pub async fn migrate_status(url: &str) -> Result<()> {
             println!();
             println!("  Run {} to rollback", "qail migrate down".cyan());
         }
-        Err(_) => {
-            println!("  {} No migrations applied yet", "○".dimmed());
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to query migration history from _qail_migrations: {}",
+                e
+            ));
         }
     }
 

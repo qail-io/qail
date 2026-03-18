@@ -26,9 +26,10 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
 
         diff_schemas(&current_schema, &target_schema)
     } else {
-        println!("{}", "Warning: Rollback requires two .qail files".yellow());
-        println!("  Use format: qail migrate down current.qail:target.qail <url>");
-        return Ok(());
+        return Err(anyhow::anyhow!(
+            "Rollback requires two .qail files.\n\
+             Use format: qail migrate down current.qail:target.qail <url>"
+        ));
     };
 
     if cmds.is_empty() {
@@ -144,4 +145,15 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
             .bold()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrate_down;
+
+    #[tokio::test]
+    async fn invalid_schema_diff_returns_error() {
+        let result = migrate_down("invalid-schema-diff", "postgres://localhost/testdb").await;
+        assert!(result.is_err(), "invalid rollback input must fail");
+    }
 }
