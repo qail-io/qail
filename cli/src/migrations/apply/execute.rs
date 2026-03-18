@@ -194,8 +194,7 @@ pub async fn migrate_apply(
         );
 
         let started_ms = now_epoch_ms();
-
-        let (executed_sql_for_receipt, checksum_input, backfill_result) =
+        let (cmds, executed_sql_for_receipt, checksum_input, backfill_result) =
             if matches!(direction, MigrateDirection::Up) && mig.phase == MigrationPhase::Backfill {
                 if let Some(spec) = parse_backfill_spec(&content, backfill_chunk_size)? {
                     let backfill_result = run_chunked_backfill(&mut pg, &mig.display_name, &spec)
@@ -209,16 +208,18 @@ pub async fn migrate_apply(
                         backfill_result.chunks,
                         backfill_result.resumed
                     ));
-                    (content.clone(), content.clone(), backfill_result)
+                    (
+                        Vec::new(),
+                        content.clone(),
+                        content.clone(),
+                        backfill_result,
+                    )
                 } else {
                     let cmds = parse_qail_to_commands_strict(&content)
                         .context("Failed to compile backfill migration to AST commands")?;
                     let sql = commands_to_sql(&cmds);
-                    execute_migration_commands(&mut pg, &cmds, &mig.display_name)
-                        .await
-                        .context(format!("Failed to execute migration {}", mig.display_name))?;
                     risk_summary.push_str(";chunked_backfill=false");
-                    (sql.clone(), sql, BackfillRun::default())
+                    (cmds, sql.clone(), sql, BackfillRun::default())
                 }
             } else {
                 let cmds = parse_qail_to_commands_strict(&content)
@@ -236,37 +237,26 @@ pub async fn migrate_apply(
                     )?;
                 }
 
-                execute_migration_commands(&mut pg, &cmds, &mig.display_name)
-                    .await
-                    .context(format!("Failed to execute migration {}", mig.display_name))?;
-                (sql.clone(), sql, BackfillRun::default())
+                (cmds, sql.clone(), sql, BackfillRun::default())
             };
-        let finished_ms = now_epoch_ms();
 
-        // Record in _qail_migrations
-        let checksum = crate::time::md5_hex(&checksum_input);
-        let receipt = MigrationReceipt {
-            version: mig.display_name.clone(),
-            name: mig.display_name.clone(),
-            checksum,
-            sql_up: executed_sql_for_receipt,
-            git_sha: runtime_git_sha(),
-            qail_version: env!("CARGO_PKG_VERSION").to_string(),
-            actor: runtime_actor(),
-            started_at_ms: Some(started_ms),
-            finished_at_ms: Some(finished_ms),
-            duration_ms: Some(finished_ms.saturating_sub(started_ms)),
-            affected_rows_est: if backfill_result.rows_updated > 0 {
-                Some(backfill_result.rows_updated)
-            } else {
-                None
-            },
-            risk_summary: Some(risk_summary),
-            shadow_checksum: None,
+        let affected_rows_est = if backfill_result.rows_updated > 0 {
+            Some(backfill_result.rows_updated)
+        } else {
+            None
         };
-        write_migration_receipt(&mut pg, &receipt)
-            .await
-            .context(format!("Failed to record migration {}", mig.display_name))?;
+        apply_commands_and_record_receipt_atomic(
+            &mut pg,
+            &cmds,
+            &mig.display_name,
+            started_ms,
+            executed_sql_for_receipt,
+            checksum_input,
+            risk_summary,
+            affected_rows_est,
+        )
+        .await
+        .context(format!("Failed to apply migration {}", mig.display_name))?;
 
         println!("{}", "✓".green());
         applied += 1;
@@ -303,13 +293,8 @@ async fn execute_migration_commands(
         return Ok(());
     }
 
-    pg.begin()
-        .await
-        .map_err(|e| anyhow!("Failed to begin migration transaction: {}", e))?;
-
     for (idx, cmd) in cmds.iter().enumerate() {
         if let Err(err) = pg.execute(cmd).await {
-            let _ = pg.rollback().await;
             return Err(anyhow!(
                 "Migration command {} failed in '{}': action={:?} table='{}' error={}",
                 idx + 1,
@@ -319,6 +304,55 @@ async fn execute_migration_commands(
                 err
             ));
         }
+    }
+
+    Ok(())
+}
+
+async fn apply_commands_and_record_receipt_atomic(
+    pg: &mut qail_pg::PgDriver,
+    cmds: &[Qail],
+    migration_name: &str,
+    started_ms: i64,
+    executed_sql_for_receipt: String,
+    checksum_input: String,
+    risk_summary: String,
+    affected_rows_est: Option<i64>,
+) -> Result<()> {
+    pg.begin()
+        .await
+        .map_err(|e| anyhow!("Failed to begin migration transaction: {}", e))?;
+
+    if let Err(err) = execute_migration_commands(pg, cmds, migration_name).await {
+        let _ = pg.rollback().await;
+        return Err(err);
+    }
+
+    let finished_ms = now_epoch_ms();
+    let checksum = crate::time::md5_hex(&checksum_input);
+    let receipt = MigrationReceipt {
+        version: migration_name.to_string(),
+        name: migration_name.to_string(),
+        checksum,
+        sql_up: executed_sql_for_receipt,
+        git_sha: runtime_git_sha(),
+        qail_version: env!("CARGO_PKG_VERSION").to_string(),
+        actor: runtime_actor(),
+        started_at_ms: Some(started_ms),
+        finished_at_ms: Some(finished_ms),
+        duration_ms: Some(finished_ms.saturating_sub(started_ms)),
+        affected_rows_est,
+        risk_summary: Some(risk_summary),
+        shadow_checksum: None,
+    };
+
+    if let Err(err) = write_migration_receipt(pg, &receipt).await {
+        let _ = pg.rollback().await;
+        return Err(anyhow!(
+            "Failed to record migration '{}': {}",
+            migration_name,
+            err
+        ));
     }
 
     pg.commit()

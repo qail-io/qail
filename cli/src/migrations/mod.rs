@@ -45,6 +45,7 @@ pub use watch::watch_schema;
 
 use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_core::parser::schema::Schema;
+use qail_core::transpiler::ToSql;
 use qail_pg::PgDriver;
 use std::path::{Path, PathBuf};
 
@@ -130,6 +131,25 @@ pub fn migration_table_ddl() -> String {
         .first()
         .expect("No table in migration schema")
         .to_ddl()
+}
+
+/// Stable checksum for a sequence of migration commands.
+///
+/// Uses both transpiled SQL and serialized AST so checksums remain distinct even
+/// when preview SQL is lossy for a specific action shape.
+pub fn stable_cmds_checksum(cmds: &[Qail]) -> String {
+    let mut material = String::new();
+    for cmd in cmds {
+        let sql = cmd.to_sql();
+        let ast = serde_json::to_string(cmd).unwrap_or_else(|_| format!("{:?}", cmd));
+        material.push_str("SQL:");
+        material.push_str(sql.trim());
+        material.push('\n');
+        material.push_str("AST:");
+        material.push_str(&ast);
+        material.push('\n');
+    }
+    crate::time::md5_hex(&material)
 }
 
 /// Ensure migration table exists and has the latest receipt columns.
@@ -237,4 +257,65 @@ pub async fn ensure_migration_table(driver: &mut PgDriver) -> anyhow::Result<()>
 
     ensure_migration_receipt_columns(driver).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stable_cmds_checksum;
+    use qail_core::ast::{Action, Expr, IndexDef, Qail};
+
+    #[test]
+    fn stable_checksum_distinguishes_column_renames() {
+        let rename_a = Qail {
+            action: Action::Mod,
+            table: "users".to_string(),
+            columns: vec![Expr::Named("email -> email_address".to_string())],
+            ..Default::default()
+        };
+        let rename_b = Qail {
+            action: Action::Mod,
+            table: "users".to_string(),
+            columns: vec![Expr::Named("email -> primary_email".to_string())],
+            ..Default::default()
+        };
+
+        let a = stable_cmds_checksum(&[rename_a]);
+        let b = stable_cmds_checksum(&[rename_b]);
+        assert_ne!(a, b, "different renames must produce different checksums");
+    }
+
+    #[test]
+    fn stable_checksum_uses_index_def_table() {
+        let idx_users = Qail {
+            action: Action::Index,
+            table: String::new(),
+            index_def: Some(IndexDef {
+                name: "idx_lookup".to_string(),
+                table: "users".to_string(),
+                columns: vec!["email".to_string()],
+                unique: false,
+                index_type: None,
+            }),
+            ..Default::default()
+        };
+        let idx_orgs = Qail {
+            action: Action::Index,
+            table: String::new(),
+            index_def: Some(IndexDef {
+                name: "idx_lookup".to_string(),
+                table: "organizations".to_string(),
+                columns: vec!["email".to_string()],
+                unique: false,
+                index_type: None,
+            }),
+            ..Default::default()
+        };
+
+        let users = stable_cmds_checksum(&[idx_users]);
+        let orgs = stable_cmds_checksum(&[idx_orgs]);
+        assert_ne!(
+            users, orgs,
+            "index checksums must differ when target tables differ"
+        );
+    }
 }

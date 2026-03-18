@@ -3,16 +3,15 @@
 use crate::colors::*;
 use anyhow::Result;
 use qail_core::migrate::{diff_schemas, parse_qail_file};
-use qail_core::prelude::Qail;
+use qail_core::transpiler::ToSql;
 use qail_pg::driver::PgDriver;
 
 use crate::migrations::risk::preflight_lock_risk;
 use crate::migrations::verify::post_apply_verify;
 use crate::migrations::{
     MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
-    write_migration_receipt,
+    stable_cmds_checksum, write_migration_receipt,
 };
-use crate::sql_gen::cmd_to_sql;
 use crate::util::parse_pg_url;
 
 /// Apply migrations forward using qail-pg native driver.
@@ -52,7 +51,7 @@ pub async fn migrate_up(
     }
 
     println!("{} {} migration(s) to apply", "Found:".cyan(), cmds.len());
-    let planned_checksum = migration_cmds_checksum(&cmds);
+    let planned_checksum = stable_cmds_checksum(&cmds);
 
     // === PHASE 0: Codebase Impact Analysis ===
     if let Some(codebase_path) = codebase {
@@ -139,7 +138,10 @@ pub async fn migrate_up(
                     "Migration BLOCKED. Fix your code first, or use --force to proceed anyway."
                         .red()
                 );
-                return Ok(());
+                return Err(anyhow::anyhow!(
+                    "Migration blocked: breaking code references detected. \
+                     Update code or re-run with --force."
+                ));
             } else {
                 println!();
                 println!(
@@ -262,7 +264,7 @@ pub async fn migrate_up(
             &cmd.table
         );
 
-        let sql = cmd_to_sql(cmd);
+        let sql = cmd.to_sql();
         sql_up_all.push_str(&sql);
         sql_up_all.push_str(";\n");
 
@@ -335,11 +337,72 @@ pub async fn migrate_up(
     Ok(())
 }
 
-fn migration_cmds_checksum(cmds: &[Qail]) -> String {
-    let mut sql_up_all = String::new();
-    for cmd in cmds {
-        sql_up_all.push_str(&cmd_to_sql(cmd));
-        sql_up_all.push_str(";\n");
+#[cfg(test)]
+mod tests {
+    use super::migrate_up;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos))
     }
-    crate::time::md5_hex(&sql_up_all)
+
+    #[tokio::test]
+    async fn blocked_breaking_changes_returns_error() {
+        let root = unique_temp_dir("qail_migrate_up_blocked");
+        fs::create_dir_all(&root).expect("create temp root");
+
+        let old_schema = root.join("old.qail");
+        let new_schema = root.join("new.qail");
+        let codebase = root.join("src");
+        fs::create_dir_all(&codebase).expect("create codebase");
+
+        fs::write(
+            &old_schema,
+            r#"
+table users {
+  id uuid primary_key
+  email text nullable
+}
+"#,
+        )
+        .expect("write old schema");
+        fs::write(
+            &new_schema,
+            r#"
+table users {
+  id uuid primary_key
+}
+"#,
+        )
+        .expect("write new schema");
+        fs::write(
+            codebase.join("queries.ts"),
+            r#"const q = "get users fields id, email where id = $1";"#,
+        )
+        .expect("write code reference");
+
+        let schema_diff = format!("{}:{}", old_schema.display(), new_schema.display());
+        let result = migrate_up(
+            &schema_diff,
+            "postgres://localhost/testdb",
+            Some(codebase.to_str().expect("utf-8 codebase path")),
+            false,
+            false,
+            true,
+            true,
+        )
+        .await;
+
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(
+            result.is_err(),
+            "blocked migration should return error (non-zero exit path)"
+        );
+    }
 }

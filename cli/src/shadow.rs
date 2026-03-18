@@ -13,7 +13,6 @@ use anyhow::{Result, anyhow};
 use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_pg::driver::PgDriver;
 
-use crate::sql_gen::cmd_to_sql;
 use crate::util::parse_pg_url;
 
 /// Shadow database state
@@ -168,12 +167,7 @@ async fn ensure_shadow_state_table(driver: &mut PgDriver) -> Result<()> {
 
 /// Stable checksum for a migration command sequence.
 pub fn diff_cmds_checksum(diff_cmds: &[Qail]) -> String {
-    let mut sql_up_all = String::new();
-    for cmd in diff_cmds {
-        sql_up_all.push_str(&cmd_to_sql(cmd));
-        sql_up_all.push_str(";\n");
-    }
-    crate::time::md5_hex(&sql_up_all)
+    crate::migrations::stable_cmds_checksum(diff_cmds)
 }
 
 /// Save shadow state to _qail_shadow_state table (for promote/abort recovery)
