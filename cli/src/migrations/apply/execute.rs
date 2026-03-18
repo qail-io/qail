@@ -204,18 +204,6 @@ pub async fn migrate_apply(
                 let cmds = parse_qail_to_commands_strict(&content)
                     .context("Failed to compile migration to AST commands")?;
                 let sql = commands_to_sql(&cmds);
-
-                if matches!(direction, MigrateDirection::Up)
-                    && mig.phase == MigrationPhase::Contract
-                {
-                    enforce_contract_safety(
-                        &mig.display_name,
-                        &sql,
-                        codebase,
-                        allow_contract_with_references,
-                    )?;
-                }
-
                 (cmds, sql.clone(), sql)
             };
 
@@ -234,6 +222,15 @@ pub async fn migrate_apply(
             );
             skipped += 1;
             continue;
+        }
+
+        if matches!(direction, MigrateDirection::Up) && mig.phase == MigrationPhase::Contract {
+            enforce_contract_safety(
+                &mig.display_name,
+                &executed_sql_for_receipt,
+                codebase,
+                allow_contract_with_references,
+            )?;
         }
 
         let backfill_result = if let Some(spec) = chunked_backfill_spec {
