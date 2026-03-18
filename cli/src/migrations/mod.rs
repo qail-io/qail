@@ -18,6 +18,7 @@ mod create;
 mod down;
 mod plan;
 mod receipt;
+mod rollback;
 mod reset;
 mod risk;
 mod status;
@@ -37,6 +38,7 @@ pub use receipt::{
     MigrationReceipt, ensure_migration_receipt_columns, now_epoch_ms, runtime_actor,
     runtime_git_sha, write_migration_receipt,
 };
+pub use rollback::migrate_rollback;
 pub use reset::migrate_reset;
 pub use status::migrate_status;
 pub use up::migrate_up;

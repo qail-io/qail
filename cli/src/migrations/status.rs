@@ -111,7 +111,7 @@ pub async fn migrate_status(url: &str) -> Result<()> {
             }
 
             println!();
-            println!("  Run {} to rollback", "qail migrate down".cyan());
+            println!("  Run {} to rollback by version", "qail migrate rollback --to".cyan());
         }
         Err(e) => {
             return Err(anyhow::anyhow!(

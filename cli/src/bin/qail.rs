@@ -25,7 +25,7 @@ use qail::lint::lint_schema;
 use qail::migrations::watch_schema;
 use qail::migrations::{
     ApplyPhase, MigrateDirection, migrate_analyze, migrate_apply, migrate_down, migrate_plan,
-    migrate_reset, migrate_status, migrate_up,
+    migrate_reset, migrate_rollback, migrate_status, migrate_up,
 };
 #[cfg(feature = "repl")]
 use qail::repl::run_repl;
@@ -253,6 +253,7 @@ SUBCOMMANDS:
     analyze  - Scan codebase for breaking changes before migrating
     up       - Apply migrations forward
     down     - Rollback migrations
+    rollback - Roll back to a specific applied version
     apply    - Run all pending migrations from migrations/ folder
     create   - Generate a new named migration file
     shadow   - Apply to shadow database (blue-green deployment)
@@ -723,6 +724,26 @@ EXAMPLES:
         #[arg(short, long)]
         url: Option<String>,
     },
+    /// Roll back applied folder migrations to a target version
+    #[command(after_help = r#"WHAT IT DOES:
+    Reads applied migration history from _qail_migrations and executes matching
+    *.down.qail files in reverse order until the target version is reached.
+
+TARGET:
+    --to <version>  Keep this version applied, roll back everything after it
+    --to base       Roll back all applied folder migrations
+
+EXAMPLES:
+    qail migrate rollback --to 20260318094500_add_users.up.qail
+    qail migrate rollback --to base --url postgres://user@localhost/mydb"#)]
+    Rollback {
+        /// Target applied migration version to keep (or "base")
+        #[arg(long)]
+        to: String,
+        /// Database URL (reads from qail.toml if not provided)
+        #[arg(short, long)]
+        url: Option<String>,
+    },
     /// Apply migrations from migrations/ folder (reads .qail files)
     #[command(after_help = r#"WHAT IT DOES:
     Scans migrations/ directory for .qail files, determines which have not
@@ -1028,6 +1049,10 @@ async fn main() -> Result<()> {
             MigrateAction::Down { schema_diff, url } => {
                 let db_url = resolve_db_url(url.as_deref())?;
                 migrate_down(schema_diff, &db_url).await?;
+            }
+            MigrateAction::Rollback { to, url } => {
+                let db_url = resolve_db_url(url.as_deref())?;
+                migrate_rollback(to, &db_url).await?;
             }
             MigrateAction::Reset { schema, url } => {
                 let db_url = resolve_db_url(url.as_deref())?;
