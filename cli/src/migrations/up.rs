@@ -24,6 +24,7 @@ pub async fn migrate_up(
     allow_destructive: bool,
     allow_no_shadow_receipt: bool,
     allow_lock_risk: bool,
+    wait_for_lock: bool,
 ) -> Result<()> {
     println!("{} {}", "Migrating UP:".cyan().bold(), url.yellow());
 
@@ -175,7 +176,7 @@ pub async fn migrate_up(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
-    acquire_migration_lock(&mut driver, "migrate up").await?;
+    acquire_migration_lock(&mut driver, "migrate up", wait_for_lock).await?;
 
     // === PHASE 0.5: Shadow Receipt Verification ===
     if !policy.require_shadow_receipt {
@@ -443,6 +444,7 @@ table users {
             false,
             true,
             true,
+            false,
         )
         .await;
 

@@ -696,7 +696,10 @@ EXAMPLES:
     qail migrate up v1.qail:v2.qail postgres://... --allow-destructive
 
     # Override lock-risk preflight guardrails (not recommended)
-    qail migrate up v1.qail:v2.qail postgres://... --allow-lock-risk"#)]
+    qail migrate up v1.qail:v2.qail postgres://... --allow-lock-risk
+
+    # Wait until global migration lock is available
+    qail migrate up v1.qail:v2.qail postgres://... --wait-for-lock"#)]
     Up {
         /// Schema diff file or inline diff
         schema_diff: String,
@@ -718,17 +721,26 @@ EXAMPLES:
         /// Skip lock-risk preflight guardrails (not recommended)
         #[arg(long)]
         allow_lock_risk: bool,
+        /// Wait for the global migration lock instead of failing fast
+        #[arg(long)]
+        wait_for_lock: bool,
     },
     /// Rollback migrations
     #[command(after_help = r#"EXAMPLES:
     # Rollback: reverses the diff (old becomes target, new becomes source)
-    qail migrate down v1.qail:v2.qail postgres://user@localhost/mydb"#)]
+    qail migrate down v1.qail:v2.qail postgres://user@localhost/mydb
+
+    # Wait until global migration lock is available
+    qail migrate down v1.qail:v2.qail postgres://... --wait-for-lock"#)]
     Down {
         /// Schema diff file or inline diff
         schema_diff: String,
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
         url: Option<String>,
+        /// Wait for the global migration lock instead of failing fast
+        #[arg(long)]
+        wait_for_lock: bool,
     },
     /// Roll back applied folder migrations to a target version
     #[command(after_help = r#"WHAT IT DOES:
@@ -741,7 +753,8 @@ TARGET:
 
 EXAMPLES:
     qail migrate rollback --to 20260318094500_add_users.up.qail
-    qail migrate rollback --to base --url postgres://user@localhost/mydb"#)]
+    qail migrate rollback --to base --url postgres://user@localhost/mydb
+    qail migrate rollback --to base --wait-for-lock"#)]
     Rollback {
         /// Target applied migration version to keep (or "base")
         #[arg(long)]
@@ -749,6 +762,9 @@ EXAMPLES:
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
         url: Option<String>,
+        /// Wait for the global migration lock instead of failing fast
+        #[arg(long)]
+        wait_for_lock: bool,
     },
     /// Apply migrations from migrations/ folder (reads .qail files)
     #[command(after_help = r#"WHAT IT DOES:
@@ -770,7 +786,10 @@ EXAMPLES:
     qail migrate apply --phase backfill --backfill-chunk-size 10000
 
     # Contract safety guard with code reference scan
-    qail migrate apply --phase contract --codebase ./src"#)]
+    qail migrate apply --phase contract --codebase ./src
+
+    # Wait until global migration lock is available
+    qail migrate apply --wait-for-lock"#)]
     Apply {
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
@@ -790,6 +809,9 @@ EXAMPLES:
         /// Default chunk size for chunked backfill runner directives
         #[arg(long, default_value_t = 5000)]
         backfill_chunk_size: usize,
+        /// Wait for the global migration lock instead of failing fast
+        #[arg(long)]
+        wait_for_lock: bool,
     },
     /// Create a new named migration file
     #[command(after_help = r#"EXAMPLES:
@@ -849,6 +871,7 @@ EXAMPLES:
 
 EXAMPLES:
     qail migrate reset schema.qail postgres://user@localhost/mydb
+    qail migrate reset schema.qail postgres://... --wait-for-lock
 
 WARNING:
     This is destructive — all data in matching tables will be lost."#)]
@@ -858,6 +881,9 @@ WARNING:
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
         url: Option<String>,
+        /// Wait for the global migration lock instead of failing fast
+        #[arg(long)]
+        wait_for_lock: bool,
     },
 }
 
@@ -1040,6 +1066,7 @@ async fn main() -> Result<()> {
                 allow_destructive,
                 allow_no_shadow_receipt,
                 allow_lock_risk,
+                wait_for_lock,
             } => {
                 let db_url = resolve_db_url(url.as_deref())?;
                 migrate_up(
@@ -1050,20 +1077,33 @@ async fn main() -> Result<()> {
                     *allow_destructive,
                     *allow_no_shadow_receipt,
                     *allow_lock_risk,
+                    *wait_for_lock,
                 )
                 .await?;
             }
-            MigrateAction::Down { schema_diff, url } => {
+            MigrateAction::Down {
+                schema_diff,
+                url,
+                wait_for_lock,
+            } => {
                 let db_url = resolve_db_url(url.as_deref())?;
-                migrate_down(schema_diff, &db_url).await?;
+                migrate_down(schema_diff, &db_url, *wait_for_lock).await?;
             }
-            MigrateAction::Rollback { to, url } => {
+            MigrateAction::Rollback {
+                to,
+                url,
+                wait_for_lock,
+            } => {
                 let db_url = resolve_db_url(url.as_deref())?;
-                migrate_rollback(to, &db_url).await?;
+                migrate_rollback(to, &db_url, *wait_for_lock).await?;
             }
-            MigrateAction::Reset { schema, url } => {
+            MigrateAction::Reset {
+                schema,
+                url,
+                wait_for_lock,
+            } => {
                 let db_url = resolve_db_url(url.as_deref())?;
-                migrate_reset(schema, &db_url).await?;
+                migrate_reset(schema, &db_url, *wait_for_lock).await?;
             }
             MigrateAction::Apply {
                 url,
@@ -1072,6 +1112,7 @@ async fn main() -> Result<()> {
                 codebase,
                 allow_contract_with_references,
                 backfill_chunk_size,
+                wait_for_lock,
             } => {
                 let db_url = resolve_db_url(url.as_deref())?;
                 migrate_apply(
@@ -1081,6 +1122,7 @@ async fn main() -> Result<()> {
                     codebase.as_deref(),
                     *allow_contract_with_references,
                     *backfill_chunk_size,
+                    *wait_for_lock,
                 )
                 .await?;
             }

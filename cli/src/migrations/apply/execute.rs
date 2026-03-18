@@ -27,6 +27,7 @@ pub async fn migrate_apply(
     codebase: Option<&str>,
     allow_contract_with_references: bool,
     backfill_chunk_size: usize,
+    wait_for_lock: bool,
 ) -> Result<()> {
     let migrations_dir = crate::migrations::resolve_deltas_dir(false)?;
     let policy = load_migration_policy()?;
@@ -86,7 +87,7 @@ pub async fn migrate_apply(
     ensure_migration_table(&mut pg)
         .await
         .context("Failed to create _qail_migrations table")?;
-    acquire_migration_lock(&mut pg, "migrate apply").await?;
+    acquire_migration_lock(&mut pg, "migrate apply", wait_for_lock).await?;
 
     // Query already-applied migration versions + checksums
     let status_cmd = Qail::get("_qail_migrations").columns(vec!["version", "checksum"]);

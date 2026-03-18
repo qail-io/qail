@@ -16,7 +16,7 @@ use crate::migrations::{
 use crate::util::parse_pg_url;
 
 /// Reset database: drop all objects, clear migration history, re-apply target schema.
-pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
+pub async fn migrate_reset(schema_file: &str, url: &str, wait_for_lock: bool) -> Result<()> {
     println!("{} {}", "🔄 Resetting database:".cyan().bold(), url);
     println!();
 
@@ -42,7 +42,7 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
-    acquire_migration_lock(&mut driver, "migrate reset").await?;
+    acquire_migration_lock(&mut driver, "migrate reset", wait_for_lock).await?;
 
     // Build DROP plan from live schema to avoid leaving drift objects behind.
     let live_schema = crate::shadow::introspect_schema(&mut driver)

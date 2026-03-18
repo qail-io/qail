@@ -15,7 +15,7 @@ use crate::migrations::{
 use crate::util::parse_pg_url;
 
 /// Rollback migrations using qail-pg native driver.
-pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
+pub async fn migrate_down(schema_diff_path: &str, url: &str, wait_for_lock: bool) -> Result<()> {
     println!("{} {}", "Migrating DOWN:".cyan().bold(), url.yellow());
 
     // For rollback, user provides: current_schema:target_schema
@@ -111,7 +111,7 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
     ensure_migration_table(&mut driver)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bootstrap migration table: {}", e))?;
-    acquire_migration_lock(&mut driver, "migrate down").await?;
+    acquire_migration_lock(&mut driver, "migrate down", wait_for_lock).await?;
 
     // Begin transaction for atomic rollback
     println!("{}", "Starting transaction...".dimmed());
@@ -191,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_schema_diff_returns_error() {
-        let result = migrate_down("invalid-schema-diff", "postgres://localhost/testdb").await;
+        let result = migrate_down("invalid-schema-diff", "postgres://localhost/testdb", false).await;
         assert!(result.is_err(), "invalid rollback input must fail");
     }
 }
