@@ -295,6 +295,7 @@ pub async fn migrate_apply(
             checksum_input,
             risk_summary,
             affected_rows_est,
+            None,
         )
         .await
         .context(format!("Failed to apply migration {}", mig.display_name))?;
@@ -361,6 +362,7 @@ async fn apply_commands_and_record_receipt_atomic(
     checksum_input: String,
     risk_summary: String,
     affected_rows_est: Option<i64>,
+    failpoint_override: Option<&str>,
 ) -> Result<()> {
     pg.begin()
         .await
@@ -389,7 +391,7 @@ async fn apply_commands_and_record_receipt_atomic(
         shadow_checksum: None,
     };
 
-    if let Err(err) = maybe_failpoint("apply.before_receipt") {
+    if let Err(err) = maybe_failpoint_override("apply.before_receipt", failpoint_override) {
         let _ = pg.rollback().await;
         return Err(err);
     }
@@ -403,7 +405,7 @@ async fn apply_commands_and_record_receipt_atomic(
         ));
     }
 
-    if let Err(err) = maybe_failpoint("apply.before_commit") {
+    if let Err(err) = maybe_failpoint_override("apply.before_commit", failpoint_override) {
         let _ = pg.rollback().await;
         return Err(err);
     }
@@ -412,6 +414,20 @@ async fn apply_commands_and_record_receipt_atomic(
         .await
         .map_err(|e| anyhow!("Failed to commit migration transaction: {}", e))?;
 
+    Ok(())
+}
+
+fn maybe_failpoint_override(name: &str, failpoint_override: Option<&str>) -> Result<()> {
+    let Some(spec) = failpoint_override else {
+        return maybe_failpoint(name);
+    };
+    if spec
+        .split(',')
+        .map(str::trim)
+        .any(|token| token == "*" || token.eq_ignore_ascii_case(name))
+    {
+        bail!("Injected failpoint triggered: {}", name);
+    }
     Ok(())
 }
 
@@ -589,11 +605,13 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_applied_checksum_matches, ensure_up_down_pairing, validate_receipts_against_local,
+        apply_commands_and_record_receipt_atomic, ensure_applied_checksum_matches,
+        ensure_up_down_pairing, validate_receipts_against_local,
     };
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
     use crate::migrations::ReceiptValidationMode;
+    use qail_core::prelude::Qail;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -716,6 +734,74 @@ mod tests {
         assert!(
             err.to_string().contains("checksum drift"),
             "error should mention checksum drift"
+        );
+    }
+
+    async fn version_exists(pg: &mut qail_pg::PgDriver, version: &str) -> bool {
+        let cmd = Qail::get("_qail_migrations")
+            .column("version")
+            .where_eq("version", version)
+            .limit(1);
+        match pg.query_ast(&cmd).await {
+            Ok(result) => !result.rows.is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_failpoint_before_receipt_rolls_back_commands_in_real_db() {
+        let Some(url) = std::env::var("QAIL_TEST_DB_URL").ok() else {
+            eprintln!("Skipping apply failpoint DB test (set QAIL_TEST_DB_URL)");
+            return;
+        };
+
+        let mut pg = qail_pg::PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+        crate::migrations::ensure_migration_table(&mut pg)
+            .await
+            .expect("bootstrap _qail_migrations");
+
+        let suffix = format!("{}_{}", std::process::id(), crate::time::timestamp_version());
+        let marker_version = format!("fp_marker_{}", suffix);
+        let migration_name = format!("fp_receipt_{}.up.qail", suffix);
+
+        let cleanup_marker = Qail::del("_qail_migrations").where_eq("version", marker_version.as_str());
+        let cleanup_receipt = Qail::del("_qail_migrations").where_eq("version", migration_name.as_str());
+        let _ = pg.execute(&cleanup_marker).await;
+        let _ = pg.execute(&cleanup_receipt).await;
+
+        let marker_cmd = Qail::add("_qail_migrations")
+            .set_value("version", marker_version.as_str())
+            .set_value("name", "fp_marker")
+            .set_value("checksum", "fp_marker_checksum")
+            .set_value("sql_up", "-- fp marker");
+
+        let err = apply_commands_and_record_receipt_atomic(
+            &mut pg,
+            &[marker_cmd],
+            &migration_name,
+            crate::migrations::now_epoch_ms(),
+            "-- fp marker".to_string(),
+            "-- fp marker".to_string(),
+            "source=apply.failpoint.test".to_string(),
+            None,
+            Some("apply.before_receipt"),
+        )
+        .await
+        .expect_err("failpoint should abort apply transaction");
+
+        assert!(
+            err.to_string().contains("Injected failpoint triggered: apply.before_receipt"),
+            "unexpected failpoint error: {err}"
+        );
+        assert!(
+            !version_exists(&mut pg, marker_version.as_str()).await,
+            "marker command row should have been rolled back"
+        );
+        assert!(
+            !version_exists(&mut pg, migration_name.as_str()).await,
+            "migration receipt should not be written when failpoint triggers"
         );
     }
 }
