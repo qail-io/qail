@@ -127,6 +127,38 @@ pub async fn migrate_rollback(
         policy.receipt_validation,
     )?;
 
+    let target_label = target.unwrap_or("base");
+    let rollback_version = execute_rollback_plan_atomic(
+        &mut driver,
+        &plan,
+        &down_by_group,
+        target_label,
+        None,
+    )
+    .await?;
+
+    println!(
+        "{}",
+        format!(
+            "✓ Rolled back {} group(s) / {} version(s) to {}",
+            plan.groups_to_rollback.len(),
+            plan.versions_to_delete.len(),
+            target_label
+        )
+        .green()
+        .bold()
+    );
+    println!("  Recorded rollback receipt: {}", rollback_version.cyan());
+    Ok(())
+}
+
+async fn execute_rollback_plan_atomic(
+    driver: &mut PgDriver,
+    plan: &RollbackPlan,
+    down_by_group: &HashMap<String, MigrationFile>,
+    target_label: &str,
+    failpoint_override: Option<&str>,
+) -> Result<String> {
     driver
         .begin()
         .await
@@ -155,9 +187,12 @@ pub async fn migrate_rollback(
             }
         };
 
-        let cmds = match parse_qail_to_commands_strict(&content)
-            .with_context(|| format!("Failed to compile rollback migration '{}'", down_migration.display_name))
-        {
+        let cmds = match parse_qail_to_commands_strict(&content).with_context(|| {
+            format!(
+                "Failed to compile rollback migration '{}'",
+                down_migration.display_name
+            )
+        }) {
             Ok(cmds) => cmds,
             Err(err) => {
                 let _ = driver.rollback().await;
@@ -191,7 +226,10 @@ pub async fn migrate_rollback(
         }
     }
 
-    if let Err(err) = maybe_failpoint("rollback.after_down_before_history_delete") {
+    if let Err(err) = maybe_failpoint_override(
+        "rollback.after_down_before_history_delete",
+        failpoint_override,
+    ) {
         let _ = driver.rollback().await;
         return Err(err);
     }
@@ -209,7 +247,6 @@ pub async fn migrate_rollback(
     }
 
     let finished_ms = now_epoch_ms();
-    let target_label = target.unwrap_or("base");
     let rollback_version = format!("rollback_{}", crate::time::timestamp_version());
     let receipt = MigrationReceipt {
         version: rollback_version.clone(),
@@ -231,7 +268,7 @@ pub async fn migrate_rollback(
         )),
         shadow_checksum: None,
     };
-    if let Err(err) = write_migration_receipt(&mut driver, &receipt).await {
+    if let Err(err) = write_migration_receipt(driver, &receipt).await {
         let _ = driver.rollback().await;
         return Err(anyhow!("Failed to record rollback receipt: {}", err));
     }
@@ -241,18 +278,20 @@ pub async fn migrate_rollback(
         .await
         .map_err(|e| anyhow!("Failed to commit rollback transaction: {}", e))?;
 
-    println!(
-        "{}",
-        format!(
-            "✓ Rolled back {} group(s) / {} version(s) to {}",
-            plan.groups_to_rollback.len(),
-            plan.versions_to_delete.len(),
-            target_label
-        )
-        .green()
-        .bold()
-    );
-    println!("  Recorded rollback receipt: {}", rollback_version.cyan());
+    Ok(rollback_version)
+}
+
+fn maybe_failpoint_override(name: &str, failpoint_override: Option<&str>) -> Result<()> {
+    let Some(spec) = failpoint_override else {
+        return maybe_failpoint(name);
+    };
+    if spec
+        .split(',')
+        .map(str::trim)
+        .any(|token| token == "*" || token.eq_ignore_ascii_case(name))
+    {
+        bail!("Injected failpoint triggered: {}", name);
+    }
     Ok(())
 }
 
@@ -427,10 +466,13 @@ fn validate_rollback_receipts(
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_rollbacks, validate_rollback_receipts};
+    use super::{
+        RollbackPlan, execute_rollback_plan_atomic, plan_rollbacks, validate_rollback_receipts,
+    };
     use crate::migrations::ReceiptValidationMode;
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
+    use qail_core::prelude::Qail;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -515,6 +557,91 @@ mod tests {
         assert!(
             err.to_string().contains("checksum drift"),
             "error should mention checksum drift"
+        );
+    }
+
+    async fn version_exists(pg: &mut qail_pg::PgDriver, version: &str) -> bool {
+        let cmd = Qail::get("_qail_migrations")
+            .column("version")
+            .where_eq("version", version)
+            .limit(1);
+        match pg.query_ast(&cmd).await {
+            Ok(result) => !result.rows.is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    async fn receipt_name_exists(pg: &mut qail_pg::PgDriver, name: &str) -> bool {
+        let cmd = Qail::get("_qail_migrations")
+            .column("name")
+            .where_eq("name", name)
+            .limit(1);
+        match pg.query_ast(&cmd).await {
+            Ok(result) => !result.rows.is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_failpoint_before_history_delete_preserves_history_in_real_db() {
+        let Some(url) = std::env::var("QAIL_TEST_DB_URL").ok() else {
+            eprintln!("Skipping rollback failpoint DB test (set QAIL_TEST_DB_URL)");
+            return;
+        };
+
+        let mut pg = qail_pg::PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+        crate::migrations::ensure_migration_table(&mut pg)
+            .await
+            .expect("bootstrap _qail_migrations");
+
+        let suffix = format!("{}_{}", std::process::id(), crate::time::timestamp_version());
+        let applied_version = format!("fp_rollback_applied_{}.up.qail", suffix);
+        let target_label = format!("fp_target_{}", suffix);
+        let rollback_name = format!("rollback_to_{}", target_label);
+
+        let cleanup_applied =
+            Qail::del("_qail_migrations").where_eq("version", applied_version.as_str());
+        let cleanup_receipt = Qail::del("_qail_migrations").where_eq("name", rollback_name.as_str());
+        let _ = pg.execute(&cleanup_applied).await;
+        let _ = pg.execute(&cleanup_receipt).await;
+
+        let seed_cmd = Qail::add("_qail_migrations")
+            .set_value("version", applied_version.as_str())
+            .set_value("name", "fp_rollback_seed")
+            .set_value("checksum", "fp_rollback_seed_checksum")
+            .set_value("sql_up", "-- rollback seed");
+        pg.execute(&seed_cmd)
+            .await
+            .expect("seed applied version row");
+
+        let plan = RollbackPlan {
+            groups_to_rollback: Vec::new(),
+            versions_to_delete: vec![applied_version.clone()],
+        };
+        let down_by_group = HashMap::new();
+        let err = execute_rollback_plan_atomic(
+            &mut pg,
+            &plan,
+            &down_by_group,
+            target_label.as_str(),
+            Some("rollback.after_down_before_history_delete"),
+        )
+        .await
+        .expect_err("failpoint should abort rollback transaction");
+
+        assert!(
+            err.to_string().contains("Injected failpoint triggered"),
+            "unexpected failpoint error: {err}"
+        );
+        assert!(
+            version_exists(&mut pg, applied_version.as_str()).await,
+            "applied migration history should remain after failpoint rollback"
+        );
+        assert!(
+            !receipt_name_exists(&mut pg, rollback_name.as_str()).await,
+            "rollback receipt should not be recorded when failpoint triggers"
         );
     }
 }
