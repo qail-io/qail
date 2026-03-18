@@ -6,6 +6,7 @@ use qail_core::migrate::{diff_schemas, parse_qail_file};
 use qail_core::prelude::{Action, Expr};
 use qail_core::transpiler::ToSql;
 use qail_pg::driver::PgDriver;
+use std::io::{IsTerminal, Write};
 
 use super::types::is_narrowing_type;
 use crate::migrations::{
@@ -18,6 +19,7 @@ use crate::util::parse_pg_url;
 pub async fn migrate_down(
     schema_diff_path: &str,
     url: &str,
+    force: bool,
     wait_for_lock: bool,
     lock_timeout_secs: Option<u64>,
 ) -> Result<()> {
@@ -89,14 +91,23 @@ pub async fn migrate_down(
             "PostgreSQL cannot automatically cast TEXT → INT.".dimmed()
         );
         println!();
-        print!("Continue anyway? [y/N] ");
-        std::io::Write::flush(&mut std::io::stdout())?;
+        if force {
+            println!("{}", "⚠️  Proceeding anyway due to --force flag...".yellow());
+        } else if !std::io::stdin().is_terminal() {
+            return Err(anyhow::anyhow!(
+                "Rollback blocked: unsafe type changes detected in non-interactive mode.\n\
+                 Re-run with --force to proceed."
+            ));
+        } else {
+            print!("Continue anyway? [y/N] ");
+            std::io::stdout().flush()?;
 
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("{}", "Rollback cancelled.".yellow());
-            return Ok(());
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("{}", "Rollback cancelled.".yellow());
+                return Ok(());
+            }
         }
     }
 
@@ -196,7 +207,9 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_schema_diff_returns_error() {
-        let result = migrate_down("invalid-schema-diff", "postgres://localhost/testdb", false, None).await;
+        let result =
+            migrate_down("invalid-schema-diff", "postgres://localhost/testdb", false, false, None)
+                .await;
         assert!(result.is_err(), "invalid rollback input must fail");
     }
 }

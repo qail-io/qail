@@ -734,6 +734,9 @@ EXAMPLES:
     # Rollback: reverses the diff (old becomes target, new becomes source)
     qail migrate down v1.qail:v2.qail postgres://user@localhost/mydb
 
+    # Force rollback on unsafe type narrowing changes (non-interactive/CI)
+    qail migrate down v1.qail:v2.qail postgres://... --force
+
     # Wait until global migration lock is available
     qail migrate down v1.qail:v2.qail postgres://... --wait-for-lock
     qail migrate down v1.qail:v2.qail postgres://... --lock-timeout-secs 30"#)]
@@ -743,6 +746,9 @@ EXAMPLES:
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
         url: Option<String>,
+        /// Force rollback even when unsafe type narrowing is detected
+        #[arg(long)]
+        force: bool,
         /// Wait for the global migration lock instead of failing fast
         #[arg(long)]
         wait_for_lock: bool,
@@ -1106,11 +1112,19 @@ async fn main() -> Result<()> {
             MigrateAction::Down {
                 schema_diff,
                 url,
+                force,
                 wait_for_lock,
                 lock_timeout_secs,
             } => {
                 let db_url = resolve_db_url(url.as_deref())?;
-                migrate_down(schema_diff, &db_url, *wait_for_lock, *lock_timeout_secs).await?;
+                migrate_down(
+                    schema_diff,
+                    &db_url,
+                    *force,
+                    *wait_for_lock,
+                    *lock_timeout_secs,
+                )
+                .await?;
             }
             MigrateAction::Rollback {
                 to,
