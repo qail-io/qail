@@ -127,7 +127,8 @@ table _qail_migrations (
     duration_ms bigint,
     affected_rows_est bigint,
     risk_summary text,
-    shadow_checksum varchar(64)
+    shadow_checksum varchar(64),
+    receipt_sig text
 )
 "#;
 
@@ -255,6 +256,11 @@ pub async fn ensure_migration_table(driver: &mut PgDriver) -> anyhow::Result<()>
                 Expr::Def {
                     name: "shadow_checksum".to_string(),
                     data_type: "varchar".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
+                    name: "receipt_sig".to_string(),
+                    data_type: "text".to_string(),
                     constraints: vec![Constraint::Nullable],
                 },
             ],

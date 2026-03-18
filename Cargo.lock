@@ -2314,6 +2314,7 @@ version = "0.25.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hmac",
  "notify-debouncer-full",
  "qail-core",
  "qail-pg",
@@ -2322,6 +2323,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "toml",
 ]
