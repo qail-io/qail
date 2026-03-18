@@ -647,7 +647,10 @@ enum MigrateAction {
     qail migrate analyze v1.qail:v2.qail -c ./src
     
     # CI mode: exits 1 if breaking changes found, outputs GitHub annotations
-    qail migrate analyze v1.qail:v2.qail --ci"#)]
+    qail migrate analyze v1.qail:v2.qail --ci
+
+    # Machine-readable output for CI gates
+    qail migrate analyze v1.qail:v2.qail --json"#)]
     Analyze {
         /// Schema diff (old.qail:new.qail)
         schema_diff: String,
@@ -657,6 +660,9 @@ enum MigrateAction {
         /// CI/CD mode: output GitHub Actions annotations, exit code 1 on errors
         #[arg(long)]
         ci: bool,
+        /// Output analysis as JSON (suitable for CI parsing)
+        #[arg(long)]
+        json: bool,
     },
     /// Preview migration SQL without executing (dry-run)
     #[command(after_help = r#"EXAMPLES:
@@ -1020,7 +1026,8 @@ async fn main() -> Result<()> {
                 schema_diff,
                 codebase,
                 ci,
-            } => migrate_analyze(schema_diff, codebase, *ci)?,
+                json,
+            } => migrate_analyze(schema_diff, codebase, *ci, *json)?,
             MigrateAction::Plan {
                 schema_diff,
                 output,

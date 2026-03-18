@@ -3,18 +3,63 @@
 use crate::colors::*;
 use anyhow::Result;
 use qail_core::migrate::{diff_schemas, parse_qail_file};
+use serde::Serialize;
 
 use crate::sql_gen::cmd_to_sql;
 
+#[derive(Serialize)]
+struct AnalyzeJsonReport {
+    schema_diff: String,
+    codebase: String,
+    ci_mode: bool,
+    safe_to_run: bool,
+    affected_files: usize,
+    references_scanned: usize,
+    scanned_files: Vec<AnalyzedFile>,
+    breaking_changes: Vec<BreakingChangeJson>,
+}
+
+#[derive(Serialize)]
+struct AnalyzedFile {
+    file: String,
+    mode: String,
+    references: usize,
+}
+
+#[derive(Serialize)]
+struct BreakingChangeJson {
+    kind: String,
+    table: String,
+    column: Option<String>,
+    old_name: Option<String>,
+    new_name: Option<String>,
+    old_type: Option<String>,
+    new_type: Option<String>,
+    references: Vec<CodeRefJson>,
+}
+
+#[derive(Serialize)]
+struct CodeRefJson {
+    file: String,
+    line: usize,
+    query_type: String,
+    snippet: String,
+}
+
 /// Analyze migration impact. See [full docs](https://dev.qail.io/docs/features/analyzer.html).
-pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: bool) -> Result<()> {
+pub fn migrate_analyze(
+    schema_diff_path: &str,
+    codebase_path: &str,
+    ci_flag: bool,
+    json_mode: bool,
+) -> Result<()> {
     use qail_core::analyzer::{CodebaseScanner, MigrationImpact};
     use std::path::Path;
 
     // Detect CI mode: explicit flag OR environment variable
     let ci_mode = ci_flag || std::env::var("CI").is_ok() || std::env::var("GITHUB_ACTIONS").is_ok();
 
-    if !ci_mode {
+    if !ci_mode && !json_mode {
         println!("{}", "🔍 Migration Impact Analyzer".cyan().bold());
         println!();
     }
@@ -25,7 +70,9 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
             let old_path = parts[0];
             let new_path = parts[1];
 
-            println!("  Schema: {} → {}", old_path.yellow(), new_path.yellow());
+            if !json_mode {
+                println!("  Schema: {} → {}", old_path.yellow(), new_path.yellow());
+            }
 
             let old = parse_qail_file(old_path)
                 .map_err(|e| anyhow::anyhow!("Failed to parse old schema: {}", e))?;
@@ -41,10 +88,24 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
         };
 
     if cmds.is_empty() {
-        println!(
-            "{}",
-            "✓ No migrations needed - schemas are identical".green()
-        );
+        if json_mode {
+            let report = AnalyzeJsonReport {
+                schema_diff: schema_diff_path.to_string(),
+                codebase: codebase_path.to_string(),
+                ci_mode,
+                safe_to_run: true,
+                affected_files: 0,
+                references_scanned: 0,
+                scanned_files: Vec::new(),
+                breaking_changes: Vec::new(),
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!(
+                "{}",
+                "✓ No migrations needed - schemas are identical".green()
+            );
+        }
         return Ok(());
     }
 
@@ -62,8 +123,10 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
         }
     };
 
-    println!("  Codebase: {}", display_path.yellow());
-    println!();
+    if !json_mode {
+        println!("  Codebase: {}", display_path.yellow());
+        println!();
+    }
 
     // Scan codebase
     let scanner = CodebaseScanner::new();
@@ -76,48 +139,70 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
         ));
     }
 
-    println!("{}", "Scanning codebase...".dimmed());
+    if !json_mode {
+        println!("{}", "Scanning codebase...".dimmed());
+    }
     let scan_result = scanner.scan_with_details(code_path);
 
     // Show per-file analysis breakdown with badges
-    println!("🔍 {}", "Analyzing files...".dimmed());
-    for file_analysis in &scan_result.files {
-        let relative_path = file_analysis
-            .file
-            .strip_prefix(code_path)
-            .unwrap_or(&file_analysis.file);
-        let mode_badge = match file_analysis.mode {
-            qail_core::analyzer::AnalysisMode::RustAST => "🦀",
-            qail_core::analyzer::AnalysisMode::Regex => {
-                match file_analysis.file.extension().and_then(|e| e.to_str()) {
-                    Some("ts") | Some("tsx") | Some("js") | Some("jsx") => "📘",
-                    Some("py") => "🐍",
-                    _ => "📄",
+    if !json_mode {
+        println!("🔍 {}", "Analyzing files...".dimmed());
+        for file_analysis in &scan_result.files {
+            let relative_path = file_analysis
+                .file
+                .strip_prefix(code_path)
+                .unwrap_or(&file_analysis.file);
+            let mode_badge = match file_analysis.mode {
+                qail_core::analyzer::AnalysisMode::RustAST => "🦀",
+                qail_core::analyzer::AnalysisMode::Regex => {
+                    match file_analysis.file.extension().and_then(|e| e.to_str()) {
+                        Some("ts") | Some("tsx") | Some("js") | Some("jsx") => "📘",
+                        Some("py") => "🐍",
+                        _ => "📄",
+                    }
                 }
-            }
-        };
-        let mode_name = match file_analysis.mode {
-            qail_core::analyzer::AnalysisMode::RustAST => "AST",
-            qail_core::analyzer::AnalysisMode::Regex => "Regex",
-        };
-        println!(
-            "   ├── {} {} ({}: {} refs)",
-            mode_badge,
-            relative_path.display().to_string().cyan(),
-            mode_name.dimmed(),
-            file_analysis.ref_count
-        );
+            };
+            let mode_name = match file_analysis.mode {
+                qail_core::analyzer::AnalysisMode::RustAST => "AST",
+                qail_core::analyzer::AnalysisMode::Regex => "Regex",
+            };
+            println!(
+                "   ├── {} {} ({}: {} refs)",
+                mode_badge,
+                relative_path.display().to_string().cyan(),
+                mode_name.dimmed(),
+                file_analysis.ref_count
+            );
+        }
+        if !scan_result.files.is_empty() {
+            println!("   └── {} files analyzed", scan_result.files.len());
+        }
+        println!();
     }
-    if !scan_result.files.is_empty() {
-        println!("   └── {} files analyzed", scan_result.files.len());
-    }
-    println!();
 
-    let code_refs = scan_result.refs;
-    println!("  Found {} query references\n", code_refs.len());
+    let code_refs = &scan_result.refs;
+    if !json_mode {
+        println!("  Found {} query references\n", code_refs.len());
+    }
 
     // Analyze impact
-    let impact = MigrationImpact::analyze(&cmds, &code_refs, &old_schema, &new_schema);
+    let impact = MigrationImpact::analyze(&cmds, code_refs, &old_schema, &new_schema);
+
+    if json_mode {
+        let report = build_json_report(
+            schema_diff_path,
+            codebase_path,
+            ci_mode,
+            &scan_result,
+            &impact,
+            code_path,
+        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if ci_mode && !impact.safe_to_run {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     if impact.safe_to_run {
         if ci_mode {
@@ -140,6 +225,130 @@ pub fn migrate_analyze(schema_diff_path: &str, codebase_path: &str, ci_flag: boo
     }
 
     Ok(())
+}
+
+fn build_json_report(
+    schema_diff_path: &str,
+    codebase_path: &str,
+    ci_mode: bool,
+    scan_result: &qail_core::analyzer::ScanResult,
+    impact: &qail_core::analyzer::MigrationImpact,
+    code_path: &std::path::Path,
+) -> AnalyzeJsonReport {
+    let scanned_files = scan_result
+        .files
+        .iter()
+        .map(|f| AnalyzedFile {
+            file: f
+                .file
+                .strip_prefix(code_path)
+                .unwrap_or(&f.file)
+                .display()
+                .to_string(),
+            mode: match f.mode {
+                qail_core::analyzer::AnalysisMode::RustAST => "rust_ast".to_string(),
+                qail_core::analyzer::AnalysisMode::Regex => "regex".to_string(),
+            },
+            references: f.ref_count,
+        })
+        .collect::<Vec<_>>();
+
+    let breaking_changes = impact
+        .breaking_changes
+        .iter()
+        .map(|change| match change {
+            qail_core::analyzer::BreakingChange::DroppedColumn {
+                table,
+                column,
+                references,
+            } => BreakingChangeJson {
+                kind: "dropped_column".to_string(),
+                table: table.clone(),
+                column: Some(column.clone()),
+                old_name: None,
+                new_name: None,
+                old_type: None,
+                new_type: None,
+                references: refs_to_json(references, code_path),
+            },
+            qail_core::analyzer::BreakingChange::DroppedTable { table, references } => {
+                BreakingChangeJson {
+                    kind: "dropped_table".to_string(),
+                    table: table.clone(),
+                    column: None,
+                    old_name: None,
+                    new_name: None,
+                    old_type: None,
+                    new_type: None,
+                    references: refs_to_json(references, code_path),
+                }
+            }
+            qail_core::analyzer::BreakingChange::RenamedColumn {
+                table,
+                old_name,
+                new_name,
+                references,
+            } => BreakingChangeJson {
+                kind: "renamed_column".to_string(),
+                table: table.clone(),
+                column: None,
+                old_name: Some(old_name.clone()),
+                new_name: Some(new_name.clone()),
+                old_type: None,
+                new_type: None,
+                references: refs_to_json(references, code_path),
+            },
+            qail_core::analyzer::BreakingChange::TypeChanged {
+                table,
+                column,
+                old_type,
+                new_type,
+                references,
+            } => BreakingChangeJson {
+                kind: "type_changed".to_string(),
+                table: table.clone(),
+                column: Some(column.clone()),
+                old_name: None,
+                new_name: None,
+                old_type: Some(old_type.clone()),
+                new_type: Some(new_type.clone()),
+                references: refs_to_json(references, code_path),
+            },
+        })
+        .collect::<Vec<_>>();
+
+    AnalyzeJsonReport {
+        schema_diff: schema_diff_path.to_string(),
+        codebase: codebase_path.to_string(),
+        ci_mode,
+        safe_to_run: impact.safe_to_run,
+        affected_files: impact.affected_files,
+        references_scanned: scan_result.refs.len(),
+        scanned_files,
+        breaking_changes,
+    }
+}
+
+fn refs_to_json(
+    refs: &[qail_core::analyzer::CodeReference],
+    code_path: &std::path::Path,
+) -> Vec<CodeRefJson> {
+    refs.iter()
+        .map(|r| CodeRefJson {
+            file: r
+                .file
+                .strip_prefix(code_path)
+                .unwrap_or(&r.file)
+                .display()
+                .to_string(),
+            line: r.line,
+            query_type: match r.query_type {
+                qail_core::analyzer::QueryType::Qail => "qail".to_string(),
+                qail_core::analyzer::QueryType::RawSql => "raw_sql".to_string(),
+            },
+            snippet: r.snippet.clone(),
+        })
+        .collect()
 }
 
 fn print_ci_breaking_changes(
