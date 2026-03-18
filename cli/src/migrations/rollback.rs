@@ -56,8 +56,14 @@ pub async fn migrate_rollback(
     ensure_migration_table(&mut driver)
         .await
         .map_err(|e| anyhow!("Failed to bootstrap migration table: {}", e))?;
-    acquire_migration_lock(&mut driver, "migrate rollback", wait_for_lock, lock_timeout_secs)
-        .await?;
+    acquire_migration_lock(
+        &mut driver,
+        "migrate rollback",
+        wait_for_lock,
+        lock_timeout_secs,
+        Some(database.as_str()),
+    )
+    .await?;
 
     let history_cmd = Qail::get("_qail_migrations")
         .columns(vec!["version", "id", "checksum"])

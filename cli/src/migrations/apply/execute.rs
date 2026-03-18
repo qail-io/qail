@@ -88,7 +88,14 @@ pub async fn migrate_apply(
     ensure_migration_table(&mut pg)
         .await
         .context("Failed to create _qail_migrations table")?;
-    acquire_migration_lock(&mut pg, "migrate apply", wait_for_lock, lock_timeout_secs).await?;
+    acquire_migration_lock(
+        &mut pg,
+        "migrate apply",
+        wait_for_lock,
+        lock_timeout_secs,
+        Some(database.as_str()),
+    )
+    .await?;
 
     // Query already-applied migration versions + checksums
     let status_cmd = Qail::get("_qail_migrations").columns(vec!["version", "checksum"]);

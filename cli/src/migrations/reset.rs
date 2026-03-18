@@ -47,7 +47,14 @@ pub async fn migrate_reset(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
-    acquire_migration_lock(&mut driver, "migrate reset", wait_for_lock, lock_timeout_secs).await?;
+    acquire_migration_lock(
+        &mut driver,
+        "migrate reset",
+        wait_for_lock,
+        lock_timeout_secs,
+        Some(database.as_str()),
+    )
+    .await?;
 
     // Build DROP plan from live schema to avoid leaving drift objects behind.
     let live_schema = crate::shadow::introspect_schema(&mut driver)

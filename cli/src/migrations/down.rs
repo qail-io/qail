@@ -127,7 +127,14 @@ pub async fn migrate_down(
     ensure_migration_table(&mut driver)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bootstrap migration table: {}", e))?;
-    acquire_migration_lock(&mut driver, "migrate down", wait_for_lock, lock_timeout_secs).await?;
+    acquire_migration_lock(
+        &mut driver,
+        "migrate down",
+        wait_for_lock,
+        lock_timeout_secs,
+        Some(database.as_str()),
+    )
+    .await?;
 
     // Begin transaction for atomic rollback
     println!("{}", "Starting transaction...".dimmed());
