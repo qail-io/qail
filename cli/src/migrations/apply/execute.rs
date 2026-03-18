@@ -29,6 +29,10 @@ pub async fn migrate_apply(
 ) -> Result<()> {
     let migrations_dir = crate::migrations::resolve_deltas_dir(false)?;
 
+    if matches!(direction, MigrateDirection::Down) && !matches!(phase_filter, ApplyPhase::All) {
+        bail!("--phase is only supported for --direction up");
+    }
+
     let discovered = discover_migrations(&migrations_dir, direction)?;
     let migrations: Vec<MigrationFile> = discovered
         .into_iter()

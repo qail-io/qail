@@ -104,6 +104,21 @@ impl From<CliApplyPhase> for ApplyPhase {
     }
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum CliMigrateDirection {
+    Up,
+    Down,
+}
+
+impl From<CliMigrateDirection> for MigrateDirection {
+    fn from(value: CliMigrateDirection) -> Self {
+        match value {
+            CliMigrateDirection::Up => MigrateDirection::Up,
+            CliMigrateDirection::Down => MigrateDirection::Down,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new QAIL project
@@ -720,6 +735,9 @@ EXAMPLES:
     # Apply with explicit URL
     qail migrate apply --url postgres://user@localhost/mydb
 
+    # Apply pending rollback files (*.down.qail)
+    qail migrate apply --direction down
+
     # Apply only expand/backfill/contract phase
     qail migrate apply --phase expand
     qail migrate apply --phase backfill --backfill-chunk-size 10000
@@ -730,6 +748,9 @@ EXAMPLES:
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
         url: Option<String>,
+        /// Direction to apply from migrations folder
+        #[arg(long, value_enum, default_value = "up")]
+        direction: CliMigrateDirection,
         /// Migration phase to apply (all, expand, backfill, contract)
         #[arg(long, value_enum, default_value = "all")]
         phase: CliApplyPhase,
@@ -1014,6 +1035,7 @@ async fn main() -> Result<()> {
             }
             MigrateAction::Apply {
                 url,
+                direction,
                 phase,
                 codebase,
                 allow_contract_with_references,
@@ -1022,7 +1044,7 @@ async fn main() -> Result<()> {
                 let db_url = resolve_db_url(url.as_deref())?;
                 migrate_apply(
                     &db_url,
-                    MigrateDirection::Up,
+                    (*direction).into(),
                     phase.clone().into(),
                     codebase.as_deref(),
                     *allow_contract_with_references,
