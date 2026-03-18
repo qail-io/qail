@@ -185,7 +185,7 @@ mod tests {
         assert!(
             timeout_err
                 .to_string()
-                .contains("Timed out waiting for global migration lock"),
+                .contains("Timed out waiting for migration lock"),
             "unexpected timeout error: {timeout_err}"
         );
         drop(waiter);
