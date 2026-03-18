@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.1] - 2026-03-18
+
+### Added
+
+- **CLI migration controls:** added `migrate down --force` with explicit non-TTY unsafe guard and wait-for-lock mode support for migration commands.
+- **CLI output and rollback UX:** added JSON output mode for `migrate analyze` and a version-driven migrate rollback command.
+- **Migration receipt integrity:** added optional HMAC signing support for migration receipts.
+- **Tests:** added DB-gated apply/rollback failpoint coverage, lock contention coverage, and timeout assertion hardening for migration flows.
+
+### Changed
+
+- **Migration locking:** moved advisory lock behavior from global scope to database-scoped locking, with lock timeout controls and scoped timeout diagnostics.
+- **Migration policy enforcement:** strengthened apply/analyze pipeline checks with up/down pairing validation and receipt drift policy enforcement.
+- **Versioning:** bumped Rust crates to `0.25.1` (`qail-core`, `qail-pg`, `qail-gateway`, `qail`, `qail-qdrant`, `qail-workflow`, `qail-encoder`, `qail-lsp`).
+- **README snippets:** updated root version badge to `0.25.1`.
+
+### Fixed
+
+- **CLI migration safety:** fixed down-direction apply handling, corrected watch apply execution and rollback receipt recording, and tightened reset/down/status/apply safety checks.
+- **Migration reliability:** fixed atomicity and checksum verification behavior for apply flows, and removed incorrect contract-guard blocking on already-applied migrations.
+- **Receipt verification:** enforce migration receipt signature verification on apply/rollback paths.
+
 ## [0.25.0] - 2026-03-12
 
 ### Breaking Changes ⚠️
