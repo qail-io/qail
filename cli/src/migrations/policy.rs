@@ -75,7 +75,10 @@ pub fn load_migration_policy() -> Result<MigrationPolicy> {
         Ok(v) => v,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(policy),
         Err(err) => {
-            return Err(anyhow!("Failed to read qail.toml for migration policy: {}", err));
+            return Err(anyhow!(
+                "Failed to read qail.toml for migration policy: {}",
+                err
+            ));
         }
     };
 
@@ -121,9 +124,9 @@ pub fn load_migration_policy() -> Result<MigrationPolicy> {
     }
 
     if let Some(raw) = policy_tbl.get("require_shadow_receipt") {
-        policy.require_shadow_receipt = raw
-            .as_bool()
-            .ok_or_else(|| anyhow!("migrations.policy.require_shadow_receipt must be true/false"))?;
+        policy.require_shadow_receipt = raw.as_bool().ok_or_else(|| {
+            anyhow!("migrations.policy.require_shadow_receipt must be true/false")
+        })?;
     }
 
     if let Some(raw) = policy_tbl

@@ -21,9 +21,9 @@ mod lock;
 mod plan;
 mod policy;
 mod receipt;
-mod rollback;
 mod reset;
 mod risk;
+mod rollback;
 mod status;
 pub mod types;
 mod up;
@@ -41,11 +41,12 @@ pub use lock::acquire_migration_lock;
 pub use plan::migrate_plan;
 pub use policy::{EnforcementMode, MigrationPolicy, ReceiptValidationMode, load_migration_policy};
 pub use receipt::{
-    MigrationReceipt, ensure_migration_receipt_columns, now_epoch_ms, runtime_actor,
-    runtime_git_sha, write_migration_receipt,
+    MigrationReceipt, ReceiptSignatureStatus, StoredMigrationReceipt,
+    ensure_migration_receipt_columns, now_epoch_ms, runtime_actor, runtime_git_sha,
+    verify_stored_receipt_signature, write_migration_receipt,
 };
-pub use rollback::migrate_rollback;
 pub use reset::migrate_reset;
+pub use rollback::migrate_rollback;
 pub use status::migrate_status;
 pub use up::migrate_up;
 #[cfg(feature = "watch")]

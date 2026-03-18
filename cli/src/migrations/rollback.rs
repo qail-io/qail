@@ -2,12 +2,13 @@
 
 use crate::colors::*;
 use crate::migrations::apply::{
-    MigrationFile, MigrateDirection, commands_to_sql, compute_expected_migration_checksum,
+    MigrateDirection, MigrationFile, commands_to_sql, compute_expected_migration_checksum,
     discover_migrations, parse_qail_to_commands_strict,
 };
 use crate::migrations::{
-    MigrationReceipt, ReceiptValidationMode, acquire_migration_lock, ensure_migration_table,
-    load_migration_policy, maybe_failpoint, now_epoch_ms, runtime_actor, runtime_git_sha,
+    MigrationReceipt, ReceiptSignatureStatus, ReceiptValidationMode, StoredMigrationReceipt,
+    acquire_migration_lock, ensure_migration_table, load_migration_policy, maybe_failpoint,
+    now_epoch_ms, runtime_actor, runtime_git_sha, verify_stored_receipt_signature,
     write_migration_receipt,
 };
 use crate::util::parse_pg_url;
@@ -28,7 +29,11 @@ pub async fn migrate_rollback(
     wait_for_lock: bool,
     lock_timeout_secs: Option<u64>,
 ) -> Result<()> {
-    println!("{} {}", "Rolling back to:".cyan().bold(), to_version.yellow());
+    println!(
+        "{} {}",
+        "Rolling back to:".cyan().bold(),
+        to_version.yellow()
+    );
     let policy = load_migration_policy()?;
 
     let migrations_dir = crate::migrations::resolve_deltas_dir(false)?;
@@ -66,7 +71,23 @@ pub async fn migrate_rollback(
     .await?;
 
     let history_cmd = Qail::get("_qail_migrations")
-        .columns(vec!["version", "id", "checksum"])
+        .columns(vec![
+            "version",
+            "id",
+            "checksum",
+            "name",
+            "sql_up",
+            "git_sha",
+            "qail_version",
+            "actor",
+            "started_at_ms",
+            "finished_at_ms",
+            "duration_ms",
+            "affected_rows_est",
+            "risk_summary",
+            "shadow_checksum",
+            "receipt_sig",
+        ])
         .order_by("id", SortOrder::Asc);
     let history = driver
         .query_ast(&history_cmd)
@@ -74,21 +95,40 @@ pub async fn migrate_rollback(
         .map_err(|e| anyhow!("Failed to query migration history: {}", e))?;
 
     let mut applied_versions = Vec::<String>::new();
-    let mut applied_checksums = HashMap::<String, String>::new();
+    let mut applied_receipts = HashMap::<String, StoredMigrationReceipt>::new();
     for row in &history.rows {
-        let Some(version) = row.first().and_then(|v| v.as_ref()) else {
+        let Some(version) = row.first().and_then(|v| v.as_ref()).cloned() else {
             continue;
         };
-        if up_by_version.contains_key(version) {
+        if up_by_version.contains_key(&version) {
             applied_versions.push(version.clone());
-            if let Some(checksum) = row.get(2).and_then(|v| v.as_ref()) {
-                applied_checksums.insert(version.clone(), checksum.clone());
-            }
+            applied_receipts.insert(
+                version.clone(),
+                StoredMigrationReceipt {
+                    version,
+                    checksum: row.get(2).and_then(|v| v.as_ref()).cloned(),
+                    name: row.get(3).and_then(|v| v.as_ref()).cloned(),
+                    sql_up: row.get(4).and_then(|v| v.as_ref()).cloned(),
+                    git_sha: row.get(5).and_then(|v| v.as_ref()).cloned(),
+                    qail_version: row.get(6).and_then(|v| v.as_ref()).cloned(),
+                    actor: row.get(7).and_then(|v| v.as_ref()).cloned(),
+                    started_at_ms: parse_i64_field(row.get(8).and_then(|v| v.as_ref())),
+                    finished_at_ms: parse_i64_field(row.get(9).and_then(|v| v.as_ref())),
+                    duration_ms: parse_i64_field(row.get(10).and_then(|v| v.as_ref())),
+                    affected_rows_est: parse_i64_field(row.get(11).and_then(|v| v.as_ref())),
+                    risk_summary: row.get(12).and_then(|v| v.as_ref()).cloned(),
+                    shadow_checksum: row.get(13).and_then(|v| v.as_ref()).cloned(),
+                    receipt_sig: row.get(14).and_then(|v| v.as_ref()).cloned(),
+                },
+            );
         }
     }
 
     if applied_versions.is_empty() {
-        println!("{}", "No applied folder migrations found to roll back.".green());
+        println!(
+            "{}",
+            "No applied folder migrations found to roll back.".green()
+        );
         return Ok(());
     }
 
@@ -98,7 +138,12 @@ pub async fn migrate_rollback(
         let group = up_by_version
             .get(version)
             .map(|m| m.group_key.clone())
-            .ok_or_else(|| anyhow!("Missing migration metadata for applied version '{}'", version))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "Missing migration metadata for applied version '{}'",
+                    version
+                )
+            })?;
         up_group_by_version.insert(version.clone(), group);
     }
 
@@ -123,19 +168,14 @@ pub async fn migrate_rollback(
     validate_rollback_receipts(
         &plan.versions_to_delete,
         &up_by_version,
-        &applied_checksums,
+        &applied_receipts,
         policy.receipt_validation,
     )?;
 
     let target_label = target.unwrap_or("base");
-    let rollback_version = execute_rollback_plan_atomic(
-        &mut driver,
-        &plan,
-        &down_by_group,
-        target_label,
-        None,
-    )
-    .await?;
+    let rollback_version =
+        execute_rollback_plan_atomic(&mut driver, &plan, &down_by_group, target_label, None)
+            .await?;
 
     println!(
         "{}",
@@ -323,7 +363,12 @@ fn plan_rollbacks(
             applied_versions
                 .iter()
                 .position(|v| v == target_version)
-                .ok_or_else(|| anyhow!("Target version '{}' is not currently applied", target_version))?,
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Target version '{}' is not currently applied",
+                        target_version
+                    )
+                })?,
         ),
         None => None,
     };
@@ -331,7 +376,12 @@ fn plan_rollbacks(
     if let Some(idx) = target_idx {
         let target_group = up_group_by_version
             .get(&applied_versions[idx])
-            .ok_or_else(|| anyhow!("Missing group metadata for target '{}'", applied_versions[idx]))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "Missing group metadata for target '{}'",
+                    applied_versions[idx]
+                )
+            })?;
         let has_newer_same_group = applied_versions[idx + 1..].iter().any(|v| {
             up_group_by_version
                 .get(v)
@@ -406,7 +456,7 @@ fn ensure_up_has_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> R
 fn validate_rollback_receipts(
     versions_to_delete: &[String],
     up_by_version: &HashMap<String, MigrationFile>,
-    applied_checksums: &HashMap<String, String>,
+    applied_receipts: &HashMap<String, StoredMigrationReceipt>,
     mode: ReceiptValidationMode,
 ) -> Result<()> {
     if versions_to_delete.is_empty() {
@@ -427,7 +477,21 @@ fn validate_rollback_receipts(
                 ReceiptValidationMode::Error => bail!("{}", msg),
             }
         };
-        let Some(stored_checksum) = applied_checksums.get(version) else {
+        let Some(stored_receipt) = applied_receipts.get(version) else {
+            let msg = format!(
+                "Missing receipt metadata in _qail_migrations for applied version '{}'.",
+                version
+            );
+            match mode {
+                ReceiptValidationMode::Warn => {
+                    eprintln!("  {} {}", "⚠".yellow(), msg.yellow());
+                    continue;
+                }
+                ReceiptValidationMode::Error => bail!("{}", msg),
+            }
+        };
+
+        let Some(stored_checksum) = stored_receipt.checksum.as_deref() else {
             let msg = format!(
                 "Missing checksum in _qail_migrations for applied version '{}'.",
                 version
@@ -440,6 +504,35 @@ fn validate_rollback_receipts(
                 ReceiptValidationMode::Error => bail!("{}", msg),
             }
         };
+
+        match verify_stored_receipt_signature(stored_receipt) {
+            ReceiptSignatureStatus::DisabledNoKey | ReceiptSignatureStatus::Valid => {}
+            ReceiptSignatureStatus::Missing => {
+                let msg = format!(
+                    "Missing receipt signature for applied version '{}'. \
+                     Set migrations.policy.receipt_validation=warn to bypass temporarily while backfilling signatures.",
+                    version
+                );
+                match mode {
+                    ReceiptValidationMode::Warn => {
+                        eprintln!("  {} {}", "⚠".yellow(), msg.yellow());
+                    }
+                    ReceiptValidationMode::Error => bail!("{}", msg),
+                }
+            }
+            ReceiptSignatureStatus::Invalid => {
+                let msg = format!(
+                    "Receipt signature verification failed for applied version '{}'.",
+                    version
+                );
+                match mode {
+                    ReceiptValidationMode::Warn => {
+                        eprintln!("  {} {}", "⚠".yellow(), msg.yellow());
+                    }
+                    ReceiptValidationMode::Error => bail!("{}", msg),
+                }
+            }
+        }
 
         let content = fs::read_to_string(&up_migration.path)
             .with_context(|| format!("Failed to read {}", up_migration.path.display()))?;
@@ -462,6 +555,10 @@ fn validate_rollback_receipts(
     }
 
     Ok(())
+}
+
+fn parse_i64_field(value: Option<&String>) -> Option<i64> {
+    value.and_then(|v| v.parse::<i64>().ok())
 }
 
 #[cfg(test)]
@@ -514,8 +611,8 @@ mod tests {
         groups.insert("001.backfill".to_string(), "001".to_string());
         groups.insert("001.contract".to_string(), "001".to_string());
 
-        let err =
-            plan_rollbacks(&applied, &groups, Some("001.expand")).expect_err("must reject partial group");
+        let err = plan_rollbacks(&applied, &groups, Some("001.expand"))
+            .expect_err("must reject partial group");
         assert!(
             err.to_string().contains("not at a rollback boundary"),
             "error should mention boundary violation"
@@ -544,13 +641,31 @@ mod tests {
             },
         );
 
-        let mut checksums = HashMap::new();
-        checksums.insert("001_add_users.up.qail".to_string(), "deadbeef".to_string());
+        let mut receipts = HashMap::new();
+        receipts.insert(
+            "001_add_users.up.qail".to_string(),
+            crate::migrations::StoredMigrationReceipt {
+                version: "001_add_users.up.qail".to_string(),
+                name: Some("001_add_users.up.qail".to_string()),
+                checksum: Some("deadbeef".to_string()),
+                sql_up: Some("table users (id int)\n".to_string()),
+                git_sha: None,
+                qail_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                actor: None,
+                started_at_ms: None,
+                finished_at_ms: None,
+                duration_ms: None,
+                affected_rows_est: None,
+                risk_summary: None,
+                shadow_checksum: None,
+                receipt_sig: None,
+            },
+        );
 
         let err = validate_rollback_receipts(
             &["001_add_users.up.qail".to_string()],
             &up_by_version,
-            &checksums,
+            &receipts,
             ReceiptValidationMode::Error,
         )
         .expect_err("drift must fail");
@@ -596,14 +711,19 @@ mod tests {
             .await
             .expect("bootstrap _qail_migrations");
 
-        let suffix = format!("{}_{}", std::process::id(), crate::time::timestamp_version());
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            crate::time::timestamp_version()
+        );
         let applied_version = format!("fp_rollback_applied_{}.up.qail", suffix);
         let target_label = format!("fp_target_{}", suffix);
         let rollback_name = format!("rollback_to_{}", target_label);
 
         let cleanup_applied =
             Qail::del("_qail_migrations").where_eq("version", applied_version.as_str());
-        let cleanup_receipt = Qail::del("_qail_migrations").where_eq("name", rollback_name.as_str());
+        let cleanup_receipt =
+            Qail::del("_qail_migrations").where_eq("name", rollback_name.as_str());
         let _ = pg.execute(&cleanup_applied).await;
         let _ = pg.execute(&cleanup_receipt).await;
 

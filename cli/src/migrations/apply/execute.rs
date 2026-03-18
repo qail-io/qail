@@ -6,15 +6,16 @@ use super::discovery::{discover_migrations, phase_rank};
 use super::types::{ApplyPhase, BackfillRun, MigrateDirection, MigrationFile, MigrationPhase};
 use crate::colors::*;
 use crate::migrations::{
-    MigrationReceipt, ReceiptValidationMode, acquire_migration_lock, ensure_migration_table,
-    load_migration_policy, maybe_failpoint, now_epoch_ms, runtime_actor, runtime_git_sha,
+    MigrationReceipt, ReceiptSignatureStatus, ReceiptValidationMode, StoredMigrationReceipt,
+    acquire_migration_lock, ensure_migration_table, load_migration_policy, maybe_failpoint,
+    now_epoch_ms, runtime_actor, runtime_git_sha, verify_stored_receipt_signature,
     write_migration_receipt,
 };
 use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
 use qail_core::prelude::Qail;
-use std::fs;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs;
 
 /// Apply all pending migrations from the migrations/ folder.
 ///
@@ -97,24 +98,65 @@ pub async fn migrate_apply(
     )
     .await?;
 
-    // Query already-applied migration versions + checksums
-    let status_cmd = Qail::get("_qail_migrations").columns(vec!["version", "checksum"]);
+    // Query already-applied migration versions + receipt metadata.
+    let status_cmd = Qail::get("_qail_migrations").columns(vec![
+        "version",
+        "checksum",
+        "name",
+        "sql_up",
+        "git_sha",
+        "qail_version",
+        "actor",
+        "started_at_ms",
+        "finished_at_ms",
+        "duration_ms",
+        "affected_rows_est",
+        "risk_summary",
+        "shadow_checksum",
+        "receipt_sig",
+    ]);
 
-    let mut applied_migrations: HashMap<String, String> = match pg.query_ast(&status_cmd).await {
-        Ok(result) => result
-            .rows
-            .iter()
-            .filter_map(|row| {
-                let version = row.first().and_then(|v| v.as_ref())?;
-                let checksum = row.get(1).and_then(|v| v.as_ref())?;
-                Some((version.clone(), checksum.clone()))
-            })
-            .collect(),
+    let (mut applied_migrations, applied_receipts): (
+        HashMap<String, String>,
+        HashMap<String, StoredMigrationReceipt>,
+    ) = match pg.query_ast(&status_cmd).await {
+        Ok(result) => {
+            let mut checksums = HashMap::new();
+            let mut receipts = HashMap::new();
+            for row in &result.rows {
+                let Some(version) = row.first().and_then(|v| v.as_ref()).cloned() else {
+                    continue;
+                };
+
+                let checksum_opt = row.get(1).and_then(|v| v.as_ref()).cloned();
+                checksums.insert(version.clone(), checksum_opt.clone().unwrap_or_default());
+                receipts.insert(
+                    version.clone(),
+                    StoredMigrationReceipt {
+                        version,
+                        checksum: checksum_opt,
+                        name: row.get(2).and_then(|v| v.as_ref()).cloned(),
+                        sql_up: row.get(3).and_then(|v| v.as_ref()).cloned(),
+                        git_sha: row.get(4).and_then(|v| v.as_ref()).cloned(),
+                        qail_version: row.get(5).and_then(|v| v.as_ref()).cloned(),
+                        actor: row.get(6).and_then(|v| v.as_ref()).cloned(),
+                        started_at_ms: parse_i64_field(row.get(7).and_then(|v| v.as_ref())),
+                        finished_at_ms: parse_i64_field(row.get(8).and_then(|v| v.as_ref())),
+                        duration_ms: parse_i64_field(row.get(9).and_then(|v| v.as_ref())),
+                        affected_rows_est: parse_i64_field(row.get(10).and_then(|v| v.as_ref())),
+                        risk_summary: row.get(11).and_then(|v| v.as_ref()).cloned(),
+                        shadow_checksum: row.get(12).and_then(|v| v.as_ref()).cloned(),
+                        receipt_sig: row.get(13).and_then(|v| v.as_ref()).cloned(),
+                    },
+                );
+            }
+            (checksums, receipts)
+        }
         Err(e) => {
             return Err(anyhow!(
                 "Failed to query applied migrations from _qail_migrations: {}",
                 e
-            ))
+            ));
         }
     };
 
@@ -122,6 +164,7 @@ pub async fn migrate_apply(
         validate_receipts_against_local(
             &all_discovered,
             &applied_migrations,
+            &applied_receipts,
             policy.receipt_validation,
             backfill_chunk_size,
         )?;
@@ -468,6 +511,7 @@ pub(crate) fn compute_expected_migration_checksum(
 fn validate_receipts_against_local(
     discovered_up: &[MigrationFile],
     applied_migrations: &HashMap<String, String>,
+    applied_receipts: &HashMap<String, StoredMigrationReceipt>,
     mode: ReceiptValidationMode,
     backfill_chunk_size: usize,
 ) -> Result<()> {
@@ -534,7 +578,64 @@ fn validate_receipts_against_local(
         }
     }
 
+    let mut missing_signature = Vec::<String>::new();
+    let mut invalid_signature = Vec::<String>::new();
+    for (version, stored) in applied_receipts {
+        if !version.ends_with(".qail") {
+            continue;
+        }
+        match verify_stored_receipt_signature(stored) {
+            ReceiptSignatureStatus::DisabledNoKey | ReceiptSignatureStatus::Valid => {}
+            ReceiptSignatureStatus::Missing => missing_signature.push(version.clone()),
+            ReceiptSignatureStatus::Invalid => invalid_signature.push(version.clone()),
+        }
+    }
+    missing_signature.sort();
+    invalid_signature.sort();
+
+    if !missing_signature.is_empty() {
+        let detail = missing_signature
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let msg = format!(
+            "Migration receipt signature missing for {} applied version(s) (examples: {}). \
+             Set migrations.policy.receipt_validation=warn to bypass temporarily while backfilling signatures.",
+            missing_signature.len(),
+            detail
+        );
+        match mode {
+            ReceiptValidationMode::Warn => eprintln!("  {} {}", "⚠".yellow(), msg.yellow()),
+            ReceiptValidationMode::Error => bail!("{}", msg),
+        }
+    }
+
+    if !invalid_signature.is_empty() {
+        let detail = invalid_signature
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let msg = format!(
+            "Migration receipt signature verification failed for {} applied version(s) (examples: {}). \
+             Refusing to proceed with untrusted migration history.",
+            invalid_signature.len(),
+            detail
+        );
+        match mode {
+            ReceiptValidationMode::Warn => eprintln!("  {} {}", "⚠".yellow(), msg.yellow()),
+            ReceiptValidationMode::Error => bail!("{}", msg),
+        }
+    }
+
     Ok(())
+}
+
+fn parse_i64_field(value: Option<&String>) -> Option<i64> {
+    value.and_then(|v| v.parse::<i64>().ok())
 }
 
 fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Result<()> {
@@ -573,7 +674,11 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
     }
 
     if !missing_groups.is_empty() {
-        let groups = missing_groups.into_iter().take(8).collect::<Vec<_>>().join(", ");
+        let groups = missing_groups
+            .into_iter()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(", ");
         bail!(
             "Missing rollback migrations (*.down.qail or <dir>/down.qail) for group(s): {}",
             groups
@@ -608,9 +713,9 @@ mod tests {
         apply_commands_and_record_receipt_atomic, ensure_applied_checksum_matches,
         ensure_up_down_pairing, validate_receipts_against_local,
     };
+    use crate::migrations::ReceiptValidationMode;
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
-    use crate::migrations::ReceiptValidationMode;
     use qail_core::prelude::Qail;
     use std::collections::HashMap;
     use std::fs;
@@ -677,10 +782,12 @@ mod tests {
         let migrations = vec![mig("001_add_users", "001_add_users.up.qail")];
         let mut applied = HashMap::new();
         applied.insert("999_missing.up.qail".to_string(), "abc".to_string());
+        let applied_receipts = HashMap::new();
         assert!(
             validate_receipts_against_local(
                 &migrations,
                 &applied,
+                &applied_receipts,
                 ReceiptValidationMode::Warn,
                 5000
             )
@@ -693,9 +800,11 @@ mod tests {
         let migrations = vec![mig("001_add_users", "001_add_users.up.qail")];
         let mut applied = HashMap::new();
         applied.insert("999_missing.up.qail".to_string(), "abc".to_string());
+        let applied_receipts = HashMap::new();
         let err = validate_receipts_against_local(
             &migrations,
             &applied,
+            &applied_receipts,
             ReceiptValidationMode::Error,
             5000,
         )
@@ -708,10 +817,8 @@ mod tests {
 
     #[test]
     fn receipt_validation_errors_on_checksum_mismatch() {
-        let root = std::env::temp_dir().join(format!(
-            "qail_receipt_validation_{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("qail_receipt_validation_{}", std::process::id()));
         let _ = fs::create_dir_all(&root);
         let path = root.join("001_add_users.up.qail");
         fs::write(&path, "table users (id int)\n").expect("write migration");
@@ -724,9 +831,11 @@ mod tests {
         }];
         let mut applied = HashMap::new();
         applied.insert("001_add_users.up.qail".to_string(), "deadbeef".to_string());
+        let applied_receipts = HashMap::new();
         let err = validate_receipts_against_local(
             &migrations,
             &applied,
+            &applied_receipts,
             ReceiptValidationMode::Error,
             5000,
         )
@@ -762,12 +871,18 @@ mod tests {
             .await
             .expect("bootstrap _qail_migrations");
 
-        let suffix = format!("{}_{}", std::process::id(), crate::time::timestamp_version());
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            crate::time::timestamp_version()
+        );
         let marker_version = format!("fp_marker_{}", suffix);
         let migration_name = format!("fp_receipt_{}.up.qail", suffix);
 
-        let cleanup_marker = Qail::del("_qail_migrations").where_eq("version", marker_version.as_str());
-        let cleanup_receipt = Qail::del("_qail_migrations").where_eq("version", migration_name.as_str());
+        let cleanup_marker =
+            Qail::del("_qail_migrations").where_eq("version", marker_version.as_str());
+        let cleanup_receipt =
+            Qail::del("_qail_migrations").where_eq("version", migration_name.as_str());
         let _ = pg.execute(&cleanup_marker).await;
         let _ = pg.execute(&cleanup_receipt).await;
 
@@ -792,7 +907,8 @@ mod tests {
         .expect_err("failpoint should abort apply transaction");
 
         assert!(
-            err.to_string().contains("Injected failpoint triggered: apply.before_receipt"),
+            err.to_string()
+                .contains("Injected failpoint triggered: apply.before_receipt"),
             "unexpected failpoint error: {err}"
         );
         assert!(

@@ -92,7 +92,10 @@ pub async fn migrate_down(
         );
         println!();
         if force {
-            println!("{}", "⚠️  Proceeding anyway due to --force flag...".yellow());
+            println!(
+                "{}",
+                "⚠️  Proceeding anyway due to --force flag...".yellow()
+            );
         } else if !std::io::stdin().is_terminal() {
             return Err(anyhow::anyhow!(
                 "Rollback blocked: unsafe type changes detected in non-interactive mode.\n\
@@ -214,9 +217,14 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_schema_diff_returns_error() {
-        let result =
-            migrate_down("invalid-schema-diff", "postgres://localhost/testdb", false, false, None)
-                .await;
+        let result = migrate_down(
+            "invalid-schema-diff",
+            "postgres://localhost/testdb",
+            false,
+            false,
+            None,
+        )
+        .await;
         assert!(result.is_err(), "invalid rollback input must fail");
     }
 }

@@ -25,6 +25,32 @@ pub struct MigrationReceipt {
     pub shadow_checksum: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StoredMigrationReceipt {
+    pub version: String,
+    pub name: Option<String>,
+    pub checksum: Option<String>,
+    pub sql_up: Option<String>,
+    pub git_sha: Option<String>,
+    pub qail_version: Option<String>,
+    pub actor: Option<String>,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub affected_rows_est: Option<i64>,
+    pub risk_summary: Option<String>,
+    pub shadow_checksum: Option<String>,
+    pub receipt_sig: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptSignatureStatus {
+    DisabledNoKey,
+    Missing,
+    Valid,
+    Invalid,
+}
+
 pub async fn ensure_migration_receipt_columns(driver: &mut PgDriver) -> Result<()> {
     let columns: &[(&str, &str)] = &[
         ("git_sha", "text"),
@@ -118,6 +144,44 @@ fn runtime_receipt_hmac_key() -> Option<String> {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
     })
+}
+
+pub fn verify_stored_receipt_signature(stored: &StoredMigrationReceipt) -> ReceiptSignatureStatus {
+    let Some(key) = runtime_receipt_hmac_key() else {
+        return ReceiptSignatureStatus::DisabledNoKey;
+    };
+    let Some(sig) = stored
+        .receipt_sig
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return ReceiptSignatureStatus::Missing;
+    };
+
+    let material = MigrationReceipt {
+        version: stored.version.clone(),
+        name: stored.name.clone().unwrap_or_default(),
+        checksum: stored.checksum.clone().unwrap_or_default(),
+        sql_up: stored.sql_up.clone().unwrap_or_default(),
+        git_sha: stored.git_sha.clone(),
+        qail_version: stored.qail_version.clone().unwrap_or_default(),
+        actor: stored.actor.clone(),
+        started_at_ms: stored.started_at_ms,
+        finished_at_ms: stored.finished_at_ms,
+        duration_ms: stored.duration_ms,
+        affected_rows_est: stored.affected_rows_est,
+        risk_summary: stored.risk_summary.clone(),
+        shadow_checksum: stored.shadow_checksum.clone(),
+    };
+    let Some(expected) = compute_receipt_hmac(&material, &key) else {
+        return ReceiptSignatureStatus::Invalid;
+    };
+    if expected.eq_ignore_ascii_case(sig) {
+        ReceiptSignatureStatus::Valid
+    } else {
+        ReceiptSignatureStatus::Invalid
+    }
 }
 
 fn compute_receipt_hmac(receipt: &MigrationReceipt, key: &str) -> Option<String> {
@@ -233,7 +297,10 @@ pub fn runtime_git_sha() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MigrationReceipt, canonical_receipt_material, compute_receipt_hmac};
+    use super::{
+        MigrationReceipt, ReceiptSignatureStatus, StoredMigrationReceipt,
+        canonical_receipt_material, compute_receipt_hmac, verify_stored_receipt_signature,
+    };
 
     fn sample_receipt() -> MigrationReceipt {
         MigrationReceipt {
@@ -265,9 +332,14 @@ mod tests {
     fn receipt_hmac_changes_when_payload_changes() {
         let mut receipt = sample_receipt();
         let before = compute_receipt_hmac(&receipt, "top-secret").expect("hmac");
-        receipt.sql_up.push_str("\nALTER TABLE users ADD COLUMN email text;");
+        receipt
+            .sql_up
+            .push_str("\nALTER TABLE users ADD COLUMN email text;");
         let after = compute_receipt_hmac(&receipt, "top-secret").expect("hmac");
-        assert_ne!(before, after, "signature must change when receipt payload changes");
+        assert_ne!(
+            before, after,
+            "signature must change when receipt payload changes"
+        );
     }
 
     #[test]
@@ -276,5 +348,29 @@ mod tests {
         assert!(material.contains("version=001_add_users.up.qail"));
         assert!(material.contains("checksum=abc123"));
         assert!(material.contains("sql_up=CREATE TABLE users (id int);"));
+    }
+
+    #[test]
+    fn verify_signature_returns_disabled_without_key() {
+        let stored = StoredMigrationReceipt {
+            version: "001_add_users.up.qail".to_string(),
+            name: Some("001_add_users.up.qail".to_string()),
+            checksum: Some("abc123".to_string()),
+            sql_up: Some("CREATE TABLE users (id int);".to_string()),
+            git_sha: Some("deadbeef".to_string()),
+            qail_version: Some("0.25.0".to_string()),
+            actor: Some("tester".to_string()),
+            started_at_ms: Some(1000),
+            finished_at_ms: Some(1100),
+            duration_ms: Some(100),
+            affected_rows_est: Some(0),
+            risk_summary: Some("source=test".to_string()),
+            shadow_checksum: None,
+            receipt_sig: None,
+        };
+        assert_eq!(
+            verify_stored_receipt_signature(&stored),
+            ReceiptSignatureStatus::DisabledNoKey
+        );
     }
 }

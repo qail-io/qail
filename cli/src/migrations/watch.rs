@@ -107,7 +107,9 @@ pub async fn watch_schema(schema_path: &str, db_url: Option<&str>, auto_apply: b
                             println!("[{}] Applying to database...", now.dimmed());
                             if let Some(driver) = driver.as_mut() {
                                 match apply_watch_changes(driver, &cmds).await {
-                                    Ok(()) => println!("       {} Applied successfully", "✓".green()),
+                                    Ok(()) => {
+                                        println!("       {} Applied successfully", "✓".green())
+                                    }
                                     Err(e) => {
                                         println!("       {} Apply failed: {}", "✗".red(), e);
                                         println!(

@@ -268,7 +268,8 @@ pub async fn migrate_up(
             EnforcementMode::Allow => {
                 println!(
                     "{}",
-                    "⚠️  Destructive changes allowed by migrations.policy.destructive=allow".yellow()
+                    "⚠️  Destructive changes allowed by migrations.policy.destructive=allow"
+                        .yellow()
                 );
             }
         }

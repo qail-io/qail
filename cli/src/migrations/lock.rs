@@ -169,14 +169,25 @@ mod tests {
         // Scenario 2: waiting contender times out.
         let mut holder = connect_test_driver(&url).await;
         let mut waiter = connect_test_driver(&url).await;
-        acquire_migration_lock(&mut holder, "test timeout holder", true, Some(5), Some(&url))
-            .await
-            .expect("timeout holder should acquire lock");
+        acquire_migration_lock(
+            &mut holder,
+            "test timeout holder",
+            true,
+            Some(5),
+            Some(&url),
+        )
+        .await
+        .expect("timeout holder should acquire lock");
         let started = Instant::now();
-        let timeout_err =
-            acquire_migration_lock(&mut waiter, "test timeout waiter", true, Some(1), Some(&url))
-                .await
-                .expect_err("waiter should time out while holder retains lock");
+        let timeout_err = acquire_migration_lock(
+            &mut waiter,
+            "test timeout waiter",
+            true,
+            Some(1),
+            Some(&url),
+        )
+        .await
+        .expect_err("waiter should time out while holder retains lock");
         assert!(
             started.elapsed() >= Duration::from_millis(900),
             "wait timeout returned too quickly: {:?}",
@@ -194,11 +205,22 @@ mod tests {
         // Scenario 3: waiter succeeds once holder releases lock.
         let mut holder = connect_test_driver(&url).await;
         let mut waiter = connect_test_driver(&url).await;
-        acquire_migration_lock(&mut holder, "test eventual holder", true, Some(5), Some(&url))
-            .await
-            .expect("eventual holder should acquire lock");
-        let waiter_fut =
-            acquire_migration_lock(&mut waiter, "test eventual waiter", true, Some(5), Some(&url));
+        acquire_migration_lock(
+            &mut holder,
+            "test eventual holder",
+            true,
+            Some(5),
+            Some(&url),
+        )
+        .await
+        .expect("eventual holder should acquire lock");
+        let waiter_fut = acquire_migration_lock(
+            &mut waiter,
+            "test eventual waiter",
+            true,
+            Some(5),
+            Some(&url),
+        );
         let release_fut = async move {
             tokio::time::sleep(Duration::from_millis(700)).await;
             drop(holder);
