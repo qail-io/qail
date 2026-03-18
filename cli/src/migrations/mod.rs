@@ -17,6 +17,7 @@ mod apply;
 mod create;
 mod down;
 mod plan;
+mod policy;
 mod receipt;
 mod rollback;
 mod reset;
@@ -34,6 +35,7 @@ pub use apply::{ApplyPhase, MigrateDirection};
 pub use create::migrate_create;
 pub use down::migrate_down;
 pub use plan::migrate_plan;
+pub use policy::{EnforcementMode, MigrationPolicy, ReceiptValidationMode, load_migration_policy};
 pub use receipt::{
     MigrationReceipt, ensure_migration_receipt_columns, now_epoch_ms, runtime_actor,
     runtime_git_sha, write_migration_receipt,

@@ -1,6 +1,7 @@
 //! Lock/impact risk preflight for migration apply.
 
 use crate::colors::*;
+use crate::migrations::EnforcementMode;
 use anyhow::{Result, anyhow};
 use qail_core::ast::{Action, JoinKind, Qail};
 use qail_pg::driver::PgDriver;
@@ -49,6 +50,8 @@ pub async fn preflight_lock_risk(
     driver: &mut PgDriver,
     cmds: &[Qail],
     allow_lock_risk: bool,
+    policy_mode: EnforcementMode,
+    policy_max_score: u8,
 ) -> Result<()> {
     let mut stats_cache: HashMap<String, TableStats> = HashMap::new();
     let mut risky = Vec::<RiskEntry>::new();
@@ -68,7 +71,8 @@ pub async fn preflight_lock_risk(
         };
 
         let score = risk_score(lock_level, stats);
-        if let Some(reason) = risk_reason(lock_level, stats, score) {
+        let reason = risk_reason(lock_level, stats, score, policy_max_score);
+        if let Some(reason) = reason {
             risky.push(RiskEntry {
                 step: idx + 1,
                 action: cmd.action,
@@ -105,17 +109,33 @@ pub async fn preflight_lock_risk(
     }
     println!();
 
-    if allow_lock_risk {
-        println!(
-            "{}",
-            "⚠️  Proceeding despite lock-risk findings due to --allow-lock-risk".yellow()
-        );
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "Migration blocked by lock-risk guardrails ({} risky operation(s)). Re-run with --allow-lock-risk to override.",
+    match policy_mode {
+        EnforcementMode::Allow => {
+            println!(
+                "{}",
+                "⚠️  Proceeding despite lock-risk findings due to migrations.policy.lock_risk=allow"
+                    .yellow()
+            );
+            Ok(())
+        }
+        EnforcementMode::Deny => Err(anyhow!(
+            "Migration blocked by lock-risk policy (migrations.policy.lock_risk=deny, {} risky operation(s)).",
             risky.len()
-        ))
+        )),
+        EnforcementMode::RequireFlag => {
+            if allow_lock_risk {
+                println!(
+                    "{}",
+                    "⚠️  Proceeding despite lock-risk findings due to --allow-lock-risk".yellow()
+                );
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "Migration blocked by lock-risk guardrails ({} risky operation(s)). Re-run with --allow-lock-risk to override.",
+                    risky.len()
+                ))
+            }
+        }
     }
 }
 
@@ -173,7 +193,14 @@ fn risk_score(level: LockLevel, stats: TableStats) -> u8 {
         .saturating_add(bytes_weight(stats.total_bytes))
 }
 
-fn risk_reason(level: LockLevel, stats: TableStats, score: u8) -> Option<String> {
+fn risk_reason(level: LockLevel, stats: TableStats, score: u8, max_score: u8) -> Option<String> {
+    if score >= max_score {
+        return Some(format!(
+            "combined lock + size risk score {} exceeds policy threshold {}",
+            score, max_score
+        ));
+    }
+
     match level {
         LockLevel::AccessExclusive if stats.est_rows >= 100_000 => {
             Some("ACCESS EXCLUSIVE lock on non-trivial table may block reads/writes".to_string())
@@ -263,7 +290,7 @@ mod tests {
             total_bytes: 100 * 1024 * 1024,
         };
         let score = risk_score(LockLevel::AccessExclusive, stats);
-        assert!(risk_reason(LockLevel::AccessExclusive, stats, score).is_some());
+        assert!(risk_reason(LockLevel::AccessExclusive, stats, score, 90).is_some());
     }
 
     #[test]
@@ -273,6 +300,6 @@ mod tests {
             total_bytes: 16 * 1024,
         };
         let score = risk_score(LockLevel::AccessExclusive, stats);
-        assert!(risk_reason(LockLevel::AccessExclusive, stats, score).is_none());
+        assert!(risk_reason(LockLevel::AccessExclusive, stats, score, 90).is_none());
     }
 }

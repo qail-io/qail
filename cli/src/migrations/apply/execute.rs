@@ -6,8 +6,8 @@ use super::discovery::{discover_migrations, phase_rank};
 use super::types::{ApplyPhase, BackfillRun, MigrateDirection, MigrationFile, MigrationPhase};
 use crate::colors::*;
 use crate::migrations::{
-    MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
-    write_migration_receipt,
+    MigrationReceipt, ReceiptValidationMode, ensure_migration_table, load_migration_policy,
+    now_epoch_ms, runtime_actor, runtime_git_sha, write_migration_receipt,
 };
 use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
@@ -28,6 +28,7 @@ pub async fn migrate_apply(
     backfill_chunk_size: usize,
 ) -> Result<()> {
     let migrations_dir = crate::migrations::resolve_deltas_dir(false)?;
+    let policy = load_migration_policy()?;
 
     if matches!(direction, MigrateDirection::Down) && !matches!(phase_filter, ApplyPhase::All) {
         bail!("--phase is only supported for --direction up");
@@ -38,6 +39,7 @@ pub async fn migrate_apply(
         let discovered_down = discover_migrations(&migrations_dir, MigrateDirection::Down)?;
         ensure_up_down_pairing(&discovered, &discovered_down)?;
     }
+    let all_discovered = discovered.clone();
     let migrations: Vec<MigrationFile> = discovered
         .into_iter()
         .filter(|m| {
@@ -104,6 +106,15 @@ pub async fn migrate_apply(
             ))
         }
     };
+
+    if matches!(direction, MigrateDirection::Up) {
+        validate_receipts_against_local(
+            &all_discovered,
+            &applied_migrations,
+            policy.receipt_validation,
+            backfill_chunk_size,
+        )?;
+    }
 
     // Phase prerequisite check: when running --phase backfill or --phase contract,
     // verify that earlier phases for each group have already been applied.
@@ -400,6 +411,95 @@ fn ensure_applied_checksum_matches(
     );
 }
 
+pub(crate) fn compute_expected_migration_checksum(
+    content: &str,
+    phase: MigrationPhase,
+    backfill_chunk_size: usize,
+) -> Result<String> {
+    if phase == MigrationPhase::Backfill
+        && parse_backfill_spec(content, backfill_chunk_size)?.is_some()
+    {
+        return Ok(crate::time::md5_hex(content));
+    }
+
+    let cmds = parse_qail_to_commands_strict(content)
+        .context("Failed to compile migration to AST commands for checksum")?;
+    let sql = commands_to_sql(&cmds);
+    Ok(crate::time::md5_hex(&sql))
+}
+
+fn validate_receipts_against_local(
+    discovered_up: &[MigrationFile],
+    applied_migrations: &HashMap<String, String>,
+    mode: ReceiptValidationMode,
+    backfill_chunk_size: usize,
+) -> Result<()> {
+    if discovered_up.is_empty() || applied_migrations.is_empty() {
+        return Ok(());
+    }
+
+    let local_versions = discovered_up
+        .iter()
+        .map(|m| m.display_name.clone())
+        .collect::<HashSet<_>>();
+
+    let mut missing_local = Vec::<String>::new();
+    for version in applied_migrations.keys() {
+        if !version.ends_with(".qail") {
+            continue;
+        }
+        if !local_versions.contains(version) {
+            missing_local.push(version.clone());
+        }
+    }
+    missing_local.sort();
+
+    if !missing_local.is_empty() {
+        let detail = missing_local
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let msg = format!(
+            "Migration receipt drift detected: {} applied migration version(s) exist in _qail_migrations but no matching local file in deltas/migrations (examples: {}).",
+            missing_local.len(),
+            detail
+        );
+        match mode {
+            ReceiptValidationMode::Warn => {
+                eprintln!("  {} {}", "⚠".yellow(), msg.yellow());
+            }
+            ReceiptValidationMode::Error => bail!("{}", msg),
+        }
+    }
+
+    for mig in discovered_up {
+        let Some(stored_checksum) = applied_migrations.get(&mig.display_name) else {
+            continue;
+        };
+        let content = std::fs::read_to_string(&mig.path)
+            .with_context(|| format!("Failed to read {}", mig.path.display()))?;
+        let expected_checksum =
+            compute_expected_migration_checksum(&content, mig.phase, backfill_chunk_size)?;
+        if stored_checksum == &expected_checksum {
+            continue;
+        }
+        let msg = format!(
+            "Migration checksum drift detected for '{}': stored={}, local={}",
+            mig.display_name, stored_checksum, expected_checksum
+        );
+        match mode {
+            ReceiptValidationMode::Warn => {
+                eprintln!("  {} {}", "⚠".yellow(), msg.yellow());
+            }
+            ReceiptValidationMode::Error => bail!("{}", msg),
+        }
+    }
+
+    Ok(())
+}
+
 fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Result<()> {
     if up.is_empty() {
         return Ok(());
@@ -467,9 +567,14 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_applied_checksum_matches, ensure_up_down_pairing};
+    use super::{
+        ensure_applied_checksum_matches, ensure_up_down_pairing, validate_receipts_against_local,
+    };
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
+    use crate::migrations::ReceiptValidationMode;
+    use std::collections::HashMap;
+    use std::fs;
     use std::path::PathBuf;
 
     fn mig(group_key: &str, display_name: &str) -> MigrationFile {
@@ -525,6 +630,71 @@ mod tests {
         assert!(
             err.to_string().contains("Ambiguous rollback mapping"),
             "error should mention ambiguous rollback mapping"
+        );
+    }
+
+    #[test]
+    fn receipt_validation_warns_on_missing_local_file() {
+        let migrations = vec![mig("001_add_users", "001_add_users.up.qail")];
+        let mut applied = HashMap::new();
+        applied.insert("999_missing.up.qail".to_string(), "abc".to_string());
+        assert!(
+            validate_receipts_against_local(
+                &migrations,
+                &applied,
+                ReceiptValidationMode::Warn,
+                5000
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn receipt_validation_errors_on_missing_local_file() {
+        let migrations = vec![mig("001_add_users", "001_add_users.up.qail")];
+        let mut applied = HashMap::new();
+        applied.insert("999_missing.up.qail".to_string(), "abc".to_string());
+        let err = validate_receipts_against_local(
+            &migrations,
+            &applied,
+            ReceiptValidationMode::Error,
+            5000,
+        )
+        .expect_err("missing local receipt must fail in error mode");
+        assert!(
+            err.to_string().contains("receipt drift"),
+            "error should mention receipt drift"
+        );
+    }
+
+    #[test]
+    fn receipt_validation_errors_on_checksum_mismatch() {
+        let root = std::env::temp_dir().join(format!(
+            "qail_receipt_validation_{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&root);
+        let path = root.join("001_add_users.up.qail");
+        fs::write(&path, "table users (id int)\n").expect("write migration");
+        let migrations = vec![MigrationFile {
+            group_key: "001_add_users".to_string(),
+            sort_key: "001_add_users.up.qail".to_string(),
+            display_name: "001_add_users.up.qail".to_string(),
+            path,
+            phase: MigrationPhase::Expand,
+        }];
+        let mut applied = HashMap::new();
+        applied.insert("001_add_users.up.qail".to_string(), "deadbeef".to_string());
+        let err = validate_receipts_against_local(
+            &migrations,
+            &applied,
+            ReceiptValidationMode::Error,
+            5000,
+        )
+        .expect_err("checksum mismatch must fail");
+        assert!(
+            err.to_string().contains("checksum drift"),
+            "error should mention checksum drift"
         );
     }
 }

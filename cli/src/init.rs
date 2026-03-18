@@ -439,6 +439,14 @@ grpc = "{}:6334"
     // Always include commented-out gateway section
     content.push_str(
         r#"
+# [migrations.policy]
+# destructive = "require-flag"     # deny | require-flag | allow
+# lock_risk = "require-flag"       # deny | require-flag | allow
+# lock_risk_max_score = 90          # 0..100
+# require_shadow_receipt = true
+# allow_no_shadow_receipt = true
+# receipt_validation = "error"      # warn | error
+#
 # [gateway]
 # bind = "0.0.0.0:8080"
 # cors = true

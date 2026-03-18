@@ -9,8 +9,8 @@ use qail_pg::driver::PgDriver;
 use crate::migrations::risk::preflight_lock_risk;
 use crate::migrations::verify::post_apply_verify;
 use crate::migrations::{
-    MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
-    stable_cmds_checksum, write_migration_receipt,
+    EnforcementMode, MigrationReceipt, ensure_migration_table, load_migration_policy, now_epoch_ms,
+    runtime_actor, runtime_git_sha, stable_cmds_checksum, write_migration_receipt,
 };
 use crate::util::parse_pg_url;
 
@@ -52,6 +52,16 @@ pub async fn migrate_up(
 
     println!("{} {} migration(s) to apply", "Found:".cyan(), cmds.len());
     let planned_checksum = stable_cmds_checksum(&cmds);
+    let policy = load_migration_policy()?;
+    println!(
+        "  {} policy destructive={} lock_risk={} threshold={} shadow_receipt={} receipt_validation={}",
+        "→".cyan(),
+        format!("{:?}", policy.destructive).to_ascii_lowercase(),
+        format!("{:?}", policy.lock_risk).to_ascii_lowercase(),
+        policy.lock_risk_max_score,
+        policy.require_shadow_receipt,
+        format!("{:?}", policy.receipt_validation).to_ascii_lowercase()
+    );
 
     // === PHASE 0: Codebase Impact Analysis ===
     if let Some(codebase_path) = codebase {
@@ -166,7 +176,18 @@ pub async fn migrate_up(
     };
 
     // === PHASE 0.5: Shadow Receipt Verification ===
-    if allow_no_shadow_receipt {
+    if !policy.require_shadow_receipt {
+        println!(
+            "{}",
+            "⚠️  Shadow receipt verification disabled by migrations.policy.require_shadow_receipt=false"
+                .yellow()
+        );
+    } else if allow_no_shadow_receipt {
+        if !policy.allow_no_shadow_receipt {
+            return Err(anyhow::anyhow!(
+                "Migration blocked: --allow-no-shadow-receipt is disabled by migrations.policy.allow_no_shadow_receipt=false"
+            ));
+        }
         println!(
             "{}",
             "⚠️  Skipping shadow receipt verification due to --allow-no-shadow-receipt".yellow()
@@ -190,7 +211,14 @@ pub async fn migrate_up(
     }
 
     // === PHASE 0.75: Lock Risk Preflight ===
-    preflight_lock_risk(&mut driver, &cmds, allow_lock_risk).await?;
+    preflight_lock_risk(
+        &mut driver,
+        &cmds,
+        allow_lock_risk,
+        policy.lock_risk,
+        policy.lock_risk_max_score,
+    )
+    .await?;
 
     // === PHASE 1: Impact Analysis ===
     use crate::backup::{
@@ -208,16 +236,31 @@ pub async fn migrate_up(
     if has_destructive {
         display_impact(&impacts);
 
-        if !allow_destructive {
-            return Err(anyhow::anyhow!(
-                "Migration blocked: destructive operations detected.\n\
-                 Re-run with --allow-destructive to continue."
-            ));
+        match policy.destructive {
+            EnforcementMode::Deny => {
+                return Err(anyhow::anyhow!(
+                    "Migration blocked: destructive operations are disabled by migrations.policy.destructive=deny"
+                ));
+            }
+            EnforcementMode::RequireFlag if !allow_destructive => {
+                return Err(anyhow::anyhow!(
+                    "Migration blocked: destructive operations detected.\n\
+                     Re-run with --allow-destructive to continue."
+                ));
+            }
+            EnforcementMode::RequireFlag => {
+                println!(
+                    "{}",
+                    "⚠️  Destructive changes acknowledged via --allow-destructive".yellow()
+                );
+            }
+            EnforcementMode::Allow => {
+                println!(
+                    "{}",
+                    "⚠️  Destructive changes allowed by migrations.policy.destructive=allow".yellow()
+                );
+            }
         }
-        println!(
-            "{}",
-            "⚠️  Destructive changes acknowledged via --allow-destructive".yellow()
-        );
 
         let choice = prompt_migration_choice();
 
@@ -293,12 +336,15 @@ pub async fn migrate_up(
         .sum();
     let destructive_ops = impacts.iter().filter(|i| i.is_destructive).count();
     let risk_summary = format!(
-        "destructive_ops={};estimated_rows={};allow_destructive={};allow_lock_risk={};shadow_receipt_required={}",
+        "destructive_ops={};estimated_rows={};allow_destructive_flag={};allow_lock_risk_flag={};shadow_receipt_required={};policy_destructive={:?};policy_lock_risk={:?};policy_lock_risk_max_score={}",
         destructive_ops,
         affected_rows_est,
         allow_destructive,
         allow_lock_risk,
-        !allow_no_shadow_receipt
+        policy.require_shadow_receipt && !allow_no_shadow_receipt,
+        policy.destructive,
+        policy.lock_risk,
+        policy.lock_risk_max_score
     );
 
     let receipt = MigrationReceipt {

@@ -2,11 +2,12 @@
 
 use crate::colors::*;
 use crate::migrations::apply::{
-    MigrationFile, MigrateDirection, commands_to_sql, discover_migrations, parse_qail_to_commands_strict,
+    MigrationFile, MigrateDirection, commands_to_sql, compute_expected_migration_checksum,
+    discover_migrations, parse_qail_to_commands_strict,
 };
 use crate::migrations::{
-    MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
-    write_migration_receipt,
+    MigrationReceipt, ReceiptValidationMode, ensure_migration_table, load_migration_policy,
+    now_epoch_ms, runtime_actor, runtime_git_sha, write_migration_receipt,
 };
 use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
@@ -22,6 +23,7 @@ use std::fs;
 /// - `base` / `0` / `root`: roll back all applied folder migrations
 pub async fn migrate_rollback(to_version: &str, url: &str) -> Result<()> {
     println!("{} {}", "Rolling back to:".cyan().bold(), to_version.yellow());
+    let policy = load_migration_policy()?;
 
     let migrations_dir = crate::migrations::resolve_deltas_dir(false)?;
     let up = discover_migrations(&migrations_dir, MigrateDirection::Up)?;
@@ -50,7 +52,7 @@ pub async fn migrate_rollback(to_version: &str, url: &str) -> Result<()> {
         .map_err(|e| anyhow!("Failed to bootstrap migration table: {}", e))?;
 
     let history_cmd = Qail::get("_qail_migrations")
-        .columns(vec!["version", "id"])
+        .columns(vec!["version", "id", "checksum"])
         .order_by("id", SortOrder::Asc);
     let history = driver
         .query_ast(&history_cmd)
@@ -58,12 +60,16 @@ pub async fn migrate_rollback(to_version: &str, url: &str) -> Result<()> {
         .map_err(|e| anyhow!("Failed to query migration history: {}", e))?;
 
     let mut applied_versions = Vec::<String>::new();
+    let mut applied_checksums = HashMap::<String, String>::new();
     for row in &history.rows {
         let Some(version) = row.first().and_then(|v| v.as_ref()) else {
             continue;
         };
         if up_by_version.contains_key(version) {
             applied_versions.push(version.clone());
+            if let Some(checksum) = row.get(2).and_then(|v| v.as_ref()) {
+                applied_checksums.insert(version.clone(), checksum.clone());
+            }
         }
     }
 
@@ -99,6 +105,13 @@ pub async fn migrate_rollback(to_version: &str, url: &str) -> Result<()> {
         plan.groups_to_rollback.len(),
         plan.versions_to_delete.len()
     );
+
+    validate_rollback_receipts(
+        &plan.versions_to_delete,
+        &up_by_version,
+        &applied_checksums,
+        policy.receipt_validation,
+    )?;
 
     driver
         .begin()
@@ -332,10 +345,76 @@ fn ensure_up_has_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> R
     );
 }
 
+fn validate_rollback_receipts(
+    versions_to_delete: &[String],
+    up_by_version: &HashMap<String, MigrationFile>,
+    applied_checksums: &HashMap<String, String>,
+    mode: ReceiptValidationMode,
+) -> Result<()> {
+    if versions_to_delete.is_empty() {
+        return Ok(());
+    }
+
+    for version in versions_to_delete {
+        let Some(up_migration) = up_by_version.get(version) else {
+            let msg = format!(
+                "Missing local migration metadata for version '{}'. Reconcile migrations before rollback.",
+                version
+            );
+            match mode {
+                ReceiptValidationMode::Warn => {
+                    eprintln!("  {} {}", "⚠".yellow(), msg.yellow());
+                    continue;
+                }
+                ReceiptValidationMode::Error => bail!("{}", msg),
+            }
+        };
+        let Some(stored_checksum) = applied_checksums.get(version) else {
+            let msg = format!(
+                "Missing checksum in _qail_migrations for applied version '{}'.",
+                version
+            );
+            match mode {
+                ReceiptValidationMode::Warn => {
+                    eprintln!("  {} {}", "⚠".yellow(), msg.yellow());
+                    continue;
+                }
+                ReceiptValidationMode::Error => bail!("{}", msg),
+            }
+        };
+
+        let content = fs::read_to_string(&up_migration.path)
+            .with_context(|| format!("Failed to read {}", up_migration.path.display()))?;
+        let expected_checksum =
+            compute_expected_migration_checksum(&content, up_migration.phase, 5000)?;
+        if &expected_checksum == stored_checksum {
+            continue;
+        }
+        let msg = format!(
+            "Receipt checksum drift detected for '{}': stored={}, local={}. \
+             Refusing rollback until migration history and local files are reconciled.",
+            version, stored_checksum, expected_checksum
+        );
+        match mode {
+            ReceiptValidationMode::Warn => {
+                eprintln!("  {} {}", "⚠".yellow(), msg.yellow());
+            }
+            ReceiptValidationMode::Error => bail!("{}", msg),
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::plan_rollbacks;
+    use super::{plan_rollbacks, validate_rollback_receipts};
+    use crate::migrations::ReceiptValidationMode;
+    use crate::migrations::apply::MigrationFile;
+    use crate::migrations::apply::types::MigrationPhase;
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn rollback_plan_dedupes_group_in_reverse_order() {
@@ -379,6 +458,44 @@ mod tests {
         assert!(
             err.to_string().contains("not at a rollback boundary"),
             "error should mention boundary violation"
+        );
+    }
+
+    #[test]
+    fn rollback_receipt_validation_detects_checksum_drift() {
+        let root = std::env::temp_dir().join(format!(
+            "qail_rollback_receipt_validation_{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&root);
+        let path = root.join("001_add_users.up.qail");
+        fs::write(&path, "table users (id int)\n").expect("write migration");
+
+        let mut up_by_version = HashMap::new();
+        up_by_version.insert(
+            "001_add_users.up.qail".to_string(),
+            MigrationFile {
+                group_key: "001_add_users".to_string(),
+                sort_key: "001_add_users.up.qail".to_string(),
+                display_name: "001_add_users.up.qail".to_string(),
+                path: PathBuf::from(path),
+                phase: MigrationPhase::Expand,
+            },
+        );
+
+        let mut checksums = HashMap::new();
+        checksums.insert("001_add_users.up.qail".to_string(), "deadbeef".to_string());
+
+        let err = validate_rollback_receipts(
+            &["001_add_users.up.qail".to_string()],
+            &up_by_version,
+            &checksums,
+            ReceiptValidationMode::Error,
+        )
+        .expect_err("drift must fail");
+        assert!(
+            err.to_string().contains("checksum drift"),
+            "error should mention checksum drift"
         );
     }
 }

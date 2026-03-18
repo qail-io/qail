@@ -9,7 +9,7 @@ use qail_core::ast::{Action, Constraint, Expr, JoinKind, Qail};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub(super) fn parse_backfill_spec(
+pub(crate) fn parse_backfill_spec(
     content: &str,
     default_chunk_size: usize,
 ) -> Result<Option<BackfillSpec>> {
