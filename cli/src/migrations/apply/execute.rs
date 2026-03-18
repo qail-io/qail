@@ -89,7 +89,12 @@ pub async fn migrate_apply(
                 Some((version.clone(), checksum.clone()))
             })
             .collect(),
-        Err(_) => HashMap::new(), // Table may not exist yet
+        Err(e) => {
+            return Err(anyhow!(
+                "Failed to query applied migrations from _qail_migrations: {}",
+                e
+            ))
+        }
     };
 
     // Phase prerequisite check: when running --phase backfill or --phase contract,

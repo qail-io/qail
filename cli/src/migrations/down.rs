@@ -4,9 +4,14 @@ use crate::colors::*;
 use anyhow::Result;
 use qail_core::migrate::{diff_schemas, parse_qail_file};
 use qail_core::prelude::{Action, Expr};
+use qail_core::transpiler::ToSql;
 use qail_pg::driver::PgDriver;
 
 use super::types::is_narrowing_type;
+use crate::migrations::{
+    MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
+    write_migration_receipt,
+};
 use crate::util::parse_pg_url;
 
 /// Rollback migrations using qail-pg native driver.
@@ -103,14 +108,20 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
 
+    ensure_migration_table(&mut driver)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to bootstrap migration table: {}", e))?;
+
     // Begin transaction for atomic rollback
     println!("{}", "Starting transaction...".dimmed());
+    let started_ms = now_epoch_ms();
     driver
         .begin()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start transaction: {}", e))?;
 
     let mut applied = 0;
+    let mut sql_down_all = String::new();
     for (i, cmd) in cmds.iter().enumerate() {
         println!(
             "  {} {} {}",
@@ -118,6 +129,9 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
             format!("{}", cmd.action).yellow(),
             &cmd.table
         );
+
+        sql_down_all.push_str(&cmd.to_sql());
+        sql_down_all.push_str(";\n");
 
         if let Err(e) = driver.execute(cmd).await {
             println!("{}", "Rolling back transaction...".red());
@@ -132,6 +146,28 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
         applied += 1;
     }
 
+    let finished_ms = now_epoch_ms();
+    let version = format!("down_{}", crate::time::timestamp_version());
+    let checksum = crate::time::md5_hex(&sql_down_all);
+    let receipt = MigrationReceipt {
+        version: version.clone(),
+        name: format!("rollback_{}", version),
+        checksum,
+        sql_up: sql_down_all,
+        git_sha: runtime_git_sha(),
+        qail_version: env!("CARGO_PKG_VERSION").to_string(),
+        actor: runtime_actor(),
+        started_at_ms: Some(started_ms),
+        finished_at_ms: Some(finished_ms),
+        duration_ms: Some(finished_ms.saturating_sub(started_ms)),
+        affected_rows_est: None,
+        risk_summary: Some(format!("source=down;schema_diff={}", schema_diff_path)),
+        shadow_checksum: None,
+    };
+    write_migration_receipt(&mut driver, &receipt)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to record rollback receipt: {}", e))?;
+
     // Commit transaction
     driver
         .commit()
@@ -144,6 +180,7 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
             .green()
             .bold()
     );
+    println!("  Recorded rollback receipt: {}", version.cyan());
     Ok(())
 }
 

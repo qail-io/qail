@@ -451,10 +451,13 @@ pub(super) async fn run_chunked_backfill(
 
         let next_pk = *batch_ids.iter().max().unwrap_or(&last_pk);
 
-        let update_cmd = Qail::set(spec.table.as_str())
+        let mut update_cmd = Qail::set(spec.table.as_str())
             .set_value(spec.set_column.as_str(), set_expr.clone())
-            .in_vals(spec.pk_column.as_str(), batch_ids)
-            .returning([spec.pk_column.as_str()]);
+            .in_vals(spec.pk_column.as_str(), batch_ids);
+        if let Some(where_null_col) = &spec.where_null_column {
+            update_cmd = update_cmd.is_null(where_null_col.as_str());
+        }
+        update_cmd = update_cmd.returning([spec.pk_column.as_str()]);
         let updated_rows = pg
             .fetch_all(&update_cmd)
             .await
