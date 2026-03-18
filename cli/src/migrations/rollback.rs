@@ -22,7 +22,12 @@ use std::fs;
 /// `to_version` semantics:
 /// - exact applied up version: roll back everything applied *after* this version
 /// - `base` / `0` / `root`: roll back all applied folder migrations
-pub async fn migrate_rollback(to_version: &str, url: &str, wait_for_lock: bool) -> Result<()> {
+pub async fn migrate_rollback(
+    to_version: &str,
+    url: &str,
+    wait_for_lock: bool,
+    lock_timeout_secs: Option<u64>,
+) -> Result<()> {
     println!("{} {}", "Rolling back to:".cyan().bold(), to_version.yellow());
     let policy = load_migration_policy()?;
 
@@ -51,7 +56,8 @@ pub async fn migrate_rollback(to_version: &str, url: &str, wait_for_lock: bool) 
     ensure_migration_table(&mut driver)
         .await
         .map_err(|e| anyhow!("Failed to bootstrap migration table: {}", e))?;
-    acquire_migration_lock(&mut driver, "migrate rollback", wait_for_lock).await?;
+    acquire_migration_lock(&mut driver, "migrate rollback", wait_for_lock, lock_timeout_secs)
+        .await?;
 
     let history_cmd = Qail::get("_qail_migrations")
         .columns(vec!["version", "id", "checksum"])

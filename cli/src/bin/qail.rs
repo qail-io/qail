@@ -699,7 +699,8 @@ EXAMPLES:
     qail migrate up v1.qail:v2.qail postgres://... --allow-lock-risk
 
     # Wait until global migration lock is available
-    qail migrate up v1.qail:v2.qail postgres://... --wait-for-lock"#)]
+    qail migrate up v1.qail:v2.qail postgres://... --wait-for-lock
+    qail migrate up v1.qail:v2.qail postgres://... --lock-timeout-secs 30"#)]
     Up {
         /// Schema diff file or inline diff
         schema_diff: String,
@@ -724,6 +725,9 @@ EXAMPLES:
         /// Wait for the global migration lock instead of failing fast
         #[arg(long)]
         wait_for_lock: bool,
+        /// Max seconds to wait for lock (implies wait-for-lock)
+        #[arg(long)]
+        lock_timeout_secs: Option<u64>,
     },
     /// Rollback migrations
     #[command(after_help = r#"EXAMPLES:
@@ -731,7 +735,8 @@ EXAMPLES:
     qail migrate down v1.qail:v2.qail postgres://user@localhost/mydb
 
     # Wait until global migration lock is available
-    qail migrate down v1.qail:v2.qail postgres://... --wait-for-lock"#)]
+    qail migrate down v1.qail:v2.qail postgres://... --wait-for-lock
+    qail migrate down v1.qail:v2.qail postgres://... --lock-timeout-secs 30"#)]
     Down {
         /// Schema diff file or inline diff
         schema_diff: String,
@@ -741,6 +746,9 @@ EXAMPLES:
         /// Wait for the global migration lock instead of failing fast
         #[arg(long)]
         wait_for_lock: bool,
+        /// Max seconds to wait for lock (implies wait-for-lock)
+        #[arg(long)]
+        lock_timeout_secs: Option<u64>,
     },
     /// Roll back applied folder migrations to a target version
     #[command(after_help = r#"WHAT IT DOES:
@@ -754,7 +762,8 @@ TARGET:
 EXAMPLES:
     qail migrate rollback --to 20260318094500_add_users.up.qail
     qail migrate rollback --to base --url postgres://user@localhost/mydb
-    qail migrate rollback --to base --wait-for-lock"#)]
+    qail migrate rollback --to base --wait-for-lock
+    qail migrate rollback --to base --lock-timeout-secs 30"#)]
     Rollback {
         /// Target applied migration version to keep (or "base")
         #[arg(long)]
@@ -765,6 +774,9 @@ EXAMPLES:
         /// Wait for the global migration lock instead of failing fast
         #[arg(long)]
         wait_for_lock: bool,
+        /// Max seconds to wait for lock (implies wait-for-lock)
+        #[arg(long)]
+        lock_timeout_secs: Option<u64>,
     },
     /// Apply migrations from migrations/ folder (reads .qail files)
     #[command(after_help = r#"WHAT IT DOES:
@@ -789,7 +801,8 @@ EXAMPLES:
     qail migrate apply --phase contract --codebase ./src
 
     # Wait until global migration lock is available
-    qail migrate apply --wait-for-lock"#)]
+    qail migrate apply --wait-for-lock
+    qail migrate apply --lock-timeout-secs 30"#)]
     Apply {
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
@@ -812,6 +825,9 @@ EXAMPLES:
         /// Wait for the global migration lock instead of failing fast
         #[arg(long)]
         wait_for_lock: bool,
+        /// Max seconds to wait for lock (implies wait-for-lock)
+        #[arg(long)]
+        lock_timeout_secs: Option<u64>,
     },
     /// Create a new named migration file
     #[command(after_help = r#"EXAMPLES:
@@ -872,6 +888,7 @@ EXAMPLES:
 EXAMPLES:
     qail migrate reset schema.qail postgres://user@localhost/mydb
     qail migrate reset schema.qail postgres://... --wait-for-lock
+    qail migrate reset schema.qail postgres://... --lock-timeout-secs 30
 
 WARNING:
     This is destructive — all data in matching tables will be lost."#)]
@@ -884,6 +901,9 @@ WARNING:
         /// Wait for the global migration lock instead of failing fast
         #[arg(long)]
         wait_for_lock: bool,
+        /// Max seconds to wait for lock (implies wait-for-lock)
+        #[arg(long)]
+        lock_timeout_secs: Option<u64>,
     },
 }
 
@@ -1067,6 +1087,7 @@ async fn main() -> Result<()> {
                 allow_no_shadow_receipt,
                 allow_lock_risk,
                 wait_for_lock,
+                lock_timeout_secs,
             } => {
                 let db_url = resolve_db_url(url.as_deref())?;
                 migrate_up(
@@ -1078,6 +1099,7 @@ async fn main() -> Result<()> {
                     *allow_no_shadow_receipt,
                     *allow_lock_risk,
                     *wait_for_lock,
+                    *lock_timeout_secs,
                 )
                 .await?;
             }
@@ -1085,25 +1107,28 @@ async fn main() -> Result<()> {
                 schema_diff,
                 url,
                 wait_for_lock,
+                lock_timeout_secs,
             } => {
                 let db_url = resolve_db_url(url.as_deref())?;
-                migrate_down(schema_diff, &db_url, *wait_for_lock).await?;
+                migrate_down(schema_diff, &db_url, *wait_for_lock, *lock_timeout_secs).await?;
             }
             MigrateAction::Rollback {
                 to,
                 url,
                 wait_for_lock,
+                lock_timeout_secs,
             } => {
                 let db_url = resolve_db_url(url.as_deref())?;
-                migrate_rollback(to, &db_url, *wait_for_lock).await?;
+                migrate_rollback(to, &db_url, *wait_for_lock, *lock_timeout_secs).await?;
             }
             MigrateAction::Reset {
                 schema,
                 url,
                 wait_for_lock,
+                lock_timeout_secs,
             } => {
                 let db_url = resolve_db_url(url.as_deref())?;
-                migrate_reset(schema, &db_url, *wait_for_lock).await?;
+                migrate_reset(schema, &db_url, *wait_for_lock, *lock_timeout_secs).await?;
             }
             MigrateAction::Apply {
                 url,
@@ -1113,6 +1138,7 @@ async fn main() -> Result<()> {
                 allow_contract_with_references,
                 backfill_chunk_size,
                 wait_for_lock,
+                lock_timeout_secs,
             } => {
                 let db_url = resolve_db_url(url.as_deref())?;
                 migrate_apply(
@@ -1123,6 +1149,7 @@ async fn main() -> Result<()> {
                     *allow_contract_with_references,
                     *backfill_chunk_size,
                     *wait_for_lock,
+                    *lock_timeout_secs,
                 )
                 .await?;
             }
