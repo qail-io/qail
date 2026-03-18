@@ -20,3 +20,6 @@ pub(crate) mod types;
 
 pub use execute::migrate_apply;
 pub use types::{ApplyPhase, MigrateDirection};
+pub(crate) use codegen::{commands_to_sql, parse_qail_to_commands_strict};
+pub(crate) use discovery::discover_migrations;
+pub(crate) use types::MigrationFile;

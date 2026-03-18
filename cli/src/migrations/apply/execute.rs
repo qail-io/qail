@@ -13,7 +13,7 @@ use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
 use qail_core::prelude::Qail;
 use std::fs;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Apply all pending migrations from the migrations/ folder.
 ///
@@ -34,6 +34,10 @@ pub async fn migrate_apply(
     }
 
     let discovered = discover_migrations(&migrations_dir, direction)?;
+    if matches!(direction, MigrateDirection::Up) {
+        let discovered_down = discover_migrations(&migrations_dir, MigrateDirection::Down)?;
+        ensure_up_down_pairing(&discovered, &discovered_down)?;
+    }
     let migrations: Vec<MigrationFile> = discovered
         .into_iter()
         .filter(|m| {
@@ -396,9 +400,87 @@ fn ensure_applied_checksum_matches(
     );
 }
 
+fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Result<()> {
+    if up.is_empty() {
+        return Ok(());
+    }
+
+    let mut down_groups: HashMap<&str, usize> = HashMap::new();
+    let mut down_display = HashSet::<String>::new();
+    for mig in down {
+        *down_groups.entry(mig.group_key.as_str()).or_insert(0) += 1;
+        down_display.insert(mig.display_name.clone());
+    }
+
+    let mut missing_groups = BTreeSet::<String>::new();
+    let mut ambiguous_groups = BTreeSet::<String>::new();
+    let mut missing_flat_pairs = BTreeSet::<String>::new();
+
+    for mig in up {
+        match down_groups.get(mig.group_key.as_str()) {
+            None => {
+                missing_groups.insert(mig.group_key.clone());
+            }
+            Some(count) if *count > 1 => {
+                ambiguous_groups.insert(mig.group_key.clone());
+            }
+            Some(_) => {}
+        }
+
+        if mig.display_name.ends_with(".up.qail") {
+            let expected_down = mig.display_name.replacen(".up.qail", ".down.qail", 1);
+            if !down_display.contains(&expected_down) {
+                missing_flat_pairs.insert(format!("{} -> {}", mig.display_name, expected_down));
+            }
+        }
+    }
+
+    if !missing_groups.is_empty() {
+        let groups = missing_groups.into_iter().take(8).collect::<Vec<_>>().join(", ");
+        bail!(
+            "Missing rollback migrations (*.down.qail or <dir>/down.qail) for group(s): {}",
+            groups
+        );
+    }
+    if !ambiguous_groups.is_empty() {
+        let groups = ambiguous_groups
+            .into_iter()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "Ambiguous rollback mapping: multiple down migrations found for group(s): {}",
+            groups
+        );
+    }
+    if !missing_flat_pairs.is_empty() {
+        let pairs = missing_flat_pairs
+            .into_iter()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("Missing flat rollback pair(s): {}", pairs);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ensure_applied_checksum_matches;
+    use super::{ensure_applied_checksum_matches, ensure_up_down_pairing};
+    use crate::migrations::apply::MigrationFile;
+    use crate::migrations::apply::types::MigrationPhase;
+    use std::path::PathBuf;
+
+    fn mig(group_key: &str, display_name: &str) -> MigrationFile {
+        MigrationFile {
+            group_key: group_key.to_string(),
+            sort_key: display_name.to_string(),
+            display_name: display_name.to_string(),
+            path: PathBuf::from(display_name),
+            phase: MigrationPhase::Expand,
+        }
+    }
 
     #[test]
     fn applied_checksum_match_passes() {
@@ -412,6 +494,37 @@ mod tests {
         assert!(
             err.to_string().contains("checksum drift"),
             "error should mention checksum drift"
+        );
+    }
+
+    #[test]
+    fn up_down_pairing_passes_for_flat_pair() {
+        let up = vec![mig("001_add_users", "001_add_users.up.qail")];
+        let down = vec![mig("001_add_users", "001_add_users.down.qail")];
+        assert!(ensure_up_down_pairing(&up, &down).is_ok());
+    }
+
+    #[test]
+    fn up_down_pairing_fails_when_missing_group_down() {
+        let up = vec![mig("001_add_users", "001_add_users.up.qail")];
+        let err = ensure_up_down_pairing(&up, &[]).expect_err("missing down must fail");
+        assert!(
+            err.to_string().contains("Missing rollback migrations"),
+            "error should mention missing rollback migration"
+        );
+    }
+
+    #[test]
+    fn up_down_pairing_fails_when_ambiguous_group() {
+        let up = vec![mig("001_add_users", "001_add_users.up.qail")];
+        let down = vec![
+            mig("001_add_users", "001_add_users.down.qail"),
+            mig("001_add_users", "001_add_users_v2.down.qail"),
+        ];
+        let err = ensure_up_down_pairing(&up, &down).expect_err("ambiguous down must fail");
+        assert!(
+            err.to_string().contains("Ambiguous rollback mapping"),
+            "error should mention ambiguous rollback mapping"
         );
     }
 }

@@ -151,7 +151,7 @@ pub(super) fn parse_drop_targets(sql: &str) -> (Vec<String>, Vec<(String, String
 ///   Subdir: `migrations/20251207000000_name/up.qail`
 ///
 /// Raw `.sql` files are rejected to enforce the type-safe barrier.
-pub(super) fn discover_migrations(
+pub(crate) fn discover_migrations(
     migrations_dir: &Path,
     direction: MigrateDirection,
 ) -> Result<Vec<MigrationFile>> {

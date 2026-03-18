@@ -35,7 +35,7 @@ impl std::fmt::Display for ApplyPhase {
 
 /// Expand/Backfill/Contract phase for a discovered migration file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum MigrationPhase {
+pub(crate) enum MigrationPhase {
     Expand = 0,
     Backfill = 1,
     Contract = 2,
@@ -52,17 +52,18 @@ impl std::fmt::Display for MigrationPhase {
 }
 
 /// A discovered migration, from either flat or subdirectory layout.
-pub(super) struct MigrationFile {
+#[derive(Clone)]
+pub(crate) struct MigrationFile {
     /// Group key (timestamp/name without phase suffix)
-    pub(super) group_key: String,
+    pub(crate) group_key: String,
     /// Sort key (directory/file name prefix)
-    pub(super) sort_key: String,
+    pub(crate) sort_key: String,
     /// Display name
-    pub(super) display_name: String,
+    pub(crate) display_name: String,
     /// Full path to the .qail file
-    pub(super) path: PathBuf,
+    pub(crate) path: PathBuf,
     /// Workflow phase this file belongs to
-    pub(super) phase: MigrationPhase,
+    pub(crate) phase: MigrationPhase,
 }
 
 #[derive(Debug, Clone)]

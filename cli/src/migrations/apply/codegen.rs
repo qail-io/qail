@@ -64,7 +64,7 @@ pub(super) fn parse_qail_to_sql(content: &str) -> Result<String> {
 /// This compiler intentionally fails on constructs that do not yet have
 /// first-class AST/wire support in the migration executor, rather than
 /// silently falling back to raw SQL execution.
-pub(super) fn parse_qail_to_commands_strict(content: &str) -> Result<Vec<Qail>> {
+pub(crate) fn parse_qail_to_commands_strict(content: &str) -> Result<Vec<Qail>> {
     let uses_braces = content.lines().any(|line| {
         let trimmed = line.trim();
         trimmed.starts_with("table ") && trimmed.ends_with('{')
@@ -87,7 +87,7 @@ pub(super) fn parse_qail_to_commands_strict(content: &str) -> Result<Vec<Qail>> 
 }
 
 /// Render compiled commands back to SQL text (for receipts/checksums/guards).
-pub(super) fn commands_to_sql(cmds: &[Qail]) -> String {
+pub(crate) fn commands_to_sql(cmds: &[Qail]) -> String {
     cmds.iter()
         .map(|cmd| cmd.to_sql())
         .collect::<Vec<_>>()
