@@ -16,6 +16,8 @@ mod analyze;
 mod apply;
 mod create;
 mod down;
+mod failpoint;
+mod lock;
 mod plan;
 mod policy;
 mod receipt;
@@ -34,6 +36,8 @@ pub use apply::migrate_apply;
 pub use apply::{ApplyPhase, MigrateDirection};
 pub use create::migrate_create;
 pub use down::migrate_down;
+pub use failpoint::maybe_failpoint;
+pub use lock::acquire_migration_lock;
 pub use plan::migrate_plan;
 pub use policy::{EnforcementMode, MigrationPolicy, ReceiptValidationMode, load_migration_policy};
 pub use receipt::{

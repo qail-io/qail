@@ -9,8 +9,8 @@ use qail_pg::driver::PgDriver;
 
 use super::types::is_narrowing_type;
 use crate::migrations::{
-    MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
-    write_migration_receipt,
+    MigrationReceipt, acquire_migration_lock, ensure_migration_table, now_epoch_ms, runtime_actor,
+    runtime_git_sha, write_migration_receipt,
 };
 use crate::util::parse_pg_url;
 
@@ -111,6 +111,7 @@ pub async fn migrate_down(schema_diff_path: &str, url: &str) -> Result<()> {
     ensure_migration_table(&mut driver)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bootstrap migration table: {}", e))?;
+    acquire_migration_lock(&mut driver, "migrate down").await?;
 
     // Begin transaction for atomic rollback
     println!("{}", "Starting transaction...".dimmed());

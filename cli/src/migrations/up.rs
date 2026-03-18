@@ -9,8 +9,9 @@ use qail_pg::driver::PgDriver;
 use crate::migrations::risk::preflight_lock_risk;
 use crate::migrations::verify::post_apply_verify;
 use crate::migrations::{
-    EnforcementMode, MigrationReceipt, ensure_migration_table, load_migration_policy, now_epoch_ms,
-    runtime_actor, runtime_git_sha, stable_cmds_checksum, write_migration_receipt,
+    EnforcementMode, MigrationReceipt, acquire_migration_lock, ensure_migration_table,
+    load_migration_policy, now_epoch_ms, runtime_actor, runtime_git_sha, stable_cmds_checksum,
+    write_migration_receipt,
 };
 use crate::util::parse_pg_url;
 
@@ -174,6 +175,7 @@ pub async fn migrate_up(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
+    acquire_migration_lock(&mut driver, "migrate up").await?;
 
     // === PHASE 0.5: Shadow Receipt Verification ===
     if !policy.require_shadow_receipt {

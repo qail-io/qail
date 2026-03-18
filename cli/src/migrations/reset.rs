@@ -10,8 +10,8 @@ use qail_core::migrate::{diff_schemas, parse_qail};
 use qail_pg::PgDriver;
 
 use crate::migrations::{
-    MigrationReceipt, ensure_migration_table, now_epoch_ms, runtime_actor, runtime_git_sha,
-    write_migration_receipt,
+    MigrationReceipt, acquire_migration_lock, ensure_migration_table, now_epoch_ms, runtime_actor,
+    runtime_git_sha, write_migration_receipt,
 };
 use crate::util::parse_pg_url;
 
@@ -42,6 +42,7 @@ pub async fn migrate_reset(schema_file: &str, url: &str) -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?
     };
+    acquire_migration_lock(&mut driver, "migrate reset").await?;
 
     // Build DROP plan from live schema to avoid leaving drift objects behind.
     let live_schema = crate::shadow::introspect_schema(&mut driver)

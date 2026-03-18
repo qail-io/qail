@@ -6,8 +6,9 @@ use crate::migrations::apply::{
     discover_migrations, parse_qail_to_commands_strict,
 };
 use crate::migrations::{
-    MigrationReceipt, ReceiptValidationMode, ensure_migration_table, load_migration_policy,
-    now_epoch_ms, runtime_actor, runtime_git_sha, write_migration_receipt,
+    MigrationReceipt, ReceiptValidationMode, acquire_migration_lock, ensure_migration_table,
+    load_migration_policy, maybe_failpoint, now_epoch_ms, runtime_actor, runtime_git_sha,
+    write_migration_receipt,
 };
 use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
@@ -50,6 +51,7 @@ pub async fn migrate_rollback(to_version: &str, url: &str) -> Result<()> {
     ensure_migration_table(&mut driver)
         .await
         .map_err(|e| anyhow!("Failed to bootstrap migration table: {}", e))?;
+    acquire_migration_lock(&mut driver, "migrate rollback").await?;
 
     let history_cmd = Qail::get("_qail_migrations")
         .columns(vec!["version", "id", "checksum"])
@@ -175,6 +177,11 @@ pub async fn migrate_rollback(to_version: &str, url: &str) -> Result<()> {
                 ));
             }
         }
+    }
+
+    if let Err(err) = maybe_failpoint("rollback.after_down_before_history_delete") {
+        let _ = driver.rollback().await;
+        return Err(err);
     }
 
     for version in &plan.versions_to_delete {

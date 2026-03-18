@@ -6,8 +6,9 @@ use super::discovery::{discover_migrations, phase_rank};
 use super::types::{ApplyPhase, BackfillRun, MigrateDirection, MigrationFile, MigrationPhase};
 use crate::colors::*;
 use crate::migrations::{
-    MigrationReceipt, ReceiptValidationMode, ensure_migration_table, load_migration_policy,
-    now_epoch_ms, runtime_actor, runtime_git_sha, write_migration_receipt,
+    MigrationReceipt, ReceiptValidationMode, acquire_migration_lock, ensure_migration_table,
+    load_migration_policy, maybe_failpoint, now_epoch_ms, runtime_actor, runtime_git_sha,
+    write_migration_receipt,
 };
 use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
@@ -85,6 +86,7 @@ pub async fn migrate_apply(
     ensure_migration_table(&mut pg)
         .await
         .context("Failed to create _qail_migrations table")?;
+    acquire_migration_lock(&mut pg, "migrate apply").await?;
 
     // Query already-applied migration versions + checksums
     let status_cmd = Qail::get("_qail_migrations").columns(vec!["version", "checksum"]);
@@ -378,6 +380,11 @@ async fn apply_commands_and_record_receipt_atomic(
         shadow_checksum: None,
     };
 
+    if let Err(err) = maybe_failpoint("apply.before_receipt") {
+        let _ = pg.rollback().await;
+        return Err(err);
+    }
+
     if let Err(err) = write_migration_receipt(pg, &receipt).await {
         let _ = pg.rollback().await;
         return Err(anyhow!(
@@ -385,6 +392,11 @@ async fn apply_commands_and_record_receipt_atomic(
             migration_name,
             err
         ));
+    }
+
+    if let Err(err) = maybe_failpoint("apply.before_commit") {
+        let _ = pg.rollback().await;
+        return Err(err);
     }
 
     pg.commit()
