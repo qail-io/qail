@@ -2,8 +2,6 @@
 
 use super::scanner::*;
 use super::schema::*;
-#[cfg(feature = "syn-scanner")]
-use super::syn_analyzer::*;
 use super::validate::*;
 
 #[test]
@@ -318,6 +316,7 @@ table users {
         action: "GET".to_string(),
         is_cte_ref: false,
         has_rls: false,
+        has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
     }];
 
@@ -351,6 +350,7 @@ table users {
         action: "GET".to_string(),
         is_cte_ref: false,
         has_rls: false,
+        has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
     }];
 
@@ -384,6 +384,7 @@ table users {
         action: "GET".to_string(),
         is_cte_ref: false,
         has_rls: false,
+        has_explicit_tenant_scope: false,
         file_uses_super_admin: false,
     }];
 
@@ -470,477 +471,6 @@ SELECT 'ALTER TABLE users ADD COLUMN injected TEXT' AS note;
     assert!(!schema.table("users").unwrap().has_column("injected"));
 }
 
-#[cfg(all(feature = "syn-scanner", not(feature = "analyzer")))]
-#[test]
-fn test_syn_scanner_nplus1_detector_available_without_analyzer() {
-    let source = r#"
-async fn demo(ids: Vec<i64>, conn: &Conn, pool: &Pool) {
-    for id in ids {
-        let q = Qail::get("users").eq("id", id);
-        let _ = conn.fetch_all(&q).await;
-    }
-}
-"#;
-    let diags = super::syn_nplus1::detect_n_plus_one_in_file("demo.rs", source);
-    assert!(!diags.is_empty(), "expected at least one N+1 diagnostic");
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_syn_extract_join_group_by_having() {
-    let source = r#"
-fn demo(ctx: &RlsContext) {
-    let _q = Qail::get("orders")
-        .left_join("customers", "orders.customer_id", "customers.id")
-        .group_by(["customer_id"])
-        .having_cond(Condition {
-            left: Expr::Named("total".into()),
-            op: Operator::Eq,
-            value: Value::Int(1),
-            is_array_unnest: false,
-        })
-        .with_rls(ctx);
-}
-"#;
-
-    let parsed = extract_syn_usages_from_source(source);
-    let usage = parsed
-        .into_iter()
-        .find(|u| u.action == "GET" && u.table == "orders")
-        .expect("expected syn usage for Qail::get(\"orders\")");
-
-    assert_eq!(usage.cmd.joins.len(), 1);
-    assert!(
-        usage
-            .cmd
-            .cages
-            .iter()
-            .any(|c| matches!(c.kind, crate::ast::CageKind::Partition))
-    );
-    assert_eq!(usage.cmd.having.len(), 1);
-    assert!(usage.has_rls);
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_validate_against_schema_uses_syn_structural_fields() {
-    let schema = Schema::parse(
-        r#"
-table orders {
-  id INT
-  customer_id INT
-  total INT
-}
-
-table customers {
-  id INT
-}
-"#,
-    )
-    .unwrap();
-
-    let content = r#"
-fn demo() {
-    let _q = Qail::get("orders")
-        .left_join("customerz", "orders.customer_id", "customerz.id")
-        .group_by(["custmer_id"])
-        .having_cond(Condition {
-            left: Expr::Named("totl".into()),
-            op: Operator::Eq,
-            value: Value::Int(1),
-            is_array_unnest: false,
-        });
-}
-"#;
-
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let test_path = std::env::temp_dir().join(format!(
-        "qail_build_syn_structural_{}_{}.rs",
-        std::process::id(),
-        unique
-    ));
-    std::fs::write(&test_path, content).unwrap();
-
-    let mut usages = Vec::new();
-    scan_file(&test_path.display().to_string(), content, &mut usages);
-    let errors = validate_against_schema(&schema, &usages);
-    let _ = std::fs::remove_file(&test_path);
-
-    assert!(errors.iter().any(|e: &String| e.contains("customerz")));
-    assert!(errors.iter().any(|e: &String| e.contains("custmer_id")));
-    assert!(errors.iter().any(|e: &String| e.contains("totl")));
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_query_ir_ignores_scanner_columns_when_syn_command_exists() {
-    let source = r#"
-fn demo() {
-    let _q = Qail::get("users").eq("id", 1);
-}
-"#;
-
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before unix epoch")
-        .as_nanos();
-    let test_path = std::env::temp_dir().join(format!(
-        "qail_build_syn_query_ir_{}_{}.rs",
-        std::process::id(),
-        unique
-    ));
-    std::fs::write(&test_path, source).expect("write source");
-
-    let mut usages = Vec::new();
-    scan_file(&test_path.display().to_string(), source, &mut usages);
-    assert_eq!(usages.len(), 1, "expected one scanner usage");
-
-    // Simulate scanner drift/noise: this column is not present in the syn AST.
-    usages[0]
-        .columns
-        .push("definitely_not_a_real_column".to_string());
-
-    let query_ir = super::query_ir::build_query_ir(&usages);
-    let _ = std::fs::remove_file(&test_path);
-
-    assert_eq!(query_ir.len(), 1);
-    let cols = normalized_columns_from_cmd(&query_ir[0].cmd);
-    assert!(
-        !cols.contains(&"definitely_not_a_real_column".to_string()),
-        "scanner-only column noise must be ignored when syn command is available"
-    );
-    assert!(
-        cols.contains(&"id".to_string()),
-        "syn-derived command should still include real filter columns"
-    );
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_syn_chain_through_await() {
-    let source = r#"
-async fn demo(pool: &Pool) {
-    let _r = Qail::get("orders")
-        .eq("status", "active")
-        .fetch_one(&pool)
-        .await;
-}
-"#;
-    let parsed = extract_syn_usages_from_source(source);
-    let usage = parsed
-        .into_iter()
-        .find(|u| u.action == "GET" && u.table == "orders")
-        .expect("expected syn usage for Qail::get(\"orders\") through .await");
-
-    // The chain should have captured the .eq("status", ...) filter
-    assert!(
-        usage
-            .cmd
-            .cages
-            .iter()
-            .any(|c| matches!(&c.kind, crate::ast::CageKind::Filter)),
-        "expected a Filter cage from .eq(\"status\", ...)"
-    );
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_syn_chain_through_try() {
-    let source = r#"
-fn demo(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
-    let _r = Qail::get("orders")
-        .eq("id", 42)
-        .fetch_one(&pool)?;
-    Ok(())
-}
-"#;
-    let parsed = extract_syn_usages_from_source(source);
-    let usage = parsed
-        .into_iter()
-        .find(|u| u.action == "GET" && u.table == "orders")
-        .expect("expected syn usage for Qail::get(\"orders\") through ?");
-
-    assert!(
-        usage
-            .cmd
-            .cages
-            .iter()
-            .any(|c| matches!(&c.kind, crate::ast::CageKind::Filter)),
-        "expected a Filter cage from .eq(\"id\", ...)"
-    );
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_syn_variable_reassigned_chain() {
-    let source = r#"
-fn demo() {
-    let mut cmd = Qail::get("orders");
-    cmd = cmd.eq("status", "active");
-    cmd = cmd.order_desc("created_at");
-}
-"#;
-    let parsed = extract_syn_usages_from_source(source);
-    // Should find multiple usages — the final one (highest score) should have all 3 columns
-    let best = parsed
-        .iter()
-        .filter(|u| u.action == "GET" && u.table == "orders")
-        .max_by_key(|u| u.score)
-        .expect("expected syn usage for reassigned Qail chain");
-
-    // The best usage should have both filter and sort cages
-    let has_filter = best
-        .cmd
-        .cages
-        .iter()
-        .any(|c| matches!(&c.kind, crate::ast::CageKind::Filter));
-    let has_sort = best
-        .cmd
-        .cages
-        .iter()
-        .any(|c| matches!(&c.kind, crate::ast::CageKind::Sort(_)));
-
-    assert!(
-        has_filter,
-        "expected a Filter cage from .eq(\"status\", ...)"
-    );
-    assert!(
-        has_sort,
-        "expected a Sort cage from .order_desc(\"created_at\")"
-    );
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_syn_closure_chain() {
-    let source = r#"
-fn demo() {
-    let items = vec![1, 2, 3];
-    let _results: Vec<_> = items.iter().map(|item| {
-        Qail::get("products").eq("product_id", *item)
-    }).collect();
-}
-"#;
-    let parsed = extract_syn_usages_from_source(source);
-    let usage = parsed
-        .into_iter()
-        .find(|u| u.action == "GET" && u.table == "products")
-        .expect("expected syn usage for Qail::get(\"products\") inside closure");
-
-    assert!(
-        usage
-            .cmd
-            .cages
-            .iter()
-            .any(|c| matches!(&c.kind, crate::ast::CageKind::Filter)),
-        "expected a Filter cage from .eq(\"product_id\", ...)"
-    );
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_syn_async_move_chain() {
-    let source = r#"
-fn demo() {
-    tokio::spawn(async move {
-        Qail::set("orders")
-            .set_value("status", "completed")
-    });
-}
-"#;
-    let parsed = extract_syn_usages_from_source(source);
-    let usage = parsed
-        .into_iter()
-        .find(|u| u.action == "SET" && u.table == "orders")
-        .expect("expected syn usage for Qail::set(\"orders\") inside async move block");
-
-    assert!(
-        usage
-            .cmd
-            .cages
-            .iter()
-            .any(|c| matches!(&c.kind, crate::ast::CageKind::Payload)),
-        "expected a Payload cage from .set_value(\"status\", ...)"
-    );
-}
-
-#[cfg(feature = "syn-scanner")]
-fn normalized_columns_from_cmd(cmd: &crate::ast::Qail) -> Vec<String> {
-    use crate::ast::Expr;
-    let mut out = Vec::<String>::new();
-    let mut seen = std::collections::HashSet::<String>::new();
-    let mut push = |name: &str| {
-        if name.is_empty() || name == "*" || name.contains('.') || name.contains('(') {
-            return;
-        }
-        if seen.insert(name.to_string()) {
-            out.push(name.to_string());
-        }
-    };
-
-    for expr in &cmd.columns {
-        match expr {
-            Expr::Named(name) => push(name),
-            Expr::Aliased { name, .. } => push(name),
-            Expr::Aggregate { col, .. } => push(col),
-            _ => {}
-        }
-    }
-    for cage in &cmd.cages {
-        for cond in &cage.conditions {
-            if let Expr::Named(name) = &cond.left {
-                push(name);
-            }
-        }
-    }
-    for cond in &cmd.having {
-        if let Expr::Named(name) = &cond.left {
-            push(name);
-        }
-    }
-    if let Some(returning) = &cmd.returning {
-        for expr in returning {
-            if let Expr::Named(name) = expr {
-                push(name);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-#[cfg(feature = "syn-scanner")]
-type NormalizedUsageRow = (usize, usize, String, String, bool, bool, bool, Vec<String>);
-
-#[cfg(feature = "syn-scanner")]
-fn normalize_usage_rows(usages: &[QailUsage]) -> Vec<NormalizedUsageRow> {
-    let mut rows = usages
-        .iter()
-        .map(|u| {
-            let mut cols = u.columns.clone();
-            cols.sort();
-            cols.dedup();
-            (
-                u.line,
-                u.column,
-                u.action.clone(),
-                u.table.clone(),
-                u.has_rls,
-                u.is_cte_ref,
-                u.file_uses_super_admin,
-                cols,
-            )
-        })
-        .collect::<Vec<_>>();
-    rows.sort();
-    rows
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_syn_emit_usage_drift_gate() {
-    let source = r#"
-fn demo(ctx: &RlsContext) {
-    let _sa = SuperAdminToken::for_system_process("jobs");
-    let _q = Qail::get("orders")
-        .columns(["id", "tenant_id", "status"])
-        .eq("tenant_id", 7)
-        .with_rls(ctx);
-    let _cte = Qail::get("orders").columns(["id"]).to_cte("agg");
-    let _read = Qail::get("agg").column("id");
-}
-"#;
-
-    let emitted = emit_qail_usages_from_syn_source("drift.rs", source);
-    let parsed = extract_syn_usages_from_source(source);
-
-    let mut best_by_key: std::collections::HashMap<
-        (usize, usize, String, String),
-        super::syn_analyzer::SynParsedUsage,
-    > = std::collections::HashMap::new();
-    for parsed_usage in parsed {
-        let key = (
-            parsed_usage.line,
-            parsed_usage.column,
-            parsed_usage.action.clone(),
-            parsed_usage.table.clone(),
-        );
-        match best_by_key.get(&key) {
-            Some(existing) if existing.score >= parsed_usage.score => {}
-            _ => {
-                best_by_key.insert(key, parsed_usage);
-            }
-        }
-    }
-
-    let mut expected_rows = best_by_key
-        .values()
-        .map(|p| {
-            (
-                p.line,
-                p.column,
-                p.action.clone(),
-                p.table.clone(),
-                p.has_rls,
-                p.table == "agg",
-                true,
-                normalized_columns_from_cmd(&p.cmd),
-            )
-        })
-        .collect::<Vec<_>>();
-    expected_rows.sort();
-
-    let actual_rows = normalize_usage_rows(&emitted);
-    assert_eq!(
-        actual_rows, expected_rows,
-        "syn parsed usage and emitted QailUsage drifted"
-    );
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_syn_emit_usage_respects_super_admin_allow_comment() {
-    let source = r#"
-// qail:allow(super_admin)
-fn demo() {
-    let _sa = SuperAdminToken::for_system_process("jobs");
-    let _q = Qail::get("orders").column("id");
-}
-"#;
-    let emitted = emit_qail_usages_from_syn_source("allow.rs", source);
-    assert!(!emitted.is_empty());
-    assert!(emitted.iter().all(|u| !u.file_uses_super_admin));
-}
-
-#[cfg(feature = "syn-scanner")]
-#[test]
-fn test_syn_emit_usage_allow_comment_applies_to_next_qail_call_only() {
-    let source = r#"
-fn demo() {
-    let _sa = SuperAdminToken::for_system_process("jobs");
-    // qail:allow(super_admin)
-    let _q1 = Qail::get("orders").column("id");
-    let _q2 = Qail::get("orders").column("status");
-}
-"#;
-    let mut emitted = emit_qail_usages_from_syn_source("allow_once.rs", source)
-        .into_iter()
-        .filter(|u| u.table == "orders")
-        .collect::<Vec<_>>();
-    emitted.sort_by_key(|u| (u.line, u.column));
-    assert!(
-        emitted.len() >= 2,
-        "expected at least two Qail usages, got {}",
-        emitted.len()
-    );
-    assert!(!emitted[0].file_uses_super_admin);
-    assert!(emitted[1].file_uses_super_admin);
-}
-
-#[cfg(feature = "syn-scanner")]
 #[test]
 fn test_super_admin_audit_warns_without_explicit_tenant_scope() {
     let schema = Schema::parse(
@@ -982,7 +512,6 @@ fn demo() {
     }));
 }
 
-#[cfg(feature = "syn-scanner")]
 #[test]
 fn test_super_admin_audit_accepts_tenant_id_is_null_scope() {
     let schema = Schema::parse(
@@ -1027,7 +556,6 @@ fn demo() {
     );
 }
 
-#[cfg(feature = "syn-scanner")]
 #[test]
 fn test_super_admin_audit_accepts_tenant_id_eq_scope() {
     let schema = Schema::parse(
@@ -1072,15 +600,14 @@ fn demo() {
     );
 }
 
-#[cfg(feature = "syn-scanner")]
 #[test]
-fn test_scan_source_files_routes_to_syn_emitter() {
+fn test_scan_source_files_uses_text_scanner() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock before unix epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "qail_build_syn_route_{}_{}",
+        "qail_build_scan_route_{}_{}",
         std::process::id(),
         unique
     ));
@@ -1090,61 +617,20 @@ fn test_scan_source_files_routes_to_syn_emitter() {
 fn demo() {
     let _q = Qail::get("users").eq("id", 1);
 }
-"#;
+    "#;
     std::fs::write(&file, source).expect("write demo.rs");
 
-    let mut scanned = scan_source_files(root.to_str().expect("utf8 temp path"));
-    let mut expected = emit_qail_usages_from_syn_source(&file.display().to_string(), source);
+    let scanned = scan_source_files(root.to_str().expect("utf8 temp path"));
     let _ = std::fs::remove_file(&file);
     let _ = std::fs::remove_dir_all(&root);
 
-    scanned.sort_by(|a, b| {
-        (
-            &a.file,
-            a.line,
-            a.column,
-            &a.action,
-            &a.table,
-            a.has_rls,
-            a.is_cte_ref,
-            a.file_uses_super_admin,
-        )
-            .cmp(&(
-                &b.file,
-                b.line,
-                b.column,
-                &b.action,
-                &b.table,
-                b.has_rls,
-                b.is_cte_ref,
-                b.file_uses_super_admin,
-            ))
-    });
-    expected.sort_by(|a, b| {
-        (
-            &a.file,
-            a.line,
-            a.column,
-            &a.action,
-            &a.table,
-            a.has_rls,
-            a.is_cte_ref,
-            a.file_uses_super_admin,
-        )
-            .cmp(&(
-                &b.file,
-                b.line,
-                b.column,
-                &b.action,
-                &b.table,
-                b.has_rls,
-                b.is_cte_ref,
-                b.file_uses_super_admin,
-            ))
-    });
-
-    assert_eq!(
-        normalize_usage_rows(&scanned),
-        normalize_usage_rows(&expected)
-    );
+    assert_eq!(scanned.len(), 1, "expected exactly one scanned usage");
+    let usage = &scanned[0];
+    assert_eq!(usage.file, file.display().to_string());
+    assert_eq!(usage.table, "users");
+    assert_eq!(usage.action, "GET");
+    assert!(usage.columns.iter().any(|c| c == "id"));
+    assert!(!usage.has_rls);
+    assert!(!usage.is_cte_ref);
+    assert!(!usage.file_uses_super_admin);
 }

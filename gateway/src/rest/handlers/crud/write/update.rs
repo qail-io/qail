@@ -74,6 +74,7 @@ pub(crate) async fn update_handler(
         .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    state.optimize_qail_for_execution(&mut cmd);
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers);

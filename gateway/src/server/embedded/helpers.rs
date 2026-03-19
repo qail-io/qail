@@ -123,6 +123,8 @@ pub(super) async fn load_user_operator_map(
     statement_timeout_ms: u32,
     lock_timeout_ms: u32,
 ) -> Result<Arc<RwLock<HashMap<String, String>>>, GatewayError> {
+    // Legacy name kept for compatibility with existing call sites.
+    // Values are tenant IDs (from `tenant_id`, fallback `operator_id`).
     let user_operator_map = Arc::new(RwLock::new(HashMap::new()));
     let token = qail_core::rls::SuperAdminToken::for_system_process("embedded_user_map");
     let rls = qail_core::rls::RlsContext::super_admin(token);
@@ -130,10 +132,30 @@ pub(super) async fn load_user_operator_map(
         .acquire_with_rls_timeouts(rls, statement_timeout_ms, lock_timeout_ms)
         .await
         .map_err(|e| GatewayError::Database(format!("User lookup connection failed: {}", e)))?;
-    let cmd = qail_core::ast::Qail::get("users")
-        .columns(["id", "operator_id"])
-        .limit(10_000);
-    match conn.fetch_all_uncached(&cmd).await {
+    let rows_result = match conn
+        .fetch_all_uncached(
+            &qail_core::ast::Qail::get("users")
+                .columns(["id", "tenant_id"])
+                .limit(10_000),
+        )
+        .await
+    {
+        Ok(rows) => Ok(rows),
+        Err(primary_err) => {
+            tracing::warn!(
+                "Could not load users.id+tenant_id map (fallback to operator_id): {}",
+                primary_err
+            );
+            conn.fetch_all_uncached(
+                &qail_core::ast::Qail::get("users")
+                    .columns(["id", "operator_id"])
+                    .limit(10_000),
+            )
+            .await
+        }
+    };
+
+    match rows_result {
         Ok(rows) => {
             let mut map = user_operator_map.write().await;
             for row in &rows {
@@ -141,24 +163,25 @@ pub(super) async fn load_user_operator_map(
                     .try_get_by_name::<String>("id")
                     .ok()
                     .or_else(|| row.get_string(0));
-                let oid = row
-                    .try_get_by_name::<String>("operator_id")
+                let tenant_id = row
+                    .try_get_by_name::<String>("tenant_id")
                     .ok()
+                    .or_else(|| row.try_get_by_name::<String>("operator_id").ok())
                     .or_else(|| row.get_string(1));
 
-                if let (Some(uid), Some(oid)) = (uid, oid)
-                    && !oid.is_empty()
+                if let (Some(uid), Some(tenant_id)) = (uid, tenant_id)
+                    && !tenant_id.is_empty()
                 {
-                    map.insert(uid, oid);
+                    map.insert(uid, tenant_id);
                 }
             }
             tracing::info!(
-                "Loaded {} user→operator mappings for JWT resolution",
+                "Loaded {} user→tenant mappings for JWT resolution",
                 map.len()
             );
         }
         Err(e) => {
-            tracing::warn!("Could not load user→operator map (non-fatal): {}", e);
+            tracing::warn!("Could not load user→tenant map (non-fatal): {}", e);
         }
     }
     conn.release().await;

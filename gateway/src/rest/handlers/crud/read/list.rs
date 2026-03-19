@@ -185,6 +185,8 @@ pub(crate) async fn list_handler(
         }
     }
 
+    state.optimize_qail_for_execution(&mut cmd);
+
     // Build cache key from full URI + user identity
     let is_streaming = params.stream.unwrap_or(false);
     let has_branch = headers.get("x-branch-id").is_some();

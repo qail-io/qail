@@ -93,7 +93,7 @@ pub struct RlsContext {
     /// Empty string means no tenant scope.
     pub tenant_id: String,
 
-    /// Legacy: The operator (vendor) this context is scoped to.
+    /// Legacy: The operator alias this context is scoped to.
     /// Set to the same value as tenant_id during the transition period.
     pub operator_id: String,
 
@@ -157,17 +157,22 @@ impl RlsContext {
         }
     }
 
-    /// Create a context scoped to both operator and agent.
-    /// Legacy — use `tenant()` for new code.
-    pub fn operator_and_agent(operator_id: &str, agent_id: &str) -> Self {
+    /// Create a context scoped to both tenant and agent.
+    pub fn tenant_and_agent(tenant_id: &str, agent_id: &str) -> Self {
         Self {
-            tenant_id: operator_id.to_string(), // primary identity
-            operator_id: operator_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            operator_id: tenant_id.to_string(), // backward compat
             agent_id: agent_id.to_string(),
             is_super_admin: false,
             is_global: false,
             user_id: String::new(),
         }
+    }
+
+    /// Create a context scoped to both operator and agent.
+    /// Legacy alias — use `tenant_and_agent()` for new code.
+    pub fn operator_and_agent(operator_id: &str, agent_id: &str) -> Self {
+        Self::tenant_and_agent(operator_id, agent_id)
     }
 
     /// Create a global context scoped to platform rows (`tenant_id IS NULL`).
@@ -335,6 +340,16 @@ mod tests {
 
     #[test]
     fn test_operator_and_agent() {
+        let ctx = RlsContext::tenant_and_agent("tenant-1", "ag-2");
+        assert_eq!(ctx.tenant_id, "tenant-1");
+        assert_eq!(ctx.operator_id, "tenant-1"); // backward compat
+        assert!(ctx.has_operator());
+        assert!(ctx.has_agent());
+        assert!(!ctx.bypasses_rls());
+    }
+
+    #[test]
+    fn test_operator_and_agent_alias() {
         let ctx = RlsContext::operator_and_agent("op-1", "ag-2");
         assert_eq!(ctx.tenant_id, "op-1"); // primary identity = operator
         assert!(ctx.has_operator());

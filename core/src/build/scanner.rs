@@ -1,5 +1,4 @@
 //! Text-based source scanner for QAIL usage patterns.
-#![cfg_attr(feature = "syn-scanner", allow(dead_code))]
 
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +26,9 @@ pub struct QailUsage {
     pub is_cte_ref: bool,
     /// Whether this query chain includes `.with_rls(` call
     pub has_rls: bool,
+    /// Whether this query chain has explicit tenant scope condition
+    /// (e.g. `.eq("tenant_id", ...)` or `.is_null("tenant_id")`).
+    pub has_explicit_tenant_scope: bool,
     /// Whether the containing file uses `SuperAdminToken::for_system_process()`.
     /// When true AND the queried table is tenant-scoped, the build emits a
     /// warning: the query may bypass tenant isolation.
@@ -35,16 +37,9 @@ pub struct QailUsage {
 
 /// Scan Rust source files for QAIL usage patterns
 pub fn scan_source_files(src_dir: &str) -> Vec<QailUsage> {
-    #[cfg(feature = "syn-scanner")]
-    {
-        super::syn_analyzer::scan_source_files_syn(src_dir)
-    }
-    #[cfg(not(feature = "syn-scanner"))]
-    {
-        let mut usages = Vec::new();
-        scan_directory(Path::new(src_dir), &mut usages);
-        usages
-    }
+    let mut usages = Vec::new();
+    scan_directory(Path::new(src_dir), &mut usages);
+    usages
 }
 
 fn scan_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
@@ -503,6 +498,7 @@ pub(crate) fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) 
 
                 // Check if query chain includes .with_rls( or .rls(
                 let has_rls = full_chain.contains(".with_rls(") || full_chain.contains(".rls(");
+                let has_explicit_tenant_scope = chain_has_explicit_tenant_scope(&full_chain);
 
                 // Extract column names from the full chain
                 let columns = extract_columns(&full_chain);
@@ -517,6 +513,7 @@ pub(crate) fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) 
                     action: action.to_string(),
                     is_cte_ref,
                     has_rls,
+                    has_explicit_tenant_scope,
                     file_uses_super_admin,
                 });
 
@@ -552,6 +549,7 @@ pub(crate) fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) 
                     }
                     let columns = extract_columns(&full_chain);
                     let has_rls = full_chain.contains(".with_rls(") || full_chain.contains(".rls(");
+                    let has_explicit_tenant_scope = chain_has_explicit_tenant_scope(&full_chain);
 
                     for resolved_table in resolved_tables {
                         let is_cte_ref = file_cte_names.contains(resolved_table);
@@ -565,6 +563,7 @@ pub(crate) fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) 
                             action: action.to_string(),
                             is_cte_ref,
                             has_rls,
+                            has_explicit_tenant_scope,
                             file_uses_super_admin,
                         });
                     }
@@ -882,6 +881,36 @@ pub(crate) fn extract_columns(line: &str) -> Vec<String> {
         .collect();
 
     columns
+}
+
+fn chain_has_explicit_tenant_scope(chain: &str) -> bool {
+    [".eq(", ".where_eq(", ".is_null("]
+        .iter()
+        .any(|method| chain_has_tenant_scope_method_arg(chain, method))
+}
+
+fn chain_has_tenant_scope_method_arg(chain: &str, method: &str) -> bool {
+    let mut remaining = chain;
+    while let Some(pos) = remaining.find(method) {
+        let after = &remaining[pos + method.len()..];
+        if let Some(col) = extract_string_arg(after)
+            && is_tenant_identifier(&col)
+        {
+            return true;
+        }
+        remaining = after;
+    }
+    false
+}
+
+fn is_tenant_identifier(raw_ident: &str) -> bool {
+    let without_cast = raw_ident.split("::").next().unwrap_or(raw_ident).trim();
+    let last_segment = without_cast.rsplit('.').next().unwrap_or(without_cast);
+    let normalized = last_segment
+        .trim_matches('"')
+        .trim_matches('`')
+        .to_ascii_lowercase();
+    normalized == "tenant_id"
 }
 
 pub(crate) fn usage_action_to_ast(action: &str) -> crate::ast::Action {

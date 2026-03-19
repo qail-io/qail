@@ -119,6 +119,8 @@ pub async fn execute_batch(
             continue;
         }
 
+        state.optimize_qail_for_execution(&mut cmd);
+
         let (depth, filters, joins) = query_complexity(&cmd);
         if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
             results.push(BatchQueryResult {

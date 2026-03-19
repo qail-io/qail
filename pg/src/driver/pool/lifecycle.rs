@@ -575,7 +575,7 @@ impl PgPool {
     /// Acquire a connection for system-level operations (no tenant context).
     ///
     /// Sets RLS session variables to maximally restrictive values:
-    /// - `app.current_operator_id = ''`
+    /// - `app.current_tenant_id = ''` (and legacy `app.current_operator_id = ''`)
     /// - `app.current_agent_id = ''`  
     /// - `app.is_super_admin = false`
     ///

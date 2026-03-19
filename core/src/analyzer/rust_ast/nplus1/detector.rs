@@ -109,6 +109,20 @@ impl NPlusOneDetector {
             syn::Expr::MethodCall(m) if is_iter_source_method(&m.method.to_string()) => {
                 self.bounded_collection_len(&m.receiver)
             }
+            syn::Expr::Call(call) => {
+                // Semantic improvement: recognize domain-specific functions that
+                // always return small fixed-size collections (e.g. build_tier_pairs
+                // always returns 6 items). This eliminates false-positive N1-002
+                // warnings on known-bounded pricing loops.
+                if let syn::Expr::Path(p) = &*call.func {
+                    if let Some(name) = path_tail(p) {
+                        if KNOWN_SMALL_COLLECTION_FNS.contains(&name.as_str()) {
+                            return Some(6);
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }

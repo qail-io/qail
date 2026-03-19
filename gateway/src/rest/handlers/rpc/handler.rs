@@ -104,7 +104,8 @@ pub(crate) async fn rpc_handler(
         return Err(err);
     }
 
-    let cmd = qail_core::ast::Qail::get(call_target);
+    let mut cmd = qail_core::ast::Qail::get(call_target);
+    state.optimize_qail_for_execution(&mut cmd);
 
     let rows = match conn
         .fetch_all_uncached_with_format(&cmd, result_format)

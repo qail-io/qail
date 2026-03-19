@@ -189,8 +189,7 @@ pub async fn extract_auth_for_state(
         state.jwks_store.as_ref(),
         &state.jwt_allowed_algorithms,
     );
-    auth.enrich_with_operator_map(&state.user_operator_map)
-        .await;
+    auth.enrich_with_tenant_map(&state.user_operator_map).await;
 
     if let Some(impersonate_header) = headers.get("x-impersonate-tenant")
         && let Ok(target_tenant) = impersonate_header.to_str()

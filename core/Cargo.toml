@@ -11,8 +11,13 @@ keywords = ["qail", "sql", "parser"]
 
 [features]
 default = []
-syn-scanner = ["dep:syn", "dep:proc-macro2"]
-analyzer = ["syn-scanner", "dep:sqlparser", "dep:quote", "dep:regex"]
+analyzer = [
+    "dep:syn",
+    "dep:proc-macro2",
+    "dep:sqlparser",
+    "dep:quote",
+    "dep:regex",
+]
 # Internal-only: enables examples that depend on external crates (qail-pg, bytes).
 # Never used in normal builds — only for manual `cargo run --example`.
 _pg_examples = []

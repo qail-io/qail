@@ -24,7 +24,7 @@ pub(crate) async fn rpc_contracts_handler(
 
     let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
 
-    let cmd = Qail::get("pg_catalog.pg_proc p")
+    let mut cmd = Qail::get("pg_catalog.pg_proc p")
         .columns_expr(vec![
             Expr::Named("n.nspname AS schema_name".to_string()),
             Expr::Named("p.proname AS function_name".to_string()),
@@ -56,6 +56,7 @@ pub(crate) async fn rpc_contracts_handler(
         .order_asc("p.proname")
         .order_asc("p.oid")
         .limit(5000);
+    state.optimize_qail_for_execution(&mut cmd);
     let rows = conn
         .fetch_all_uncached(&cmd)
         .await

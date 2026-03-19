@@ -268,3 +268,74 @@ fn test_expand_filter_tenant_id_missing() {
     let result = engine.expand_filter("operator_id = $tenant_id", &auth);
     assert_eq!(result, "operator_id = $tenant_id");
 }
+
+#[test]
+fn test_apply_policies_does_not_early_deny_when_later_policy_allows_operation() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "harbors_public_read".to_string(),
+        table: "harbors".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "harbors_operator_crud".to_string(),
+        table: "harbors".to_string(),
+        filter: None,
+        role: Some("operator".to_string()),
+        operations: vec![
+            OperationType::Read,
+            OperationType::Create,
+            OperationType::Update,
+            OperationType::Delete,
+        ],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user-op".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-op".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::set("harbors");
+    let result = engine.apply_policies(&auth, &mut cmd);
+    assert!(
+        result.is_ok(),
+        "expected update to be allowed by operator CRUD policy, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_apply_policies_denies_when_matching_policies_exist_but_none_allow_operation() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "harbors_public_read".to_string(),
+        table: "harbors".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "anon".to_string(),
+        role: "anonymous".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::set("harbors");
+    let result = engine.apply_policies(&auth, &mut cmd);
+    assert!(
+        result.is_err(),
+        "expected update deny when only read policy matches"
+    );
+}

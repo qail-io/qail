@@ -155,8 +155,8 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub qdrant: Option<qail_core::config::QdrantConfig>,
 
-    /// Tenant boundary column name (default: "operator_id").
-    /// Tables using a different partition key (e.g., "tenant_id") can override this.
+    /// Tenant boundary column name (default: "tenant_id").
+    /// Legacy schemas using `operator_id` can override this.
     #[serde(default = "default_tenant_column")]
     pub tenant_column: String,
 

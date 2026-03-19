@@ -66,7 +66,7 @@ fn test_engine_style_jwt() {
     let auth = validate_jwt(&token, &config).unwrap();
     assert_eq!(auth.user_id, "4fcc89a7-0753-4b8d-8457-71619533dbd8");
     assert_eq!(auth.role, "SuperAdmin");
-    // No tenant_id in engine JWT — will be resolved via user_operator_map
+    // No tenant_id in engine JWT — will be resolved via startup user→tenant map
     assert_eq!(auth.tenant_id, None);
 }
 
@@ -249,7 +249,7 @@ async fn redteam_enrich_fills_missing_tenant() {
         m.insert("user-abc".to_string(), "operator-xyz".to_string());
         m
     });
-    auth.enrich_with_operator_map(&map).await;
+    auth.enrich_with_tenant_map(&map).await;
     assert_eq!(auth.tenant_id, Some("operator-xyz".to_string()));
 }
 
@@ -266,7 +266,7 @@ async fn redteam_enrich_does_not_overwrite_existing_tenant() {
         m.insert("user-abc".to_string(), "operator-xyz".to_string());
         m
     });
-    auth.enrich_with_operator_map(&map).await;
+    auth.enrich_with_tenant_map(&map).await;
     assert_eq!(
         auth.tenant_id,
         Some("already-set".to_string()),
@@ -287,7 +287,7 @@ async fn redteam_enrich_skips_anonymous() {
         m.insert("anonymous".to_string(), "should-not-see".to_string());
         m
     });
-    auth.enrich_with_operator_map(&map).await;
+    auth.enrich_with_tenant_map(&map).await;
     assert_eq!(
         auth.tenant_id, None,
         "Anonymous users must not get tenant_id enrichment"

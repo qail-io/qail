@@ -41,32 +41,40 @@ impl AuthContext {
         self.role == "denied"
     }
 
-    /// Resolve tenant_id from the user→operator cache when the JWT doesn't include it.
+    /// Resolve tenant_id from the user→tenant cache when the JWT doesn't include it.
     ///
-    /// Engine-style JWTs only contain `user_id` and `role` — the `operator_id`
+    /// Engine-style JWTs often only contain `user_id` and `role` — the tenant id
     /// must be looked up from the database. This method checks the startup-loaded
     /// cache and fills in `tenant_id` if missing.
-    pub async fn enrich_with_operator_map(
+    pub async fn enrich_with_tenant_map(
         &mut self,
         map: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
     ) {
         if self.tenant_id.is_none() && self.is_authenticated() {
             let guard = map.read().await;
-            if let Some(operator_id) = guard.get(&self.user_id) {
-                self.tenant_id = Some(operator_id.clone());
+            if let Some(tenant_id) = guard.get(&self.user_id) {
+                self.tenant_id = Some(tenant_id.clone());
             }
         }
+    }
+
+    /// Legacy alias for `enrich_with_tenant_map`.
+    pub async fn enrich_with_operator_map(
+        &mut self,
+        map: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    ) {
+        self.enrich_with_tenant_map(map).await;
     }
 
     /// Convert gateway AuthContext to PgDriver's RlsContext for Postgres-native RLS.
     ///
     /// Mapping:
-    /// - `tenant_id` → `operator_id`
+    /// - `tenant_id` → tenant scope (`operator_id` kept internally for legacy compat)
     /// - `claims["agent_id"]` → `agent_id`
     /// - `role == "super_admin"` → `is_super_admin`
     pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {
         // Only the platform-level "administrator" role bypasses RLS.
-        // Tenant-scoped roles (operator, super_admin) use operator_id filtering.
+        // Tenant-scoped roles (operator, super_admin) use tenant filtering.
         let is_super_admin = matches!(self.role.as_str(), "administrator" | "Administrator");
 
         // Audit log: super_admin activation is a high-privilege event
@@ -81,7 +89,7 @@ impl AuthContext {
             return qail_core::rls::RlsContext::super_admin(token);
         }
 
-        let operator_id = self.tenant_id.clone().unwrap_or_default();
+        let tenant_id = self.tenant_id.clone().unwrap_or_default();
         let agent_id = self
             .claims
             .get("agent_id")
@@ -89,12 +97,12 @@ impl AuthContext {
             .unwrap_or("")
             .to_string();
 
-        if !agent_id.is_empty() && !operator_id.is_empty() {
-            qail_core::rls::RlsContext::operator_and_agent(&operator_id, &agent_id)
+        if !agent_id.is_empty() && !tenant_id.is_empty() {
+            qail_core::rls::RlsContext::tenant_and_agent(&tenant_id, &agent_id)
         } else if !agent_id.is_empty() {
             qail_core::rls::RlsContext::agent(&agent_id)
         } else {
-            qail_core::rls::RlsContext::operator(&operator_id)
+            qail_core::rls::RlsContext::tenant(&tenant_id)
         }
     }
 }

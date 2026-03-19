@@ -136,7 +136,7 @@ tables:
       - name: user_id
         type: uuid
         nullable: true
-      - name: vendor_id
+      - name: tenant_id
         type: uuid
         nullable: true
       - name: status

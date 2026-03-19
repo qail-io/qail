@@ -89,8 +89,17 @@ pub(super) fn is_iter_source_method(name: &str) -> bool {
             | "keys"
             | "into_values"
             | "into_keys"
+            | "enumerate"
     )
 }
+
+/// Known functions that always return a small, fixed-size collection
+/// (e.g. build_tier_pairs always returns exactly 6 items). This makes
+/// N+1 detection semantically aware of domain-specific bounded loops
+/// and reduces false positives without losing detection power.
+pub(super) const KNOWN_SMALL_COLLECTION_FNS: &[&str] = &[
+    "build_tier_pairs",
+];
 
 /// Small compile-time bounded loops (e.g. hardcoded tier pairs) are often
 /// deliberate and not true N+1 anti-patterns.

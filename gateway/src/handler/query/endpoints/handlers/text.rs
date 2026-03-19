@@ -81,6 +81,8 @@ pub async fn execute_query_export(
         return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
 
+    state.optimize_qail_for_execution(&mut cmd);
+
     let (depth, filters, joins) = query_complexity(&cmd);
     if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
         crate::metrics::record_complexity_rejected();

@@ -2,9 +2,9 @@
 //!
 //! Proves ZERO cross-tenant data leakage under concurrent load.
 //!
-//! 1. Creates a temporary RLS-protected table with `operator_id` column
-//! 2. Inserts data for N distinct operator IDs
-//! 3. Spawns N concurrent workers, each with a different `operator_id` session var
+//! 1. Creates a temporary RLS-protected table with `tenant_id` column
+//! 2. Inserts data for N distinct tenant IDs
+//! 3. Spawns N concurrent workers, each with a different `app.current_tenant_id` session var
 //! 4. Each worker runs many SELECTs, asserting ALL returned rows belong to their tenant
 //!
 //! Pass criteria: Zero cross-tenant rows across all queries, zero errors.
@@ -64,7 +64,7 @@ async fn main() {
             .execute_raw(
                 "CREATE TABLE _rls_chaos_test (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                operator_id UUID NOT NULL,
+                tenant_id UUID NOT NULL,
                 data TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )",
@@ -82,12 +82,12 @@ async fn main() {
             .await
             .expect("Failed to force RLS");
 
-        // Create policy: users can only see their own operator_id rows
+        // Create policy: users can only see their own tenant_id rows
         driver
             .execute_raw(
                 "CREATE POLICY tenant_isolation ON _rls_chaos_test
              FOR ALL
-             USING (operator_id = current_setting('app.operator_id')::uuid)",
+             USING (tenant_id = current_setting('app.current_tenant_id')::uuid)",
             )
             .await
             .expect("Failed to create policy");
@@ -95,15 +95,15 @@ async fn main() {
         // Insert test data for each tenant
         for (i, tenant_id) in tenant_ids.iter().enumerate() {
             // Set the session variable so RLS USING clause passes during INSERT
-            let set_sql = format!("SET app.operator_id = '{}'", tenant_id);
+            let set_sql = format!("SET app.current_tenant_id = '{}'", tenant_id);
             driver
                 .execute_raw(&set_sql)
                 .await
-                .expect("Failed to set operator_id for insert");
+                .expect("Failed to set tenant_id for insert");
 
             for j in 0..ROWS_PER_TENANT {
                 let sql = format!(
-                    "INSERT INTO _rls_chaos_test (operator_id, data) VALUES ('{}', 'tenant_{}_row_{}')",
+                    "INSERT INTO _rls_chaos_test (tenant_id, data) VALUES ('{}', 'tenant_{}_row_{}')",
                     tenant_id, i, j
                 );
                 driver
@@ -147,11 +147,11 @@ async fn main() {
                 .expect("Worker failed to connect");
 
             // Set this worker's tenant context
-            let set_sql = format!("SET app.operator_id = '{}'", tenant_id);
+            let set_sql = format!("SET app.current_tenant_id = '{}'", tenant_id);
             driver
                 .execute_raw(&set_sql)
                 .await
-                .expect("Failed to set operator_id");
+                .expect("Failed to set tenant_id");
 
             // Wait for all workers to be ready
             barrier.wait().await;
@@ -162,23 +162,23 @@ async fn main() {
 
             for _ in 0..QUERIES_PER_WORKER {
                 // Build query using Qail AST
-                let cmd = Qail::get("_rls_chaos_test").columns(vec!["id", "operator_id", "data"]);
+                let cmd = Qail::get("_rls_chaos_test").columns(vec!["id", "tenant_id", "data"]);
 
                 match driver.fetch_all_cached(&cmd).await {
                     Ok(rows) => {
                         for row in &rows {
                             local_rows += 1;
                             // CRITICAL CHECK: every row must belong to our tenant
-                            let op_idx = row
-                                .column_index("operator_id")
-                                .expect("missing operator_id column");
-                            let row_operator_id: String = row.text(op_idx);
+                            let col_idx = row
+                                .column_index("tenant_id")
+                                .expect("missing tenant_id column");
+                            let row_tenant_id: String = row.text(col_idx);
                             let expected = tenant_id.to_string();
-                            if row_operator_id != expected {
+                            if row_tenant_id != expected {
                                 local_violations += 1;
                                 eprintln!(
                                     "  ❌ VIOLATION! Tenant {} saw row belonging to {}",
-                                    expected, row_operator_id
+                                    expected, row_tenant_id
                                 );
                             }
                         }

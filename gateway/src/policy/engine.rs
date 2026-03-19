@@ -51,8 +51,8 @@ impl PolicyEngine {
     /// * `cmd` — Mutable Qail AST command to inject policy filters into.
     pub fn apply_policies(&self, auth: &AuthContext, cmd: &mut Qail) -> Result<(), GatewayError> {
         let op = OperationType::from_action(cmd.action);
-
-        let mut filters_to_inject: Vec<(String, String)> = Vec::new();
+        let mut matched_policy_names: Vec<String> = Vec::new();
+        let mut applicable_policies: Vec<&PolicyDef> = Vec::new();
 
         for policy in &self.policies {
             if policy.table != "*" && policy.table != cmd.table {
@@ -65,16 +65,31 @@ impl PolicyEngine {
                 continue;
             }
 
-            if let Some(operation) = op
-                && !policy.operations.is_empty()
-                && !policy.operations.contains(&operation)
-            {
-                return Err(GatewayError::AccessDenied(format!(
-                    "Operation {:?} not allowed on table '{}' by policy '{}'",
-                    operation, cmd.table, policy.name
-                )));
-            }
+            matched_policy_names.push(policy.name.clone());
 
+            let op_allowed = if let Some(operation) = op {
+                policy.operations.is_empty() || policy.operations.contains(&operation)
+            } else {
+                true
+            };
+
+            if op_allowed {
+                applicable_policies.push(policy);
+            }
+        }
+
+        if let Some(operation) = op
+            && !matched_policy_names.is_empty()
+            && applicable_policies.is_empty()
+        {
+            return Err(GatewayError::AccessDenied(format!(
+                "Operation {:?} not allowed on table '{}' by matching policies {:?}",
+                operation, cmd.table, matched_policy_names
+            )));
+        }
+
+        let mut filters_to_inject: Vec<(String, String)> = Vec::new();
+        for policy in &applicable_policies {
             if let Some(ref filter_template) = policy.filter {
                 let filter = self.expand_filter(filter_template, auth);
                 filters_to_inject.push((policy.name.clone(), filter));
@@ -87,16 +102,7 @@ impl PolicyEngine {
         }
 
         // Apply column-level permissions
-        for policy in &self.policies {
-            if policy.table != "*" && policy.table != cmd.table {
-                continue;
-            }
-            if let Some(ref required_role) = policy.role
-                && &auth.role != required_role
-            {
-                continue;
-            }
-
+        for policy in &applicable_policies {
             // Whitelist: restrict to allowed columns only
             if !policy.allowed_columns.is_empty() {
                 self.apply_column_whitelist(cmd, &policy.allowed_columns);

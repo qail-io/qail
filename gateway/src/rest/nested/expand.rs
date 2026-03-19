@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use qail_core::ast::{Operator, Value as QailValue};
+use qail_core::ast::Value as QailValue;
+use qail_core::optimizer::{NestedRelationKind, plan_nested_batch_fetch};
+use qail_core::schema::RelationRegistry;
 use serde_json::Value;
 
 use crate::GatewayState;
@@ -44,127 +46,175 @@ pub async fn expand_nested(
             )));
         }
 
-        // Try forward FK: this table → rel table
-        if let Some((fk_col, ref_col)) = state.schema.relation_for(table_name, rel) {
-            // Collect all FK values from data
-            let fk_values: Vec<QailValue> = data
-                .iter()
-                .filter_map(|row| row.get(fk_col).cloned())
-                .filter(|v| !v.is_null())
-                .map(json_to_qail_value)
-                .collect();
+        let relation_registry = relation_registry_for_pair(&state.schema, table_name, rel);
+        let parent_key_column = relation_registry
+            .get(table_name, rel)
+            .map(|(fk_col, _)| fk_col.to_string())
+            .or_else(|| {
+                relation_registry
+                    .get(rel, table_name)
+                    .map(|(_, ref_col)| ref_col.to_string())
+            });
 
-            if fk_values.is_empty() {
-                continue;
-            }
+        let Some(parent_key_column) = parent_key_column else {
+            conn.release().await;
+            return Err(ApiError::parse_error(format!(
+                "No relation between '{}' and '{}' for nested expansion",
+                table_name, rel
+            )));
+        };
 
-            // Fetch related rows in one query: get rel[ref_col IN (...)]
-            let mut cmd = qail_core::ast::Qail::get(*rel).filter(
-                ref_col,
-                Operator::In,
-                QailValue::Array(fk_values),
-            );
-            if let Err(e) = state.policy_engine.apply_policies(auth, &mut cmd) {
+        let parent_keys: Vec<QailValue> = data
+            .iter()
+            .filter_map(|row| row.get(&parent_key_column).cloned())
+            .map(json_to_qail_value)
+            .collect();
+
+        let plan = match plan_nested_batch_fetch(&relation_registry, table_name, rel, parent_keys) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => continue,
+            Err(_) => {
                 conn.release().await;
-                return Err(ApiError::forbidden(e.to_string()));
+                return Err(ApiError::parse_error(format!(
+                    "No relation between '{}' and '{}' for nested expansion",
+                    table_name, rel
+                )));
             }
+        };
 
-            let rows = match conn.fetch_all_uncached(&cmd).await {
-                Ok(r) => r,
-                Err(e) => {
-                    conn.release().await;
-                    return Err(ApiError::from_pg_driver_error(&e, Some(rel)));
+        let mut cmd = plan.to_qail();
+        state.optimize_qail_for_execution(&mut cmd);
+        if let Err(e) = state.policy_engine.apply_policies(auth, &mut cmd) {
+            conn.release().await;
+            return Err(ApiError::forbidden(e.to_string()));
+        }
+
+        let rows = match conn.fetch_all_uncached(&cmd).await {
+            Ok(r) => r,
+            Err(e) => {
+                conn.release().await;
+                return Err(ApiError::from_pg_driver_error(&e, Some(rel)));
+            }
+        };
+
+        match plan.kind {
+            NestedRelationKind::ForwardObject => {
+                let related: HashMap<String, Value> = rows
+                    .iter()
+                    .map(|row| {
+                        let json = row_to_json(row);
+                        let key = json
+                            .get(&plan.related_match_column)
+                            .map(json_value_key)
+                            .unwrap_or_default();
+                        (key, json)
+                    })
+                    .collect();
+
+                for row in data.iter_mut() {
+                    if let Some(parent_key_value) = row.get(&plan.parent_key_column) {
+                        let key = json_value_key(parent_key_value);
+                        if let Some(related_row) = related.get(&key)
+                            && let Some(obj) = row.as_object_mut()
+                        {
+                            obj.insert(rel.to_string(), related_row.clone());
+                        }
+                    }
                 }
-            };
-
-            // Index by PK
-            let related: HashMap<String, Value> = rows
-                .iter()
-                .map(|row| {
+            }
+            NestedRelationKind::ReverseArray => {
+                let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
+                for row in &rows {
                     let json = row_to_json(row);
-                    let key = json.get(ref_col).map(json_value_key).unwrap_or_default();
-                    (key, json)
-                })
-                .collect();
+                    let key = json
+                        .get(&plan.related_match_column)
+                        .map(json_value_key)
+                        .unwrap_or_default();
+                    grouped.entry(key).or_default().push(json);
+                }
 
-            // Inject nested object
-            for row in data.iter_mut() {
-                if let Some(fk_val) = row.get(fk_col) {
-                    let key = json_value_key(fk_val);
-                    if let Some(related_row) = related.get(&key)
-                        && let Some(obj) = row.as_object_mut()
-                    {
-                        obj.insert(rel.to_string(), related_row.clone());
+                for row in data.iter_mut() {
+                    if let Some(parent_key_value) = row.get(&plan.parent_key_column) {
+                        let key = json_value_key(parent_key_value);
+                        let children = grouped.get(&key).cloned().unwrap_or_default();
+                        if let Some(obj) = row.as_object_mut() {
+                            obj.insert(rel.to_string(), serde_json::json!(children));
+                        }
                     }
                 }
             }
-            continue;
         }
-
-        // Try reverse FK: rel table → this table
-        if let Some((fk_col, ref_col)) = state.schema.relation_for(rel, table_name) {
-            // Collect all PK values from data
-            let pk_values: Vec<QailValue> = data
-                .iter()
-                .filter_map(|row| row.get(ref_col).cloned())
-                .filter(|v| !v.is_null())
-                .map(json_to_qail_value)
-                .collect();
-
-            if pk_values.is_empty() {
-                continue;
-            }
-
-            // Fetch all child rows: get rel[fk_col IN (...)]
-            let mut cmd = qail_core::ast::Qail::get(*rel).filter(
-                fk_col,
-                Operator::In,
-                QailValue::Array(pk_values),
-            );
-            if let Err(e) = state.policy_engine.apply_policies(auth, &mut cmd) {
-                conn.release().await;
-                return Err(ApiError::forbidden(e.to_string()));
-            }
-
-            let rows = match conn.fetch_all_uncached(&cmd).await {
-                Ok(r) => r,
-                Err(e) => {
-                    conn.release().await;
-                    return Err(ApiError::from_pg_driver_error(&e, Some(rel)));
-                }
-            };
-
-            // Group by FK value
-            let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
-            for row in &rows {
-                let json = row_to_json(row);
-                let key = json.get(fk_col).map(json_value_key).unwrap_or_default();
-                grouped.entry(key).or_default().push(json);
-            }
-
-            // Inject nested array
-            for row in data.iter_mut() {
-                if let Some(pk_val) = row.get(ref_col) {
-                    let key = json_value_key(pk_val);
-                    let children = grouped.get(&key).cloned().unwrap_or_default();
-                    if let Some(obj) = row.as_object_mut() {
-                        obj.insert(rel.to_string(), serde_json::json!(children));
-                    }
-                }
-            }
-            continue;
-        }
-
-        // Release connection before returning error
-        conn.release().await;
-        return Err(ApiError::parse_error(format!(
-            "No relation between '{}' and '{}' for nested expansion",
-            table_name, rel
-        )));
     }
 
     // Release connection back to pool
     conn.release().await;
 
     Ok(())
+}
+
+fn relation_registry_for_pair(
+    schema: &crate::schema::SchemaRegistry,
+    left_table: &str,
+    right_table: &str,
+) -> RelationRegistry {
+    let mut relations = RelationRegistry::new();
+    if let Some((fk_col, ref_col)) = schema.relation_for(left_table, right_table) {
+        relations.register(left_table, fk_col, right_table, ref_col);
+    }
+    if let Some((fk_col, ref_col)) = schema.relation_for(right_table, left_table) {
+        relations.register(right_table, fk_col, left_table, ref_col);
+    }
+    relations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::SchemaRegistry;
+
+    #[test]
+    fn relation_registry_adapter_registers_forward_relation() {
+        let mut schema = SchemaRegistry::new();
+        schema
+            .load_from_qail_str(
+                r#"
+table users {
+    id uuid primary_key
+}
+
+table posts {
+    id uuid primary_key
+    user_id uuid references users(id)
+}
+"#,
+            )
+            .expect("schema should parse");
+
+        let rel = relation_registry_for_pair(&schema, "posts", "users");
+        assert_eq!(rel.get("posts", "users"), Some(("user_id", "id")));
+    }
+
+    #[test]
+    fn relation_registry_adapter_registers_reverse_relation_for_planner() {
+        let mut schema = SchemaRegistry::new();
+        schema
+            .load_from_qail_str(
+                r#"
+table users {
+    id uuid primary_key
+}
+
+table posts {
+    id uuid primary_key
+    user_id uuid references users(id)
+}
+"#,
+            )
+            .expect("schema should parse");
+
+        // Asking for users -> posts should still register the underlying
+        // posts -> users FK so reverse planning can resolve it.
+        let rel = relation_registry_for_pair(&schema, "users", "posts");
+        assert_eq!(rel.get("posts", "users"), Some(("user_id", "id")));
+    }
 }

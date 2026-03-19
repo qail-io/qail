@@ -10,6 +10,21 @@ use crate::middleware::ApiError;
 use super::{backpressure_api_error, record_acquire_outcome, waiter_key_for_auth};
 
 impl GatewayState {
+    /// Central optimizer hook for all executable QAIL commands.
+    ///
+    /// This keeps runtime optimization on QAIL semantics rather than source-level
+    /// syntax analysis.
+    pub fn optimize_qail_for_execution(&self, cmd: &mut qail_core::ast::Qail) {
+        if let Ok(normalized) = qail_core::optimizer::normalize_select(cmd) {
+            *cmd = qail_core::optimizer::cleanup_select(&normalized).to_qail();
+            return;
+        }
+
+        if let Ok(normalized) = qail_core::optimizer::normalize_mutation(cmd) {
+            *cmd = qail_core::optimizer::cleanup_mutation(&normalized).to_qail();
+        }
+    }
+
     /// Acquire RLS-scoped connection with queue backpressure guards.
     pub async fn acquire_with_rls_timeouts_guarded(
         &self,

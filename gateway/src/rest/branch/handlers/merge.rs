@@ -152,7 +152,8 @@ pub(crate) async fn branch_merge_handler(
                         _ => None,
                     };
 
-                    if let Some(qail_cmd) = cmd {
+                    if let Some(mut qail_cmd) = cmd {
+                        state.optimize_qail_for_execution(&mut qail_cmd);
                         match conn.fetch_all_uncached(&qail_cmd).await {
                             Ok(_) => applied += 1,
                             Err(e) => errors.push(format!("{}.{}: {}", table, row_pk, e)),

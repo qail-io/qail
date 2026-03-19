@@ -25,6 +25,8 @@ pub mod error;
 pub mod fmt;
 /// Database migration types.
 pub mod migrate;
+/// Query normalization and optimizer support.
+pub mod optimizer;
 /// QAIL query parser.
 pub mod parser;
 /// Row-level security context.

@@ -243,6 +243,7 @@ pub(crate) async fn create_handler(
             conn.release().await;
             return Err(ApiError::forbidden(e.to_string()));
         }
+        state.optimize_qail_for_execution(&mut cmd);
 
         let rows = match conn.fetch_all_uncached(&cmd).await {
             Ok(rows) => rows,

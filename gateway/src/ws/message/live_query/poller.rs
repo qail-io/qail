@@ -39,6 +39,8 @@ pub(super) fn spawn_live_query_poller(
         tenant_id,
         tenant_col,
     } = cfg;
+    let mut cmd = cmd;
+    state.optimize_qail_for_execution(&mut cmd);
 
     let (trigger_tx, mut trigger_rx) = mpsc::channel::<()>(1);
 

@@ -7,8 +7,8 @@
 //! ```
 //! use qail_core::rls::tenant::{register_tenant_table, lookup_tenant_column};
 //!
-//! register_tenant_table("orders", "operator_id");
-//! assert_eq!(lookup_tenant_column("orders"), Some("operator_id".to_string()));
+//! register_tenant_table("orders", "tenant_id");
+//! assert_eq!(lookup_tenant_column("orders"), Some("tenant_id".to_string()));
 //! assert_eq!(lookup_tenant_column("migrations"), None);
 //! ```
 
@@ -18,7 +18,8 @@ use std::sync::RwLock;
 
 /// Registry of tables that participate in tenant-scope isolation.
 ///
-/// Each entry maps a table name to its tenant column (usually `operator_id`).
+/// Each entry maps a table name to its tenant column
+/// (prefer `tenant_id`, fallback `operator_id` for legacy schemas).
 #[derive(Debug, Default)]
 pub struct TenantRegistry {
     tables: HashMap<String, String>,
@@ -34,7 +35,7 @@ impl TenantRegistry {
     ///
     /// # Arguments
     /// * `table` — table name (e.g., `"orders"`)
-    /// * `column` — tenant column (e.g., `"operator_id"`)
+    /// * `column` — tenant column (e.g., `"tenant_id"`)
     pub fn register(&mut self, table: impl Into<String>, column: impl Into<String>) {
         self.tables.insert(table.into(), column.into());
     }
@@ -67,13 +68,15 @@ impl TenantRegistry {
 
     /// Load tenant tables from a parsed build::Schema.
     ///
-    /// Scans all tables for columns named `operator_id` and registers them.
+    /// Scans all tables for columns named `tenant_id` first,
+    /// then falls back to `operator_id` for legacy schemas.
     pub fn from_build_schema(schema: &crate::build::Schema) -> Self {
         let mut registry = Self::new();
 
         for table in schema.tables.values() {
-            // Auto-detect: any table with an `operator_id` column is tenant-scoped
-            if table.columns.contains_key("operator_id") {
+            if table.columns.contains_key("tenant_id") {
+                registry.register(&table.name, "tenant_id");
+            } else if table.columns.contains_key("operator_id") {
                 registry.register(&table.name, "operator_id");
             }
         }
@@ -91,7 +94,7 @@ pub static TENANT_TABLES: LazyLock<RwLock<TenantRegistry>> =
 /// # Example
 /// ```
 /// use qail_core::rls::tenant::register_tenant_table;
-/// register_tenant_table("orders", "operator_id");
+/// register_tenant_table("orders", "tenant_id");
 /// ```
 pub fn register_tenant_table(table: &str, column: &str) {
     if let Ok(mut reg) = TENANT_TABLES.write() {
@@ -105,8 +108,8 @@ pub fn register_tenant_table(table: &str, column: &str) {
 /// # Example
 /// ```
 /// use qail_core::rls::tenant::{register_tenant_table, lookup_tenant_column};
-/// register_tenant_table("orders", "operator_id");
-/// assert_eq!(lookup_tenant_column("orders"), Some("operator_id".to_string()));
+/// register_tenant_table("orders", "tenant_id");
+/// assert_eq!(lookup_tenant_column("orders"), Some("tenant_id".to_string()));
 /// ```
 pub fn lookup_tenant_column(table: &str) -> Option<String> {
     let registry = TENANT_TABLES.read().ok()?;
@@ -114,7 +117,7 @@ pub fn lookup_tenant_column(table: &str) -> Option<String> {
 }
 
 /// Load tenant tables from a schema.qail file.
-/// Auto-detects tables with `operator_id` columns.
+/// Auto-detects tables with `tenant_id` columns first, then `operator_id`.
 /// Returns the number of tenant tables found.
 pub fn load_tenant_tables(path: &str) -> Result<usize, String> {
     let schema = crate::build::Schema::parse_file(path)?;
@@ -124,7 +127,10 @@ pub fn load_tenant_tables(path: &str) -> Result<usize, String> {
 
     let mut count = 0;
     for table in schema.tables.values() {
-        if table.columns.contains_key("operator_id") {
+        if table.columns.contains_key("tenant_id") {
+            registry.register(&table.name, "tenant_id");
+            count += 1;
+        } else if table.columns.contains_key("operator_id") {
             registry.register(&table.name, "operator_id");
             count += 1;
         }
@@ -141,9 +147,9 @@ pub fn load_tenant_tables(path: &str) -> Result<usize, String> {
 /// ```
 /// use qail_core::rls::tenant::register_tenant_tables;
 /// register_tenant_tables(&[
-///     ("orders", "operator_id"),
-///     ("bookings", "operator_id"),
-///     ("users", "operator_id"),
+///     ("orders", "tenant_id"),
+///     ("bookings", "tenant_id"),
+///     ("users", "tenant_id"),
 /// ]);
 /// ```
 pub fn register_tenant_tables(tables: &[(&str, &str)]) {
@@ -161,18 +167,18 @@ mod tests {
     #[test]
     fn test_registry_register_and_lookup() {
         let mut reg = TenantRegistry::new();
-        reg.register("orders", "operator_id");
-        reg.register("bookings", "operator_id");
+        reg.register("orders", "tenant_id");
+        reg.register("bookings", "tenant_id");
 
-        assert_eq!(reg.get("orders"), Some("operator_id"));
-        assert_eq!(reg.get("bookings"), Some("operator_id"));
+        assert_eq!(reg.get("orders"), Some("tenant_id"));
+        assert_eq!(reg.get("bookings"), Some("tenant_id"));
         assert_eq!(reg.get("migrations"), None);
     }
 
     #[test]
     fn test_registry_is_tenant_table() {
         let mut reg = TenantRegistry::new();
-        reg.register("orders", "operator_id");
+        reg.register("orders", "tenant_id");
 
         assert!(reg.is_tenant_table("orders"));
         assert!(!reg.is_tenant_table("users"));
@@ -183,7 +189,7 @@ mod tests {
         let mut reg = TenantRegistry::new();
         assert!(reg.is_empty());
 
-        reg.register("orders", "operator_id");
+        reg.register("orders", "tenant_id");
         assert_eq!(reg.len(), 1);
         assert!(!reg.is_empty());
     }
@@ -191,10 +197,10 @@ mod tests {
     #[test]
     fn test_global_register_and_lookup() {
         // Use unique table names to avoid test interference
-        register_tenant_table("_test_t1", "operator_id");
+        register_tenant_table("_test_t1", "tenant_id");
         assert_eq!(
             lookup_tenant_column("_test_t1"),
-            Some("operator_id".to_string())
+            Some("tenant_id".to_string())
         );
         assert_eq!(lookup_tenant_column("_test_nonexistent"), None);
 
@@ -206,23 +212,42 @@ mod tests {
 
     #[test]
     fn test_bulk_register() {
-        register_tenant_tables(&[
-            ("_test_bulk_a", "operator_id"),
-            ("_test_bulk_b", "operator_id"),
-        ]);
+        register_tenant_tables(&[("_test_bulk_a", "tenant_id"), ("_test_bulk_b", "tenant_id")]);
 
         assert_eq!(
             lookup_tenant_column("_test_bulk_a"),
-            Some("operator_id".to_string())
+            Some("tenant_id".to_string())
         );
         assert_eq!(
             lookup_tenant_column("_test_bulk_b"),
-            Some("operator_id".to_string())
+            Some("tenant_id".to_string())
         );
 
         // Clean up
         if let Ok(mut reg) = TENANT_TABLES.write() {
             *reg = TenantRegistry::new();
         }
+    }
+
+    #[test]
+    fn test_from_build_schema_prefers_tenant_id() {
+        let schema = crate::build::Schema::parse(
+            r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+
+table legacy_bookings {
+  id UUID
+  operator_id UUID
+}
+"#,
+        )
+        .expect("schema should parse");
+
+        let reg = TenantRegistry::from_build_schema(&schema);
+        assert_eq!(reg.get("orders"), Some("tenant_id"));
+        assert_eq!(reg.get("legacy_bookings"), Some("operator_id"));
     }
 }

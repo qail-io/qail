@@ -14,7 +14,7 @@ pub use qail_core::rls::RlsContext;
 /// PostgreSQL session variables for RLS policy evaluation.
 ///
 /// **Security**: GUC values are sanitized to prevent SQL injection via
-/// crafted JWT claims (e.g., `operator_id: "'; DROP TABLE users; --"`).
+/// crafted JWT claims (e.g., `tenant_id: "'; DROP TABLE users; --"`).
 pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
     let nil_uuid = "00000000-0000-0000-0000-000000000000";
     let t_id_raw = if ctx.is_global() && ctx.tenant_id.is_empty() {
@@ -47,10 +47,14 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
          SELECT set_config('app.current_user_id', '{}', true), \
                 set_config('app.current_tenant_id', '{}', true), \
                 set_config('app.current_operator_id', '{}', true), \
+                set_config('app.tenant_id', '{}', true), \
+                set_config('app.operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         is_global,
         u_id,
+        t_id,
+        op_id,
         t_id,
         op_id,
         ag_id,
@@ -114,12 +118,16 @@ pub(crate) fn context_to_sql_with_timeouts(
          SELECT set_config('app.current_user_id', '{}', true), \
                 set_config('app.current_tenant_id', '{}', true), \
                 set_config('app.current_operator_id', '{}', true), \
+                set_config('app.tenant_id', '{}', true), \
+                set_config('app.operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         statement_timeout_ms,
         lock_clause,
         is_global,
         u_id,
+        t_id,
+        op_id,
         t_id,
         op_id,
         ag_id,
@@ -171,6 +179,8 @@ mod tests {
         assert!(sql.contains("'abc-123'"));
         assert!(sql.contains("app.current_tenant_id"));
         assert!(sql.contains("app.current_operator_id"));
+        assert!(sql.contains("app.tenant_id"));
+        assert!(sql.contains("app.operator_id"));
         assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
         assert!(sql.contains("'false'")); // is_super_admin
     }

@@ -8,8 +8,10 @@ pub(super) async fn execute_qail_cmd_fast(
     cmd: &qail_core::ast::Qail,
 ) -> Result<Json<FastQueryResponse>, ApiError> {
     use qail_core::ast::Action;
+    let mut cmd = cmd.clone();
+    state.optimize_qail_for_execution(&mut cmd);
 
-    let (depth, filters, joins) = query_complexity(cmd);
+    let (depth, filters, joins) = query_complexity(&cmd);
     if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
         crate::metrics::record_complexity_rejected();
         return Err(api_err);
@@ -35,7 +37,7 @@ pub(super) async fn execute_qail_cmd_fast(
 
     let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
     let rows = conn
-        .fetch_all_fast(cmd)
+        .fetch_all_fast(&cmd)
         .await
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
     timer.finish(rows.is_ok());
@@ -63,8 +65,10 @@ pub(super) async fn execute_qail_cmd(
     cmd: &qail_core::ast::Qail,
 ) -> Result<Json<QueryResponse>, ApiError> {
     use qail_core::ast::Action;
+    let mut cmd = cmd.clone();
+    state.optimize_qail_for_execution(&mut cmd);
 
-    let (depth, filters, joins) = query_complexity(cmd);
+    let (depth, filters, joins) = query_complexity(&cmd);
     if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
         tracing::warn!(
             table = %cmd.table,
@@ -85,7 +89,7 @@ pub(super) async fn execute_qail_cmd(
     ) {
         #[cfg(feature = "qdrant")]
         {
-            return execute_qdrant_cmd(state, cmd).await;
+            return execute_qdrant_cmd(state, &cmd).await;
         }
         #[cfg(not(feature = "qdrant"))]
         {
@@ -100,7 +104,7 @@ pub(super) async fn execute_qail_cmd(
     let is_read_query = matches!(cmd.action, Action::Get);
 
     let tenant = auth.tenant_id.as_deref().unwrap_or("_anon");
-    let cache_key = format!("{}:{}:{}", tenant, auth.user_id, exact_cache_key(cmd));
+    let cache_key = format!("{}:{}:{}", tenant, auth.user_id, exact_cache_key(&cmd));
 
     if is_read_query && let Some(cached) = state.cache.get(&cache_key) {
         tracing::debug!("Cache HIT for table '{}'", table);
@@ -121,7 +125,7 @@ pub(super) async fn execute_qail_cmd(
 
     let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
     let rows = conn
-        .fetch_all_with_rls(cmd, &rls_sql)
+        .fetch_all_with_rls(&cmd, &rls_sql)
         .await
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
     timer.finish(rows.is_ok());

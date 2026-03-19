@@ -162,7 +162,9 @@ pub fn validate_against_schema_diagnostics(
                 .table(&query.table)
                 .map(|t| t.has_column("tenant_id"))
                 .unwrap_or(false);
-            if table_has_tenant_id && !has_explicit_tenant_scope(&query.cmd) {
+            if table_has_tenant_id
+                && !(query.has_explicit_tenant_scope || has_explicit_tenant_scope(&query.cmd))
+            {
                 push_unique(ValidationDiagnostic::rls_warning(format!(
                     "{}:{}: ⚠️ RLS AUDIT: Qail::{}(\"{}\") in file using SuperAdminToken::for_system_process() \
    — query has no explicit tenant scope (`tenant_id = ...` or `tenant_id IS NULL`) and may bypass tenant isolation. \
@@ -192,9 +194,8 @@ pub fn validate_against_schema(schema: &Schema, usages: &[QailUsage]) -> Vec<Str
 /// Controlled by environment variables:
 /// - `QAIL_NPLUS1`: `off` | `warn` (default) | `deny`
 /// - `QAIL_NPLUS1_MAX_WARNINGS`: max warnings before truncation (default 50)
-#[cfg(feature = "analyzer")]
 fn run_nplus1_check(src_dir: &str) {
-    use crate::analyzer::{NPlusOneSeverity, detect_n_plus_one_in_dir};
+    use super::nplus1_semantic::{NPlusOneSeverity, detect_n_plus_one_in_dir};
 
     println!("cargo:rerun-if-env-changed=QAIL_NPLUS1");
     println!("cargo:rerun-if-env-changed=QAIL_NPLUS1_MAX_WARNINGS");
@@ -240,71 +241,6 @@ fn run_nplus1_check(src_dir: &str) {
             "QAIL N+1: {} diagnostic(s) found. Fix N+1 patterns or set QAIL_NPLUS1=warn",
             total
         ));
-    }
-}
-
-#[cfg(all(not(feature = "analyzer"), feature = "syn-scanner"))]
-fn run_nplus1_check(src_dir: &str) {
-    use super::syn_nplus1::{NPlusOneSeverity, detect_n_plus_one_in_dir};
-
-    println!("cargo:rerun-if-env-changed=QAIL_NPLUS1");
-    println!("cargo:rerun-if-env-changed=QAIL_NPLUS1_MAX_WARNINGS");
-
-    let mode = std::env::var("QAIL_NPLUS1").unwrap_or_else(|_| "warn".to_string());
-
-    if mode == "off" || mode == "false" || mode == "0" {
-        return;
-    }
-
-    let max_warnings: usize = std::env::var("QAIL_NPLUS1_MAX_WARNINGS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50);
-
-    let diagnostics = detect_n_plus_one_in_dir(Path::new(src_dir));
-
-    if diagnostics.is_empty() {
-        println!("cargo:warning=QAIL: N+1 scan clean ✓");
-        return;
-    }
-
-    let total = diagnostics.len();
-    let shown = total.min(max_warnings);
-
-    for diag in diagnostics.iter().take(shown) {
-        let prefix = match diag.severity {
-            NPlusOneSeverity::Error => "QAIL N+1 ERROR",
-            NPlusOneSeverity::Warning => "QAIL N+1",
-        };
-        println!("cargo:warning={}: {}", prefix, diag);
-    }
-
-    if total > shown {
-        println!(
-            "cargo:warning=QAIL N+1: ... and {} more (set QAIL_NPLUS1_MAX_WARNINGS to see all)",
-            total - shown
-        );
-    }
-
-    if mode == "deny" {
-        fail_build(format!(
-            "QAIL N+1: {} diagnostic(s) found. Fix N+1 patterns or set QAIL_NPLUS1=warn",
-            total
-        ));
-    }
-}
-
-#[cfg(all(not(feature = "analyzer"), not(feature = "syn-scanner")))]
-fn run_nplus1_check(_src_dir: &str) {
-    println!("cargo:rerun-if-env-changed=QAIL_NPLUS1");
-    let mode = std::env::var("QAIL_NPLUS1").unwrap_or_else(|_| "warn".to_string());
-    let disabled = mode == "off" || mode == "false" || mode == "0";
-    if !disabled {
-        println!(
-            "cargo:warning=QAIL: N+1 check requested (QAIL_NPLUS1={}) but both `analyzer` and `syn-scanner` features are disabled; \
-enable qail-core feature `analyzer` (full) or `syn-scanner` (syn-only) in build-dependencies to activate compile-time N+1 detection.",
-            mode
-        );
     }
 }
 

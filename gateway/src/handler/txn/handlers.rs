@@ -79,6 +79,7 @@ pub async fn txn_query(
 
     // Clamp LIMIT to prevent oversized result sets in long-lived txn sessions.
     crate::handler::clamp_query_limit(&mut cmd, state.config.max_result_rows);
+    state.optimize_qail_for_execution(&mut cmd);
 
     // Complexity guard parity with /qail.
     let (depth, filters, joins) = crate::handler::query::query_complexity(&cmd);

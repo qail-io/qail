@@ -140,6 +140,7 @@ pub(crate) async fn nested_list_handler(
         .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    state.optimize_qail_for_execution(&mut cmd);
 
     // Execute — single query, no N+1
     let mut conn = state

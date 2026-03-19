@@ -27,7 +27,8 @@ pub struct TableSchema {
     /// Foreign key relationships to other tables
     pub foreign_keys: Vec<ForeignKey>,
     /// Whether this table has Row-Level Security enabled
-    /// Auto-detected: table has `operator_id` column OR has `rls` keyword in schema.qail
+    /// Auto-detected: table has `tenant_id` (or legacy `operator_id`) column
+    /// OR has `rls` keyword in schema.qail
     pub rls_enabled: bool,
 }
 
@@ -147,8 +148,11 @@ impl Schema {
             if line.starts_with("table ") && (line.ends_with('{') || line.contains('{')) {
                 // Save previous table if any
                 if let Some(table_name) = current_table.take() {
-                    // Auto-detect RLS: table has operator_id column or was marked `rls`
-                    let has_rls = current_rls_flag || current_columns.contains_key("operator_id");
+                    // Auto-detect RLS: tenant_id (preferred) or operator_id (legacy)
+                    // column, or explicit `rls` marker.
+                    let has_rls = current_rls_flag
+                        || current_columns.contains_key("tenant_id")
+                        || current_columns.contains_key("operator_id");
                     schema.tables.insert(
                         table_name.clone(),
                         TableSchema {
@@ -173,7 +177,9 @@ impl Schema {
             // End of table definition
             else if line == "}" {
                 if let Some(table_name) = current_table.take() {
-                    let has_rls = current_rls_flag || current_columns.contains_key("operator_id");
+                    let has_rls = current_rls_flag
+                        || current_columns.contains_key("tenant_id")
+                        || current_columns.contains_key("operator_id");
                     schema.tables.insert(
                         table_name.clone(),
                         TableSchema {

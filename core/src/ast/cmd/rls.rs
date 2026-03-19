@@ -8,10 +8,10 @@
 //! ```text
 //!  Qail::get("orders")
 //!    .with_rls(&ctx)          ← Phase 4: AST injection (primary)
-//!    → WHERE operator_id = 'uuid'
+//!    → WHERE tenant_id = 'uuid'
 //!
 //!  acquire_with_rls(ctx)      ← Phase 2: DB session vars (backup)
-//!    → SET app.current_operator_id = 'uuid'
+//!    → SET app.current_tenant_id = 'uuid'
 //!
 //!  CREATE POLICY ...          ← Phase 3: DB policies (safety net)
 //!    → ENABLE ROW LEVEL SECURITY
@@ -23,11 +23,11 @@
 //! use qail_core::rls::RlsContext;
 //! use qail_core::rls::tenant::register_tenant_table;
 //!
-//! register_tenant_table("orders", "operator_id");
+//! register_tenant_table("orders", "tenant_id");
 //!
-//! let ctx = RlsContext::operator("550e8400-e29b-41d4-a716-446655440000");
+//! let ctx = RlsContext::tenant("550e8400-e29b-41d4-a716-446655440000");
 //! let query = Qail::get("orders").with_rls(&ctx);
-//! // Transpiles to: SELECT * FROM orders WHERE operator_id = '550e8400-...'
+//! // Transpiles to: SELECT * FROM orders WHERE tenant_id = '550e8400-...'
 //! ```
 
 use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
@@ -37,8 +37,8 @@ use crate::rls::tenant::lookup_tenant_column;
 impl Qail {
     /// Apply tenant-scope isolation based on the query action.
     ///
-    /// - **GET/SET/DEL** → injects `WHERE operator_id = $value`
-    /// - **ADD/Upsert** → auto-sets `operator_id` in payload
+    /// - **GET/SET/DEL** → injects `WHERE tenant_col = $value`
+    /// - **ADD/Upsert** → auto-sets `tenant_col` in payload
     /// - **Global context** → injects `tenant_col IS NULL` (or payload `tenant_col = NULL`)
     /// - **Super admins** → no-op (bypasses isolation)
     /// - **Unregistered tables** → no-op (not a tenant table)
@@ -46,7 +46,7 @@ impl Qail {
     ///
     /// # Example
     /// ```ignore
-    /// let ctx = RlsContext::operator("op-uuid");
+    /// let ctx = RlsContext::tenant("tenant-uuid");
     /// let query = Qail::get("orders").with_rls(&ctx);
     /// ```
     pub fn with_rls(self, ctx: &RlsContext) -> Self {
@@ -86,7 +86,7 @@ impl Qail {
         }
     }
 
-    /// Inject a `WHERE tenant_col = operator_id` filter for reads.
+    /// Inject a `WHERE tenant_col = scope_id` filter for reads.
     ///
     /// Adds the condition to the existing Filter cage (AND), or creates
     /// a new one. Uses the same pattern as `.filter()`.
@@ -144,9 +144,9 @@ impl Qail {
         self
     }
 
-    /// Auto-set `operator_id` in INSERT/UPSERT payload.
+    /// Auto-set tenant scope in INSERT/UPSERT payload.
     ///
-    /// Adds the tenant column to the Payload cage so the operator_id
+    /// Adds the tenant column to the Payload cage so the scope id
     /// is always included in INSERT statements.
     fn scope_insert_tenant(mut self, tenant_col: &str, ctx: &RlsContext) -> Self {
         let condition = Condition {

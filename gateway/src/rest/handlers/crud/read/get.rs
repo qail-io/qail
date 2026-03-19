@@ -40,6 +40,7 @@ pub(crate) async fn get_by_id_handler(
         .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    state.optimize_qail_for_execution(&mut cmd);
 
     // Execute
     let mut conn = state

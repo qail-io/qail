@@ -73,7 +73,8 @@ pub(in super::super) async fn enforce_rpc_signature_contract(
         cached
     } else {
         crate::metrics::record_rpc_signature_cache_miss();
-        let cmd = rpc_signature_lookup_cmd(function_name)?;
+        let mut cmd = rpc_signature_lookup_cmd(function_name)?;
+        state.optimize_qail_for_execution(&mut cmd);
         let rows = conn
             .fetch_all_uncached(&cmd)
             .await

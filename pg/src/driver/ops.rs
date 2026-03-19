@@ -105,7 +105,7 @@ impl PgDriver {
 
     /// Set the RLS context for multi-tenant data isolation.
     ///
-    /// Configures PostgreSQL session variables (`app.current_operator_id`, etc.)
+    /// Configures PostgreSQL session variables (`app.current_tenant_id`, etc.)
     /// so that RLS policies automatically filter data by tenant.
     ///
     /// Since `PgDriver` takes `&mut self`, the borrow checker guarantees
@@ -114,9 +114,9 @@ impl PgDriver {
     ///
     /// # Example
     /// ```ignore
-    /// driver.set_rls_context(RlsContext::operator("op-123")).await?;
+    /// driver.set_rls_context(RlsContext::tenant("tenant-123")).await?;
     /// let orders = driver.fetch_all(&Qail::get("orders")).await?;
-    /// // orders only contains rows where operator_id = 'op-123'
+    /// // orders only contains rows for tenant-123
     /// ```
     pub async fn set_rls_context(&mut self, ctx: rls::RlsContext) -> PgResult<()> {
         let sql = rls::context_to_sql(&ctx);
@@ -133,7 +133,7 @@ impl PgDriver {
     /// Clear the RLS context, resetting session variables to safe defaults.
     ///
     /// After clearing, all RLS-protected queries will return zero rows
-    /// (empty operator_id matches nothing).
+    /// (empty tenant scope matches nothing).
     pub async fn clear_rls_context(&mut self) -> PgResult<()> {
         let sql = rls::reset_sql();
         if sql.as_bytes().contains(&0) {

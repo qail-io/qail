@@ -106,8 +106,7 @@ async fn extract_tenant_scope(state: &crate::GatewayState, headers: HeaderMap) -
         state.jwks_store.as_ref(),
         &state.jwt_allowed_algorithms,
     );
-    auth.enrich_with_operator_map(&state.user_operator_map)
-        .await;
+    auth.enrich_with_tenant_map(&state.user_operator_map).await;
     auth.tenant_id.clone().unwrap_or_else(|| {
         if auth.is_authenticated() {
             auth.user_id.clone()

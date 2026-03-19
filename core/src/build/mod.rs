@@ -21,6 +21,8 @@
 
 /// Typed schema code generation.
 mod codegen;
+/// Semantic N+1 detector that reasons on executable query patterns.
+mod nplus1_semantic;
 /// Shared query IR used across build-time rules.
 mod query_ir;
 /// Text-based source scanner.
@@ -29,14 +31,6 @@ pub mod scanner;
 pub mod schema;
 /// Build-time no-raw-SQL policy detector.
 mod sql_guard;
-/// Syn-based AST analyzer (requires `syn-scanner` feature).
-#[cfg(feature = "syn-scanner")]
-pub mod syn_analyzer;
-/// Syn-based N+1 detector used when `syn-scanner` is enabled without full `analyzer`.
-#[cfg(all(feature = "syn-scanner", not(feature = "analyzer")))]
-#[allow(dead_code)]
-#[path = "../analyzer/rust_ast/nplus1/mod.rs"]
-mod syn_nplus1;
 /// Validation pipeline.
 mod validate;
 

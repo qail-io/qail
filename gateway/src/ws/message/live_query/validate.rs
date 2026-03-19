@@ -75,6 +75,7 @@ pub(super) async fn prepare_and_send_initial_snapshot(
     }
 
     crate::handler::clamp_query_limit(&mut cmd, state.config.max_result_rows);
+    state.optimize_qail_for_execution(&mut cmd);
 
     let (depth, filters, joins) = crate::handler::query::query_complexity(&cmd);
     if let Err(_api_err) = state.complexity_guard.check(depth, filters, joins) {

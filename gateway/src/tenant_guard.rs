@@ -1,7 +1,7 @@
 //! Tenant Boundary Invariant Enforcer
 //!
 //! Runtime verification that RLS is working correctly. After every query,
-//! scans returned rows for a configurable tenant column (default `operator_id`)
+//! scans returned rows for a configurable tenant column (default `tenant_id`)
 //! mismatches against the authenticated tenant context.
 //!
 //! This catches RLS bypass bugs in code we haven't written yet.
@@ -30,7 +30,7 @@ pub struct TenantVerified(());
 
 impl TenantVerified {
     /// Create a `TenantVerified` for unauthenticated/system requests
-    /// where no tenant scoping applies (e.g., no `operator_id` in context).
+    /// where no tenant scoping applies (e.g., no `tenant_id` in context).
     pub fn unscoped() -> Self {
         Self(())
     }
