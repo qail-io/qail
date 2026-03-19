@@ -124,7 +124,7 @@ impl GatewayConfig {
             max_query_depth: 5,
             max_query_filters: 20,
             max_query_joins: 10,
-            qdrant: qail.qdrant.clone(),
+            qdrant: qail.qdrant.clone().map(Into::into),
             tenant_column: "tenant_id".to_string(),
             tenant_guard_exempt_tables: Vec::new(),
             allow_list_path: None,

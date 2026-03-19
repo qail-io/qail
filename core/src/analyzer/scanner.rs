@@ -4,12 +4,12 @@ use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::rust_ast::RustAnalyzer;
+use super::rust_ast::{RustAnalyzer, detect_raw_sql_in_file};
 
 /// Analysis mode for the codebase scanner
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AnalysisMode {
-    /// Full Rust AST analysis using `syn` (100% accurate)
+    /// Semantic Rust source analysis (shared with build scanner)
     RustAST,
     Regex,
 }
@@ -17,7 +17,7 @@ pub enum AnalysisMode {
 /// Type of query found in source code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryType {
-    /// Native QAIL query (v2: get users, or legacy v1: get::users)
+    /// Native QAIL query in modern text form (e.g. `get users fields ...`).
     Qail,
     RawSql,
 }
@@ -51,9 +51,7 @@ pub struct ScanResult {
 
 /// Scanner for finding QAIL and SQL references in source code.
 pub struct CodebaseScanner {
-    /// Regex patterns for QAIL queries (legacy symbol syntax)
-    qail_action_pattern: Regex,
-    qail_column_pattern: Regex,
+    /// Regex patterns for modern QAIL text syntax
     qail_v2_get_pattern: Regex,
     qail_v2_set_pattern: Regex,
     qail_v2_del_pattern: Regex,
@@ -76,9 +74,6 @@ impl CodebaseScanner {
         // SAFETY: All regex patterns below are compile-time constant strings.
         // They have been validated and will never fail to compile, so .expect() is infallible.
         Self {
-            qail_action_pattern: Regex::new(r"(get|set|del|add)::(\w+)")
-                .expect("valid qail action regex"),
-            qail_column_pattern: Regex::new(r"'(\w+)").expect("valid qail column regex"),
             qail_v2_get_pattern: Regex::new(
                 r"\bget\s+(\w+)\s+fields\s+([^\n]+?)(?:\s+where|\s+order|\s+limit|$)",
             )
@@ -184,16 +179,16 @@ impl CodebaseScanner {
     }
 
     /// Scan a single file for references.
-    /// Uses Rust AST analyzer for .rs files + regex for raw SQL, regex-only for others.
+    /// Uses semantic Rust analysis for `.rs` files and regex scanning for
+    /// non-Rust sources.
     fn scan_file(&self, path: &Path) -> Vec<CodeReference> {
         let mut refs = Vec::new();
 
-        // For Rust files: run AST analyzer first, then also run regex for raw SQL
         if path.extension().map(|e| e == "rs").unwrap_or(false) {
             refs.extend(RustAnalyzer::scan_file(path));
+            refs.extend(self.scan_rust_raw_sql(path));
+            return refs;
         }
-
-        // Regex scanner: for non-Rust files OR for raw SQL detection in Rust files
 
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
@@ -206,26 +201,6 @@ impl CodebaseScanner {
             // R7-ReDoS: Skip excessively long lines to bound regex backtracking
             if line.len() > 4096 {
                 continue;
-            }
-
-            for cap in self.qail_action_pattern.captures_iter(line) {
-                let action = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-                let table = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-
-                let columns: Vec<String> = self
-                    .qail_column_pattern
-                    .captures_iter(line)
-                    .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-                    .collect();
-
-                refs.push(CodeReference {
-                    file: path.to_path_buf(),
-                    line: line_number,
-                    table: table.to_string(),
-                    columns,
-                    query_type: QueryType::Qail,
-                    snippet: format!("{}::{}", action, table),
-                });
             }
 
             for cap in self.qail_v2_get_pattern.captures_iter(line) {
@@ -350,6 +325,75 @@ impl CodebaseScanner {
         refs
     }
 
+    fn scan_rust_raw_sql(&self, path: &Path) -> Vec<CodeReference> {
+        let mut refs = Vec::new();
+        for sql_match in detect_raw_sql_in_file(path) {
+            let snippet = sql_match
+                .raw_sql
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if snippet.is_empty() {
+                continue;
+            }
+
+            let (table, columns) = if let Some(cap) = self.sql_select_pattern.captures(&snippet) {
+                let columns_str = cap.get(1).map(|m| m.as_str()).unwrap_or_default();
+                let table = cap
+                    .get(2)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let columns = if columns_str.trim() == "*" {
+                    vec!["*".to_string()]
+                } else {
+                    columns_str
+                        .split(',')
+                        .map(|c| c.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect()
+                };
+                (table, columns)
+            } else if let Some(cap) = self.sql_insert_pattern.captures(&snippet) {
+                (
+                    cap.get(1)
+                        .map(|m| m.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    vec![],
+                )
+            } else if let Some(cap) = self.sql_update_pattern.captures(&snippet) {
+                (
+                    cap.get(1)
+                        .map(|m| m.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    vec![],
+                )
+            } else if let Some(cap) = self.sql_delete_pattern.captures(&snippet) {
+                (
+                    cap.get(1)
+                        .map(|m| m.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    vec![],
+                )
+            } else {
+                (String::new(), vec![])
+            };
+
+            refs.push(CodeReference {
+                file: path.to_path_buf(),
+                line: sql_match.line,
+                table,
+                columns,
+                query_type: QueryType::RawSql,
+                snippet: snippet.chars().take(60).collect(),
+            });
+        }
+        refs
+    }
+
     /// Parse v2 column list: "id, name, email" or "*"
     fn parse_v2_columns(columns_str: &str) -> Vec<String> {
         if columns_str.trim() == "*" {
@@ -384,15 +428,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_qail_pattern() {
+    fn test_v2_get_pattern() {
         let scanner = CodebaseScanner::new();
-        let line = r#"let result = qail!("get::users:'name'email[id=$1]");"#;
+        let line = "get users fields name, email where id = $1";
 
-        assert!(scanner.qail_action_pattern.is_match(line));
+        assert!(scanner.qail_v2_get_pattern.is_match(line));
 
-        let cap = scanner.qail_action_pattern.captures(line).unwrap();
-        assert_eq!(cap.get(1).unwrap().as_str(), "get");
-        assert_eq!(cap.get(2).unwrap().as_str(), "users");
+        let cap = scanner.qail_v2_get_pattern.captures(line).unwrap();
+        assert_eq!(cap.get(1).unwrap().as_str(), "users");
+        assert_eq!(cap.get(2).unwrap().as_str(), "name, email");
     }
 
     #[test]
@@ -407,16 +451,43 @@ mod tests {
     }
 
     #[test]
-    fn test_column_extraction() {
+    fn test_v2_set_column_extraction() {
+        let columns = CodebaseScanner::parse_v2_set_columns("name = 'Alice', status = 'active'");
+        assert_eq!(columns, vec!["name", "status"]);
+    }
+
+    #[test]
+    fn test_rust_scan_uses_semantic_sql_detection() {
         let scanner = CodebaseScanner::new();
-        let line = r#"get::users:'name'email'created_at"#;
+        let tmp_name = format!(
+            "qail_scanner_rust_sql_{}_{}.rs",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
 
-        let columns: Vec<String> = scanner
-            .qail_column_pattern
-            .captures_iter(line)
-            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-            .collect();
+        let source = r#"
+            // SELECT id FROM comments_should_not_match
+            fn demo() {
+                let sql = "SELECT id, email FROM users WHERE active = true";
+                let _ = sqlx::query(sql);
+            }
+        "#;
 
-        assert_eq!(columns, vec!["name", "email", "created_at"]);
+        std::fs::write(&path, source).expect("write temp rust file");
+        let refs = scanner.scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let raw_sql_refs = refs
+            .iter()
+            .filter(|r| r.query_type == QueryType::RawSql)
+            .collect::<Vec<_>>();
+
+        assert_eq!(raw_sql_refs.len(), 1, "{raw_sql_refs:?}");
+        assert_eq!(raw_sql_refs[0].table, "users");
+        assert_eq!(raw_sql_refs[0].columns, vec!["id", "email"]);
     }
 }

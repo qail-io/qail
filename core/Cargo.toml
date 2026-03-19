@@ -12,10 +12,6 @@ keywords = ["qail", "sql", "parser"]
 [features]
 default = []
 analyzer = [
-    "dep:syn",
-    "dep:proc-macro2",
-    "dep:sqlparser",
-    "dep:quote",
     "dep:regex",
 ]
 # Internal-only: enables examples that depend on external crates (qail-pg, bytes).
@@ -24,19 +20,13 @@ _pg_examples = []
 
 [dependencies]
 nom = "8"
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "js"] }
 strsim = "0.11"
 toml = "1.0"
 
-# Analyzer-only: SQL-to-QAIL refactoring tool
-syn = { version = "2", features = ["full", "visit", "parsing"], optional = true }
-proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
-sqlparser = { version = "0.60.0", optional = true }
-quote = { version = "1.0.45", optional = true }
+# Analyzer-only helpers
 regex = { version = "1.10", optional = true }
 
 [dev-dependencies]

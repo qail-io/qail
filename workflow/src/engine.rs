@@ -81,7 +81,8 @@ impl std::error::Error for WorkflowError {}
 /// #[async_trait]
 /// impl WorkflowExecutor for MyExecutor {
 ///     async fn execute_query(&self, cmd_json: &str) -> Result<Value, WorkflowError> {
-///         let cmd: Qail = serde_json::from_str(cmd_json)?;
+///         let cmd: Qail = qail_core::wire::decode_cmd_text(cmd_json)
+///             .map_err(WorkflowError::QueryFailed)?;
 ///         let rows = self.pg.fetch_all(&cmd).await?;
 ///         Ok(rows_to_json(rows))
 ///     }
@@ -104,7 +105,7 @@ impl std::error::Error for WorkflowError {}
 /// ```
 #[async_trait]
 pub trait WorkflowExecutor: Send + Sync {
-    /// Execute a QAIL query (serialized as JSON) and return results.
+    /// Execute a QAIL query (QAIL wire text) and return results.
     async fn execute_query(&self, cmd_json: &str) -> Result<Value, WorkflowError>;
 
     /// Send a notification through a channel.

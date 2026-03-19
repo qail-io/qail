@@ -146,7 +146,7 @@ fn zig_default(zig_type: &str, field_name: &str) -> Option<String> {
 }
 
 // ============================================================================
-// Parsing with syn
+// Parsing (custom, syn-free)
 // ============================================================================
 
 /// A parsed Rust enum.
@@ -179,122 +179,759 @@ struct StructField {
 fn parse_file(path: &Path) -> (Vec<RustEnum>, Vec<RustStruct>) {
     let source = std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
-    let syntax = syn::parse_file(&source)
-        .unwrap_or_else(|e| panic!("Cannot parse {}: {}", path.display(), e));
-
     let mut enums = Vec::new();
     let mut structs = Vec::new();
 
-    for item in &syntax.items {
-        match item {
-            syn::Item::Enum(e) => {
-                // Skip non-pub or impl-only enums
-                if !matches!(e.vis, syn::Visibility::Public(_)) {
-                    continue;
-                }
-                let doc = extract_doc_attrs(&e.attrs);
-                let mut variants = Vec::new();
-                for v in &e.variants {
-                    let vdoc = extract_doc_attrs(&v.attrs);
-                    let fields = match &v.fields {
-                        syn::Fields::Unit => vec![],
-                        syn::Fields::Unnamed(f) => f
-                            .unnamed
-                            .iter()
-                            .enumerate()
-                            .map(|(i, field)| StructField {
-                                name: format!("f{}", i),
-                                doc: String::new(),
-                                ty: type_to_string(&field.ty),
-                            })
-                            .collect(),
-                        syn::Fields::Named(f) => f
-                            .named
-                            .iter()
-                            .map(|field| StructField {
-                                name: field.ident.as_ref().unwrap().to_string(),
-                                doc: extract_doc_attrs(&field.attrs),
-                                ty: type_to_string(&field.ty),
-                            })
-                            .collect(),
-                    };
-                    variants.push(EnumVariant {
-                        name: v.ident.to_string(),
-                        doc: vdoc,
-                        fields,
-                    });
-                }
-                enums.push(RustEnum {
-                    name: e.ident.to_string(),
-                    doc,
-                    variants,
-                });
+    let mut pos = 0usize;
+    let mut brace_depth = 0i32;
+    let mut pending_doc: Vec<String> = Vec::new();
+
+    while pos < source.len() {
+        let line_end = source[pos..]
+            .find('\n')
+            .map(|off| pos + off)
+            .unwrap_or(source.len());
+        let line = &source[pos..line_end];
+        let trimmed = line.trim_start();
+
+        if brace_depth == 0 {
+            if let Some(doc_line) = trimmed.strip_prefix("///") {
+                pending_doc.push(doc_line.trim().to_string());
+                pos = next_line_start(&source, line_end);
+                continue;
             }
-            syn::Item::Struct(s) => {
-                if !matches!(s.vis, syn::Visibility::Public(_)) {
-                    continue;
-                }
-                let doc = extract_doc_attrs(&s.attrs);
-                let fields = match &s.fields {
-                    syn::Fields::Named(f) => f
-                        .named
-                        .iter()
-                        .map(|field| StructField {
-                            name: field.ident.as_ref().unwrap().to_string(),
-                            doc: extract_doc_attrs(&field.attrs),
-                            ty: type_to_string(&field.ty),
-                        })
-                        .collect(),
-                    _ => vec![],
-                };
-                structs.push(RustStruct {
-                    name: s.ident.to_string(),
-                    doc,
-                    fields,
-                });
+
+            if trimmed.starts_with("#[") {
+                pos = next_line_start(&source, line_end);
+                continue;
             }
-            _ => {}
+
+            if trimmed.is_empty() {
+                pending_doc.clear();
+                pos = next_line_start(&source, line_end);
+                continue;
+            }
+
+            let kind = if trimmed.starts_with("pub enum ") {
+                Some(ItemKind::Enum)
+            } else if trimmed.starts_with("pub struct ") {
+                Some(ItemKind::Struct)
+            } else {
+                None
+            };
+
+            if let Some(kind) = kind {
+                let item_start = pos + (line.len() - trimmed.len());
+                let doc = join_doc_lines(&pending_doc);
+                pending_doc.clear();
+                let parsed = parse_pub_item(&source, item_start, kind, doc).unwrap_or_else(|| {
+                    panic!("Cannot parse item at {}:{}", path.display(), item_start)
+                });
+                let parsed_end = parsed.end_idx;
+
+                match parsed.kind {
+                    ItemKind::Enum => enums.push(parse_enum_item(parsed)),
+                    ItemKind::Struct => structs.push(parse_struct_item(parsed)),
+                }
+
+                pos = next_line_start(&source, parsed_end);
+                brace_depth = 0;
+                continue;
+            }
+
+            pending_doc.clear();
         }
+
+        brace_depth += brace_delta(line);
+        pos = next_line_start(&source, line_end);
     }
 
     (enums, structs)
 }
 
-/// Extract doc comments from attributes.
-fn extract_doc_attrs(attrs: &[syn::Attribute]) -> String {
-    let mut doc = String::new();
-    for attr in attrs {
-        if attr.path().is_ident("doc") {
-            if let syn::Meta::NameValue(nv) = &attr.meta {
-                if let syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(s),
-                    ..
-                }) = &nv.value
-                {
-                    let line = s.value();
-                    if !doc.is_empty() {
-                        doc.push('\n');
-                    }
-                    doc.push_str(line.trim());
-                }
-            }
-        }
-    }
-    doc
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemKind {
+    Enum,
+    Struct,
 }
 
-/// Convert a syn::Type to a string like "Vec<String>", "Option<i64>", etc.
-fn type_to_string(ty: &syn::Type) -> String {
-    use quote::ToTokens;
-    let tokens = ty.to_token_stream();
-    // Normalize by removing spaces around < >
-    let s = tokens.to_string();
-    s.replace(" < ", "<")
+#[derive(Debug, Clone)]
+struct ParsedItem {
+    kind: ItemKind,
+    name: String,
+    doc: String,
+    body: String,
+    end_idx: usize,
+}
+
+fn parse_pub_item(
+    source: &str,
+    item_start: usize,
+    kind: ItemKind,
+    doc: String,
+) -> Option<ParsedItem> {
+    let prefix = match kind {
+        ItemKind::Enum => "pub enum",
+        ItemKind::Struct => "pub struct",
+    };
+    let after_prefix = source.get(item_start..)?.strip_prefix(prefix)?;
+    let mut cursor = item_start + (source.get(item_start..)?.len() - after_prefix.len());
+    cursor = skip_ascii_ws(source, cursor);
+    let name = parse_ident_from(source, &mut cursor)?;
+    let open_brace = find_char_outside_comments(source, cursor, b'{')?;
+    let close_brace = find_matching_brace(source, open_brace)?;
+    let body = source.get(open_brace + 1..close_brace)?.to_string();
+
+    let mut end_idx = close_brace + 1;
+    while end_idx < source.len() {
+        let b = source.as_bytes()[end_idx];
+        if b.is_ascii_whitespace() {
+            end_idx += 1;
+            continue;
+        }
+        if b == b';' {
+            end_idx += 1;
+        }
+        break;
+    }
+
+    Some(ParsedItem {
+        kind,
+        name,
+        doc,
+        body,
+        end_idx,
+    })
+}
+
+fn parse_enum_item(parsed: ParsedItem) -> RustEnum {
+    let variants = split_top_level_entries(&parsed.body, ',')
+        .into_iter()
+        .filter_map(parse_enum_variant)
+        .collect();
+
+    RustEnum {
+        name: parsed.name,
+        doc: parsed.doc,
+        variants,
+    }
+}
+
+fn parse_struct_item(parsed: ParsedItem) -> RustStruct {
+    RustStruct {
+        name: parsed.name,
+        doc: parsed.doc,
+        fields: parse_named_fields(&parsed.body),
+    }
+}
+
+fn parse_enum_variant(entry: &str) -> Option<EnumVariant> {
+    let (doc, core) = split_doc_prefix(entry);
+    if core.is_empty() {
+        return None;
+    }
+
+    let mut cursor = 0usize;
+    let name = parse_ident_from(&core, &mut cursor)?;
+    let rest = core[cursor..].trim_start();
+
+    let fields = if rest.starts_with('{') {
+        let (inside, _) = extract_enclosed_content(rest, '{', '}')?;
+        parse_named_fields(inside)
+    } else if rest.starts_with('(') {
+        let (inside, _) = extract_enclosed_content(rest, '(', ')')?;
+        split_top_level_entries(inside, ',')
+            .into_iter()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .enumerate()
+            .map(|(idx, ty)| StructField {
+                name: format!("f{}", idx),
+                doc: String::new(),
+                ty: normalize_type(ty),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Some(EnumVariant { name, doc, fields })
+}
+
+fn parse_named_fields(body: &str) -> Vec<StructField> {
+    split_top_level_entries(body, ',')
+        .into_iter()
+        .filter_map(|entry| {
+            let (doc, core) = split_doc_prefix(entry);
+            if core.is_empty() {
+                return None;
+            }
+
+            let core = strip_visibility_prefix(core.trim());
+            let colon_idx = find_top_level_char(core, ':')?;
+            let name = core[..colon_idx].trim();
+            let ty = normalize_type(core[colon_idx + 1..].trim());
+
+            if name.is_empty() || ty.is_empty() {
+                None
+            } else {
+                Some(StructField {
+                    name: name.to_string(),
+                    doc,
+                    ty,
+                })
+            }
+        })
+        .collect()
+}
+
+fn split_doc_prefix(entry: &str) -> (String, String) {
+    let mut docs = Vec::new();
+    let mut body_lines = Vec::new();
+    let mut in_prefix = true;
+
+    for line in entry.lines() {
+        let trimmed = line.trim_start();
+        if in_prefix && trimmed.starts_with("///") {
+            docs.push(trimmed.trim_start_matches("///").trim().to_string());
+            continue;
+        }
+        if in_prefix && (trimmed.starts_with("#[") || trimmed.is_empty()) {
+            continue;
+        }
+        in_prefix = false;
+        body_lines.push(line);
+    }
+
+    (
+        join_doc_lines(&docs),
+        body_lines.join("\n").trim().to_string(),
+    )
+}
+
+fn strip_visibility_prefix(mut s: &str) -> &str {
+    s = s.trim_start();
+    if let Some(rest) = s.strip_prefix("pub ") {
+        return rest.trim_start();
+    }
+    if let Some(rest) = s.strip_prefix("pub(")
+        && let Some(close) = rest.find(')')
+    {
+        return rest[close + 1..].trim_start();
+    }
+    s
+}
+
+fn normalize_type(raw: &str) -> String {
+    raw.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" < ", "<")
         .replace("< ", "<")
         .replace(" <", "<")
         .replace(" > ", ">")
         .replace("> ", ">")
         .replace(" >", ">")
+        .replace(" :: ", "::")
+        .replace(":: ", "::")
+        .replace(" ::", "::")
+}
+
+fn split_top_level_entries(text: &str, delim: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut paren = 0i32;
+    let mut bracket = 0i32;
+    let mut brace = 0i32;
+    let mut angle = 0i32;
+    let mut in_string = false;
+    let mut in_line_comment = false;
+    let mut block_comment_depth = 0usize;
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if in_line_comment {
+            if bytes[i] == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if block_comment_depth > 0 {
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                block_comment_depth += 1;
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                block_comment_depth = block_comment_depth.saturating_sub(1);
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_string {
+            if bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth = 1;
+            i += 2;
+            continue;
+        }
+
+        match bytes[i] {
+            b'"' => {
+                in_string = true;
+            }
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b'[' => bracket += 1,
+            b']' => bracket -= 1,
+            b'{' => brace += 1,
+            b'}' => brace -= 1,
+            b'<' => angle += 1,
+            b'>' => angle -= 1,
+            _ => {}
+        }
+
+        if text.as_bytes()[i] == delim as u8
+            && paren == 0
+            && bracket == 0
+            && brace == 0
+            && angle == 0
+        {
+            out.push(&text[start..i]);
+            start = i + delim.len_utf8();
+        }
+
+        i += 1;
+    }
+
+    out.push(&text[start..]);
+    out
+}
+
+fn find_top_level_char(text: &str, target: char) -> Option<usize> {
+    let mut paren = 0i32;
+    let mut bracket = 0i32;
+    let mut brace = 0i32;
+    let mut angle = 0i32;
+    let mut in_string = false;
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if in_string {
+            if bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match bytes[i] {
+            b'"' => in_string = true,
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b'[' => bracket += 1,
+            b']' => bracket -= 1,
+            b'{' => brace += 1,
+            b'}' => brace -= 1,
+            b'<' => angle += 1,
+            b'>' => angle -= 1,
+            _ => {}
+        }
+
+        if bytes[i] == target as u8 && paren == 0 && bracket == 0 && brace == 0 && angle == 0 {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn extract_enclosed_content(text: &str, open: char, close: char) -> Option<(&str, usize)> {
+    let text = text.trim_start();
+    if !text.starts_with(open) {
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut in_line_comment = false;
+    let mut block_comment_depth = 0usize;
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if in_line_comment {
+            if bytes[i] == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if block_comment_depth > 0 {
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                block_comment_depth += 1;
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                block_comment_depth = block_comment_depth.saturating_sub(1);
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_string {
+            if bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth = 1;
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == open as u8 {
+            depth += 1;
+        } else if bytes[i] == close as u8 {
+            depth -= 1;
+            if depth == 0 {
+                return Some((&text[1..i], i + 1));
+            }
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn find_char_outside_comments(source: &str, start: usize, target: u8) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut in_string = false;
+    let mut in_line_comment = false;
+    let mut block_comment_depth = 0usize;
+    let mut i = start;
+
+    while i < bytes.len() {
+        if in_line_comment {
+            if bytes[i] == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if block_comment_depth > 0 {
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                block_comment_depth += 1;
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                block_comment_depth = block_comment_depth.saturating_sub(1);
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_string {
+            if bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth = 1;
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == target {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_matching_brace(source: &str, open_brace: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes.get(open_brace).copied() != Some(b'{') {
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut in_line_comment = false;
+    let mut block_comment_depth = 0usize;
+    let mut i = open_brace;
+
+    while i < bytes.len() {
+        if in_line_comment {
+            if bytes[i] == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if block_comment_depth > 0 {
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                block_comment_depth += 1;
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                block_comment_depth = block_comment_depth.saturating_sub(1);
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_string {
+            if bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment_depth = 1;
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'{' {
+            depth += 1;
+        } else if bytes[i] == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+
+        i += 1;
+    }
+    None
+}
+
+fn parse_ident_from(source: &str, cursor: &mut usize) -> Option<String> {
+    *cursor = skip_ascii_ws(source, *cursor);
+    let start = *cursor;
+    while *cursor < source.len()
+        && (source.as_bytes()[*cursor].is_ascii_alphanumeric()
+            || source.as_bytes()[*cursor] == b'_')
+    {
+        *cursor += 1;
+    }
+    if *cursor == start {
+        None
+    } else {
+        source.get(start..*cursor).map(ToOwned::to_owned)
+    }
+}
+
+fn skip_ascii_ws(source: &str, mut idx: usize) -> usize {
+    while idx < source.len() && source.as_bytes()[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    idx
+}
+
+fn next_line_start(source: &str, line_end: usize) -> usize {
+    if line_end < source.len() {
+        line_end + 1
+    } else {
+        source.len()
+    }
+}
+
+fn join_doc_lines(lines: &[String]) -> String {
+    lines.join("\n")
+}
+
+fn strip_line_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut prev = '\0';
+    for (idx, ch) in line.char_indices() {
+        if ch == '"' && prev != '\\' {
+            in_string = !in_string;
+        }
+        if !in_string && ch == '/' && prev == '/' {
+            return &line[..idx - 1];
+        }
+        prev = ch;
+    }
+    line
+}
+
+fn brace_delta(line: &str) -> i32 {
+    let line = strip_line_comment(line);
+    let mut in_string = false;
+    let mut prev = '\0';
+    let mut depth = 0i32;
+    for ch in line.chars() {
+        if ch == '"' && prev != '\\' {
+            in_string = !in_string;
+        } else if !in_string {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        prev = ch;
+    }
+    depth
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_public_enum_with_tuple_and_named_variants() {
+        let source = r#"
+/// Value docs
+pub enum Value {
+    /// Boolean docs
+    Bool(bool),
+    /// Interval docs
+    Interval {
+        /// Amount docs
+        amount: i64,
+        unit: IntervalUnit,
+    },
+    Unit,
+}
+"#;
+
+        let start = source.find("pub enum").expect("enum start");
+        let parsed = parse_pub_item(source, start, ItemKind::Enum, "Value docs".to_string())
+            .expect("parse enum");
+        let parsed_enum = parse_enum_item(parsed);
+
+        assert_eq!(parsed_enum.name, "Value");
+        assert_eq!(parsed_enum.doc, "Value docs");
+        assert_eq!(parsed_enum.variants.len(), 3);
+        assert_eq!(parsed_enum.variants[0].name, "Bool");
+        assert_eq!(parsed_enum.variants[0].fields[0].ty, "bool");
+        assert_eq!(parsed_enum.variants[1].name, "Interval");
+        assert_eq!(parsed_enum.variants[1].fields[0].name, "amount");
+        assert_eq!(parsed_enum.variants[1].fields[0].doc, "Amount docs");
+    }
+
+    #[test]
+    fn parses_public_struct_and_normalizes_field_types() {
+        let source = r#"
+/// Demo docs
+pub struct Demo {
+    pub name: String,
+    pub(crate) payload: Option < Box < Qail > >,
+}
+"#;
+
+        let start = source.find("pub struct").expect("struct start");
+        let parsed = parse_pub_item(source, start, ItemKind::Struct, "Demo docs".to_string())
+            .expect("parse struct");
+        let parsed_struct = parse_struct_item(parsed);
+
+        assert_eq!(parsed_struct.name, "Demo");
+        assert_eq!(parsed_struct.doc, "Demo docs");
+        assert_eq!(parsed_struct.fields.len(), 2);
+        assert_eq!(parsed_struct.fields[0].name, "name");
+        assert_eq!(parsed_struct.fields[0].ty, "String");
+        assert_eq!(parsed_struct.fields[1].name, "payload");
+        assert_eq!(parsed_struct.fields[1].ty, "Option<Box<Qail>>");
+    }
 }
 
 // ============================================================================
@@ -402,7 +1039,8 @@ fn is_simple_enum(e: &RustEnum) -> bool {
 
 fn main() {
     let rust_ast_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/src/ast");
-    let zig_output_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../qail-zig/src/ast/generated");
+    let zig_output_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../qail-zig/src/ast/generated");
 
     // Create output directory
     std::fs::create_dir_all(&zig_output_dir).expect("Failed to create output directory");
@@ -448,7 +1086,11 @@ fn main() {
 
         for s in &structs {
             // Rename Qail → QailCmd for Zig convention
-            let name = if s.name == "Qail" { Some("QailCmd") } else { None };
+            let name = if s.name == "Qail" {
+                Some("QailCmd")
+            } else {
+                None
+            };
             output.push_str(&gen_zig_struct(s, name));
             output.push('\n');
             total_structs += 1;
@@ -458,11 +1100,19 @@ fn main() {
         std::fs::write(&zig_path, &output)
             .unwrap_or_else(|e| panic!("Cannot write {}: {}", zig_path.display(), e));
 
-        println!("✅ {} → {} ({} enums, {} structs)",
-            rust_file, zig_file, enums.len(), structs.len());
+        println!(
+            "✅ {} → {} ({} enums, {} structs)",
+            rust_file,
+            zig_file,
+            enums.len(),
+            structs.len()
+        );
     }
 
-    println!("\n🎯 Total: {} enums, {} structs generated", total_enums, total_structs);
+    println!(
+        "\n🎯 Total: {} enums, {} structs generated",
+        total_enums, total_structs
+    );
     println!("📁 Output: {}", zig_output_dir.display());
 }
 

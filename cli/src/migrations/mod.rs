@@ -151,7 +151,7 @@ pub fn stable_cmds_checksum(cmds: &[Qail]) -> String {
     let mut material = String::new();
     for cmd in cmds {
         let sql = cmd.to_sql();
-        let ast = serde_json::to_string(cmd).unwrap_or_else(|_| format!("{:?}", cmd));
+        let ast = qail_core::wire::encode_cmd_text(cmd);
         material.push_str("SQL:");
         material.push_str(sql.trim());
         material.push('\n');

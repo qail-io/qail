@@ -1,7 +1,5 @@
 //! Public N+1 diagnostic types.
 
-use std::collections::HashSet;
-
 /// Diagnostic rule code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NPlusOneCode {
@@ -76,5 +74,3 @@ impl std::fmt::Display for NPlusOneDiagnostic {
         Ok(())
     }
 }
-
-pub(super) type Suppressions = HashSet<(usize, NPlusOneCode)>;

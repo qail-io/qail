@@ -4,8 +4,8 @@
 //! breaking changes before migrations are applied.
 //!
 //! Supports tiered analysis:
-//! - Rust files: Full AST parsing with `syn` (100% accurate)
-//! - Other files: Regex-based scanning (90% accurate)
+//! - Rust files: semantic extraction plus semantic N+1 analysis
+//! - Other files: Regex-based scanning
 
 mod impact;
 pub mod rust_ast; // Public for LSP access to query_extractor

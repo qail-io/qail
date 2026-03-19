@@ -223,7 +223,7 @@ qail.rs/
 
 ## N+1 Detection
 
-Compile-time static analysis catches query-in-loop patterns before they reach production. Powered by `syn::Visit` AST traversal.
+Compile-time static analysis catches query-in-loop patterns before they reach production. Powered by QAIL semantic Rust scanning (no `syn` dependency on the runtime analyzer path).
 
 ### Rules
 

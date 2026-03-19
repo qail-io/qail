@@ -1,9 +1,8 @@
 use crate::ast::Qail;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Time interval unit for duration expressions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntervalUnit {
     /// Seconds.
     Second,
@@ -36,7 +35,7 @@ impl std::fmt::Display for IntervalUnit {
 }
 
 /// A value in a condition.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// SQL NULL.
     Null,

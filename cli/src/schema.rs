@@ -15,6 +15,21 @@ pub enum OutputFormat {
     Pretty,
 }
 
+fn cmds_wire_json(cmds: &[Qail], dialect: Dialect) -> serde_json::Value {
+    let rows = cmds
+        .iter()
+        .map(|cmd| {
+            serde_json::json!({
+                "wire": qail_core::wire::encode_cmd_text(cmd),
+                "sql": cmd.to_sql_with_dialect(dialect),
+                "action": format!("{}", cmd.action),
+                "table": cmd.table.clone(),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows)
+}
+
 /// Validate a QAIL schema file with detailed error reporting.
 /// When `src_dir` is provided, also scans source for query validation + RLS audit.
 pub fn check_schema(
@@ -377,7 +392,10 @@ pub fn diff_schemas_cmd(
             }
         }
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&cmds)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&cmds_wire_json(&cmds, dialect))?
+            );
         }
         OutputFormat::Pretty => {
             for (i, cmd) in cmds.iter().enumerate() {
@@ -461,7 +479,10 @@ pub async fn diff_live(
             }
         }
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&cmds)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&cmds_wire_json(&cmds, dialect))?
+            );
         }
         OutputFormat::Pretty => {
             for (i, cmd) in cmds.iter().enumerate() {

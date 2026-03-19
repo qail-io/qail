@@ -1,37 +1,33 @@
 //! Schema definitions for QAIL validation.
 //!
-//! Provides types for representing database schemas and loading them from JSON/TOML.
+//! Provides types for representing database schemas and loading them from QAIL schema sources.
 //!
 //! # Example
 //! ```
 //! use qail_core::schema::Schema;
 //!
-//! let json = r#"{
-//!     "tables": [{
-//!         "name": "users",
-//!         "columns": [
-//!             { "name": "id", "typ": "uuid", "nullable": false },
-//!             { "name": "email", "typ": "varchar", "nullable": false }
-//!         ]
-//!     }]
-//! }"#;
+//! let qail = r#"
+//! table users (
+//!     id uuid not null,
+//!     email varchar not null
+//! )
+//! "#;
 //!
-//! let schema: Schema = serde_json::from_str(json).unwrap();
+//! let schema = Schema::from_qail_schema(qail).unwrap();
 //! let validator = schema.to_validator();
 //! ```
 
 use crate::validator::Validator;
-use serde::{Deserialize, Serialize};
 
 /// A database schema comprising one or more table definitions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Schema {
     /// Table definitions.
     pub tables: Vec<TableDef>,
 }
 
 /// Definition of a single table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TableDef {
     /// Table name.
     pub name: String,
@@ -40,18 +36,15 @@ pub struct TableDef {
 }
 
 /// Definition of a single column.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ColumnDef {
     /// Column name.
     pub name: String,
     /// SQL data type.
-    #[serde(rename = "type", alias = "typ")]
     pub typ: String,
     /// Whether the column accepts NULL.
-    #[serde(default)]
     pub nullable: bool,
     /// Whether the column is a primary key.
-    #[serde(default)]
     pub primary_key: bool,
 }
 
@@ -74,11 +67,6 @@ impl Schema {
             v.add_table(&table.name, &cols);
         }
         v
-    }
-
-    /// Load schema from JSON string.
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
     }
 
     /// Load schema from QAIL schema format (schema.qail).
@@ -154,17 +142,10 @@ impl Schema {
         Ok(schema)
     }
 
-    /// Load schema from file path (auto-detects format).
+    /// Load schema from QAIL schema source path (file or modular directory).
     pub fn from_file(path: &std::path::Path) -> Result<Self, String> {
-        // Detect format: .json -> JSON, else -> QAIL schema
-        if path.extension().map(|e| e == "json").unwrap_or(false) {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-            Self::from_json(&content).map_err(|e| e.to_string())
-        } else {
-            let content = crate::schema_source::read_qail_schema_source(path)?;
-            Self::from_qail_schema(&content)
-        }
+        let content = crate::schema_source::read_qail_schema_source(path)?;
+        Self::from_qail_schema(&content)
     }
 }
 
@@ -216,18 +197,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_schema_from_json() {
-        let json = r#"{
-            "tables": [{
-                "name": "users",
-                "columns": [
-                    { "name": "id", "type": "uuid", "nullable": false, "primary_key": true },
-                    { "name": "email", "type": "varchar", "nullable": false }
-                ]
-            }]
-        }"#;
+    fn test_schema_from_qail_schema() {
+        let qail = r#"
+table users (
+    id uuid not null,
+    email varchar not null
+)
+"#;
 
-        let schema = Schema::from_json(json).unwrap();
+        let schema = Schema::from_qail_schema(qail).unwrap();
         assert_eq!(schema.tables.len(), 1);
         assert_eq!(schema.tables[0].name, "users");
         assert_eq!(schema.tables[0].columns.len(), 2);

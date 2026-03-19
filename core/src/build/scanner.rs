@@ -385,6 +385,15 @@ fn extract_inline_cte_alias(after: &str) -> Option<String> {
 }
 
 pub(crate) fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
+    scan_file_inner(file, content, usages, true);
+}
+
+#[cfg(feature = "analyzer")]
+pub(crate) fn scan_file_silent(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
+    scan_file_inner(file, content, usages, false);
+}
+
+fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_warnings: bool) {
     // All CRUD patterns: GET=SELECT, ADD=INSERT, SET=UPDATE, DEL=DELETE, PUT=UPSERT
     // Also detect Qail::typed (compile-time safety) and Qail::raw_sql (advisory)
     let patterns = [
@@ -465,10 +474,12 @@ pub(crate) fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) 
 
             if action == "RAW" {
                 // raw_sql bypasses schema — emit advisory, don't validate
-                println!(
-                    "cargo:warning=QAIL: raw SQL at {}:{} — not schema-validated",
-                    file, start_line
-                );
+                if emit_warnings {
+                    println!(
+                        "cargo:warning=QAIL: raw SQL at {}:{} — not schema-validated",
+                        file, start_line
+                    );
+                }
                 cursor = next_cursor;
                 continue;
             }
@@ -573,10 +584,12 @@ pub(crate) fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) 
                     }
                 } else {
                     // Truly dynamic — cannot validate
-                    println!(
-                        "cargo:warning=Qail: dynamic table name `{}` in {}:{} — cannot validate columns at build time. Consider using string literals.",
-                        var_hint, file, start_line
-                    );
+                    if emit_warnings {
+                        println!(
+                            "cargo:warning=Qail: dynamic table name `{}` in {}:{} — cannot validate columns at build time. Consider using string literals.",
+                            var_hint, file, start_line
+                        );
+                    }
                 }
             }
             // else: Qail::typed with non-parsable table — skip silently (it has compile-time safety)

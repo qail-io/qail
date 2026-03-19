@@ -20,17 +20,16 @@ use nom::{
     combinator::map,
     multi::{many0, separated_list0},
 };
-use serde::{Deserialize, Serialize};
 
 /// Collection of named queries from a queries.qail file
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct QueryFile {
     /// Named query definitions.
     pub queries: Vec<QueryDef>,
 }
 
 /// A named query definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct QueryDef {
     /// Query name (function name)
     pub name: String,
@@ -45,7 +44,7 @@ pub struct QueryDef {
 }
 
 /// Query parameter
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct QueryParam {
     /// Parameter name.
     pub name: String,
@@ -54,7 +53,7 @@ pub struct QueryParam {
 }
 
 /// Return type for queries
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ReturnType {
     /// Single result: -> User
     Single(String),
@@ -79,16 +78,6 @@ impl QueryFile {
         self.queries
             .iter()
             .find(|q| q.name.eq_ignore_ascii_case(name))
-    }
-
-    /// Export to JSON
-    pub fn to_json(&self) -> Result<String, String> {
-        serde_json::to_string_pretty(self).map_err(|e| format!("JSON serialization failed: {}", e))
-    }
-
-    /// Import from JSON
-    pub fn from_json(json: &str) -> Result<Self, String> {
-        serde_json::from_str(json).map_err(|e| format!("JSON deserialization failed: {}", e))
     }
 }
 

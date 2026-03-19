@@ -9,27 +9,61 @@
 //! let pg_url = config.postgres_url();
 //! ```
 
-use serde::Deserialize;
 use std::path::Path;
 
 /// Error type for configuration loading.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ConfigError {
     /// Config file not found.
-    #[error("Config file not found: {0}")]
     NotFound(String),
 
     /// I/O error reading config.
-    #[error("Failed to read config: {0}")]
-    Read(#[from] std::io::Error),
+    Read(std::io::Error),
 
     /// TOML parse error.
-    #[error("Failed to parse TOML: {0}")]
-    Parse(#[from] toml::de::Error),
+    Parse(toml::de::Error),
+
+    /// Invalid config structure or type.
+    Invalid(String),
 
     /// Required env var not set.
-    #[error("Missing required environment variable: {0}")]
     MissingEnvVar(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(path) => write!(f, "Config file not found: {path}"),
+            Self::Read(err) => write!(f, "Failed to read config: {err}"),
+            Self::Parse(err) => write!(f, "Failed to parse TOML: {err}"),
+            Self::Invalid(msg) => write!(f, "Invalid qail.toml: {msg}"),
+            Self::MissingEnvVar(var) => {
+                write!(f, "Missing required environment variable: {var}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(err) => Some(err),
+            Self::Parse(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for ConfigError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Read(value)
+    }
+}
+
+impl From<toml::de::Error> for ConfigError {
+    fn from(value: toml::de::Error) -> Self {
+        Self::Parse(value)
+    }
 }
 
 /// Result alias for config operations.
@@ -42,26 +76,21 @@ pub type ConfigResult<T> = Result<T, ConfigError>;
 /// Root config — deserialized from `qail.toml`.
 ///
 /// All sections are optional for backward compatibility.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct QailConfig {
     /// `[project]` section.
-    #[serde(default)]
     pub project: ProjectConfig,
 
     /// `[postgres]` section.
-    #[serde(default)]
     pub postgres: PostgresConfig,
 
     /// `[qdrant]` section (optional).
-    #[serde(default)]
     pub qdrant: Option<QdrantConfig>,
 
     /// `[gateway]` section (optional).
-    #[serde(default)]
     pub gateway: Option<GatewayConfig>,
 
     /// `[[sync]]` rules.
-    #[serde(default)]
     pub sync: Vec<SyncRule>,
 }
 
@@ -70,14 +99,12 @@ pub struct QailConfig {
 // ────────────────────────────────────────────────────────────
 
 /// `[project]` — project metadata.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProjectConfig {
     /// Project name.
-    #[serde(default = "default_project_name")]
     pub name: String,
 
     /// Database mode (`postgres`, `hybrid`).
-    #[serde(default = "default_mode")]
     pub mode: String,
 
     /// Default `.qail` schema file path.
@@ -108,47 +135,39 @@ impl Default for ProjectConfig {
 fn default_project_name() -> String {
     "qail-app".to_string()
 }
+
 fn default_mode() -> String {
     "postgres".to_string()
 }
 
 /// `[postgres]` — PostgreSQL connection and pool settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PostgresConfig {
     /// Connection URL. Supports `${VAR}` expansion.
-    #[serde(default = "default_pg_url")]
     pub url: String,
 
     /// Maximum pool connections.
-    #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 
     /// Minimum idle connections.
-    #[serde(default = "default_min_connections")]
     pub min_connections: usize,
 
     /// Idle connection timeout in seconds.
-    #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
 
     /// Connection acquire timeout in seconds.
-    #[serde(default = "default_acquire_timeout")]
     pub acquire_timeout_secs: u64,
 
     /// TCP connect timeout in seconds.
-    #[serde(default = "default_connect_timeout")]
     pub connect_timeout_secs: u64,
 
     /// Whether to test connections on acquire.
-    #[serde(default)]
     pub test_on_acquire: bool,
 
     /// RLS defaults.
-    #[serde(default)]
     pub rls: Option<RlsConfig>,
 
     /// SSH tunnel host for remote connections (e.g., "myserver" or "user@host").
-    #[serde(default)]
     pub ssh: Option<String>,
 }
 
@@ -171,24 +190,29 @@ impl Default for PostgresConfig {
 fn default_pg_url() -> String {
     "postgres://postgres@localhost:5432/postgres".to_string()
 }
+
 fn default_max_connections() -> usize {
     10
 }
+
 fn default_min_connections() -> usize {
     1
 }
+
 fn default_idle_timeout() -> u64 {
     600
 }
+
 fn default_acquire_timeout() -> u64 {
     30
 }
+
 fn default_connect_timeout() -> u64 {
     10
 }
 
 /// `[postgres.rls]` — RLS default settings.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct RlsConfig {
     /// Postgres role used for application connections.
     pub default_role: Option<String>,
@@ -198,25 +222,33 @@ pub struct RlsConfig {
 }
 
 /// `[qdrant]` — Qdrant connection settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct QdrantConfig {
     /// Qdrant HTTP URL.
-    #[serde(default = "default_qdrant_url")]
     pub url: String,
 
     /// gRPC endpoint (defaults to port 6334).
     pub grpc: Option<String>,
 
     /// Max connections.
-    #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 
     /// Use TLS for gRPC connections.
     /// - `None` (default) → auto-detect from URL scheme (`https://` = TLS)
     /// - `Some(true)` → force TLS
     /// - `Some(false)` → force plain TCP
-    #[serde(default)]
     pub tls: Option<bool>,
+}
+
+impl Default for QdrantConfig {
+    fn default() -> Self {
+        Self {
+            url: default_qdrant_url(),
+            grpc: None,
+            max_connections: default_max_connections(),
+            tls: None,
+        }
+    }
 }
 
 fn default_qdrant_url() -> String {
@@ -224,82 +256,100 @@ fn default_qdrant_url() -> String {
 }
 
 /// `[gateway]` — Gateway server settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct GatewayConfig {
     /// Bind address.
-    #[serde(default = "default_bind")]
     pub bind: String,
 
     /// Enable CORS.
-    #[serde(default = "default_true")]
     pub cors: bool,
 
     /// Allowed CORS origins. Empty = allow all.
-    #[serde(default)]
     pub cors_allowed_origins: Option<Vec<String>>,
 
     /// Path to policy file.
     pub policy: Option<String>,
 
     /// Query cache settings.
-    #[serde(default)]
     pub cache: Option<CacheConfig>,
 
     /// Maximum number of relations in `?expand=` (default: 4).
     /// Prevents query explosion from unbounded LEFT JOINs.
-    #[serde(default = "default_max_expand_depth")]
     pub max_expand_depth: usize,
 
     /// Tables to block from auto-REST endpoint generation.
     /// Blocked tables will not have any CRUD routes, cannot be referenced
     /// via `?expand=`, and cannot appear as nested route targets.
     /// Use this to hide sensitive tables (e.g., `users`) from the HTTP API.
-    #[serde(default)]
     pub blocked_tables: Option<Vec<String>>,
 
     /// Tables to allow for auto-REST endpoint generation (whitelist mode).
     /// When set, ONLY these tables are exposed — all others are blocked.
     /// This is a fail-closed approach: new tables must be explicitly allowed.
     /// Takes precedence over `blocked_tables` if both are set.
-    #[serde(default)]
     pub allowed_tables: Option<Vec<String>>,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_bind(),
+            cors: default_true(),
+            cors_allowed_origins: None,
+            policy: None,
+            cache: None,
+            max_expand_depth: default_max_expand_depth(),
+            blocked_tables: None,
+            allowed_tables: None,
+        }
+    }
 }
 
 fn default_bind() -> String {
     "0.0.0.0:8080".to_string()
 }
+
 fn default_true() -> bool {
     true
 }
+
 fn default_max_expand_depth() -> usize {
     4
 }
 
 /// `[gateway.cache]` — query cache settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CacheConfig {
     /// Whether caching is enabled.
-    #[serde(default = "default_true")]
     pub enabled: bool,
 
     /// Maximum cache entries.
-    #[serde(default = "default_cache_max")]
     pub max_entries: usize,
 
     /// Default TTL in seconds.
-    #[serde(default = "default_cache_ttl")]
     pub ttl_secs: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            max_entries: default_cache_max(),
+            ttl_secs: default_cache_ttl(),
+        }
+    }
 }
 
 fn default_cache_max() -> usize {
     1000
 }
+
 fn default_cache_ttl() -> u64 {
     60
 }
 
 /// `[[sync]]` — Qdrant sync rule (unchanged from existing CLI).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SyncRule {
     /// PostgreSQL source table.
     pub source_table: String,
@@ -307,11 +357,9 @@ pub struct SyncRule {
     pub target_collection: String,
 
     /// Column that triggers re-sync.
-    #[serde(default)]
     pub trigger_column: Option<String>,
 
     /// Embedding model for sync.
-    #[serde(default)]
     pub embedding_model: Option<String>,
 }
 
@@ -338,8 +386,8 @@ impl QailConfig {
         // Phase 1: Expand ${VAR} and ${VAR:-default} in raw TOML text
         let expanded = expand_env(&raw)?;
 
-        // Phase 2: Parse TOML
-        let mut config: QailConfig = toml::from_str(&expanded)?;
+        // Phase 2: Parse TOML table manually (serde-free)
+        let mut config = Self::from_toml_str(&expanded)?;
 
         // Phase 3: Apply env var overrides (highest priority)
         config.apply_env_overrides();
@@ -369,6 +417,271 @@ impl QailConfig {
             gw.bind = bind;
         }
     }
+
+    fn from_toml_str(input: &str) -> ConfigResult<Self> {
+        let value: toml::Value = toml::from_str(input)?;
+        let root = value
+            .as_table()
+            .ok_or_else(|| ConfigError::Invalid("root must be a TOML table".to_string()))?;
+
+        Ok(Self {
+            project: parse_project(root)?,
+            postgres: parse_postgres(root)?,
+            qdrant: parse_qdrant(root)?,
+            gateway: parse_gateway(root)?,
+            sync: parse_sync(root)?,
+        })
+    }
+}
+
+fn parse_project(root: &toml::Table) -> ConfigResult<ProjectConfig> {
+    let mut cfg = ProjectConfig::default();
+    let Some(tbl) = subtable(root, "project")? else {
+        return Ok(cfg);
+    };
+
+    if let Some(v) = opt_string(tbl, "project", "name")? {
+        cfg.name = v;
+    }
+    if let Some(v) = opt_string(tbl, "project", "mode")? {
+        cfg.mode = v;
+    }
+    cfg.schema = opt_string(tbl, "project", "schema")?;
+    cfg.migrations_dir = opt_string(tbl, "project", "migrations_dir")?;
+    cfg.schema_strict_manifest = opt_bool(tbl, "project", "schema_strict_manifest")?;
+
+    Ok(cfg)
+}
+
+fn parse_postgres(root: &toml::Table) -> ConfigResult<PostgresConfig> {
+    let mut cfg = PostgresConfig::default();
+    let Some(tbl) = subtable(root, "postgres")? else {
+        return Ok(cfg);
+    };
+
+    if let Some(v) = opt_string(tbl, "postgres", "url")? {
+        cfg.url = v;
+    }
+    if let Some(v) = opt_usize(tbl, "postgres", "max_connections")? {
+        cfg.max_connections = v;
+    }
+    if let Some(v) = opt_usize(tbl, "postgres", "min_connections")? {
+        cfg.min_connections = v;
+    }
+    if let Some(v) = opt_u64(tbl, "postgres", "idle_timeout_secs")? {
+        cfg.idle_timeout_secs = v;
+    }
+    if let Some(v) = opt_u64(tbl, "postgres", "acquire_timeout_secs")? {
+        cfg.acquire_timeout_secs = v;
+    }
+    if let Some(v) = opt_u64(tbl, "postgres", "connect_timeout_secs")? {
+        cfg.connect_timeout_secs = v;
+    }
+    if let Some(v) = opt_bool(tbl, "postgres", "test_on_acquire")? {
+        cfg.test_on_acquire = v;
+    }
+    cfg.ssh = opt_string(tbl, "postgres", "ssh")?;
+
+    cfg.rls = if let Some(rls_tbl) = nested_table(tbl, "postgres", "rls")? {
+        Some(RlsConfig {
+            default_role: opt_string(rls_tbl, "postgres.rls", "default_role")?,
+            super_admin_role: opt_string(rls_tbl, "postgres.rls", "super_admin_role")?,
+        })
+    } else {
+        None
+    };
+
+    Ok(cfg)
+}
+
+fn parse_qdrant(root: &toml::Table) -> ConfigResult<Option<QdrantConfig>> {
+    let Some(tbl) = subtable(root, "qdrant")? else {
+        return Ok(None);
+    };
+
+    let mut cfg = QdrantConfig::default();
+
+    if let Some(v) = opt_string(tbl, "qdrant", "url")? {
+        cfg.url = v;
+    }
+    cfg.grpc = opt_string(tbl, "qdrant", "grpc")?;
+    if let Some(v) = opt_usize(tbl, "qdrant", "max_connections")? {
+        cfg.max_connections = v;
+    }
+    cfg.tls = opt_bool(tbl, "qdrant", "tls")?;
+
+    Ok(Some(cfg))
+}
+
+fn parse_gateway(root: &toml::Table) -> ConfigResult<Option<GatewayConfig>> {
+    let Some(tbl) = subtable(root, "gateway")? else {
+        return Ok(None);
+    };
+
+    let mut cfg = GatewayConfig::default();
+
+    if let Some(v) = opt_string(tbl, "gateway", "bind")? {
+        cfg.bind = v;
+    }
+    if let Some(v) = opt_bool(tbl, "gateway", "cors")? {
+        cfg.cors = v;
+    }
+    cfg.cors_allowed_origins = opt_string_vec(tbl, "gateway", "cors_allowed_origins")?;
+    cfg.policy = opt_string(tbl, "gateway", "policy")?;
+    if let Some(v) = opt_usize(tbl, "gateway", "max_expand_depth")? {
+        cfg.max_expand_depth = v;
+    }
+    cfg.blocked_tables = opt_string_vec(tbl, "gateway", "blocked_tables")?;
+    cfg.allowed_tables = opt_string_vec(tbl, "gateway", "allowed_tables")?;
+
+    cfg.cache = if let Some(cache_tbl) = nested_table(tbl, "gateway", "cache")? {
+        let mut cache = CacheConfig::default();
+        if let Some(v) = opt_bool(cache_tbl, "gateway.cache", "enabled")? {
+            cache.enabled = v;
+        }
+        if let Some(v) = opt_usize(cache_tbl, "gateway.cache", "max_entries")? {
+            cache.max_entries = v;
+        }
+        if let Some(v) = opt_u64(cache_tbl, "gateway.cache", "ttl_secs")? {
+            cache.ttl_secs = v;
+        }
+        Some(cache)
+    } else {
+        None
+    };
+
+    Ok(Some(cfg))
+}
+
+fn parse_sync(root: &toml::Table) -> ConfigResult<Vec<SyncRule>> {
+    let Some(value) = root.get("sync") else {
+        return Ok(Vec::new());
+    };
+
+    let arr = value
+        .as_array()
+        .ok_or_else(|| ConfigError::Invalid("sync must be an array of tables".to_string()))?;
+
+    let mut out = Vec::with_capacity(arr.len());
+    for (idx, item) in arr.iter().enumerate() {
+        let path = format!("sync[{idx}]");
+        let tbl = item
+            .as_table()
+            .ok_or_else(|| ConfigError::Invalid(format!("{path} must be a table")))?;
+
+        out.push(SyncRule {
+            source_table: required_string(tbl, &path, "source_table")?,
+            target_collection: required_string(tbl, &path, "target_collection")?,
+            trigger_column: opt_string(tbl, &path, "trigger_column")?,
+            embedding_model: opt_string(tbl, &path, "embedding_model")?,
+        });
+    }
+
+    Ok(out)
+}
+
+fn subtable<'a>(root: &'a toml::Table, section: &str) -> ConfigResult<Option<&'a toml::Table>> {
+    match root.get(section) {
+        None => Ok(None),
+        Some(value) => value.as_table().map(Some).ok_or_else(|| {
+            ConfigError::Invalid(format!("{section} must be a table (e.g. [{section}])"))
+        }),
+    }
+}
+
+fn nested_table<'a>(
+    table: &'a toml::Table,
+    parent: &str,
+    key: &str,
+) -> ConfigResult<Option<&'a toml::Table>> {
+    match table.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_table()
+            .map(Some)
+            .ok_or_else(|| ConfigError::Invalid(format!("{parent}.{key} must be a table"))),
+    }
+}
+
+fn required_string(table: &toml::Table, section: &str, key: &str) -> ConfigResult<String> {
+    opt_string(table, section, key)?
+        .ok_or_else(|| ConfigError::Invalid(format!("{section}.{key} is required")))
+}
+
+fn opt_string(table: &toml::Table, section: &str, key: &str) -> ConfigResult<Option<String>> {
+    match table.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|s| Some(s.to_string()))
+            .ok_or_else(|| ConfigError::Invalid(format!("{section}.{key} must be a string"))),
+    }
+}
+
+fn opt_bool(table: &toml::Table, section: &str, key: &str) -> ConfigResult<Option<bool>> {
+    match table.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| ConfigError::Invalid(format!("{section}.{key} must be a boolean"))),
+    }
+}
+
+fn opt_usize(table: &toml::Table, section: &str, key: &str) -> ConfigResult<Option<usize>> {
+    match table.get(key) {
+        None => Ok(None),
+        Some(value) => {
+            let raw = value.as_integer().ok_or_else(|| {
+                ConfigError::Invalid(format!("{section}.{key} must be a non-negative integer"))
+            })?;
+            let converted = usize::try_from(raw).map_err(|_| {
+                ConfigError::Invalid(format!("{section}.{key} must be a non-negative integer"))
+            })?;
+            Ok(Some(converted))
+        }
+    }
+}
+
+fn opt_u64(table: &toml::Table, section: &str, key: &str) -> ConfigResult<Option<u64>> {
+    match table.get(key) {
+        None => Ok(None),
+        Some(value) => {
+            let raw = value.as_integer().ok_or_else(|| {
+                ConfigError::Invalid(format!("{section}.{key} must be a non-negative integer"))
+            })?;
+            let converted = u64::try_from(raw).map_err(|_| {
+                ConfigError::Invalid(format!("{section}.{key} must be a non-negative integer"))
+            })?;
+            Ok(Some(converted))
+        }
+    }
+}
+
+fn opt_string_vec(
+    table: &toml::Table,
+    section: &str,
+    key: &str,
+) -> ConfigResult<Option<Vec<String>>> {
+    let Some(value) = table.get(key) else {
+        return Ok(None);
+    };
+
+    let arr = value
+        .as_array()
+        .ok_or_else(|| ConfigError::Invalid(format!("{section}.{key} must be an array")))?;
+
+    let mut out = Vec::with_capacity(arr.len());
+    for (idx, item) in arr.iter().enumerate() {
+        let Some(s) = item.as_str() else {
+            return Err(ConfigError::Invalid(format!(
+                "{section}.{key}[{idx}] must be a string"
+            )));
+        };
+        out.push(s.to_string());
+    }
+
+    Ok(Some(out))
 }
 
 // ────────────────────────────────────────────────────────────
@@ -531,7 +844,7 @@ mode = "postgres"
 [postgres]
 url = "postgres://localhost/test"
 "#;
-        let config: QailConfig = toml::from_str(toml_str).unwrap();
+        let config = QailConfig::from_toml_str(toml_str).unwrap();
         assert_eq!(config.project.name, "test");
         assert_eq!(config.postgres.url, "postgres://localhost/test");
         assert_eq!(config.postgres.max_connections, 10); // default
@@ -580,7 +893,7 @@ target_collection = "products_search"
 trigger_column = "description"
 embedding_model = "candle:bert-base"
 "#;
-        let config: QailConfig = toml::from_str(toml_str).unwrap();
+        let config = QailConfig::from_toml_str(toml_str).unwrap();
         assert_eq!(config.project.name, "fulltest");
         assert_eq!(config.project.schema_strict_manifest, Some(true));
         assert_eq!(config.postgres.max_connections, 25);
@@ -614,7 +927,7 @@ mode = "postgres"
 [postgres]
 url = "postgres://localhost/legacy"
 "#;
-        let config: QailConfig = toml::from_str(toml_str).unwrap();
+        let config = QailConfig::from_toml_str(toml_str).unwrap();
         assert_eq!(config.project.name, "legacy");
         assert_eq!(config.postgres.url, "postgres://localhost/legacy");
         // All new fields should have defaults

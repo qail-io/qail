@@ -7,20 +7,32 @@ use crate::server::QailLanguageServer;
 
 /// QAIL keyword completions
 const QAIL_KEYWORDS: &[(&str, &str)] = &[
-    ("get", "SELECT query - get::table [cols] ?filter"),
-    ("set", "UPDATE query - set::table {col=val} ?filter"),
-    ("add", "INSERT query - add::table {col=val}"),
-    ("del", "DELETE query - del::table ?filter"),
-    ("with", "CTE query - with::{name{...}}"),
+    (
+        "get",
+        "SELECT query - get users fields id, email where id = :id",
+    ),
+    (
+        "set",
+        "UPDATE query - set users values name = :name where id = :id",
+    ),
+    (
+        "add",
+        "INSERT query - add users fields name, email values :name, :email",
+    ),
+    ("del", "DELETE query - del users where id = :id"),
+    (
+        "with",
+        "CTE query - with recent as (get users fields id) get recent fields id",
+    ),
 ];
 
 /// QAIL operator completions
 const QAIL_OPERATORS: &[(&str, &str)] = &[
-    ("?", "WHERE clause filter"),
-    ("!", "JOIN clause"),
-    ("@", "ORDER BY clause"),
-    ("#", "LIMIT clause"),
-    ("^", "GROUP BY clause"),
+    ("fields", "Select output columns"),
+    ("where", "Filter rows"),
+    ("order by", "Sort rows"),
+    ("limit", "Limit row count"),
+    ("group by", "Group rows"),
 ];
 
 impl QailLanguageServer {
@@ -33,10 +45,10 @@ impl QailLanguageServer {
 
         for (keyword, doc) in QAIL_KEYWORDS {
             items.push(CompletionItem {
-                label: format!("{}::", keyword),
+                label: keyword.to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some(doc.to_string()),
-                insert_text: Some(format!("{}::", keyword)),
+                insert_text: Some(format!("{} ", keyword)),
                 ..Default::default()
             });
         }
@@ -76,10 +88,10 @@ impl QailLanguageServer {
         {
             for table in validator.table_names() {
                 items.push(CompletionItem {
-                    label: format!("get::{}", table),
+                    label: format!("get {}", table),
                     kind: Some(CompletionItemKind::CLASS),
                     detail: Some(format!("SELECT * FROM {}", table)),
-                    insert_text: Some(format!("get::{}", table)),
+                    insert_text: Some(format!("get {} fields ", table)),
                     ..Default::default()
                 });
             }

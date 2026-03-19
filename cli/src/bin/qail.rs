@@ -1387,7 +1387,15 @@ fn transpile_query(query: &str, cli: &Cli) -> Result<()> {
 
     match cli.format {
         OutputFormat::Sql => println!("{}", cmd.to_sql_with_dialect(dialect)),
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&cmd)?),
+        OutputFormat::Json => {
+            let payload = serde_json::json!({
+                "wire": qail_core::wire::encode_cmd_text(&cmd),
+                "sql": cmd.to_sql_with_dialect(dialect),
+                "action": format!("{}", cmd.action),
+                "table": cmd.table.clone(),
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        }
         OutputFormat::Pretty => {
             println!("{}", "Generated SQL:".green().bold());
             println!("{}", cmd.to_sql_with_dialect(dialect).white());

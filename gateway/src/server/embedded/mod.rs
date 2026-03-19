@@ -74,7 +74,8 @@ impl GatewayState {
 
         #[cfg(feature = "qdrant")]
         let qdrant_pool = if let Some(ref qdrant_config) = config.qdrant {
-            let pool_config = qail_qdrant::PoolConfig::from_qail_config_ref(qdrant_config);
+            let core_qdrant = qdrant_config.to_core_config();
+            let pool_config = qail_qdrant::PoolConfig::from_qail_config_ref(&core_qdrant);
             let pool = qail_qdrant::QdrantPool::new(pool_config)
                 .await
                 .map_err(|e| GatewayError::Database(format!("Qdrant pool init failed: {}", e)))?;

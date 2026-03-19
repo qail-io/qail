@@ -1,4 +1,4 @@
-//! Rust AST analyzer modules.
+//! Rust semantic analyzer modules.
 //!
 //! This module provides functionality for analyzing Rust source code,
 //! detecting raw SQL patterns, and generating QAIL equivalents.

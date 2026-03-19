@@ -1,7 +1,5 @@
-use serde::{Deserialize, Serialize};
-
 /// The action type (SQL operation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// SELECT query.
     Get,
@@ -227,7 +225,7 @@ impl std::fmt::Display for Action {
 }
 
 /// Logical operator between conditions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogicalOp {
     #[default]
     /// Logical AND.
@@ -237,7 +235,7 @@ pub enum LogicalOp {
 }
 
 /// Sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
     /// Ascending.
     Asc,
@@ -254,7 +252,7 @@ pub enum SortOrder {
 }
 
 /// Comparison / filtering operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
     /// `=`
     Eq,
@@ -399,7 +397,7 @@ impl Operator {
 }
 
 /// Aggregate function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregateFunc {
     /// COUNT(*).
     Count,
@@ -444,7 +442,7 @@ impl std::fmt::Display for AggregateFunc {
 }
 
 /// Join Type
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum JoinKind {
     /// INNER JOIN.
     Inner,
@@ -461,7 +459,7 @@ pub enum JoinKind {
 }
 
 /// Set operation type for combining queries
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetOp {
     /// UNION (de-duplicated).
     Union,
@@ -474,7 +472,7 @@ pub enum SetOp {
 }
 
 /// ALTER TABLE modification kind.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ModKind {
     /// ADD.
     Add,
@@ -483,7 +481,7 @@ pub enum ModKind {
 }
 
 /// GROUP BY mode for advanced aggregations
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum GroupByMode {
     #[default]
     /// Standard GROUP BY.
@@ -504,7 +502,7 @@ impl GroupByMode {
 }
 
 /// Row locking mode for SELECT...FOR UPDATE/SHARE
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
     /// FOR UPDATE.
     Update,
@@ -517,7 +515,7 @@ pub enum LockMode {
 }
 
 /// OVERRIDING clause for INSERT with GENERATED columns
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverridingKind {
     /// OVERRIDING SYSTEM VALUE.
     SystemValue,
@@ -526,7 +524,7 @@ pub enum OverridingKind {
 }
 
 /// TABLESAMPLE sampling method
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleMethod {
     /// Random row sampling (row-level).
     Bernoulli,
@@ -535,7 +533,7 @@ pub enum SampleMethod {
 }
 
 /// Distance metric for vector similarity
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Distance {
     #[default]
     /// Cosine similarity.

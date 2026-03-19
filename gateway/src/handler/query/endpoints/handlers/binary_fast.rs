@@ -3,7 +3,7 @@ use super::*;
 
 /// Execute a QAIL query (BINARY format)
 ///
-/// Accepts postcard-encoded QAIL AST and returns JSON results.
+/// Accepts QAIL wire-binary payload and returns JSON results.
 /// This is faster than text format since it skips parsing.
 pub async fn execute_query_binary(
     State(state): State<Arc<GatewayState>>,
@@ -29,10 +29,10 @@ pub async fn execute_query_binary(
         ));
     }
 
-    let mut cmd: qail_core::ast::Qail = match postcard::from_bytes(&body) {
+    let mut cmd: qail_core::ast::Qail = match qail_core::wire::decode_cmd_binary(&body) {
         Ok(cmd) => cmd,
         Err(e) => {
-            tracing::warn!("Postcard decode error: {}", e);
+            tracing::warn!("Wire decode error: {}", e);
             return Err(ApiError::bad_request(
                 "DECODE_ERROR",
                 format!("Invalid binary format: {}", e),

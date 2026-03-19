@@ -1,31 +1,45 @@
 //! Code Action Handler - SQL to QAIL Migration
 
-use qail_core::analyzer::detect_raw_sql;
+use qail_core::analyzer::rust_ast::transformer::sql_to_qail;
+use qail_core::analyzer::{QueryCall, detect_query_calls};
 use std::collections::HashMap;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::server::QailLanguageServer;
 
-/// Detect fetch method from sqlx query chain
-fn detect_fetch_method(lines: &[&str], start: usize, end: usize) -> &'static str {
-    for i in start..=end.min(lines.len().saturating_sub(1)) {
-        if let Some(line) = lines.get(i) {
-            if line.contains(".fetch_optional") {
-                return "fetch_optional";
-            }
-            if line.contains(".fetch_one") {
-                return "fetch_one";
-            }
-            if line.contains(".fetch_all") {
-                return "fetch_all";
-            }
-            if line.contains(".execute") {
-                return "execute";
+/// Detect fetch method from semantic query call span.
+fn detect_fetch_method(lines: &[&str], query: &QueryCall, sql_type: &str) -> &'static str {
+    let start = query.start_line.saturating_sub(1);
+    let end = query
+        .end_line
+        .saturating_sub(1)
+        .min(lines.len().saturating_sub(1));
+
+    if start <= end {
+        for i in start..=end {
+            if let Some(line) = lines.get(i) {
+                if line.contains(".fetch_optional") {
+                    return "fetch_optional";
+                }
+                if line.contains(".fetch_one") {
+                    return "fetch_one";
+                }
+                if line.contains(".fetch_all") {
+                    return "fetch_all";
+                }
+                if line.contains(".execute") {
+                    return "execute";
+                }
             }
         }
     }
-    "fetch_all"
+
+    if sql_type == "SELECT" {
+        "fetch_all"
+    } else {
+        "execute"
+    }
 }
 
 /// Map fetch method + SQL type to driver method
@@ -42,63 +56,92 @@ fn get_driver_method(fetch_method: &str, sql_type: &str) -> &'static str {
     }
 }
 
-/// Extract bind parameters from code block
-fn extract_binds(lines: &[&str], start: usize, end: usize) -> Vec<String> {
-    let mut binds = Vec::new();
-    for i in start..=end {
-        if let Some(line) = lines.get(i)
-            && line.contains(".bind(")
-            && let Some(start_idx) = line.find(".bind(")
-        {
-            let rest = &line[start_idx + 6..];
-            if let Some(end_idx) = rest.find(')') {
-                binds.push(rest[..end_idx].trim().to_string());
-            }
-        }
+fn classify_sql_type(sql: &str) -> Option<&'static str> {
+    let upper = sql.to_ascii_uppercase();
+
+    if upper.contains("SELECT") && upper.contains("FROM") {
+        Some("SELECT")
+    } else if upper.contains("INSERT INTO") {
+        Some("INSERT")
+    } else if upper.contains("UPDATE") && upper.contains("SET") {
+        Some("UPDATE")
+    } else if upper.contains("DELETE FROM") {
+        Some("DELETE")
+    } else {
+        None
     }
-    binds
 }
 
-/// Extract return type from query_as::<_, Type>
-fn extract_return_type(lines: &[&str], start: usize, end: usize) -> Option<String> {
-    for i in start..=end {
-        if let Some(line) = lines.get(i)
-            && line.contains("query_as::<")
-            && let Some(start_idx) = line.find("query_as::<_, ")
-        {
-            let rest = &line[start_idx + 14..];
-            if let Some(end_idx) = rest.find('>') {
-                return Some(rest[..end_idx].trim().to_string());
-            }
-        }
-    }
-    None
+fn selection_overlaps_query(selection: &Range, query: &QueryCall) -> bool {
+    let start = query.start_line.saturating_sub(1) as u32;
+    let end = query.end_line.saturating_sub(1) as u32;
+    selection.start.line <= end && selection.end.line >= start
 }
 
-/// Find block boundaries (let query = ... .await?)
-fn find_block_range(lines: &[&str], sql_start: usize, sql_end: usize) -> (usize, usize) {
-    let mut block_start = sql_start;
-    for i in (0..=sql_start).rev() {
-        if let Some(line) = lines.get(i)
-            && line.trim_start().starts_with("let ")
-            && (line.contains("= r\"") || line.contains("= \"") || line.contains("query"))
-        {
-            block_start = i;
-            break;
+fn query_block_start(lines: &[&str], query: &QueryCall) -> usize {
+    let mut start = query.start_line.saturating_sub(1);
+    if lines.is_empty() {
+        return 0;
+    }
+    start = start.min(lines.len().saturating_sub(1));
+
+    while start > 0 {
+        let prev = lines[start - 1].trim_end();
+        if prev.ends_with('=') {
+            start -= 1;
+            continue;
         }
+        break;
     }
 
-    let mut block_end = sql_end;
-    for i in sql_end..lines.len().min(sql_end + 15) {
-        if let Some(line) = lines.get(i)
-            && line.contains(".await")
-        {
-            block_end = i;
-            break;
-        }
+    start
+}
+
+fn expand_end_column(line: &str, end_column: usize) -> usize {
+    let bytes = line.as_bytes();
+    let mut col = end_column.min(bytes.len());
+
+    while col < bytes.len() && bytes[col].is_ascii_whitespace() {
+        col += 1;
     }
 
-    (block_start, block_end)
+    if col < bytes.len() && bytes[col] == b'?' {
+        col += 1;
+    }
+
+    while col < bytes.len() && bytes[col].is_ascii_whitespace() {
+        col += 1;
+    }
+
+    if col < bytes.len() && bytes[col] == b';' {
+        col += 1;
+    }
+
+    col
+}
+
+fn query_edit_range(lines: &[&str], query: &QueryCall) -> Range {
+    let start_line = query_block_start(lines, query);
+    let end_line = query
+        .end_line
+        .saturating_sub(1)
+        .min(lines.len().saturating_sub(1));
+
+    let end_col = lines
+        .get(end_line)
+        .map(|line| expand_end_column(line, query.end_column))
+        .unwrap_or(query.end_column);
+
+    Range {
+        start: Position {
+            line: start_line as u32,
+            character: 0,
+        },
+        end: Position {
+            line: end_line as u32,
+            character: end_col as u32,
+        },
+    }
 }
 
 /// Apply indentation to generated code
@@ -225,77 +268,97 @@ impl QailLanguageServer {
             return Ok(Some(actions));
         };
 
-        // Detect raw SQL
-        let sql_matches = detect_raw_sql(content);
+        let query_calls = detect_query_calls(content);
         let lines: Vec<&str> = content.lines().collect();
 
-        for sql_match in &sql_matches {
-            let sql_start = sql_match.line - 1;
-            let sql_end = sql_match.end_line - 1;
-
-            if params.range.start.line as usize <= sql_end
-                && params.range.end.line as usize >= sql_start
-            {
-                // Find block boundaries
-                let (block_start, block_end) = find_block_range(&lines, sql_start, sql_end);
-
-                let binds = extract_binds(&lines, sql_end, block_end);
-                let return_type = extract_return_type(&lines, sql_end, block_end);
-                let fetch_method = detect_fetch_method(&lines, sql_end, block_end);
-                let driver_method = get_driver_method(fetch_method, &sql_match.sql_type);
-
-                let qail_code = transform_qail_code(
-                    sql_match.suggested_qail.clone(),
-                    &binds,
-                    return_type.as_deref(),
-                    driver_method,
-                );
-
-                // Apply indentation
-                let target_indent = lines
-                    .get(block_start)
-                    .map(|l| l.len() - l.trim_start().len())
-                    .unwrap_or(0);
-                let indented_code = apply_indentation(&qail_code, target_indent);
-
-                let end_col = lines
-                    .get(block_end)
-                    .map(|l| l.find(';').map(|p| p + 1).unwrap_or(l.len()))
-                    .unwrap_or(0);
-
-                let range = Range {
-                    start: Position {
-                        line: block_start as u32,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: block_end as u32,
-                        character: end_col as u32,
-                    },
-                };
-
-                let mut changes = HashMap::new();
-                changes.insert(
-                    uri.clone(),
-                    vec![TextEdit {
-                        range,
-                        new_text: indented_code,
-                    }],
-                );
-
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: format!("🚀 Migrate {} to QAIL", sql_match.sql_type),
-                    kind: Some(CodeActionKind::REFACTOR),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    is_preferred: Some(true),
-                    ..Default::default()
-                }));
+        for query in &query_calls {
+            if !selection_overlaps_query(&params.range, query) {
+                continue;
             }
+
+            let Some(sql_type) = classify_sql_type(&query.sql) else {
+                continue;
+            };
+
+            let suggested_qail =
+                sql_to_qail(&query.sql).unwrap_or_else(|_| "// Could not parse SQL".to_string());
+            let fetch_method = detect_fetch_method(&lines, query, sql_type);
+            let driver_method = get_driver_method(fetch_method, sql_type);
+
+            let qail_code = transform_qail_code(
+                suggested_qail,
+                &query.binds,
+                query.return_type.as_deref(),
+                driver_method,
+            );
+
+            let range = query_edit_range(&lines, query);
+            let target_indent = lines
+                .get(range.start.line as usize)
+                .map(|l| l.len() - l.trim_start().len())
+                .unwrap_or(0);
+            let indented_code = apply_indentation(&qail_code, target_indent);
+
+            let mut changes = HashMap::new();
+            changes.insert(
+                uri.clone(),
+                vec![TextEdit {
+                    range,
+                    new_text: indented_code,
+                }],
+            );
+
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("🚀 Migrate {} to QAIL", sql_type),
+                kind: Some(CodeActionKind::REFACTOR),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                is_preferred: Some(true),
+                ..Default::default()
+            }));
         }
 
         Ok(Some(actions))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_sql_type_detects_select() {
+        assert_eq!(
+            classify_sql_type("SELECT id FROM users WHERE id = $1"),
+            Some("SELECT")
+        );
+    }
+
+    #[test]
+    fn query_range_extends_through_optional_suffix() {
+        let lines = vec!["let rows = sqlx::query(\"SELECT 1\").fetch_all(&pool).await?;"];
+        let await_end = lines[0]
+            .find(".await")
+            .map(|idx| idx + ".await".len())
+            .expect("await token expected");
+
+        let query = QueryCall {
+            start_line: 1,
+            start_column: 11,
+            end_line: 1,
+            end_column: await_end,
+            sql: "SELECT 1".to_string(),
+            binds: vec![],
+            return_type: None,
+            query_fn: "query".to_string(),
+        };
+
+        let range = query_edit_range(&lines, &query);
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, 0);
+        assert_eq!(range.end.line, 0);
+        assert_eq!(range.end.character as usize, lines[0].len());
     }
 }

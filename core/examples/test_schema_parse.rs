@@ -55,12 +55,6 @@ table orders (
                     println!();
                 }
             }
-
-            println!("\n✓ JSON export:");
-            match schema.to_json() {
-                Ok(json) => println!("{}", &json[..300.min(json.len())]),
-                Err(e) => println!("JSON error: {}", e),
-            }
         }
         Err(e) => {
             eprintln!("✗ Parse error: {}", e);

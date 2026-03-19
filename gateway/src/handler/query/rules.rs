@@ -39,7 +39,7 @@ pub(super) fn exact_cache_key(cmd: &qail_core::ast::Qail) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    let payload = serde_json::to_string(cmd).unwrap_or_else(|_| format!("{cmd:?}"));
+    let payload = qail_core::wire::encode_cmd_text(cmd);
     let mut hasher = DefaultHasher::new();
     payload.hash(&mut hasher);
     format!("full:{:016x}", hasher.finish())

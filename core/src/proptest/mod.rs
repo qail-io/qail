@@ -6,7 +6,4 @@
 pub mod arbitrary;
 
 #[cfg(test)]
-mod roundtrip;
-
-#[cfg(test)]
 mod invariants;

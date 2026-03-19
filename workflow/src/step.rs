@@ -14,10 +14,10 @@ use crate::payment::PaymentKind;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowStep {
     /// Execute a QAIL query against the database.
-    /// The `cmd_sql` holds the transpiled SQL (since Qail AST isn't serializable by default).
+    /// The `cmd_json` field stores QAIL wire text (`qail_core::wire::encode_cmd_text`).
     /// The `store_as` key saves the result into WorkflowContext for later steps.
     Query {
-        /// QAIL AST command (serialized as JSON)
+        /// QAIL command encoded in QAIL wire text.
         cmd_json: String,
         /// Optional key to store query results in context
         store_as: Option<String>,
@@ -98,8 +98,8 @@ pub enum WorkflowStep {
 impl WorkflowStep {
     /// Create a Query step from a Qail command.
     pub fn query(cmd: &qail_core::Qail, store_as: Option<&str>) -> Self {
-        // Serialize the Qail AST to JSON for persistence
-        let cmd_json = serde_json::to_string(cmd).unwrap_or_default();
+        // Serialize the Qail AST into QAIL wire text for persistence.
+        let cmd_json = qail_core::wire::encode_cmd_text(cmd);
         WorkflowStep::Query {
             cmd_json,
             store_as: store_as.map(String::from),

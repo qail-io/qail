@@ -37,14 +37,14 @@ pub mod sanitize;
 pub mod schema;
 /// Filesystem schema source loader (`schema.qail` or modular `schema/`).
 pub mod schema_source;
-#[cfg(feature = "analyzer")]
-pub mod transformer;
 /// SQL transpiler (AST to SQL).
 pub mod transpiler;
 /// Typed column and table traits.
 pub mod typed;
 /// Schema validator.
 pub mod validator;
+/// Serde-free AST wire codec.
+pub mod wire;
 
 #[cfg(test)]
 mod proptest;

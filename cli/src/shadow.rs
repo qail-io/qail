@@ -180,9 +180,8 @@ async fn save_shadow_state(
 ) -> Result<()> {
     ensure_shadow_state_table(driver).await?;
 
-    // Serialize diff commands as JSON
-    let diff_json = serde_json::to_string(diff_cmds)
-        .map_err(|e| anyhow!("Failed to serialize diff commands: {}", e))?;
+    // Serialize diff commands as QAIL wire text (serde-free for AST).
+    let diff_json = qail_core::wire::encode_cmds_text(diff_cmds);
     let diff_checksum = diff_cmds_checksum(diff_cmds);
 
     // Clear any existing pending state
@@ -246,8 +245,8 @@ async fn load_shadow_state(driver: &mut PgDriver) -> Result<Option<(ShadowState,
         .get_string(2)
         .ok_or_else(|| anyhow!("Missing diff_cmds"))?;
 
-    let diff_cmds: Vec<Qail> = serde_json::from_str(&diff_json)
-        .map_err(|e| anyhow!("Failed to deserialize diff commands: {}", e))?;
+    let diff_cmds = qail_core::wire::decode_cmds_text(&diff_json)
+        .map_err(|e| anyhow!("Failed to decode diff commands: {}", e))?;
 
     let state = ShadowState {
         primary_url: primary_url.clone(),
@@ -297,7 +296,7 @@ pub async fn has_verified_shadow_receipt_with_driver(
                 return Ok(true);
             }
             if let Some(diff_json) = row.get_string(0)
-                && let Ok(diff_cmds) = serde_json::from_str::<Vec<Qail>>(&diff_json)
+                && let Ok(diff_cmds) = qail_core::wire::decode_cmds_text(&diff_json)
                 && diff_cmds_checksum(&diff_cmds) == expected_checksum
             {
                 return Ok(true);

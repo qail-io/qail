@@ -1,12 +1,9 @@
 //! Error types for QAIL.
 
-use thiserror::Error;
-
 /// Error types for QAIL operations.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum QailError {
     /// Failed to parse the QAIL query string.
-    #[error("Parse error at position {position}: {message}")]
     Parse {
         /// Byte offset of the error.
         position: usize,
@@ -15,11 +12,9 @@ pub enum QailError {
     },
 
     /// Invalid action (must be get, set, del, or add).
-    #[error("Invalid action: '{0}'. Expected: get, set, del, or add")]
     InvalidAction(String),
 
     /// Required syntax symbol is missing.
-    #[error("Missing required symbol: {symbol} ({description})")]
     MissingSymbol {
         /// The missing symbol.
         symbol: &'static str,
@@ -28,36 +23,28 @@ pub enum QailError {
     },
 
     /// Invalid operator in expression.
-    #[error("Invalid operator: '{0}'")]
     InvalidOperator(String),
 
     /// Invalid value in expression.
-    #[error("Invalid value: {0}")]
     InvalidValue(String),
 
     /// Database-layer error.
-    #[error("Database error: {0}")]
     Database(String),
 
     /// Connection-layer error.
-    #[error("Connection error: {0}")]
     Connection(String),
 
     /// Execution-layer error.
-    #[error("Execution error: {0}")]
     Execution(String),
 
     /// Validation error.
-    #[error("Validation error: {0}")]
     Validation(String),
 
     /// Configuration error.
-    #[error("Configuration error: {0}")]
     Config(String),
 
     /// I/O error.
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 }
 
 impl QailError {
@@ -75,6 +62,51 @@ impl QailError {
             symbol,
             description,
         }
+    }
+}
+
+impl std::fmt::Display for QailError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse { position, message } => {
+                write!(f, "Parse error at position {position}: {message}")
+            }
+            Self::InvalidAction(action) => {
+                write!(
+                    f,
+                    "Invalid action: '{action}'. Expected: get, set, del, or add"
+                )
+            }
+            Self::MissingSymbol {
+                symbol,
+                description,
+            } => {
+                write!(f, "Missing required symbol: {symbol} ({description})")
+            }
+            Self::InvalidOperator(op) => write!(f, "Invalid operator: '{op}'"),
+            Self::InvalidValue(value) => write!(f, "Invalid value: {value}"),
+            Self::Database(msg) => write!(f, "Database error: {msg}"),
+            Self::Connection(msg) => write!(f, "Connection error: {msg}"),
+            Self::Execution(msg) => write!(f, "Execution error: {msg}"),
+            Self::Validation(msg) => write!(f, "Validation error: {msg}"),
+            Self::Config(msg) => write!(f, "Configuration error: {msg}"),
+            Self::Io(err) => write!(f, "IO error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for QailError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for QailError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
     }
 }
 

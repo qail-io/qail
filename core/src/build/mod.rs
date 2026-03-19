@@ -22,7 +22,7 @@
 /// Typed schema code generation.
 mod codegen;
 /// Semantic N+1 detector that reasons on executable query patterns.
-mod nplus1_semantic;
+pub(crate) mod nplus1_semantic;
 /// Shared query IR used across build-time rules.
 mod query_ir;
 /// Text-based source scanner.

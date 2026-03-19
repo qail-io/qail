@@ -1,8 +1,7 @@
 use crate::ast::{Expr, Operator, Value};
-use serde::{Deserialize, Serialize};
 
 /// A single condition within a cage.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Condition {
     /// Left-hand expression.
     pub left: Expr,
@@ -11,7 +10,6 @@ pub struct Condition {
     /// Right-hand value.
     pub value: Value,
     /// Whether to unnest array values.
-    #[serde(default)]
     pub is_array_unnest: bool,
 }
 

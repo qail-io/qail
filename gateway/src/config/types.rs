@@ -3,6 +3,47 @@ use std::collections::HashMap;
 
 use super::defaults::*;
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayQdrantConfig {
+    #[serde(default = "default_qdrant_url")]
+    pub url: String,
+    pub grpc: Option<String>,
+    #[serde(default = "default_qdrant_max_connections")]
+    pub max_connections: usize,
+    #[serde(default)]
+    pub tls: Option<bool>,
+}
+
+impl GatewayQdrantConfig {
+    pub fn to_core_config(&self) -> qail_core::config::QdrantConfig {
+        qail_core::config::QdrantConfig {
+            url: self.url.clone(),
+            grpc: self.grpc.clone(),
+            max_connections: self.max_connections,
+            tls: self.tls,
+        }
+    }
+}
+
+impl From<qail_core::config::QdrantConfig> for GatewayQdrantConfig {
+    fn from(value: qail_core::config::QdrantConfig) -> Self {
+        Self {
+            url: value.url,
+            grpc: value.grpc,
+            max_connections: value.max_connections,
+            tls: value.tls,
+        }
+    }
+}
+
+fn default_qdrant_url() -> String {
+    "http://localhost:6333".to_string()
+}
+
+fn default_qdrant_max_connections() -> usize {
+    10
+}
+
 /// Main gateway configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayConfig {
@@ -153,7 +194,7 @@ pub struct GatewayConfig {
 
     /// Optional Qdrant configuration for vector operations.
     #[serde(default)]
-    pub qdrant: Option<qail_core::config::QdrantConfig>,
+    pub qdrant: Option<GatewayQdrantConfig>,
 
     /// Tenant boundary column name (default: "tenant_id").
     /// Legacy schemas using `operator_id` can override this.

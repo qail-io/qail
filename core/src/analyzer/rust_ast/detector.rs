@@ -1,237 +1,38 @@
-//! Rust AST analyzer using `syn`.
+//! Semantic Rust analyzer using shared scanner/IR utilities.
 //!
-//! Provides 100% accurate detection of QAIL patterns in Rust source code
-//! by parsing the actual AST instead of using regex.
+//! This module intentionally avoids `syn` so analyzer mode and build mode
+//! use one semantic extraction path for QAIL usage and SQL-literal detection.
 
 use std::fs;
 use std::path::Path;
-use syn::visit::Visit;
-use syn::{Expr, ExprCall, ExprMethodCall, Lit, LitStr};
 
-// Use the parent analyzer module's types
 use crate::analyzer::{CodeReference, QueryType};
 
-// Re-export proc_macro2 span type for line number extraction
-use proc_macro2::Span;
-
-/// Patterns we're looking for in Rust code
-#[derive(Debug, Clone)]
-pub struct RustPattern {
-    pub table: String,
-    pub columns: Vec<String>,
-    /// Line number (approximation based on span)
-    pub line: usize,
-    /// Code snippet
-    pub snippet: String,
-}
-
-/// Visitor that walks Rust AST to find QAIL patterns
-struct QailVisitor {
-    patterns: Vec<RustPattern>,
-    #[allow(dead_code)]
-    source: String,
-}
-
-impl QailVisitor {
-    fn new(source: String) -> Self {
-        Self {
-            patterns: Vec::new(),
-            source,
-        }
-    }
-
-    /// Extract string value from a string literal
-    fn extract_string(lit: &LitStr) -> String {
-        lit.value()
-    }
-
-    /// Approximate line number from span
-    fn line_from_span(span: Span) -> usize {
-        span.start().line
-    }
-
-    /// Extract all string literals from any expression (generic approach)
-    fn extract_strings_from_expr(expr: &Expr) -> Vec<String> {
-        let mut strings = Vec::new();
-        match expr {
-            // Direct string literal
-            Expr::Lit(lit) => {
-                if let Lit::Str(s) = &lit.lit {
-                    strings.push(Self::extract_string(s));
-                }
-            }
-            // Array of strings [\"a\", \"b\", \"c\"]
-            Expr::Array(arr) => {
-                for elem in &arr.elems {
-                    strings.extend(Self::extract_strings_from_expr(elem));
-                }
-            }
-            // Reference &\"string\"
-            Expr::Reference(r) => {
-                strings.extend(Self::extract_strings_from_expr(&r.expr));
-            }
-            _ => {}
-        }
-        strings
-    }
-
-    /// Check if this is a Qail constructor call (generic - detects ALL constructors)
-    fn check_qailcmd_call(
-        &mut self,
-        path: &syn::ExprPath,
-        args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>,
-    ) {
-        let segments: Vec<_> = path
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect();
-
-        // Match Qail::* where * is any method
-        if let (Some(first_seg), Some(action_seg)) = (segments.first(), segments.get(1)) {
-            if first_seg != "Qail" {
-                return;
-            }
-
-            let mut columns = Vec::new();
-            let mut table = String::new();
-
-            for arg in args {
-                let extracted = Self::extract_strings_from_expr(arg);
-                if table.is_empty() {
-                    if let Some(first) = extracted.first() {
-                        table.clone_from(first);
-                    }
-                } else {
-                    columns.extend(extracted);
-                }
-            }
-
-            if !table.is_empty() {
-                self.patterns.push(RustPattern {
-                    table: table.clone(),
-                    columns,
-                    line: Self::line_from_span(
-                        path.path
-                            .segments
-                            .first()
-                            .map(|s| s.ident.span())
-                            .unwrap_or_else(Span::call_site),
-                    ),
-                    snippet: format!("Qail::{}(\"{}\")", action_seg, table),
-                });
-            }
-        }
-    }
-
-    /// Check method calls for column/table references (generic - captures ALL string arguments)
-    fn check_method_call(
-        &mut self,
-        method: &str,
-        args: &syn::punctuated::Punctuated<Expr, syn::token::Comma>,
-        span: Span,
-    ) {
-        let mut all_strings = Vec::new();
-        for arg in args {
-            all_strings.extend(Self::extract_strings_from_expr(arg));
-        }
-
-        // If we found any strings, record this method call
-        if let Some(first) = all_strings.first() {
-            let snippet = if all_strings.len() == 1 {
-                format!(".{method}(\"{first}\")")
-            } else if all_strings.len() <= 3 {
-                format!(
-                    ".{}([{}])",
-                    method,
-                    all_strings
-                        .iter()
-                        .map(|s| format!("\"{s}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            } else {
-                format!(".{method}([\"{first}\" +{}])", all_strings.len() - 1)
-            };
-
-            self.patterns.push(RustPattern {
-                table: String::new(), // Will be merged with parent
-                columns: all_strings,
-                line: Self::line_from_span(span),
-                snippet,
-            });
-        }
-    }
-}
-
-impl<'ast> Visit<'ast> for QailVisitor {
-    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if let Expr::Path(path) = &*node.func {
-            self.check_qailcmd_call(path, &node.args);
-        }
-        // Continue visiting children
-        syn::visit::visit_expr_call(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        let method = node.method.to_string();
-        self.check_method_call(&method, &node.args, node.method.span());
-        // Continue visiting children
-        syn::visit::visit_expr_method_call(self, node);
-    }
-}
-
-/// Rust AST Analyzer
+/// Rust source analyzer backed by QAIL semantic scanner.
 pub struct RustAnalyzer;
 
 impl RustAnalyzer {
-    /// Scan a Rust file for QAIL patterns using AST parsing
+    /// Scan a Rust file for QAIL patterns.
     pub fn scan_file(path: &Path) -> Vec<CodeReference> {
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
-            Err(_) => return vec![],
+            Err(_) => return Vec::new(),
         };
 
-        let syntax = match syn::parse_file(&content) {
-            Ok(s) => s,
-            Err(_) => return vec![], // Fall back to regex if parse fails
-        };
+        let mut usages = Vec::new();
+        crate::build::scanner::scan_file_silent(&path.display().to_string(), &content, &mut usages);
 
-        let mut visitor = QailVisitor::new(content);
-        visitor.visit_file(&syntax);
-
-        // Post-process: merge column patterns with their preceding table pattern
-        let mut merged_refs: Vec<CodeReference> = Vec::new();
-        let mut current_table = String::new();
-
-        for p in visitor.patterns {
-            if !p.table.is_empty() {
-                // This is a table reference (Qail::get("table"))
-                current_table = p.table.clone();
-                merged_refs.push(CodeReference {
-                    file: path.to_path_buf(),
-                    line: p.line,
-                    table: p.table,
-                    columns: p.columns,
-                    query_type: QueryType::Qail,
-                    snippet: p.snippet,
-                });
-            } else if !current_table.is_empty() {
-                // This is a column reference (.filter("col"), .columns([...]))
-                // Associate it with the current table
-                merged_refs.push(CodeReference {
-                    file: path.to_path_buf(),
-                    line: p.line,
-                    table: current_table.clone(), // <-- Associate with parent table!
-                    columns: p.columns,
-                    query_type: QueryType::Qail,
-                    snippet: p.snippet,
-                });
-            }
-        }
-
-        merged_refs
+        usages
+            .into_iter()
+            .map(|usage| CodeReference {
+                file: path.to_path_buf(),
+                line: usage.line,
+                table: usage.table.clone(),
+                columns: usage.columns,
+                query_type: QueryType::Qail,
+                snippet: usage_to_snippet(&usage.action, &usage.table),
+            })
+            .collect()
     }
 
     /// Check if this is a Rust project (has Cargo.toml)
@@ -245,7 +46,7 @@ impl RustAnalyzer {
         cargo_toml.map(|p| p.exists()).unwrap_or(false)
     }
 
-    /// Scan a directory for Rust files
+    /// Scan a directory for Rust files.
     pub fn scan_directory(dir: &Path) -> Vec<CodeReference> {
         let mut refs = Vec::new();
         Self::scan_dir_recursive(dir, &mut refs);
@@ -261,17 +62,28 @@ impl RustAnalyzer {
         for entry in entries.flatten() {
             let path = entry.path();
 
-            // Skip common non-source directories
             if path.is_dir() {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if name == "target" || name == ".git" || name == "node_modules" {
                     continue;
                 }
                 Self::scan_dir_recursive(&path, refs);
-            } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            } else if path.extension().is_some_and(|e| e == "rs") {
                 refs.extend(Self::scan_file(&path));
             }
         }
+    }
+}
+
+fn usage_to_snippet(action: &str, table: &str) -> String {
+    match action {
+        "GET" => format!("Qail::get(\"{}\")", table),
+        "ADD" => format!("Qail::add(\"{}\")", table),
+        "SET" => format!("Qail::set(\"{}\")", table),
+        "DEL" => format!("Qail::del(\"{}\")", table),
+        "PUT" => format!("Qail::put(\"{}\")", table),
+        "TYPED" => format!("Qail::typed(/* {} */)", table),
+        _ => format!("Qail::get(\"{}\")", table),
     }
 }
 
@@ -279,15 +91,15 @@ impl RustAnalyzer {
 // Raw SQL Detection (for VS Code extension)
 // =============================================================================
 
-/// A raw SQL statement detected in Rust source code
-#[derive(Debug, Clone, serde::Serialize)]
+/// A raw SQL statement detected in Rust source code.
+#[derive(Debug, Clone)]
 pub struct RawSqlMatch {
     /// Line number (1-indexed)
     pub line: usize,
     pub column: usize,
     /// End line number (1-indexed)
     pub end_line: usize,
-    /// End column number (1-indexed)
+    /// End column number (0-indexed, exclusive)
     pub end_column: usize,
     /// Type of SQL statement
     pub sql_type: String,
@@ -297,76 +109,43 @@ pub struct RawSqlMatch {
     pub suggested_qail: String,
 }
 
-/// Visitor that finds raw SQL strings in Rust code
-struct SqlDetectorVisitor {
-    matches: Vec<RawSqlMatch>,
+#[derive(Debug, Clone)]
+struct StringLiteralMatch {
+    start_offset: usize,
+    end_offset: usize,
+    value: String,
 }
 
-impl SqlDetectorVisitor {
-    fn new() -> Self {
-        Self {
-            matches: Vec::new(),
-        }
-    }
+/// Detect raw SQL strings in Rust source code.
+pub fn detect_raw_sql(source: &str) -> Vec<RawSqlMatch> {
+    let line_starts = compute_line_starts(source);
+    let literals = scan_rust_string_literals(source);
 
-    /// Check if a string literal contains SQL
-    fn check_string_literal(&mut self, lit: &LitStr) {
-        let value = lit.value();
-        let upper = value.to_uppercase();
-
-        let sql_type = if upper.contains("SELECT") && upper.contains("FROM") {
-            "SELECT"
-        } else if upper.contains("INSERT INTO") {
-            "INSERT"
-        } else if upper.contains("UPDATE") && upper.contains("SET") {
-            "UPDATE"
-        } else if upper.contains("DELETE FROM") {
-            "DELETE"
-        } else {
-            return; // Not SQL
+    let mut out = Vec::new();
+    for lit in literals {
+        let Some(sql_type) = classify_sql_type(&lit.value) else {
+            continue;
         };
 
-        let span = lit.span();
-        let start = span.start();
-        let end = span.end();
+        let (line, column) = offset_to_line_col(&line_starts, lit.start_offset);
+        let (end_line, end_column) = offset_to_line_col(&line_starts, lit.end_offset);
 
-        // The span includes the quotes, so we use the exact positions
-        // But we need to ensure we capture the entire literal including quotes
-        self.matches.push(RawSqlMatch {
-            line: start.line,
-            column: start.column, // 0-indexed, includes opening quote
-            end_line: end.line,
-            end_column: end.column, // 0-indexed, should be after closing quote
+        out.push(RawSqlMatch {
+            line,
+            column,
+            end_line,
+            end_column,
             sql_type: sql_type.to_string(),
-            raw_sql: value.clone(),
-            suggested_qail: super::transformer::sql_to_qail(&value)
+            raw_sql: lit.value.clone(),
+            suggested_qail: super::transformer::sql_to_qail(&lit.value)
                 .unwrap_or_else(|_| "// Could not parse SQL".to_string()),
         });
     }
+
+    out
 }
 
-impl<'ast> Visit<'ast> for SqlDetectorVisitor {
-    fn visit_lit(&mut self, lit: &'ast Lit) {
-        if let Lit::Str(lit_str) = lit {
-            self.check_string_literal(lit_str);
-        }
-        syn::visit::visit_lit(self, lit);
-    }
-}
-
-/// Detect raw SQL strings in a Rust source file
-pub fn detect_raw_sql(source: &str) -> Vec<RawSqlMatch> {
-    match syn::parse_file(source) {
-        Ok(syntax) => {
-            let mut visitor = SqlDetectorVisitor::new();
-            visitor.visit_file(&syntax);
-            visitor.matches
-        }
-        Err(_) => Vec::new(),
-    }
-}
-
-/// Detect raw SQL strings in a file by path
+/// Detect raw SQL strings in a file by path.
 pub fn detect_raw_sql_in_file(path: &Path) -> Vec<RawSqlMatch> {
     match fs::read_to_string(path) {
         Ok(source) => detect_raw_sql(&source),
@@ -374,12 +153,256 @@ pub fn detect_raw_sql_in_file(path: &Path) -> Vec<RawSqlMatch> {
     }
 }
 
+fn compute_line_starts(source: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(source.lines().count() + 1);
+    starts.push(0);
+    for (idx, b) in source.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(idx + 1);
+        }
+    }
+    starts
+}
+
+fn offset_to_line_col(line_starts: &[usize], offset: usize) -> (usize, usize) {
+    let idx = line_starts.partition_point(|&start| start <= offset);
+    let line_idx = idx.saturating_sub(1);
+    let line_start = line_starts.get(line_idx).copied().unwrap_or(0);
+    (line_idx + 1, offset.saturating_sub(line_start))
+}
+
+fn classify_sql_type(value: &str) -> Option<&'static str> {
+    let upper = value.to_ascii_uppercase();
+
+    if upper.contains("SELECT") && upper.contains("FROM") {
+        Some("SELECT")
+    } else if upper.contains("INSERT INTO") {
+        Some("INSERT")
+    } else if upper.contains("UPDATE") && upper.contains("SET") {
+        Some("UPDATE")
+    } else if upper.contains("DELETE FROM") {
+        Some("DELETE")
+    } else {
+        None
+    }
+}
+
+fn scan_rust_string_literals(source: &str) -> Vec<StringLiteralMatch> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if starts_with(bytes, i, b"/*") {
+            i += 2;
+            let mut depth = 1usize;
+            while i < bytes.len() && depth > 0 {
+                if starts_with(bytes, i, b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if starts_with(bytes, i, b"*/") {
+                    depth = depth.saturating_sub(1);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+
+        if let Some((prefix_start, content_start, hashes)) = raw_string_prefix(bytes, i) {
+            if let Some(end_quote) = find_raw_string_end(bytes, content_start, hashes) {
+                let end_offset = end_quote + 1 + hashes;
+                if let Some(raw) = source.get(content_start..end_quote) {
+                    out.push(StringLiteralMatch {
+                        start_offset: prefix_start,
+                        end_offset,
+                        value: raw.to_string(),
+                    });
+                }
+                i = end_offset;
+                continue;
+            }
+            break;
+        }
+
+        if bytes[i] == b'"' || starts_with(bytes, i, b"b\"") {
+            let start_offset = i;
+            let quote_offset = if bytes[i] == b'"' { i } else { i + 1 };
+            let mut j = quote_offset + 1;
+
+            while j < bytes.len() {
+                if bytes[j] == b'\\' {
+                    j = (j + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[j] == b'"' {
+                    let end_offset = j + 1;
+                    if let Some(raw) = source.get(quote_offset + 1..j) {
+                        out.push(StringLiteralMatch {
+                            start_offset,
+                            end_offset,
+                            value: unescape_rust_string(raw),
+                        });
+                    }
+                    i = end_offset;
+                    break;
+                }
+                j += 1;
+            }
+
+            if j >= bytes.len() {
+                break;
+            }
+            continue;
+        }
+
+        if bytes[i] == b'\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[i] == b'\'' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        i += 1;
+    }
+
+    out
+}
+
+fn starts_with(haystack: &[u8], idx: usize, needle: &[u8]) -> bool {
+    haystack
+        .get(idx..idx.saturating_add(needle.len()))
+        .is_some_and(|s| s == needle)
+}
+
+fn raw_string_prefix(bytes: &[u8], idx: usize) -> Option<(usize, usize, usize)> {
+    if bytes.get(idx).copied() == Some(b'r') {
+        let mut j = idx + 1;
+        while bytes.get(j).copied() == Some(b'#') {
+            j += 1;
+        }
+        if bytes.get(j).copied() == Some(b'"') {
+            let hashes = j - (idx + 1);
+            return Some((idx, j + 1, hashes));
+        }
+        return None;
+    }
+
+    if bytes.get(idx).copied() == Some(b'b') && bytes.get(idx + 1).copied() == Some(b'r') {
+        let mut j = idx + 2;
+        while bytes.get(j).copied() == Some(b'#') {
+            j += 1;
+        }
+        if bytes.get(j).copied() == Some(b'"') {
+            let hashes = j - (idx + 2);
+            return Some((idx, j + 1, hashes));
+        }
+    }
+
+    None
+}
+
+fn find_raw_string_end(bytes: &[u8], mut idx: usize, hashes: usize) -> Option<usize> {
+    while idx < bytes.len() {
+        if bytes[idx] == b'"' {
+            let mut ok = true;
+            for off in 0..hashes {
+                if bytes.get(idx + 1 + off).copied() != Some(b'#') {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                return Some(idx);
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn unescape_rust_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('0') => out.push('\0'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('x') => {
+                let h1 = chars.next();
+                let h2 = chars.next();
+                if let (Some(a), Some(b)) = (h1, h2)
+                    && let (Some(ha), Some(hb)) = (a.to_digit(16), b.to_digit(16))
+                    && let Some(decoded) = char::from_u32((ha * 16) + hb)
+                {
+                    out.push(decoded);
+                    continue;
+                }
+                out.push('\\');
+                out.push('x');
+                if let Some(a) = h1 {
+                    out.push(a);
+                }
+                if let Some(b) = h2 {
+                    out.push(b);
+                }
+            }
+            Some(other) => {
+                // Keep unknown escapes stable for downstream SQL parsing.
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_qailcmd_get() {
+    fn test_detect_qail_scan_file() {
+        let tmp_name = format!(
+            "qail_detector_test_{}_{}.rs",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+
         let code = r#"
             fn query() {
                 let cmd = Qail::get("users")
@@ -388,19 +411,15 @@ mod tests {
             }
         "#;
 
-        let syntax = syn::parse_file(code).unwrap();
-        let mut visitor = QailVisitor::new(code.to_string());
-        visitor.visit_file(&syntax);
+        fs::write(&path, code).expect("write temp rust file");
+        let refs = RustAnalyzer::scan_file(&path);
+        let _ = fs::remove_file(&path);
 
-        assert!(!visitor.patterns.is_empty());
-        // Should find "users" table
-        assert!(visitor.patterns.iter().any(|p| p.table == "users"));
-        // Should find "status" column
+        assert!(!refs.is_empty());
+        assert!(refs.iter().any(|r| r.table == "users"));
         assert!(
-            visitor
-                .patterns
-                .iter()
-                .any(|p| p.columns.contains(&"status".to_string()))
+            refs.iter()
+                .any(|r| r.columns.contains(&"status".to_string()))
         );
     }
 
@@ -420,12 +439,12 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_cte_qail() {
+    fn test_detect_raw_multiline_cte_sql() {
         let code = r##"
             fn get_insights() {
                 let sql = r#"
                     WITH stats AS (
-                        SELECT COUNT(*) FILTER (WHERE direction = 'outbound' 
+                        SELECT COUNT(*) FILTER (WHERE direction = 'outbound'
                         AND created_at > NOW() - INTERVAL '24 hours') AS sent
                         FROM messages
                     )
@@ -438,17 +457,31 @@ mod tests {
         assert!(!matches.is_empty());
 
         let qail = &matches[0].suggested_qail;
-        // Should detect CTE pattern - generates separate CTE variables
         assert!(
             qail.contains("CTE 'stats'") || qail.contains("stats_cte"),
             "Should generate CTE variable: {}",
             qail
         );
-        // Should find the source table
         assert!(
             qail.contains("messages"),
             "Should find source table 'messages': {}",
             qail
         );
+    }
+
+    #[test]
+    fn ignores_sql_in_comments() {
+        let code = r#"
+            // SELECT id FROM users
+            /*
+              DELETE FROM sessions
+            */
+            fn ok() {
+                let msg = "just text";
+            }
+        "#;
+
+        let matches = detect_raw_sql(code);
+        assert!(matches.is_empty(), "matches: {matches:?}");
     }
 }
