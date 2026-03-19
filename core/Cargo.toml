@@ -11,9 +11,7 @@ keywords = ["qail", "sql", "parser"]
 
 [features]
 default = []
-analyzer = [
-    "dep:regex",
-]
+analyzer = []
 # Internal-only: enables examples that depend on external crates (qail-pg, bytes).
 # Never used in normal builds — only for manual `cargo run --example`.
 _pg_examples = []
@@ -25,9 +23,6 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "js"] }
 strsim = "0.11"
 toml = "1.0"
-
-# Analyzer-only helpers
-regex = { version = "1.10", optional = true }
 
 [dev-dependencies]
 proptest = "1.10.0"

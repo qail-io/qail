@@ -13,7 +13,7 @@ pub(crate) struct SqlUsageDiagnostic {
     pub(crate) message: String,
 }
 
-mod syn_impl {
+mod semantic_impl {
     use super::SqlUsageDiagnostic;
 
     pub(super) fn detect_in_source(file: &str, source: &str) -> Vec<SqlUsageDiagnostic> {
@@ -21,44 +21,228 @@ mod syn_impl {
             return Vec::new();
         }
 
+        let line_starts = compute_line_starts(source);
+        let bytes = source.as_bytes();
         let mut out = Vec::new();
-        for (idx, line) in source.lines().enumerate() {
-            if line.contains("Qail::raw_sql(") {
-                out.push(SqlUsageDiagnostic {
-                    file: file.to_string(),
-                    line: idx + 1,
-                    column: line.find("Qail::raw_sql(").unwrap_or(0) + 1,
-                    code: "SQL-001",
-                    message: "Qail::raw_sql(...) bypasses QAIL structural validation".to_string(),
-                });
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            if starts_with(bytes, i, b"//") {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
             }
-            if line.contains("sqlx::query(")
-                || line.contains("sqlx::query_as(")
-                || line.contains("sqlx::query_scalar(")
-            {
-                out.push(SqlUsageDiagnostic {
-                    file: file.to_string(),
-                    line: idx + 1,
-                    column: line.find("sqlx::query").unwrap_or(0) + 1,
-                    code: "SQL-002",
-                    message: "sqlx::query* detected; use QAIL DSL instead of raw SQL APIs"
-                        .to_string(),
-                });
+
+            if starts_with(bytes, i, b"/*") {
+                i = consume_block_comment(bytes, i);
+                continue;
             }
-            if line.contains("sqlx::query!(")
-                || line.contains("sqlx::query_as!(")
-                || line.contains("sqlx::query_scalar!(")
-            {
+
+            if let Some(next) = consume_rust_literal(bytes, i) {
+                i = next;
+                continue;
+            }
+
+            if starts_with(bytes, i, b"Qail::raw_sql") {
+                let after = skip_ws(bytes, i + "Qail::raw_sql".len());
+                if bytes.get(after).copied() == Some(b'(') {
+                    let (line, column) = offset_to_line_col(&line_starts, i);
+                    out.push(SqlUsageDiagnostic {
+                        file: file.to_string(),
+                        line,
+                        column: column + 1,
+                        code: "SQL-001",
+                        message: "Qail::raw_sql(...) bypasses QAIL structural validation"
+                            .to_string(),
+                    });
+                    i += "Qail::raw_sql".len();
+                    continue;
+                }
+            }
+
+            let mut matched_sqlx = false;
+            for name in ["sqlx::query_scalar", "sqlx::query_as", "sqlx::query"] {
+                if !starts_with(bytes, i, name.as_bytes()) {
+                    continue;
+                }
+                let after = skip_ws(bytes, i + name.len());
+                let code = match bytes.get(after).copied() {
+                    Some(b'!') => Some("SQL-003"),
+                    Some(b'(') => Some("SQL-002"),
+                    _ => None,
+                };
+
+                let Some(code) = code else {
+                    continue;
+                };
+
+                let (line, column) = offset_to_line_col(&line_starts, i);
+                let message = if code == "SQL-003" {
+                    "sqlx::query!* macro detected; use QAIL DSL instead".to_string()
+                } else {
+                    "sqlx::query* detected; use QAIL DSL instead of raw SQL APIs".to_string()
+                };
+
                 out.push(SqlUsageDiagnostic {
                     file: file.to_string(),
-                    line: idx + 1,
-                    column: line.find("sqlx::query").unwrap_or(0) + 1,
-                    code: "SQL-003",
-                    message: "sqlx::query!* macro detected; use QAIL DSL instead".to_string(),
+                    line,
+                    column: column + 1,
+                    code,
+                    message,
                 });
+                i += name.len();
+                matched_sqlx = true;
+                break;
+            }
+
+            if !matched_sqlx {
+                i += 1;
             }
         }
         out
+    }
+
+    fn compute_line_starts(source: &str) -> Vec<usize> {
+        let mut starts = Vec::with_capacity(source.lines().count() + 1);
+        starts.push(0);
+        for (idx, b) in source.bytes().enumerate() {
+            if b == b'\n' {
+                starts.push(idx + 1);
+            }
+        }
+        starts
+    }
+
+    fn offset_to_line_col(line_starts: &[usize], offset: usize) -> (usize, usize) {
+        let idx = line_starts.partition_point(|&start| start <= offset);
+        let line_idx = idx.saturating_sub(1);
+        let line_start = line_starts.get(line_idx).copied().unwrap_or(0);
+        (line_idx + 1, offset.saturating_sub(line_start))
+    }
+
+    fn starts_with(haystack: &[u8], idx: usize, needle: &[u8]) -> bool {
+        haystack
+            .get(idx..idx.saturating_add(needle.len()))
+            .is_some_and(|s| s == needle)
+    }
+
+    fn skip_ws(bytes: &[u8], mut idx: usize) -> usize {
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        idx
+    }
+
+    fn consume_block_comment(bytes: &[u8], start: usize) -> usize {
+        let mut i = start + 2;
+        let mut depth = 1usize;
+
+        while i < bytes.len() && depth > 0 {
+            if starts_with(bytes, i, b"/*") {
+                depth += 1;
+                i += 2;
+            } else if starts_with(bytes, i, b"*/") {
+                depth = depth.saturating_sub(1);
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+
+        i
+    }
+
+    fn consume_rust_literal(bytes: &[u8], start: usize) -> Option<usize> {
+        if let Some((_, content_start, hashes)) = raw_string_prefix(bytes, start) {
+            let end_quote = find_raw_string_end(bytes, content_start, hashes)?;
+            return Some(end_quote + 1 + hashes);
+        }
+
+        if bytes.get(start).copied() == Some(b'"') || starts_with(bytes, start, b"b\"") {
+            let quote_offset = if bytes.get(start).copied() == Some(b'"') {
+                start
+            } else {
+                start + 1
+            };
+
+            let mut i = quote_offset + 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    return Some(i + 1);
+                }
+                i += 1;
+            }
+            return Some(bytes.len());
+        }
+
+        if bytes.get(start).copied() == Some(b'\'') {
+            let mut i = start + 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                if bytes[i] == b'\'' {
+                    return Some(i + 1);
+                }
+                i += 1;
+            }
+            return Some(bytes.len());
+        }
+
+        None
+    }
+
+    fn raw_string_prefix(bytes: &[u8], idx: usize) -> Option<(usize, usize, usize)> {
+        if bytes.get(idx).copied() == Some(b'r') {
+            let mut j = idx + 1;
+            while bytes.get(j).copied() == Some(b'#') {
+                j += 1;
+            }
+            if bytes.get(j).copied() == Some(b'"') {
+                let hashes = j - (idx + 1);
+                return Some((idx, j + 1, hashes));
+            }
+            return None;
+        }
+
+        if bytes.get(idx).copied() == Some(b'b') && bytes.get(idx + 1).copied() == Some(b'r') {
+            let mut j = idx + 2;
+            while bytes.get(j).copied() == Some(b'#') {
+                j += 1;
+            }
+            if bytes.get(j).copied() == Some(b'"') {
+                let hashes = j - (idx + 2);
+                return Some((idx, j + 1, hashes));
+            }
+        }
+
+        None
+    }
+
+    fn find_raw_string_end(bytes: &[u8], mut idx: usize, hashes: usize) -> Option<usize> {
+        while idx < bytes.len() {
+            if bytes[idx] == b'"' {
+                let mut ok = true;
+                for off in 0..hashes {
+                    if bytes.get(idx + 1 + off).copied() != Some(b'#') {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    return Some(idx);
+                }
+            }
+            idx += 1;
+        }
+        None
     }
 }
 
@@ -67,9 +251,9 @@ fn detect_sql_in_file(path: &Path) -> Vec<SqlUsageDiagnostic> {
         return Vec::new();
     };
     #[cfg(feature = "analyzer")]
-    let mut out = syn_impl::detect_in_source(&path.display().to_string(), &source);
+    let mut out = semantic_impl::detect_in_source(&path.display().to_string(), &source);
     #[cfg(not(feature = "analyzer"))]
-    let out = syn_impl::detect_in_source(&path.display().to_string(), &source);
+    let out = semantic_impl::detect_in_source(&path.display().to_string(), &source);
 
     #[cfg(feature = "analyzer")]
     {
@@ -131,7 +315,7 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[cfg(test)]
 mod tests {
-    use super::syn_impl::detect_in_source;
+    use super::semantic_impl::detect_in_source;
 
     #[test]
     fn detects_qail_raw_sql() {
@@ -159,6 +343,19 @@ fn x() {
 // qail:allow(raw_sql)
 fn x() {
     let _ = Qail::raw_sql("SELECT 1");
+}
+"#;
+        let hits = detect_in_source("x.rs", src);
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn ignores_markers_inside_strings_and_comments() {
+        let src = r#"
+fn x() {
+    let _ = "sqlx::query(SELECT 1)";
+    // sqlx::query_as!("SELECT 1")
+    /* Qail::raw_sql("SELECT 1") */
 }
 "#;
         let hits = detect_in_source("x.rs", src);

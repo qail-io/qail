@@ -3,10 +3,58 @@
 //! Detects database query calls and extracts:
 //! - Full span of the entire call chain (for replacement)
 //! - SQL string content
+//! - SQL statement type (SELECT/INSERT/UPDATE/DELETE/UNKNOWN)
 //! - Bind parameters with their expressions
+//! - Fetch method (fetch_all/fetch_one/fetch_optional/execute/unknown)
 //! - Return type (from turbofish)
 
 #![allow(dead_code)] // Module under development, will be used by LSP
+
+use super::sql_semantics::{SqlStmtKind, classify_sql_kind};
+
+/// SQL statement category for a detected query call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlType {
+    Select,
+    Insert,
+    Update,
+    Delete,
+    Unknown,
+}
+
+impl SqlType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SqlType::Select => "SELECT",
+            SqlType::Insert => "INSERT",
+            SqlType::Update => "UPDATE",
+            SqlType::Delete => "DELETE",
+            SqlType::Unknown => "UNKNOWN",
+        }
+    }
+}
+
+/// Terminal fetch/execute method used by a detected query chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchMethod {
+    FetchAll,
+    FetchOne,
+    FetchOptional,
+    Execute,
+    Unknown,
+}
+
+impl FetchMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FetchMethod::FetchAll => "fetch_all",
+            FetchMethod::FetchOne => "fetch_one",
+            FetchMethod::FetchOptional => "fetch_optional",
+            FetchMethod::Execute => "execute",
+            FetchMethod::Unknown => "unknown",
+        }
+    }
+}
 
 /// A detected database query call.
 #[derive(Debug, Clone)]
@@ -21,8 +69,12 @@ pub struct QueryCall {
     pub end_column: usize,
     /// The raw SQL string
     pub sql: String,
+    /// SQL statement category for migration tooling.
+    pub sql_type: SqlType,
     /// Bind parameters in order (the expression source code)
     pub binds: Vec<String>,
+    /// Terminal execution method in the chain.
+    pub fetch_method: FetchMethod,
     pub return_type: Option<String>,
     /// The query function name (query, query_as, query_scalar)
     pub query_fn: String,
@@ -133,9 +185,12 @@ fn parse_query_call(
     let args = source.get(cursor + 1..call_end)?;
     let first_arg = extract_first_argument(args);
     let sql = extract_first_string_literal(first_arg)?;
+    let sql_type = classify_sql_type(&sql);
 
     let await_pos = find_await_in_chain(source, call_end + 1)?;
-    let binds = extract_bind_args(source.get(call_end + 1..await_pos).unwrap_or_default());
+    let chain = source.get(call_end + 1..await_pos).unwrap_or_default();
+    let binds = extract_bind_args(chain);
+    let fetch_method = detect_fetch_method(chain);
 
     let end_offset = await_pos + ".await".len();
     let (start_line, start_column) = offset_to_line_col(line_starts, start);
@@ -148,7 +203,9 @@ fn parse_query_call(
             end_line,
             end_column,
             sql,
+            sql_type,
             binds,
+            fetch_method,
             return_type,
             query_fn: pat.query_fn.to_string(),
         },
@@ -559,6 +616,133 @@ fn extract_bind_args(chain: &str) -> Vec<String> {
     out
 }
 
+fn classify_sql_type(sql: &str) -> SqlType {
+    match classify_sql_kind(sql) {
+        Some(SqlStmtKind::Select) => SqlType::Select,
+        Some(SqlStmtKind::Insert) => SqlType::Insert,
+        Some(SqlStmtKind::Update) => SqlType::Update,
+        Some(SqlStmtKind::Delete) => SqlType::Delete,
+        None => SqlType::Unknown,
+    }
+}
+
+fn detect_fetch_method(chain: &str) -> FetchMethod {
+    let bytes = chain.as_bytes();
+    let mut i = 0usize;
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+    let mut detected = FetchMethod::Unknown;
+
+    while i < bytes.len() {
+        if starts_with(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if starts_with(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        match bytes[i] {
+            b'(' => {
+                paren += 1;
+                i += 1;
+                continue;
+            }
+            b')' => {
+                paren = paren.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            b'[' => {
+                bracket += 1;
+                i += 1;
+                continue;
+            }
+            b']' => {
+                bracket = bracket.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            b'{' => {
+                brace += 1;
+                i += 1;
+                continue;
+            }
+            b'}' => {
+                brace = brace.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            b'.' if paren == 0 && bracket == 0 && brace == 0 => {
+                let name_start = skip_ws(bytes, i + 1);
+                let Some((method, mut cursor)) = parse_ident_at_bytes(chain, name_start) else {
+                    i += 1;
+                    continue;
+                };
+                cursor = skip_ws(bytes, cursor);
+
+                if starts_with(bytes, cursor, b"::") {
+                    cursor = skip_ws(bytes, cursor + 2);
+                    if bytes.get(cursor).copied() == Some(b'<') {
+                        if let Some(angle_end) = find_matching_delim(chain, cursor, b'<', b'>') {
+                            cursor = skip_ws(bytes, angle_end + 1);
+                        } else {
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+
+                if bytes.get(cursor).copied() != Some(b'(') {
+                    i += 1;
+                    continue;
+                }
+
+                detected = match method {
+                    "fetch_optional" => FetchMethod::FetchOptional,
+                    "fetch_one" => FetchMethod::FetchOne,
+                    "fetch_all" => FetchMethod::FetchAll,
+                    "execute" => FetchMethod::Execute,
+                    _ => detected,
+                };
+
+                i = cursor + 1;
+                continue;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    detected
+}
+
+fn parse_ident_at_bytes(text: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = text.as_bytes();
+    let mut end = start;
+    while end < bytes.len() && is_ident_byte(bytes[end]) {
+        end += 1;
+    }
+
+    if end == start {
+        None
+    } else {
+        Some((text.get(start..end)?, end))
+    }
+}
+
 fn extract_second_turbofish_type(args: &str) -> Option<String> {
     let mut parts = Vec::new();
     let mut start = 0usize;
@@ -647,6 +831,8 @@ mod tests {
         let calls = detect_query_calls(code);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].sql, "SELECT * FROM users");
+        assert_eq!(calls[0].sql_type, SqlType::Select);
+        assert_eq!(calls[0].fetch_method, FetchMethod::FetchAll);
         assert_eq!(calls[0].query_fn, "query_as");
         assert_eq!(calls[0].return_type.as_deref(), Some("User"));
     }
@@ -683,6 +869,70 @@ mod tests {
         let calls = detect_query_calls(code);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].binds.len(), 2);
+    }
+
+    #[test]
+    fn test_detect_execute_update_chain() {
+        let code = r#"
+            async fn test() {
+                let _ = sqlx::query("UPDATE users SET active = true WHERE id = $1")
+                    .bind(user_id)
+                    .execute(&pool)
+                    .await;
+            }
+        "#;
+
+        let calls = detect_query_calls(code);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].sql_type, SqlType::Update);
+        assert_eq!(calls[0].fetch_method, FetchMethod::Execute);
+    }
+
+    #[test]
+    fn detects_fetch_method_with_turbofish() {
+        let code = r#"
+            async fn test() {
+                let rows = sqlx::query_as::<_, User>("SELECT * FROM users")
+                    .fetch_all::<User>(&pool)
+                    .await;
+            }
+        "#;
+
+        let calls = detect_query_calls(code);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].fetch_method, FetchMethod::FetchAll);
+    }
+
+    #[test]
+    fn ignores_fetch_method_tokens_inside_bind_string() {
+        let code = r#"
+            async fn test() {
+                let rows = sqlx::query("SELECT * FROM users")
+                    .bind(".fetch_one(")
+                    .fetch_all(&pool)
+                    .await;
+            }
+        "#;
+
+        let calls = detect_query_calls(code);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].fetch_method, FetchMethod::FetchAll);
+    }
+
+    #[test]
+    fn ignores_fetch_method_tokens_inside_comments() {
+        let code = r#"
+            async fn test() {
+                let rows = sqlx::query("SELECT * FROM users")
+                    // .fetch_one(&pool)
+                    .fetch_all(&pool)
+                    .await;
+            }
+        "#;
+
+        let calls = detect_query_calls(code);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].fetch_method, FetchMethod::FetchAll);
     }
 
     #[test]

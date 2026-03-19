@@ -8,6 +8,8 @@ use std::path::Path;
 
 use crate::analyzer::{CodeReference, QueryType};
 
+use super::sql_semantics::classify_sql_kind;
+
 /// Rust source analyzer backed by QAIL semantic scanner.
 pub struct RustAnalyzer;
 
@@ -172,19 +174,7 @@ fn offset_to_line_col(line_starts: &[usize], offset: usize) -> (usize, usize) {
 }
 
 fn classify_sql_type(value: &str) -> Option<&'static str> {
-    let upper = value.to_ascii_uppercase();
-
-    if upper.contains("SELECT") && upper.contains("FROM") {
-        Some("SELECT")
-    } else if upper.contains("INSERT INTO") {
-        Some("INSERT")
-    } else if upper.contains("UPDATE") && upper.contains("SET") {
-        Some("UPDATE")
-    } else if upper.contains("DELETE FROM") {
-        Some("DELETE")
-    } else {
-        None
-    }
+    classify_sql_kind(value).map(|kind| kind.as_str())
 }
 
 fn scan_rust_string_literals(source: &str) -> Vec<StringLiteralMatch> {

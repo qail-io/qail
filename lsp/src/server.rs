@@ -1,6 +1,9 @@
 //! QAIL Language Server Core
 
-use qail_core::analyzer::{QueryCall, detect_query_calls};
+use qail_core::analyzer::{
+    QueryCall, detect_query_calls, extract_qail_candidate_from_line, looks_like_qail_query,
+    strip_text_line_comment,
+};
 use qail_core::parse;
 use qail_core::schema::Schema;
 use qail_core::validator::Validator;
@@ -83,7 +86,8 @@ impl QailLanguageServer {
         }
 
         let target_line = content.lines().nth(line)?;
-        let (start_column, query) = extract_qail_candidate_from_line(target_line)?;
+        let code_line = strip_text_line_comment(target_line);
+        let (start_column, query) = extract_qail_candidate_from_line(code_line)?;
         Some(EmbeddedQuery {
             kind: EmbeddedQueryKind::Qail,
             text: query.clone(),
@@ -145,13 +149,12 @@ impl QailLanguageServer {
     }
 }
 
-const QAIL_ACTION_PREFIXES: [&str; 7] = ["get", "set", "add", "del", "with", "make", "mod"];
-
 fn collect_text_qail_diagnostics(text: &str) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     for (line_num, line) in text.lines().enumerate() {
-        if let Some((col, query_text)) = extract_qail_candidate_from_line(line)
+        let code_line = strip_text_line_comment(line);
+        if let Some((col, query_text)) = extract_qail_candidate_from_line(code_line)
             && let Err(e) = parse(&query_text)
         {
             diagnostics.push(diagnostic_from_parse_error(
@@ -242,71 +245,6 @@ fn is_line_in_query_call(query: &QueryCall, line: usize) -> bool {
     let start = query.start_line.saturating_sub(1);
     let end = query.end_line.saturating_sub(1);
     (start..=end).contains(&line)
-}
-
-fn looks_like_qail_query(text: &str) -> bool {
-    let head = text
-        .trim_start()
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    QAIL_ACTION_PREFIXES.contains(&head.as_str())
-}
-
-fn extract_qail_candidate_from_line(line: &str) -> Option<(usize, String)> {
-    let start = find_qail_start(line)?;
-    let rest = &line[start..];
-
-    let before = line[..start].trim_end();
-    let is_quoted = before.ends_with("(\"")
-        || before.ends_with("(r\"")
-        || before.ends_with("(r#\"")
-        || before.ends_with("= \"")
-        || before.ends_with("= r\"")
-        || before.ends_with("= r#\"");
-
-    if is_quoted && let Some(end) = rest.find('"') {
-        return Some((start, rest[..end].trim().to_string()));
-    }
-
-    Some((start, rest.trim().trim_end_matches(';').to_string()))
-}
-
-fn find_qail_start(line: &str) -> Option<usize> {
-    for (idx, _) in line.char_indices() {
-        let before_ok = if idx == 0 {
-            true
-        } else {
-            let ch = line[..idx].chars().next_back().unwrap_or(' ');
-            !is_ident_char(ch)
-        };
-        if !before_ok {
-            continue;
-        }
-
-        for action in QAIL_ACTION_PREFIXES {
-            let Some(tail) = line.get(idx..) else {
-                continue;
-            };
-            if !tail.starts_with(action) {
-                continue;
-            }
-            let after = idx + action.len();
-            let Some(next) = line[after..].chars().next() else {
-                continue;
-            };
-            if next.is_whitespace() {
-                return Some(idx);
-            }
-        }
-    }
-    None
-}
-
-fn is_ident_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 #[cfg(test)]

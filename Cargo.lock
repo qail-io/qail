@@ -2274,7 +2274,6 @@ dependencies = [
  "chrono",
  "nom 8.0.0",
  "proptest",
- "regex",
  "serde_json",
  "strsim",
  "toml",

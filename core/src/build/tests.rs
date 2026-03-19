@@ -634,3 +634,62 @@ fn demo() {
     assert!(!usage.is_cte_ref);
     assert!(!usage.file_uses_super_admin);
 }
+
+#[test]
+fn test_scan_file_ignores_qail_markers_in_comments_and_strings() {
+    let content = r#"
+fn demo() {
+    let _fake = "Qail::get(\"ghost\").column(\"id\")";
+    // let _also_fake = Qail::set("ghost");
+    /* Qail::del("ghost"); */
+    let _q = Qail::get("users").column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(
+        usages.len(),
+        1,
+        "expected only real Qail chain to be scanned"
+    );
+    assert_eq!(usages[0].table, "users");
+    assert_eq!(usages[0].action, "GET");
+}
+
+#[test]
+fn test_extract_columns_ignores_method_markers_inside_string_literals() {
+    let line = r#"Qail::get("orders")
+        .column("id")
+        .eq("note", ".set_value(\"secret\", 1)")
+        .filter("status", true)"#;
+    let cols = extract_columns(line);
+
+    assert!(cols.contains(&"id".to_string()));
+    assert!(cols.contains(&"status".to_string()));
+    assert!(
+        !cols.contains(&"secret".to_string()),
+        "string content must not be parsed as method call"
+    );
+}
+
+#[test]
+fn test_super_admin_allow_comment_in_block_comment_disables_audit_flag() {
+    let content = r#"
+/*
+ qail:allow(super_admin)
+*/
+fn demo() {
+    let _sa = SuperAdminToken::for_system_process("jobs");
+    let _q = Qail::get("orders").column("id");
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        !usages[0].file_uses_super_admin,
+        "allow marker in comments should disable super-admin file flag"
+    );
+}

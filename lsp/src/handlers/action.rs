@@ -1,74 +1,24 @@
 //! Code Action Handler - SQL to QAIL Migration
 
 use qail_core::analyzer::rust_ast::transformer::sql_to_qail;
-use qail_core::analyzer::{QueryCall, detect_query_calls};
+use qail_core::analyzer::{FetchMethod, QueryCall, SqlType, detect_query_calls};
 use std::collections::HashMap;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::server::QailLanguageServer;
 
-/// Detect fetch method from semantic query call span.
-fn detect_fetch_method(lines: &[&str], query: &QueryCall, sql_type: &str) -> &'static str {
-    let start = query.start_line.saturating_sub(1);
-    let end = query
-        .end_line
-        .saturating_sub(1)
-        .min(lines.len().saturating_sub(1));
-
-    if start <= end {
-        for i in start..=end {
-            if let Some(line) = lines.get(i) {
-                if line.contains(".fetch_optional") {
-                    return "fetch_optional";
-                }
-                if line.contains(".fetch_one") {
-                    return "fetch_one";
-                }
-                if line.contains(".fetch_all") {
-                    return "fetch_all";
-                }
-                if line.contains(".execute") {
-                    return "execute";
-                }
-            }
-        }
-    }
-
-    if sql_type == "SELECT" {
-        "fetch_all"
-    } else {
-        "execute"
-    }
-}
-
 /// Map fetch method + SQL type to driver method
-fn get_driver_method(fetch_method: &str, sql_type: &str) -> &'static str {
+fn get_driver_method(fetch_method: FetchMethod, sql_type: SqlType) -> &'static str {
     match (fetch_method, sql_type) {
-        ("fetch_optional", _) => "query_optional",
-        ("fetch_one", _) => "query_one",
-        ("execute", _) => "execute",
-        (_, "SELECT") => "query_as",
-        (_, "INSERT") => "query_one",
-        (_, "UPDATE") => "execute",
-        (_, "DELETE") => "execute",
+        (FetchMethod::FetchOptional, _) => "query_optional",
+        (FetchMethod::FetchOne, _) => "query_one",
+        (FetchMethod::Execute, _) => "execute",
+        (_, SqlType::Select) => "query_as",
+        (_, SqlType::Insert) => "query_one",
+        (_, SqlType::Update) => "execute",
+        (_, SqlType::Delete) => "execute",
         _ => "query_as",
-    }
-}
-
-fn classify_sql_type(sql: &str) -> Option<&'static str> {
-    let upper = sql.to_ascii_uppercase();
-
-    if upper.contains("SELECT") && upper.contains("FROM") {
-        Some("SELECT")
-    } else if upper.contains("INSERT INTO") {
-        Some("INSERT")
-    } else if upper.contains("UPDATE") && upper.contains("SET") {
-        Some("UPDATE")
-    } else if upper.contains("DELETE FROM") {
-        Some("DELETE")
-    } else {
-        None
     }
 }
 
@@ -276,14 +226,13 @@ impl QailLanguageServer {
                 continue;
             }
 
-            let Some(sql_type) = classify_sql_type(&query.sql) else {
+            if query.sql_type == SqlType::Unknown {
                 continue;
-            };
+            }
 
             let suggested_qail =
                 sql_to_qail(&query.sql).unwrap_or_else(|_| "// Could not parse SQL".to_string());
-            let fetch_method = detect_fetch_method(&lines, query, sql_type);
-            let driver_method = get_driver_method(fetch_method, sql_type);
+            let driver_method = get_driver_method(query.fetch_method, query.sql_type);
 
             let qail_code = transform_qail_code(
                 suggested_qail,
@@ -309,7 +258,7 @@ impl QailLanguageServer {
             );
 
             actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                title: format!("🚀 Migrate {} to QAIL", sql_type),
+                title: format!("🚀 Migrate {} to QAIL", query.sql_type.as_str()),
                 kind: Some(CodeActionKind::REFACTOR),
                 edit: Some(WorkspaceEdit {
                     changes: Some(changes),
@@ -329,10 +278,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_sql_type_detects_select() {
+    fn driver_method_uses_semantic_fields() {
         assert_eq!(
-            classify_sql_type("SELECT id FROM users WHERE id = $1"),
-            Some("SELECT")
+            get_driver_method(FetchMethod::FetchOptional, SqlType::Select),
+            "query_optional"
+        );
+        assert_eq!(
+            get_driver_method(FetchMethod::Unknown, SqlType::Update),
+            "execute"
         );
     }
 
@@ -350,7 +303,9 @@ mod tests {
             end_line: 1,
             end_column: await_end,
             sql: "SELECT 1".to_string(),
+            sql_type: SqlType::Select,
             binds: vec![],
+            fetch_method: FetchMethod::FetchAll,
             return_type: None,
             query_fn: "query".to_string(),
         };
