@@ -41,7 +41,7 @@
 | **AuthenticationSASL** | ✅ | SCRAM-SHA-256 |
 | **AuthenticationSASLContinue** | ✅ | |
 | **AuthenticationSASLFinal** | ✅ | |
-| **BackendKeyData (K)** | ✅ | `connection.rs` — process_id, secret_key for cancel |
+| **BackendKeyData (K)** | ✅ | `wire/backend.rs` + `connection/startup.rs` — process_id + variable-length cancel key bytes (`4..=256`) |
 | **ParameterStatus (S)** | ✅ | `wire.rs::decode_parameter_status` |
 | **ReadyForQuery (Z)** | ✅ | Transaction status I/T/E |
 | **RowDescription (T)** | ✅ | Field descriptions |
@@ -61,7 +61,7 @@
 | **ParameterDescription (t)** | ✅ | |
 | **PortalSuspended (s)** | ❓ | Cursor row limit — may be implicitly handled |
 | **CloseComplete (3)** | ❌ | No Close sent, so not expected |
-| **NegotiateProtocolVersion (v)** | ❓ | Protocol 3.2+ — not explicitly handled |
+| **NegotiateProtocolVersion (v)** | ✅ | `wire/backend.rs` decode + `connection/startup.rs` negotiation handling |
 | **AuthenticationCleartextPassword** | ✅ | Legacy auth path |
 | **AuthenticationKerberosV5, GSS, SSPI** | ❌ | Not implemented |
 

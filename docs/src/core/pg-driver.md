@@ -12,6 +12,8 @@ The `qail-pg` crate provides a **native PostgreSQL driver** with AST-native wire
 - **Enterprise Auth Policy** — Configure allowed auth mechanisms and SCRAM channel binding mode
 - **Kerberos/GSS/SSPI Hooks** — Protocol-level support with pluggable token providers (legacy + stateful)
 - **Built-in Linux Kerberos Provider** — Optional `enterprise-gssapi` feature for native krb5/GSS flow
+- **Protocol Negotiation** — Requests startup protocol 3.2 by default with one-shot fallback to 3.0 on explicit server version rejection
+- **Cancel-Key Compatibility** — Native bytes cancel-key APIs with legacy i32 wrappers retained for 4-byte keys
 - **Connection Pooling** — Efficient resource management with RLS-safe checkout
 - **COPY Protocol** — Bulk insert for high throughput (1.63M rows/sec)
 - **Pipeline Execution** — Multiple queries per round-trip

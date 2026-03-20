@@ -1049,6 +1049,7 @@ mod tests {
                 returns: "int".to_string(),
                 body: "BEGIN RETURN v + 1; END;".to_string(),
                 language: Some("plpgsql".to_string()),
+                volatility: None,
             }),
             ..Default::default()
         };

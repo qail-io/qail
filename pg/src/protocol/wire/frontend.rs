@@ -22,6 +22,7 @@ impl FrontendMessage {
             FrontendMessage::Startup {
                 user,
                 database,
+                protocol_version,
                 startup_params,
             } => {
                 if Self::has_nul(user) {
@@ -32,7 +33,7 @@ impl FrontendMessage {
                 }
                 let mut seen_startup_keys = std::collections::HashSet::new();
                 let mut buf = Vec::new();
-                buf.extend_from_slice(&196608i32.to_be_bytes());
+                buf.extend_from_slice(&protocol_version.to_be_bytes());
                 buf.extend_from_slice(b"user\0");
                 buf.extend_from_slice(user.as_bytes());
                 buf.push(0);

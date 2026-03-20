@@ -15,6 +15,7 @@
 use super::super::notification::Notification;
 use super::super::stream::PgStream;
 use super::super::{AuthSettings, EnterpriseAuthMechanism};
+use crate::protocol::PROTOCOL_VERSION_3_2;
 use bytes::BytesMut;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
@@ -177,6 +178,7 @@ impl TlsConfig {
 ///
 /// Groups the 8 common arguments to avoid exceeding clippy's
 /// `too_many_arguments` threshold.
+#[derive(Clone)]
 pub(super) struct ConnectParams<'a> {
     pub(super) host: &'a str,
     pub(super) port: u16,
@@ -186,6 +188,7 @@ pub(super) struct ConnectParams<'a> {
     pub(super) auth_settings: AuthSettings,
     pub(super) gss_token_provider: Option<super::super::GssTokenProvider>,
     pub(super) gss_token_provider_ex: Option<super::super::GssTokenProviderEx>,
+    pub(super) protocol_minor: u16,
     pub(super) startup_params: Vec<(String, String)>,
 }
 
@@ -233,7 +236,17 @@ pub struct PgConnection {
     /// This cache ensures by-name column access works even for cached prepared statements.
     pub(crate) column_info_cache: HashMap<u64, Arc<super::super::ColumnInfo>>,
     pub(crate) process_id: i32,
+    /// Legacy 4-byte cancel secret key (protocol 3.0-compatible wrappers).
+    ///
+    /// For protocol 3.2 extended key lengths, this remains `0` and callers
+    /// must use `cancel_key_bytes`.
     pub(crate) secret_key: i32,
+    /// Full cancel key bytes (`4..=256`) from BackendKeyData.
+    pub(crate) cancel_key_bytes: Vec<u8>,
+    /// Startup protocol minor requested by this connection (for example `2` for 3.2).
+    pub(crate) requested_protocol_minor: u16,
+    /// Startup protocol minor negotiated with the server.
+    pub(crate) negotiated_protocol_minor: u16,
     /// Buffer for asynchronous LISTEN/NOTIFY notifications.
     /// Populated by `recv()` when it encounters NotificationResponse messages.
     pub(crate) notifications: VecDeque<Notification>,
@@ -251,4 +264,23 @@ pub struct PgConnection {
     pub(crate) pending_statement_closes: Vec<String>,
     /// Reentrancy guard for pending-close drain path.
     pub(crate) draining_statement_closes: bool,
+}
+
+impl PgConnection {
+    #[inline]
+    pub(crate) fn default_protocol_minor() -> u16 {
+        (PROTOCOL_VERSION_3_2 & 0xFFFF) as u16
+    }
+
+    /// Startup protocol minor requested by this connection.
+    #[inline]
+    pub fn requested_protocol_minor(&self) -> u16 {
+        self.requested_protocol_minor
+    }
+
+    /// Startup protocol minor negotiated with the server.
+    #[inline]
+    pub fn negotiated_protocol_minor(&self) -> u16 {
+        self.negotiated_protocol_minor
+    }
 }

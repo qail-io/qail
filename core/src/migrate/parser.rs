@@ -18,11 +18,10 @@
 //! ```
 
 use super::policy::{PolicyTarget, RlsPolicy};
-use super::policy_parser::parse_policy_expr;
 use super::schema::{
     CheckConstraint, CheckExpr, Column, Comment, EnumType, Extension, FkAction, Grant, Index,
-    MigrationHint, MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind, Schema,
-    SchemaFunctionDef, SchemaTriggerDef, Sequence, Table, ViewDef,
+    IndexMethod, MigrationHint, MultiColumnForeignKey, Privilege, ResourceDef, ResourceKind,
+    Schema, SchemaFunctionDef, SchemaTriggerDef, Sequence, Table, ViewDef,
 };
 use super::types::ColumnType;
 use crate::ast::Expr;
@@ -221,8 +220,14 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
             }
             "default" => {
                 if i + 1 < parts.len() {
-                    col.default = Some(parts[i + 1].to_string());
+                    let mut default_parts = Vec::new();
                     i += 1;
+                    default_parts.push(parts[i]);
+                    while i + 1 < parts.len() && !is_column_constraint_keyword(parts[i + 1]) {
+                        i += 1;
+                        default_parts.push(parts[i]);
+                    }
+                    col.default = Some(default_parts.join(" "));
                 }
             }
             s if s.starts_with("references") => {
@@ -263,23 +268,26 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                 }
             }
             s if s.starts_with("check(") => {
-                // Parse check(expr) — may span multiple parts if expression has spaces
-                // Reconstruct the full check(...) from remaining parts
-                let check_str = if s.ends_with(')') {
-                    s.to_string()
-                } else {
-                    // Consume parts until we find the closing )
-                    let mut full = s.to_string();
-                    while i + 1 < parts.len() {
-                        i += 1;
-                        full.push(' ');
-                        full.push_str(parts[i]);
-                        if parts[i].ends_with(')') {
-                            break;
-                        }
-                    }
-                    full
-                };
+                // Parse check(expr) — expression may contain nested parens and spaces.
+                // Keep consuming tokens until the outer `check(` parenthesis is balanced.
+                let mut check_str = s.to_string();
+                let mut depth: i32 = s.chars().fold(0, |acc, ch| match ch {
+                    '(' => acc + 1,
+                    ')' => acc - 1,
+                    _ => acc,
+                });
+
+                while depth > 0 && i + 1 < parts.len() {
+                    i += 1;
+                    check_str.push(' ');
+                    check_str.push_str(parts[i]);
+                    depth += parts[i].chars().fold(0, |acc, ch| match ch {
+                        '(' => acc + 1,
+                        ')' => acc - 1,
+                        _ => acc,
+                    });
+                }
+
                 // Strip "check(" and trailing ")"
                 let inner = check_str
                     .strip_prefix("check(")
@@ -289,6 +297,14 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     && let Some(expr) = parse_check_expr_from_qail(inner)
                 {
                     col.check = Some(CheckConstraint { expr, name: None });
+                }
+            }
+            "check_name" => {
+                if i + 1 < parts.len() {
+                    i += 1;
+                    if let Some(ref mut check) = col.check {
+                        check.name = Some(parts[i].to_string());
+                    }
                 }
             }
             _ => {
@@ -321,11 +337,31 @@ fn parse_index(line: &str) -> Result<Index, String> {
     let rest = parts[1];
 
     let paren_start = rest.find('(').ok_or("Missing ( in index")?;
-    let paren_end = rest.rfind(')').ok_or("Missing ) in index")?;
+    let mut depth = 0_i32;
+    let mut paren_end = None;
+    for (idx, ch) in rest.char_indices().skip(paren_start) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    paren_end = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let paren_end = paren_end.ok_or("Missing ) in index")?;
 
-    let table = rest[..paren_start].trim().to_string();
+    let before_cols = rest[..paren_start].trim();
+    let (table, method) = if let Some((tbl, method)) = before_cols.split_once(" using ") {
+        (tbl.trim().to_string(), Some(parse_index_method_str(method)))
+    } else {
+        (before_cols.to_string(), None)
+    };
     let cols_str = &rest[paren_start + 1..paren_end];
-    let columns: Vec<String> = cols_str.split(',').map(|s| s.trim().to_string()).collect();
+    let columns: Vec<String> = split_top_level_csv(cols_str);
 
     // Detect expression indexes: columns contain parentheses like "(lower(email))"
     let has_expressions = columns
@@ -340,8 +376,49 @@ fn parse_index(line: &str) -> Result<Index, String> {
     if is_unique {
         index.unique = true;
     }
+    if let Some(method) = method {
+        index.method = method;
+    }
+
+    let trailing = rest[paren_end + 1..].trim();
+    if let Some(pred) = trailing.strip_prefix("where ") {
+        index.where_clause = Some(CheckExpr::Raw(pred.trim().to_string()));
+    }
 
     Ok(index)
+}
+
+fn split_top_level_csv(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0_i32;
+
+    for ch in s.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                let piece = cur.trim();
+                if !piece.is_empty() {
+                    out.push(piece.to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+
+    let tail = cur.trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
 }
 
 /// Parse a rename hint.
@@ -466,7 +543,9 @@ fn parse_comment(line: &str) -> Result<Comment, String> {
         .ok_or_else(|| "unterminated comment text".to_string())?
         .to_string();
 
-    if target_str.contains('.') {
+    if is_comment_raw_target(target_str) {
+        Ok(Comment::on_raw(target_str, text))
+    } else if target_str.contains('.') {
         let (table, column) = target_str
             .split_once('.')
             .ok_or_else(|| "invalid comment target".to_string())?;
@@ -474,6 +553,19 @@ fn parse_comment(line: &str) -> Result<Comment, String> {
     } else {
         Ok(Comment::on_table(target_str, text))
     }
+}
+
+fn is_comment_raw_target(target: &str) -> bool {
+    let t = target.trim().to_ascii_lowercase();
+    t.starts_with("function ")
+        || t.starts_with("type ")
+        || t.starts_with("policy ")
+        || t.starts_with("constraint ")
+        || t.starts_with("index ")
+        || t.starts_with("sequence ")
+        || t.starts_with("view ")
+        || t.starts_with("materialized view ")
+        || t.starts_with("schema ")
 }
 
 /// Parse a sequence definition.
@@ -726,6 +818,7 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     let mut returns = "void".to_string();
     let mut language = "plpgsql".to_string();
 
+    let mut volatility: Option<String> = None;
     let mut i = 0;
     let mut body_start_idx = None;
     while i < parts.len() {
@@ -735,11 +828,17 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
         } else if parts[i] == "language" && i + 1 < parts.len() {
             language = parts[i + 1].to_string();
             i += 2;
-        } else if parts[i] == "$$" {
-            body_start_idx = Some(i);
-            break;
         } else {
-            i += 1;
+            let token = parts[i].to_ascii_lowercase();
+            if token == "volatile" || token == "stable" || token == "immutable" {
+                volatility = Some(token);
+                i += 1;
+            } else if parts[i] == "$$" {
+                body_start_idx = Some(i);
+                break;
+            } else {
+                i += 1;
+            }
         }
     }
 
@@ -771,6 +870,7 @@ fn parse_function<'a, I: Iterator<Item = &'a str>>(
     let mut func = SchemaFunctionDef::new(name, &returns, body);
     func.language = language;
     func.args = args;
+    func.volatility = volatility;
 
     Ok(func)
 }
@@ -804,19 +904,54 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
 
     // Collect events (INSERT, UPDATE, DELETE, etc.) until "execute"
     let mut events = Vec::new();
+    let mut update_columns = Vec::new();
     let mut exec_idx = None;
     for (j, part) in parts.iter().enumerate().skip(on_idx + 3) {
         if part.eq_ignore_ascii_case("execute") {
             exec_idx = Some(j);
             break;
         }
-        let evt = part.to_uppercase();
-        if evt != "OR" {
-            events.push(evt);
-        }
     }
 
     let exec_idx = exec_idx.ok_or("trigger missing 'execute' keyword")?;
+    let event_tokens = &parts[on_idx + 3..exec_idx];
+    let mut chunks: Vec<Vec<&str>> = Vec::new();
+    let mut current = Vec::new();
+    for tok in event_tokens {
+        if tok.eq_ignore_ascii_case("or") {
+            if !current.is_empty() {
+                chunks.push(current);
+                current = Vec::new();
+            }
+            continue;
+        }
+        current.push(*tok);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    for chunk in chunks {
+        if chunk.is_empty() {
+            continue;
+        }
+        if chunk.len() >= 3
+            && chunk[0].eq_ignore_ascii_case("update")
+            && chunk[1].eq_ignore_ascii_case("of")
+        {
+            events.push("UPDATE".to_string());
+            let cols = chunk[2..].join(" ");
+            for col in cols.split(',') {
+                let c = col.trim();
+                if !c.is_empty() {
+                    update_columns.push(c.to_string());
+                }
+            }
+            continue;
+        }
+        events.push(chunk.join(" ").to_uppercase());
+    }
+
     let func_name = parts
         .get(exec_idx + 1)
         .ok_or("trigger missing function name")?;
@@ -824,6 +959,7 @@ fn parse_trigger(line: &str) -> Result<SchemaTriggerDef, String> {
     let mut trigger = SchemaTriggerDef::new(name, *table, *func_name);
     trigger.timing = timing;
     trigger.events = events;
+    trigger.update_columns = update_columns;
 
     Ok(trigger)
 }
@@ -891,6 +1027,32 @@ fn parse_fk_action_str(s: &str) -> FkAction {
         "restrict" => FkAction::Restrict,
         _ => FkAction::NoAction,
     }
+}
+
+fn parse_index_method_str(s: &str) -> IndexMethod {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "hash" => IndexMethod::Hash,
+        "gin" => IndexMethod::Gin,
+        "gist" => IndexMethod::Gist,
+        "brin" => IndexMethod::Brin,
+        "spgist" => IndexMethod::SpGist,
+        _ => IndexMethod::BTree,
+    }
+}
+
+fn is_column_constraint_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "primary_key"
+            | "not_null"
+            | "nullable"
+            | "unique"
+            | "default"
+            | "references"
+            | "on_delete"
+            | "on_update"
+            | "check_name"
+    ) || token.starts_with("check(")
 }
 
 /// Parse a QAIL check expression string into a CheckExpr.
@@ -982,7 +1144,11 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
         });
     }
 
-    None
+    if s.is_empty() {
+        None
+    } else {
+        Some(CheckExpr::Raw(s.to_string()))
+    }
 }
 
 /// Parse an infrastructure resource declaration.
@@ -1141,10 +1307,9 @@ fn parse_policy<'a, I: Iterator<Item = &'a str>>(
             let after_keyword = trimmed.strip_prefix(keyword).unwrap_or("").trim();
 
             let body = extract_dollar_body(after_keyword, lines)?;
-            let expr = match parse_policy_expr(&body) {
-                Ok(expr) => expr,
-                Err(_e) => Expr::Named(body.clone()),
-            };
+            // Preserve policy predicate text as-is. Parsing/re-serialization can
+            // alter semantics for complex predicates.
+            let expr = Expr::Named(body.clone());
 
             if is_using {
                 policy.using = Some(expr);
@@ -1457,6 +1622,15 @@ $$
     }
 
     #[test]
+    fn test_parse_function_with_volatility() {
+        let input = "function is_super_admin() returns boolean language plpgsql stable $$ BEGIN RETURN true; END; $$";
+        let schema = parse_qail(input).unwrap();
+        assert_eq!(schema.functions.len(), 1);
+        assert_eq!(schema.functions[0].name, "is_super_admin");
+        assert_eq!(schema.functions[0].volatility.as_deref(), Some("stable"));
+    }
+
+    #[test]
     fn test_parse_trigger() {
         let input = "trigger trg_updated_at on users before update execute set_updated_at";
         let schema = parse_qail(input).unwrap();
@@ -1591,6 +1765,41 @@ table products {
         };
         assert_eq!(column, "score");
         assert_eq!(*value, 0);
+    }
+
+    #[test]
+    fn test_parse_default_expression_with_spaces_and_cast() {
+        let input = r#"
+table idempotency_keys {
+  expires_at timestamptz default (now() + '24:00:00'::interval)
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let col = &schema.tables["idempotency_keys"].columns[0];
+        assert_eq!(
+            col.default.as_deref(),
+            Some("(now() + '24:00:00'::interval)")
+        );
+    }
+
+    #[test]
+    fn test_parse_check_expression_falls_back_to_raw() {
+        let input = r#"
+table vendors {
+  name text check(char_length(btrim(name::text)) > 0)
+}
+"#;
+        let schema = parse_qail(input).unwrap();
+        let col = &schema.tables["vendors"].columns[0];
+        let expr = &col.check.as_ref().unwrap().expr;
+        match expr {
+            CheckExpr::Raw(raw) => assert_eq!(raw, "char_length(btrim(name::text)) > 0"),
+            CheckExpr::GreaterThan { column, value } => {
+                assert_eq!(column, "char_length(btrim(name::text))");
+                assert_eq!(*value, 0);
+            }
+            other => panic!("Expected raw-or-greater-than check expression, got {other:?}"),
+        }
     }
 
     #[test]

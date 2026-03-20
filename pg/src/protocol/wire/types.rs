@@ -2,6 +2,11 @@
 //!
 //! Reference: <https://www.postgresql.org/docs/current/protocol-message-formats.html>
 
+/// PostgreSQL protocol 3.0 (legacy baseline).
+pub const PROTOCOL_VERSION_3_0: i32 = 196608;
+/// PostgreSQL protocol 3.2 (new default request).
+pub const PROTOCOL_VERSION_3_2: i32 = 196610;
+
 /// Frontend (client → server) message types
 #[derive(Debug, Clone)]
 pub enum FrontendMessage {
@@ -11,6 +16,8 @@ pub enum FrontendMessage {
         user: String,
         /// Target database name.
         database: String,
+        /// Startup protocol version (for example `196610` for protocol 3.2).
+        protocol_version: i32,
         /// Additional startup parameters (e.g. `replication=database`).
         startup_params: Vec<(String, String)>,
     },
@@ -109,8 +116,18 @@ pub enum BackendMessage {
     BackendKeyData {
         /// Backend process ID (used for cancel requests).
         process_id: i32,
-        /// Cancel secret key.
-        secret_key: i32,
+        /// Cancel secret key bytes (`4..=256` bytes).
+        secret_key: Vec<u8>,
+    },
+    /// Protocol minor-version negotiation (message type `'v'`).
+    ///
+    /// Sent by servers that need to negotiate down from the requested startup
+    /// protocol minor version while continuing the startup sequence.
+    NegotiateProtocolVersion {
+        /// Highest protocol minor version this server supports.
+        newest_minor_supported: i32,
+        /// Startup options not recognized by the server.
+        unrecognized_protocol_options: Vec<String>,
     },
     /// Server is ready; transaction state indicated.
     ReadyForQuery(TransactionStatus),

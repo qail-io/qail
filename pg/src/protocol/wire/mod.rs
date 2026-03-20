@@ -16,5 +16,5 @@ mod types;
 
 pub use types::{
     BackendMessage, ErrorFields, FieldDescription, FrontendEncodeError, FrontendMessage,
-    TransactionStatus,
+    PROTOCOL_VERSION_3_0, PROTOCOL_VERSION_3_2, TransactionStatus,
 };

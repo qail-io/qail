@@ -295,6 +295,8 @@ pub enum CheckExpr {
     Or(Box<CheckExpr>, Box<CheckExpr>),
     /// Logical NOT of an expression.
     Not(Box<CheckExpr>),
+    /// Raw SQL boolean expression (preserved as-is).
+    Raw(String),
 }
 
 /// CHECK constraint with optional name
@@ -361,6 +363,17 @@ pub enum IndexMethod {
     SpGist,
 }
 
+fn index_method_str(method: &IndexMethod) -> &'static str {
+    match method {
+        IndexMethod::BTree => "btree",
+        IndexMethod::Hash => "hash",
+        IndexMethod::Gin => "gin",
+        IndexMethod::Gist => "gist",
+        IndexMethod::Brin => "brin",
+        IndexMethod::SpGist => "spgist",
+    }
+}
+
 // ============================================================================
 // Phase 7: Extensions, Comments, Sequences
 // ============================================================================
@@ -420,6 +433,8 @@ pub enum CommentTarget {
         /// Column name.
         column: String,
     },
+    /// COMMENT ON arbitrary object target (e.g. FUNCTION/POLICY/TYPE/CONSTRAINT).
+    Raw(String),
 }
 
 impl Comment {
@@ -442,6 +457,14 @@ impl Comment {
                 table: table.into(),
                 column: column.into(),
             },
+            text: text.into(),
+        }
+    }
+
+    /// Create a comment on an arbitrary object target.
+    pub fn on_raw(target: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            target: CommentTarget::Raw(target.into()),
             text: text.into(),
         }
     }
@@ -710,6 +733,8 @@ pub struct SchemaTriggerDef {
     pub timing: String,
     /// Events that fire the trigger (INSERT, UPDATE, DELETE).
     pub events: Vec<String>,
+    /// Optional column list for `UPDATE OF` triggers.
+    pub update_columns: Vec<String>,
     /// Whether the trigger fires FOR EACH ROW (vs. FOR EACH STATEMENT).
     pub for_each_row: bool,
     /// Function to execute.
@@ -730,6 +755,7 @@ impl SchemaTriggerDef {
             table: table.into(),
             timing: "BEFORE".to_string(),
             events: vec!["INSERT".to_string()],
+            update_columns: Vec::new(),
             for_each_row: true,
             execute_function: execute_function.into(),
             condition: None,
@@ -1272,6 +1298,7 @@ fn check_expr_str(expr: &CheckExpr) -> String {
         CheckExpr::And(l, r) => format!("{} and {}", check_expr_str(l), check_expr_str(r)),
         CheckExpr::Or(l, r) => format!("{} or {}", check_expr_str(l), check_expr_str(r)),
         CheckExpr::Not(e) => format!("not {}", check_expr_str(e)),
+        CheckExpr::Raw(sql) => sql.clone(),
     }
 }
 
@@ -1388,6 +1415,9 @@ pub fn to_qail_string(schema: &Schema) -> String {
             }
             if let Some(ref check) = col.check {
                 constraints.push(format!("check({})", check_expr_str(&check.expr)));
+                if let Some(name) = &check.name {
+                    constraints.push(format!("check_name {}", name));
+                }
             }
 
             let constraint_str = if constraints.is_empty() {
@@ -1429,10 +1459,20 @@ pub fn to_qail_string(schema: &Schema) -> String {
         } else {
             idx.columns.join(", ")
         };
-        output.push_str(&format!(
-            "{}index {} on {} ({})\n",
-            unique, idx.name, idx.table, cols
-        ));
+        let mut line = format!("{}index {} on {}", unique, idx.name, idx.table);
+        if idx.method != IndexMethod::BTree {
+            line.push_str(" using ");
+            line.push_str(index_method_str(&idx.method));
+        }
+        line.push_str(" (");
+        line.push_str(&cols);
+        line.push(')');
+        if let Some(where_clause) = &idx.where_clause {
+            line.push_str(" where ");
+            line.push_str(&check_expr_str(where_clause));
+        }
+        output.push_str(&line);
+        output.push('\n');
     }
 
     for hint in &schema.migrations {
@@ -1466,21 +1506,34 @@ pub fn to_qail_string(schema: &Schema) -> String {
     // Functions
     for func in &schema.functions {
         let args = func.args.join(", ");
+        let volatility = func
+            .volatility
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| format!(" {}", v))
+            .unwrap_or_default();
         output.push_str(&format!(
-            "function {}({}) returns {} language {} $$\n{}\n$$\n\n",
-            func.name, args, func.returns, func.language, func.body
+            "function {}({}) returns {} language {}{} $$\n{}\n$$\n\n",
+            func.name, args, func.returns, func.language, volatility, func.body
         ));
     }
 
     // Triggers
     for trigger in &schema.triggers {
-        let events = trigger.events.join(" or ");
+        let mut events = Vec::new();
+        for evt in &trigger.events {
+            if evt.eq_ignore_ascii_case("UPDATE") && !trigger.update_columns.is_empty() {
+                events.push(format!("UPDATE OF {}", trigger.update_columns.join(", ")));
+            } else {
+                events.push(evt.clone());
+            }
+        }
         output.push_str(&format!(
             "trigger {} on {} {} {} execute {}\n",
             trigger.name,
             trigger.table,
             trigger.timing.to_lowercase(),
-            events.to_lowercase(),
+            events.join(" or ").to_lowercase(),
             trigger.execute_function
         ));
     }
@@ -1560,6 +1613,9 @@ pub fn to_qail_string(schema: &Schema) -> String {
                     table, column, comment.text
                 ));
             }
+            CommentTarget::Raw(target) => {
+                output.push_str(&format!("comment on {} \"{}\"\n", target, comment.text));
+            }
         }
     }
 
@@ -1569,19 +1625,76 @@ pub fn to_qail_string(schema: &Schema) -> String {
 /// Convert a Schema to a list of Qail commands (CREATE TABLE, CREATE INDEX).
 /// Used by shadow migration to apply the base schema before applying diffs.
 pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
-    use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
+    use crate::ast::{Action, ColumnGeneration, Constraint, Expr, IndexDef, Qail};
 
     let mut cmds = Vec::new();
 
-    // Sort tables to handle dependencies (tables with FK refs should come after their targets)
-    let mut table_order: Vec<&Table> = schema.tables.values().collect();
-    table_order.sort_by(|a, b| {
-        let a_has_fk = a.columns.iter().any(|c| c.foreign_key.is_some());
-        let b_has_fk = b.columns.iter().any(|c| c.foreign_key.is_some());
-        a_has_fk.cmp(&b_has_fk)
-    });
+    // Topologically sort tables by FK dependencies:
+    // referenced targets must be created before dependent tables.
+    let mut indegree: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut reverse_adj: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
 
-    for table in table_order {
+    for name in schema.tables.keys() {
+        indegree.insert(name.clone(), 0);
+    }
+
+    for table in schema.tables.values() {
+        let mut deps = std::collections::HashSet::new();
+        for col in &table.columns {
+            if let Some(fk) = &col.foreign_key
+                && fk.table != table.name
+                && schema.tables.contains_key(&fk.table)
+            {
+                deps.insert(fk.table.clone());
+            }
+        }
+
+        indegree.insert(table.name.clone(), deps.len());
+        for dep in deps {
+            reverse_adj.entry(dep).or_default().push(table.name.clone());
+        }
+    }
+
+    let mut ready = std::collections::BTreeSet::new();
+    for (name, deg) in &indegree {
+        if *deg == 0 {
+            ready.insert(name.clone());
+        }
+    }
+
+    let mut ordered_names: Vec<String> = Vec::with_capacity(schema.tables.len());
+    while let Some(next) = ready.pop_first() {
+        ordered_names.push(next.clone());
+        if let Some(dependents) = reverse_adj.get(&next) {
+            for dep_name in dependents {
+                if let Some(d) = indegree.get_mut(dep_name)
+                    && *d > 0
+                {
+                    *d -= 1;
+                    if *d == 0 {
+                        ready.insert(dep_name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // If there is an FK cycle, append remaining names in lexical order
+    // so output is deterministic (runtime may still reject unresolved cycle).
+    if ordered_names.len() < schema.tables.len() {
+        let mut leftovers: Vec<String> = schema
+            .tables
+            .keys()
+            .filter(|name| !ordered_names.contains(*name))
+            .cloned()
+            .collect();
+        leftovers.sort();
+        ordered_names.extend(leftovers);
+    }
+
+    for table_name in ordered_names {
+        let table = &schema.tables[&table_name];
         // Build columns using Expr::Def exactly like diff.rs does
         let columns: Vec<Expr> = table
             .columns
@@ -1602,10 +1715,32 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
                     constraints.push(Constraint::Default(def.clone()));
                 }
                 if let Some(ref fk) = col.foreign_key {
-                    constraints.push(Constraint::References(format!(
-                        "{}({})",
-                        fk.table, fk.column
-                    )));
+                    constraints.push(Constraint::References(foreign_key_to_sql(fk)));
+                }
+                if let Some(check) = &col.check {
+                    let check_sql = check_expr_to_sql(&check.expr);
+                    if let Some(name) = &check.name {
+                        constraints.push(Constraint::Check(vec![format!(
+                            "CONSTRAINT {} CHECK ({})",
+                            name, check_sql
+                        )]));
+                    } else {
+                        constraints.push(Constraint::Check(vec![check_sql]));
+                    }
+                }
+                if let Some(generated) = &col.generated {
+                    let gen_constraint = match generated {
+                        Generated::AlwaysStored(expr) => {
+                            Constraint::Generated(ColumnGeneration::Stored(expr.clone()))
+                        }
+                        Generated::AlwaysIdentity => {
+                            Constraint::Generated(ColumnGeneration::Stored("identity".to_string()))
+                        }
+                        Generated::ByDefaultIdentity => Constraint::Generated(
+                            ColumnGeneration::Stored("identity_by_default".to_string()),
+                        ),
+                    };
+                    constraints.push(gen_constraint);
                 }
 
                 Expr::Def {
@@ -1632,15 +1767,104 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
             index_def: Some(IndexDef {
                 name: idx.name.clone(),
                 table: idx.table.clone(),
-                columns: idx.columns.clone(),
+                columns: if !idx.expressions.is_empty() {
+                    idx.expressions.clone()
+                } else {
+                    idx.columns.clone()
+                },
                 unique: idx.unique,
-                index_type: None,
+                index_type: Some(index_method_str(&idx.method).to_string()),
+                where_clause: idx.where_clause.as_ref().map(check_expr_to_sql),
             }),
             ..Default::default()
         });
     }
 
     cmds
+}
+
+fn fk_action_to_sql(action: &FkAction) -> &'static str {
+    match action {
+        FkAction::NoAction => "NO ACTION",
+        FkAction::Cascade => "CASCADE",
+        FkAction::SetNull => "SET NULL",
+        FkAction::SetDefault => "SET DEFAULT",
+        FkAction::Restrict => "RESTRICT",
+    }
+}
+
+fn deferrable_to_sql(deferrable: &Deferrable) -> Option<&'static str> {
+    match deferrable {
+        Deferrable::NotDeferrable => None,
+        Deferrable::Deferrable => Some("DEFERRABLE"),
+        Deferrable::InitiallyDeferred => Some("DEFERRABLE INITIALLY DEFERRED"),
+        Deferrable::InitiallyImmediate => Some("DEFERRABLE INITIALLY IMMEDIATE"),
+    }
+}
+
+fn foreign_key_to_sql(fk: &ForeignKey) -> String {
+    let mut target = format!("{}({})", fk.table, fk.column);
+    if fk.on_delete != FkAction::NoAction {
+        target.push_str(" ON DELETE ");
+        target.push_str(fk_action_to_sql(&fk.on_delete));
+    }
+    if fk.on_update != FkAction::NoAction {
+        target.push_str(" ON UPDATE ");
+        target.push_str(fk_action_to_sql(&fk.on_update));
+    }
+    if let Some(def) = deferrable_to_sql(&fk.deferrable) {
+        target.push(' ');
+        target.push_str(def);
+    }
+    target
+}
+
+fn check_expr_to_sql(expr: &CheckExpr) -> String {
+    match expr {
+        CheckExpr::GreaterThan { column, value } => format!("{column} > {value}"),
+        CheckExpr::GreaterOrEqual { column, value } => format!("{column} >= {value}"),
+        CheckExpr::LessThan { column, value } => format!("{column} < {value}"),
+        CheckExpr::LessOrEqual { column, value } => format!("{column} <= {value}"),
+        CheckExpr::Between { column, low, high } => format!("{column} BETWEEN {low} AND {high}"),
+        CheckExpr::In { column, values } => {
+            if values.len() == 1 && looks_like_raw_check_expr(&values[0]) {
+                return values[0].clone();
+            }
+            let quoted = values
+                .iter()
+                .map(|v| format!("'{}'", v.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{column} IN ({quoted})")
+        }
+        CheckExpr::Regex { column, pattern } => {
+            format!("{column} ~ '{}'", pattern.replace('\'', "''"))
+        }
+        CheckExpr::MaxLength { column, max } => format!("char_length({column}) <= {max}"),
+        CheckExpr::MinLength { column, min } => format!("char_length({column}) >= {min}"),
+        CheckExpr::NotNull { column } => format!("{column} IS NOT NULL"),
+        CheckExpr::And(left, right) => {
+            format!(
+                "({}) AND ({})",
+                check_expr_to_sql(left),
+                check_expr_to_sql(right)
+            )
+        }
+        CheckExpr::Or(left, right) => {
+            format!(
+                "({}) OR ({})",
+                check_expr_to_sql(left),
+                check_expr_to_sql(right)
+            )
+        }
+        CheckExpr::Not(inner) => format!("NOT ({})", check_expr_to_sql(inner)),
+        CheckExpr::Raw(sql) => sql.clone(),
+    }
+}
+
+fn looks_like_raw_check_expr(s: &str) -> bool {
+    s.chars()
+        .any(|c| c.is_whitespace() || matches!(c, '<' | '>' | '=' | '!' | '(' | ')' | ':'))
 }
 
 #[cfg(test)]
@@ -1675,6 +1899,24 @@ mod tests {
 
         let output = to_qail_string(&schema);
         assert!(output.contains("rename users.username -> users.name"));
+    }
+
+    #[test]
+    fn test_to_qail_string_includes_function_volatility() {
+        let mut schema = Schema::new();
+        let func = SchemaFunctionDef::new(
+            "is_super_admin",
+            "boolean",
+            "BEGIN RETURN true; END;".to_string(),
+        )
+        .language("plpgsql")
+        .volatility("stable");
+        schema.add_function(func);
+
+        let output = to_qail_string(&schema);
+        assert!(
+            output.contains("function is_super_admin() returns boolean language plpgsql stable $$")
+        );
     }
 
     #[test]
@@ -1764,5 +2006,72 @@ mod tests {
         let result = schema.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err()[0].contains("non-existent column"));
+    }
+
+    #[test]
+    fn test_schema_to_commands_preserves_fk_actions_and_checks() {
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("orgs").column(Column::new("id", ColumnType::Uuid).primary_key()),
+        );
+        schema.add_table(
+            Table::new("users")
+                .column(Column::new("id", ColumnType::Uuid).primary_key())
+                .column(
+                    Column::new("org_id", ColumnType::Uuid)
+                        .references("orgs", "id")
+                        .on_delete(FkAction::Cascade)
+                        .on_update(FkAction::Restrict),
+                )
+                .column(
+                    Column::new("age", ColumnType::Int).check(CheckExpr::GreaterOrEqual {
+                        column: "age".to_string(),
+                        value: 18,
+                    }),
+                ),
+        );
+
+        let cmds = schema_to_commands(&schema);
+        let users_cmd = cmds
+            .iter()
+            .find(|c| c.action == crate::ast::Action::Make && c.table == "users")
+            .expect("users create command should exist");
+        let org_id_constraints = users_cmd
+            .columns
+            .iter()
+            .find_map(|e| match e {
+                crate::ast::Expr::Def {
+                    name, constraints, ..
+                } if name == "org_id" => Some(constraints),
+                _ => None,
+            })
+            .expect("org_id should exist");
+        let age_constraints = users_cmd
+            .columns
+            .iter()
+            .find_map(|e| match e {
+                crate::ast::Expr::Def {
+                    name, constraints, ..
+                } if name == "age" => Some(constraints),
+                _ => None,
+            })
+            .expect("age should exist");
+
+        assert!(
+            org_id_constraints.iter().any(|c| matches!(
+                c,
+                crate::ast::Constraint::References(target)
+                if target.contains("orgs(id)")
+                    && target.contains("ON DELETE CASCADE")
+                    && target.contains("ON UPDATE RESTRICT")
+            )),
+            "foreign key action clauses should be preserved"
+        );
+        assert!(
+            age_constraints
+                .iter()
+                .any(|c| matches!(c, crate::ast::Constraint::Check(vals) if vals.len() == 1)),
+            "check expressions should be preserved"
+        );
     }
 }

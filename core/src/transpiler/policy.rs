@@ -112,6 +112,7 @@ fn check_expr_to_sql(expr: &CheckExpr) -> String {
             check_expr_to_sql(right)
         ),
         CheckExpr::Not(inner) => format!("NOT ({})", check_expr_to_sql(inner)),
+        CheckExpr::Raw(sql) => sql.clone(),
     }
 }
 

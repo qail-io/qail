@@ -187,6 +187,10 @@ impl GssEncMode {
 }
 
 /// Advanced connection options for enterprise deployments.
+///
+/// Protocol-version controls are intentionally not exposed here in this
+/// milestone. The driver requests protocol 3.2 by default and performs a
+/// one-shot fallback to protocol 3.0 only on explicit version rejection.
 #[derive(Clone, Default)]
 pub struct ConnectOptions {
     /// TLS mode for the primary connection.

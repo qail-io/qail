@@ -7,6 +7,7 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use qail_pg::protocol::PROTOCOL_VERSION_3_2;
 use qail_pg::{ConnectOptions, GssEncMode, PgConnection, TlsMode};
 
 /// Helper: bind a random-port listener and return (listener, port).
@@ -94,9 +95,11 @@ async fn gssenc_negotiate_server_rejects_n_prefer_fallback() {
         // Read protocol version (next 4 bytes)
         let mut ver = [0u8; 4];
         sock2.read_exact(&mut ver).await.unwrap();
-        let version = u32::from_be_bytes(ver);
-        // Protocol version 3.0 = 196608
-        assert_eq!(version, 196608, "Expected protocol 3.0");
+        let version = i32::from_be_bytes(ver);
+        assert_eq!(
+            version, PROTOCOL_VERSION_3_2,
+            "Expected default protocol 3.2 StartupMessage"
+        );
         // Close without completing handshake — client will get connection error
         drop(sock2);
     });
@@ -317,11 +320,11 @@ async fn gssenc_disable_skips_negotiation() {
         let len = u32::from_be_bytes(hdr) as usize;
         let mut ver = [0u8; 4];
         sock.read_exact(&mut ver).await.unwrap();
-        let version = u32::from_be_bytes(ver);
-        // Should be protocol 3.0 StartupMessage, NOT GSSENCRequest
+        let version = i32::from_be_bytes(ver);
+        // Should be StartupMessage (not GSSENCRequest), using the default requested protocol version.
         assert_eq!(
-            version, 196608,
-            "Expected StartupMessage v3.0, not GSSENCRequest"
+            version, PROTOCOL_VERSION_3_2,
+            "Expected default protocol 3.2 StartupMessage, not GSSENCRequest"
         );
         assert!(len > 8, "StartupMessage should be longer than 8 bytes");
         drop(sock);

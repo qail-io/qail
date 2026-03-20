@@ -179,22 +179,88 @@ impl std::str::FromStr for ColumnType {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        let raw = s.trim();
+        let lower = raw.to_lowercase();
+
+        if let Some(inner) = lower.strip_suffix("[]") {
+            let inner_ty = inner
+                .parse::<ColumnType>()
+                .unwrap_or_else(|_| Self::Range(inner.to_uppercase()));
+            return Ok(Self::Array(Box::new(inner_ty)));
+        }
+
+        if let Some(inner) = lower
+            .strip_prefix("varchar(")
+            .and_then(|v| v.strip_suffix(')'))
+        {
+            if let Ok(len) = inner.trim().parse::<u16>() {
+                return Ok(Self::Varchar(Some(len)));
+            }
+            return Err(());
+        }
+
+        if let Some(inner) = lower
+            .strip_prefix("character varying(")
+            .and_then(|v| v.strip_suffix(')'))
+        {
+            if let Ok(len) = inner.trim().parse::<u16>() {
+                return Ok(Self::Varchar(Some(len)));
+            }
+            return Err(());
+        }
+
+        if let Some(inner) = lower
+            .strip_prefix("decimal(")
+            .and_then(|v| v.strip_suffix(')'))
+        {
+            let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+            if parts.len() == 2
+                && let (Ok(p), Ok(s)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>())
+            {
+                return Ok(Self::Decimal(Some((p, s))));
+            }
+            return Err(());
+        }
+
+        if let Some(inner) = lower
+            .strip_prefix("numeric(")
+            .and_then(|v| v.strip_suffix(')'))
+        {
+            let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+            if parts.len() == 2
+                && let (Ok(p), Ok(s)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>())
+            {
+                return Ok(Self::Decimal(Some((p, s))));
+            }
+            return Err(());
+        }
+
+        match lower.as_str() {
             "uuid" => Ok(Self::Uuid),
             "text" | "string" | "str" => Ok(Self::Text),
-            "varchar" => Ok(Self::Varchar(None)),
+            "varchar" | "character varying" | "bpchar" | "char" | "character" => {
+                Ok(Self::Varchar(None))
+            }
+            "smallint" | "int2" => Ok(Self::Range("SMALLINT".to_string())),
             "int" | "integer" | "i32" | "int4" => Ok(Self::Int),
             "bigint" | "i64" | "int8" => Ok(Self::BigInt),
             "serial" => Ok(Self::Serial),
             "bigserial" => Ok(Self::BigSerial),
             "bool" | "boolean" => Ok(Self::Bool),
-            "float" | "f64" | "double" | "double precision" | "float8" => Ok(Self::Float),
+            "float" | "f64" | "double" | "double precision" | "float8" | "real" | "float4" => {
+                Ok(Self::Float)
+            }
             "decimal" | "numeric" | "dec" => Ok(Self::Decimal(None)),
             "jsonb" | "json" => Ok(Self::Jsonb),
-            "timestamp" | "time" => Ok(Self::Timestamp),
-            "timestamptz" => Ok(Self::Timestamptz),
+            "timestamp" => Ok(Self::Timestamp),
+            "timestamptz" | "timestamp with time zone" => Ok(Self::Timestamptz),
+            "time" | "time without time zone" => Ok(Self::Time),
             "date" => Ok(Self::Date),
             "bytea" | "bytes" => Ok(Self::Bytea),
+            "interval" => Ok(Self::Interval),
+            "cidr" => Ok(Self::Cidr),
+            "inet" => Ok(Self::Inet),
+            "macaddr" => Ok(Self::MacAddr),
             _ => Err(()),
         }
     }
@@ -238,6 +304,14 @@ mod tests {
         assert_eq!("uuid".parse::<ColumnType>(), Ok(ColumnType::Uuid));
         assert_eq!("TEXT".parse::<ColumnType>(), Ok(ColumnType::Text));
         assert_eq!("serial".parse::<ColumnType>(), Ok(ColumnType::Serial));
+        assert_eq!(
+            "int[]".parse::<ColumnType>(),
+            Ok(ColumnType::Array(Box::new(ColumnType::Int)))
+        );
+        assert_eq!(
+            "smallint".parse::<ColumnType>(),
+            Ok(ColumnType::Range("SMALLINT".to_string()))
+        );
         assert!("unknown".parse::<ColumnType>().is_err());
     }
 }

@@ -497,7 +497,7 @@ mod tests {
                 secret_key,
             } => {
                 assert_eq!(process_id, 42);
-                assert_eq!(secret_key, 99);
+                assert_eq!(secret_key, 99i32.to_be_bytes());
             }
             _ => panic!("Expected BackendKeyData"),
         }
@@ -511,6 +511,77 @@ mod tests {
                 .unwrap_err()
                 .contains("too short")
         );
+    }
+
+    #[test]
+    fn decode_backend_key_extended_secret_key() {
+        let mut payload = 7i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55]);
+        let buf = wire_msg(b'K', &payload);
+        let (msg, _) = BackendMessage::decode(&buf).unwrap();
+        match msg {
+            BackendMessage::BackendKeyData {
+                process_id,
+                secret_key,
+            } => {
+                assert_eq!(process_id, 7);
+                assert_eq!(secret_key, vec![0x11, 0x22, 0x33, 0x44, 0x55]);
+            }
+            _ => panic!("Expected BackendKeyData"),
+        }
+    }
+
+    #[test]
+    fn decode_backend_key_secret_key_too_small_or_too_large() {
+        let mut too_small = 1i32.to_be_bytes().to_vec();
+        too_small.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // 3 bytes
+        let err_small = BackendMessage::decode(&wire_msg(b'K', &too_small)).unwrap_err();
+        assert!(err_small.contains("too short") || err_small.contains("invalid secret key length"));
+
+        let mut too_large = 1i32.to_be_bytes().to_vec();
+        too_large.extend_from_slice(&vec![0u8; 257]); // >256
+        let err_large = BackendMessage::decode(&wire_msg(b'K', &too_large)).unwrap_err();
+        assert!(err_large.contains("invalid secret key length"));
+    }
+
+    // ========== NegotiateProtocolVersion tests ==========
+
+    #[test]
+    fn decode_negotiate_protocol_version() {
+        let mut payload = 2i32.to_be_bytes().to_vec(); // newest_minor_supported
+        payload.extend_from_slice(&2i32.to_be_bytes()); // 2 option strings
+        payload.extend_from_slice(b"foo\0bar\0");
+        let (msg, _) = BackendMessage::decode(&wire_msg(b'v', &payload)).unwrap();
+        match msg {
+            BackendMessage::NegotiateProtocolVersion {
+                newest_minor_supported,
+                unrecognized_protocol_options,
+            } => {
+                assert_eq!(newest_minor_supported, 2);
+                assert_eq!(
+                    unrecognized_protocol_options,
+                    vec!["foo".to_string(), "bar".to_string()]
+                );
+            }
+            _ => panic!("Expected NegotiateProtocolVersion"),
+        }
+    }
+
+    #[test]
+    fn decode_negotiate_protocol_version_rejects_malformed_payloads() {
+        let err_short = BackendMessage::decode(&wire_msg(b'v', &[0, 0, 0, 2])).unwrap_err();
+        assert!(err_short.contains("too short"));
+
+        let mut negative_count = 2i32.to_be_bytes().to_vec();
+        negative_count.extend_from_slice(&(-1i32).to_be_bytes());
+        let err_neg = BackendMessage::decode(&wire_msg(b'v', &negative_count)).unwrap_err();
+        assert!(err_neg.contains("negative"));
+
+        let mut missing_terminator = 2i32.to_be_bytes().to_vec();
+        missing_terminator.extend_from_slice(&1i32.to_be_bytes());
+        missing_terminator.extend_from_slice(b"unterminated");
+        let err_term = BackendMessage::decode(&wire_msg(b'v', &missing_terminator)).unwrap_err();
+        assert!(err_term.contains("terminator"));
     }
 
     // ========== ErrorResponse tests ==========
@@ -997,6 +1068,7 @@ mod tests {
         let msg = FrontendMessage::Startup {
             user: "user\0x".to_string(),
             database: "db".to_string(),
+            protocol_version: PROTOCOL_VERSION_3_2,
             startup_params: Vec::new(),
         };
         assert!(msg.encode_checked().is_err());
@@ -1007,10 +1079,11 @@ mod tests {
         let msg = FrontendMessage::Startup {
             user: "alice".to_string(),
             database: "app".to_string(),
+            protocol_version: PROTOCOL_VERSION_3_2,
             startup_params: vec![("replication".to_string(), "database".to_string())],
         };
         let encoded = msg.encode_checked().unwrap();
-        assert_eq!(&encoded[4..8], &196608i32.to_be_bytes());
+        assert_eq!(&encoded[4..8], &PROTOCOL_VERSION_3_2.to_be_bytes());
         assert!(
             encoded
                 .windows("user\0alice\0".len())
@@ -1030,10 +1103,23 @@ mod tests {
     }
 
     #[test]
+    fn encode_startup_with_protocol_3_0_compat() {
+        let msg = FrontendMessage::Startup {
+            user: "alice".to_string(),
+            database: "app".to_string(),
+            protocol_version: PROTOCOL_VERSION_3_0,
+            startup_params: Vec::new(),
+        };
+        let encoded = msg.encode_checked().expect("encode startup");
+        assert_eq!(&encoded[4..8], &PROTOCOL_VERSION_3_0.to_be_bytes());
+    }
+
+    #[test]
     fn encode_startup_with_reserved_param_key_returns_error() {
         let msg = FrontendMessage::Startup {
             user: "alice".to_string(),
             database: "app".to_string(),
+            protocol_version: PROTOCOL_VERSION_3_2,
             startup_params: vec![("user".to_string(), "mallory".to_string())],
         };
         assert!(msg.encode_checked().is_err());
@@ -1044,6 +1130,7 @@ mod tests {
         let msg = FrontendMessage::Startup {
             user: "alice".to_string(),
             database: "app".to_string(),
+            protocol_version: PROTOCOL_VERSION_3_2,
             startup_params: vec![
                 ("application_name".to_string(), "a".to_string()),
                 ("APPLICATION_NAME".to_string(), "b".to_string()),

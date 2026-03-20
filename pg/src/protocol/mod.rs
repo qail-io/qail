@@ -19,5 +19,5 @@ pub use encoder::PgEncoder;
 pub use types::{is_array_oid, oid, oid_to_name};
 pub use wire::{
     BackendMessage, ErrorFields, FieldDescription, FrontendEncodeError, FrontendMessage,
-    TransactionStatus,
+    PROTOCOL_VERSION_3_0, PROTOCOL_VERSION_3_2, TransactionStatus,
 };

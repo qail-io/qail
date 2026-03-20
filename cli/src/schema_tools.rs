@@ -489,6 +489,7 @@ fn build_globals_schema(schema: &Schema, table_name_set: &HashSet<&str>) -> Sche
         .filter(|c| match &c.target {
             CommentTarget::Table(t) => !table_name_set.contains(t.as_str()),
             CommentTarget::Column { table, column: _ } => !table_name_set.contains(table.as_str()),
+            CommentTarget::Raw(_) => true,
         })
         .cloned()
         .collect();
@@ -536,6 +537,7 @@ fn comment_targets_table(comment: &qail_core::migrate::Comment, table: &str) -> 
             table: t,
             column: _,
         } => t == table,
+        CommentTarget::Raw(_) => false,
     }
 }
 

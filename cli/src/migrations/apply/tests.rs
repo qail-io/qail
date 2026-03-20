@@ -4,7 +4,9 @@
 #[allow(clippy::module_inception)]
 mod tests {
     use super::super::backfill::{parse_backfill_spec, split_schema_table};
-    use super::super::codegen::{parse_qail_to_commands_strict, parse_qail_to_sql};
+    use super::super::codegen::{
+        commands_to_sql, parse_qail_to_commands_strict, parse_qail_to_sql,
+    };
     use super::super::discovery::{
         detect_phase, discover_migrations, normalize_group_key, parse_drop_targets,
     };
@@ -139,6 +141,62 @@ index idx_users_name on users (name)
             cmds.iter()
                 .any(|c| matches!(c.action, qail_core::ast::Action::AlterForceRls)),
             "should include FORCE RLS"
+        );
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_supports_advanced_column_constraints() {
+        let input = r#"
+table users {
+    id uuid primary_key
+    org_id uuid not_null references orgs(id) on_delete cascade on_update restrict
+    age int check(age >= 18)
+}
+
+table orgs {
+    id uuid primary_key
+}
+"#;
+
+        let cmds = parse_qail_to_commands_strict(input)
+            .expect("advanced constraints should compile in strict mode");
+        let create_users = cmds
+            .iter()
+            .find(|c| matches!(c.action, qail_core::ast::Action::Make) && c.table == "users")
+            .expect("expected users create command");
+
+        let user_cols = &create_users.columns;
+        let org_id = user_cols
+            .iter()
+            .find_map(|expr| match expr {
+                qail_core::ast::Expr::Def {
+                    name, constraints, ..
+                } if name == "org_id" => Some(constraints),
+                _ => None,
+            })
+            .expect("org_id column should exist");
+        let age = user_cols
+            .iter()
+            .find_map(|expr| match expr {
+                qail_core::ast::Expr::Def {
+                    name, constraints, ..
+                } if name == "age" => Some(constraints),
+                _ => None,
+            })
+            .expect("age column should exist");
+
+        assert!(
+            org_id.iter().any(|c| matches!(
+                c,
+                qail_core::ast::Constraint::References(target)
+                if target.contains("orgs(id)") && target.contains("ON DELETE CASCADE")
+            )),
+            "foreign key actions should be preserved"
+        );
+        assert!(
+            age.iter()
+                .any(|c| matches!(c, qail_core::ast::Constraint::Check(vals) if vals.len() == 1)),
+            "check constraint should be preserved"
         );
     }
 
@@ -640,5 +698,34 @@ ALTER TABLE users ADD COLUMN name_ci text;
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_debug_idempotency_keys_sql_shape() {
+        let input = r#"
+table idempotency_keys {
+  expires_at TIMESTAMPTZ default (now() + '24:00:00'::interval)
+  created_at TIMESTAMPTZ default now()
+  idempotency_key TEXT not_null
+  endpoint TEXT not_null
+  tenant_id UUID not_null
+  response_body JSONB not_null default '{}'
+  updated_at TIMESTAMPTZ not_null default now()
+  id UUID primary_key default gen_random_uuid()
+  status_code INT not_null
+}
+"#;
+        let cmds =
+            parse_qail_to_commands_strict(input).expect("idempotency snippet should compile");
+        let sql = commands_to_sql(&cmds);
+        println!("{sql}");
+        assert!(
+            sql.contains("CREATE TABLE idempotency_keys"),
+            "expected create table"
+        );
+        assert!(
+            sql.contains("DEFAULT (now() + '24:00:00'::interval)"),
+            "expected interval default preserved"
+        );
     }
 }

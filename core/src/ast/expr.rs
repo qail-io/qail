@@ -595,6 +595,8 @@ pub struct IndexDef {
     pub unique: bool,
     /// Index type (e.g., "keyword", "integer", "float", "geo", "text")
     pub index_type: Option<String>,
+    /// Optional partial-index predicate (`WHERE ...` body without the keyword).
+    pub where_clause: Option<String>,
 }
 
 /// Table-level constraints for composite keys
@@ -643,6 +645,8 @@ pub struct FunctionDef {
     pub body: String,
     /// Language (default: plpgsql).
     pub language: Option<String>,
+    /// Volatility modifier (IMMUTABLE/STABLE/VOLATILE), if specified.
+    pub volatility: Option<String>,
 }
 
 /// Trigger timing (BEFORE or AFTER)
@@ -680,6 +684,8 @@ pub struct TriggerDef {
     pub timing: TriggerTiming,
     /// Events that fire the trigger.
     pub events: Vec<TriggerEvent>,
+    /// Optional column list for `UPDATE OF` triggers.
+    pub update_columns: Vec<String>,
     /// Whether the trigger fires FOR EACH ROW.
     pub for_each_row: bool,
     /// Function to execute.

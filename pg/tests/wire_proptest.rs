@@ -8,7 +8,7 @@
 //! 3. PgEncoder produces valid message boundaries (type + length + payload)
 
 use proptest::prelude::*;
-use qail_pg::protocol::wire::{BackendMessage, FrontendMessage};
+use qail_pg::protocol::wire::{BackendMessage, FrontendMessage, PROTOCOL_VERSION_3_2};
 
 // ============================================================================
 // Strategy: arbitrary safe strings (no interior NULLs - PG protocol invariant)
@@ -34,6 +34,7 @@ fn arb_frontend_message() -> impl Strategy<Value = FrontendMessage> {
         (arb_pg_string(), arb_pg_string()).prop_map(|(user, database)| FrontendMessage::Startup {
             user,
             database,
+            protocol_version: PROTOCOL_VERSION_3_2,
             startup_params: Vec::new(),
         }),
         // Query (simple protocol)
@@ -102,9 +103,9 @@ proptest! {
                 let declared_len = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
                 prop_assert_eq!(bytes.len(), declared_len, "Startup length mismatch");
 
-                // Protocol version 3.0 = 196608
+                // Default startup protocol version 3.2 = 196610
                 let version = i32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-                prop_assert_eq!(version, 196608, "Must use protocol version 3.0");
+                prop_assert_eq!(version, PROTOCOL_VERSION_3_2, "Must use protocol version 3.2");
             }
             FrontendMessage::Sync | FrontendMessage::Terminate => {
                 // Fixed 5-byte messages

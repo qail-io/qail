@@ -100,6 +100,7 @@ fn test_create_function_with_args_sql() {
             returns: "int".to_string(),
             body: "BEGIN RETURN v + 1; END;".to_string(),
             language: Some("plpgsql".to_string()),
+            volatility: None,
         }),
         ..Default::default()
     };

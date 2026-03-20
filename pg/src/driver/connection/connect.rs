@@ -16,6 +16,7 @@ use super::types::{
 };
 use crate::driver::stream::PgStream;
 use crate::driver::{AuthSettings, ConnectOptions, GssEncMode, PgError, PgResult, TlsMode};
+use crate::protocol::PROTOCOL_VERSION_3_0;
 use crate::protocol::wire::FrontendMessage;
 use bytes::BytesMut;
 use std::collections::{HashMap, VecDeque};
@@ -23,6 +24,25 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+
+#[inline]
+fn protocol_version_from_minor(minor: u16) -> i32 {
+    ((3i32) << 16) | i32::from(minor)
+}
+
+fn is_explicit_protocol_version_rejection(err: &PgError) -> bool {
+    let msg = match err {
+        PgError::Connection(msg) | PgError::Protocol(msg) | PgError::Auth(msg) => msg,
+        PgError::Query(msg) => msg,
+        PgError::QueryServer(server) => &server.message,
+        _ => return false,
+    };
+
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("unsupported frontend protocol")
+        || lower.contains("frontend protocol") && lower.contains("unsupported")
+        || lower.contains("protocol version") && lower.contains("not support")
+}
 
 impl PgConnection {
     /// Connect to PostgreSQL server without authentication (trust mode).
@@ -39,6 +59,10 @@ impl PgConnection {
 
     /// Connect to PostgreSQL server with optional password authentication.
     /// Includes a default 10-second timeout covering TCP connect + handshake.
+    ///
+    /// Startup requests protocol 3.2 by default and performs a one-shot retry
+    /// with protocol 3.0 only when startup fails due to explicit
+    /// protocol-version rejection from the server.
     pub async fn connect_with_password(
         host: &str,
         port: u16,
@@ -63,6 +87,10 @@ impl PgConnection {
     ///   1. If gss_enc_mode != Disable → try GSSENCRequest on fresh TCP
     ///   2. If GSSENC rejected/unavailable and tls_mode != Disable → try SSLRequest
     ///   3. If both rejected/unavailable → plain StartupMessage
+    ///
+    /// The StartupMessage protocol version behavior is the same as
+    /// `connect_with_password`: request protocol 3.2 first, then retry once
+    /// with 3.0 only on explicit protocol-version rejection.
     pub async fn connect_with_options(
         host: &str,
         port: u16,
@@ -112,6 +140,7 @@ impl PgConnection {
                     auth_settings: auth,
                     gss_token_provider,
                     gss_token_provider_ex,
+                    protocol_minor: Self::default_protocol_minor(),
                     startup_params: startup_params.clone(),
                 },
                 mtls_config,
@@ -127,57 +156,57 @@ impl PgConnection {
                     record_connect_attempt(CONNECT_TRANSPORT_GSSENC, CONNECT_BACKEND_TOKIO);
                     #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
                     {
-                        let gssenc_fut = async {
-                            let gss_stream = super::super::gss::gssenc_handshake(tcp_stream, host)
-                                .await
-                                .map_err(PgError::Auth)?;
-                            let mut conn = Self {
-                                stream: PgStream::GssEnc(gss_stream),
-                                buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
-                                write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),
-                                sql_buf: BytesMut::with_capacity(512),
-                                params_buf: Vec::with_capacity(16),
-                                prepared_statements: HashMap::new(),
-                                stmt_cache: StatementCache::new(STMT_CACHE_CAPACITY),
-                                column_info_cache: HashMap::new(),
-                                process_id: 0,
-                                secret_key: 0,
-                                notifications: VecDeque::new(),
-                                replication_stream_active: false,
-                                replication_mode_enabled: has_logical_replication_startup_mode(
-                                    &startup_params,
-                                ),
-                                last_replication_wal_end: None,
-                                io_desynced: false,
-                                pending_statement_closes: Vec::new(),
-                                draining_statement_closes: false,
-                            };
-                            conn.send(FrontendMessage::Startup {
-                                user: user.to_string(),
-                                database: database.to_string(),
-                                startup_params: startup_params.clone(),
-                            })
-                            .await?;
-                            conn.handle_startup(
-                                user,
-                                password,
-                                auth,
-                                gss_token_provider,
-                                gss_token_provider_ex,
-                            )
-                            .await?;
-                            Ok(conn)
-                        };
-                        let result: PgResult<Self> =
-                            tokio::time::timeout(DEFAULT_CONNECT_TIMEOUT, gssenc_fut)
-                                .await
-                                .map_err(|_| {
-                                    PgError::Connection(format!(
-                                        "GSSENC connection timeout after {:?} \
-                                 (handshake + auth)",
-                                        DEFAULT_CONNECT_TIMEOUT
-                                    ))
-                                })?;
+                        let default_minor = Self::default_protocol_minor();
+                        let mut result = Self::connect_gssenc_accepted_with_timeout(
+                            tcp_stream,
+                            host,
+                            user,
+                            database,
+                            password,
+                            auth,
+                            gss_token_provider,
+                            gss_token_provider_ex.clone(),
+                            startup_params.clone(),
+                            default_minor,
+                        )
+                        .await;
+                        if let Err(err) = &result {
+                            if default_minor > 0 && is_explicit_protocol_version_rejection(err) {
+                                let downgrade_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+                                let retry_stream = match Self::try_gssenc_request(host, port).await
+                                {
+                                    Ok(GssEncNegotiationResult::Accepted(stream)) => stream,
+                                    Ok(GssEncNegotiationResult::Rejected) => {
+                                        return Err(PgError::Connection(
+                                            "Protocol downgrade retry failed: server rejected GSSENCRequest"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    Ok(GssEncNegotiationResult::ServerError) => {
+                                        return Err(PgError::Connection(
+                                            "Protocol downgrade retry failed: server returned error to GSSENCRequest"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        return Err(e);
+                                    }
+                                };
+                                result = Self::connect_gssenc_accepted_with_timeout(
+                                    retry_stream,
+                                    host,
+                                    user,
+                                    database,
+                                    password,
+                                    auth,
+                                    gss_token_provider,
+                                    gss_token_provider_ex,
+                                    startup_params.clone(),
+                                    downgrade_minor,
+                                )
+                                .await;
+                            }
+                        }
                         record_connect_result(
                             CONNECT_TRANSPORT_GSSENC,
                             CONNECT_BACKEND_TOKIO,
@@ -247,6 +276,7 @@ impl PgConnection {
                     auth_settings: auth,
                     gss_token_provider,
                     gss_token_provider_ex,
+                    protocol_minor: Self::default_protocol_minor(),
                     startup_params: startup_params.clone(),
                 })
                 .await
@@ -262,6 +292,7 @@ impl PgConnection {
                         auth_settings: auth,
                         gss_token_provider,
                         gss_token_provider_ex,
+                        protocol_minor: Self::default_protocol_minor(),
                         startup_params: startup_params.clone(),
                     },
                     tls_ca_cert_pem.as_deref(),
@@ -279,6 +310,7 @@ impl PgConnection {
                         auth_settings: auth,
                         gss_token_provider,
                         gss_token_provider_ex: gss_token_provider_ex.clone(),
+                        protocol_minor: Self::default_protocol_minor(),
                         startup_params: startup_params.clone(),
                     },
                     tls_ca_cert_pem.as_deref(),
@@ -298,6 +330,7 @@ impl PgConnection {
                             auth_settings: auth,
                             gss_token_provider,
                             gss_token_provider_ex,
+                            protocol_minor: Self::default_protocol_minor(),
                             startup_params: startup_params.clone(),
                         })
                         .await
@@ -390,6 +423,72 @@ impl PgConnection {
         }
     }
 
+    #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
+    async fn connect_gssenc_accepted_with_timeout(
+        tcp_stream: TcpStream,
+        host: &str,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+        auth_settings: AuthSettings,
+        gss_token_provider: Option<super::super::GssTokenProvider>,
+        gss_token_provider_ex: Option<super::super::GssTokenProviderEx>,
+        startup_params: Vec<(String, String)>,
+        protocol_minor: u16,
+    ) -> PgResult<Self> {
+        let gssenc_fut = async {
+            let gss_stream = super::super::gss::gssenc_handshake(tcp_stream, host)
+                .await
+                .map_err(PgError::Auth)?;
+            let mut conn = Self {
+                stream: PgStream::GssEnc(gss_stream),
+                buffer: BytesMut::with_capacity(BUFFER_CAPACITY),
+                write_buf: BytesMut::with_capacity(BUFFER_CAPACITY),
+                sql_buf: BytesMut::with_capacity(512),
+                params_buf: Vec::with_capacity(16),
+                prepared_statements: HashMap::new(),
+                stmt_cache: StatementCache::new(STMT_CACHE_CAPACITY),
+                column_info_cache: HashMap::new(),
+                process_id: 0,
+                secret_key: 0,
+                cancel_key_bytes: Vec::new(),
+                requested_protocol_minor: protocol_minor,
+                negotiated_protocol_minor: protocol_minor,
+                notifications: VecDeque::new(),
+                replication_stream_active: false,
+                replication_mode_enabled: has_logical_replication_startup_mode(&startup_params),
+                last_replication_wal_end: None,
+                io_desynced: false,
+                pending_statement_closes: Vec::new(),
+                draining_statement_closes: false,
+            };
+            conn.send(FrontendMessage::Startup {
+                user: user.to_string(),
+                database: database.to_string(),
+                protocol_version: protocol_version_from_minor(protocol_minor),
+                startup_params: startup_params.clone(),
+            })
+            .await?;
+            conn.handle_startup(
+                user,
+                password,
+                auth_settings,
+                gss_token_provider,
+                gss_token_provider_ex,
+            )
+            .await?;
+            Ok(conn)
+        };
+        tokio::time::timeout(DEFAULT_CONNECT_TIMEOUT, gssenc_fut)
+            .await
+            .map_err(|_| {
+                PgError::Connection(format!(
+                    "GSSENC connection timeout after {:?} (handshake + auth)",
+                    DEFAULT_CONNECT_TIMEOUT
+                ))
+            })?
+    }
+
     /// Connect to PostgreSQL server with optional password authentication and auth policy.
     pub async fn connect_with_password_and_auth(
         host: &str,
@@ -408,12 +507,27 @@ impl PgConnection {
             auth_settings,
             gss_token_provider: None,
             gss_token_provider_ex: None,
+            protocol_minor: Self::default_protocol_minor(),
             startup_params: Vec::new(),
         })
         .await
     }
 
     async fn connect_with_password_and_auth_and_gss(params: ConnectParams<'_>) -> PgResult<Self> {
+        let first = Self::connect_with_password_and_auth_and_gss_once(params.clone()).await;
+        if let Err(err) = &first {
+            if params.protocol_minor > 0 && is_explicit_protocol_version_rejection(err) {
+                let mut downgraded = params;
+                downgraded.protocol_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+                return Self::connect_with_password_and_auth_and_gss_once(downgraded).await;
+            }
+        }
+        first
+    }
+
+    async fn connect_with_password_and_auth_and_gss_once(
+        params: ConnectParams<'_>,
+    ) -> PgResult<Self> {
         let connect_started = Instant::now();
         let attempt_backend = plain_connect_attempt_backend();
         record_connect_attempt(CONNECT_TRANSPORT_PLAIN, attempt_backend);
@@ -452,6 +566,7 @@ impl PgConnection {
             auth_settings,
             gss_token_provider,
             gss_token_provider_ex,
+            protocol_minor,
             startup_params,
         } = params;
         let replication_mode_enabled = has_logical_replication_startup_mode(&startup_params);
@@ -469,6 +584,9 @@ impl PgConnection {
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: protocol_minor,
+            negotiated_protocol_minor: protocol_minor,
             notifications: VecDeque::new(),
             replication_stream_active: false,
             replication_mode_enabled,
@@ -481,6 +599,7 @@ impl PgConnection {
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
+            protocol_version: protocol_version_from_minor(protocol_minor),
             startup_params,
         })
         .await?;
@@ -570,6 +689,7 @@ impl PgConnection {
                 auth_settings,
                 gss_token_provider: None,
                 gss_token_provider_ex: None,
+                protocol_minor: Self::default_protocol_minor(),
                 startup_params: Vec::new(),
             },
             ca_cert_pem,
@@ -578,6 +698,21 @@ impl PgConnection {
     }
 
     async fn connect_tls_with_auth_and_gss(
+        params: ConnectParams<'_>,
+        ca_cert_pem: Option<&[u8]>,
+    ) -> PgResult<Self> {
+        let first = Self::connect_tls_with_auth_and_gss_once(params.clone(), ca_cert_pem).await;
+        if let Err(err) = &first {
+            if params.protocol_minor > 0 && is_explicit_protocol_version_rejection(err) {
+                let mut downgraded = params;
+                downgraded.protocol_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+                return Self::connect_tls_with_auth_and_gss_once(downgraded, ca_cert_pem).await;
+            }
+        }
+        first
+    }
+
+    async fn connect_tls_with_auth_and_gss_once(
         params: ConnectParams<'_>,
         ca_cert_pem: Option<&[u8]>,
     ) -> PgResult<Self> {
@@ -617,6 +752,7 @@ impl PgConnection {
             auth_settings,
             gss_token_provider,
             gss_token_provider_ex,
+            protocol_minor,
             startup_params,
         } = params;
         let replication_mode_enabled = has_logical_replication_startup_mode(&startup_params);
@@ -686,6 +822,9 @@ impl PgConnection {
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: protocol_minor,
+            negotiated_protocol_minor: protocol_minor,
             notifications: VecDeque::new(),
             replication_stream_active: false,
             replication_mode_enabled,
@@ -698,6 +837,7 @@ impl PgConnection {
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
+            protocol_version: protocol_version_from_minor(protocol_minor),
             startup_params,
         })
         .await?;
@@ -769,6 +909,7 @@ impl PgConnection {
                 auth_settings,
                 gss_token_provider: None,
                 gss_token_provider_ex: None,
+                protocol_minor: Self::default_protocol_minor(),
                 startup_params: Vec::new(),
             },
             config,
@@ -777,6 +918,24 @@ impl PgConnection {
     }
 
     async fn connect_mtls_with_password_and_auth_and_gss(
+        params: ConnectParams<'_>,
+        config: TlsConfig,
+    ) -> PgResult<Self> {
+        let first =
+            Self::connect_mtls_with_password_and_auth_and_gss_once(params.clone(), config.clone())
+                .await;
+        if let Err(err) = &first {
+            if params.protocol_minor > 0 && is_explicit_protocol_version_rejection(err) {
+                let mut downgraded = params;
+                downgraded.protocol_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+                return Self::connect_mtls_with_password_and_auth_and_gss_once(downgraded, config)
+                    .await;
+            }
+        }
+        first
+    }
+
+    async fn connect_mtls_with_password_and_auth_and_gss_once(
         params: ConnectParams<'_>,
         config: TlsConfig,
     ) -> PgResult<Self> {
@@ -813,6 +972,7 @@ impl PgConnection {
             auth_settings,
             gss_token_provider,
             gss_token_provider_ex,
+            protocol_minor,
             startup_params,
         } = params;
         let replication_mode_enabled = has_logical_replication_startup_mode(&startup_params);
@@ -899,6 +1059,9 @@ impl PgConnection {
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: protocol_minor,
+            negotiated_protocol_minor: protocol_minor,
             notifications: VecDeque::new(),
             replication_stream_active: false,
             replication_mode_enabled,
@@ -911,6 +1074,7 @@ impl PgConnection {
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
+            protocol_version: protocol_version_from_minor(protocol_minor),
             startup_params,
         })
         .await?;
@@ -935,6 +1099,34 @@ impl PgConnection {
         database: &str,
         password: Option<&str>,
     ) -> PgResult<Self> {
+        let default_minor = Self::default_protocol_minor();
+        let first =
+            Self::connect_unix_with_protocol(socket_path, user, database, password, default_minor)
+                .await;
+        if let Err(err) = &first {
+            if default_minor > 0 && is_explicit_protocol_version_rejection(err) {
+                let downgrade_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+                return Self::connect_unix_with_protocol(
+                    socket_path,
+                    user,
+                    database,
+                    password,
+                    downgrade_minor,
+                )
+                .await;
+            }
+        }
+        first
+    }
+
+    #[cfg(unix)]
+    async fn connect_unix_with_protocol(
+        socket_path: &str,
+        user: &str,
+        database: &str,
+        password: Option<&str>,
+        protocol_minor: u16,
+    ) -> PgResult<Self> {
         use tokio::net::UnixStream;
 
         let unix_stream = UnixStream::connect(socket_path).await?;
@@ -950,6 +1142,9 @@ impl PgConnection {
             column_info_cache: HashMap::new(),
             process_id: 0,
             secret_key: 0,
+            cancel_key_bytes: Vec::new(),
+            requested_protocol_minor: protocol_minor,
+            negotiated_protocol_minor: protocol_minor,
             notifications: VecDeque::new(),
             replication_stream_active: false,
             replication_mode_enabled: false,
@@ -962,6 +1157,7 @@ impl PgConnection {
         conn.send(FrontendMessage::Startup {
             user: user.to_string(),
             database: database.to_string(),
+            protocol_version: protocol_version_from_minor(protocol_minor),
             startup_params: Vec::new(),
         })
         .await?;
@@ -970,5 +1166,32 @@ impl PgConnection {
             .await?;
 
         Ok(conn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_explicit_protocol_version_rejection, protocol_version_from_minor};
+    use crate::driver::PgError;
+
+    #[test]
+    fn protocol_version_from_minor_encodes_major_3() {
+        assert_eq!(protocol_version_from_minor(2), 196610);
+        assert_eq!(protocol_version_from_minor(0), 196608);
+    }
+
+    #[test]
+    fn explicit_protocol_rejection_detection_is_case_insensitive() {
+        let err = PgError::Connection("Unsupported frontend protocol 3.2".to_string());
+        assert!(is_explicit_protocol_version_rejection(&err));
+
+        let err = PgError::Protocol("server: Protocol VERSION not supported".to_string());
+        assert!(is_explicit_protocol_version_rejection(&err));
+    }
+
+    #[test]
+    fn explicit_protocol_rejection_does_not_match_unrelated_errors() {
+        let err = PgError::Connection("connection reset by peer".to_string());
+        assert!(!is_explicit_protocol_version_rejection(&err));
     }
 }

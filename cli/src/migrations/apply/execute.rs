@@ -182,6 +182,22 @@ pub async fn migrate_apply(
         )?;
     }
 
+    // For down-direction apply, reconcile history by deleting matching applied up versions.
+    // This keeps `_qail_migrations` consistent so a later `migrate apply` (up) can re-run.
+    let mut applied_up_versions_by_group: HashMap<String, Vec<String>> = HashMap::new();
+    if matches!(direction, MigrateDirection::Down) {
+        let discovered_up = discover_migrations(&migrations_dir, MigrateDirection::Up)?;
+        ensure_up_down_pairing(&discovered_up, &migrations)?;
+        for up_mig in &discovered_up {
+            if applied_migrations.contains_key(&up_mig.display_name) {
+                applied_up_versions_by_group
+                    .entry(up_mig.group_key.clone())
+                    .or_default()
+                    .push(up_mig.display_name.clone());
+            }
+        }
+    }
+
     // Phase prerequisite check: when running --phase backfill or --phase contract,
     // verify that earlier phases for each group have already been applied.
     if matches!(direction, MigrateDirection::Up)
@@ -264,6 +280,25 @@ pub async fn migrate_apply(
             mig.phase.to_string().yellow()
         );
 
+        let versions_to_delete = if matches!(direction, MigrateDirection::Down) {
+            applied_up_versions_by_group
+                .get(&mig.group_key)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if matches!(direction, MigrateDirection::Down) && versions_to_delete.is_empty() {
+            println!(
+                "  {} {} {}",
+                "‒".dimmed(),
+                mig.display_name.dimmed(),
+                "(group not applied; skipped)".dimmed()
+            );
+            skipped += 1;
+            continue;
+        }
+
         let content = fs::read_to_string(&mig.path)
             .context(format!("Failed to read {}", mig.path.display()))?;
 
@@ -298,20 +333,22 @@ pub async fn migrate_apply(
             };
 
         let expected_checksum = crate::time::md5_hex(&checksum_input);
-        if let Some(stored_checksum) = applied_migrations.get(&mig.display_name) {
-            ensure_applied_checksum_matches(
-                &mig.display_name,
-                stored_checksum,
-                &expected_checksum,
-            )?;
-            println!(
-                "  {} {} {}",
-                "‒".dimmed(),
-                mig.display_name.dimmed(),
-                "(already applied)".dimmed()
-            );
-            skipped += 1;
-            continue;
+        if matches!(direction, MigrateDirection::Up) {
+            if let Some(stored_checksum) = applied_migrations.get(&mig.display_name) {
+                ensure_applied_checksum_matches(
+                    &mig.display_name,
+                    stored_checksum,
+                    &expected_checksum,
+                )?;
+                println!(
+                    "  {} {} {}",
+                    "‒".dimmed(),
+                    mig.display_name.dimmed(),
+                    "(already applied)".dimmed()
+                );
+                skipped += 1;
+                continue;
+            }
         }
 
         if matches!(direction, MigrateDirection::Up) && !cmds.is_empty() {
@@ -397,21 +434,45 @@ pub async fn migrate_apply(
             policy.lock_risk,
             policy.lock_risk_max_score
         ));
-        apply_commands_and_record_receipt_atomic(
-            &mut pg,
-            &cmds,
-            &mig.display_name,
-            started_ms,
-            executed_sql_for_receipt,
-            checksum_input,
-            risk_summary,
-            affected_rows_est,
-            None,
-        )
-        .await
-        .context(format!("Failed to apply migration {}", mig.display_name))?;
+        if matches!(direction, MigrateDirection::Down) {
+            apply_down_commands_and_reconcile_history_atomic(
+                &mut pg,
+                &cmds,
+                &mig.display_name,
+                started_ms,
+                executed_sql_for_receipt,
+                checksum_input,
+                risk_summary,
+                versions_to_delete.as_slice(),
+                None,
+            )
+            .await
+            .context(format!(
+                "Failed to apply down migration {}",
+                mig.display_name
+            ))?;
 
-        applied_migrations.insert(mig.display_name.clone(), expected_checksum);
+            for version in &versions_to_delete {
+                applied_migrations.remove(version);
+            }
+            applied_up_versions_by_group.remove(&mig.group_key);
+        } else {
+            apply_commands_and_record_receipt_atomic(
+                &mut pg,
+                &cmds,
+                &mig.display_name,
+                started_ms,
+                executed_sql_for_receipt,
+                checksum_input,
+                risk_summary,
+                affected_rows_est,
+                None,
+            )
+            .await
+            .context(format!("Failed to apply migration {}", mig.display_name))?;
+
+            applied_migrations.insert(mig.display_name.clone(), expected_checksum);
+        }
 
         println!("{}", "✓".green());
         applied += 1;
@@ -865,6 +926,106 @@ async fn apply_commands_and_record_receipt_atomic(
     Ok(())
 }
 
+async fn apply_down_commands_and_reconcile_history_atomic(
+    pg: &mut qail_pg::PgDriver,
+    cmds: &[Qail],
+    migration_name: &str,
+    started_ms: i64,
+    executed_sql_for_receipt: String,
+    checksum_input: String,
+    risk_summary: String,
+    versions_to_delete: &[String],
+    failpoint_override: Option<&str>,
+) -> Result<()> {
+    pg.begin()
+        .await
+        .map_err(|e| anyhow!("Failed to begin migration transaction: {}", e))?;
+
+    if let Err(err) = execute_migration_commands(pg, cmds, migration_name).await {
+        let _ = pg.rollback().await;
+        return Err(err);
+    }
+
+    if let Err(err) = verify_applied_commands_effects(pg, migration_name, cmds).await {
+        let _ = pg.rollback().await;
+        return Err(err);
+    }
+
+    for version in versions_to_delete {
+        let delete_cmd = Qail::del("_qail_migrations").where_eq("version", version.as_str());
+        if let Err(err) = pg.execute(&delete_cmd).await {
+            let _ = pg.rollback().await;
+            return Err(anyhow!(
+                "Failed to reconcile migration history (delete '{}'): {}",
+                version,
+                err
+            ));
+        }
+    }
+
+    if let Err(err) = maybe_failpoint_override("apply.before_receipt", failpoint_override) {
+        let _ = pg.rollback().await;
+        return Err(err);
+    }
+
+    let finished_ms = now_epoch_ms();
+    let checksum = crate::time::md5_hex(&checksum_input);
+    let deleted = if versions_to_delete.is_empty() {
+        String::from("none")
+    } else {
+        versions_to_delete.join(",")
+    };
+    let receipt_tag: String = migration_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let receipt = MigrationReceipt {
+        version: format!(
+            "apply_down_{}_{}",
+            receipt_tag,
+            crate::time::timestamp_version()
+        ),
+        name: format!("apply_down {}", migration_name),
+        checksum,
+        sql_up: executed_sql_for_receipt,
+        git_sha: runtime_git_sha(),
+        qail_version: env!("CARGO_PKG_VERSION").to_string(),
+        actor: runtime_actor(),
+        started_at_ms: Some(started_ms),
+        finished_at_ms: Some(finished_ms),
+        duration_ms: Some(finished_ms.saturating_sub(started_ms)),
+        affected_rows_est: Some(i64::try_from(versions_to_delete.len()).unwrap_or(i64::MAX)),
+        risk_summary: Some(format!("{risk_summary};rolled_back_versions={deleted}")),
+        shadow_checksum: None,
+    };
+
+    if let Err(err) = write_migration_receipt(pg, &receipt).await {
+        let _ = pg.rollback().await;
+        return Err(anyhow!(
+            "Failed to record down migration '{}': {}",
+            migration_name,
+            err
+        ));
+    }
+
+    if let Err(err) = maybe_failpoint_override("apply.before_commit", failpoint_override) {
+        let _ = pg.rollback().await;
+        return Err(err);
+    }
+
+    pg.commit()
+        .await
+        .map_err(|e| anyhow!("Failed to commit migration transaction: {}", e))?;
+
+    Ok(())
+}
+
 fn maybe_failpoint_override(name: &str, failpoint_override: Option<&str>) -> Result<()> {
     let Some(spec) = failpoint_override else {
         return maybe_failpoint(name);
@@ -1115,13 +1276,15 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_commands_and_record_receipt_atomic, enforce_apply_destructive_policy,
-        ensure_applied_checksum_matches, ensure_up_down_pairing, parse_rename_expr,
-        split_schema_ident, strip_optional_if_exists_prefix, validate_receipts_against_local,
+        apply_commands_and_record_receipt_atomic, apply_down_commands_and_reconcile_history_atomic,
+        enforce_apply_destructive_policy, ensure_applied_checksum_matches, ensure_up_down_pairing,
+        parse_rename_expr, split_schema_ident, strip_optional_if_exists_prefix,
+        validate_receipts_against_local,
     };
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
     use crate::migrations::{EnforcementMode, ReceiptValidationMode};
+    use qail_core::ast::{Action, Constraint, Expr};
     use qail_core::prelude::Qail;
     use std::collections::HashMap;
     use std::fs;
@@ -1411,6 +1574,106 @@ mod tests {
         assert!(
             !version_exists(&mut pg, migration_name.as_str()).await,
             "migration receipt should not be written when failpoint triggers"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_down_reconciles_up_history_in_real_db() {
+        let Some(url) = std::env::var("QAIL_TEST_DB_URL").ok() else {
+            eprintln!("Skipping apply-down history reconciliation DB test (set QAIL_TEST_DB_URL)");
+            return;
+        };
+
+        let mut pg = qail_pg::PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+        crate::migrations::ensure_migration_table(&mut pg)
+            .await
+            .expect("bootstrap _qail_migrations");
+
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            crate::time::timestamp_version()
+        );
+        let table = format!("apply_down_hist_{}", suffix);
+        let up_v1 = format!("{}_001.up.qail", suffix);
+        let up_v2 = format!("{}_002.up.qail", suffix);
+        let down_name = format!("{}_group/down.qail", suffix);
+
+        // Create a table that down command will drop.
+        let create_cmd = Qail {
+            action: Action::Make,
+            table: table.clone(),
+            columns: vec![Expr::Def {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            }],
+            ..Default::default()
+        };
+        pg.execute(&create_cmd).await.expect("create test table");
+
+        // Seed synthetic "applied up" history rows.
+        for version in [&up_v1, &up_v2] {
+            let seed = Qail::add("_qail_migrations")
+                .set_value("version", version.as_str())
+                .set_value("name", version.as_str())
+                .set_value("checksum", "seed_checksum")
+                .set_value("sql_up", "-- seed up");
+            pg.execute(&seed).await.expect("seed migration history");
+        }
+
+        let down_cmds = vec![Qail {
+            action: Action::Drop,
+            table: table.clone(),
+            ..Default::default()
+        }];
+
+        apply_down_commands_and_reconcile_history_atomic(
+            &mut pg,
+            &down_cmds,
+            &down_name,
+            crate::migrations::now_epoch_ms(),
+            format!("drop {};", table),
+            format!("drop {};", table),
+            "source=apply.down.reconcile.test".to_string(),
+            &[up_v1.clone(), up_v2.clone()],
+            None,
+        )
+        .await
+        .expect("apply down with history reconciliation");
+
+        assert!(
+            !version_exists(&mut pg, up_v1.as_str()).await,
+            "first up version should be deleted from _qail_migrations"
+        );
+        assert!(
+            !version_exists(&mut pg, up_v2.as_str()).await,
+            "second up version should be deleted from _qail_migrations"
+        );
+        assert!(
+            !super::table_exists(&mut pg, table.as_str())
+                .await
+                .expect("table existence check"),
+            "down command should drop table"
+        );
+
+        let versions = pg
+            .query_ast(&Qail::get("_qail_migrations").column("version"))
+            .await
+            .expect("query migration versions")
+            .rows
+            .iter()
+            .filter_map(|row| row.first().and_then(|v| v.as_ref()).cloned())
+            .collect::<Vec<_>>();
+        assert!(
+            versions.iter().all(|v| !v.ends_with(".down.qail")),
+            "down-direction apply must not persist .down.qail versions"
+        );
+        assert!(
+            versions.iter().any(|v| v.starts_with("apply_down_")),
+            "down-direction apply should record a non-.qail audit receipt"
         );
     }
 }

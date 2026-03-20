@@ -243,16 +243,25 @@ impl ToSql for Qail {
                 if let Some(func) = &self.function_def {
                     let lang = func.language.as_deref().unwrap_or("plpgsql");
                     let args = func.args.join(", ");
+                    let volatility = func
+                        .volatility
+                        .as_deref()
+                        .map(|v| format!(" {}", v.to_uppercase()))
+                        .unwrap_or_default();
                     format!(
-                        "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} LANGUAGE {} AS $$ {} $$",
-                        func.name, args, func.returns, lang, func.body
+                        "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} LANGUAGE {}{} AS $$ {} $$",
+                        func.name, args, func.returns, lang, volatility, func.body
                     )
                 } else {
                     "-- CreateFunction requires function_def".to_string()
                 }
             }
             operators::Action::DropFunction => {
-                format!("DROP FUNCTION IF EXISTS {}()", self.table)
+                if let Some(signature) = &self.payload {
+                    format!("DROP FUNCTION IF EXISTS {}", signature)
+                } else {
+                    format!("DROP FUNCTION IF EXISTS {}()", self.table)
+                }
             }
             operators::Action::CreateTrigger => {
                 if let Some(trig) = &self.trigger_def {
@@ -276,11 +285,8 @@ impl ToSql for Qail {
                     } else {
                         "FOR EACH STATEMENT"
                     };
-                    // Prepend DROP for idempotency - PostgreSQL has no CREATE OR REPLACE TRIGGER
                     format!(
-                        "DROP TRIGGER IF EXISTS {} ON {};\nCREATE TRIGGER {} {} {} ON {} {} EXECUTE FUNCTION {}()",
-                        trig.name,
-                        trig.table,
+                        "CREATE TRIGGER {} {} {} ON {} {} EXECUTE FUNCTION {}()",
                         trig.name,
                         timing,
                         events.join(" OR "),

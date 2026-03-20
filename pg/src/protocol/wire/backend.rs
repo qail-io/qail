@@ -44,6 +44,7 @@ impl BackendMessage {
             b'R' => Self::decode_auth(payload)?,
             b'S' => Self::decode_parameter_status(payload)?,
             b'K' => Self::decode_backend_key(payload)?,
+            b'v' => Self::decode_negotiate_protocol_version(payload)?,
             b'Z' => Self::decode_ready_for_query(payload)?,
             b'T' => Self::decode_row_description(payload)?,
             b'D' => Self::decode_data_row(payload)?,
@@ -242,12 +243,64 @@ impl BackendMessage {
     }
 
     fn decode_backend_key(payload: &[u8]) -> Result<Self, String> {
-        if payload.len() != 8 {
+        if payload.len() < 8 {
             return Err("BackendKeyData payload too short".to_string());
+        }
+        let key_len = payload.len() - 4;
+        if !(4..=256).contains(&key_len) {
+            return Err(format!(
+                "BackendKeyData invalid secret key length: {} (expected 4..=256)",
+                key_len
+            ));
         }
         Ok(BackendMessage::BackendKeyData {
             process_id: i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]),
-            secret_key: i32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]),
+            secret_key: payload[4..].to_vec(),
+        })
+    }
+
+    fn decode_negotiate_protocol_version(payload: &[u8]) -> Result<Self, String> {
+        if payload.len() < 8 {
+            return Err("NegotiateProtocolVersion payload too short".to_string());
+        }
+
+        let newest_minor_supported =
+            i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        if newest_minor_supported < 0 {
+            return Err("NegotiateProtocolVersion newest_minor_supported is negative".to_string());
+        }
+
+        let unrecognized_count =
+            i32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+        if unrecognized_count < 0 {
+            return Err(
+                "NegotiateProtocolVersion unrecognized option count is negative".to_string(),
+            );
+        }
+        let unrecognized_count = unrecognized_count as usize;
+
+        let mut options = Vec::with_capacity(unrecognized_count);
+        let mut pos = 8usize;
+        for _ in 0..unrecognized_count {
+            if pos >= payload.len() {
+                return Err("NegotiateProtocolVersion missing option string terminator".to_string());
+            }
+            let rel_end = payload[pos..]
+                .iter()
+                .position(|&b| b == 0)
+                .ok_or("NegotiateProtocolVersion option missing null terminator")?;
+            let end = pos + rel_end;
+            options.push(String::from_utf8_lossy(&payload[pos..end]).to_string());
+            pos = end + 1;
+        }
+
+        if pos != payload.len() {
+            return Err("NegotiateProtocolVersion has trailing bytes".to_string());
+        }
+
+        Ok(BackendMessage::NegotiateProtocolVersion {
+            newest_minor_supported,
+            unrecognized_protocol_options: options,
         })
     }
 

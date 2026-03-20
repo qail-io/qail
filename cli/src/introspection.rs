@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use qail_core::ast::{Operator, Qail};
 use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use qail_core::migrate::schema::{SchemaFunctionDef, SchemaTriggerDef, ViewDef};
-use qail_core::migrate::{Column, Schema, Table, parse_policy_expr, to_qail_string};
+use qail_core::migrate::{Column, Schema, Table, to_qail_string};
 use qail_pg::driver::PgDriver;
 
 use crate::util::parse_pg_url;
@@ -55,6 +55,19 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             .map_err(|e| anyhow!("Failed to connect: {}", e))?
     };
 
+    // Resolve public namespace OID once; OID columns cannot be filtered with subquery text.
+    let public_ns_cmd = Qail::get("pg_catalog.pg_namespace")
+        .columns(["oid"])
+        .filter("nspname", Operator::Eq, "public");
+    let public_ns_rows = driver
+        .fetch_all(&public_ns_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query public namespace OID: {}", e))?;
+    let public_namespace_oid = public_ns_rows
+        .first()
+        .map(|r| r.text(0))
+        .ok_or_else(|| anyhow!("Public schema not found in pg_namespace"))?;
+
     // ── 0. Enums (must be before columns to resolve enum column types) ──
     let enum_cmd = Qail::get("pg_catalog.pg_type")
         .columns(["typname", "oid"])
@@ -89,12 +102,34 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         });
     }
 
+    // ── 0b. Base Tables (exclude views/materialized views) ──────────────
+    let base_tables_cmd = Qail::get("information_schema.tables")
+        .columns(["table_name", "table_type"])
+        .filter("table_schema", Operator::Eq, "public");
+    let base_table_rows = driver
+        .fetch_all(&base_tables_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query table list: {}", e))?;
+    let mut base_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in base_table_rows {
+        let table_name = row.text(0);
+        let table_type = row.text(1);
+        if table_type.eq_ignore_ascii_case("BASE TABLE") && !is_internal_qail_relation(&table_name)
+        {
+            base_tables.insert(table_name);
+        }
+    }
+
     // ── 1. Columns + Defaults (AST-native) ──────────────────────────────
     let columns_cmd = Qail::get("information_schema.columns")
         .columns([
             "table_name",
             "column_name",
             "udt_name",
+            "data_type",
+            "character_maximum_length",
+            "numeric_precision",
+            "numeric_scale",
             "is_nullable",
             "column_default",
         ])
@@ -110,25 +145,32 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     for row in rows {
         let table_name = row.text(0);
+        if !base_tables.contains(&table_name) {
+            continue;
+        }
         let col_name = row.text(1);
         let udt_name = row.text(2);
-        let is_nullable_str = row.text(3);
+        let data_type = row.text(3);
+        let char_max_len = row.get_string(4);
+        let numeric_precision = row.get_string(5);
+        let numeric_scale = row.get_string(6);
+        let is_nullable_str = row.text(7);
         let is_nullable = is_nullable_str == "YES";
-        let column_default_raw = row.get_string(4);
+        let column_default_raw = row.get_string(8);
 
-        // Map PostgreSQL type to QAIL ColumnType
-        // Check if this is a known enum type first
-        let col_type = if let Some(values) = enum_names.get(&udt_name) {
-            qail_core::migrate::ColumnType::Enum {
-                name: udt_name.clone(),
-                values: values.clone(),
-            }
-        } else {
-            let col_type_str = map_pg_type(&udt_name);
-            col_type_str
-                .parse()
-                .unwrap_or(qail_core::migrate::ColumnType::Text)
-        };
+        let is_nextval_default = column_default_raw
+            .as_deref()
+            .map(|d| d.trim_start().starts_with("nextval("))
+            .unwrap_or(false);
+        let col_type = map_pg_column_type(
+            &udt_name,
+            &data_type,
+            char_max_len.as_deref(),
+            numeric_precision.as_deref(),
+            numeric_scale.as_deref(),
+            is_nextval_default,
+            &enum_names,
+        );
 
         let mut col = Column::new(&col_name, col_type);
         col.nullable = is_nullable;
@@ -136,20 +178,19 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         // Parse default value (skip nextval sequences — those are serial types)
         if let Some(ref default_str) = column_default_raw {
             let d = default_str.trim();
-            if !d.is_empty() && !d.starts_with("nextval(") {
-                // Strip type casts like ::text, ::integer for cleaner output
-                let clean = if let Some(pos) = d.find("::") {
-                    d[..pos].trim().to_string()
-                } else {
-                    d.to_string()
-                };
-                // Strip surrounding single quotes from string literals
-                let clean = if clean.starts_with('\'') && clean.ends_with('\'') {
-                    format!("'{}'", &clean[1..clean.len() - 1])
-                } else {
-                    clean
-                };
-                col.default = Some(clean);
+            if !d.is_empty() {
+                // For serial/bigserial we intentionally omit explicit nextval()
+                // because type already implies sequence-backed default.
+                if !(d.starts_with("nextval(")
+                    && matches!(
+                        col.data_type,
+                        qail_core::migrate::ColumnType::Serial
+                            | qail_core::migrate::ColumnType::BigSerial
+                    ))
+                {
+                    // Keep default expression as-is to preserve casts/functions.
+                    col.default = Some(d.to_string());
+                }
             }
         }
 
@@ -253,6 +294,20 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query check constraints: {}", e))?;
 
+    let check_table_cmd = Qail::get("information_schema.table_constraints")
+        .columns(["constraint_name", "table_name"])
+        .filter("table_schema", Operator::Eq, "public")
+        .filter("constraint_type", Operator::Eq, "CHECK");
+    let check_table_rows = driver
+        .fetch_all(&check_table_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query check constraint table mapping: {}", e))?;
+    let mut check_table_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for row in check_table_rows {
+        check_table_map.insert(row.text(0), row.text(1));
+    }
+
     // Get constraint-to-column mapping
     let ccu_cmd = Qail::get("information_schema.constraint_column_usage")
         .columns(["table_name", "column_name", "constraint_name"])
@@ -276,11 +331,12 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let constraint_name = row.text(0);
         let check_clause = row.text(1);
 
-        // Skip NOT NULL checks (auto-generated by PG)
-        if check_clause.contains("IS NOT NULL") {
+        // Skip trivial auto-generated NOT NULL checks only.
+        if is_trivial_not_null_check(&check_clause) {
             continue;
         }
 
+        let mut applied = false;
         if let Some((table_name, col_name)) = check_column_map.get(&constraint_name)
             && let Some(columns) = tables.get_mut(table_name.as_str())
             && let Some(expr) = parse_check_expr(&check_clause, col_name)
@@ -291,8 +347,20 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
                         expr: expr.clone(),
                         name: Some(constraint_name.clone()),
                     });
+                    applied = true;
                 }
             }
+        }
+
+        if !applied
+            && let Some(table_name) = check_table_map.get(&constraint_name)
+            && let Some(columns) = tables.get_mut(table_name.as_str())
+            && let Some(col) = columns.iter_mut().find(|c| c.check.is_none())
+        {
+            col.check = Some(qail_core::migrate::CheckConstraint {
+                expr: qail_core::migrate::schema::CheckExpr::Raw(check_clause.clone()),
+                name: Some(constraint_name.clone()),
+            });
         }
     }
 
@@ -331,7 +399,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     // ── 5b. Deferrable FK Detection ──────────────────────────────────────
     let defer_cmd = Qail::get("pg_catalog.pg_constraint")
         .columns(["conname", "condeferrable", "condeferred"])
-        .filter("contype", Operator::Eq, "f");
+        .filter("contype", Operator::Eq, "f")
+        .filter("connamespace", Operator::Eq, public_namespace_oid.clone());
 
     let defer_rows = driver
         .fetch_all(&defer_cmd)
@@ -420,6 +489,43 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query indexes: {}", e))?;
 
+    // Index OID -> name map (public schema)
+    let idx_class_cmd = Qail::get("pg_catalog.pg_class")
+        .columns(["oid", "relname"])
+        .filter("relkind", Operator::Eq, "i")
+        .filter("relnamespace", Operator::Eq, public_namespace_oid.clone());
+    let idx_class_rows = driver
+        .fetch_all(&idx_class_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query index class metadata: {}", e))?;
+    let mut index_oid_to_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for row in idx_class_rows {
+        index_oid_to_name.insert(row.text(0), row.text(1));
+    }
+
+    // Constraint-backed index names (PK/UNIQUE/EXCLUSION) should not be
+    // re-emitted as plain indexes; those are represented by constraints.
+    let conidx_cmd = Qail::get("pg_catalog.pg_constraint")
+        .columns(["conindid", "contype"])
+        .filter("connamespace", Operator::Eq, public_namespace_oid.clone());
+    let conidx_rows = driver
+        .fetch_all(&conidx_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query constraint index metadata: {}", e))?;
+    let mut constraint_index_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for row in conidx_rows {
+        let conindid = row.text(0);
+        let contype = row.text(1);
+        if matches!(contype.as_str(), "p" | "u" | "x")
+            && conindid != "0"
+            && let Some(name) = index_oid_to_name.get(&conindid)
+        {
+            constraint_index_names.insert(name.clone());
+        }
+    }
+
     // ── 9. Extensions (AST-native) ──────────────────────────────────────
     let ext_cmd = Qail::get("pg_catalog.pg_extension").columns(["extname", "extversion"]);
 
@@ -459,11 +565,45 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query sequences: {}", e))?;
 
+    // Sequence OID map for ownership detection.
+    let seq_class_cmd = Qail::get("pg_catalog.pg_class")
+        .columns(["oid", "relname"])
+        .filter("relkind", Operator::Eq, "S")
+        .filter("relnamespace", Operator::Eq, public_namespace_oid.clone());
+    let seq_class_rows = driver
+        .fetch_all(&seq_class_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query sequence class metadata: {}", e))?;
+    let mut seq_name_to_oid: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for row in seq_class_rows {
+        seq_name_to_oid.insert(row.text(1), row.text(0));
+    }
+
+    // deptype='a' marks auto dependency (owned by table column / serial identity).
+    let dep_cmd = Qail::get("pg_catalog.pg_depend").columns(["objid", "deptype"]);
+    let dep_rows = driver
+        .fetch_all(&dep_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query sequence dependencies: {}", e))?;
+    let mut owned_sequence_oids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for row in dep_rows {
+        if row.text(1) == "a" {
+            owned_sequence_oids.insert(row.text(0));
+        }
+    }
+
     let mut sequences: Vec<qail_core::migrate::Sequence> = Vec::new();
     for row in seq_rows {
         let name = row.text(0);
-        // Skip sequences owned by serial columns (auto-generated)
-        if name.ends_with("_seq") {
+        if is_internal_qail_relation(&name) {
+            continue;
+        }
+        // Skip sequences owned by table columns (auto-generated serial/identity).
+        if let Some(oid) = seq_name_to_oid.get(&name)
+            && owned_sequence_oids.contains(oid)
+        {
             continue;
         }
         let start = row.get_string(1).and_then(|s| s.parse::<i64>().ok());
@@ -543,6 +683,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             "udt_name",
             "parameter_mode",
             "ordinal_position",
+            "parameter_default",
         ])
         .filter("specific_schema", Operator::Eq, "public");
 
@@ -560,17 +701,25 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let ptype = row.text(2);
         let mode = row.text(3);
         let ordinal: i32 = row.get_string(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let default = row.get_string(5);
 
         // Only include IN parameters (skip OUT/INOUT for now)
         if mode != "IN" {
             continue;
         }
 
-        let arg_str = if pname.is_empty() {
+        let mut arg_str = if pname.is_empty() {
             ptype.clone()
         } else {
             format!("{} {}", pname, ptype)
         };
+        if let Some(default) = default {
+            let d = default.trim();
+            if !d.is_empty() {
+                arg_str.push_str(" DEFAULT ");
+                arg_str.push_str(d);
+            }
+        }
 
         param_map
             .entry(specific)
@@ -581,11 +730,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     // 13c: Volatility from pg_proc (AST-native — no function calls needed)
     let vol_cmd = Qail::get("pg_catalog.pg_proc")
         .columns(["proname", "provolatile"])
-        .filter(
-            "pronamespace",
-            Operator::Eq,
-            "(SELECT oid FROM pg_namespace WHERE nspname = 'public')",
-        );
+        .filter("pronamespace", Operator::Eq, public_namespace_oid.clone());
 
     let vol_rows = driver.fetch_all(&vol_cmd).await;
 
@@ -612,8 +757,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let language = row.text(3);
         let returns = row.text(4);
 
-        // Skip functions without bodies (e.g. C functions)
-        if body.is_empty() {
+        // Skip extension/internal functions that are not user-authored routine bodies.
+        if body.is_empty() || language.eq_ignore_ascii_case("c") {
             continue;
         }
 
@@ -650,6 +795,33 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query triggers: {}", e))?;
 
+    let trig_update_cols_cmd = Qail::get("information_schema.triggered_update_columns")
+        .columns(["trigger_name", "event_object_table", "event_object_column"])
+        .filter("trigger_schema", Operator::Eq, "public");
+
+    let trig_update_rows = driver
+        .fetch_all(&trig_update_cols_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query trigger update columns: {}", e))?;
+
+    let mut trig_update_cols_map: std::collections::HashMap<(String, String), Vec<String>> =
+        std::collections::HashMap::new();
+    for row in trig_update_rows {
+        let trig_name = row.text(0);
+        let table = row.text(1);
+        if !base_tables.contains(&table) {
+            continue;
+        }
+        let col = row.text(2);
+        if col.is_empty() {
+            continue;
+        }
+        trig_update_cols_map
+            .entry((trig_name, table))
+            .or_default()
+            .push(col);
+    }
+
     // Group by (trigger_name, table) since each event is a separate row
     let mut trigger_map: std::collections::HashMap<
         (String, String),
@@ -658,6 +830,9 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     for row in trig_rows {
         let name = row.text(0);
         let table = row.text(1);
+        if !base_tables.contains(&table) {
+            continue;
+        }
         let timing = row.text(2);
         let event = row.text(3);
         let action = row.text(4);
@@ -680,7 +855,14 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
         let mut trig = SchemaTriggerDef::new(&name, &table, &exec_fn);
         trig.timing = timing;
-        trig.events = events;
+        trig.events = events.clone();
+        if events.iter().any(|e| e.eq_ignore_ascii_case("UPDATE"))
+            && let Some(mut cols) = trig_update_cols_map.remove(&(name.clone(), table.clone()))
+        {
+            cols.sort();
+            cols.dedup();
+            trig.update_columns = cols;
+        }
         triggers.push(trig);
     }
 
@@ -706,6 +888,9 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     for row in policy_rows {
         let name = row.text(0);
         let table = row.text(1);
+        if !base_tables.contains(&table) {
+            continue;
+        }
         let cmd_str = row.text(2);
         let permissive_str = row.text(3); // "PERMISSIVE" or "RESTRICTIVE"
         let roles_str = row.text(4); // e.g. "{app_user}" or "{public}"
@@ -737,28 +922,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             }
         };
 
-        let using_expr = match qual {
-            Some(s) => Some(parse_policy_expr(&s).map_err(|e| {
-                anyhow!(
-                    "Failed to parse USING expression for policy '{}' on '{}': {}",
-                    name,
-                    table,
-                    e
-                )
-            })?),
-            None => None,
-        };
-        let with_check_expr = match with_check {
-            Some(s) => Some(parse_policy_expr(&s).map_err(|e| {
-                anyhow!(
-                    "Failed to parse WITH CHECK expression for policy '{}' on '{}': {}",
-                    name,
-                    table,
-                    e
-                )
-            })?),
-            None => None,
-        };
+        // Preserve policy predicates as raw SQL expressions from pg_policies.
+        // Parsing/re-serializing can mutate semantics for complex predicates.
+        let using_expr = qual.map(qail_core::ast::Expr::Named);
+        let with_check_expr = with_check.map(qail_core::ast::Expr::Named);
 
         let mut policy = RlsPolicy::create(&name, &table);
         policy.target = target;
@@ -767,6 +934,171 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         policy.using = using_expr;
         policy.with_check = with_check_expr;
         policies.push(policy);
+    }
+
+    // ── 16. Table/Column comments (AST-native joins) ───────────────────
+    let table_comment_cmd = Qail::get(
+        "pg_catalog.pg_class c \
+         LEFT JOIN pg_catalog.pg_description d \
+           ON d.objoid = c.oid AND d.objsubid = 0",
+    )
+    .columns(["c.relname", "c.relkind", "d.description"])
+    .filter("c.relnamespace", Operator::Eq, public_namespace_oid.clone());
+
+    let table_comment_rows = driver
+        .fetch_all(&table_comment_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query table comments: {}", e))?;
+
+    let col_comment_cmd = Qail::get(
+        "pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON a.attrelid = c.oid \
+         LEFT JOIN pg_catalog.pg_description d \
+           ON d.objoid = c.oid AND d.objsubid = a.attnum",
+    )
+    .columns([
+        "c.relname",
+        "a.attname",
+        "a.attnum",
+        "a.attisdropped",
+        "d.description",
+    ])
+    .filter("c.relnamespace", Operator::Eq, public_namespace_oid.clone());
+
+    let col_comment_rows = driver
+        .fetch_all(&col_comment_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query column comments: {}", e))?;
+
+    let mut comments: Vec<qail_core::migrate::schema::Comment> = Vec::new();
+    for row in table_comment_rows {
+        let table = row.text(0);
+        let relkind = row.text(1);
+        let text = normalize_comment_text(&row.get_string(2).unwrap_or_default());
+        if relkind == "r" && base_tables.contains(&table) && !text.trim().is_empty() {
+            comments.push(qail_core::migrate::schema::Comment::on_table(table, text));
+        }
+    }
+    for row in col_comment_rows {
+        let table = row.text(0);
+        let column = row.text(1);
+        let attnum = row
+            .get_string(2)
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
+        let attisdropped = row.text(3) == "t";
+        let text = normalize_comment_text(&row.get_string(4).unwrap_or_default());
+        if attnum > 0
+            && !attisdropped
+            && base_tables.contains(&table)
+            && !text.trim().is_empty()
+            && !is_internal_qail_relation(&table)
+        {
+            comments.push(qail_core::migrate::schema::Comment::on_column(
+                table, column, text,
+            ));
+        }
+    }
+
+    let fn_comment_cmd = Qail::get(
+        "pg_catalog.pg_proc p \
+         LEFT JOIN pg_catalog.pg_description d \
+           ON d.objoid = p.oid AND d.objsubid = 0",
+    )
+    .columns([
+        "p.proname",
+        "pg_catalog.pg_get_function_identity_arguments(p.oid)",
+        "d.description",
+    ])
+    .filter("p.pronamespace", Operator::Eq, public_namespace_oid.clone());
+
+    let fn_comment_rows = driver
+        .fetch_all(&fn_comment_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query function comments: {}", e))?;
+    for row in fn_comment_rows {
+        let name = row.text(0);
+        let args = row.get_string(1).unwrap_or_default();
+        let text = normalize_comment_text(&row.get_string(2).unwrap_or_default());
+        if !text.trim().is_empty() {
+            comments.push(qail_core::migrate::schema::Comment::on_raw(
+                format!("function public.{}({})", name, args),
+                text,
+            ));
+        }
+    }
+
+    let type_comment_cmd = Qail::get(
+        "pg_catalog.pg_type t \
+         LEFT JOIN pg_catalog.pg_description d \
+           ON d.objoid = t.oid AND d.objsubid = 0",
+    )
+    .columns(["t.typname", "d.description"])
+    .filter("t.typnamespace", Operator::Eq, public_namespace_oid.clone());
+
+    let type_comment_rows = driver
+        .fetch_all(&type_comment_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query type comments: {}", e))?;
+    for row in type_comment_rows {
+        let typname = row.text(0);
+        let text = normalize_comment_text(&row.get_string(1).unwrap_or_default());
+        if !text.trim().is_empty() {
+            comments.push(qail_core::migrate::schema::Comment::on_raw(
+                format!("type public.{}", typname),
+                text,
+            ));
+        }
+    }
+
+    let policy_comment_cmd = Qail::get(
+        "pg_catalog.pg_policy p \
+         JOIN pg_catalog.pg_class c ON c.oid = p.polrelid \
+         LEFT JOIN pg_catalog.pg_description d \
+           ON d.objoid = p.oid AND d.objsubid = 0",
+    )
+    .columns(["p.polname", "c.relname", "d.description"])
+    .filter("c.relnamespace", Operator::Eq, public_namespace_oid.clone());
+
+    let policy_comment_rows = driver
+        .fetch_all(&policy_comment_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query policy comments: {}", e))?;
+    for row in policy_comment_rows {
+        let name = row.text(0);
+        let table = row.text(1);
+        let text = normalize_comment_text(&row.get_string(2).unwrap_or_default());
+        if !text.trim().is_empty() && base_tables.contains(&table) {
+            comments.push(qail_core::migrate::schema::Comment::on_raw(
+                format!("policy {} on public.{}", name, table),
+                text,
+            ));
+        }
+    }
+
+    let constraint_comment_cmd = Qail::get(
+        "pg_catalog.pg_constraint con \
+         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+         LEFT JOIN pg_catalog.pg_description d \
+           ON d.objoid = con.oid AND d.objsubid = 0",
+    )
+    .columns(["con.conname", "c.relname", "d.description"])
+    .filter("c.relnamespace", Operator::Eq, public_namespace_oid);
+
+    let constraint_comment_rows = driver
+        .fetch_all(&constraint_comment_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query constraint comments: {}", e))?;
+    for row in constraint_comment_rows {
+        let name = row.text(0);
+        let table = row.text(1);
+        let text = normalize_comment_text(&row.get_string(2).unwrap_or_default());
+        if !text.trim().is_empty() && base_tables.contains(&table) {
+            comments.push(qail_core::migrate::schema::Comment::on_raw(
+                format!("constraint {} on public.{}", name, table),
+                text,
+            ));
+        }
     }
 
     // ── Build Schema ────────────────────────────────────────────────────
@@ -778,6 +1110,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     schema.functions = functions;
     schema.triggers = triggers;
     schema.policies = policies;
+    schema.comments = comments;
 
     for (name, columns) in tables {
         let mut table = Table::new(&name);
@@ -795,51 +1128,243 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let table = row.text(1);
         let def = row.text(2);
 
-        // Skip primary key and unique constraint indexes (already captured)
-        if name.ends_with("_pkey") || name.ends_with("_key") {
+        if !base_tables.contains(&table) {
+            continue;
+        }
+
+        // Skip indexes owned by constraints (PK/UNIQUE/EXCLUSION).
+        if constraint_index_names.contains(&name) {
             continue;
         }
 
         let is_unique = def.to_uppercase().contains("UNIQUE");
-        let cols = parse_index_columns(&def);
+        let (cols, where_clause, method) = parse_index_parts(&def);
+        let has_expressions = cols.iter().any(|c| !is_simple_index_column(c));
 
-        let mut index = qail_core::migrate::Index::new(&name, &table, cols);
+        let mut index = if has_expressions {
+            qail_core::migrate::Index::expression(&name, &table, cols)
+        } else {
+            qail_core::migrate::Index::new(&name, &table, cols)
+        };
         if is_unique {
             index.unique = true;
         }
+        if let Some(predicate) = where_clause {
+            index.where_clause = Some(qail_core::migrate::schema::CheckExpr::Raw(predicate));
+        }
+        index.method = method;
         schema.add_index(index);
     }
 
     Ok(schema)
 }
 
-fn map_pg_type(udt_name: &str) -> &'static str {
-    match udt_name {
-        "int4" => "int",
-        "int8" | "bigint" => "bigint",
-        "serial" => "serial",
-        "bigserial" => "bigserial",
-        "float4" | "float8" | "numeric" => "float",
-        "bool" => "bool",
-        "json" | "jsonb" => "jsonb",
-        "timestamp" => "timestamp",
-        "timestamptz" => "timestamptz",
-        "date" => "date",
-        "uuid" => "uuid",
-        "text" => "text",
-        "varchar" | "character varying" => "varchar",
-        _ => "text",
+fn map_pg_column_type(
+    udt_name: &str,
+    data_type: &str,
+    char_max_len: Option<&str>,
+    numeric_precision: Option<&str>,
+    numeric_scale: Option<&str>,
+    nextval_default: bool,
+    enum_names: &std::collections::HashMap<String, Vec<String>>,
+) -> qail_core::migrate::ColumnType {
+    if let Some(values) = enum_names.get(udt_name) {
+        return qail_core::migrate::ColumnType::Enum {
+            name: udt_name.to_string(),
+            values: values.clone(),
+        };
+    }
+
+    if let Some(array_inner) = udt_name.strip_prefix('_') {
+        let inner = map_pg_column_type(array_inner, data_type, None, None, None, false, enum_names);
+        return qail_core::migrate::ColumnType::Array(Box::new(inner));
+    }
+
+    let lower_udt = udt_name.to_ascii_lowercase();
+    let lower_data_type = data_type.to_ascii_lowercase();
+    match lower_udt.as_str() {
+        "int2" | "smallint" => qail_core::migrate::ColumnType::Range("SMALLINT".to_string()),
+        "int4" | "integer" => {
+            if nextval_default {
+                qail_core::migrate::ColumnType::Serial
+            } else {
+                qail_core::migrate::ColumnType::Int
+            }
+        }
+        "int8" | "bigint" => {
+            if nextval_default {
+                qail_core::migrate::ColumnType::BigSerial
+            } else {
+                qail_core::migrate::ColumnType::BigInt
+            }
+        }
+        "varchar" | "bpchar" => {
+            let len = char_max_len.and_then(|s| s.parse::<u16>().ok());
+            qail_core::migrate::ColumnType::Varchar(len)
+        }
+        "numeric" => {
+            let p = numeric_precision.and_then(|s| s.parse::<u8>().ok());
+            let s = numeric_scale.and_then(|v| v.parse::<u8>().ok());
+            qail_core::migrate::ColumnType::Decimal(match (p, s) {
+                (Some(p), Some(s)) => Some((p, s)),
+                _ => None,
+            })
+        }
+        "float4" | "float8" | "real" => qail_core::migrate::ColumnType::Float,
+        "bool" | "boolean" => qail_core::migrate::ColumnType::Bool,
+        "json" | "jsonb" => qail_core::migrate::ColumnType::Jsonb,
+        "timestamp" | "timestamp without time zone" => qail_core::migrate::ColumnType::Timestamp,
+        "timestamptz" | "timestamp with time zone" => qail_core::migrate::ColumnType::Timestamptz,
+        "time" | "time without time zone" => qail_core::migrate::ColumnType::Time,
+        "date" => qail_core::migrate::ColumnType::Date,
+        "uuid" => qail_core::migrate::ColumnType::Uuid,
+        "text" => qail_core::migrate::ColumnType::Text,
+        "bytea" => qail_core::migrate::ColumnType::Bytea,
+        "interval" => qail_core::migrate::ColumnType::Interval,
+        "inet" => qail_core::migrate::ColumnType::Inet,
+        "cidr" => qail_core::migrate::ColumnType::Cidr,
+        "macaddr" => qail_core::migrate::ColumnType::MacAddr,
+        _ => {
+            let raw = map_pg_base_type_fallback(&lower_udt, &lower_data_type);
+            raw.parse()
+                .unwrap_or_else(|_| qail_core::migrate::ColumnType::Range(raw.to_uppercase()))
+        }
     }
 }
 
-fn parse_index_columns(def: &str) -> Vec<String> {
-    if let Some(start) = def.rfind('(')
-        && let Some(end) = def.rfind(')')
-    {
-        let cols_str = &def[start + 1..end];
-        return cols_str.split(',').map(|s| s.trim().to_string()).collect();
+fn map_pg_base_type_fallback(udt_name_lower: &str, data_type_lower: &str) -> String {
+    match udt_name_lower {
+        "character" | "char" | "character varying" => "varchar".to_string(),
+        _ if data_type_lower == "character varying" => "varchar".to_string(),
+        _ => udt_name_lower.to_string(),
     }
-    vec![]
+}
+
+fn parse_index_parts(
+    def: &str,
+) -> (
+    Vec<String>,
+    Option<String>,
+    qail_core::migrate::schema::IndexMethod,
+) {
+    let upper = def.to_uppercase();
+    let where_pos = upper.find(" WHERE ");
+    let (main, where_clause) = if let Some(pos) = where_pos {
+        (def[..pos].trim(), Some(def[pos + 7..].trim().to_string()))
+    } else {
+        (def.trim(), None)
+    };
+
+    let Some(start) = main.find('(') else {
+        return (
+            Vec::new(),
+            where_clause,
+            qail_core::migrate::schema::IndexMethod::BTree,
+        );
+    };
+
+    let method = if let Some(using_pos) = main.to_ascii_uppercase().find(" USING ") {
+        let method_chunk = main[using_pos + 7..start].trim().to_ascii_lowercase();
+        match method_chunk.as_str() {
+            "hash" => qail_core::migrate::schema::IndexMethod::Hash,
+            "gin" => qail_core::migrate::schema::IndexMethod::Gin,
+            "gist" => qail_core::migrate::schema::IndexMethod::Gist,
+            "brin" => qail_core::migrate::schema::IndexMethod::Brin,
+            "spgist" => qail_core::migrate::schema::IndexMethod::SpGist,
+            _ => qail_core::migrate::schema::IndexMethod::BTree,
+        }
+    } else {
+        qail_core::migrate::schema::IndexMethod::BTree
+    };
+
+    let mut depth = 0_i32;
+    let mut end = None;
+    for (idx, ch) in main.char_indices().skip(start) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let Some(end_idx) = end else {
+        return (Vec::new(), where_clause, method);
+    };
+
+    let inner = &main[start + 1..end_idx];
+    (split_top_level_csv(inner), where_clause, method)
+}
+
+fn split_top_level_csv(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0_i32;
+
+    for ch in s.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                let piece = cur.trim();
+                if !piece.is_empty() {
+                    out.push(piece.to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+
+    let tail = cur.trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
+}
+
+fn is_simple_index_column(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty()
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+fn is_internal_qail_relation(name: &str) -> bool {
+    name.starts_with("_qail_")
+}
+
+fn normalize_comment_text(s: &str) -> String {
+    s.replace('\r', " ")
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_trivial_not_null_check(check_clause: &str) -> bool {
+    let normalized = check_clause
+        .replace(['(', ')'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+
+    normalized.ends_with("IS NOT NULL")
+        && !normalized.contains(" AND ")
+        && !normalized.contains(" OR ")
+        && normalized.split_whitespace().count() <= 4
 }
 
 /// Map information_schema FK rule string to FkAction enum
@@ -864,13 +1389,15 @@ fn parse_check_expr(
 ) -> Option<qail_core::migrate::schema::CheckExpr> {
     use qail_core::migrate::schema::CheckExpr;
 
-    // Strip outer parens and whitespace
-    let s = clause.replace(['(', ')'], "").trim().to_string();
+    let s = strip_wrapping_parens(clause.trim()).trim().to_string();
+    if s.is_empty() {
+        return None;
+    }
 
     // Try BETWEEN-style: "col >= low AND col <= high"
     if let Some(and_pos) = s.find(" AND ") {
-        let left = s[..and_pos].trim();
-        let right = s[and_pos + 5..].trim();
+        let left = strip_wrapping_parens(s[..and_pos].trim());
+        let right = strip_wrapping_parens(s[and_pos + 5..].trim());
 
         if let (Some(l), Some(r)) = (parse_simple_cmp(left), parse_simple_cmp(right)) {
             // col >= low AND col <= high → Between
@@ -905,7 +1432,42 @@ fn parse_check_expr(
         return cmp_to_check_expr(cmp);
     }
 
-    None
+    Some(CheckExpr::Raw(s))
+}
+
+fn strip_wrapping_parens(mut s: &str) -> &str {
+    loop {
+        let trimmed = s.trim();
+        if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
+            return trimmed;
+        }
+
+        let mut depth = 0_i32;
+        let mut wraps_all = true;
+        for (idx, ch) in trimmed.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && idx != trimmed.len() - 1 {
+                        wraps_all = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            if depth < 0 {
+                wraps_all = false;
+                break;
+            }
+        }
+
+        if wraps_all && depth == 0 {
+            s = &trimmed[1..trimmed.len() - 1];
+            continue;
+        }
+        return trimmed;
+    }
 }
 
 #[derive(Debug)]
@@ -917,6 +1479,7 @@ enum CmpOp {
 }
 
 fn parse_simple_cmp(s: &str) -> Option<(String, CmpOp, i64)> {
+    let s = strip_wrapping_parens(s.trim());
     // Try >=, <=, >, < in order (longer first)
     let ops: &[(&str, CmpOp)] = &[
         (">=", CmpOp::Gte),
@@ -927,8 +1490,8 @@ fn parse_simple_cmp(s: &str) -> Option<(String, CmpOp, i64)> {
 
     for (op_str, op) in ops {
         if let Some(pos) = s.find(op_str) {
-            let col = s[..pos].trim().to_string();
-            let val_str = s[pos + op_str.len()..].trim();
+            let col = strip_wrapping_parens(s[..pos].trim()).to_string();
+            let val_str = strip_wrapping_parens(s[pos + op_str.len()..].trim());
             // Strip type casts like ::numeric, ::integer
             let val_clean = if let Some(cast_pos) = val_str.find("::") {
                 val_str[..cast_pos].trim()

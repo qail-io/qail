@@ -61,12 +61,12 @@ impl PooledConnection {
     /// Get a token to cancel the currently running query.
     pub fn cancel_token(&self) -> PgResult<crate::driver::CancelToken> {
         let conn = self.conn_ref()?;
-        let (process_id, secret_key) = conn.get_cancel_key();
+        let (process_id, secret_key_bytes) = conn.get_cancel_key_bytes();
         Ok(crate::driver::CancelToken {
             host: self.pool.config.host.clone(),
             port: self.pool.config.port,
             process_id,
-            secret_key,
+            secret_key_bytes: secret_key_bytes.to_vec(),
         })
     }
 

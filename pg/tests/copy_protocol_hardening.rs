@@ -5,6 +5,7 @@
 
 use qail_core::ast::Qail;
 use qail_pg::PgConnection;
+use qail_pg::protocol::PROTOCOL_VERSION_3_2;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -22,8 +23,11 @@ async fn read_startup_message(sock: &mut TcpStream) {
 
     let mut rest = vec![0u8; len - 4];
     sock.read_exact(&mut rest).await.unwrap();
-    let version = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]);
-    assert_eq!(version, 196608, "Expected protocol 3.0 StartupMessage");
+    let version = i32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]);
+    assert_eq!(
+        version, PROTOCOL_VERSION_3_2,
+        "Expected default protocol 3.2 StartupMessage"
+    );
 }
 
 async fn read_frontend_frame(sock: &mut TcpStream) -> (u8, Vec<u8>) {

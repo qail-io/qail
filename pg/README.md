@@ -45,6 +45,8 @@ This shows the exact protocol-byte path used by the driver.
 - **Query Pipelining** - 24x faster batch operations via `pipeline_batch()`
 - **SSL/TLS** - Production-ready with `tokio-rustls`
 - **Password Auth Modes** - Supports SCRAM-SHA-256, MD5, and cleartext server flows
+- **Protocol 3.2 Ready** - Requests startup protocol 3.2 by default with one-shot fallback to 3.0 on explicit protocol rejection
+- **Cancel-Key Compatibility** - Supports variable-length cancel keys via bytes-native APIs (legacy i32 wrappers retained for 4-byte keys)
 - **Connection Pooling** - Built-in `PgPool`
 - **Transactions** - Full `begin`/`commit`/`rollback` support
 

@@ -400,6 +400,36 @@ impl PgConnection {
                         ));
                     }
                 }
+                BackendMessage::NegotiateProtocolVersion {
+                    newest_minor_supported,
+                    unrecognized_protocol_options,
+                } => {
+                    if saw_auth_ok {
+                        return Err(PgError::Protocol(
+                            "Received NegotiateProtocolVersion after AuthenticationOk".to_string(),
+                        ));
+                    }
+                    let negotiated = u16::try_from(newest_minor_supported).map_err(|_| {
+                        PgError::Protocol(format!(
+                            "Invalid NegotiateProtocolVersion newest_minor_supported: {}",
+                            newest_minor_supported
+                        ))
+                    })?;
+                    if negotiated > self.requested_protocol_minor {
+                        return Err(PgError::Protocol(format!(
+                            "Server negotiated protocol minor {} above requested {}",
+                            negotiated, self.requested_protocol_minor
+                        )));
+                    }
+                    self.negotiated_protocol_minor = negotiated;
+                    if !unrecognized_protocol_options.is_empty() {
+                        tracing::debug!(
+                            negotiated_minor = negotiated,
+                            unrecognized_count = unrecognized_protocol_options.len(),
+                            "startup_negotiate_protocol_version"
+                        );
+                    }
+                }
                 BackendMessage::BackendKeyData {
                     process_id,
                     secret_key,
@@ -410,7 +440,17 @@ impl PgConnection {
                         ));
                     }
                     self.process_id = process_id;
-                    self.secret_key = secret_key;
+                    self.cancel_key_bytes = secret_key;
+                    self.secret_key = if self.cancel_key_bytes.len() == 4 {
+                        i32::from_be_bytes([
+                            self.cancel_key_bytes[0],
+                            self.cancel_key_bytes[1],
+                            self.cancel_key_bytes[2],
+                            self.cancel_key_bytes[3],
+                        ])
+                    } else {
+                        0
+                    };
                 }
                 BackendMessage::ReadyForQuery(TransactionStatus::Idle)
                 | BackendMessage::ReadyForQuery(TransactionStatus::InBlock)

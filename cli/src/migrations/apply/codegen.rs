@@ -7,9 +7,11 @@ use qail_core::ast::{
 use qail_core::migrate::parse_qail;
 use qail_core::migrate::policy::RlsPolicy;
 #[cfg(test)]
+use qail_core::migrate::schema::FkAction;
+#[cfg(test)]
 use qail_core::migrate::schema::GrantAction;
 use qail_core::migrate::schema::{
-    Comment, CommentTarget, EnumType, Extension, FkAction, Grant, MigrationHint, ResourceDef,
+    Comment, CommentTarget, EnumType, Extension, Grant, MigrationHint, ResourceDef,
     SchemaFunctionDef, SchemaTriggerDef, Sequence, ViewDef,
 };
 use qail_core::parser::schema::Schema;
@@ -121,23 +123,6 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
     {
         unsupported.push("multi-column foreign keys");
     }
-    if schema.tables.values().any(|t| {
-        t.columns.iter().any(|c| {
-            c.check.is_some()
-                || c.generated.is_some()
-                || c.foreign_key.as_ref().is_some_and(|fk| {
-                    fk.on_delete != FkAction::NoAction
-                        || fk.on_update != FkAction::NoAction
-                        || !matches!(
-                            fk.deferrable,
-                            qail_core::migrate::schema::Deferrable::NotDeferrable
-                        )
-                })
-        })
-    }) {
-        unsupported.push("advanced column constraints");
-    }
-
     if !unsupported.is_empty() {
         bail!(
             "Strict AST migration compiler does not support: {}",
@@ -146,12 +131,23 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
     }
 
     let mut cmds = Vec::new();
+    let mut early_functions = Vec::new();
+    let mut late_functions = Vec::new();
+    for func in &schema.functions {
+        if function_used_by_table_columns(schema, &func.name) {
+            early_functions.push(func.clone());
+        } else {
+            late_functions.push(func.clone());
+        }
+    }
 
     // Order matters for dependency correctness:
-    // extensions/types/sequences -> tables/indexes -> views/functions/triggers/policies/comments -> hints.
+    // extensions/types/sequences + table-default functions -> tables/indexes ->
+    // views + remaining functions -> triggers/policies/comments -> hints.
     cmds.extend(compile_extensions_strict(&schema.extensions)?);
     cmds.extend(compile_enums_strict(&schema.enums)?);
     cmds.extend(compile_sequences_strict(&schema.sequences)?);
+    cmds.extend(compile_functions_strict(&early_functions)?);
     cmds.extend(qail_core::migrate::schema::schema_to_commands(schema));
 
     // Preserve schema-level RLS toggles for CREATE TABLE blocks.
@@ -177,7 +173,7 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
     }
 
     cmds.extend(compile_views_strict(&schema.views)?);
-    cmds.extend(compile_functions_strict(&schema.functions)?);
+    cmds.extend(compile_functions_strict(&late_functions)?);
     cmds.extend(compile_triggers_strict(&schema.triggers)?);
     cmds.extend(compile_policies_strict(&schema.policies)?);
     cmds.extend(compile_grants_strict(&schema.grants)?);
@@ -226,6 +222,38 @@ fn format_resource_summary(resources: &[ResourceDef]) -> String {
         .map(|r| format!("{} {}", r.kind, r.name))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn function_used_by_table_columns(
+    schema: &qail_core::migrate::schema::Schema,
+    func_name: &str,
+) -> bool {
+    for table in schema.tables.values() {
+        for col in &table.columns {
+            if let Some(default) = &col.default
+                && contains_function_call(default, func_name)
+            {
+                return true;
+            }
+            if let Some(generated) = &col.generated {
+                let expr = match generated {
+                    qail_core::migrate::schema::Generated::AlwaysStored(expr) => expr.as_str(),
+                    qail_core::migrate::schema::Generated::AlwaysIdentity
+                    | qail_core::migrate::schema::Generated::ByDefaultIdentity => "",
+                };
+                if !expr.is_empty() && contains_function_call(expr, func_name) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn contains_function_call(expr: &str, func_name: &str) -> bool {
+    let expr_l = expr.to_lowercase();
+    let name_l = func_name.to_lowercase();
+    expr_l.contains(&format!("{name_l}(")) || expr_l.contains(&format!("{name_l} ("))
 }
 
 fn compile_extensions_strict(extensions: &[Extension]) -> Result<Vec<Qail>> {
@@ -287,6 +315,16 @@ fn compile_comments_strict(comments: &[Comment]) -> Result<Vec<Qail>> {
                     );
                 }
                 format!("{}.{}", table, column)
+            }
+            CommentTarget::Raw(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() || trimmed.contains('\n') || trimmed.contains(';') {
+                    bail!(
+                        "Strict AST migration compiler rejects unsafe raw comment target '{}'",
+                        raw
+                    );
+                }
+                trimmed.to_string()
             }
         };
         cmds.push(Qail {
@@ -499,12 +537,6 @@ fn compile_functions_strict(functions: &[SchemaFunctionDef]) -> Result<Vec<Qail>
                 func.name
             );
         }
-        if func.volatility.is_some() {
-            bail!(
-                "Strict AST migration compiler does not support function volatility yet (function '{}')",
-                func.name
-            );
-        }
         if func.name.trim().is_empty() || func.returns.trim().is_empty() {
             bail!(
                 "Strict AST migration compiler rejects invalid function definition '{}'",
@@ -530,6 +562,7 @@ fn compile_functions_strict(functions: &[SchemaFunctionDef]) -> Result<Vec<Qail>
                 returns: func.returns.clone(),
                 body: func.body.clone(),
                 language: Some(func.language.clone()),
+                volatility: func.volatility.clone(),
             }),
             ..Default::default()
         });
@@ -567,6 +600,17 @@ fn compile_triggers_strict(triggers: &[SchemaTriggerDef]) -> Result<Vec<Qail>> {
 
         let timing = parse_trigger_timing(&trigger.timing, &trigger.name)?;
         let events = parse_trigger_events(&trigger.events, &trigger.name)?;
+        let mut update_columns = Vec::new();
+        for col in &trigger.update_columns {
+            if !is_valid_ident(col) {
+                bail!(
+                    "Strict AST migration compiler rejects invalid trigger UPDATE OF column '{}' on '{}'",
+                    col,
+                    trigger.name
+                );
+            }
+            update_columns.push(col.clone());
+        }
 
         cmds.push(Qail {
             action: Action::CreateTrigger,
@@ -575,6 +619,7 @@ fn compile_triggers_strict(triggers: &[SchemaTriggerDef]) -> Result<Vec<Qail>> {
                 table: trigger.table.clone(),
                 timing,
                 events,
+                update_columns,
                 for_each_row: trigger.for_each_row,
                 execute_function: trigger.execute_function.clone(),
             }),
@@ -755,9 +800,25 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         });
     }
 
-    if let Some(function_name) = target.strip_prefix("function ").map(str::trim) {
-        let function_name = normalize_optional_if_exists_prefix(function_name);
-        if !is_valid_ident_path(&function_name) {
+    if let Some(function_target) = target.strip_prefix("function ").map(str::trim) {
+        let function_target = normalize_optional_if_exists_prefix(function_target);
+
+        if let Some((fn_name, _arg_sig)) = split_function_signature(&function_target) {
+            if !is_valid_ident_path(fn_name) || !is_valid_function_signature(&function_target) {
+                bail!(
+                    "Strict AST migration compiler rejects invalid function signature in drop hint: '{}'",
+                    target
+                );
+            }
+            return Ok(Qail {
+                action: Action::DropFunction,
+                table: fn_name.to_string(),
+                payload: Some(function_target),
+                ..Default::default()
+            });
+        }
+
+        if !is_valid_ident_path(&function_target) {
             bail!(
                 "Strict AST migration compiler rejects invalid function identifier in drop hint: '{}'",
                 target
@@ -765,7 +826,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         }
         return Ok(Qail {
             action: Action::DropFunction,
-            table: function_name.to_string(),
+            table: function_target.to_string(),
             ..Default::default()
         });
     }
@@ -923,6 +984,33 @@ fn normalize_optional_if_exists_prefix(target: &str) -> String {
     }
 }
 
+fn split_function_signature(target: &str) -> Option<(&str, &str)> {
+    let open = target.find('(')?;
+    if !target.ends_with(')') || open == 0 {
+        return None;
+    }
+    let name = target[..open].trim();
+    let args = &target[open + 1..target.len() - 1];
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, args))
+}
+
+fn is_valid_function_signature(target: &str) -> bool {
+    let Some((name, args)) = split_function_signature(target) else {
+        return false;
+    };
+    if !is_valid_ident_path(name) {
+        return false;
+    }
+    if args.contains(';') || args.contains('\n') || args.contains('\r') {
+        return false;
+    }
+    args.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == ',' || c == ' ')
+}
+
 fn is_valid_ident_path(path: &str) -> bool {
     let mut seen = false;
     for part in path.split('.') {
@@ -1029,6 +1117,7 @@ fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
                 columns: idx.columns.clone(),
                 unique: idx.unique,
                 index_type: None,
+                where_clause: None,
             }),
             ..Default::default()
         });
@@ -1184,6 +1273,7 @@ fn migrate_schema_to_sql(schema: &qail_core::migrate::schema::Schema) -> String 
         let target_sql = match &comment.target {
             CommentTarget::Table(name) => format!("TABLE {}", name),
             CommentTarget::Column { table, column } => format!("COLUMN {}.{}", table, column),
+            CommentTarget::Raw(raw) => raw.clone(),
         };
         parts.push(format!(
             "COMMENT ON {} IS '{}';",
