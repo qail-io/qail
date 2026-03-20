@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.2] - 2026-03-20
+
 ### Added
 
 - **PG protocol 3.2 negotiation:** `qail-pg` now decodes backend `NegotiateProtocolVersion` (`'v'`) during startup and tracks negotiated protocol minor on `PgConnection`.
@@ -21,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PG compatibility fallback:** on explicit protocol-version rejection during startup, the driver performs one reconnect retry with protocol `3.0`; non-protocol startup failures do not trigger downgrade retry.
 - **PG cancel model:** backend cancel secret key handling now supports variable-length keys (`4..=256` bytes) for protocol 3.2 compatibility.
 - **Legacy cancel wrappers retained:** i32 cancel access/call APIs remain available for source compatibility, but are compatibility-only for 4-byte keys.
+- **Versioning:** bumped Rust crates to `0.26.2`.
+- **Docs/readmes:** refreshed installation snippets and version references to `0.26.2`.
 
 ## [0.26.1] - 2026-03-20
 

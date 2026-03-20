@@ -4,12 +4,10 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v0.26.1)
+## Current Highlights (v0.26.2)
 
-- Patch release: fixed publish CI breakage after tenant-only cutover (`RlsContext::tenant(...)` migration in remaining examples/tests) and aligned gateway binary examples to `QWB1`.
-- Tenant scope is now runtime-canonical on `tenant_id`; legacy `operator_id` compatibility aliases were removed.
-- Workflow query payload runtime now enforces QAIL wire text (`QAIL-CMD/1`) and includes legacy payload detection helpers for cutover audits.
-- Migration apply path is strict AST-first, with stronger hint support, post-apply verification gates, and improved backfill support for uuid/text PK cursors.
-- Gateway policy evaluation no longer prematurely denies requests when later allow policies apply.
-- Analyzer diagnostics are tighter, with reduced false positives from SQL comments/string literals.
-- Direct SDK track is TypeScript, Swift, and Kotlin; Node.js native binding/WASM remain deferred.
+- PostgreSQL startup now requests protocol `3.2` by default, with one-shot downgrade retry to `3.0` on explicit protocol-version rejection.
+- Native startup decode/handling for backend `NegotiateProtocolVersion` (`'v'`) is now implemented.
+- Cancel key handling is bytes-native (`4..=256`), with public bytes-based cancel APIs for protocol 3.2 correctness.
+- Legacy i32 cancel access/cancel APIs are retained as compatibility wrappers for 4-byte key behavior.
+- Hardening/integration tests now cover protocol negotiation, downgrade boundaries, and startup/copy/replication harnesses under the 3.2 default.
