@@ -418,7 +418,7 @@ mod tests {
         let code = r#"
             fn query() {
                 let sql = "SELECT id, name FROM users WHERE status = 'active'";
-                sqlx::query(sql);
+                query(sql);
             }
         "#;
 

@@ -1,8 +1,8 @@
 //! QAIL Language Server Core
 
 use qail_core::analyzer::{
-    QueryCall, detect_query_calls, extract_qail_candidate_from_line, looks_like_qail_query,
-    strip_text_line_comment,
+    QueryCall, TextLiteral, detect_query_calls, extract_text_literals, literal_offset_to_line_col,
+    looks_like_qail_query, looks_like_sql_query, trim_query_bounds,
 };
 use qail_core::parse;
 use qail_core::schema::Schema;
@@ -85,17 +85,7 @@ impl QailLanguageServer {
             return extract_rust_query_at_line(content, line);
         }
 
-        let target_line = content.lines().nth(line)?;
-        let code_line = strip_text_line_comment(target_line);
-        let (start_column, query) = extract_qail_candidate_from_line(code_line)?;
-        Some(EmbeddedQuery {
-            kind: EmbeddedQueryKind::Qail,
-            text: query.clone(),
-            start_line: line,
-            start_column,
-            end_line: line,
-            end_column: start_column + query.len(),
-        })
+        extract_text_query_at_line(content, line)
     }
 
     /// Get diagnostics for a document. Pass the file URI to enable N+1 detection for `.rs` files.
@@ -152,16 +142,21 @@ impl QailLanguageServer {
 fn collect_text_qail_diagnostics(text: &str) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    for (line_num, line) in text.lines().enumerate() {
-        let code_line = strip_text_line_comment(line);
-        if let Some((col, query_text)) = extract_qail_candidate_from_line(code_line)
-            && let Err(e) = parse(&query_text)
+    for literal in extract_text_literals(text) {
+        let Some((kind, query_text, start_line, start_col, end_line, end_col)) =
+            literal_query_span(&literal)
+        else {
+            continue;
+        };
+
+        if kind == EmbeddedQueryKind::Qail
+            && let Err(e) = parse(query_text)
         {
             diagnostics.push(diagnostic_from_parse_error(
-                line_num,
-                col,
-                line_num,
-                col + query_text.len(),
+                start_line.saturating_sub(1),
+                start_col.saturating_sub(1),
+                end_line.saturating_sub(1),
+                end_col.saturating_sub(1),
                 e.to_string(),
             ));
         }
@@ -247,6 +242,54 @@ fn is_line_in_query_call(query: &QueryCall, line: usize) -> bool {
     (start..=end).contains(&line)
 }
 
+fn extract_text_query_at_line(content: &str, line: usize) -> Option<EmbeddedQuery> {
+    for literal in extract_text_literals(content) {
+        if !is_line_in_literal(&literal, line) {
+            continue;
+        }
+
+        let Some((kind, query_text, start_line, start_col, end_line, end_col)) =
+            literal_query_span(&literal)
+        else {
+            continue;
+        };
+
+        return Some(EmbeddedQuery {
+            kind,
+            text: query_text.to_string(),
+            start_line: start_line.saturating_sub(1),
+            start_column: start_col.saturating_sub(1),
+            end_line: end_line.saturating_sub(1),
+            end_column: end_col.saturating_sub(1),
+        });
+    }
+
+    None
+}
+
+fn is_line_in_literal(literal: &TextLiteral, zero_based_line: usize) -> bool {
+    let line = zero_based_line + 1;
+    (literal.start_line..=literal.end_line).contains(&line)
+}
+
+fn literal_query_span(
+    literal: &TextLiteral,
+) -> Option<(EmbeddedQueryKind, &str, usize, usize, usize, usize)> {
+    let (start, end) = trim_query_bounds(&literal.text)?;
+    let query_text = literal.text.get(start..end)?;
+    let kind = if looks_like_qail_query(query_text) {
+        EmbeddedQueryKind::Qail
+    } else if looks_like_sql_query(query_text) {
+        EmbeddedQueryKind::Sql
+    } else {
+        return None;
+    };
+
+    let (start_line, start_col) = literal_offset_to_line_col(literal, start);
+    let (end_line, end_col) = literal_offset_to_line_col(literal, end);
+    Some((kind, query_text, start_line, start_col, end_line, end_col))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +297,7 @@ mod tests {
     #[test]
     fn rust_query_span_detection_covers_chain_lines() {
         let src = r#"async fn run(pool: &Pool) {
-    let rows = sqlx::query("SELECT * FROM users")
+    let rows = query("SELECT * FROM users")
         .fetch_all(pool)
         .await;
 }"#;
@@ -267,7 +310,7 @@ mod tests {
     #[test]
     fn rust_query_kind_marks_qail_text() {
         let src = r#"async fn run(pool: &Pool) {
-    let rows = sqlx::query("get users fields id")
+    let rows = query("get users fields id")
         .fetch_all(pool)
         .await;
 }"#;
@@ -280,6 +323,49 @@ mod tests {
     fn qail_classifier_rejects_sql_prefix() {
         assert!(!looks_like_qail_query("SELECT id FROM users"));
         assert!(looks_like_qail_query("get users fields id"));
+    }
+
+    #[test]
+    fn text_query_extraction_supports_multiline_literals() {
+        let src = r#"const q = `
+get users
+fields id, email
+where active = true
+`;"#;
+
+        let query = extract_text_query_at_line(src, 2).expect("query expected");
+        assert_eq!(query.kind, EmbeddedQueryKind::Qail);
+        assert_eq!(
+            query.text,
+            "get users\nfields id, email\nwhere active = true"
+        );
+    }
+
+    #[test]
+    fn text_query_extraction_marks_sql_literals() {
+        let src = r#"const sql = "
+SELECT id, email
+FROM users
+WHERE active = true
+";"#;
+
+        let query = extract_text_query_at_line(src, 2).expect("sql query expected");
+        assert_eq!(query.kind, EmbeddedQueryKind::Sql);
+        assert_eq!(
+            query.text,
+            "SELECT id, email\nFROM users\nWHERE active = true"
+        );
+    }
+
+    #[test]
+    fn text_diagnostics_ignore_comment_literals() {
+        let src = r#"
+// "get users fields id where"
+const msg = "hello";
+"#;
+
+        let diags = collect_text_qail_diagnostics(src);
+        assert!(diags.is_empty(), "{diags:?}");
     }
 }
 

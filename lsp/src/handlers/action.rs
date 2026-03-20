@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn query_range_extends_through_optional_suffix() {
-        let lines = vec!["let rows = sqlx::query(\"SELECT 1\").fetch_all(&pool).await?;"];
+        let lines = vec!["let rows = query(\"SELECT 1\").fetch_all(&pool).await?;"];
         let await_end = lines[0]
             .find(".await")
             .map(|idx| idx + ".await".len())

@@ -25,7 +25,7 @@ Qail is a **native AST PostgreSQL pipeline**. Instead of writing ad-hoc SQL stri
 
 ```rust
 // String-based (every other driver): parse → plan → execute
-sqlx::query!("SELECT id, email FROM users WHERE active = $1", true)
+"SELECT id, email FROM users WHERE active = $1"
 
 // Qail: AST → protocol bytes → server parse/plan/execute
 // (no app-side SQL interpolation surface)

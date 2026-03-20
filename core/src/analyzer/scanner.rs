@@ -10,7 +10,12 @@ use crate::parse;
 use super::rust_ast::RustAnalyzer;
 use super::rust_ast::detect_raw_sql_in_file;
 use super::rust_ast::sql_semantics::{SqlStmtKind, classify_sql_kind};
-use super::text_qail::{extract_qail_candidate_from_line, strip_text_line_comment};
+#[cfg(test)]
+use super::text_qail::extract_qail_candidate_from_line;
+use super::text_qail::{
+    TextLiteral, extract_text_literals, literal_offset_to_line_col, looks_like_qail_query,
+    trim_query_bounds,
+};
 
 /// Analysis mode for the codebase scanner
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -175,59 +180,37 @@ impl CodebaseScanner {
     fn scan_text_file(&self, path: &Path, content: &str) -> Vec<CodeReference> {
         let mut refs = Vec::new();
 
-        for (line_num, line) in content.lines().enumerate() {
-            let line_number = line_num + 1;
-            let code_line = strip_text_line_comment(line);
-            let code_line = code_line.trim();
-            if code_line.is_empty() {
-                continue;
-            }
-
-            // Skip excessively long lines to keep scans bounded.
-            if code_line.len() > 4096 {
-                continue;
-            }
-
-            if let Some(qail_ref) = self.scan_text_qail_line(path, line_number, code_line) {
-                refs.push(qail_ref);
-            }
-
-            refs.extend(self.scan_text_sql_line(path, line_number, code_line));
+        for literal in extract_text_literals(content) {
+            refs.extend(self.scan_text_literal(path, &literal));
         }
 
         refs
     }
 
-    fn scan_text_qail_line(
-        &self,
-        path: &Path,
-        line_number: usize,
-        line: &str,
-    ) -> Option<CodeReference> {
-        let (_, query) = extract_qail_candidate_from_line(line)?;
-        let cmd = parse(&query).ok()?;
-        command_to_reference(path, line_number, &cmd)
-    }
-
-    fn scan_text_sql_line(
-        &self,
-        path: &Path,
-        line_number: usize,
-        line: &str,
-    ) -> Vec<CodeReference> {
+    fn scan_text_literal(&self, path: &Path, literal: &TextLiteral) -> Vec<CodeReference> {
         let mut refs = Vec::new();
-        let mut seen = HashSet::new();
+        let Some((start, end)) = trim_query_bounds(&literal.text) else {
+            return refs;
+        };
+        let Some(candidate) = literal.text.get(start..end) else {
+            return refs;
+        };
 
-        for candidate in extract_sql_candidates_from_line(line) {
-            let normalized = normalize_whitespace(&candidate);
-            if normalized.is_empty() || !seen.insert(normalized.clone()) {
-                continue;
-            }
+        // Keep scans bounded for very large embedded literals.
+        if candidate.len() > 16384 {
+            return refs;
+        }
+        let (line_number, _) = literal_offset_to_line_col(literal, start);
 
-            let Some((_kind, table, columns)) = parse_sql_reference(&normalized) else {
-                continue;
-            };
+        if looks_like_qail_query(candidate)
+            && let Ok(cmd) = parse(candidate)
+            && let Some(qail_ref) = command_to_reference(path, line_number, &cmd)
+        {
+            refs.push(qail_ref);
+        }
 
+        let normalized = normalize_whitespace(candidate);
+        if let Some((_kind, table, columns)) = parse_sql_reference(&normalized) {
             refs.push(CodeReference {
                 file: path.to_path_buf(),
                 line: line_number,
@@ -346,59 +329,6 @@ fn extract_payload_columns(cmd: &crate::Qail) -> Vec<String> {
 
 fn is_ident_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
-}
-
-fn extract_sql_candidates_from_line(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
-
-    let trimmed = line.trim();
-    if classify_sql_kind(trimmed).is_some() {
-        out.push(trimmed.to_string());
-    }
-
-    for literal in extract_quoted_literals(line) {
-        if classify_sql_kind(&literal).is_some() {
-            out.push(literal);
-        }
-    }
-
-    out
-}
-
-fn extract_quoted_literals(line: &str) -> Vec<String> {
-    let bytes = line.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        let quote = match bytes[i] {
-            b'"' | b'\'' | b'`' => bytes[i],
-            _ => {
-                i += 1;
-                continue;
-            }
-        };
-
-        let start = i + 1;
-        i += 1;
-
-        while i < bytes.len() {
-            if bytes[i] == b'\\' {
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-            if bytes[i] == quote {
-                if let Some(lit) = line.get(start..i) {
-                    out.push(lit.to_string());
-                }
-                i += 1;
-                break;
-            }
-            i += 1;
-        }
-    }
-
-    out
 }
 
 fn normalize_whitespace(input: &str) -> String {
@@ -748,6 +678,51 @@ mod tests {
     }
 
     #[test]
+    fn test_non_rust_scan_supports_multiline_literals() {
+        let scanner = CodebaseScanner::new();
+        let tmp_name = format!(
+            "qail_scanner_text_multiline_{}_{}.ts",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(tmp_name);
+
+        let source = r#"const q = `
+get users
+fields id, email
+where active = true
+`;
+const s = "
+SELECT id, email
+FROM users
+WHERE active = true
+";"#;
+
+        std::fs::write(&path, source).expect("write temp ts file");
+        let refs = scanner.scan(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let qail_refs = refs
+            .iter()
+            .filter(|r| r.query_type == QueryType::Qail)
+            .collect::<Vec<_>>();
+        assert_eq!(qail_refs.len(), 1);
+        assert_eq!(qail_refs[0].table, "users");
+        assert_eq!(qail_refs[0].columns, vec!["id", "email"]);
+
+        let raw_sql_refs = refs
+            .iter()
+            .filter(|r| r.query_type == QueryType::RawSql)
+            .collect::<Vec<_>>();
+        assert_eq!(raw_sql_refs.len(), 1);
+        assert_eq!(raw_sql_refs[0].table, "users");
+        assert_eq!(raw_sql_refs[0].columns, vec!["id", "email"]);
+    }
+
+    #[test]
     fn test_rust_scan_uses_semantic_sql_detection() {
         let scanner = CodebaseScanner::new();
         let tmp_name = format!(
@@ -764,7 +739,7 @@ mod tests {
             // SELECT id FROM comments_should_not_match
             fn demo() {
                 let sql = "SELECT id, email FROM users WHERE active = true";
-                let _ = sqlx::query(sql);
+                let _ = query(sql);
             }
         "#;
 

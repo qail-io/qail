@@ -4,7 +4,7 @@ fn main() {
     // Test: Multi-line raw string like in the user's code
     let code = r##"
 fn get_insights() {
-    let insights = sqlx::query_as::<_, Insights>(
+    let insights = query_as::<_, Insights>(
         r#"
             WITH stats AS (
                 SELECT

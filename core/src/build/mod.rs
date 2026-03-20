@@ -25,6 +25,8 @@ mod codegen;
 pub(crate) mod nplus1_semantic;
 /// Shared query IR used across build-time rules.
 mod query_ir;
+/// Shared Rust lexical masking helpers.
+mod rust_lex;
 /// Text-based source scanner.
 pub mod scanner;
 /// Schema types and parsing.

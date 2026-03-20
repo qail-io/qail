@@ -88,21 +88,6 @@ struct QueryFnPattern {
 
 const QUERY_PATTERNS: &[QueryFnPattern] = &[
     QueryFnPattern {
-        full: "sqlx::query_scalar",
-        query_fn: "query_scalar",
-        requires_colon_guard: false,
-    },
-    QueryFnPattern {
-        full: "sqlx::query_as",
-        query_fn: "query_as",
-        requires_colon_guard: false,
-    },
-    QueryFnPattern {
-        full: "sqlx::query",
-        query_fn: "query",
-        requires_colon_guard: false,
-    },
-    QueryFnPattern {
         full: "query_scalar",
         query_fn: "query_scalar",
         requires_colon_guard: true,
@@ -822,7 +807,7 @@ mod tests {
     fn test_detect_simple_query() {
         let code = r#"
             async fn test() {
-                let rows = sqlx::query_as::<_, User>("SELECT * FROM users")
+                let rows = query_as::<_, User>("SELECT * FROM users")
                     .fetch_all(&pool)
                     .await;
             }
@@ -841,7 +826,7 @@ mod tests {
     fn test_detect_query_with_binds() {
         let code = r#"
             async fn test() {
-                let rows = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+                let rows = query_as::<_, User>("SELECT * FROM users WHERE id = $1")
                     .bind(user_id)
                     .fetch_all(&pool)
                     .await;
@@ -858,7 +843,7 @@ mod tests {
     fn test_detect_multiple_binds() {
         let code = r#"
             async fn test() {
-                let rows = sqlx::query("SELECT * FROM users WHERE name = $1 AND age > $2")
+                let rows = query("SELECT * FROM users WHERE name = $1 AND age > $2")
                     .bind(name)
                     .bind(min_age)
                     .fetch_all(&pool)
@@ -875,7 +860,7 @@ mod tests {
     fn test_detect_execute_update_chain() {
         let code = r#"
             async fn test() {
-                let _ = sqlx::query("UPDATE users SET active = true WHERE id = $1")
+                let _ = query("UPDATE users SET active = true WHERE id = $1")
                     .bind(user_id)
                     .execute(&pool)
                     .await;
@@ -892,7 +877,7 @@ mod tests {
     fn detects_fetch_method_with_turbofish() {
         let code = r#"
             async fn test() {
-                let rows = sqlx::query_as::<_, User>("SELECT * FROM users")
+                let rows = query_as::<_, User>("SELECT * FROM users")
                     .fetch_all::<User>(&pool)
                     .await;
             }
@@ -907,7 +892,7 @@ mod tests {
     fn ignores_fetch_method_tokens_inside_bind_string() {
         let code = r#"
             async fn test() {
-                let rows = sqlx::query("SELECT * FROM users")
+                let rows = query("SELECT * FROM users")
                     .bind(".fetch_one(")
                     .fetch_all(&pool)
                     .await;
@@ -923,7 +908,7 @@ mod tests {
     fn ignores_fetch_method_tokens_inside_comments() {
         let code = r#"
             async fn test() {
-                let rows = sqlx::query("SELECT * FROM users")
+                let rows = query("SELECT * FROM users")
                     // .fetch_one(&pool)
                     .fetch_all(&pool)
                     .await;
@@ -939,7 +924,7 @@ mod tests {
     fn ignores_non_awaited_query_chains() {
         let code = r#"
             async fn test() {
-                let q = sqlx::query("SELECT 1").bind(id);
+                let q = query("SELECT 1").bind(id);
                 let _ = q;
             }
         "#;

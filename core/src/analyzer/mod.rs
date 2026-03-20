@@ -19,8 +19,8 @@ pub use scanner::{
     AnalysisMode, CodeReference, CodebaseScanner, FileAnalysis, QueryType, ScanResult,
 };
 pub use text_qail::{
-    QAIL_ACTION_PREFIXES, extract_qail_candidate_from_line, looks_like_qail_query,
-    strip_text_line_comment,
+    QAIL_ACTION_PREFIXES, TextLiteral, extract_qail_candidate_from_line, extract_text_literals,
+    literal_offset_to_line_col, looks_like_qail_query, looks_like_sql_query, trim_query_bounds,
 };
 // N+1 detection
 pub use rust_ast::{
