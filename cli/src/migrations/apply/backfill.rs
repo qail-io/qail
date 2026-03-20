@@ -786,6 +786,154 @@ mod pk_type_tests {
     }
 }
 
+#[cfg(test)]
+mod runtime_backfill_tests {
+    use super::{BackfillSpec, BackfillTransform, BackfillTransformOp, run_chunked_backfill};
+    use qail_core::ast::{Action, Constraint, Expr, Qail};
+
+    fn test_suffix() -> String {
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{}_{}", std::process::id(), now_nanos)
+    }
+
+    #[tokio::test]
+    async fn chunked_backfill_supports_uuid_pk_runtime() {
+        let Some(url) = std::env::var("QAIL_TEST_DB_URL").ok() else {
+            eprintln!("Skipping UUID backfill runtime test (set QAIL_TEST_DB_URL)");
+            return;
+        };
+
+        let mut pg = qail_pg::PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+
+        let suffix = test_suffix();
+        let table = format!("bf_uuid_{}", suffix);
+        let migration_version = format!("bf_uuid_{}.backfill.up.qail", suffix);
+
+        let create_table = Qail {
+            action: Action::Make,
+            table: table.clone(),
+            columns: vec![
+                Expr::Def {
+                    name: "id".to_string(),
+                    data_type: "uuid".to_string(),
+                    constraints: vec![Constraint::PrimaryKey],
+                },
+                Expr::Def {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![],
+                },
+                Expr::Def {
+                    name: "name_ci".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+            ],
+            ..Default::default()
+        };
+        pg.execute(&create_table).await.expect("create uuid table");
+
+        let rows = vec![
+            ("00000000-0000-0000-0000-000000000001", "  Alice  ", "alice"),
+            ("00000000-0000-0000-0000-000000000002", " Bob", "bob"),
+            ("00000000-0000-0000-0000-000000000003", "CAROL ", "carol"),
+        ];
+
+        for (id, name, _) in &rows {
+            let insert = Qail::add(table.as_str())
+                .set_value("id", *id)
+                .set_value("name", *name);
+            pg.execute(&insert).await.expect("insert test row");
+        }
+
+        let spec = BackfillSpec {
+            table: table.clone(),
+            pk_column: "id".to_string(),
+            set_column: "name_ci".to_string(),
+            source_column: "name".to_string(),
+            transform: BackfillTransform::Pipeline(vec![
+                BackfillTransformOp::Lower,
+                BackfillTransformOp::Trim,
+            ]),
+            where_null_column: Some("name_ci".to_string()),
+            chunk_size: 2,
+        };
+
+        let run = run_chunked_backfill(&mut pg, &migration_version, &spec)
+            .await
+            .expect("run uuid backfill");
+        assert_eq!(run.rows_updated, 3);
+        assert!(
+            run.chunks >= 2,
+            "chunk size=2 with 3 rows should use >=2 chunks"
+        );
+
+        let verify_rows = pg
+            .fetch_all(
+                &Qail::get(table.as_str())
+                    .columns(["id", "name_ci"])
+                    .order_asc("id"),
+            )
+            .await
+            .expect("query updated rows");
+        assert_eq!(verify_rows.len(), rows.len());
+        for (idx, row) in verify_rows.iter().enumerate() {
+            assert_eq!(
+                row.get_string(1).as_deref(),
+                Some(rows[idx].2),
+                "row {} should be normalized into name_ci",
+                idx
+            );
+        }
+
+        let checkpoint = pg
+            .fetch_all(
+                &Qail::get("_qail_backfill_checkpoints")
+                    .columns(["last_pk", "last_pk_text", "rows_processed", "finished_at"])
+                    .where_eq("migration_version", migration_version.as_str())
+                    .limit(1),
+            )
+            .await
+            .expect("query checkpoint");
+        assert_eq!(checkpoint.len(), 1, "checkpoint row should exist");
+        let cp = &checkpoint[0];
+        assert_eq!(cp.get_i64(0), Some(0), "uuid cursor uses text checkpoint");
+        assert_eq!(
+            cp.get_i64(2),
+            Some(3),
+            "rows_processed should match updated rows"
+        );
+        assert!(
+            cp.get_string(1).is_some(),
+            "last_pk_text should be set for uuid/text PK backfill"
+        );
+        assert!(
+            cp.get_string(3).is_some(),
+            "finished_at should be set after successful backfill"
+        );
+
+        let _ = pg.execute(&Qail::del(table.as_str())).await;
+        let _ = pg
+            .execute(
+                &Qail::del("_qail_backfill_checkpoints")
+                    .where_eq("migration_version", migration_version.as_str()),
+            )
+            .await;
+        let _ = pg
+            .execute(&Qail {
+                action: Action::Drop,
+                table,
+                ..Default::default()
+            })
+            .await;
+    }
+}
+
 pub(super) fn enforce_contract_safety(
     migration_name: &str,
     sql: &str,

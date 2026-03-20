@@ -677,7 +677,8 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
 
     if let Some(view_name) = target.strip_prefix("materialized view ").map(str::trim) {
-        if !is_valid_ident_path(view_name) {
+        let view_name = normalize_optional_if_exists_prefix(view_name);
+        if !is_valid_ident_path(&view_name) {
             bail!(
                 "Strict AST migration compiler rejects invalid materialized view identifier in drop hint: '{}'",
                 target
@@ -691,7 +692,8 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
 
     if let Some(view_name) = target.strip_prefix("view ").map(str::trim) {
-        if !is_valid_ident_path(view_name) {
+        let view_name = normalize_optional_if_exists_prefix(view_name);
+        if !is_valid_ident_path(&view_name) {
             bail!(
                 "Strict AST migration compiler rejects invalid view identifier in drop hint: '{}'",
                 target
@@ -705,6 +707,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
 
     if let Some(ext_name) = target.strip_prefix("extension ").map(str::trim) {
+        let ext_name = normalize_optional_if_exists_prefix(ext_name);
         if ext_name.is_empty() {
             bail!(
                 "Strict AST migration compiler rejects empty extension identifier in drop hint: '{}'",
@@ -719,7 +722,8 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
 
     if let Some(seq_name) = target.strip_prefix("sequence ").map(str::trim) {
-        if !is_valid_ident_path(seq_name) {
+        let seq_name = normalize_optional_if_exists_prefix(seq_name);
+        if !is_valid_ident_path(&seq_name) {
             bail!(
                 "Strict AST migration compiler rejects invalid sequence identifier in drop hint: '{}'",
                 target
@@ -737,7 +741,8 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         .or_else(|| target.strip_prefix("type "))
         .map(str::trim)
     {
-        if !is_valid_ident_path(enum_name) {
+        let enum_name = normalize_optional_if_exists_prefix(enum_name);
+        if !is_valid_ident_path(&enum_name) {
             bail!(
                 "Strict AST migration compiler rejects invalid enum/type identifier in drop hint: '{}'",
                 target
@@ -751,7 +756,8 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
 
     if let Some(function_name) = target.strip_prefix("function ").map(str::trim) {
-        if !is_valid_ident_path(function_name) {
+        let function_name = normalize_optional_if_exists_prefix(function_name);
+        if !is_valid_ident_path(&function_name) {
             bail!(
                 "Strict AST migration compiler rejects invalid function identifier in drop hint: '{}'",
                 target
@@ -765,11 +771,13 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
 
     if let Some(policy_target) = target.strip_prefix("policy ").map(str::trim) {
-        return compile_drop_policy_target(policy_target, target);
+        let policy_target = normalize_optional_if_exists_prefix(policy_target);
+        return compile_drop_policy_target(&policy_target, target);
     }
 
     if let Some(trigger_target) = target.strip_prefix("trigger ").map(str::trim) {
-        if !is_valid_ident_path(trigger_target) || !trigger_target.contains('.') {
+        let trigger_target = normalize_optional_if_exists_prefix(trigger_target);
+        if !is_valid_ident_path(&trigger_target) || !trigger_target.contains('.') {
             bail!(
                 "Strict AST migration compiler expects trigger drop hint as 'trigger <table>.<trigger>' (got '{}')",
                 target
@@ -783,7 +791,8 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
 
     if let Some(index_name) = target.strip_prefix("index ").map(str::trim) {
-        if !is_valid_ident_path(index_name) {
+        let index_name = normalize_optional_if_exists_prefix(index_name);
+        if !is_valid_ident_path(&index_name) {
             bail!(
                 "Strict AST migration compiler rejects invalid index identifier in drop hint: '{}'",
                 target
@@ -799,7 +808,8 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
 
     if let Some(table_name) = target.strip_prefix("table ").map(str::trim) {
-        if !is_valid_ident_path(table_name) {
+        let table_name = normalize_optional_if_exists_prefix(table_name);
+        if !is_valid_ident_path(&table_name) {
             bail!(
                 "Strict AST migration compiler rejects invalid table identifier in drop hint: '{}'",
                 target
@@ -813,15 +823,17 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
 
     if let Some(column_target) = target.strip_prefix("column ").map(str::trim) {
-        return compile_drop_column_target(column_target, target);
+        let column_target = normalize_optional_if_exists_prefix(column_target);
+        return compile_drop_column_target(&column_target, target);
     }
 
     // Legacy hint style: `drop table_name` or `drop table.column`
-    if target.contains('.') {
-        return compile_drop_column_target(target, target);
+    let normalized_target = normalize_optional_if_exists_prefix(target);
+    if normalized_target.contains('.') {
+        return compile_drop_column_target(&normalized_target, target);
     }
 
-    if !is_valid_ident_path(target) {
+    if !is_valid_ident_path(&normalized_target) {
         bail!(
             "Strict AST migration compiler rejects invalid drop target identifier: '{}'",
             target
@@ -829,7 +841,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     }
     Ok(Qail {
         action: Action::Drop,
-        table: target.to_string(),
+        table: normalized_target,
         ..Default::default()
     })
 }
@@ -897,6 +909,18 @@ fn split_table_column_target(target: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((table, column))
+}
+
+fn normalize_optional_if_exists_prefix(target: &str) -> String {
+    let tokens: Vec<&str> = target.split_whitespace().collect();
+    if tokens.len() >= 3
+        && tokens[0].eq_ignore_ascii_case("if")
+        && tokens[1].eq_ignore_ascii_case("exists")
+    {
+        tokens[2..].join(" ")
+    } else {
+        target.trim().to_string()
+    }
 }
 
 fn is_valid_ident_path(path: &str) -> bool {

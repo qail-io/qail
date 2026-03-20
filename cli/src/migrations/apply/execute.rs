@@ -16,6 +16,7 @@ use crate::migrations::{
 use crate::shadow::has_verified_shadow_receipt_with_driver;
 use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
+use qail_core::ast::{Action, Expr, JoinKind};
 use qail_core::prelude::Qail;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -534,6 +535,267 @@ async fn execute_migration_commands(
     Ok(())
 }
 
+async fn verify_applied_commands_effects(
+    pg: &mut qail_pg::PgDriver,
+    migration_name: &str,
+    cmds: &[Qail],
+) -> Result<()> {
+    if cmds.is_empty() {
+        return Ok(());
+    }
+
+    let mut failures = Vec::<String>::new();
+
+    for cmd in cmds {
+        match cmd.action {
+            Action::Make => {
+                if !table_exists(pg, &cmd.table).await? {
+                    failures.push(format!("expected table '{}' to exist", cmd.table));
+                }
+            }
+            Action::Drop => {
+                if table_exists(pg, &cmd.table).await? {
+                    failures.push(format!("expected table '{}' to be dropped", cmd.table));
+                }
+            }
+            Action::Index => {
+                let index_name = cmd
+                    .index_def
+                    .as_ref()
+                    .map(|idx| idx.name.as_str())
+                    .unwrap_or(cmd.table.as_str());
+                let index_name = strip_optional_if_exists_prefix(index_name);
+                if !index_name.is_empty() && !index_exists(pg, &index_name).await? {
+                    failures.push(format!("expected index '{}' to exist", index_name));
+                }
+            }
+            Action::DropIndex => {
+                let index_name = strip_optional_if_exists_prefix(&cmd.table);
+                if !index_name.is_empty() && index_exists(pg, &index_name).await? {
+                    failures.push(format!("expected index '{}' to be dropped", index_name));
+                }
+            }
+            Action::AlterDrop => {
+                for column in extract_column_names(&cmd.columns) {
+                    if column_exists(pg, &cmd.table, &column).await? {
+                        failures.push(format!(
+                            "expected column '{}.{}' to be dropped",
+                            cmd.table, column
+                        ));
+                    }
+                }
+            }
+            Action::Mod => {
+                for rename_expr in cmd.columns.iter().filter_map(|col| match col {
+                    Expr::Named(raw) => Some(raw.as_str()),
+                    _ => None,
+                }) {
+                    let Some((old_col, new_col)) = parse_rename_expr(rename_expr) else {
+                        continue;
+                    };
+
+                    let old_exists = column_exists(pg, &cmd.table, old_col).await?;
+                    let new_exists = column_exists(pg, &cmd.table, new_col).await?;
+                    if old_exists || !new_exists {
+                        failures.push(format!(
+                            "expected rename '{}.{} -> {}' to be applied (old_exists={}, new_exists={})",
+                            cmd.table, old_col, new_col, old_exists, new_exists
+                        ));
+                    }
+                }
+            }
+            Action::AlterEnableRls => match table_rls_flags(pg, &cmd.table).await? {
+                Some((enabled, _)) if enabled => {}
+                Some((enabled, _)) => failures.push(format!(
+                    "expected table '{}' RLS enabled (relrowsecurity={})",
+                    cmd.table, enabled
+                )),
+                None => failures.push(format!(
+                    "expected table '{}' to exist for RLS enable verification",
+                    cmd.table
+                )),
+            },
+            Action::AlterForceRls => match table_rls_flags(pg, &cmd.table).await? {
+                Some((_, forced)) if forced => {}
+                Some((_, forced)) => failures.push(format!(
+                    "expected table '{}' FORCE RLS enabled (relforcerowsecurity={})",
+                    cmd.table, forced
+                )),
+                None => failures.push(format!(
+                    "expected table '{}' to exist for FORCE RLS verification",
+                    cmd.table
+                )),
+            },
+            Action::CreatePolicy => {
+                if let Some(policy) = &cmd.policy_def
+                    && !policy_exists(pg, &policy.table, &policy.name).await?
+                {
+                    failures.push(format!(
+                        "expected policy '{}' on table '{}' to exist",
+                        policy.name, policy.table
+                    ));
+                }
+            }
+            Action::DropPolicy => {
+                let Some(policy_name) = cmd.payload.as_deref() else {
+                    continue;
+                };
+                if policy_exists(pg, &cmd.table, policy_name).await? {
+                    failures.push(format!(
+                        "expected policy '{}' on table '{}' to be dropped",
+                        policy_name, cmd.table
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    let detail = failures
+        .into_iter()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("\n  - ");
+    bail!(
+        "Post-apply verification failed for '{}':\n  - {}",
+        migration_name,
+        detail
+    );
+}
+
+fn split_schema_ident(name: &str) -> (&str, &str) {
+    if let Some((schema, object)) = name.rsplit_once('.') {
+        let schema = schema.trim();
+        let object = object.trim();
+        if !schema.is_empty() && !object.is_empty() {
+            return (schema, object);
+        }
+    }
+    ("public", name.trim())
+}
+
+fn strip_optional_if_exists_prefix(name: &str) -> String {
+    let tokens: Vec<&str> = name.split_whitespace().collect();
+    if tokens.len() >= 3
+        && tokens[0].eq_ignore_ascii_case("if")
+        && tokens[1].eq_ignore_ascii_case("exists")
+    {
+        tokens[2..].join(" ")
+    } else {
+        name.trim().to_string()
+    }
+}
+
+fn parse_rename_expr(raw: &str) -> Option<(&str, &str)> {
+    let (left, right) = raw.split_once("->")?;
+    let left = left.trim();
+    let right = right.trim();
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    Some((left, right))
+}
+
+fn extract_column_names(columns: &[Expr]) -> Vec<String> {
+    columns
+        .iter()
+        .filter_map(|expr| match expr {
+            Expr::Named(name) => Some(name.trim().to_string()),
+            Expr::Def { name, .. } => Some(name.trim().to_string()),
+            _ => None,
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+async fn table_exists(pg: &mut qail_pg::PgDriver, table: &str) -> Result<bool> {
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("information_schema.tables")
+        .column("1")
+        .where_eq("table_schema", schema)
+        .where_eq("table_name", table_name)
+        .limit(1);
+    let rows = pg
+        .fetch_all(&cmd)
+        .await
+        .with_context(|| format!("Failed table existence check for '{}'", table))?;
+    Ok(!rows.is_empty())
+}
+
+async fn column_exists(pg: &mut qail_pg::PgDriver, table: &str, column: &str) -> Result<bool> {
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("information_schema.columns")
+        .column("1")
+        .where_eq("table_schema", schema)
+        .where_eq("table_name", table_name)
+        .where_eq("column_name", column)
+        .limit(1);
+    let rows = pg.fetch_all(&cmd).await.with_context(|| {
+        format!(
+            "Failed column existence check for '{}.{}'",
+            table_name, column
+        )
+    })?;
+    Ok(!rows.is_empty())
+}
+
+async fn index_exists(pg: &mut qail_pg::PgDriver, index_name: &str) -> Result<bool> {
+    let (schema, name) = split_schema_ident(index_name);
+    let cmd = Qail::get("pg_class c")
+        .column("1")
+        .join(JoinKind::Inner, "pg_namespace n", "n.oid", "c.relnamespace")
+        .where_eq("n.nspname", schema)
+        .where_eq("c.relname", name)
+        .limit(1);
+    let rows = pg
+        .fetch_all(&cmd)
+        .await
+        .with_context(|| format!("Failed index existence check for '{}'", index_name))?;
+    Ok(!rows.is_empty())
+}
+
+async fn policy_exists(pg: &mut qail_pg::PgDriver, table: &str, policy_name: &str) -> Result<bool> {
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("pg_policies")
+        .column("1")
+        .where_eq("schemaname", schema)
+        .where_eq("tablename", table_name)
+        .where_eq("policyname", policy_name)
+        .limit(1);
+    let rows = pg.fetch_all(&cmd).await.with_context(|| {
+        format!(
+            "Failed policy existence check for '{}.{}'",
+            table_name, policy_name
+        )
+    })?;
+    Ok(!rows.is_empty())
+}
+
+async fn table_rls_flags(pg: &mut qail_pg::PgDriver, table: &str) -> Result<Option<(bool, bool)>> {
+    let (schema, table_name) = split_schema_ident(table);
+    let cmd = Qail::get("pg_class c")
+        .columns(["c.relrowsecurity", "c.relforcerowsecurity"])
+        .join(JoinKind::Inner, "pg_namespace n", "n.oid", "c.relnamespace")
+        .where_eq("n.nspname", schema)
+        .where_eq("c.relname", table_name)
+        .limit(1);
+    let rows = pg
+        .fetch_all(&cmd)
+        .await
+        .with_context(|| format!("Failed RLS flag check for '{}'", table))?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.get_bool(0).unwrap_or(false),
+        row.get_bool(1).unwrap_or(false),
+    )))
+}
+
 async fn apply_commands_and_record_receipt_atomic(
     pg: &mut qail_pg::PgDriver,
     cmds: &[Qail],
@@ -550,6 +812,11 @@ async fn apply_commands_and_record_receipt_atomic(
         .map_err(|e| anyhow!("Failed to begin migration transaction: {}", e))?;
 
     if let Err(err) = execute_migration_commands(pg, cmds, migration_name).await {
+        let _ = pg.rollback().await;
+        return Err(err);
+    }
+
+    if let Err(err) = verify_applied_commands_effects(pg, migration_name, cmds).await {
         let _ = pg.rollback().await;
         return Err(err);
     }
@@ -849,7 +1116,8 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
 mod tests {
     use super::{
         apply_commands_and_record_receipt_atomic, enforce_apply_destructive_policy,
-        ensure_applied_checksum_matches, ensure_up_down_pairing, validate_receipts_against_local,
+        ensure_applied_checksum_matches, ensure_up_down_pairing, parse_rename_expr,
+        split_schema_ident, strip_optional_if_exists_prefix, validate_receipts_against_local,
     };
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
@@ -882,6 +1150,42 @@ mod tests {
             err.to_string().contains("checksum drift"),
             "error should mention checksum drift"
         );
+    }
+
+    #[test]
+    fn split_schema_ident_defaults_to_public() {
+        let (schema, name) = split_schema_ident("users");
+        assert_eq!(schema, "public");
+        assert_eq!(name, "users");
+    }
+
+    #[test]
+    fn split_schema_ident_handles_qualified_name() {
+        let (schema, name) = split_schema_ident("analytics.users");
+        assert_eq!(schema, "analytics");
+        assert_eq!(name, "users");
+    }
+
+    #[test]
+    fn strip_optional_if_exists_prefix_normalizes_name() {
+        assert_eq!(
+            strip_optional_if_exists_prefix("if exists idx_users_email"),
+            "idx_users_email"
+        );
+        assert_eq!(
+            strip_optional_if_exists_prefix("IDX_USERS_EMAIL"),
+            "IDX_USERS_EMAIL"
+        );
+    }
+
+    #[test]
+    fn parse_rename_expr_extracts_column_pair() {
+        assert_eq!(
+            parse_rename_expr("old_name -> new_name"),
+            Some(("old_name", "new_name"))
+        );
+        assert_eq!(parse_rename_expr("  a->b "), Some(("a", "b")));
+        assert_eq!(parse_rename_expr("old_name"), None);
     }
 
     #[test]

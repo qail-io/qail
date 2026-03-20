@@ -217,6 +217,22 @@ drop table _qail_queue
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_normalizes_drop_if_exists_hints() {
+        let input = r#"
+drop index if exists idx_qail_queue_ref
+drop table if exists _qail_queue
+"#;
+
+        let cmds =
+            parse_qail_to_commands_strict(input).expect("drop if exists hints should compile");
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(cmds[0].action, qail_core::ast::Action::DropIndex));
+        assert_eq!(cmds[0].table, "idx_qail_queue_ref");
+        assert!(matches!(cmds[1].action, qail_core::ast::Action::Drop));
+        assert_eq!(cmds[1].table, "_qail_queue");
+    }
+
+    #[test]
     fn test_parse_qail_to_commands_strict_supports_rename_hints() {
         let input = "rename users.old_name -> users.new_name";
         let cmds = parse_qail_to_commands_strict(input).expect("rename hints should compile");

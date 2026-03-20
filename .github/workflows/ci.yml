@@ -72,6 +72,7 @@ jobs:
         if: matrix.scope == 'full'
         run: |
           cargo test -p qail migrations::apply::execute::tests::apply_failpoint_before_receipt_rolls_back_commands_in_real_db -- --nocapture
+          cargo test -p qail migrations::apply::backfill::runtime_backfill_tests::chunked_backfill_supports_uuid_pk_runtime -- --nocapture
           cargo test -p qail migrations::rollback::tests::rollback_failpoint_before_history_delete_preserves_history_in_real_db -- --nocapture
           cargo test -p qail migrations::lock::tests::advisory_lock_real_db_contention_and_timeout -- --nocapture
 

@@ -108,7 +108,7 @@ impl ToSql for Qail {
             Action::Over => dml::window::build_window(self, dialect),
             Action::With => dml::cte::build_cte(self, dialect),
             Action::Index => ddl::build_create_index(self, dialect),
-            Action::DropIndex => format!("DROP INDEX {}", self.table),
+            Action::DropIndex => format!("DROP INDEX IF EXISTS {}", self.table),
             Action::Alter => ddl::build_alter_add_column(self, dialect),
             Action::AlterDrop => ddl::build_alter_drop_column(self, dialect),
             Action::AlterType => ddl::build_alter_column_type(self, dialect),

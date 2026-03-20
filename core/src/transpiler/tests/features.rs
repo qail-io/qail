@@ -150,6 +150,17 @@ fn test_drop_policy_sql() {
     assert_eq!(sql, "DROP POLICY IF EXISTS users_isolation ON users");
 }
 
+#[test]
+fn test_drop_index_sql_uses_if_exists() {
+    let cmd = Qail {
+        action: Action::DropIndex,
+        table: "idx_users_email".to_string(),
+        ..Default::default()
+    };
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(sql, "DROP INDEX IF EXISTS idx_users_email");
+}
+
 // ============= Upsert Tests =============
 
 #[test]
