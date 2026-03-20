@@ -4,11 +4,11 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (Unreleased)
+## Current Highlights (v0.26.0)
 
-- Tenant terminology is standardized to `tenant_id` as the canonical scope identity.
-- Gateway compatibility remains for legacy `operator_id` JWT/schema paths.
-- Gateway policy evaluation was fixed to avoid premature deny outcomes when later policies allow access.
-- Gateway handlers now consistently run optimized QAIL command execution paths.
-- Analyzer diagnostics were tightened to reduce SQL/query false positives from comments and string literals.
-- SDK direction is now direct-first for TypeScript, Swift, and Kotlin; Node.js native binding/WASM remain deferred.
+- Tenant scope is now runtime-canonical on `tenant_id`; legacy `operator_id` compatibility aliases were removed.
+- Workflow query payload runtime now enforces QAIL wire text (`QAIL-CMD/1`) and includes legacy payload detection helpers for cutover audits.
+- Migration apply path is strict AST-first, with stronger hint support, post-apply verification gates, and improved backfill support for uuid/text PK cursors.
+- Gateway policy evaluation no longer prematurely denies requests when later allow policies apply.
+- Analyzer diagnostics are tighter, with reduced false positives from SQL comments/string literals.
+- Direct SDK track is TypeScript, Swift, and Kotlin; Node.js native binding/WASM remain deferred.

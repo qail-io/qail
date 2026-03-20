@@ -41,10 +41,10 @@ qail migrate up old:new postgres:  # Apply migrations
 
 ```bash
 mdbook build
-# Copy to public/docs so it gets built by Astro
-cp -r book/* /Users/orion/qail-web/public/docs/
+# Output path is configured in docs/book.toml:
+# /Users/orion/dev.qail.io/public/docs
 # Build and deploy (npm run deploy = astro build && wrangler pages deploy dist)
-cd /Users/orion/qail-web && npm run deploy
+cd /Users/orion/dev.qail.io && npm run deploy
 ```
 
 ## 🤝 Contributing & Support

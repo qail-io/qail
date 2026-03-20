@@ -16,17 +16,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `RlsContext::operator_and_agent(...)` removed in favor of `RlsContext::tenant_and_agent(...)`.
   - `RlsContext::operator_id` and `has_operator()` removed from runtime paths.
 - **Gateway JWT tenant resolution:** tenant scope is now resolved from `tenant_id` only in runtime auth flows. Legacy `operator_id` JWT claim no longer maps to tenant scope.
+- **Workflow query payload cutover:** runtime execution now requires `WorkflowStep::Query.cmd_json` to use QAIL wire text (`QAIL-CMD/1`). Legacy persisted payloads are rejected until migrated/purged.
+- **Migration apply strictness:** folder-based `migrate apply` now enforces strict AST execution paths and rejects infrastructure resource declarations (`bucket/queue/topic`) in migration deltas.
+- **Binary query wire contract:** `/qail/binary` requires QAIL wire-binary (`QWB1`) payloads; legacy postcard-like payloads are rejected.
 
 ### Added
 
-- **SDK direction clarified:** direct SDK support is now documented for TypeScript (`@qail/client`), Swift (`sdk/swift`), and Kotlin (`sdk/kotlin`).
-- **Docs/web updates:** refreshed mdBook content for tenant-first terminology and current SDK/runtime status.
+- **Workflow cutover audit helper:** added legacy payload detection/reporting for workflow definitions:
+  - `collect_legacy_query_payload_issues(...)`
+  - nested step-path reporting and payload preview diagnostics
+- **Strict migration hint support:** `migrate apply` strict compiler now supports and validates:
+  - `rename <table>.<column> -> <table>.<column>` hints
+  - expanded `drop` hint coverage (index/table/view/materialized view/function/trigger/policy/sequence/enum/extension/column)
+  - canonicalization for `drop ... if exists ...` forms
+- **Chunked backfill capability:** improved backfill runner support for semantic transforms and non-integer cursors:
+  - transform pipelines (`lower|trim` and nested function parse)
+  - `initcap` transform
+  - uuid/text/varchar/char PK checkpoint cursor support (`last_pk_text`)
+- **Migration correctness gates:** added post-apply transactional verification in `migrate apply` for key AST effects (table/index/column/rename/RLS/policy checks) before receipt commit.
+- **CI safety gate:** added DB-backed UUID backfill runtime test into CI migration gate lane.
 
 ### Changed
 
 - **Tenant terminology standardization:** `tenant_id` is now the canonical identity across gateway/runtime docs and APIs.
-- **Analyzer path hardening:** continued shift from syntax-only scanning toward QAIL semantic scanning for query diagnostics and N+1 analysis.
-- **Language binding scope:** Node.js native binding / WASM packaging remains deferred while direct SDK tracks are prioritized.
+- **Analyzer hardening:** continued shift from syntax-only scanning toward QAIL semantic scanning for query diagnostics and N+1 analysis.
+- **SDK scope:** direct SDK support is documented for TypeScript (`@qail/client`), Swift (`sdk/swift`), and Kotlin (`sdk/kotlin`); Node.js native binding/WASM remain deferred.
+- **Migration docs/tooling:** mdBook and CLI guidance were updated for tenant-first terminology and strict migration apply behavior.
 - **Versioning:** bumped Rust crates to `0.26.0` (`qail-core`, `qail-pg`, `qail-gateway`, `qail`, `qail-qdrant`, `qail-workflow`, `qail-encoder`, `qail-lsp`).
 
 ### Fixed
@@ -34,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gateway policy evaluation:** fixed policy handling so applicable allow policies are not prematurely denied during evaluation.
 - **Gateway execution pipeline:** expanded `optimize_qail_for_execution(&mut cmd)` usage across handlers to avoid inconsistent execution planning.
 - **SQL/query diagnostics:** reduced false positives by ignoring comment/string-literal noise in source scanning and improving text-literal classification.
+- **Migration drop/index behavior:** fixed strict drop hint handling around `IF EXISTS` normalization and aligned drop-index SQL rendering with runtime encoder semantics.
+- **Workflow execution diagnostics:** improved failure messaging for legacy/invalid workflow query payloads with explicit migration guidance.
 
 ## [0.25.1] - 2026-03-18
 
