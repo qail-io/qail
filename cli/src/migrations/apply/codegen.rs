@@ -9,8 +9,8 @@ use qail_core::migrate::policy::RlsPolicy;
 #[cfg(test)]
 use qail_core::migrate::schema::GrantAction;
 use qail_core::migrate::schema::{
-    Comment, CommentTarget, EnumType, Extension, FkAction, Grant, MigrationHint, SchemaFunctionDef,
-    SchemaTriggerDef, Sequence, ViewDef,
+    Comment, CommentTarget, EnumType, Extension, FkAction, Grant, MigrationHint, ResourceDef,
+    SchemaFunctionDef, SchemaTriggerDef, Sequence, ViewDef,
 };
 use qail_core::parser::schema::Schema;
 use qail_core::transpiler::ToSql;
@@ -103,11 +103,17 @@ pub(crate) fn commands_to_sql(cmds: &[Qail]) -> String {
 fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) -> Result<Vec<Qail>> {
     let (hint_cmds, hint_unsupported) = compile_migration_hints_strict(&schema.migrations)?;
 
+    if !schema.resources.is_empty() {
+        bail!(
+            "Strict AST migration compiler rejects infrastructure resources in migration apply: {}. \
+             Resources (bucket/queue/topic) are declarative infra objects, not executable database AST commands. \
+             Move them to schema/deploy tooling and keep delta migrations database-only.",
+            format_resource_summary(&schema.resources)
+        );
+    }
+
     let mut unsupported = Vec::new();
     unsupported.extend(hint_unsupported);
-    if !schema.resources.is_empty() {
-        unsupported.push("resources");
-    }
     if schema
         .tables
         .values()
@@ -212,6 +218,14 @@ fn add_unsupported(unsupported: &mut Vec<&'static str>, item: &'static str) {
     if !unsupported.contains(&item) {
         unsupported.push(item);
     }
+}
+
+fn format_resource_summary(resources: &[ResourceDef]) -> String {
+    resources
+        .iter()
+        .map(|r| format!("{} {}", r.kind, r.name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn compile_extensions_strict(extensions: &[Extension]) -> Result<Vec<Qail>> {

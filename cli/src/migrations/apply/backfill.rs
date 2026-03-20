@@ -1,7 +1,7 @@
 //! Chunked backfill system and contract safety enforcement.
 
 use super::discovery::{is_valid_ident, parse_drop_targets};
-use super::types::{BackfillRun, BackfillSpec, BackfillTransform};
+use super::types::{BackfillRun, BackfillSpec, BackfillTransform, BackfillTransformOp};
 use crate::colors::*;
 use crate::migrations::maybe_failpoint;
 use anyhow::{Context, Result, anyhow, bail};
@@ -157,43 +157,105 @@ fn parse_set_clause(raw: &str) -> Result<(String, String, BackfillTransform)> {
         bail!("Invalid -- @backfill.set: expression cannot be empty");
     }
 
-    if is_valid_ident(expr) {
-        return Ok((target, expr.to_string(), BackfillTransform::Identity));
+    let (source, transform) = parse_set_expr(expr)?;
+    Ok((target, source, transform))
+}
+
+fn parse_set_expr(expr: &str) -> Result<(String, BackfillTransform)> {
+    let mut current = expr.trim().to_string();
+    let mut pipeline = Vec::<BackfillTransformOp>::new();
+
+    loop {
+        if is_valid_ident(&current) {
+            pipeline.reverse();
+            return Ok((current, collapse_pipeline_to_transform(pipeline)));
+        }
+
+        let (func, arg) = parse_unary_call(&current)
+            .ok_or_else(|| anyhow!("Unsupported -- @backfill.set expression '{}'", expr))?;
+        let op = parse_transform_op(func)?;
+        pipeline.push(op);
+        current = arg;
+    }
+}
+
+fn parse_unary_call(expr: &str) -> Option<(&str, String)> {
+    let open = expr.find('(')?;
+    if !expr.ends_with(')') {
+        return None;
     }
 
-    let open = expr
-        .find('(')
-        .ok_or_else(|| anyhow!("Unsupported -- @backfill.set expression '{}'", expr))?;
-    let close = expr
-        .rfind(')')
-        .ok_or_else(|| anyhow!("Unsupported -- @backfill.set expression '{}'", expr))?;
+    let func = expr[..open].trim();
+    if !is_valid_ident(func) {
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut close_idx = None;
+    for (idx, ch) in expr.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close_idx = Some(idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close_idx?;
     if close != expr.len() - 1 {
-        bail!("Unsupported -- @backfill.set expression '{}'", expr);
+        return None;
     }
 
-    let func = expr[..open].trim().to_ascii_lowercase();
-    let arg = expr[open + 1..close].trim().to_string();
-    if !is_valid_ident(&arg) {
-        bail!(
-            "Unsupported -- @backfill.set argument '{}': expected identifier",
-            arg
-        );
+    let inner = expr[open + 1..close].trim().to_string();
+    if inner.is_empty() {
+        return None;
     }
 
-    let transform = parse_transform(&func)?;
-    Ok((target, arg, transform))
+    Some((func, inner))
 }
 
 fn parse_transform(raw: &str) -> Result<BackfillTransform> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "identity" | "copy" => Ok(BackfillTransform::Identity),
-        "lower" => Ok(BackfillTransform::Lower),
-        "upper" => Ok(BackfillTransform::Upper),
-        "trim" => Ok(BackfillTransform::Trim),
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(BackfillTransform::Identity);
+    }
+
+    if normalized == "identity" || normalized == "copy" {
+        return Ok(BackfillTransform::Identity);
+    }
+
+    let mut ops = Vec::<BackfillTransformOp>::new();
+    for token in normalized.split('|') {
+        ops.push(parse_transform_op(token.trim())?);
+    }
+    Ok(collapse_pipeline_to_transform(ops))
+}
+
+fn parse_transform_op(raw: &str) -> Result<BackfillTransformOp> {
+    match raw {
+        "lower" => Ok(BackfillTransformOp::Lower),
+        "upper" => Ok(BackfillTransformOp::Upper),
+        "trim" => Ok(BackfillTransformOp::Trim),
+        "initcap" => Ok(BackfillTransformOp::Initcap),
         other => bail!(
-            "Unsupported backfill transform '{}'. Allowed: identity, lower, upper, trim",
+            "Unsupported backfill transform '{}'. Allowed: identity, lower, upper, trim, initcap, or pipelines like lower|trim",
             other
         ),
+    }
+}
+
+fn collapse_pipeline_to_transform(ops: Vec<BackfillTransformOp>) -> BackfillTransform {
+    match ops.as_slice() {
+        [] => BackfillTransform::Identity,
+        [BackfillTransformOp::Lower] => BackfillTransform::Lower,
+        [BackfillTransformOp::Upper] => BackfillTransform::Upper,
+        [BackfillTransformOp::Trim] => BackfillTransform::Trim,
+        [BackfillTransformOp::Initcap] => BackfillTransform::Initcap,
+        _ => BackfillTransform::Pipeline(ops),
     }
 }
 
@@ -655,21 +717,25 @@ fn build_set_expr(spec: &BackfillSpec) -> Expr {
     let src = Expr::Named(spec.source_column.clone());
     match spec.transform {
         BackfillTransform::Identity => src,
-        BackfillTransform::Lower => Expr::FunctionCall {
-            name: "LOWER".to_string(),
-            args: vec![src],
-            alias: None,
-        },
-        BackfillTransform::Upper => Expr::FunctionCall {
-            name: "UPPER".to_string(),
-            args: vec![src],
-            alias: None,
-        },
-        BackfillTransform::Trim => Expr::FunctionCall {
-            name: "TRIM".to_string(),
-            args: vec![src],
-            alias: None,
-        },
+        BackfillTransform::Lower => apply_transform_op(src, BackfillTransformOp::Lower),
+        BackfillTransform::Upper => apply_transform_op(src, BackfillTransformOp::Upper),
+        BackfillTransform::Trim => apply_transform_op(src, BackfillTransformOp::Trim),
+        BackfillTransform::Initcap => apply_transform_op(src, BackfillTransformOp::Initcap),
+        BackfillTransform::Pipeline(ref ops) => ops.iter().copied().fold(src, apply_transform_op),
+    }
+}
+
+fn apply_transform_op(expr: Expr, op: BackfillTransformOp) -> Expr {
+    let func = match op {
+        BackfillTransformOp::Lower => "LOWER",
+        BackfillTransformOp::Upper => "UPPER",
+        BackfillTransformOp::Trim => "TRIM",
+        BackfillTransformOp::Initcap => "INITCAP",
+    };
+    Expr::FunctionCall {
+        name: func.to_string(),
+        args: vec![expr],
+        alias: None,
     }
 }
 

@@ -66,12 +66,22 @@ pub(crate) struct MigrationFile {
     pub(crate) phase: MigrationPhase,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BackfillTransformOp {
+    Lower,
+    Upper,
+    Trim,
+    Initcap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BackfillTransform {
     Identity,
     Lower,
     Upper,
     Trim,
+    Initcap,
+    Pipeline(Vec<BackfillTransformOp>),
 }
 
 #[derive(Debug, Clone)]

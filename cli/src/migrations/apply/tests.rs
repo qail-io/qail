@@ -8,7 +8,9 @@ mod tests {
     use super::super::discovery::{
         detect_phase, discover_migrations, normalize_group_key, parse_drop_targets,
     };
-    use super::super::types::{BackfillTransform, MigrateDirection, MigrationPhase};
+    use super::super::types::{
+        BackfillTransform, BackfillTransformOp, MigrateDirection, MigrationPhase,
+    };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -165,6 +167,35 @@ policy users_isolation on users
         assert_eq!(policy.name, "users_isolation");
         assert_eq!(policy.table, "users");
         assert_eq!(policy.target, qail_core::migrate::policy::PolicyTarget::All);
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_rejects_resources_with_guidance() {
+        let input = r#"
+bucket avatars {
+  provider s3
+  region "ap-southeast-1"
+}
+"#;
+
+        let err =
+            parse_qail_to_commands_strict(input).expect_err("resources must be rejected in apply");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("infrastructure resources"),
+            "error should mention infra resources, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("bucket avatars"),
+            "error should include resource identity, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("database-only"),
+            "error should include migration guidance, got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -403,6 +434,61 @@ function sum_one(v int) returns int language plpgsql $$ BEGIN RETURN v + 1; END;
         assert!(matches!(spec.transform, BackfillTransform::Lower));
         assert_eq!(spec.chunk_size, 2048);
         assert_eq!(spec.where_null_column.as_deref(), Some("name_ci"));
+    }
+
+    #[test]
+    fn test_parse_backfill_spec_nested_set_transform() {
+        let content = r#"
+-- @backfill.table: users
+-- @backfill.pk: id
+-- @backfill.set: name_ci = trim(lower(name))
+"#;
+        let spec = parse_backfill_spec(content, 5000)
+            .expect("spec parse should work")
+            .expect("spec should exist");
+        assert_eq!(spec.source_column, "name");
+        assert!(matches!(
+            spec.transform,
+            BackfillTransform::Pipeline(ref ops)
+                if ops
+                    == &vec![BackfillTransformOp::Lower, BackfillTransformOp::Trim]
+        ));
+    }
+
+    #[test]
+    fn test_parse_backfill_spec_structured_transform_pipeline() {
+        let content = r#"
+-- @backfill.table: users
+-- @backfill.pk: id
+-- @backfill.set_column: name_ci
+-- @backfill.set_source: name
+-- @backfill.set_transform: lower|trim
+"#;
+        let spec = parse_backfill_spec(content, 5000)
+            .expect("spec parse should work")
+            .expect("spec should exist");
+        assert_eq!(spec.source_column, "name");
+        assert!(matches!(
+            spec.transform,
+            BackfillTransform::Pipeline(ref ops)
+                if ops
+                    == &vec![BackfillTransformOp::Lower, BackfillTransformOp::Trim]
+        ));
+    }
+
+    #[test]
+    fn test_parse_backfill_spec_initcap_transform() {
+        let content = r#"
+-- @backfill.table: users
+-- @backfill.pk: id
+-- @backfill.set: display_name = initcap(name)
+"#;
+        let spec = parse_backfill_spec(content, 5000)
+            .expect("spec parse should work")
+            .expect("spec should exist");
+        assert_eq!(spec.set_column, "display_name");
+        assert_eq!(spec.source_column, "name");
+        assert!(matches!(spec.transform, BackfillTransform::Initcap));
     }
 
     #[test]

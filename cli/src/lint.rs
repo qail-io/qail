@@ -2,6 +2,7 @@
 
 use crate::colors::*;
 use anyhow::Result;
+use qail_core::migrate::schema::ResourceKind;
 use qail_core::migrate::{ColumnType, parse_qail_file};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +35,7 @@ pub fn lint_schema(schema_path: &str, strict: bool) -> Result<()> {
     println!();
 
     let mut issues: Vec<LintIssue> = Vec::new();
+    issues.extend(lint_resource_issues(&schema, schema_path));
 
     for table in schema.tables.values() {
         let has_pk = table.columns.iter().any(|c| c.primary_key);
@@ -189,4 +191,87 @@ pub fn lint_schema(schema_path: &str, strict: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn lint_resource_issues(schema: &qail_core::migrate::Schema, schema_path: &str) -> Vec<LintIssue> {
+    if schema.resources.is_empty() {
+        return Vec::new();
+    }
+
+    let migration_input = looks_like_migration_input(schema_path);
+    let mut issues = Vec::with_capacity(schema.resources.len());
+
+    for resource in &schema.resources {
+        let level = if migration_input {
+            LintLevel::Error
+        } else {
+            LintLevel::Warning
+        };
+        issues.push(LintIssue {
+            level,
+            table: "resource".to_string(),
+            column: Some(resource.name.clone()),
+            message: format!(
+                "Resource declaration '{} {}' is not executable by `qail migrate apply`",
+                resource_kind_name(&resource.kind),
+                resource.name
+            ),
+            suggestion: Some(if migration_input {
+                "Move infra resources to schema/build-deploy flow and keep migration files database-only".to_string()
+            } else {
+                "Infra resources are declarative metadata; use build/deploy tooling instead of migrate apply".to_string()
+            }),
+        });
+    }
+
+    issues
+}
+
+fn looks_like_migration_input(schema_path: &str) -> bool {
+    let lower = schema_path.to_ascii_lowercase();
+    lower.ends_with(".up.qail")
+        || lower.ends_with(".down.qail")
+        || lower.contains("/migrations/")
+        || lower.contains("\\migrations\\")
+}
+
+fn resource_kind_name(kind: &ResourceKind) -> &'static str {
+    match kind {
+        ResourceKind::Bucket => "bucket",
+        ResourceKind::Queue => "queue",
+        ResourceKind::Topic => "topic",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LintLevel, lint_resource_issues, looks_like_migration_input};
+    use qail_core::migrate::Schema;
+    use qail_core::migrate::schema::{ResourceDef, ResourceKind};
+    use std::collections::HashMap;
+
+    #[test]
+    fn detects_migration_like_paths() {
+        assert!(looks_like_migration_input(
+            "deltas/migrations/001_init.up.qail"
+        ));
+        assert!(looks_like_migration_input("001_init.down.qail"));
+        assert!(!looks_like_migration_input("schema.qail"));
+    }
+
+    #[test]
+    fn resource_issue_is_error_for_migration_inputs() {
+        let mut schema = Schema::new();
+        schema.add_resource(ResourceDef {
+            name: "avatars".to_string(),
+            kind: ResourceKind::Bucket,
+            provider: Some("s3".to_string()),
+            properties: HashMap::new(),
+        });
+
+        let issues = lint_resource_issues(&schema, "deltas/migrations/001_assets.up.qail");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].level, LintLevel::Error);
+        assert!(issues[0].message.contains("bucket avatars"));
+    }
 }
