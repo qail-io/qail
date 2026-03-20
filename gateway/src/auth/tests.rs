@@ -12,7 +12,6 @@ fn test_jwt_validation() {
         exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
         role: Some("admin".to_string()),
         tenant_id: Some("tenant1".to_string()),
-        operator_id: None,
         extra: HashMap::new(),
     };
 
@@ -104,12 +103,12 @@ fn test_super_admin_does_not_bypass_rls() {
     let auth = AuthContext {
         user_id: "scoot-user".to_string(),
         role: "super_admin".to_string(),
-        tenant_id: Some("operator-123".to_string()),
+        tenant_id: Some("tenant-123".to_string()),
         claims: HashMap::new(),
     };
     let rls = auth.to_rls_context();
     assert!(!rls.bypasses_rls(), "super_admin should NOT bypass RLS");
-    assert_eq!(rls.operator_id, "operator-123");
+    assert_eq!(rls.tenant_id, "tenant-123");
 }
 
 #[test]
@@ -122,7 +121,7 @@ fn test_operator_role_does_not_bypass_rls() {
     };
     let rls = auth.to_rls_context();
     assert!(!rls.bypasses_rls(), "operator role should NOT bypass RLS");
-    assert_eq!(rls.operator_id, "op-test-001");
+    assert_eq!(rls.tenant_id, "op-test-001");
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -208,8 +207,8 @@ fn redteam_jwt_is_super_admin_claim_no_rls_bypass() {
 }
 
 #[test]
-fn redteam_jwt_operator_id_resolution() {
-    // Engine JWT with operator_id claim
+fn redteam_jwt_operator_id_claim_is_not_tenant_id() {
+    // Legacy operator_id claim must not be treated as tenant_id.
     let secret = "test-secret-key-12345";
     let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize;
     let payload = serde_json::json!({
@@ -230,9 +229,13 @@ fn redteam_jwt_operator_id_resolution() {
     };
     let auth = validate_jwt(&token, &config).unwrap();
     assert_eq!(
-        auth.tenant_id,
-        Some("op-123".to_string()),
-        "operator_id claim must resolve to tenant_id"
+        auth.tenant_id, None,
+        "Legacy operator_id claim must not resolve to tenant_id"
+    );
+    assert_eq!(
+        auth.claims.get("operator_id"),
+        Some(&serde_json::json!("op-123")),
+        "Unknown JWT claims remain available in extra claims"
     );
 }
 
@@ -246,11 +249,11 @@ async fn redteam_enrich_fills_missing_tenant() {
     };
     let map = tokio::sync::RwLock::new({
         let mut m = std::collections::HashMap::new();
-        m.insert("user-abc".to_string(), "operator-xyz".to_string());
+        m.insert("user-abc".to_string(), "tenant-xyz".to_string());
         m
     });
     auth.enrich_with_tenant_map(&map).await;
-    assert_eq!(auth.tenant_id, Some("operator-xyz".to_string()));
+    assert_eq!(auth.tenant_id, Some("tenant-xyz".to_string()));
 }
 
 #[tokio::test]
@@ -263,7 +266,7 @@ async fn redteam_enrich_does_not_overwrite_existing_tenant() {
     };
     let map = tokio::sync::RwLock::new({
         let mut m = std::collections::HashMap::new();
-        m.insert("user-abc".to_string(), "operator-xyz".to_string());
+        m.insert("user-abc".to_string(), "tenant-xyz".to_string());
         m
     });
     auth.enrich_with_tenant_map(&map).await;
@@ -299,7 +302,7 @@ fn redteam_finance_admin_does_not_bypass_rls() {
     let auth = AuthContext {
         user_id: "finance-user".to_string(),
         role: "FinanceAdmin".to_string(),
-        tenant_id: Some("op-123".to_string()),
+        tenant_id: Some("tenant-123".to_string()),
         claims: HashMap::new(),
     };
     let rls = auth.to_rls_context();
@@ -434,14 +437,14 @@ fn impersonation_downgrades_administrator_role() {
     };
 
     // Apply impersonation logic (same as in extract_auth_for_state)
-    let target_tenant = "operator-abc-123";
+    let target_tenant = "tenant-abc-123";
     let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator");
     assert!(is_platform_admin);
     auth.tenant_id = Some(target_tenant.to_string());
     auth.role = "operator".to_string();
 
     // After impersonation: tenant_id is set, role is downgraded
-    assert_eq!(auth.tenant_id, Some("operator-abc-123".to_string()));
+    assert_eq!(auth.tenant_id, Some("tenant-abc-123".to_string()));
     assert_eq!(auth.role, "operator");
 
     // RLS must NOT bypass
@@ -450,7 +453,7 @@ fn impersonation_downgrades_administrator_role() {
         !rls.bypasses_rls(),
         "Impersonated admin must NOT bypass RLS"
     );
-    assert_eq!(rls.operator_id, "operator-abc-123");
+    assert_eq!(rls.tenant_id, "tenant-abc-123");
 }
 
 #[test]

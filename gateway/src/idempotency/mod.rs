@@ -99,14 +99,14 @@ fn request_fingerprint(
 /// Returns tenant_id (multi-tenant), user_id (single-user), or "anonymous".
 ///
 /// **Security (F3):** Uses the JWT-validated tenant_id — the real SaaS tenant
-/// boundary — not the spoofable `x-operator-id` request header.
+/// boundary — not the spoofable `x-tenant-id` request header.
 async fn extract_tenant_scope(state: &crate::GatewayState, headers: HeaderMap) -> String {
     let mut auth = crate::auth::extract_auth_from_headers_with_jwks(
         &headers,
         state.jwks_store.as_ref(),
         &state.jwt_allowed_algorithms,
     );
-    auth.enrich_with_tenant_map(&state.user_operator_map).await;
+    auth.enrich_with_tenant_map(&state.user_tenant_map).await;
     auth.tenant_id.clone().unwrap_or_else(|| {
         if auth.is_authenticated() {
             auth.user_id.clone()

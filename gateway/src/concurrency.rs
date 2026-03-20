@@ -17,7 +17,7 @@ struct TenantEntry {
 
 /// Per-tenant concurrency limiter with bounded growth.
 ///
-/// Each tenant (identified by operator_id) gets its own semaphore with
+/// Each tenant (identified by tenant_id) gets its own semaphore with
 /// `max_permits` concurrent slots. When all slots are occupied, additional
 /// requests receive a 429 response instead of queuing unboundedly.
 ///

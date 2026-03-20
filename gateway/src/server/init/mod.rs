@@ -28,7 +28,7 @@ pub(crate) struct StartupState {
     explain_config: qail_pg::explain::ExplainConfig,
     tenant_semaphore: Arc<crate::concurrency::TenantSemaphore>,
     db_backpressure: Arc<crate::db_backpressure::DbBackpressure>,
-    user_operator_map: Arc<RwLock<HashMap<String, String>>>,
+    user_tenant_map: Arc<RwLock<HashMap<String, String>>>,
     #[cfg(feature = "qdrant")]
     qdrant_pool: Option<qail_qdrant::QdrantPool>,
     prometheus_handle: Arc<metrics_exporter_prometheus::PrometheusHandle>,
@@ -57,7 +57,7 @@ impl StartupState {
             explain_config: self.explain_config,
             tenant_semaphore: self.tenant_semaphore,
             db_backpressure: self.db_backpressure,
-            user_operator_map: self.user_operator_map,
+            user_tenant_map: self.user_tenant_map,
             #[cfg(feature = "qdrant")]
             qdrant_pool: self.qdrant_pool,
             prometheus_handle: self.prometheus_handle,

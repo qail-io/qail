@@ -386,9 +386,9 @@ impl PgPool {
     /// use qail_core::rls::RlsContext;
     ///
     /// let mut conn = pool.acquire_with_rls(
-    ///     RlsContext::operator("550e8400-e29b-41d4-a716-446655440000")
+    ///     RlsContext::tenant("550e8400-e29b-41d4-a716-446655440000")
     /// ).await?;
-    /// // All queries through `conn` are now scoped to this operator
+    /// // All queries through `conn` are now scoped to this tenant
     /// ```
     pub async fn acquire_with_rls(
         &self,
@@ -575,7 +575,7 @@ impl PgPool {
     /// Acquire a connection for system-level operations (no tenant context).
     ///
     /// Sets RLS session variables to maximally restrictive values:
-    /// - `app.current_tenant_id = ''` (and legacy `app.current_operator_id = ''`)
+    /// - `app.current_tenant_id = ''`
     /// - `app.current_agent_id = ''`  
     /// - `app.is_super_admin = false`
     ///

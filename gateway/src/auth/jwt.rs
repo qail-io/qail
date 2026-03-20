@@ -63,20 +63,10 @@ pub fn validate_jwt(token: &str, config: &JwtConfig) -> Result<AuthContext, Gate
 
     let claims = token_data.claims;
 
-    // Resolve tenant_id: prefer explicit tenant_id, then operator_id from claims,
-    // then check extra claims for operator_id (engine puts it in flattened extra)
-    let tenant_id = claims.tenant_id.or(claims.operator_id).or_else(|| {
-        claims
-            .extra
-            .get("operator_id")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-    });
-
     Ok(AuthContext {
         user_id: claims.sub,
         role: claims.role.unwrap_or_else(|| "user".to_string()),
-        tenant_id,
+        tenant_id: claims.tenant_id,
         claims: claims.extra,
     })
 }

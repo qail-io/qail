@@ -81,8 +81,8 @@ pub struct GatewayState {
     /// DB acquire backpressure guard (global + per-tenant waiting caps).
     pub db_backpressure: Arc<crate::db_backpressure::DbBackpressure>,
     /// Cache mapping user_id → tenant_id for JWTs that lack tenant scope.
-    /// Loaded at startup from users (`tenant_id`, fallback `operator_id`).
-    pub user_operator_map: Arc<RwLock<HashMap<String, String>>>,
+    /// Loaded at startup from users (`tenant_id`).
+    pub user_tenant_map: Arc<RwLock<HashMap<String, String>>>,
     /// Optional Qdrant connection pool for vector operations.
     #[cfg(feature = "qdrant")]
     pub qdrant_pool: Option<qail_qdrant::QdrantPool>,

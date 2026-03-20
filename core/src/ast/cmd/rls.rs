@@ -68,7 +68,7 @@ impl Qail {
             };
         }
 
-        if !ctx.has_operator() {
+        if !ctx.has_tenant() {
             return self;
         }
 
@@ -94,7 +94,7 @@ impl Qail {
         let condition = Condition {
             left: Expr::Named(tenant_col.to_string()),
             op: Operator::Eq,
-            value: Value::String(ctx.operator_id.clone()),
+            value: Value::String(ctx.tenant_id.clone()),
             is_array_unnest: false,
         };
 
@@ -152,7 +152,7 @@ impl Qail {
         let condition = Condition {
             left: Expr::Named(tenant_col.to_string()),
             op: Operator::Eq,
-            value: Value::String(ctx.operator_id.clone()),
+            value: Value::String(ctx.tenant_id.clone()),
             is_array_unnest: false,
         };
 
@@ -213,9 +213,9 @@ mod tests {
 
     #[test]
     fn test_with_rls_injects_filter_on_get() {
-        register_tenant_table("_rls_get_orders", "operator_id");
+        register_tenant_table("_rls_get_orders", "tenant_id");
 
-        let ctx = RlsContext::operator("op-123");
+        let ctx = RlsContext::tenant("t-123");
         let query = Qail::get("_rls_get_orders").with_rls(&ctx);
 
         let filter = query
@@ -227,18 +227,18 @@ mod tests {
         let conditions = &filter.unwrap().conditions;
         assert!(
             conditions.iter().any(|c| {
-                matches!(&c.left, Expr::Named(n) if n == "operator_id")
-                    && matches!(&c.value, Value::String(v) if v == "op-123")
+                matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                    && matches!(&c.value, Value::String(v) if v == "t-123")
             }),
-            "Expected operator_id = 'op-123' condition"
+            "Expected tenant_id = 't-123' condition"
         );
     }
 
     #[test]
     fn test_with_rls_injects_payload_on_add() {
-        register_tenant_table("_rls_add_orders", "operator_id");
+        register_tenant_table("_rls_add_orders", "tenant_id");
 
-        let ctx = RlsContext::operator("op-456");
+        let ctx = RlsContext::tenant("t-456");
         let query = Qail::add("_rls_add_orders")
             .set_value("total", 100)
             .with_rls(&ctx);
@@ -252,16 +252,16 @@ mod tests {
         let conditions = &payload.unwrap().conditions;
         assert!(
             conditions.iter().any(|c| {
-                matches!(&c.left, Expr::Named(n) if n == "operator_id")
-                    && matches!(&c.value, Value::String(v) if v == "op-456")
+                matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                    && matches!(&c.value, Value::String(v) if v == "t-456")
             }),
-            "Expected operator_id = 'op-456' in payload"
+            "Expected tenant_id = 't-456' in payload"
         );
     }
 
     #[test]
     fn test_with_rls_noop_for_super_admin() {
-        register_tenant_table("_rls_admin_orders", "operator_id");
+        register_tenant_table("_rls_admin_orders", "tenant_id");
 
         let token = crate::rls::SuperAdminToken::for_system_process("test_super_admin_noop");
         let ctx = RlsContext::super_admin(token);
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_with_rls_noop_for_unregistered_table() {
-        let ctx = RlsContext::operator("op-789");
+        let ctx = RlsContext::tenant("t-789");
         let query = Qail::get("_rls_unreg_migrations").with_rls(&ctx);
 
         let filter = query
@@ -291,9 +291,9 @@ mod tests {
 
     #[test]
     fn test_with_rls_noop_for_ddl() {
-        register_tenant_table("_rls_ddl_orders", "operator_id");
+        register_tenant_table("_rls_ddl_orders", "tenant_id");
 
-        let ctx = RlsContext::operator("op-000");
+        let ctx = RlsContext::tenant("t-000");
         let query = Qail {
             action: Action::Make,
             table: "_rls_ddl_orders".to_string(),
@@ -306,9 +306,9 @@ mod tests {
 
     #[test]
     fn test_with_rls_appends_to_existing_filter() {
-        register_tenant_table("_rls_merge_orders", "operator_id");
+        register_tenant_table("_rls_merge_orders", "tenant_id");
 
-        let ctx = RlsContext::operator("op-merge");
+        let ctx = RlsContext::tenant("t-merge");
         let query = Qail::get("_rls_merge_orders")
             .filter("status", Operator::Eq, "active")
             .with_rls(&ctx);
@@ -322,15 +322,15 @@ mod tests {
         assert_eq!(
             filters[0].conditions.len(),
             2,
-            "Should have 2 conditions: status + operator_id"
+            "Should have 2 conditions: status + tenant_id"
         );
     }
 
     #[test]
     fn test_with_rls_on_set_injects_filter() {
-        register_tenant_table("_rls_set_orders", "operator_id");
+        register_tenant_table("_rls_set_orders", "tenant_id");
 
-        let ctx = RlsContext::operator("op-set");
+        let ctx = RlsContext::tenant("t-set");
         let query = Qail::set("_rls_set_orders")
             .set_value("status", "shipped")
             .with_rls(&ctx);
@@ -345,16 +345,16 @@ mod tests {
         assert!(
             conditions
                 .iter()
-                .any(|c| { matches!(&c.left, Expr::Named(n) if n == "operator_id") }),
-            "Expected operator_id filter on SET"
+                .any(|c| { matches!(&c.left, Expr::Named(n) if n == "tenant_id") }),
+            "Expected tenant_id filter on SET"
         );
     }
 
     #[test]
-    fn test_with_rls_noop_no_operator() {
-        register_tenant_table("_rls_noops_orders", "operator_id");
+    fn test_with_rls_noop_no_tenant() {
+        register_tenant_table("_rls_noops_orders", "tenant_id");
 
-        // Agent-only context without operator_id
+        // Agent-only context without tenant_id
         let ctx = RlsContext::agent("ag-only");
         let query = Qail::get("_rls_noops_orders").with_rls(&ctx);
 
@@ -364,7 +364,7 @@ mod tests {
             .find(|c| matches!(c.kind, CageKind::Filter));
         assert!(
             filter.is_none(),
-            "Agent-only should not inject operator filter"
+            "Agent-only should not inject tenant filter"
         );
     }
 

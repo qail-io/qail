@@ -118,46 +118,31 @@ pub(super) fn load_event_engine(
     Ok(event_engine)
 }
 
-pub(super) async fn load_user_operator_map(
+pub(super) async fn load_user_tenant_map(
     pool: &PgPool,
     statement_timeout_ms: u32,
     lock_timeout_ms: u32,
 ) -> Result<Arc<RwLock<HashMap<String, String>>>, GatewayError> {
-    // Legacy name kept for compatibility with existing call sites.
-    // Values are tenant IDs (from `tenant_id`, fallback `operator_id`).
-    let user_operator_map = Arc::new(RwLock::new(HashMap::new()));
+    // Legacy variable/function name kept to avoid wide call-site churn.
+    // Values are tenant IDs from `users.tenant_id`.
+    let user_tenant_map = Arc::new(RwLock::new(HashMap::new()));
     let token = qail_core::rls::SuperAdminToken::for_system_process("embedded_user_map");
     let rls = qail_core::rls::RlsContext::super_admin(token);
     let mut conn = pool
         .acquire_with_rls_timeouts(rls, statement_timeout_ms, lock_timeout_ms)
         .await
         .map_err(|e| GatewayError::Database(format!("User lookup connection failed: {}", e)))?;
-    let rows_result = match conn
+    let rows_result = conn
         .fetch_all_uncached(
             &qail_core::ast::Qail::get("users")
                 .columns(["id", "tenant_id"])
                 .limit(10_000),
         )
-        .await
-    {
-        Ok(rows) => Ok(rows),
-        Err(primary_err) => {
-            tracing::warn!(
-                "Could not load users.id+tenant_id map (fallback to operator_id): {}",
-                primary_err
-            );
-            conn.fetch_all_uncached(
-                &qail_core::ast::Qail::get("users")
-                    .columns(["id", "operator_id"])
-                    .limit(10_000),
-            )
-            .await
-        }
-    };
+        .await;
 
     match rows_result {
         Ok(rows) => {
-            let mut map = user_operator_map.write().await;
+            let mut map = user_tenant_map.write().await;
             for row in &rows {
                 let uid = row
                     .try_get_by_name::<String>("id")
@@ -166,7 +151,6 @@ pub(super) async fn load_user_operator_map(
                 let tenant_id = row
                     .try_get_by_name::<String>("tenant_id")
                     .ok()
-                    .or_else(|| row.try_get_by_name::<String>("operator_id").ok())
                     .or_else(|| row.get_string(1));
 
                 if let (Some(uid), Some(tenant_id)) = (uid, tenant_id)
@@ -185,7 +169,7 @@ pub(super) async fn load_user_operator_map(
         }
     }
     conn.release().await;
-    Ok(user_operator_map)
+    Ok(user_tenant_map)
 }
 
 pub(super) fn build_prometheus_handle() -> Result<Arc<PrometheusHandle>, GatewayError> {

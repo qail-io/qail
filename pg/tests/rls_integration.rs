@@ -13,10 +13,10 @@ use qail_core::ast::Qail;
 use qail_core::rls::RlsContext;
 use qail_pg::PgDriver;
 
-/// Test operator: Tenant A
-const OPERATOR_A_ID: &str = "00000000-0000-0000-0000-000000000001";
-/// Test operator: Tenant B
-const OPERATOR_B_ID: &str = "00000000-0000-0000-0000-000000000002";
+/// Test tenant: Tenant A
+const TENANT_A_ID: &str = "00000000-0000-0000-0000-000000000001";
+/// Test tenant: Tenant B
+const TENANT_B_ID: &str = "00000000-0000-0000-0000-000000000002";
 
 async fn connect() -> PgDriver {
     PgDriver::connect_env()
@@ -30,7 +30,7 @@ async fn test_no_context_sees_nothing() {
     let mut driver = connect().await;
 
     // Without RLS context, a non-superuser should see zero rows
-    // because empty operator_id matches nothing
+    // because empty tenant_id matches nothing
     let vessels = driver
         .fetch_all(&Qail::get("vessels").columns(["id"]))
         .await
@@ -45,12 +45,12 @@ async fn test_no_context_sees_nothing() {
 
 #[tokio::test]
 #[ignore = "Requires local PostgreSQL with RLS policies"]
-async fn test_operator_isolation() {
+async fn test_tenant_isolation() {
     let mut driver = connect().await;
 
-    // Set Operator A context
+    // Set Tenant A context
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(TENANT_A_ID))
         .await
         .unwrap();
 
@@ -61,12 +61,12 @@ async fn test_operator_isolation() {
 
     assert!(
         !tenant_a_vessels.is_empty(),
-        "Operator A should have vessels visible"
+        "Tenant A should have vessels visible"
     );
 
-    // Switch to Operator B context
+    // Switch to Tenant B context
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_B_ID))
+        .set_rls_context(RlsContext::tenant(TENANT_B_ID))
         .await
         .unwrap();
 
@@ -77,14 +77,14 @@ async fn test_operator_isolation() {
 
     assert!(
         !tenant_b_vessels.is_empty(),
-        "Operator B should have vessels visible"
+        "Tenant B should have vessels visible"
     );
 
-    // Different operators see different data
+    // Different tenants see different data
     assert_ne!(
         tenant_a_vessels.len(),
         tenant_b_vessels.len(),
-        "Different operators should see different vessel counts"
+        "Different tenants should see different vessel counts"
     );
 }
 
@@ -95,7 +95,7 @@ async fn test_clear_context_revokes_access() {
 
     // Set context → see data
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(TENANT_A_ID))
         .await
         .unwrap();
 
@@ -126,7 +126,7 @@ async fn test_clear_context_revokes_access() {
 async fn test_super_admin_bypass() {
     let mut driver = connect().await;
 
-    // Super admin should see ALL vessels across all operators
+    // Super admin should see ALL vessels across all tenants
     driver
         .set_rls_context(RlsContext::super_admin(
             qail_core::rls::SuperAdminToken::for_system_process("test_super_admin"),
@@ -139,7 +139,7 @@ async fn test_super_admin_bypass() {
         .await
         .unwrap();
 
-    // Should see more than any single operator
+    // Should see more than any single tenant
     assert!(
         all_vessels.len() > 11,
         "Super admin should see all vessels (got {})",
@@ -159,12 +159,12 @@ async fn test_context_getter() {
 
     // Set context
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(TENANT_A_ID))
         .await
         .unwrap();
 
     let ctx = driver.rls_context().unwrap();
-    assert_eq!(ctx.operator_id, OPERATOR_A_ID);
+    assert_eq!(ctx.tenant_id, TENANT_A_ID);
     assert!(!ctx.bypasses_rls());
 
     // Clear
@@ -177,9 +177,9 @@ async fn test_context_getter() {
 async fn test_rls_across_multiple_tables() {
     let mut driver = connect().await;
 
-    // Set Operator A context
+    // Set Tenant A context
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(TENANT_A_ID))
         .await
         .unwrap();
 
@@ -195,8 +195,8 @@ async fn test_rls_across_multiple_tables() {
         .await
         .unwrap();
 
-    // Both should return data (Operator A has vessels and odysseys)
-    assert!(!vessels.is_empty(), "Operator A should have vessels");
+    // Both should return data (Tenant A has vessels and odysseys)
+    assert!(!vessels.is_empty(), "Tenant A should have vessels");
 
     // Odysseys may or may not have data for this operator,
     // but the query should succeed (no permission error)
@@ -219,7 +219,7 @@ async fn test_pool_connection_recycling_isolation() {
 
     // ── Step 1: Tenant A context — query and count vessels ──
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(TENANT_A_ID))
         .await
         .unwrap();
 
@@ -247,7 +247,7 @@ async fn test_pool_connection_recycling_isolation() {
 
     // ── Step 3: Tenant B context on SAME connection ──
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_B_ID))
+        .set_rls_context(RlsContext::tenant(TENANT_B_ID))
         .await
         .unwrap();
 
@@ -259,7 +259,7 @@ async fn test_pool_connection_recycling_isolation() {
     assert!(b_count > 0, "Tenant B should see vessels");
 
     // ── Step 4: Verify complete isolation ──
-    // Different operators see different data on the SAME recycled connection.
+    // Different tenants see different data on the SAME recycled connection.
     // If DISCARD ALL or RLS reset failed, Tenant B would see Tenant A data.
     assert_ne!(
         a_count, b_count,

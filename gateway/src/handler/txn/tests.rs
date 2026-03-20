@@ -114,7 +114,7 @@ async fn build_test_state(config: GatewayConfig) -> Arc<GatewayState> {
         explain_config,
         tenant_semaphore,
         db_backpressure,
-        user_operator_map: Arc::new(RwLock::new(HashMap::new())),
+        user_tenant_map: Arc::new(RwLock::new(HashMap::new())),
         #[cfg(feature = "qdrant")]
         qdrant_pool: None,
         prometheus_handle,

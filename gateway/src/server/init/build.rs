@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::super::database_url::load_rpc_allow_list;
 use super::helpers::{
     build_pool, load_event_engine, load_policy_engine, load_schema_registry,
-    load_user_operator_map, verify_schema_drift,
+    load_user_tenant_map, verify_schema_drift,
 };
 use super::{Gateway, StartupState};
 use crate::error::GatewayError;
@@ -87,7 +87,7 @@ impl Gateway {
             self.config.max_tenants
         );
 
-        let user_operator_map = load_user_operator_map(
+        let user_tenant_map = load_user_tenant_map(
             &pool,
             "startup_user_map",
             self.config.statement_timeout_ms,
@@ -216,7 +216,7 @@ impl Gateway {
             explain_config,
             tenant_semaphore,
             db_backpressure,
-            user_operator_map,
+            user_tenant_map,
             #[cfg(feature = "qdrant")]
             qdrant_pool,
             prometheus_handle,

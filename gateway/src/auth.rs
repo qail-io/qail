@@ -27,12 +27,9 @@ pub struct JwtClaims {
     /// User role (e.g. `"admin"`, `"operator"`).
     #[serde(default)]
     pub role: Option<String>,
-    /// Tenant / operator ID embedded in the token.
+    /// Tenant ID embedded in the token.
     #[serde(default)]
     pub tenant_id: Option<String>,
-    /// Engine-style: operator_id directly in JWT claims
-    #[serde(default)]
-    pub operator_id: Option<String>,
     /// Additional claims not captured by named fields.
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -45,7 +42,7 @@ pub struct AuthContext {
     pub user_id: String,
     /// User role string.
     pub role: String,
-    /// Tenant / operator ID (may be resolved after JWT decode).
+    /// Tenant ID (may be resolved after JWT decode).
     #[serde(default)]
     pub tenant_id: Option<String>,
     /// Extra JWT claims passed through for downstream use.

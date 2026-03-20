@@ -65,7 +65,7 @@ impl GatewayState {
             config.max_tenants,
         ));
 
-        let user_operator_map = helpers::load_user_operator_map(
+        let user_tenant_map = helpers::load_user_tenant_map(
             &pool,
             config.statement_timeout_ms,
             config.lock_timeout_ms,
@@ -135,7 +135,7 @@ impl GatewayState {
             explain_config: explain_cfg,
             tenant_semaphore,
             db_backpressure,
-            user_operator_map,
+            user_tenant_map,
             #[cfg(feature = "qdrant")]
             qdrant_pool,
             prometheus_handle,

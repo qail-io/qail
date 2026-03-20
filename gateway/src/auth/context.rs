@@ -58,18 +58,10 @@ impl AuthContext {
         }
     }
 
-    /// Legacy alias for `enrich_with_tenant_map`.
-    pub async fn enrich_with_operator_map(
-        &mut self,
-        map: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
-    ) {
-        self.enrich_with_tenant_map(map).await;
-    }
-
     /// Convert gateway AuthContext to PgDriver's RlsContext for Postgres-native RLS.
     ///
     /// Mapping:
-    /// - `tenant_id` → tenant scope (`operator_id` kept internally for legacy compat)
+    /// - `tenant_id` → tenant scope
     /// - `claims["agent_id"]` → `agent_id`
     /// - `role == "super_admin"` → `is_super_admin`
     pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {

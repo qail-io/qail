@@ -604,7 +604,7 @@ impl<T: Table> TypedQail<T> {
 
 /// Marker trait for tables that do NOT require RLS.
 ///
-/// Tables without `operator_id` get this trait from codegen,
+/// Tables without `tenant_id` get this trait from codegen,
 /// allowing `TypedQail<T>.build()` directly.
 pub trait DirectBuild: Table {}
 
@@ -624,7 +624,7 @@ impl<T: Table + DirectBuild> TypedQail<T> {
 
 /// Marker trait for tables that require tenant isolation.
 ///
-/// Tables with `operator_id` column get this from codegen.
+/// Tables with `tenant_id` column get this from codegen.
 /// When a table implements `RequiresRls`, its `TypedQail<T>` can only
 /// produce a `Qail` via `.with_rls(ctx)` → `RlsQuery<T>` → `.build()`.
 ///
@@ -632,7 +632,7 @@ impl<T: Table + DirectBuild> TypedQail<T> {
 ///
 /// # Example
 /// ```ignore
-/// // Codegen for a table with operator_id:
+/// // Codegen for a table with tenant_id:
 /// pub struct Orders;
 /// impl Table for Orders { ... }
 /// impl RequiresRls for Orders {}
@@ -641,7 +641,7 @@ impl<T: Table + DirectBuild> TypedQail<T> {
 /// Qail::typed(Orders).build()
 ///
 /// // ✓ Compiles — RLS proof provided
-/// let ctx = RlsContext::operator("op-uuid");
+/// let ctx = RlsContext::tenant("tenant-uuid");
 /// Qail::typed(Orders).with_rls(&ctx).build()
 /// ```
 pub trait RequiresRls: Table {}
@@ -698,7 +698,7 @@ impl<T: Table + RequiresRls> TypedQail<T> {
     /// there's no `.build()` method available.
     ///
     /// ```ignore
-    /// let ctx = RlsContext::operator("op-uuid");
+    /// let ctx = RlsContext::tenant("tenant-uuid");
     /// let query = Qail::typed(Orders)
     ///     .column("id")
     ///     .with_rls(&ctx)   // returns RlsQuery<Orders>
@@ -935,7 +935,7 @@ mod tests {
     }
     impl DirectBuild for Products {}
 
-    // RLS-protected table (has operator_id)
+    // RLS-protected table (has tenant_id)
     struct Orders;
     impl Table for Orders {
         fn table_name() -> &'static str {
@@ -1062,7 +1062,7 @@ mod tests {
         use crate::rls::RlsContext;
         use crate::transpiler::ToSql;
 
-        let ctx = RlsContext::operator("op-123");
+        let ctx = RlsContext::tenant("tenant-123");
         // The real test is that this COMPILES — Orders requires RLS proof
         let query = Qail::typed(Orders)
             .column("id")
@@ -1081,7 +1081,7 @@ mod tests {
         use crate::rls::RlsContext;
         use crate::transpiler::ToSql;
 
-        let ctx = RlsContext::operator("op-456");
+        let ctx = RlsContext::tenant("tenant-456");
         // The real test: chaining after .with_rls() still works
         let query = Qail::typed(Orders)
             .column("id")
@@ -1121,7 +1121,7 @@ mod tests {
 
         let sql = query.to_sql();
         assert!(sql.contains("orders"), "Should query orders");
-        // Super admin should NOT inject operator_id filter
+        // Super admin should NOT inject tenant_id filter
     }
 
     // NOTE: The following should NOT compile — proving compile-time safety:

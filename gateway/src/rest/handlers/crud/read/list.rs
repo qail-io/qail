@@ -219,7 +219,10 @@ pub(crate) async fn list_handler(
     }
 
     // ── Per-tenant concurrency guard ────────────────────────────────────
-    let tenant_id = auth.to_rls_context().operator_id.clone();
+    let tenant_id = auth
+        .tenant_id
+        .clone()
+        .unwrap_or_else(|| "_anon".to_string());
     let _concurrency_permit = state
         .tenant_semaphore
         .try_acquire(&tenant_id)

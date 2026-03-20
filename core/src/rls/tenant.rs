@@ -18,8 +18,7 @@ use std::sync::RwLock;
 
 /// Registry of tables that participate in tenant-scope isolation.
 ///
-/// Each entry maps a table name to its tenant column
-/// (prefer `tenant_id`, fallback `operator_id` for legacy schemas).
+/// Each entry maps a table name to its tenant column (`tenant_id`).
 #[derive(Debug, Default)]
 pub struct TenantRegistry {
     tables: HashMap<String, String>,
@@ -68,16 +67,13 @@ impl TenantRegistry {
 
     /// Load tenant tables from a parsed build::Schema.
     ///
-    /// Scans all tables for columns named `tenant_id` first,
-    /// then falls back to `operator_id` for legacy schemas.
+    /// Scans all tables for columns named `tenant_id`.
     pub fn from_build_schema(schema: &crate::build::Schema) -> Self {
         let mut registry = Self::new();
 
         for table in schema.tables.values() {
             if table.columns.contains_key("tenant_id") {
                 registry.register(&table.name, "tenant_id");
-            } else if table.columns.contains_key("operator_id") {
-                registry.register(&table.name, "operator_id");
             }
         }
 
@@ -117,7 +113,7 @@ pub fn lookup_tenant_column(table: &str) -> Option<String> {
 }
 
 /// Load tenant tables from a schema.qail file.
-/// Auto-detects tables with `tenant_id` columns first, then `operator_id`.
+/// Auto-detects tables with `tenant_id` columns.
 /// Returns the number of tenant tables found.
 pub fn load_tenant_tables(path: &str) -> Result<usize, String> {
     let schema = crate::build::Schema::parse_file(path)?;
@@ -129,9 +125,6 @@ pub fn load_tenant_tables(path: &str) -> Result<usize, String> {
     for table in schema.tables.values() {
         if table.columns.contains_key("tenant_id") {
             registry.register(&table.name, "tenant_id");
-            count += 1;
-        } else if table.columns.contains_key("operator_id") {
-            registry.register(&table.name, "operator_id");
             count += 1;
         }
     }
@@ -238,16 +231,12 @@ table orders {
   tenant_id UUID
 }
 
-table legacy_bookings {
-  id UUID
-  operator_id UUID
-}
 "#,
         )
         .expect("schema should parse");
 
         let reg = TenantRegistry::from_build_schema(&schema);
         assert_eq!(reg.get("orders"), Some("tenant_id"));
-        assert_eq!(reg.get("legacy_bookings"), Some("operator_id"));
+        assert_eq!(reg.get("legacy_bookings"), None);
     }
 }

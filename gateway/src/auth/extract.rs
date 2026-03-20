@@ -63,13 +63,6 @@ pub fn extract_auth_from_headers_with_jwks(
                 match decode::<JwtClaims>(token, &decoding_key, &validation) {
                     Ok(token_data) => {
                         let claims = token_data.claims;
-                        let tenant_id = claims.tenant_id.or(claims.operator_id).or_else(|| {
-                            claims
-                                .extra
-                                .get("operator_id")
-                                .and_then(|v| v.as_str())
-                                .map(String::from)
-                        });
                         tracing::debug!(
                             "JWT validated via JWKS (kid={}): user={}",
                             kid,
@@ -78,7 +71,7 @@ pub fn extract_auth_from_headers_with_jwks(
                         return AuthContext {
                             user_id: claims.sub,
                             role: claims.role.unwrap_or_else(|| "user".to_string()),
-                            tenant_id,
+                            tenant_id: claims.tenant_id,
                             claims: claims.extra,
                         };
                     }
@@ -189,7 +182,7 @@ pub async fn extract_auth_for_state(
         state.jwks_store.as_ref(),
         &state.jwt_allowed_algorithms,
     );
-    auth.enrich_with_tenant_map(&state.user_operator_map).await;
+    auth.enrich_with_tenant_map(&state.user_tenant_map).await;
 
     if let Some(impersonate_header) = headers.get("x-impersonate-tenant")
         && let Ok(target_tenant) = impersonate_header.to_str()

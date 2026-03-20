@@ -22,18 +22,12 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
     } else {
         &ctx.tenant_id
     };
-    let op_id_raw = if ctx.is_global() && ctx.operator_id.is_empty() {
-        nil_uuid
-    } else {
-        &ctx.operator_id
-    };
     let ag_id_raw = if ctx.is_global() && ctx.agent_id.is_empty() {
         nil_uuid
     } else {
         &ctx.agent_id
     };
     let t_id = sanitize_guc_value(t_id_raw);
-    let op_id = sanitize_guc_value(op_id_raw);
     let ag_id = sanitize_guc_value(ag_id_raw);
     let u_id_raw = if ctx.user_id().is_empty() {
         nil_uuid
@@ -46,17 +40,13 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
         "BEGIN; SET LOCAL app.is_global = '{}'; \
          SELECT set_config('app.current_user_id', '{}', true), \
                 set_config('app.current_tenant_id', '{}', true), \
-                set_config('app.current_operator_id', '{}', true), \
                 set_config('app.tenant_id', '{}', true), \
-                set_config('app.operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         is_global,
         u_id,
         t_id,
-        op_id,
         t_id,
-        op_id,
         ag_id,
         ctx.bypasses_rls(),
     )
@@ -85,18 +75,12 @@ pub(crate) fn context_to_sql_with_timeouts(
     } else {
         &ctx.tenant_id
     };
-    let op_id_raw = if ctx.is_global() && ctx.operator_id.is_empty() {
-        nil_uuid
-    } else {
-        &ctx.operator_id
-    };
     let ag_id_raw = if ctx.is_global() && ctx.agent_id.is_empty() {
         nil_uuid
     } else {
         &ctx.agent_id
     };
     let t_id = sanitize_guc_value(t_id_raw);
-    let op_id = sanitize_guc_value(op_id_raw);
     let ag_id = sanitize_guc_value(ag_id_raw);
     let u_id_raw = if ctx.user_id().is_empty() {
         nil_uuid
@@ -117,9 +101,7 @@ pub(crate) fn context_to_sql_with_timeouts(
          SET LOCAL app.is_global = '{}'; \
          SELECT set_config('app.current_user_id', '{}', true), \
                 set_config('app.current_tenant_id', '{}', true), \
-                set_config('app.current_operator_id', '{}', true), \
                 set_config('app.tenant_id', '{}', true), \
-                set_config('app.operator_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         statement_timeout_ms,
@@ -127,9 +109,7 @@ pub(crate) fn context_to_sql_with_timeouts(
         is_global,
         u_id,
         t_id,
-        op_id,
         t_id,
-        op_id,
         ag_id,
         ctx.bypasses_rls(),
     )
@@ -173,14 +153,12 @@ mod tests {
     use qail_core::rls::SuperAdminToken;
 
     #[test]
-    fn test_context_to_sql_operator() {
-        let ctx = RlsContext::operator("abc-123");
+    fn test_context_to_sql_tenant() {
+        let ctx = RlsContext::tenant("abc-123");
         let sql = context_to_sql(&ctx);
         assert!(sql.contains("'abc-123'"));
         assert!(sql.contains("app.current_tenant_id"));
-        assert!(sql.contains("app.current_operator_id"));
         assert!(sql.contains("app.tenant_id"));
-        assert!(sql.contains("app.operator_id"));
         assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
         assert!(sql.contains("'false'")); // is_super_admin
     }
@@ -253,26 +231,26 @@ mod tests {
 
     #[test]
     fn redteam_guc_injection_single_quote_stripped() {
-        let ctx = RlsContext::operator("'; DROP TABLE users; --");
+        let ctx = RlsContext::tenant("'; DROP TABLE users; --");
         let sql = context_to_sql(&ctx);
         // Quotes and semicolons stripped → value is harmless inside set_config()
         // The value becomes " DROP TABLE users --" (inert string, not executable SQL)
         let sanitized = sanitize_guc_value("'; DROP TABLE users; --");
         assert!(!sanitized.contains('\''), "Single quotes must be stripped");
         assert!(!sanitized.contains(';'), "Semicolons must be stripped");
-        assert!(sql.contains("app.current_operator_id"));
+        assert!(sql.contains("app.current_tenant_id"));
     }
 
     #[test]
     fn redteam_guc_injection_backslash_stripped() {
-        let ctx = RlsContext::operator("abc\\'; SELECT 1; --");
+        let ctx = RlsContext::tenant("abc\\'; SELECT 1; --");
         let sql = context_to_sql(&ctx);
         let sanitized = sanitize_guc_value("abc\\'; SELECT 1; --");
         assert!(!sanitized.contains('\\'), "Backslashes must be stripped");
         assert!(!sanitized.contains('\''), "Quotes must be stripped");
         assert!(!sanitized.contains(';'), "Semicolons must be stripped");
         // The resulting SQL has the value safely inside set_config quotes
-        assert!(sql.contains("app.current_operator_id"));
+        assert!(sql.contains("app.current_tenant_id"));
     }
 
     #[test]
@@ -287,7 +265,7 @@ mod tests {
 
     #[test]
     fn redteam_guc_injection_with_timeout() {
-        let ctx = RlsContext::operator("'; DROP TABLE users; --");
+        let ctx = RlsContext::tenant("'; DROP TABLE users; --");
         let sql = context_to_sql_with_timeout(&ctx, 5000);
         // The injected value is sanitized — no quote/semicolon escape
         assert!(
@@ -300,7 +278,7 @@ mod tests {
     #[test]
     fn redteam_guc_normal_uuid_passes_through() {
         let uuid = "4fcc89a7-0753-4b8d-8457-71619533dbd8";
-        let ctx = RlsContext::operator(uuid);
+        let ctx = RlsContext::tenant(uuid);
         let sql = context_to_sql(&ctx);
         assert!(
             sql.contains(uuid),
@@ -327,7 +305,7 @@ mod tests {
 
     #[test]
     fn lock_timeout_injected_when_nonzero() {
-        let ctx = RlsContext::operator("tenant-1");
+        let ctx = RlsContext::tenant("tenant-1");
         let sql = context_to_sql_with_timeouts(&ctx, 30_000, 5_000);
         assert!(
             sql.contains("statement_timeout = 30000"),
@@ -342,7 +320,7 @@ mod tests {
 
     #[test]
     fn lock_timeout_omitted_when_zero() {
-        let ctx = RlsContext::operator("tenant-1");
+        let ctx = RlsContext::tenant("tenant-1");
         let sql = context_to_sql_with_timeouts(&ctx, 30_000, 0);
         assert!(
             sql.contains("statement_timeout = 30000"),

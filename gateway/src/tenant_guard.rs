@@ -99,7 +99,7 @@ pub static TENANT_GUARD: TenantGuardMetrics = TenantGuardMetrics::new();
 ///
 /// * `rows` - The JSON rows from the query response
 /// * `expected_tenant_id` - The authenticated tenant's ID
-/// * `tenant_column` - Column name to check (e.g. "operator_id", "tenant_id")
+/// * `tenant_column` - Column name to check (e.g. "tenant_id")
 /// * `table` - Table name for logging context
 /// * `endpoint` - Endpoint name for logging context
 pub fn verify_tenant_boundary(

@@ -197,7 +197,6 @@ pub struct GatewayConfig {
     pub qdrant: Option<GatewayQdrantConfig>,
 
     /// Tenant boundary column name (default: "tenant_id").
-    /// Legacy schemas using `operator_id` can override this.
     #[serde(default = "default_tenant_column")]
     pub tenant_column: String,
 
