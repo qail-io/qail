@@ -326,6 +326,7 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, Qail> {
             on_disk: None,
             function_def: None,
             trigger_def: None,
+            policy_def: None,
         },
     ))
 }

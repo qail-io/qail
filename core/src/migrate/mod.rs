@@ -27,7 +27,7 @@ pub mod schema;
 pub mod types;
 
 pub use alter::{AlterOp, AlterTable, TableConstraint};
-pub use diff::diff_schemas;
+pub use diff::{diff_schemas, diff_schemas_checked, validate_state_diff_support};
 pub use named_migration::{MigrationMeta, parse_migration_meta, validate_dependencies};
 pub use parser::{parse_qail, parse_qail_file};
 pub use policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy, session_bool_check, tenant_check};

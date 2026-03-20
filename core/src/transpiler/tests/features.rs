@@ -1,6 +1,7 @@
 //! Feature tests (DDL, Upsert, JSON operations, advanced features).
 
 use crate::ast::*;
+use crate::migrate::policy::RlsPolicy;
 use crate::parser::parse;
 use crate::transpiler::{Dialect, ToSql};
 
@@ -58,6 +59,95 @@ fn test_rename_column() {
     });
     let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
     assert!(sql.contains("ALTER TABLE users RENAME COLUMN old_name TO new_name"));
+}
+
+#[test]
+fn test_grant_sql() {
+    let cmd = Qail {
+        action: Action::Grant,
+        table: "users".to_string(),
+        columns: vec![
+            Expr::Named("SELECT".to_string()),
+            Expr::Named("INSERT".to_string()),
+        ],
+        payload: Some("app_role".to_string()),
+        ..Default::default()
+    };
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(sql, "GRANT SELECT, INSERT ON users TO app_role");
+}
+
+#[test]
+fn test_revoke_sql() {
+    let cmd = Qail {
+        action: Action::Revoke,
+        table: "users".to_string(),
+        columns: vec![Expr::Named("UPDATE".to_string())],
+        payload: Some("app_role".to_string()),
+        ..Default::default()
+    };
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(sql, "REVOKE UPDATE ON users FROM app_role");
+}
+
+#[test]
+fn test_create_function_with_args_sql() {
+    let cmd = Qail {
+        action: Action::CreateFunction,
+        function_def: Some(FunctionDef {
+            name: "sum_one".to_string(),
+            args: vec!["v int".to_string()],
+            returns: "int".to_string(),
+            body: "BEGIN RETURN v + 1; END;".to_string(),
+            language: Some("plpgsql".to_string()),
+        }),
+        ..Default::default()
+    };
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "CREATE OR REPLACE FUNCTION sum_one(v int) RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN v + 1; END; $$"
+    );
+}
+
+#[test]
+fn test_create_policy_sql() {
+    let policy = RlsPolicy::create("users_isolation", "users")
+        .for_all()
+        .restrictive()
+        .to_role("app_role")
+        .using(Expr::Named(
+            "tenant_id = current_setting('app.current_tenant_id')::uuid".to_string(),
+        ))
+        .with_check(Expr::Named(
+            "tenant_id = current_setting('app.current_tenant_id')::uuid".to_string(),
+        ));
+    let cmd = Qail {
+        action: Action::CreatePolicy,
+        policy_def: Some(policy),
+        ..Default::default()
+    };
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert!(sql.contains("CREATE POLICY users_isolation ON users"));
+    assert!(sql.contains("AS RESTRICTIVE"));
+    assert!(sql.contains("FOR ALL"));
+    assert!(sql.contains("TO app_role"));
+    assert!(sql.contains("USING (tenant_id = current_setting('app.current_tenant_id')::uuid)"));
+    assert!(
+        sql.contains("WITH CHECK (tenant_id = current_setting('app.current_tenant_id')::uuid)")
+    );
+}
+
+#[test]
+fn test_drop_policy_sql() {
+    let cmd = Qail {
+        action: Action::DropPolicy,
+        table: "users".to_string(),
+        payload: Some("users_isolation".to_string()),
+        ..Default::default()
+    };
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(sql, "DROP POLICY IF EXISTS users_isolation ON users");
 }
 
 // ============= Upsert Tests =============

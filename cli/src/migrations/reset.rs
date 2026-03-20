@@ -6,7 +6,7 @@
 
 use crate::colors::*;
 use anyhow::Result;
-use qail_core::migrate::{diff_schemas, parse_qail};
+use qail_core::migrate::{diff_schemas_checked, parse_qail};
 use qail_pg::PgDriver;
 
 use crate::migrations::{
@@ -34,7 +34,13 @@ pub async fn migrate_reset(
     let empty_schema = Default::default();
 
     // Phase 2: Diff empty → target (generates CREATE statements)
-    let create_cmds = diff_schemas(&empty_schema, &target_schema);
+    let create_cmds = diff_schemas_checked(&empty_schema, &target_schema).map_err(|e| {
+        anyhow::anyhow!(
+            "State-based diff unsupported for target reset schema '{}': {}",
+            schema_file,
+            e
+        )
+    })?;
 
     // Connect
     let (host, port, user, password, database) = parse_pg_url(url)?;
@@ -62,7 +68,13 @@ pub async fn migrate_reset(
         .map_err(|e| anyhow::anyhow!("Failed to introspect live schema: {}", e))?;
 
     // Phase 1: Diff live → empty (generates DROP statements for current DB state)
-    let drop_cmds = diff_schemas(&live_schema, &empty_schema);
+    let drop_cmds = diff_schemas_checked(&live_schema, &empty_schema).map_err(|e| {
+        anyhow::anyhow!(
+            "State-based diff unsupported for live reset schema '{}': {}",
+            schema_file,
+            e
+        )
+    })?;
 
     // === Phase 1: DROP everything ===
     if drop_cmds.is_empty() {

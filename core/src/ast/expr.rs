@@ -635,6 +635,8 @@ impl From<&String> for Expr {
 pub struct FunctionDef {
     /// Function name.
     pub name: String,
+    /// Function arguments (e.g., "v int", "tenant uuid").
+    pub args: Vec<String>,
     /// Return type (e.g., "trigger", "integer", "void").
     pub returns: String,
     /// Function body (PL/pgSQL code).

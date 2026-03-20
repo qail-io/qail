@@ -142,6 +142,8 @@ impl ToSql for Qail {
                         self.table,
                         source.to_sql_with_dialect(dialect)
                     )
+                } else if let Some(query) = &self.payload {
+                    format!("CREATE MATERIALIZED VIEW {} AS {}", self.table, query)
                 } else {
                     format!(
                         "CREATE MATERIALIZED VIEW {} AS {}",
@@ -153,7 +155,9 @@ impl ToSql for Qail {
             // REFRESH MATERIALIZED VIEW
             Action::RefreshMaterializedView => format!("REFRESH MATERIALIZED VIEW {}", self.table),
             // DROP MATERIALIZED VIEW
-            Action::DropMaterializedView => format!("DROP MATERIALIZED VIEW {}", self.table),
+            Action::DropMaterializedView => {
+                format!("DROP MATERIALIZED VIEW IF EXISTS {}", self.table)
+            }
             // LISTEN/NOTIFY (Pub/Sub)
             Action::Listen => {
                 if let Some(ch) = &self.channel {
@@ -210,6 +214,8 @@ impl ToSql for Qail {
                         self.table,
                         source.to_sql_with_dialect(dialect)
                     )
+                } else if let Some(query) = &self.payload {
+                    format!("CREATE VIEW {} AS {}", self.table, query)
                 } else {
                     format!(
                         "CREATE VIEW {} AS {}",
@@ -236,9 +242,10 @@ impl ToSql for Qail {
             operators::Action::CreateFunction => {
                 if let Some(func) = &self.function_def {
                     let lang = func.language.as_deref().unwrap_or("plpgsql");
+                    let args = func.args.join(", ");
                     format!(
-                        "CREATE OR REPLACE FUNCTION {}() RETURNS {} LANGUAGE {} AS $$ {} $$",
-                        func.name, func.returns, lang, func.body
+                        "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} LANGUAGE {} AS $$ {} $$",
+                        func.name, args, func.returns, lang, func.body
                     )
                 } else {
                     "-- CreateFunction requires function_def".to_string()
@@ -286,7 +293,11 @@ impl ToSql for Qail {
                 }
             }
             operators::Action::DropTrigger => {
-                format!("DROP TRIGGER IF EXISTS {} ON {}", self.table, self.table)
+                if let Some((table, trigger)) = self.table.rsplit_once('.') {
+                    format!("DROP TRIGGER IF EXISTS {} ON {}", trigger, table)
+                } else {
+                    format!("DROP TRIGGER IF EXISTS {}", self.table)
+                }
             }
             // Phase 7: Extensions, Comments, Sequences
             Action::CreateExtension => ddl::build_create_extension(self, dialect),
@@ -382,6 +393,51 @@ impl ToSql for Qail {
             }
             Action::DropDatabase => {
                 format!("DROP DATABASE IF EXISTS {}", self.table)
+            }
+            Action::Grant => {
+                let role = self.payload.as_deref().unwrap_or("");
+                let privs: Vec<String> = self
+                    .columns
+                    .iter()
+                    .filter_map(|c| match c {
+                        Expr::Named(p) => Some(p.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                format!("GRANT {} ON {} TO {}", privs.join(", "), self.table, role)
+            }
+            Action::Revoke => {
+                let role = self.payload.as_deref().unwrap_or("");
+                let privs: Vec<String> = self
+                    .columns
+                    .iter()
+                    .filter_map(|c| match c {
+                        Expr::Named(p) => Some(p.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                format!(
+                    "REVOKE {} ON {} FROM {}",
+                    privs.join(", "),
+                    self.table,
+                    role
+                )
+            }
+            Action::CreatePolicy => {
+                if let Some(policy) = &self.policy_def {
+                    policy::create_policy_sql(policy)
+                } else {
+                    "-- CreatePolicy requires policy_def".to_string()
+                }
+            }
+            Action::DropPolicy => {
+                if let Some(policy) = &self.policy_def {
+                    policy::drop_policy_sql(&policy.name, &policy.table)
+                } else if let Some(policy_name) = &self.payload {
+                    policy::drop_policy_sql(policy_name, &self.table)
+                } else {
+                    "-- DropPolicy requires policy name + table".to_string()
+                }
             }
         }
     }

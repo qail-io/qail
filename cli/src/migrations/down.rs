@@ -2,7 +2,7 @@
 
 use crate::colors::*;
 use anyhow::Result;
-use qail_core::migrate::{diff_schemas, parse_qail_file};
+use qail_core::migrate::{diff_schemas_checked, parse_qail_file};
 use qail_core::prelude::{Action, Expr};
 use qail_core::transpiler::ToSql;
 use qail_pg::driver::PgDriver;
@@ -36,7 +36,9 @@ pub async fn migrate_down(
         let target_schema = parse_qail_file(target_path)
             .map_err(|e| anyhow::anyhow!("Failed to parse target schema: {}", e))?;
 
-        diff_schemas(&current_schema, &target_schema)
+        diff_schemas_checked(&current_schema, &target_schema).map_err(|e| {
+            anyhow::anyhow!("State-based diff unsupported for this schema pair: {}", e)
+        })?
     } else {
         return Err(anyhow::anyhow!(
             "Rollback requires two .qail files.\n\

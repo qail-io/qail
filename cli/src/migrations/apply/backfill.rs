@@ -258,6 +258,11 @@ async fn ensure_backfill_checkpoint_table(pg: &mut qail_pg::PgDriver) -> Result<
                     constraints: vec![Constraint::Default("0".to_string())],
                 },
                 Expr::Def {
+                    name: "last_pk_text".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                },
+                Expr::Def {
                     name: "chunk_size".to_string(),
                     data_type: "int".to_string(),
                     constraints: vec![],
@@ -288,6 +293,33 @@ async fn ensure_backfill_checkpoint_table(pg: &mut qail_pg::PgDriver) -> Result<
         pg.execute(&create_cmd)
             .await
             .context("Failed to ensure _qail_backfill_checkpoints table")?;
+    } else {
+        // Cutover helper: add text checkpoint column for uuid/text PK runners.
+        let col_exists_cmd = Qail::get("information_schema.columns")
+            .column("1")
+            .where_eq("table_schema", "public")
+            .where_eq("table_name", "_qail_backfill_checkpoints")
+            .where_eq("column_name", "last_pk_text")
+            .limit(1);
+        let col_rows = pg
+            .fetch_all(&col_exists_cmd)
+            .await
+            .context("Failed to inspect _qail_backfill_checkpoints columns")?;
+        if col_rows.is_empty() {
+            let alter_cmd = Qail {
+                action: Action::Mod,
+                table: "_qail_backfill_checkpoints".to_string(),
+                columns: vec![Expr::Def {
+                    name: "last_pk_text".to_string(),
+                    data_type: "text".to_string(),
+                    constraints: vec![Constraint::Nullable],
+                }],
+                ..Default::default()
+            };
+            pg.execute(&alter_cmd)
+                .await
+                .context("Failed to add last_pk_text column for backfill checkpoints")?;
+        }
     }
     Ok(())
 }
@@ -301,11 +333,44 @@ pub(super) fn split_schema_table(table: &str) -> (&str, &str) {
     }
 }
 
-async fn ensure_integer_backfill_pk(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackfillPkKind {
+    Integer,
+    TextComparable,
+}
+
+fn classify_backfill_pk_type(raw_type: &str) -> Result<BackfillPkKind> {
+    let typ = raw_type.trim().to_ascii_lowercase();
+
+    if ["smallint", "integer", "bigint"]
+        .iter()
+        .any(|t| typ.contains(t))
+    {
+        return Ok(BackfillPkKind::Integer);
+    }
+
+    if typ.contains("uuid")
+        || typ.contains("text")
+        || typ.contains("character varying")
+        || typ.contains("varchar")
+        || typ == "character"
+        || typ.starts_with("character(")
+        || typ.contains("bpchar")
+    {
+        return Ok(BackfillPkKind::TextComparable);
+    }
+
+    bail!(
+        "Backfill checkpoint runner supports PK types: smallint/int/bigint/uuid/text/varchar/char. Found '{}'",
+        typ
+    )
+}
+
+async fn inspect_backfill_pk_kind(
     pg: &mut qail_pg::PgDriver,
     table: &str,
     pk_column: &str,
-) -> Result<()> {
+) -> Result<BackfillPkKind> {
     let (schema, table_name) = split_schema_table(table);
     let cmd = Qail::get("pg_attribute a")
         .column("format_type(a.atttypid, a.atttypmod) AS typ")
@@ -336,18 +401,13 @@ async fn ensure_integer_backfill_pk(
         );
     };
 
-    let typ = row.get_string(0).unwrap_or_default().to_ascii_lowercase();
-    let supported = ["smallint", "integer", "bigint"];
-    if !supported.iter().any(|t| typ.contains(t)) {
-        bail!(
-            "Backfill checkpoint runner requires integer PK (smallint/int/bigint). Found '{}.{}' type '{}'",
-            table,
-            pk_column,
-            typ
-        );
-    }
-
-    Ok(())
+    let typ = row.get_string(0).unwrap_or_default();
+    classify_backfill_pk_type(&typ).with_context(|| {
+        format!(
+            "Unsupported backfill PK '{}.{}' type '{}'",
+            table, pk_column, typ
+        )
+    })
 }
 
 pub(super) async fn run_chunked_backfill(
@@ -356,7 +416,7 @@ pub(super) async fn run_chunked_backfill(
     spec: &BackfillSpec,
 ) -> Result<BackfillRun> {
     ensure_backfill_checkpoint_table(pg).await?;
-    ensure_integer_backfill_pk(pg, &spec.table, &spec.pk_column).await?;
+    let pk_kind = inspect_backfill_pk_kind(pg, &spec.table, &spec.pk_column).await?;
 
     let init_cmd = Qail::add("_qail_backfill_checkpoints")
         .set_value("migration_version", migration_version)
@@ -369,7 +429,7 @@ pub(super) async fn run_chunked_backfill(
         .context("Failed to initialize backfill checkpoint")?;
 
     let status_cmd = Qail::get("_qail_backfill_checkpoints")
-        .columns(["last_pk", "rows_processed", "finished_at"])
+        .columns(["last_pk", "last_pk_text", "rows_processed", "finished_at"])
         .where_eq("migration_version", migration_version)
         .limit(1);
     let status_rows = pg
@@ -383,9 +443,10 @@ pub(super) async fn run_chunked_backfill(
         );
     };
 
-    let mut last_pk = status_row.get_i64(0).unwrap_or(0);
-    let mut rows_updated = status_row.get_i64(1).unwrap_or(0);
-    let already_finished = status_row.get_string(2).is_some();
+    let mut last_pk_int = status_row.get_i64(0).unwrap_or(0);
+    let mut last_pk_text = status_row.get_string(1);
+    let mut rows_updated = status_row.get_i64(2).unwrap_or(0);
+    let already_finished = status_row.get_string(3).is_some();
     if already_finished {
         println!(
             "{}",
@@ -402,13 +463,24 @@ pub(super) async fn run_chunked_backfill(
         });
     }
 
-    let resumed = last_pk > 0 || rows_updated > 0;
+    let resumed = match pk_kind {
+        BackfillPkKind::Integer => last_pk_int > 0 || rows_updated > 0,
+        BackfillPkKind::TextComparable => {
+            last_pk_text.as_ref().is_some_and(|v| !v.is_empty()) || rows_updated > 0
+        }
+    };
     if resumed {
+        let cursor = match pk_kind {
+            BackfillPkKind::Integer => last_pk_int.to_string(),
+            BackfillPkKind::TextComparable => {
+                last_pk_text.clone().unwrap_or_else(|| "<none>".into())
+            }
+        };
         println!(
             "{}",
             format!(
                 "↳ resuming checkpoint from last_pk={} rows_done={}",
-                last_pk, rows_updated
+                cursor, rows_updated
             )
             .dimmed()
         );
@@ -420,9 +492,18 @@ pub(super) async fn run_chunked_backfill(
     loop {
         let mut batch_cmd = Qail::get(spec.table.as_str())
             .column(spec.pk_column.as_str())
-            .gt(spec.pk_column.as_str(), last_pk)
             .order_asc(spec.pk_column.as_str())
             .limit(spec.chunk_size as i64);
+        match pk_kind {
+            BackfillPkKind::Integer => {
+                batch_cmd = batch_cmd.gt(spec.pk_column.as_str(), last_pk_int);
+            }
+            BackfillPkKind::TextComparable => {
+                if let Some(cursor) = &last_pk_text {
+                    batch_cmd = batch_cmd.gt(spec.pk_column.as_str(), cursor.as_str());
+                }
+            }
+        }
 
         if let Some(where_null_col) = &spec.where_null_column {
             batch_cmd = batch_cmd.is_null(where_null_col.as_str());
@@ -436,25 +517,52 @@ pub(super) async fn run_chunked_backfill(
             break;
         }
 
-        let mut batch_ids = Vec::<i64>::with_capacity(batch_rows.len());
-        for row in &batch_rows {
-            if let Some(pk) = row.get_i64(0) {
-                batch_ids.push(pk);
+        let mut batch_ids_int = Vec::<i64>::new();
+        let mut batch_ids_text = Vec::<String>::new();
+        match pk_kind {
+            BackfillPkKind::Integer => {
+                batch_ids_int.reserve(batch_rows.len());
+                for row in &batch_rows {
+                    if let Some(pk) = row.get_i64(0) {
+                        batch_ids_int.push(pk);
+                    }
+                }
+                if batch_ids_int.is_empty() {
+                    bail!(
+                        "Chunked backfill could not extract integer PK values for '{}.{}'",
+                        spec.table,
+                        spec.pk_column
+                    );
+                }
+            }
+            BackfillPkKind::TextComparable => {
+                batch_ids_text.reserve(batch_rows.len());
+                for row in &batch_rows {
+                    if let Some(pk) = row.get_string(0) {
+                        batch_ids_text.push(pk);
+                    }
+                }
+                if batch_ids_text.is_empty() {
+                    bail!(
+                        "Chunked backfill could not extract text/uuid PK values for '{}.{}'",
+                        spec.table,
+                        spec.pk_column
+                    );
+                }
             }
         }
-        if batch_ids.is_empty() {
-            bail!(
-                "Chunked backfill could not extract integer PK values for '{}.{}'",
-                spec.table,
-                spec.pk_column
-            );
-        }
 
-        let next_pk = *batch_ids.iter().max().unwrap_or(&last_pk);
+        let next_pk_int = batch_ids_int.last().copied().unwrap_or(last_pk_int);
+        let next_pk_text = batch_ids_text.last().cloned().or(last_pk_text.clone());
 
-        let mut update_cmd = Qail::set(spec.table.as_str())
-            .set_value(spec.set_column.as_str(), set_expr.clone())
-            .in_vals(spec.pk_column.as_str(), batch_ids);
+        let mut update_cmd =
+            Qail::set(spec.table.as_str()).set_value(spec.set_column.as_str(), set_expr.clone());
+        update_cmd = match pk_kind {
+            BackfillPkKind::Integer => update_cmd.in_vals(spec.pk_column.as_str(), batch_ids_int),
+            BackfillPkKind::TextComparable => {
+                update_cmd.in_vals(spec.pk_column.as_str(), batch_ids_text)
+            }
+        };
         if let Some(where_null_col) = &spec.where_null_column {
             update_cmd = update_cmd.is_null(where_null_col.as_str());
         }
@@ -488,11 +596,18 @@ pub(super) async fn run_chunked_backfill(
 
         let next_rows_updated = rows_updated.saturating_add(updated);
 
-        let checkpoint_cmd = Qail::set("_qail_backfill_checkpoints")
-            .set_value("last_pk", next_pk)
+        let mut checkpoint_cmd = Qail::set("_qail_backfill_checkpoints")
             .set_value("rows_processed", next_rows_updated)
             .set_value("updated_at", qail_core::ast::builders::now())
             .where_eq("migration_version", migration_version);
+        checkpoint_cmd = match pk_kind {
+            BackfillPkKind::Integer => checkpoint_cmd
+                .set_value("last_pk", next_pk_int)
+                .set_value("last_pk_text", Option::<String>::None),
+            BackfillPkKind::TextComparable => checkpoint_cmd
+                .set_value("last_pk", 0i64)
+                .set_value("last_pk_text", next_pk_text.clone()),
+        };
         let checkpoint_res = pg
             .execute(&checkpoint_cmd)
             .await
@@ -506,17 +621,25 @@ pub(super) async fn run_chunked_backfill(
             .await
             .context("Failed to commit backfill chunk transaction")?;
 
-        last_pk = next_pk;
+        last_pk_int = next_pk_int;
+        last_pk_text = next_pk_text;
         rows_updated = next_rows_updated;
         chunks += 1;
     }
 
-    let finish_cmd = Qail::set("_qail_backfill_checkpoints")
+    let mut finish_cmd = Qail::set("_qail_backfill_checkpoints")
         .set_value("finished_at", qail_core::ast::builders::now())
         .set_value("updated_at", qail_core::ast::builders::now())
         .set_value("rows_processed", rows_updated)
-        .set_value("last_pk", last_pk)
         .where_eq("migration_version", migration_version);
+    finish_cmd = match pk_kind {
+        BackfillPkKind::Integer => finish_cmd
+            .set_value("last_pk", last_pk_int)
+            .set_value("last_pk_text", Option::<String>::None),
+        BackfillPkKind::TextComparable => finish_cmd
+            .set_value("last_pk", 0i64)
+            .set_value("last_pk_text", last_pk_text),
+    };
     pg.execute(&finish_cmd)
         .await
         .context("Failed to finalize backfill checkpoint")?;
@@ -547,6 +670,53 @@ fn build_set_expr(spec: &BackfillSpec) -> Expr {
             args: vec![src],
             alias: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod pk_type_tests {
+    use super::{BackfillPkKind, classify_backfill_pk_type};
+
+    #[test]
+    fn classify_integer_pk_types() {
+        assert_eq!(
+            classify_backfill_pk_type("bigint").expect("bigint should be supported"),
+            BackfillPkKind::Integer
+        );
+        assert_eq!(
+            classify_backfill_pk_type("integer").expect("integer should be supported"),
+            BackfillPkKind::Integer
+        );
+        assert_eq!(
+            classify_backfill_pk_type("smallint").expect("smallint should be supported"),
+            BackfillPkKind::Integer
+        );
+    }
+
+    #[test]
+    fn classify_text_comparable_pk_types() {
+        assert_eq!(
+            classify_backfill_pk_type("uuid").expect("uuid should be supported"),
+            BackfillPkKind::TextComparable
+        );
+        assert_eq!(
+            classify_backfill_pk_type("character varying(255)")
+                .expect("varchar should be supported"),
+            BackfillPkKind::TextComparable
+        );
+        assert_eq!(
+            classify_backfill_pk_type("text").expect("text should be supported"),
+            BackfillPkKind::TextComparable
+        );
+    }
+
+    #[test]
+    fn reject_unsupported_pk_type() {
+        let err = classify_backfill_pk_type("jsonb").expect_err("jsonb PK should be rejected");
+        assert!(
+            err.to_string().contains("supports PK types"),
+            "error should explain supported PK types"
+        );
     }
 }
 

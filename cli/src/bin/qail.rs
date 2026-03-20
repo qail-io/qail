@@ -807,6 +807,11 @@ EXAMPLES:
     # Contract safety guard with code reference scan
     qail migrate apply --phase contract --codebase ./src
 
+    # Allow destructive operations and lock-risk overrides (if policy requires explicit flags)
+    qail migrate apply --allow-destructive
+    qail migrate apply --allow-lock-risk
+    qail migrate apply --allow-no-shadow-receipt
+
     # Wait until global migration lock is available
     qail migrate apply --wait-for-lock
     qail migrate apply --lock-timeout-secs 30"#)]
@@ -826,6 +831,15 @@ EXAMPLES:
         /// Override contract guard even when references still exist in code
         #[arg(long)]
         allow_contract_with_references: bool,
+        /// Explicitly allow destructive migration operations
+        #[arg(long)]
+        allow_destructive: bool,
+        /// Skip shadow receipt verification gate (not recommended)
+        #[arg(long)]
+        allow_no_shadow_receipt: bool,
+        /// Skip lock-risk preflight guardrails (not recommended)
+        #[arg(long)]
+        allow_lock_risk: bool,
         /// Default chunk size for chunked backfill runner directives
         #[arg(long, default_value_t = 5000)]
         backfill_chunk_size: usize,
@@ -975,7 +989,7 @@ fn parse_schema_diff_with_old(
     String,
     String,
 )> {
-    use qail_core::migrate::{diff_schemas, parse_qail_file, schema_to_commands};
+    use qail_core::migrate::{diff_schemas_checked, parse_qail_file, schema_to_commands};
 
     if schema_diff.contains(':') && !schema_diff.starts_with("postgres") {
         let parts: Vec<&str> = schema_diff.splitn(2, ':').collect();
@@ -988,7 +1002,8 @@ fn parse_schema_diff_with_old(
             .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
         let old_cmds = schema_to_commands(&old_schema);
-        let diff_cmds = diff_schemas(&old_schema, &new_schema);
+        let diff_cmds = diff_schemas_checked(&old_schema, &new_schema)
+            .map_err(|e| anyhow::anyhow!("State-based diff unsupported for shadow input: {}", e))?;
 
         Ok((
             old_cmds,
@@ -1151,6 +1166,9 @@ async fn main() -> Result<()> {
                 phase,
                 codebase,
                 allow_contract_with_references,
+                allow_destructive,
+                allow_no_shadow_receipt,
+                allow_lock_risk,
                 backfill_chunk_size,
                 wait_for_lock,
                 lock_timeout_secs,
@@ -1162,6 +1180,9 @@ async fn main() -> Result<()> {
                     phase.clone().into(),
                     codebase.as_deref(),
                     *allow_contract_with_references,
+                    *allow_destructive,
+                    *allow_no_shadow_receipt,
+                    *allow_lock_risk,
                     *backfill_chunk_size,
                     *wait_for_lock,
                     *lock_timeout_secs,

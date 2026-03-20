@@ -1,5 +1,5 @@
 use super::rules::exact_cache_key;
-use super::{execute_query_export, is_query_allowed};
+use super::{execute_query_binary, execute_query_export, is_query_allowed};
 use crate::GatewayState;
 use crate::cache::QueryCache;
 use crate::concurrency::TenantSemaphore;
@@ -110,6 +110,15 @@ fn parse_error_code(bytes: &[u8]) -> String {
         .get("code")
         .and_then(serde_json::Value::as_str)
         .expect("error code")
+        .to_string()
+}
+
+fn parse_error_message(bytes: &[u8]) -> String {
+    let value: serde_json::Value = serde_json::from_slice(bytes).expect("valid JSON error");
+    value
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .expect("error message")
         .to_string()
 }
 
@@ -271,4 +280,106 @@ async fn export_handler_enforces_allow_list_before_db_acquire() {
         .await
         .expect("body should read");
     assert_eq!(parse_error_code(&body), "QUERY_NOT_ALLOWED");
+}
+
+#[tokio::test]
+async fn binary_handler_accepts_qwb1_then_enforces_binary_allow_list_gate() {
+    let _serial = crate::metrics::txn_test_serial_guard().await;
+    let config = GatewayConfig {
+        production_strict: false,
+        ..GatewayConfig::default()
+    };
+
+    let state = build_test_state(config, QueryAllowList::new()).await;
+    let app = Router::new()
+        .route("/qail/binary", post(execute_query_binary))
+        .with_state(Arc::clone(&state));
+
+    let payload = qail_core::wire::encode_cmd_binary(&qail_core::ast::Qail::get("users").limit(1));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/qail/binary")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(payload))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should execute");
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    assert_eq!(parse_error_code(&body), "BINARY_REQUIRES_ALLOW_LIST");
+}
+
+#[tokio::test]
+async fn binary_handler_rejects_invalid_binary_payload() {
+    let _serial = crate::metrics::txn_test_serial_guard().await;
+    let config = GatewayConfig {
+        production_strict: false,
+        ..GatewayConfig::default()
+    };
+
+    let state = build_test_state(config, QueryAllowList::new()).await;
+    let app = Router::new()
+        .route("/qail/binary", post(execute_query_binary))
+        .with_state(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/qail/binary")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(vec![0x01, 0x02, 0x03]))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should execute");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    assert_eq!(parse_error_code(&body), "DECODE_ERROR");
+}
+
+#[tokio::test]
+async fn binary_handler_rejects_legacy_postcard_like_payload() {
+    let _serial = crate::metrics::txn_test_serial_guard().await;
+    let config = GatewayConfig {
+        production_strict: false,
+        ..GatewayConfig::default()
+    };
+
+    let state = build_test_state(config, QueryAllowList::new()).await;
+    let app = Router::new()
+        .route("/qail/binary", post(execute_query_binary))
+        .with_state(Arc::clone(&state));
+
+    // Legacy postcard-style payloads do not carry QWB1 magic and must be rejected.
+    let legacy_payload = vec![0x82, 0xA6, 0x61, 0x63, 0x74, 0x69, 0x6F, 0x6E];
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/qail/binary")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(legacy_payload))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should execute");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    assert_eq!(parse_error_code(&body), "DECODE_ERROR");
+    assert!(
+        parse_error_message(&body).contains("Invalid binary format"),
+        "error message should indicate wire decode failure"
+    );
 }

@@ -68,7 +68,7 @@ html {
     align-items: center;
     gap: 8px;
     text-decoration: none !important;
-    font-weight: 700;
+    font-weight: 600;
     font-size: 1.25rem;
     color: var(--qail-text) !important;
 }
@@ -93,7 +93,7 @@ html {
     color: var(--qail-muted) !important;
     text-decoration: none !important;
     font-size: 0.88rem;
-    font-weight: 500;
+    font-weight: 400;
     transition: var(--qail-transition);
     white-space: nowrap;
 }
@@ -104,7 +104,7 @@ html {
 
 .nav-links a.active {
     color: var(--qail-ok) !important;
-    font-weight: 600;
+    font-weight: 500;
 }
 
 .btn {
@@ -179,7 +179,7 @@ html {
     color: var(--qail-text) !important;
     text-decoration: none !important;
     font-size: 0.98rem;
-    font-weight: 500;
+    font-weight: 400;
     padding: 8px 0;
     border-bottom: 1px solid rgba(148, 163, 184, 0.14);
 }

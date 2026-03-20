@@ -162,7 +162,67 @@ async fn ensure_shadow_state_table(driver: &mut PgDriver) -> Result<()> {
                 .map_err(|e| anyhow!("Failed to migrate shadow state table: {}", e))?;
         }
     }
+    purge_legacy_shadow_state_rows(driver).await?;
     Ok(())
+}
+
+fn is_current_shadow_diff_cmds_wire(diff_cmds: &str) -> bool {
+    diff_cmds.starts_with("QAIL-CMDS/1\n")
+}
+
+async fn purge_legacy_shadow_state_rows(driver: &mut PgDriver) -> Result<()> {
+    let cmd = Qail::get("_qail_shadow_state")
+        .columns(["id", "status", "diff_cmds"])
+        .in_vals("status", ["pending", "verified"]);
+    let rows = driver
+        .fetch_all(&cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to inspect shadow state rows: {}", e))?;
+
+    let mut purged = 0u64;
+    for row in rows {
+        let id = row.get_i64(0).or_else(|| row.get_i32(0).map(i64::from));
+        let status = row.get_string(1).unwrap_or_else(|| "unknown".to_string());
+        let diff_cmds = row.get_string(2).unwrap_or_default();
+
+        if !is_current_shadow_diff_cmds_wire(&diff_cmds)
+            && let Some(id) = id
+        {
+            let del = Qail::del("_qail_shadow_state").where_eq("id", id);
+            driver
+                .execute(&del)
+                .await
+                .map_err(|e| anyhow!("Failed to purge legacy shadow row id={}: {}", id, e))?;
+            purged += 1;
+            eprintln!(
+                "{} Purged legacy _qail_shadow_state row id={} status={} (non-wire diff_cmds)",
+                "⚠".yellow(),
+                id,
+                status
+            );
+        }
+    }
+
+    if purged > 0 {
+        eprintln!(
+            "{} Purged {} legacy shadow state row(s) during wire cutover",
+            "⚠".yellow(),
+            purged
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod shadow_state_cutover_tests {
+    use super::is_current_shadow_diff_cmds_wire;
+
+    #[test]
+    fn detects_current_shadow_wire_payload() {
+        assert!(is_current_shadow_diff_cmds_wire("QAIL-CMDS/1\n0\n"));
+        assert!(!is_current_shadow_diff_cmds_wire("[]"));
+        assert!(!is_current_shadow_diff_cmds_wire("{\"legacy\":true}"));
+    }
 }
 
 /// Stable checksum for a migration command sequence.
@@ -1171,7 +1231,7 @@ pub async fn run_shadow_migration_live(
     primary_url: &str,
     new_schema_path: &str,
 ) -> Result<ShadowState> {
-    use qail_core::migrate::{diff_schemas, parse_qail_file, schema_to_commands};
+    use qail_core::migrate::{diff_schemas_checked, parse_qail_file, schema_to_commands};
 
     println!();
     println!(
@@ -1210,7 +1270,13 @@ pub async fn run_shadow_migration_live(
 
     // Step 2: Generate diff between LIVE schema and new schema
     let old_cmds = schema_to_commands(&live_schema);
-    let diff_cmds = diff_schemas(&live_schema, &new_schema);
+    let diff_cmds = diff_schemas_checked(&live_schema, &new_schema).map_err(|e| {
+        anyhow!(
+            "State-based diff unsupported for live shadow migration '{}': {}",
+            new_schema_path,
+            e
+        )
+    })?;
 
     println!(
         "    {} {} migration commands generated",

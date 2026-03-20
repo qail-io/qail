@@ -3,7 +3,10 @@
 //! CREATE TABLE, CREATE INDEX, DROP, ALTER statements.
 
 use bytes::BytesMut;
-use qail_core::ast::{Constraint, Expr, Qail, TableConstraint};
+use qail_core::ast::{
+    Action, Constraint, Expr, Qail, TableConstraint, TriggerEvent, TriggerTiming,
+};
+use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget};
 
 /// Map QAIL types to PostgreSQL types.
 #[inline]
@@ -269,6 +272,12 @@ pub fn encode_create_view(
     // The source_query contains the SELECT statement for the view
     if let Some(ref source) = cmd.source_query {
         super::dml::encode_select(source, buf, params)?;
+    } else if let Some(query) = &cmd.payload {
+        buf.extend_from_slice(query.as_bytes());
+    } else {
+        return Err(super::super::EncodeError::UnsupportedAction(
+            Action::CreateView,
+        ));
     }
     Ok(())
 }
@@ -276,6 +285,40 @@ pub fn encode_create_view(
 /// Encode DROP VIEW statement.
 pub fn encode_drop_view(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP VIEW IF EXISTS ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}
+
+/// Encode CREATE MATERIALIZED VIEW statement.
+pub fn encode_create_materialized_view(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), super::super::EncodeError> {
+    buf.extend_from_slice(b"CREATE MATERIALIZED VIEW ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" AS ");
+
+    if let Some(ref source) = cmd.source_query {
+        super::dml::encode_select(source, buf, params)?;
+    } else if let Some(query) = &cmd.payload {
+        buf.extend_from_slice(query.as_bytes());
+    } else {
+        return Err(super::super::EncodeError::UnsupportedAction(
+            Action::CreateMaterializedView,
+        ));
+    }
+    Ok(())
+}
+
+/// Encode REFRESH MATERIALIZED VIEW statement.
+pub fn encode_refresh_materialized_view(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"REFRESH MATERIALIZED VIEW ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}
+
+/// Encode DROP MATERIALIZED VIEW statement.
+pub fn encode_drop_materialized_view(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"DROP MATERIALIZED VIEW IF EXISTS ");
     buf.extend_from_slice(cmd.table.as_bytes());
 }
 
@@ -410,6 +453,377 @@ pub fn encode_create_database(cmd: &Qail, buf: &mut BytesMut) {
 pub fn encode_drop_database(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP DATABASE IF EXISTS ");
     buf.extend_from_slice(cmd.table.as_bytes());
+}
+
+/// Encode GRANT privileges ON object TO role.
+pub fn encode_grant(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::EncodeError> {
+    let Some(role) = cmd.payload.as_deref() else {
+        return Err(super::super::EncodeError::UnsupportedAction(Action::Grant));
+    };
+
+    let mut first = true;
+    let mut privs = String::new();
+    for col in &cmd.columns {
+        if let Expr::Named(p) = col {
+            if !first {
+                privs.push_str(", ");
+            }
+            first = false;
+            privs.push_str(p);
+        }
+    }
+    if privs.is_empty() || cmd.table.trim().is_empty() || role.trim().is_empty() {
+        return Err(super::super::EncodeError::UnsupportedAction(Action::Grant));
+    }
+
+    buf.extend_from_slice(b"GRANT ");
+    buf.extend_from_slice(privs.as_bytes());
+    buf.extend_from_slice(b" ON ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" TO ");
+    buf.extend_from_slice(role.as_bytes());
+    Ok(())
+}
+
+/// Encode REVOKE privileges ON object FROM role.
+pub fn encode_revoke(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::EncodeError> {
+    let Some(role) = cmd.payload.as_deref() else {
+        return Err(super::super::EncodeError::UnsupportedAction(Action::Revoke));
+    };
+
+    let mut first = true;
+    let mut privs = String::new();
+    for col in &cmd.columns {
+        if let Expr::Named(p) = col {
+            if !first {
+                privs.push_str(", ");
+            }
+            first = false;
+            privs.push_str(p);
+        }
+    }
+    if privs.is_empty() || cmd.table.trim().is_empty() || role.trim().is_empty() {
+        return Err(super::super::EncodeError::UnsupportedAction(Action::Revoke));
+    }
+
+    buf.extend_from_slice(b"REVOKE ");
+    buf.extend_from_slice(privs.as_bytes());
+    buf.extend_from_slice(b" ON ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" FROM ");
+    buf.extend_from_slice(role.as_bytes());
+    Ok(())
+}
+
+/// Encode CREATE POLICY statement.
+pub fn encode_create_policy(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let Some(policy) = &cmd.policy_def else {
+        return Err(super::super::EncodeError::UnsupportedAction(
+            Action::CreatePolicy,
+        ));
+    };
+
+    buf.extend_from_slice(b"CREATE POLICY ");
+    buf.extend_from_slice(policy.name.as_bytes());
+    buf.extend_from_slice(b" ON ");
+    buf.extend_from_slice(policy.table.as_bytes());
+
+    if policy.permissiveness == PolicyPermissiveness::Restrictive {
+        buf.extend_from_slice(b" AS RESTRICTIVE");
+    }
+
+    let target = match policy.target {
+        PolicyTarget::All => "ALL",
+        PolicyTarget::Select => "SELECT",
+        PolicyTarget::Insert => "INSERT",
+        PolicyTarget::Update => "UPDATE",
+        PolicyTarget::Delete => "DELETE",
+    };
+    buf.extend_from_slice(b" FOR ");
+    buf.extend_from_slice(target.as_bytes());
+
+    if let Some(role) = &policy.role {
+        buf.extend_from_slice(b" TO ");
+        buf.extend_from_slice(role.as_bytes());
+    }
+
+    if let Some(expr) = &policy.using {
+        buf.extend_from_slice(b" USING (");
+        buf.extend_from_slice(expr.to_string().as_bytes());
+        buf.extend_from_slice(b")");
+    }
+    if let Some(expr) = &policy.with_check {
+        buf.extend_from_slice(b" WITH CHECK (");
+        buf.extend_from_slice(expr.to_string().as_bytes());
+        buf.extend_from_slice(b")");
+    }
+
+    Ok(())
+}
+
+/// Encode DROP POLICY statement.
+///
+/// Expects table in `cmd.table` and policy name in `cmd.payload` (or `cmd.policy_def`).
+pub fn encode_drop_policy(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::EncodeError> {
+    let (policy_name, table_name) = if let Some(policy) = &cmd.policy_def {
+        (policy.name.as_str(), policy.table.as_str())
+    } else if let Some(name) = cmd.payload.as_deref() {
+        (name, cmd.table.as_str())
+    } else {
+        return Err(super::super::EncodeError::UnsupportedAction(
+            Action::DropPolicy,
+        ));
+    };
+
+    if policy_name.trim().is_empty() || table_name.trim().is_empty() {
+        return Err(super::super::EncodeError::UnsupportedAction(
+            Action::DropPolicy,
+        ));
+    }
+
+    buf.extend_from_slice(b"DROP POLICY IF EXISTS ");
+    buf.extend_from_slice(policy_name.as_bytes());
+    buf.extend_from_slice(b" ON ");
+    buf.extend_from_slice(table_name.as_bytes());
+    Ok(())
+}
+
+/// Encode CREATE FUNCTION statement.
+pub fn encode_create_function(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let Some(func) = &cmd.function_def else {
+        return Err(super::super::EncodeError::UnsupportedAction(
+            Action::CreateFunction,
+        ));
+    };
+
+    let lang = func.language.as_deref().unwrap_or("plpgsql");
+    let args = func.args.join(", ");
+    buf.extend_from_slice(b"CREATE OR REPLACE FUNCTION ");
+    buf.extend_from_slice(func.name.as_bytes());
+    buf.extend_from_slice(b"(");
+    buf.extend_from_slice(args.as_bytes());
+    buf.extend_from_slice(b") RETURNS ");
+    buf.extend_from_slice(func.returns.as_bytes());
+    buf.extend_from_slice(b" LANGUAGE ");
+    buf.extend_from_slice(lang.as_bytes());
+    buf.extend_from_slice(b" AS $$ ");
+    buf.extend_from_slice(func.body.as_bytes());
+    buf.extend_from_slice(b" $$");
+    Ok(())
+}
+
+/// Encode DROP FUNCTION statement.
+pub fn encode_drop_function(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"DROP FUNCTION IF EXISTS ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b"()");
+}
+
+/// Encode CREATE TRIGGER statement.
+pub fn encode_create_trigger(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let Some(trig) = &cmd.trigger_def else {
+        return Err(super::super::EncodeError::UnsupportedAction(
+            Action::CreateTrigger,
+        ));
+    };
+
+    let timing = match trig.timing {
+        TriggerTiming::Before => "BEFORE",
+        TriggerTiming::After => "AFTER",
+        TriggerTiming::InsteadOf => "INSTEAD OF",
+    };
+
+    let mut first = true;
+    let mut events = String::new();
+    for evt in &trig.events {
+        if !first {
+            events.push_str(" OR ");
+        }
+        first = false;
+        let evt_str = match evt {
+            TriggerEvent::Insert => "INSERT",
+            TriggerEvent::Update => "UPDATE",
+            TriggerEvent::Delete => "DELETE",
+            TriggerEvent::Truncate => "TRUNCATE",
+        };
+        events.push_str(evt_str);
+    }
+
+    if events.is_empty() {
+        return Err(super::super::EncodeError::UnsupportedAction(
+            Action::CreateTrigger,
+        ));
+    }
+
+    let for_each = if trig.for_each_row {
+        "FOR EACH ROW"
+    } else {
+        "FOR EACH STATEMENT"
+    };
+
+    // PostgreSQL has no CREATE OR REPLACE TRIGGER; drop first for idempotency.
+    buf.extend_from_slice(b"DROP TRIGGER IF EXISTS ");
+    buf.extend_from_slice(trig.name.as_bytes());
+    buf.extend_from_slice(b" ON ");
+    buf.extend_from_slice(trig.table.as_bytes());
+    buf.extend_from_slice(b";\nCREATE TRIGGER ");
+    buf.extend_from_slice(trig.name.as_bytes());
+    buf.extend_from_slice(b" ");
+    buf.extend_from_slice(timing.as_bytes());
+    buf.extend_from_slice(b" ");
+    buf.extend_from_slice(events.as_bytes());
+    buf.extend_from_slice(b" ON ");
+    buf.extend_from_slice(trig.table.as_bytes());
+    buf.extend_from_slice(b" ");
+    buf.extend_from_slice(for_each.as_bytes());
+    buf.extend_from_slice(b" EXECUTE FUNCTION ");
+    buf.extend_from_slice(trig.execute_function.as_bytes());
+    buf.extend_from_slice(b"()");
+    Ok(())
+}
+
+/// Encode DROP TRIGGER statement.
+///
+/// Expects `cmd.table` in `table.trigger` form.
+pub fn encode_drop_trigger(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+) -> Result<(), super::super::EncodeError> {
+    let Some((table, trigger)) = cmd.table.rsplit_once('.') else {
+        return Err(super::super::EncodeError::UnsupportedAction(
+            Action::DropTrigger,
+        ));
+    };
+    buf.extend_from_slice(b"DROP TRIGGER IF EXISTS ");
+    buf.extend_from_slice(trigger.as_bytes());
+    buf.extend_from_slice(b" ON ");
+    buf.extend_from_slice(table.as_bytes());
+    Ok(())
+}
+
+/// Encode CREATE EXTENSION statement.
+pub fn encode_create_extension(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"CREATE EXTENSION IF NOT EXISTS \"");
+    buf.extend_from_slice(cmd.table.replace('"', "\"\"").as_bytes());
+    buf.extend_from_slice(b"\"");
+
+    for col in &cmd.columns {
+        if let Expr::Named(opt) = col {
+            buf.extend_from_slice(b" ");
+            buf.extend_from_slice(opt.as_bytes());
+        }
+    }
+}
+
+/// Encode DROP EXTENSION statement.
+pub fn encode_drop_extension(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"DROP EXTENSION IF EXISTS \"");
+    buf.extend_from_slice(cmd.table.replace('"', "\"\"").as_bytes());
+    buf.extend_from_slice(b"\"");
+}
+
+/// Encode COMMENT ON TABLE/COLUMN statement.
+pub fn encode_comment_on(cmd: &Qail, buf: &mut BytesMut) {
+    let comment_text = cmd
+        .columns
+        .first()
+        .and_then(|c| match c {
+            Expr::Named(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .unwrap_or("");
+    let escaped = comment_text.replace('\'', "''");
+
+    if cmd.table.contains('.') {
+        let mut parts = cmd.table.splitn(2, '.');
+        let table = parts.next().unwrap_or_default();
+        let col = parts.next().unwrap_or_default();
+        buf.extend_from_slice(b"COMMENT ON COLUMN ");
+        buf.extend_from_slice(table.as_bytes());
+        buf.extend_from_slice(b".");
+        buf.extend_from_slice(col.as_bytes());
+    } else {
+        buf.extend_from_slice(b"COMMENT ON TABLE ");
+        buf.extend_from_slice(cmd.table.as_bytes());
+    }
+
+    buf.extend_from_slice(b" IS '");
+    buf.extend_from_slice(escaped.as_bytes());
+    buf.extend_from_slice(b"'");
+}
+
+/// Encode CREATE SEQUENCE statement.
+pub fn encode_create_sequence(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"CREATE SEQUENCE ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+
+    for col in &cmd.columns {
+        if let Expr::Named(opt) = col {
+            buf.extend_from_slice(b" ");
+            buf.extend_from_slice(opt.as_bytes());
+        }
+    }
+}
+
+/// Encode DROP SEQUENCE statement.
+pub fn encode_drop_sequence(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"DROP SEQUENCE IF EXISTS ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}
+
+/// Encode CREATE TYPE ... AS ENUM statement.
+pub fn encode_create_enum(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"CREATE TYPE ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(b" AS ENUM (");
+
+    let mut first = true;
+    for col in &cmd.columns {
+        if let Expr::Named(val) = col {
+            if !first {
+                buf.extend_from_slice(b", ");
+            }
+            first = false;
+            buf.extend_from_slice(b"'");
+            buf.extend_from_slice(val.replace('\'', "''").as_bytes());
+            buf.extend_from_slice(b"'");
+        }
+    }
+
+    buf.extend_from_slice(b")");
+}
+
+/// Encode DROP TYPE statement.
+pub fn encode_drop_enum(cmd: &Qail, buf: &mut BytesMut) {
+    buf.extend_from_slice(b"DROP TYPE IF EXISTS ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+}
+
+/// Encode ALTER TYPE ... ADD VALUE IF NOT EXISTS statement(s).
+pub fn encode_alter_enum_add_value(cmd: &Qail, buf: &mut BytesMut) {
+    let mut first = true;
+    for col in &cmd.columns {
+        if let Expr::Named(val) = col {
+            if !first {
+                buf.extend_from_slice(b"; ");
+            }
+            first = false;
+            buf.extend_from_slice(b"ALTER TYPE ");
+            buf.extend_from_slice(cmd.table.as_bytes());
+            buf.extend_from_slice(b" ADD VALUE IF NOT EXISTS '");
+            buf.extend_from_slice(val.replace('\'', "''").as_bytes());
+            buf.extend_from_slice(b"'");
+        }
+    }
 }
 
 // ── Pub/Sub commands ───────────────────────────────────────────────

@@ -182,6 +182,23 @@ impl AstEncoder {
             Action::Mod => ddl::encode_rename_column(cmd, sql_buf),
             Action::CreateView => ddl::encode_create_view(cmd, sql_buf, params)?,
             Action::DropView => ddl::encode_drop_view(cmd, sql_buf),
+            Action::CreateMaterializedView => {
+                ddl::encode_create_materialized_view(cmd, sql_buf, params)?
+            }
+            Action::RefreshMaterializedView => ddl::encode_refresh_materialized_view(cmd, sql_buf),
+            Action::DropMaterializedView => ddl::encode_drop_materialized_view(cmd, sql_buf),
+            Action::CreateFunction => ddl::encode_create_function(cmd, sql_buf)?,
+            Action::DropFunction => ddl::encode_drop_function(cmd, sql_buf),
+            Action::CreateTrigger => ddl::encode_create_trigger(cmd, sql_buf)?,
+            Action::DropTrigger => ddl::encode_drop_trigger(cmd, sql_buf)?,
+            Action::CreateExtension => ddl::encode_create_extension(cmd, sql_buf),
+            Action::DropExtension => ddl::encode_drop_extension(cmd, sql_buf),
+            Action::CommentOn => ddl::encode_comment_on(cmd, sql_buf),
+            Action::CreateSequence => ddl::encode_create_sequence(cmd, sql_buf),
+            Action::DropSequence => ddl::encode_drop_sequence(cmd, sql_buf),
+            Action::CreateEnum => ddl::encode_create_enum(cmd, sql_buf),
+            Action::DropEnum => ddl::encode_drop_enum(cmd, sql_buf),
+            Action::AlterEnumAddValue => ddl::encode_alter_enum_add_value(cmd, sql_buf),
             Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, sql_buf),
             Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, sql_buf),
             Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, sql_buf),
@@ -197,6 +214,10 @@ impl AstEncoder {
             Action::SessionReset => ddl::encode_session_reset(cmd, sql_buf),
             Action::CreateDatabase => ddl::encode_create_database(cmd, sql_buf),
             Action::DropDatabase => ddl::encode_drop_database(cmd, sql_buf),
+            Action::Grant => ddl::encode_grant(cmd, sql_buf)?,
+            Action::Revoke => ddl::encode_revoke(cmd, sql_buf)?,
+            Action::CreatePolicy => ddl::encode_create_policy(cmd, sql_buf)?,
+            Action::DropPolicy => ddl::encode_drop_policy(cmd, sql_buf)?,
             Action::Listen => ddl::encode_listen(cmd, sql_buf),
             Action::Unlisten => ddl::encode_unlisten(cmd, sql_buf),
             Action::Notify => ddl::encode_notify(cmd, sql_buf),
@@ -248,6 +269,25 @@ impl AstEncoder {
             Action::Mod => ddl::encode_rename_column(cmd, &mut sql_buf),
             Action::CreateView => ddl::encode_create_view(cmd, &mut sql_buf, &mut params)?,
             Action::DropView => ddl::encode_drop_view(cmd, &mut sql_buf),
+            Action::CreateMaterializedView => {
+                ddl::encode_create_materialized_view(cmd, &mut sql_buf, &mut params)?
+            }
+            Action::RefreshMaterializedView => {
+                ddl::encode_refresh_materialized_view(cmd, &mut sql_buf)
+            }
+            Action::DropMaterializedView => ddl::encode_drop_materialized_view(cmd, &mut sql_buf),
+            Action::CreateFunction => ddl::encode_create_function(cmd, &mut sql_buf)?,
+            Action::DropFunction => ddl::encode_drop_function(cmd, &mut sql_buf),
+            Action::CreateTrigger => ddl::encode_create_trigger(cmd, &mut sql_buf)?,
+            Action::DropTrigger => ddl::encode_drop_trigger(cmd, &mut sql_buf)?,
+            Action::CreateExtension => ddl::encode_create_extension(cmd, &mut sql_buf),
+            Action::DropExtension => ddl::encode_drop_extension(cmd, &mut sql_buf),
+            Action::CommentOn => ddl::encode_comment_on(cmd, &mut sql_buf),
+            Action::CreateSequence => ddl::encode_create_sequence(cmd, &mut sql_buf),
+            Action::DropSequence => ddl::encode_drop_sequence(cmd, &mut sql_buf),
+            Action::CreateEnum => ddl::encode_create_enum(cmd, &mut sql_buf),
+            Action::DropEnum => ddl::encode_drop_enum(cmd, &mut sql_buf),
+            Action::AlterEnumAddValue => ddl::encode_alter_enum_add_value(cmd, &mut sql_buf),
             Action::AlterSetNotNull => ddl::encode_alter_set_not_null(cmd, &mut sql_buf),
             Action::AlterDropNotNull => ddl::encode_alter_drop_not_null(cmd, &mut sql_buf),
             Action::AlterSetDefault => ddl::encode_alter_set_default(cmd, &mut sql_buf),
@@ -263,6 +303,10 @@ impl AstEncoder {
             Action::SessionReset => ddl::encode_session_reset(cmd, &mut sql_buf),
             Action::CreateDatabase => ddl::encode_create_database(cmd, &mut sql_buf),
             Action::DropDatabase => ddl::encode_drop_database(cmd, &mut sql_buf),
+            Action::Grant => ddl::encode_grant(cmd, &mut sql_buf)?,
+            Action::Revoke => ddl::encode_revoke(cmd, &mut sql_buf)?,
+            Action::CreatePolicy => ddl::encode_create_policy(cmd, &mut sql_buf)?,
+            Action::DropPolicy => ddl::encode_drop_policy(cmd, &mut sql_buf)?,
             Action::Listen => ddl::encode_listen(cmd, &mut sql_buf),
             Action::Unlisten => ddl::encode_unlisten(cmd, &mut sql_buf),
             Action::Notify => ddl::encode_notify(cmd, &mut sql_buf),
@@ -842,6 +886,177 @@ mod tests {
         let cmd = Qail::drop_database("shadow_db");
         let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
         assert_eq!(sql, "DROP DATABASE IF EXISTS shadow_db");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_create_extension() {
+        use qail_core::ast::Expr;
+
+        let cmd = Qail {
+            action: Action::CreateExtension,
+            table: "uuid-ossp".to_string(),
+            columns: vec![
+                Expr::Named("SCHEMA public".to_string()),
+                Expr::Named("VERSION '1.1'".to_string()),
+            ],
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" SCHEMA public VERSION '1.1'"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_create_view_with_payload() {
+        let cmd = Qail {
+            action: Action::CreateView,
+            table: "active_users".to_string(),
+            payload: Some("SELECT id FROM users WHERE active = true".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE VIEW active_users AS SELECT id FROM users WHERE active = true"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_create_materialized_view_with_payload() {
+        let cmd = Qail {
+            action: Action::CreateMaterializedView,
+            table: "booking_stats".to_string(),
+            payload: Some("SELECT COUNT(*) AS total FROM bookings".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE MATERIALIZED VIEW booking_stats AS SELECT COUNT(*) AS total FROM bookings"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_drop_trigger_table_target() {
+        let cmd = Qail {
+            action: Action::DropTrigger,
+            table: "users.trg_users_updated".to_string(),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(sql, "DROP TRIGGER IF EXISTS trg_users_updated ON users");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_grant() {
+        use qail_core::ast::Expr;
+
+        let cmd = Qail {
+            action: Action::Grant,
+            table: "users".to_string(),
+            columns: vec![
+                Expr::Named("SELECT".to_string()),
+                Expr::Named("INSERT".to_string()),
+            ],
+            payload: Some("app_role".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(sql, "GRANT SELECT, INSERT ON users TO app_role");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_revoke() {
+        use qail_core::ast::Expr;
+
+        let cmd = Qail {
+            action: Action::Revoke,
+            table: "users".to_string(),
+            columns: vec![Expr::Named("UPDATE".to_string())],
+            payload: Some("app_role".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(sql, "REVOKE UPDATE ON users FROM app_role");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_create_policy() {
+        use qail_core::ast::{BinaryOp, Expr, Value};
+        use qail_core::migrate::policy::RlsPolicy;
+
+        let policy = RlsPolicy::create("users_isolation", "users")
+            .for_all()
+            .using(Expr::Binary {
+                left: Box::new(Expr::Named("tenant_id".to_string())),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Cast {
+                    expr: Box::new(Expr::FunctionCall {
+                        name: "current_setting".to_string(),
+                        args: vec![Expr::Literal(Value::String(
+                            "app.current_tenant_id".to_string(),
+                        ))],
+                        alias: None,
+                    }),
+                    target_type: "uuid".to_string(),
+                    alias: None,
+                }),
+                alias: None,
+            });
+
+        let cmd = Qail {
+            action: Action::CreatePolicy,
+            policy_def: Some(policy),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE POLICY users_isolation ON users FOR ALL USING ((tenant_id = CURRENT_SETTING('app.current_tenant_id')::uuid))"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_drop_policy() {
+        let cmd = Qail {
+            action: Action::DropPolicy,
+            table: "users".to_string(),
+            payload: Some("users_isolation".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(sql, "DROP POLICY IF EXISTS users_isolation ON users");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_create_function_with_args() {
+        let cmd = Qail {
+            action: Action::CreateFunction,
+            function_def: Some(qail_core::ast::FunctionDef {
+                name: "sum_one".to_string(),
+                args: vec!["v int".to_string()],
+                returns: "int".to_string(),
+                body: "BEGIN RETURN v + 1; END;".to_string(),
+                language: Some("plpgsql".to_string()),
+            }),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE OR REPLACE FUNCTION sum_one(v int) RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN v + 1; END; $$"
+        );
         assert!(params.is_empty());
     }
 

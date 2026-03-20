@@ -3,7 +3,7 @@
 use crate::colors::*;
 use crate::migrations::types::{MigrationClass, classify_migration};
 use anyhow::Result;
-use qail_core::migrate::{diff_schemas, parse_qail, parse_qail_file};
+use qail_core::migrate::{diff_schemas_checked, parse_qail, parse_qail_file};
 use qail_core::prelude::*;
 use qail_core::transpiler::Dialect;
 
@@ -293,7 +293,8 @@ pub fn check_migration(old_path: &str, new_path: &str) -> Result<()> {
     println!("{}", "✓ Both schemas are valid".green().bold());
 
     // Compute diff
-    let cmds = diff_schemas(&old_schema, &new_schema);
+    let cmds = diff_schemas_checked(&old_schema, &new_schema)
+        .map_err(|e| anyhow::anyhow!("State-based diff unsupported for this schema pair: {}", e))?;
 
     if cmds.is_empty() {
         println!(
@@ -375,7 +376,8 @@ pub fn diff_schemas_cmd(
         .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
     // Compute diff
-    let cmds = diff_schemas(&old_schema, &new_schema);
+    let cmds = diff_schemas_checked(&old_schema, &new_schema)
+        .map_err(|e| anyhow::anyhow!("State-based diff unsupported for this schema pair: {}", e))?;
 
     if cmds.is_empty() {
         println!("{}", "No changes detected.".green());
@@ -454,7 +456,8 @@ pub async fn diff_live(
         parse_qail_file(new_path).map_err(|e| anyhow::anyhow!("Failed to parse schema: {}", e))?;
 
     // Step 3: Diff live → target
-    let cmds = diff_schemas(&live_schema, &new_schema);
+    let cmds = diff_schemas_checked(&live_schema, &new_schema)
+        .map_err(|e| anyhow::anyhow!("State-based diff unsupported for this schema pair: {}", e))?;
 
     if cmds.is_empty() {
         println!(

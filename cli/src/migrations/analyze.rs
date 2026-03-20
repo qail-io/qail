@@ -2,7 +2,7 @@
 
 use crate::colors::*;
 use anyhow::Result;
-use qail_core::migrate::{diff_schemas, parse_qail_file};
+use qail_core::migrate::{diff_schemas_checked, parse_qail_file};
 use serde::Serialize;
 
 use crate::sql_gen::cmd_to_sql;
@@ -79,7 +79,9 @@ pub fn migrate_analyze(
             let new = parse_qail_file(new_path)
                 .map_err(|e| anyhow::anyhow!("Failed to parse new schema: {}", e))?;
 
-            let cmds = diff_schemas(&old, &new);
+            let cmds = diff_schemas_checked(&old, &new).map_err(|e| {
+                anyhow::anyhow!("State-based diff unsupported for this schema pair: {}", e)
+            })?;
             (old, new, cmds)
         } else {
             return Err(anyhow::anyhow!(

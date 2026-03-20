@@ -269,13 +269,17 @@ pub(crate) fn discover_migrations(
         }
     }
 
-    // Sort by group key + phase order to enforce expand -> backfill -> contract.
+    // Sort by group key + phase order to enforce expand -> backfill -> contract for UP.
+    // For DOWN, execute in reverse discovery order so latest groups roll back first.
     migrations.sort_by(|a, b| {
         a.group_key
             .cmp(&b.group_key)
             .then_with(|| phase_rank(a.phase).cmp(&phase_rank(b.phase)))
             .then_with(|| a.sort_key.cmp(&b.sort_key))
     });
+    if matches!(direction, MigrateDirection::Down) {
+        migrations.reverse();
+    }
 
     Ok(migrations)
 }

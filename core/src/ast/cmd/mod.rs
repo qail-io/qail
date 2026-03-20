@@ -82,6 +82,8 @@ pub struct Qail {
     pub function_def: Option<crate::ast::FunctionDef>,
     /// Trigger definition.
     pub trigger_def: Option<crate::ast::TriggerDef>,
+    /// RLS policy definition.
+    pub policy_def: Option<crate::migrate::policy::RlsPolicy>,
 }
 
 /// Common Table Expression (WITH clause) definition.
@@ -173,6 +175,7 @@ impl Default for Qail {
             // Procedural objects
             function_def: None,
             trigger_def: None,
+            policy_def: None,
         }
     }
 }

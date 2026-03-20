@@ -3,7 +3,7 @@
 use crate::colors::*;
 use anyhow::Result;
 use qail_core::ast::Qail;
-use qail_core::migrate::{diff_schemas, parse_qail_file};
+use qail_core::migrate::{diff_schemas_checked, parse_qail_file};
 use qail_pg::PgDriver;
 
 use crate::sql_gen::cmd_to_sql;
@@ -85,7 +85,18 @@ pub async fn watch_schema(schema_path: &str, db_url: Option<&str>, auto_apply: b
                         }
                     };
 
-                    let cmds = diff_schemas(&last_schema, &new_schema);
+                    let cmds = match diff_schemas_checked(&last_schema, &new_schema) {
+                        Ok(cmds) => cmds,
+                        Err(e) => {
+                            println!(
+                                "[{}] {} State-based diff unsupported: {}",
+                                now.dimmed(),
+                                "✗".red(),
+                                e
+                            );
+                            continue;
+                        }
+                    };
 
                     if cmds.is_empty() {
                         println!("[{}] {} No changes detected", now.dimmed(), "•".dimmed());

@@ -373,7 +373,10 @@ pub fn build_alter_column_type(cmd: &Qail, dialect: Dialect) -> String {
 /// Generate CREATE EXTENSION IF NOT EXISTS SQL.
 pub fn build_create_extension(cmd: &Qail, _dialect: Dialect) -> String {
     // table field holds extension name, columns[0] may hold schema, columns[1] may hold version
-    let mut sql = format!("CREATE EXTENSION IF NOT EXISTS \"{}\"", cmd.table);
+    let mut sql = format!(
+        "CREATE EXTENSION IF NOT EXISTS \"{}\"",
+        cmd.table.replace('"', "\"\"")
+    );
 
     for col in &cmd.columns {
         match col {
@@ -392,7 +395,10 @@ pub fn build_create_extension(cmd: &Qail, _dialect: Dialect) -> String {
 
 /// Generate DROP EXTENSION IF EXISTS SQL.
 pub fn build_drop_extension(cmd: &Qail, _dialect: Dialect) -> String {
-    format!("DROP EXTENSION IF EXISTS \"{}\"", cmd.table)
+    format!(
+        "DROP EXTENSION IF EXISTS \"{}\"",
+        cmd.table.replace('"', "\"\"")
+    )
 }
 
 /// Generate COMMENT ON SQL.

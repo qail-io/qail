@@ -144,6 +144,14 @@ pub enum Action {
     CreateDatabase,
     /// DROP DATABASE.
     DropDatabase,
+    /// GRANT privileges.
+    Grant,
+    /// REVOKE privileges.
+    Revoke,
+    /// CREATE POLICY.
+    CreatePolicy,
+    /// DROP POLICY.
+    DropPolicy,
 }
 
 impl std::fmt::Display for Action {
@@ -220,6 +228,10 @@ impl std::fmt::Display for Action {
             Action::SessionReset => write!(f, "SESSION_RESET"),
             Action::CreateDatabase => write!(f, "CREATE_DATABASE"),
             Action::DropDatabase => write!(f, "DROP_DATABASE"),
+            Action::Grant => write!(f, "GRANT"),
+            Action::Revoke => write!(f, "REVOKE"),
+            Action::CreatePolicy => write!(f, "CREATE_POLICY"),
+            Action::DropPolicy => write!(f, "DROP_POLICY"),
         }
     }
 }

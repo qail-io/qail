@@ -81,7 +81,7 @@ impl std::fmt::Display for PolicyPermissiveness {
 ///
 /// All expressions use typed `Expr` nodes — no raw SQL strings.
 /// The transpiler converts these to `CREATE POLICY ... USING (...) WITH CHECK (...)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RlsPolicy {
     /// Policy name (e.g., "orders_operator_isolation")
     pub name: String,

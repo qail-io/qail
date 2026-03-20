@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::super::database_url::load_rpc_allow_list;
 use super::helpers::{
-    build_pool, load_event_engine, load_policy_engine, load_schema_registry,
-    load_user_tenant_map, verify_schema_drift,
+    build_pool, load_event_engine, load_policy_engine, load_schema_registry, load_user_tenant_map,
+    verify_schema_drift,
 };
 use super::{Gateway, StartupState};
 use crate::error::GatewayError;

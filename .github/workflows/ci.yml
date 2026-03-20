@@ -15,6 +15,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   DATABASE_URL: postgres://postgres:postgres@localhost:5432/qail_test
+  QAIL_TEST_DB_URL: postgres://postgres:postgres@localhost:5432/qail_test
 
 jobs:
   test:
@@ -66,6 +67,13 @@ jobs:
       - name: Unit tests (full lane)
         if: matrix.scope == 'full'
         run: cargo test --workspace --lib
+
+      - name: Migration DB atomicity/lock gates (full lane)
+        if: matrix.scope == 'full'
+        run: |
+          cargo test -p qail migrations::apply::execute::tests::apply_failpoint_before_receipt_rolls_back_commands_in_real_db -- --nocapture
+          cargo test -p qail migrations::rollback::tests::rollback_failpoint_before_history_delete_preserves_history_in_real_db -- --nocapture
+          cargo test -p qail migrations::lock::tests::advisory_lock_real_db_contention_and_timeout -- --nocapture
 
       - name: Integration tests (full lane)
         if: matrix.scope == 'full'

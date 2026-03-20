@@ -5,8 +5,12 @@
 mod tests {
     use super::super::backfill::{parse_backfill_spec, split_schema_table};
     use super::super::codegen::{parse_qail_to_commands_strict, parse_qail_to_sql};
-    use super::super::discovery::{detect_phase, normalize_group_key, parse_drop_targets};
-    use super::super::types::{BackfillTransform, MigrationPhase};
+    use super::super::discovery::{
+        detect_phase, discover_migrations, normalize_group_key, parse_drop_targets,
+    };
+    use super::super::types::{BackfillTransform, MigrateDirection, MigrationPhase};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_parse_booking_to_sql() {
@@ -137,10 +141,11 @@ index idx_users_name on users (name)
     }
 
     #[test]
-    fn test_parse_qail_to_commands_strict_rejects_policies() {
+    fn test_parse_qail_to_commands_strict_supports_policies() {
         let input = r#"
 table users (
-    id uuid primary_key
+    id uuid primary_key,
+    tenant_id uuid not null
 ) enable_rls
 
 policy users_isolation on users
@@ -148,13 +153,18 @@ policy users_isolation on users
     using (tenant_id = current_setting('app.current_tenant_id')::uuid)
 "#;
 
-        let err = parse_qail_to_commands_strict(input).expect_err("policies must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("polic"),
-            "error should mention policies, got: {}",
-            msg
-        );
+        let cmds = parse_qail_to_commands_strict(input).expect("policies should compile");
+        let policy_cmd = cmds
+            .iter()
+            .find(|c| matches!(c.action, qail_core::ast::Action::CreatePolicy))
+            .expect("expected CREATE POLICY command");
+        let policy = policy_cmd
+            .policy_def
+            .as_ref()
+            .expect("policy_def should be present");
+        assert_eq!(policy.name, "users_isolation");
+        assert_eq!(policy.table, "users");
+        assert_eq!(policy.target, qail_core::migrate::policy::PolicyTarget::All);
     }
 
     #[test]
@@ -200,6 +210,148 @@ drop table _qail_queue
             "error should mention same-table constraint, got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_supports_schema_objects() {
+        let input = r#"
+extension "uuid-ossp"
+enum status { active, inactive }
+sequence order_seq { start 1000 increment 1 }
+
+table users {
+  id uuid primary_key
+  tenant_id uuid not_null
+  status status not_null
+}
+
+view active_users $$ SELECT id FROM users WHERE status = 'active' $$
+function set_updated_at() returns trigger language plpgsql $$ BEGIN RETURN NEW; END; $$
+trigger trg_users_updated on users before update execute set_updated_at
+policy users_isolation on users for select
+  using $$ tenant_id = current_setting('app.current_tenant_id')::uuid $$
+grant select on users to app_role
+revoke insert on users from app_role
+comment on users "User accounts"
+"#;
+
+        let cmds =
+            parse_qail_to_commands_strict(input).expect("schema objects should compile strictly");
+
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::CreateExtension)),
+            "should include CREATE EXTENSION"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::CreateEnum)),
+            "should include CREATE ENUM"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::CreateSequence)),
+            "should include CREATE SEQUENCE"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::CreateView)),
+            "should include CREATE VIEW"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::CreateFunction)),
+            "should include CREATE FUNCTION"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::CreateTrigger)),
+            "should include CREATE TRIGGER"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::CreatePolicy)),
+            "should include CREATE POLICY"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::CommentOn)),
+            "should include COMMENT ON"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::Grant)),
+            "should include GRANT"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c.action, qail_core::ast::Action::Revoke)),
+            "should include REVOKE"
+        );
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_supports_extended_drop_hints() {
+        let input = r#"
+drop view active_users
+drop materialized view booking_stats
+drop extension pgcrypto
+drop sequence order_seq
+drop enum status
+drop function set_updated_at
+drop trigger users.trg_users_updated
+drop policy users_isolation on users
+"#;
+
+        let cmds =
+            parse_qail_to_commands_strict(input).expect("extended drop hints should compile");
+        assert_eq!(cmds.len(), 8);
+        assert!(matches!(cmds[0].action, qail_core::ast::Action::DropView));
+        assert!(matches!(
+            cmds[1].action,
+            qail_core::ast::Action::DropMaterializedView
+        ));
+        assert!(matches!(
+            cmds[2].action,
+            qail_core::ast::Action::DropExtension
+        ));
+        assert!(matches!(
+            cmds[3].action,
+            qail_core::ast::Action::DropSequence
+        ));
+        assert!(matches!(cmds[4].action, qail_core::ast::Action::DropEnum));
+        assert!(matches!(
+            cmds[5].action,
+            qail_core::ast::Action::DropFunction
+        ));
+        assert!(matches!(
+            cmds[6].action,
+            qail_core::ast::Action::DropTrigger
+        ));
+        assert_eq!(cmds[6].table, "users.trg_users_updated");
+        assert!(matches!(cmds[7].action, qail_core::ast::Action::DropPolicy));
+        assert_eq!(cmds[7].table, "users");
+        assert_eq!(cmds[7].payload.as_deref(), Some("users_isolation"));
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_supports_function_args() {
+        let input = r#"
+function sum_one(v int) returns int language plpgsql $$ BEGIN RETURN v + 1; END; $$
+"#;
+        let cmds =
+            parse_qail_to_commands_strict(input).expect("function args should compile strictly");
+        let func = cmds
+            .iter()
+            .find(|c| matches!(c.action, qail_core::ast::Action::CreateFunction))
+            .expect("expected CREATE FUNCTION command");
+        let args = func
+            .function_def
+            .as_ref()
+            .expect("function_def should be present")
+            .args
+            .clone();
+        assert_eq!(args, vec!["v int".to_string()]);
     }
 
     #[test]
@@ -355,5 +507,36 @@ ALTER TABLE users ADD COLUMN name_ci text;
         assert_eq!(spec.set_column, "email_lower");
         assert_eq!(spec.source_column, "email");
         assert!(matches!(spec.transform, BackfillTransform::Lower));
+    }
+
+    #[test]
+    fn test_discover_migrations_down_runs_newest_first() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "qail_apply_discovery_down_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&root).expect("create temp migration dir");
+
+        fs::write(root.join("001_init.down.qail"), "drop table init_table\n").expect("write 001");
+        fs::write(root.join("002_users.down.qail"), "drop table users\n").expect("write 002");
+        fs::write(root.join("003_orders.down.qail"), "drop table orders\n").expect("write 003");
+
+        let discovered = discover_migrations(&root, MigrateDirection::Down).expect("discover down");
+        let names: Vec<String> = discovered.iter().map(|m| m.display_name.clone()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "003_orders.down.qail".to_string(),
+                "002_users.down.qail".to_string(),
+                "001_init.down.qail".to_string()
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

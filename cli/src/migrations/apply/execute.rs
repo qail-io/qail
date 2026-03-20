@@ -4,13 +4,16 @@ use super::backfill::{enforce_contract_safety, parse_backfill_spec, run_chunked_
 use super::codegen::{commands_to_sql, parse_qail_to_commands_strict};
 use super::discovery::{discover_migrations, phase_rank};
 use super::types::{ApplyPhase, BackfillRun, MigrateDirection, MigrationFile, MigrationPhase};
+use crate::backup::analyze_impact;
 use crate::colors::*;
+use crate::migrations::risk::preflight_lock_risk;
 use crate::migrations::{
-    MigrationReceipt, ReceiptSignatureStatus, ReceiptValidationMode, StoredMigrationReceipt,
-    acquire_migration_lock, ensure_migration_table, load_migration_policy, maybe_failpoint,
-    now_epoch_ms, runtime_actor, runtime_git_sha, verify_stored_receipt_signature,
-    write_migration_receipt,
+    EnforcementMode, MigrationPolicy, MigrationReceipt, ReceiptSignatureStatus,
+    ReceiptValidationMode, StoredMigrationReceipt, acquire_migration_lock, ensure_migration_table,
+    load_migration_policy, maybe_failpoint, now_epoch_ms, runtime_actor, runtime_git_sha,
+    stable_cmds_checksum, verify_stored_receipt_signature, write_migration_receipt,
 };
+use crate::shadow::has_verified_shadow_receipt_with_driver;
 use crate::util::parse_pg_url;
 use anyhow::{Context, Result, anyhow, bail};
 use qail_core::prelude::Qail;
@@ -27,6 +30,9 @@ pub async fn migrate_apply(
     phase_filter: ApplyPhase,
     codebase: Option<&str>,
     allow_contract_with_references: bool,
+    allow_destructive: bool,
+    allow_no_shadow_receipt: bool,
+    allow_lock_risk: bool,
     backfill_chunk_size: usize,
     wait_for_lock: bool,
     lock_timeout_secs: Option<u64>,
@@ -97,6 +103,11 @@ pub async fn migrate_apply(
         Some(database.as_str()),
     )
     .await?;
+    let enforce_shadow_receipt = if matches!(direction, MigrateDirection::Up) {
+        resolve_apply_shadow_receipt_policy(&policy, allow_no_shadow_receipt)?
+    } else {
+        false
+    };
 
     // Query already-applied migration versions + receipt metadata.
     let status_cmd = Qail::get("_qail_migrations").columns(vec![
@@ -302,6 +313,53 @@ pub async fn migrate_apply(
             continue;
         }
 
+        if matches!(direction, MigrateDirection::Up) && !cmds.is_empty() {
+            if enforce_shadow_receipt {
+                let planned_checksum = stable_cmds_checksum(&cmds);
+                let has_receipt =
+                    has_verified_shadow_receipt_with_driver(&mut pg, &planned_checksum).await?;
+                if !has_receipt {
+                    bail!(
+                        "Migration blocked: no verified shadow receipt for '{}'.\n\
+                         Expected checksum: {}.\n\
+                         Run 'qail migrate shadow <old.qail:new.qail> --url <db>' first, \
+                         or re-run apply with --allow-no-shadow-receipt.",
+                        mig.display_name,
+                        planned_checksum
+                    );
+                }
+                println!(
+                    "  {} Verified shadow receipt checksum: {}",
+                    "✓".green(),
+                    planned_checksum.cyan()
+                );
+            }
+
+            preflight_lock_risk(
+                &mut pg,
+                &cmds,
+                allow_lock_risk,
+                policy.lock_risk,
+                policy.lock_risk_max_score,
+            )
+            .await?;
+
+            let mut destructive_ops = Vec::<String>::new();
+            for cmd in &cmds {
+                let impact = analyze_impact(&mut pg, cmd).await?;
+                if impact.is_destructive {
+                    destructive_ops.push(format!("{} {}", impact.operation, impact.table));
+                }
+            }
+
+            enforce_apply_destructive_policy(
+                &mig.display_name,
+                &destructive_ops,
+                policy.destructive,
+                allow_destructive,
+            )?;
+        }
+
         if matches!(direction, MigrateDirection::Up) && mig.phase == MigrationPhase::Contract {
             enforce_contract_safety(
                 &mig.display_name,
@@ -329,6 +387,15 @@ pub async fn migrate_apply(
         } else {
             None
         };
+        risk_summary.push_str(&format!(
+            ";allow_destructive_flag={};allow_lock_risk_flag={};shadow_receipt_required={};policy_destructive={:?};policy_lock_risk={:?};policy_lock_risk_max_score={}",
+            allow_destructive,
+            allow_lock_risk,
+            matches!(direction, MigrateDirection::Up) && enforce_shadow_receipt,
+            policy.destructive,
+            policy.lock_risk,
+            policy.lock_risk_max_score
+        ));
         apply_commands_and_record_receipt_atomic(
             &mut pg,
             &cmds,
@@ -367,6 +434,77 @@ pub async fn migrate_apply(
     }
     if applied == 0 && skipped > 0 {
         println!("\n{}", "✓ Database is up to date.".green().bold());
+    }
+    Ok(())
+}
+
+fn resolve_apply_shadow_receipt_policy(
+    policy: &MigrationPolicy,
+    allow_no_shadow_receipt: bool,
+) -> Result<bool> {
+    if !policy.require_shadow_receipt {
+        println!(
+            "{}",
+            "⚠️  Shadow receipt verification disabled by migrations.policy.require_shadow_receipt=false"
+                .yellow()
+        );
+        return Ok(false);
+    }
+    if allow_no_shadow_receipt {
+        if !policy.allow_no_shadow_receipt {
+            bail!(
+                "Migration blocked: --allow-no-shadow-receipt is disabled by migrations.policy.allow_no_shadow_receipt=false"
+            );
+        }
+        println!(
+            "{}",
+            "⚠️  Skipping shadow receipt verification due to --allow-no-shadow-receipt".yellow()
+        );
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn enforce_apply_destructive_policy(
+    migration_name: &str,
+    destructive_ops: &[String],
+    policy_mode: EnforcementMode,
+    allow_destructive: bool,
+) -> Result<()> {
+    if destructive_ops.is_empty() {
+        return Ok(());
+    }
+
+    let detail = destructive_ops
+        .iter()
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match policy_mode {
+        EnforcementMode::Deny => bail!(
+            "Migration blocked: destructive operations are disabled by migrations.policy.destructive=deny (migration '{}'; examples: {}).",
+            migration_name,
+            detail
+        ),
+        EnforcementMode::RequireFlag if !allow_destructive => bail!(
+            "Migration blocked: destructive operations detected in '{}'. \
+             Re-run with --allow-destructive to continue (examples: {}).",
+            migration_name,
+            detail
+        ),
+        EnforcementMode::RequireFlag => {
+            println!(
+                "{}",
+                "⚠️  Destructive changes acknowledged via --allow-destructive".yellow()
+            );
+        }
+        EnforcementMode::Allow => {
+            println!(
+                "{}",
+                "⚠️  Destructive changes allowed by migrations.policy.destructive=allow".yellow()
+            );
+        }
     }
     Ok(())
 }
@@ -710,12 +848,12 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_commands_and_record_receipt_atomic, ensure_applied_checksum_matches,
-        ensure_up_down_pairing, validate_receipts_against_local,
+        apply_commands_and_record_receipt_atomic, enforce_apply_destructive_policy,
+        ensure_applied_checksum_matches, ensure_up_down_pairing, validate_receipts_against_local,
     };
-    use crate::migrations::ReceiptValidationMode;
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
+    use crate::migrations::{EnforcementMode, ReceiptValidationMode};
     use qail_core::prelude::Qail;
     use std::collections::HashMap;
     use std::fs;
@@ -743,6 +881,57 @@ mod tests {
         assert!(
             err.to_string().contains("checksum drift"),
             "error should mention checksum drift"
+        );
+    }
+
+    #[test]
+    fn destructive_policy_passes_when_no_destructive_ops() {
+        let result =
+            enforce_apply_destructive_policy("001_init.up.qail", &[], EnforcementMode::Deny, false);
+        assert!(result.is_ok(), "no-op should pass regardless of policy");
+    }
+
+    #[test]
+    fn destructive_policy_require_flag_blocks_without_flag() {
+        let err = enforce_apply_destructive_policy(
+            "002_drop_users.up.qail",
+            &[String::from("DROP TABLE users")],
+            EnforcementMode::RequireFlag,
+            false,
+        )
+        .expect_err("require-flag should block without --allow-destructive");
+        assert!(
+            err.to_string().contains("--allow-destructive"),
+            "error should mention allow-destructive override"
+        );
+    }
+
+    #[test]
+    fn destructive_policy_require_flag_passes_with_flag() {
+        let result = enforce_apply_destructive_policy(
+            "002_drop_users.up.qail",
+            &[String::from("DROP TABLE users")],
+            EnforcementMode::RequireFlag,
+            true,
+        );
+        assert!(
+            result.is_ok(),
+            "require-flag policy should pass when allow flag is set"
+        );
+    }
+
+    #[test]
+    fn destructive_policy_deny_blocks_even_with_flag() {
+        let err = enforce_apply_destructive_policy(
+            "002_drop_users.up.qail",
+            &[String::from("DROP TABLE users")],
+            EnforcementMode::Deny,
+            true,
+        )
+        .expect_err("deny mode must always block destructive migrations");
+        assert!(
+            err.to_string().contains("destructive=deny"),
+            "error should mention deny policy"
         );
     }
 

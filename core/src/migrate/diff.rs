@@ -5,6 +5,71 @@
 
 use super::schema::{MigrationHint, Schema};
 use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
+use std::collections::BTreeSet;
+
+/// Return unsupported non-table object families present in a schema.
+///
+/// State-based diff currently covers table/index/migration-hint operations only.
+fn unsupported_state_diff_features(schema: &Schema) -> BTreeSet<&'static str> {
+    let mut out = BTreeSet::new();
+    if !schema.extensions.is_empty() {
+        out.insert("extensions");
+    }
+    if !schema.comments.is_empty() {
+        out.insert("comments");
+    }
+    if !schema.sequences.is_empty() {
+        out.insert("sequences");
+    }
+    if !schema.enums.is_empty() {
+        out.insert("enums");
+    }
+    if !schema.views.is_empty() {
+        out.insert("views");
+    }
+    if !schema.functions.is_empty() {
+        out.insert("functions");
+    }
+    if !schema.triggers.is_empty() {
+        out.insert("triggers");
+    }
+    if !schema.grants.is_empty() {
+        out.insert("grants");
+    }
+    if !schema.policies.is_empty() {
+        out.insert("policies");
+    }
+    if !schema.resources.is_empty() {
+        out.insert("resources");
+    }
+    out
+}
+
+/// Validate that a schema pair is fully supported by state-based diff.
+///
+/// Returns an error when object families outside table/index/hint coverage are present.
+pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), String> {
+    let mut unsupported = unsupported_state_diff_features(old);
+    unsupported.extend(unsupported_state_diff_features(new));
+
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+
+    let detail = unsupported.into_iter().collect::<Vec<_>>().join(", ");
+    Err(format!(
+        "State-based diff currently supports tables, columns, indexes, and migration hints only. \
+         Unsupported schema object families present: {}. \
+         Use folder-based strict migrations for these objects.",
+        detail
+    ))
+}
+
+/// Checked variant of [`diff_schemas`] that rejects unsupported object families.
+pub fn diff_schemas_checked(old: &Schema, new: &Schema) -> Result<Vec<Qail>, String> {
+    validate_state_diff_support(old, new)?;
+    Ok(diff_schemas(old, new))
+}
 
 /// Compute the difference between two schemas.
 /// Returns a `Vec<Qail>` representing the operations needed to migrate
@@ -413,7 +478,7 @@ fn parse_table_col(s: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::schema::{Column, Table};
+    use super::super::schema::{Column, Table, ViewDef};
     use super::*;
 
     #[test]
@@ -430,6 +495,33 @@ mod tests {
         let cmds = diff_schemas(&old, &new);
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0].action, Action::Make));
+    }
+
+    #[test]
+    fn state_diff_support_rejects_non_table_object_families() {
+        let old = Schema::default();
+        let mut new = Schema::default();
+        new.add_view(ViewDef::new("active_users", "SELECT 1"));
+
+        let err = validate_state_diff_support(&old, &new)
+            .expect_err("state-based diff should reject unsupported view objects");
+        assert!(
+            err.contains("views"),
+            "error should include unsupported family name"
+        );
+    }
+
+    #[test]
+    fn state_diff_checked_passes_for_table_index_only_schema() {
+        use super::super::types::ColumnType;
+        let old = Schema::default();
+        let mut new = Schema::default();
+        new.add_table(Table::new("users").column(Column::new("id", ColumnType::Serial)));
+        let cmds = diff_schemas_checked(&old, &new).expect("table/index-only schema should pass");
+        assert!(
+            cmds.iter().any(|c| matches!(c.action, Action::Make)),
+            "checked diff should still produce normal table commands"
+        );
     }
 
     #[test]

@@ -85,6 +85,7 @@ impl Qail {
             on_disk: None,
             function_def: None,
             trigger_def: None,
+            policy_def: None,
 
             ctes: vec![CTEDef {
                 name: cte_name,

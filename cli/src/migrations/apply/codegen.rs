@@ -1,11 +1,17 @@
 //! .qail → SQL code generation.
 
 use anyhow::{Result, anyhow, bail};
-use qail_core::ast::{Action, Constraint, Expr, IndexDef, Qail};
+use qail_core::ast::{
+    Action, Constraint, Expr, FunctionDef, IndexDef, Qail, TriggerDef, TriggerEvent, TriggerTiming,
+};
 use qail_core::migrate::parse_qail;
+use qail_core::migrate::policy::RlsPolicy;
 #[cfg(test)]
 use qail_core::migrate::schema::GrantAction;
-use qail_core::migrate::schema::{FkAction, MigrationHint};
+use qail_core::migrate::schema::{
+    Comment, CommentTarget, EnumType, Extension, FkAction, Grant, MigrationHint, SchemaFunctionDef,
+    SchemaTriggerDef, Sequence, ViewDef,
+};
 use qail_core::parser::schema::Schema;
 use qail_core::transpiler::ToSql;
 
@@ -99,33 +105,6 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
 
     let mut unsupported = Vec::new();
     unsupported.extend(hint_unsupported);
-    if !schema.extensions.is_empty() {
-        unsupported.push("extensions");
-    }
-    if !schema.comments.is_empty() {
-        unsupported.push("comments");
-    }
-    if !schema.sequences.is_empty() {
-        unsupported.push("sequences");
-    }
-    if !schema.enums.is_empty() {
-        unsupported.push("enums");
-    }
-    if !schema.views.is_empty() {
-        unsupported.push("views");
-    }
-    if !schema.functions.is_empty() {
-        unsupported.push("functions");
-    }
-    if !schema.triggers.is_empty() {
-        unsupported.push("triggers");
-    }
-    if !schema.grants.is_empty() {
-        unsupported.push("grants/revokes");
-    }
-    if !schema.policies.is_empty() {
-        unsupported.push("rls policies");
-    }
     if !schema.resources.is_empty() {
         unsupported.push("resources");
     }
@@ -160,7 +139,14 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
         );
     }
 
-    let mut cmds = qail_core::migrate::schema::schema_to_commands(schema);
+    let mut cmds = Vec::new();
+
+    // Order matters for dependency correctness:
+    // extensions/types/sequences -> tables/indexes -> views/functions/triggers/policies/comments -> hints.
+    cmds.extend(compile_extensions_strict(&schema.extensions)?);
+    cmds.extend(compile_enums_strict(&schema.enums)?);
+    cmds.extend(compile_sequences_strict(&schema.sequences)?);
+    cmds.extend(qail_core::migrate::schema::schema_to_commands(schema));
 
     // Preserve schema-level RLS toggles for CREATE TABLE blocks.
     let mut table_names: Vec<&String> = schema.tables.keys().collect();
@@ -184,6 +170,12 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
         }
     }
 
+    cmds.extend(compile_views_strict(&schema.views)?);
+    cmds.extend(compile_functions_strict(&schema.functions)?);
+    cmds.extend(compile_triggers_strict(&schema.triggers)?);
+    cmds.extend(compile_policies_strict(&schema.policies)?);
+    cmds.extend(compile_grants_strict(&schema.grants)?);
+    cmds.extend(compile_comments_strict(&schema.comments)?);
     cmds.extend(hint_cmds);
 
     if cmds.is_empty() {
@@ -220,6 +212,403 @@ fn add_unsupported(unsupported: &mut Vec<&'static str>, item: &'static str) {
     if !unsupported.contains(&item) {
         unsupported.push(item);
     }
+}
+
+fn compile_extensions_strict(extensions: &[Extension]) -> Result<Vec<Qail>> {
+    let mut cmds = Vec::with_capacity(extensions.len());
+
+    for ext in extensions {
+        let name = ext.name.trim();
+        if name.is_empty() {
+            bail!("Strict AST migration compiler rejects extension with empty name");
+        }
+
+        let mut columns = Vec::new();
+        if let Some(schema) = &ext.schema {
+            if !is_valid_ident_path(schema) {
+                bail!(
+                    "Strict AST migration compiler rejects invalid extension schema '{}'",
+                    schema
+                );
+            }
+            columns.push(Expr::Named(format!("SCHEMA {}", schema)));
+        }
+        if let Some(version) = &ext.version {
+            columns.push(Expr::Named(format!(
+                "VERSION '{}'",
+                escape_sql_literal(version)
+            )));
+        }
+
+        cmds.push(Qail {
+            action: Action::CreateExtension,
+            table: name.to_string(),
+            columns,
+            ..Default::default()
+        });
+    }
+
+    Ok(cmds)
+}
+
+fn compile_comments_strict(comments: &[Comment]) -> Result<Vec<Qail>> {
+    let mut cmds = Vec::with_capacity(comments.len());
+    for comment in comments {
+        let target = match &comment.target {
+            CommentTarget::Table(table) => {
+                if !is_valid_ident_path(table) {
+                    bail!(
+                        "Strict AST migration compiler rejects invalid table comment target '{}'",
+                        table
+                    );
+                }
+                table.clone()
+            }
+            CommentTarget::Column { table, column } => {
+                if !is_valid_ident_path(table) || !is_valid_ident(column) {
+                    bail!(
+                        "Strict AST migration compiler rejects invalid column comment target '{}.{}'",
+                        table,
+                        column
+                    );
+                }
+                format!("{}.{}", table, column)
+            }
+        };
+        cmds.push(Qail {
+            action: Action::CommentOn,
+            table: target,
+            columns: vec![Expr::Named(comment.text.clone())],
+            ..Default::default()
+        });
+    }
+    Ok(cmds)
+}
+
+fn compile_grants_strict(grants: &[Grant]) -> Result<Vec<Qail>> {
+    let mut cmds = Vec::with_capacity(grants.len());
+    for grant in grants {
+        let object = grant.on_object.trim();
+        if object.is_empty() {
+            bail!("Strict AST migration compiler rejects GRANT/REVOKE with empty target object");
+        }
+        if object.contains(';') || object.contains('\n') {
+            bail!(
+                "Strict AST migration compiler rejects unsafe GRANT/REVOKE object '{}'",
+                grant.on_object
+            );
+        }
+
+        let role = grant.to_role.trim();
+        if !is_valid_ident_path(role) {
+            bail!(
+                "Strict AST migration compiler rejects invalid GRANT/REVOKE role '{}'",
+                grant.to_role
+            );
+        }
+
+        let privileges: Vec<Expr> = grant
+            .privileges
+            .iter()
+            .map(|p| Expr::Named(p.to_string()))
+            .collect();
+        if privileges.is_empty() {
+            bail!("Strict AST migration compiler rejects GRANT/REVOKE with empty privileges");
+        }
+
+        cmds.push(Qail {
+            action: match grant.action {
+                qail_core::migrate::schema::GrantAction::Grant => Action::Grant,
+                qail_core::migrate::schema::GrantAction::Revoke => Action::Revoke,
+            },
+            table: object.to_string(),
+            columns: privileges,
+            payload: Some(role.to_string()),
+            ..Default::default()
+        });
+    }
+    Ok(cmds)
+}
+
+fn compile_policies_strict(policies: &[RlsPolicy]) -> Result<Vec<Qail>> {
+    let mut cmds = Vec::with_capacity(policies.len());
+    for policy in policies {
+        if !is_valid_ident(&policy.name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid policy name '{}'",
+                policy.name
+            );
+        }
+        if !is_valid_ident_path(&policy.table) {
+            bail!(
+                "Strict AST migration compiler rejects invalid policy table '{}'",
+                policy.table
+            );
+        }
+        if let Some(role) = &policy.role
+            && !is_valid_ident_path(role)
+        {
+            bail!(
+                "Strict AST migration compiler rejects invalid policy role '{}'",
+                role
+            );
+        }
+
+        cmds.push(Qail {
+            action: Action::CreatePolicy,
+            policy_def: Some(policy.clone()),
+            ..Default::default()
+        });
+    }
+    Ok(cmds)
+}
+
+fn compile_sequences_strict(sequences: &[Sequence]) -> Result<Vec<Qail>> {
+    let mut cmds = Vec::with_capacity(sequences.len());
+    for seq in sequences {
+        if !is_valid_ident_path(&seq.name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid sequence identifier '{}'",
+                seq.name
+            );
+        }
+
+        let mut opts = Vec::new();
+        if let Some(data_type) = &seq.data_type {
+            opts.push(Expr::Named(format!("AS {}", data_type)));
+        }
+        if let Some(start) = seq.start {
+            opts.push(Expr::Named(format!("START WITH {}", start)));
+        }
+        if let Some(increment) = seq.increment {
+            opts.push(Expr::Named(format!("INCREMENT BY {}", increment)));
+        }
+        if let Some(min_value) = seq.min_value {
+            opts.push(Expr::Named(format!("MINVALUE {}", min_value)));
+        }
+        if let Some(max_value) = seq.max_value {
+            opts.push(Expr::Named(format!("MAXVALUE {}", max_value)));
+        }
+        if let Some(cache) = seq.cache {
+            opts.push(Expr::Named(format!("CACHE {}", cache)));
+        }
+        if seq.cycle {
+            opts.push(Expr::Named("CYCLE".to_string()));
+        }
+        if let Some(owned_by) = &seq.owned_by {
+            if !is_valid_ident_path(owned_by) {
+                bail!(
+                    "Strict AST migration compiler rejects invalid sequence OWNED BY target '{}'",
+                    owned_by
+                );
+            }
+            opts.push(Expr::Named(format!("OWNED BY {}", owned_by)));
+        }
+
+        cmds.push(Qail {
+            action: Action::CreateSequence,
+            table: seq.name.clone(),
+            columns: opts,
+            ..Default::default()
+        });
+    }
+    Ok(cmds)
+}
+
+fn compile_enums_strict(enums: &[EnumType]) -> Result<Vec<Qail>> {
+    let mut cmds = Vec::with_capacity(enums.len());
+    for enum_type in enums {
+        if !is_valid_ident_path(&enum_type.name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid enum type identifier '{}'",
+                enum_type.name
+            );
+        }
+        if enum_type.values.is_empty() {
+            bail!(
+                "Strict AST migration compiler rejects enum '{}' with no values",
+                enum_type.name
+            );
+        }
+
+        cmds.push(Qail {
+            action: Action::CreateEnum,
+            table: enum_type.name.clone(),
+            columns: enum_type
+                .values
+                .iter()
+                .map(|v| Expr::Named(v.clone()))
+                .collect(),
+            ..Default::default()
+        });
+    }
+    Ok(cmds)
+}
+
+fn compile_views_strict(views: &[ViewDef]) -> Result<Vec<Qail>> {
+    let mut cmds = Vec::with_capacity(views.len());
+    for view in views {
+        if !is_valid_ident_path(&view.name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid view identifier '{}'",
+                view.name
+            );
+        }
+        let query = view.query.trim();
+        if query.is_empty() {
+            bail!(
+                "Strict AST migration compiler rejects view '{}' with empty query body",
+                view.name
+            );
+        }
+
+        cmds.push(Qail {
+            action: if view.materialized {
+                Action::CreateMaterializedView
+            } else {
+                Action::CreateView
+            },
+            table: view.name.clone(),
+            payload: Some(query.to_string()),
+            ..Default::default()
+        });
+    }
+    Ok(cmds)
+}
+
+fn compile_functions_strict(functions: &[SchemaFunctionDef]) -> Result<Vec<Qail>> {
+    let mut cmds = Vec::with_capacity(functions.len());
+    for func in functions {
+        if !is_valid_ident_path(&func.name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid function name '{}'",
+                func.name
+            );
+        }
+        if func.volatility.is_some() {
+            bail!(
+                "Strict AST migration compiler does not support function volatility yet (function '{}')",
+                func.name
+            );
+        }
+        if func.name.trim().is_empty() || func.returns.trim().is_empty() {
+            bail!(
+                "Strict AST migration compiler rejects invalid function definition '{}'",
+                func.name
+            );
+        }
+        if func
+            .args
+            .iter()
+            .any(|arg| arg.contains(';') || arg.contains('\n'))
+        {
+            bail!(
+                "Strict AST migration compiler rejects unsafe function arguments in '{}'",
+                func.name
+            );
+        }
+
+        cmds.push(Qail {
+            action: Action::CreateFunction,
+            function_def: Some(FunctionDef {
+                name: func.name.clone(),
+                args: func.args.clone(),
+                returns: func.returns.clone(),
+                body: func.body.clone(),
+                language: Some(func.language.clone()),
+            }),
+            ..Default::default()
+        });
+    }
+    Ok(cmds)
+}
+
+fn compile_triggers_strict(triggers: &[SchemaTriggerDef]) -> Result<Vec<Qail>> {
+    let mut cmds = Vec::with_capacity(triggers.len());
+    for trigger in triggers {
+        if !is_valid_ident(&trigger.name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid trigger name '{}'",
+                trigger.name
+            );
+        }
+        if !is_valid_ident_path(&trigger.table) {
+            bail!(
+                "Strict AST migration compiler rejects invalid trigger table '{}'",
+                trigger.table
+            );
+        }
+        if !is_valid_ident_path(&trigger.execute_function) {
+            bail!(
+                "Strict AST migration compiler rejects invalid trigger execute function '{}'",
+                trigger.execute_function
+            );
+        }
+        if trigger.condition.is_some() {
+            bail!(
+                "Strict AST migration compiler does not support trigger WHEN conditions yet (trigger '{}')",
+                trigger.name
+            );
+        }
+
+        let timing = parse_trigger_timing(&trigger.timing, &trigger.name)?;
+        let events = parse_trigger_events(&trigger.events, &trigger.name)?;
+
+        cmds.push(Qail {
+            action: Action::CreateTrigger,
+            trigger_def: Some(TriggerDef {
+                name: trigger.name.clone(),
+                table: trigger.table.clone(),
+                timing,
+                events,
+                for_each_row: trigger.for_each_row,
+                execute_function: trigger.execute_function.clone(),
+            }),
+            ..Default::default()
+        });
+    }
+    Ok(cmds)
+}
+
+fn parse_trigger_timing(timing: &str, trigger_name: &str) -> Result<TriggerTiming> {
+    match timing.trim().to_ascii_uppercase().as_str() {
+        "BEFORE" => Ok(TriggerTiming::Before),
+        "AFTER" => Ok(TriggerTiming::After),
+        "INSTEAD" | "INSTEAD OF" => Ok(TriggerTiming::InsteadOf),
+        other => bail!(
+            "Strict AST migration compiler rejects unsupported trigger timing '{}' on '{}'",
+            other,
+            trigger_name
+        ),
+    }
+}
+
+fn parse_trigger_events(events: &[String], trigger_name: &str) -> Result<Vec<TriggerEvent>> {
+    let mut out = Vec::new();
+    for event in events {
+        match event.trim().to_ascii_uppercase().as_str() {
+            "INSERT" => out.push(TriggerEvent::Insert),
+            "UPDATE" => out.push(TriggerEvent::Update),
+            "DELETE" => out.push(TriggerEvent::Delete),
+            "TRUNCATE" => out.push(TriggerEvent::Truncate),
+            other => bail!(
+                "Strict AST migration compiler rejects unsupported trigger event '{}' on '{}'",
+                other,
+                trigger_name
+            ),
+        }
+    }
+    if out.is_empty() {
+        bail!(
+            "Strict AST migration compiler rejects trigger '{}' with no events",
+            trigger_name
+        );
+    }
+    Ok(out)
+}
+
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 fn compile_rename_hint_strict(from: &str, to: &str) -> Result<Qail> {
@@ -271,6 +660,112 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
     let target = target.trim();
     if target.is_empty() {
         bail!("Strict AST migration compiler got empty drop target");
+    }
+
+    if let Some(view_name) = target.strip_prefix("materialized view ").map(str::trim) {
+        if !is_valid_ident_path(view_name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid materialized view identifier in drop hint: '{}'",
+                target
+            );
+        }
+        return Ok(Qail {
+            action: Action::DropMaterializedView,
+            table: view_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    if let Some(view_name) = target.strip_prefix("view ").map(str::trim) {
+        if !is_valid_ident_path(view_name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid view identifier in drop hint: '{}'",
+                target
+            );
+        }
+        return Ok(Qail {
+            action: Action::DropView,
+            table: view_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    if let Some(ext_name) = target.strip_prefix("extension ").map(str::trim) {
+        if ext_name.is_empty() {
+            bail!(
+                "Strict AST migration compiler rejects empty extension identifier in drop hint: '{}'",
+                target
+            );
+        }
+        return Ok(Qail {
+            action: Action::DropExtension,
+            table: ext_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    if let Some(seq_name) = target.strip_prefix("sequence ").map(str::trim) {
+        if !is_valid_ident_path(seq_name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid sequence identifier in drop hint: '{}'",
+                target
+            );
+        }
+        return Ok(Qail {
+            action: Action::DropSequence,
+            table: seq_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    if let Some(enum_name) = target
+        .strip_prefix("enum ")
+        .or_else(|| target.strip_prefix("type "))
+        .map(str::trim)
+    {
+        if !is_valid_ident_path(enum_name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid enum/type identifier in drop hint: '{}'",
+                target
+            );
+        }
+        return Ok(Qail {
+            action: Action::DropEnum,
+            table: enum_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    if let Some(function_name) = target.strip_prefix("function ").map(str::trim) {
+        if !is_valid_ident_path(function_name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid function identifier in drop hint: '{}'",
+                target
+            );
+        }
+        return Ok(Qail {
+            action: Action::DropFunction,
+            table: function_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    if let Some(policy_target) = target.strip_prefix("policy ").map(str::trim) {
+        return compile_drop_policy_target(policy_target, target);
+    }
+
+    if let Some(trigger_target) = target.strip_prefix("trigger ").map(str::trim) {
+        if !is_valid_ident_path(trigger_target) || !trigger_target.contains('.') {
+            bail!(
+                "Strict AST migration compiler expects trigger drop hint as 'trigger <table>.<trigger>' (got '{}')",
+                target
+            );
+        }
+        return Ok(Qail {
+            action: Action::DropTrigger,
+            table: trigger_target.to_string(),
+            ..Default::default()
+        });
     }
 
     if let Some(index_name) = target.strip_prefix("index ").map(str::trim) {
@@ -346,6 +841,40 @@ fn compile_drop_column_target(column_target: &str, original_target: &str) -> Res
     })
 }
 
+fn compile_drop_policy_target(policy_target: &str, original_target: &str) -> Result<Qail> {
+    let Some((policy_name, table_name)) = split_policy_target(policy_target) else {
+        bail!(
+            "Strict AST migration compiler expects policy drop hint as 'policy <name> on <table>' or 'policy <table>.<name>' (got '{}')",
+            original_target
+        );
+    };
+    if !is_valid_ident(policy_name) || !is_valid_ident_path(table_name) {
+        bail!(
+            "Strict AST migration compiler rejects invalid policy drop hint: '{}'",
+            original_target
+        );
+    }
+    Ok(Qail {
+        action: Action::DropPolicy,
+        table: table_name.to_string(),
+        payload: Some(policy_name.to_string()),
+        ..Default::default()
+    })
+}
+
+fn split_policy_target(target: &str) -> Option<(&str, &str)> {
+    if let Some((name, table)) = target.split_once(" on ") {
+        let name = name.trim();
+        let table = table.trim();
+        if !name.is_empty() && !table.is_empty() {
+            return Some((name, table));
+        }
+    }
+
+    let (table, policy) = split_table_column_target(target)?;
+    Some((policy, table))
+}
+
 fn split_table_column_target(target: &str) -> Option<(&str, &str)> {
     let (table, column) = target.rsplit_once('.')?;
     let table = table.trim();
@@ -377,10 +906,6 @@ fn is_valid_ident(ident: &str) -> bool {
 }
 
 fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
-    if !schema.policies.is_empty() {
-        bail!("Strict AST migration compiler does not support parser-schema policies yet");
-    }
-
     let mut cmds = Vec::<Qail>::new();
 
     for table in &schema.tables {
@@ -470,6 +995,8 @@ fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
             ..Default::default()
         });
     }
+
+    cmds.extend(compile_policies_strict(&schema.policies)?);
 
     if cmds.is_empty() {
         bail!("No executable AST commands found in migration");

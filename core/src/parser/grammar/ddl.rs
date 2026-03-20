@@ -61,6 +61,7 @@ pub fn parse_create_table<'a>(input: &'a str, table: &str) -> IResult<&'a str, Q
             on_disk: None,
             function_def: None,
             trigger_def: None,
+            policy_def: None,
         },
     ))
 }
@@ -230,6 +231,7 @@ pub fn parse_create_index(input: &str) -> IResult<&str, Qail> {
             on_disk: None,
             function_def: None,
             trigger_def: None,
+            policy_def: None,
         },
     ))
 }
