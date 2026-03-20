@@ -84,3 +84,10 @@ log
 
 
 CLAUDE.md
+
+# Local migration/retest sandboxes
+tmp/matrix_*/
+tmp/retest_*/
+tmp/pg18_*/
+tmp/*/deltas/
+tmp/*/migrations/
