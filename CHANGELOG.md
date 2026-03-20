@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-03-20
+
+### Breaking Changes ⚠️
+
+- **Tenant-only runtime semantics:** removed runtime compatibility aliases for `operator` scoping:
+  - `RlsContext::operator(...)` removed in favor of `RlsContext::tenant(...)`.
+  - `RlsContext::operator_and_agent(...)` removed in favor of `RlsContext::tenant_and_agent(...)`.
+  - `RlsContext::operator_id` and `has_operator()` removed from runtime paths.
+- **Gateway JWT tenant resolution:** tenant scope is now resolved from `tenant_id` only in runtime auth flows. Legacy `operator_id` JWT claim no longer maps to tenant scope.
+
 ### Added
 
 - **SDK direction clarified:** direct SDK support is now documented for TypeScript (`@qail/client`), Swift (`sdk/swift`), and Kotlin (`sdk/kotlin`).
@@ -14,9 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Tenant terminology standardization:** `tenant_id` is now the canonical identity across gateway/runtime docs and APIs; legacy `operator_id`/`vendor` naming remains compatibility-oriented.
+- **Tenant terminology standardization:** `tenant_id` is now the canonical identity across gateway/runtime docs and APIs.
 - **Analyzer path hardening:** continued shift from syntax-only scanning toward QAIL semantic scanning for query diagnostics and N+1 analysis.
 - **Language binding scope:** Node.js native binding / WASM packaging remains deferred while direct SDK tracks are prioritized.
+- **Versioning:** bumped Rust crates to `0.26.0` (`qail-core`, `qail-pg`, `qail-gateway`, `qail`, `qail-qdrant`, `qail-workflow`, `qail-encoder`, `qail-lsp`).
 
 ### Fixed
 

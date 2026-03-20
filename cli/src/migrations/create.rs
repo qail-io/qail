@@ -7,8 +7,8 @@ use anyhow::Result;
 /// ## Generated Files
 /// ```text
 /// migrations/
-/// ├── 20251231093400_add_users.up.qail
-/// └── 20251231093400_add_users.down.qail
+/// ├── 20251231093400123_add_users.up.qail
+/// └── 20251231093400123_add_users.down.qail
 /// ```
 pub fn migrate_create(name: &str, depends: Option<&str>, author: Option<&str>) -> Result<()> {
     println!("{}", "📝 Creating Migration".cyan().bold());

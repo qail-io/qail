@@ -3,15 +3,21 @@
 //! Provides local-time formatting using only the standard library.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Format the current local time as `YYYYMMDDHHMMSS` (for migration versions).
+static LAST_MIGRATION_TICK_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Format the current local time as `YYYYMMDDHHMMSSmmm` (for migration versions).
 pub fn timestamp_version() -> String {
     // Use the `date` command for local time — avoids pulling in chrono
     let output = Command::new("date")
         .arg("+%Y%m%d%H%M%S")
         .output()
         .expect("failed to run `date`");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    let base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let ms_suffix = monotonic_epoch_ms() % 1000;
+    format!("{base}{ms_suffix:03}")
 }
 
 /// Format the current local time as `YYYYMMDD_HHMMSS` (for backup filenames).
@@ -40,6 +46,24 @@ pub fn timestamp_rfc3339() -> String {
         .output()
         .expect("failed to run `date`");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn monotonic_epoch_ms() -> u64 {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    loop {
+        let last = LAST_MIGRATION_TICK_MS.load(Ordering::Relaxed);
+        let next = if now_ms > last { now_ms } else { last + 1 };
+        if LAST_MIGRATION_TICK_MS
+            .compare_exchange(last, next, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
 }
 
 /// Simple MD5 hash — replaces the `md5` crate.
@@ -136,7 +160,7 @@ mod tests {
     #[test]
     fn test_timestamp_version_format() {
         let ts = timestamp_version();
-        assert_eq!(ts.len(), 14);
+        assert_eq!(ts.len(), 17);
         assert!(ts.chars().all(|c| c.is_ascii_digit()));
     }
 }

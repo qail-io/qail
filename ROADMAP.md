@@ -58,7 +58,7 @@ The sections below are a historical milestone log of completed and deferred road
 ## 2. SaaS Multi-Tenant Isolation (RLS) ✅
 
 ### Phase 1: Driver-Level Context ✅ (v0.14.21)
-- [x] `RlsContext` struct in `core/src/rls.rs` — operator_id, agent_id, is_super_admin
+- [x] `RlsContext` struct in `core/src/rls.rs` — tenant_id, agent_id, is_super_admin
 - [x] `PgDriver.set_rls_context(ctx)` — calls `set_config()`
 - [x] `PgDriver.clear_rls_context()` — resets to safe defaults
 
@@ -74,7 +74,7 @@ The sections below are a historical milestone log of completed and deferred road
 
 ### Phase 4: AST-Level Query Injection ✅ (v0.15.6)
 - [x] `TenantRegistry` + `TENANT_TABLES` global in `core/src/rls/tenant.rs`
-- [x] Auto-detect via `from_build_schema()` — tables with `operator_id` auto-register
+- [x] Auto-detect via `from_build_schema()` — tables with `tenant_id` auto-register
 - [x] `Qail::with_rls(ctx)` — GET/SET/DEL → filter, ADD → payload
 - [x] Super admins + unregistered tables bypass injection
 
@@ -209,7 +209,7 @@ The sections below are a historical milestone log of completed and deferred road
 - [x] Invalid joins = compile error
 
 ### Phase 4: RLS Proof Witness ✅
-- [x] `RequiresRls` marker trait on tables with `operator_id`
+- [x] `RequiresRls` marker trait on tables with `tenant_id`
 - [x] `DirectBuild` marker trait on tables without — `.build()` available directly
 - [x] Queries without `.with_rls()` on `RequiresRls` tables = compile error (no `.build()` method)
 - [x] `RlsQuery<T>` wrapper — sealed proof witness, only produced by `TypedQail<T>::with_rls(ctx)`

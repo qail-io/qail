@@ -134,7 +134,6 @@ qail types schema.qail > src/generated/schema.rs # Typed codegen
 // RLS: tenant-first constructors
 let ctx = RlsContext::tenant(tenant_id);            // Single tenant (preferred)
 let ctx = RlsContext::tenant_and_agent(tenant_id, agent_id); // Agent/reseller within tenant
-let ctx = RlsContext::operator(op_id);              // Legacy alias (compat)
 let ctx = RlsContext::global();                     // Shared data (tenant_id IS NULL)
 let token = SuperAdminToken::for_system_process("admin");
 let ctx = RlsContext::super_admin(token);           // Full bypass (internal only)
@@ -230,7 +229,7 @@ qail.rs/
 | Kotlin | ✅ Supported | Gradle module in `sdk/kotlin` |
 | Node.js native binding | ⏸ Deferred | Not shipped yet |
 
-`tenant_id` is canonical in new SDK/docs flows. `operator_id` is still accepted only for legacy compatibility (JWT claim fallback and legacy schema column mapping) on gateway/RLS paths.
+`tenant_id` is the runtime contract across gateway and RLS paths. Legacy `operator_id` runtime compatibility aliases were removed in `v0.26.0`.
 
 ---
 

@@ -731,15 +731,16 @@ EXAMPLES:
     },
     /// Rollback migrations
     #[command(after_help = r#"EXAMPLES:
-    # Rollback: reverses the diff (old becomes target, new becomes source)
-    qail migrate down v1.qail:v2.qail postgres://user@localhost/mydb
+    # Rollback from current schema to target schema
+    qail migrate down current.qail:target.qail postgres://user@localhost/mydb
+    qail migrate down v2.qail:v1.qail postgres://user@localhost/mydb
 
     # Force rollback on unsafe type narrowing changes (non-interactive/CI)
-    qail migrate down v1.qail:v2.qail postgres://... --force
+    qail migrate down current.qail:target.qail postgres://... --force
 
     # Wait until global migration lock is available
-    qail migrate down v1.qail:v2.qail postgres://... --wait-for-lock
-    qail migrate down v1.qail:v2.qail postgres://... --lock-timeout-secs 30"#)]
+    qail migrate down current.qail:target.qail postgres://... --wait-for-lock
+    qail migrate down current.qail:target.qail postgres://... --lock-timeout-secs 30"#)]
     Down {
         /// Schema diff file or inline diff
         schema_diff: String,
@@ -766,7 +767,7 @@ TARGET:
     --to base       Roll back all applied folder migrations
 
 EXAMPLES:
-    qail migrate rollback --to 20260318094500_add_users.up.qail
+    qail migrate rollback --to 20260318094500123_add_users.up.qail
     qail migrate rollback --to base --url postgres://user@localhost/mydb
     qail migrate rollback --to base --wait-for-lock
     qail migrate rollback --to base --lock-timeout-secs 30"#)]

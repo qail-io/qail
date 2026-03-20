@@ -158,6 +158,51 @@ policy users_isolation on users
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_supports_drop_hints() {
+        let input = r#"
+drop index idx_qail_queue_ref
+drop index idx_qail_queue_poll
+drop table _qail_queue
+"#;
+
+        let cmds = parse_qail_to_commands_strict(input).expect("drop hints should compile");
+        assert_eq!(cmds.len(), 3);
+        assert!(matches!(cmds[0].action, qail_core::ast::Action::DropIndex));
+        assert_eq!(cmds[0].table, "idx_qail_queue_ref");
+        assert!(matches!(cmds[1].action, qail_core::ast::Action::DropIndex));
+        assert_eq!(cmds[1].table, "idx_qail_queue_poll");
+        assert!(matches!(cmds[2].action, qail_core::ast::Action::Drop));
+        assert_eq!(cmds[2].table, "_qail_queue");
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_supports_rename_hints() {
+        let input = "rename users.old_name -> users.new_name";
+        let cmds = parse_qail_to_commands_strict(input).expect("rename hints should compile");
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0].action, qail_core::ast::Action::Mod));
+        assert_eq!(cmds[0].table, "users");
+        assert!(
+            cmds[0].columns.iter().any(
+                |c| matches!(c, qail_core::ast::Expr::Named(n) if n == "old_name -> new_name")
+            ),
+            "rename command should encode 'old_name -> new_name'"
+        );
+    }
+
+    #[test]
+    fn test_parse_qail_to_commands_strict_rejects_cross_table_rename_hints() {
+        let input = "rename users.name -> profiles.name";
+        let err = parse_qail_to_commands_strict(input).expect_err("cross-table rename must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("same-table"),
+            "error should mention same-table constraint, got: {}",
+            msg
+        );
+    }
+
+    #[test]
     fn test_detect_phase_from_name() {
         assert_eq!(
             detect_phase("20260101010101_add_users.expand.up.qail"),

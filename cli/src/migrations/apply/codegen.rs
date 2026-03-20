@@ -3,9 +3,9 @@
 use anyhow::{Result, anyhow, bail};
 use qail_core::ast::{Action, Constraint, Expr, IndexDef, Qail};
 use qail_core::migrate::parse_qail;
-use qail_core::migrate::schema::FkAction;
 #[cfg(test)]
 use qail_core::migrate::schema::GrantAction;
+use qail_core::migrate::schema::{FkAction, MigrationHint};
 use qail_core::parser::schema::Schema;
 use qail_core::transpiler::ToSql;
 
@@ -95,10 +95,10 @@ pub(crate) fn commands_to_sql(cmds: &[Qail]) -> String {
 }
 
 fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) -> Result<Vec<Qail>> {
+    let (hint_cmds, hint_unsupported) = compile_migration_hints_strict(&schema.migrations)?;
+
     let mut unsupported = Vec::new();
-    if !schema.migrations.is_empty() {
-        unsupported.push("migration hints");
-    }
+    unsupported.extend(hint_unsupported);
     if !schema.extensions.is_empty() {
         unsupported.push("extensions");
     }
@@ -184,11 +184,196 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
         }
     }
 
+    cmds.extend(hint_cmds);
+
     if cmds.is_empty() {
         bail!("No executable AST commands found in migration");
     }
 
     Ok(cmds)
+}
+
+fn compile_migration_hints_strict(
+    hints: &[MigrationHint],
+) -> Result<(Vec<Qail>, Vec<&'static str>)> {
+    let mut cmds = Vec::new();
+    let mut unsupported = Vec::new();
+
+    for hint in hints {
+        match hint {
+            // In migration files, drop directives are explicit execution steps.
+            // They are compiled directly to AST commands for strict runtime execution.
+            MigrationHint::Drop { target, .. } => {
+                cmds.push(compile_drop_hint_strict(target)?);
+            }
+            MigrationHint::Rename { from, to } => {
+                cmds.push(compile_rename_hint_strict(from, to)?);
+            }
+            MigrationHint::Transform { .. } => add_unsupported(&mut unsupported, "transform hints"),
+        }
+    }
+
+    Ok((cmds, unsupported))
+}
+
+fn add_unsupported(unsupported: &mut Vec<&'static str>, item: &'static str) {
+    if !unsupported.contains(&item) {
+        unsupported.push(item);
+    }
+}
+
+fn compile_rename_hint_strict(from: &str, to: &str) -> Result<Qail> {
+    let Some((from_table, from_col)) = split_table_column_target(from) else {
+        bail!(
+            "Strict AST migration compiler expected rename source in '<table>.<column>' form, got '{}'",
+            from
+        );
+    };
+    let Some((to_table, to_col)) = split_table_column_target(to) else {
+        bail!(
+            "Strict AST migration compiler expected rename target in '<table>.<column>' form, got '{}'",
+            to
+        );
+    };
+
+    if from_table != to_table {
+        bail!(
+            "Strict AST migration compiler only supports same-table column rename hints (got '{} -> {}')",
+            from,
+            to
+        );
+    }
+    if from_col == to_col {
+        bail!(
+            "Strict AST migration compiler rejects no-op rename hint '{} -> {}'",
+            from,
+            to
+        );
+    }
+
+    if !is_valid_ident_path(from_table) || !is_valid_ident(from_col) || !is_valid_ident(to_col) {
+        bail!(
+            "Strict AST migration compiler rejects invalid rename identifier in hint '{} -> {}'",
+            from,
+            to
+        );
+    }
+
+    Ok(Qail {
+        action: Action::Mod,
+        table: from_table.to_string(),
+        columns: vec![Expr::Named(format!("{from_col} -> {to_col}"))],
+        ..Default::default()
+    })
+}
+
+fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
+    let target = target.trim();
+    if target.is_empty() {
+        bail!("Strict AST migration compiler got empty drop target");
+    }
+
+    if let Some(index_name) = target.strip_prefix("index ").map(str::trim) {
+        if !is_valid_ident_path(index_name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid index identifier in drop hint: '{}'",
+                target
+            );
+        }
+        return Ok(Qail {
+            action: Action::DropIndex,
+            // qail-pg AST encoder emits "DROP INDEX IF EXISTS ..." already.
+            // Keep only the raw index identifier here to avoid "IF EXISTS IF EXISTS ...".
+            table: index_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    if let Some(table_name) = target.strip_prefix("table ").map(str::trim) {
+        if !is_valid_ident_path(table_name) {
+            bail!(
+                "Strict AST migration compiler rejects invalid table identifier in drop hint: '{}'",
+                target
+            );
+        }
+        return Ok(Qail {
+            action: Action::Drop,
+            table: table_name.to_string(),
+            ..Default::default()
+        });
+    }
+
+    if let Some(column_target) = target.strip_prefix("column ").map(str::trim) {
+        return compile_drop_column_target(column_target, target);
+    }
+
+    // Legacy hint style: `drop table_name` or `drop table.column`
+    if target.contains('.') {
+        return compile_drop_column_target(target, target);
+    }
+
+    if !is_valid_ident_path(target) {
+        bail!(
+            "Strict AST migration compiler rejects invalid drop target identifier: '{}'",
+            target
+        );
+    }
+    Ok(Qail {
+        action: Action::Drop,
+        table: target.to_string(),
+        ..Default::default()
+    })
+}
+
+fn compile_drop_column_target(column_target: &str, original_target: &str) -> Result<Qail> {
+    let Some((table, column)) = split_table_column_target(column_target) else {
+        bail!(
+            "Strict AST migration compiler expected '<table>.<column>' in drop hint, got '{}'",
+            original_target
+        );
+    };
+    if !is_valid_ident_path(table) || !is_valid_ident(column) {
+        bail!(
+            "Strict AST migration compiler rejects invalid column drop hint: '{}'",
+            original_target
+        );
+    }
+    Ok(Qail {
+        action: Action::AlterDrop,
+        table: table.to_string(),
+        columns: vec![Expr::Named(column.to_string())],
+        ..Default::default()
+    })
+}
+
+fn split_table_column_target(target: &str) -> Option<(&str, &str)> {
+    let (table, column) = target.rsplit_once('.')?;
+    let table = table.trim();
+    let column = column.trim();
+    if table.is_empty() || column.is_empty() {
+        return None;
+    }
+    Some((table, column))
+}
+
+fn is_valid_ident_path(path: &str) -> bool {
+    let mut seen = false;
+    for part in path.split('.') {
+        seen = true;
+        if !is_valid_ident(part.trim()) {
+            return false;
+        }
+    }
+    seen
+}
+
+fn is_valid_ident(ident: &str) -> bool {
+    let mut chars = ident.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
