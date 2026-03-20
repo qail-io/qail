@@ -12,6 +12,129 @@ use crate::payment::{ChargeRequest, ChargeResponse, Currency, PaymentKind};
 use crate::registry::WorkflowDefinition;
 use crate::step::WorkflowStep;
 
+const WORKFLOW_QUERY_WIRE_MAGIC: &str = "QAIL-CMD/1\n";
+
+/// A single legacy query payload detected in a workflow definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyQueryPayloadIssue {
+    /// Transition source state containing the step.
+    pub transition_from: String,
+    /// Transition destination state containing the step.
+    pub transition_to: String,
+    /// Path to the offending step inside the transition.
+    pub step_path: String,
+    /// Short preview of the legacy payload (escaped, truncated).
+    pub payload_preview: String,
+}
+
+/// Return legacy query payload issues found in a workflow definition.
+///
+/// A query payload is considered legacy when `cmd_json` does not start with
+/// QAIL wire text magic (`QAIL-CMD/1\n`).
+///
+/// This helper is intended for cutover audits before loading persisted workflows
+/// into runtime execution.
+pub fn collect_legacy_query_payload_issues(
+    definition: &WorkflowDefinition,
+) -> Vec<LegacyQueryPayloadIssue> {
+    let mut out = Vec::new();
+    for transition in &definition.transitions {
+        collect_legacy_query_payload_issues_in_steps(
+            &transition.from,
+            &transition.to,
+            &transition.steps,
+            "",
+            &mut out,
+        );
+    }
+    out
+}
+
+fn collect_legacy_query_payload_issues_in_steps(
+    transition_from: &str,
+    transition_to: &str,
+    steps: &[WorkflowStep],
+    path_prefix: &str,
+    out: &mut Vec<LegacyQueryPayloadIssue>,
+) {
+    for (idx, step) in steps.iter().enumerate() {
+        let step_path = if path_prefix.is_empty() {
+            format!("steps[{idx}]")
+        } else {
+            format!("{path_prefix}.steps[{idx}]")
+        };
+
+        match step {
+            WorkflowStep::Query { cmd_json, .. } => {
+                if !is_current_workflow_query_wire(cmd_json) {
+                    out.push(LegacyQueryPayloadIssue {
+                        transition_from: transition_from.to_string(),
+                        transition_to: transition_to.to_string(),
+                        step_path,
+                        payload_preview: summarize_payload_preview(cmd_json),
+                    });
+                }
+            }
+            WorkflowStep::Wait { on_timeout, .. } => {
+                collect_legacy_query_payload_issues_in_steps(
+                    transition_from,
+                    transition_to,
+                    on_timeout,
+                    &format!("{step_path}.on_timeout"),
+                    out,
+                );
+            }
+            WorkflowStep::Branch {
+                branches, default, ..
+            } => {
+                for (branch_idx, (branch_value, branch_steps)) in branches.iter().enumerate() {
+                    collect_legacy_query_payload_issues_in_steps(
+                        transition_from,
+                        transition_to,
+                        branch_steps,
+                        &format!("{step_path}.branches[{branch_idx}:{branch_value}]"),
+                        out,
+                    );
+                }
+                collect_legacy_query_payload_issues_in_steps(
+                    transition_from,
+                    transition_to,
+                    default,
+                    &format!("{step_path}.default"),
+                    out,
+                );
+            }
+            WorkflowStep::ForEach { steps: nested, .. } => {
+                collect_legacy_query_payload_issues_in_steps(
+                    transition_from,
+                    transition_to,
+                    nested,
+                    &format!("{step_path}.for_each"),
+                    out,
+                );
+            }
+            WorkflowStep::Notify { .. }
+            | WorkflowStep::Transition { .. }
+            | WorkflowStep::Log { .. }
+            | WorkflowStep::Charge { .. } => {}
+        }
+    }
+}
+
+fn summarize_payload_preview(cmd_json: &str) -> String {
+    const MAX_CHARS: usize = 64;
+    let escaped = cmd_json.replace('\n', "\\n");
+    let mut preview = escaped.chars().take(MAX_CHARS).collect::<String>();
+    if escaped.chars().count() > MAX_CHARS {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn is_current_workflow_query_wire(cmd_json: &str) -> bool {
+    cmd_json.starts_with(WORKFLOW_QUERY_WIRE_MAGIC)
+}
+
 /// Errors that can occur during workflow execution.
 #[derive(Debug)]
 pub enum WorkflowError {
@@ -146,7 +269,8 @@ fn execute_step<'a, E: WorkflowExecutor>(
     Box::pin(async move {
         match step {
             WorkflowStep::Query { cmd_json, store_as } => {
-                let result = executor.execute_query(cmd_json).await?;
+                let cmd_wire = normalize_query_wire_for_execution(cmd_json)?;
+                let result = executor.execute_query(&cmd_wire).await?;
                 if let Some(key) = store_as {
                     ctx.set(key, result);
                 }
@@ -297,6 +421,26 @@ fn execute_step<'a, E: WorkflowExecutor>(
 
         Ok(())
     })
+}
+
+fn normalize_query_wire_for_execution(cmd_json: &str) -> Result<String, WorkflowError> {
+    if !is_current_workflow_query_wire(cmd_json) {
+        return Err(WorkflowError::QueryFailed(
+            "Legacy workflow query payload detected: cmd_json must use QAIL wire text \
+             (QAIL-CMD/1). Migrate persisted workflow rows to wire text or purge/restart pending workflows."
+                .to_string(),
+        ));
+    }
+
+    let cmd = qail_core::wire::decode_cmd_text(cmd_json).map_err(|e| {
+        WorkflowError::QueryFailed(format!(
+            "Invalid workflow query wire payload (expected QAIL-CMD/1): {}",
+            e
+        ))
+    })?;
+
+    // Canonicalize payload before handing it to the executor.
+    Ok(qail_core::wire::encode_cmd_text(&cmd))
 }
 
 /// Run a workflow from its current state until it reaches a Wait or terminal state.
@@ -636,5 +780,147 @@ mod tests {
             Some("Pending")
         );
         assert!(charge.get("qr_code").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_query_step_rejects_legacy_non_wire_payload() {
+        let executor = MockExecutor::new();
+
+        let wf = WorkflowDefinition::new("legacy_query")
+            .initial_state("start")
+            .transition(
+                "start",
+                "done",
+                vec![
+                    WorkflowStep::Query {
+                        cmd_json: "get users limit 1".to_string(),
+                        store_as: Some("rows".to_string()),
+                    },
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-legacy-query-001", "start");
+        let err = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect_err("legacy non-wire query payload must fail");
+
+        match err {
+            WorkflowError::QueryFailed(msg) => {
+                assert!(
+                    msg.contains("QAIL-CMD/1"),
+                    "error should mention required wire magic"
+                );
+                assert!(
+                    msg.contains("purge/restart pending workflows"),
+                    "error should include cutover guidance"
+                );
+            }
+            other => panic!("expected QueryFailed, got: {other}"),
+        }
+
+        assert!(
+            executor.queries.lock().unwrap().is_empty(),
+            "legacy payload must fail before executor query is invoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_step_accepts_wire_payload_and_executes() {
+        let executor = MockExecutor::new();
+        let cmd = qail_core::Qail::get("users").columns(["id"]).limit(1);
+        let wire = qail_core::wire::encode_cmd_text(&cmd);
+
+        let wf = WorkflowDefinition::new("wire_query")
+            .initial_state("start")
+            .transition(
+                "start",
+                "done",
+                vec![
+                    WorkflowStep::Query {
+                        cmd_json: wire.clone(),
+                        store_as: Some("rows".to_string()),
+                    },
+                    WorkflowStep::transition("done"),
+                ],
+            );
+
+        let mut ctx = WorkflowContext::new("wf-wire-query-001", "start");
+        let result = run_workflow(&executor, &wf, &mut ctx)
+            .await
+            .expect("wire payload should execute");
+        assert_eq!(result, "done");
+
+        let queries = executor.queries.lock().unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(
+            queries[0], wire,
+            "executor should receive canonical wire payload"
+        );
+    }
+
+    #[test]
+    fn test_collect_legacy_query_payload_issues_reports_nested_paths() {
+        let wire_cmd = qail_core::wire::encode_cmd_text(&qail_core::Qail::get("users").limit(1));
+        let wf = WorkflowDefinition::new("legacy_audit")
+            .initial_state("start")
+            .transition(
+                "start",
+                "done",
+                vec![
+                    WorkflowStep::Query {
+                        cmd_json: "get users limit 1".to_string(),
+                        store_as: Some("rows".to_string()),
+                    },
+                    WorkflowStep::Wait {
+                        event: "timeout".to_string(),
+                        timeout: std::time::Duration::from_secs(10),
+                        on_timeout: vec![WorkflowStep::Query {
+                            cmd_json: "{\"legacy\":true}".to_string(),
+                            store_as: None,
+                        }],
+                    },
+                    WorkflowStep::branch(
+                        "kind",
+                        vec![(
+                            "wire_ok",
+                            vec![WorkflowStep::Query {
+                                cmd_json: wire_cmd,
+                                store_as: None,
+                            }],
+                        )],
+                        vec![WorkflowStep::ForEach {
+                            list_key: "items".to_string(),
+                            steps: vec![WorkflowStep::Query {
+                                cmd_json: "select * from legacy".to_string(),
+                                store_as: None,
+                            }],
+                        }],
+                    ),
+                ],
+            );
+
+        let issues = collect_legacy_query_payload_issues(&wf);
+        assert_eq!(
+            issues.len(),
+            3,
+            "expected all legacy payloads to be detected"
+        );
+
+        let paths: Vec<String> = issues.iter().map(|i| i.step_path.clone()).collect();
+        assert!(
+            paths.iter().any(|p| p == "steps[0]"),
+            "top-level legacy query should be reported"
+        );
+        assert!(
+            paths.iter().any(|p| p == "steps[1].on_timeout.steps[0]"),
+            "nested wait/on_timeout legacy query should be reported"
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p == "steps[2].default.steps[0].for_each.steps[0]"),
+            "nested branch/default/foreach legacy query should be reported"
+        );
     }
 }

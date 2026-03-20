@@ -57,7 +57,10 @@ pub mod step;
 // Re-exports for convenience
 pub use channel::{ChannelError, ChannelKind, NotifyChannel};
 pub use context::WorkflowContext;
-pub use engine::{WorkflowError, WorkflowExecutor, run_workflow};
+pub use engine::{
+    LegacyQueryPayloadIssue, WorkflowError, WorkflowExecutor, collect_legacy_query_payload_issues,
+    run_workflow,
+};
 pub use payment::{
     ChargeRequest, ChargeResponse, ChargeStatus, Currency, PaymentError, PaymentEvent, PaymentKind,
     PaymentProvider,
