@@ -2,7 +2,7 @@
 
 > **New in v0.15** — The first Rust PostgreSQL driver with built-in multi-tenant data isolation
 
-QAIL injects tenant context at the **AST level**, ensuring every query is automatically scoped to the correct operator, agent, or user — without manual `WHERE` clauses.
+QAIL injects tenant context at the **AST level**, ensuring every query is automatically scoped to the correct tenant, agent, or user — without manual `WHERE` clauses.
 
 ## The Problem
 
@@ -10,10 +10,10 @@ Every multi-tenant SaaS app needs data isolation. Traditional solutions are frag
 
 ```rust
 // ❌ Manual WHERE clauses — easy to forget, impossible to audit
-let sql = "SELECT * FROM bookings WHERE operator_id = $1";
+let sql = "SELECT * FROM bookings WHERE tenant_id = $1";
 
 // ❌ Every query must remember to add the filter
-let sql = "SELECT * FROM invoices"; // BUG: leaks ALL operator data
+let sql = "SELECT * FROM invoices"; // BUG: leaks ALL tenant data
 ```
 
 One missed `WHERE` clause = cross-tenant data leak. In a codebase with 200+ queries, this is a ticking time bomb.
@@ -26,7 +26,7 @@ QAIL solves this at the driver level:
 use qail_core::rls::{RlsContext, SuperAdminToken};
 
 // Create context from authenticated session
-let ctx = RlsContext::operator(operator_id);
+let ctx = RlsContext::tenant(tenant_id);
 
 // Every query is automatically scoped
 let query = Qail::get("bookings")
@@ -34,7 +34,7 @@ let query = Qail::get("bookings")
     .with_rls(&ctx);  // ← RLS injected at AST level
 
 // Generated SQL: SELECT ... FROM bookings
-// But the connection sets app.current_operator_id/app.current_agent_id
+// But the connection sets app.current_tenant_id/app.current_agent_id
 // PostgreSQL RLS policy handles the rest
 ```
 
@@ -42,18 +42,19 @@ let query = Qail::get("bookings")
 
 | Constructor | Scope | Use Case |
 |-------------|-------|----------|
-| `RlsContext::operator(id)` | Single operator | Operator dashboard |
+| `RlsContext::tenant(id)` | Single tenant | Tenant dashboard |
 | `RlsContext::agent(id)` | Single agent | Agent portal |
-| `RlsContext::operator_and_agent(op, ag)` | Both | Agent within operator |
+| `RlsContext::tenant_and_agent(t, ag)` | Both | Agent within tenant |
+| `RlsContext::operator(id)` | Legacy alias | Backward compatibility |
 | `RlsContext::global()` | Shared/global rows (`tenant_id IS NULL`) | Public/reference data |
 | `RlsContext::super_admin(token)` | Bypasses RLS | Internal platform-only ops |
 
 ## Query Methods
 
 ```rust
-let ctx = RlsContext::operator_and_agent(op_id, agent_id);
+let ctx = RlsContext::tenant_and_agent(tenant_id, agent_id);
 
-ctx.has_operator();   // true
+ctx.has_tenant();     // true
 ctx.has_agent();      // true
 ctx.bypasses_rls();   // false
 
@@ -77,18 +78,21 @@ admin.bypasses_rls(); // true
 │  AST Builder adds RLS context to query            │
 │       ↓                                           │
 │  PgDriver::execute()                              │
+│  ├─ set_config('app.current_tenant_id', '<uuid>', true)    │
 │  ├─ set_config('app.current_operator_id', '<uuid>', true)  │
 │  ├─ set_config('app.current_agent_id', '<uuid>', true)     │
 │  └─ Execute query on SAME connection                       │
 │       ↓                                           │
 │  PostgreSQL RLS Policy                            │
 │  CREATE POLICY tenant_isolation ON bookings       │
-│    USING (operator_id = current_setting(          │
-│           'app.current_operator_id')::uuid)       │
+│    USING (tenant_id = current_setting(            │
+│           'app.current_tenant_id')::uuid)         │
 │       ↓                                           │
 │  Only matching rows returned                      │
 └─────────────────────────────────────────────────┘
 ```
+
+> Compatibility note: gateway/driver still writes legacy operator GUCs and accepts `operator_id` in JWTs while tenant-first naming is rolled out.
 
 ## Why AST-Level?
 

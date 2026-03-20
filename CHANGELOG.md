@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **SDK direction clarified:** direct SDK support is now documented for TypeScript (`@qail/client`), Swift (`sdk/swift`), and Kotlin (`sdk/kotlin`).
+- **Docs/web updates:** refreshed mdBook content for tenant-first terminology and current SDK/runtime status.
+
+### Changed
+
+- **Tenant terminology standardization:** `tenant_id` is now the canonical identity across gateway/runtime docs and APIs; legacy `operator_id`/`vendor` naming remains compatibility-oriented.
+- **Analyzer path hardening:** continued shift from syntax-only scanning toward QAIL semantic scanning for query diagnostics and N+1 analysis.
+- **Language binding scope:** Node.js native binding / WASM packaging remains deferred while direct SDK tracks are prioritized.
+
+### Fixed
+
+- **Gateway policy evaluation:** fixed policy handling so applicable allow policies are not prematurely denied during evaluation.
+- **Gateway execution pipeline:** expanded `optimize_qail_for_execution(&mut cmd)` usage across handlers to avoid inconsistent execution planning.
+- **SQL/query diagnostics:** reduced false positives by ignoring comment/string-literal noise in source scanning and improving text-literal classification.
+
 ## [0.25.1] - 2026-03-18
 
 ### Added

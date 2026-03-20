@@ -6,8 +6,8 @@ Add QAIL to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-qail-core = "0.9"    # AST and Builder
-qail-pg = "0.9"      # PostgreSQL driver
+qail-core = "0.25.1"    # AST and builder
+qail-pg = "0.25.1"      # PostgreSQL driver
 ```
 
 ## CLI
@@ -18,14 +18,32 @@ Install the QAIL command-line tool:
 cargo install qail
 ```
 
-## JavaScript/TypeScript (WASM)
+## TypeScript SDK
 
-WASM packaging is currently deferred until the platform reaches production-ready status.
-Use Rust crates and CLI for now.
+```bash
+npm install @qail/client
+```
+
+## Swift SDK
+
+Use the source package in this repository:
+
+- `sdk/swift/Package.swift`
+
+## Kotlin SDK
+
+Use the Gradle module in this repository:
+
+- `sdk/kotlin/build.gradle.kts`
+
+## Deferred Bindings
+
+- Node.js native binding: deferred
+- WASM packaging: deferred
 
 ## Verify Installation
 
 ```bash
 qail --version
-# qail 0.9.5
+# qail 0.25.x
 ```

@@ -4,6 +4,10 @@ This page describes the gateway's internal architecture — the request lifecycl
 
 **Read time: ~10 minutes.**
 
+Recent hardening:
+- Policy evaluation now avoids premature deny outcomes when later matching policies allow the operation.
+- Handler execution paths consistently run command optimization before DB execution.
+
 ---
 
 ## Request Lifecycle
@@ -24,7 +28,7 @@ Every HTTP request flows through a fixed, ordered pipeline:
  │     → 429 Too Many Requests on exhaustion                 │
  ├───────────────────────────────────────────────────────────┤
  │  3. Authentication                                        │
- │     JWT validation (HS256) → extract operator_id,         │
+ │     JWT validation (HS256) → extract tenant_id,           │
  │     user_id, role from claims                             │
  │     Fallback: header-based (dev only, no JWT_SECRET)      │
  ├───────────────────────────────────────────────────────────┤
@@ -42,6 +46,7 @@ Every HTTP request flows through a fixed, ordered pipeline:
  │     pool.acquire_with_rls(RlsContext) or                  │
  │     pool.acquire_with_rls_timeout(RlsContext, timeout)    │
  │     Sets PostgreSQL GUCs:                                 │
+ │       set_config('app.current_tenant_id', '...', false)   │
  │       set_config('app.current_operator_id', '...', false) │
  │       set_config('app.is_super_admin', '...', false)      │
  ├───────────────────────────────────────────────────────────┤
@@ -140,7 +145,7 @@ The integration test `test_pool_connection_recycling_isolation` verifies this wi
 | Resource | Bound | Mechanism |
 |----------|-------|-----------|
 | Connections | `max_connections` | Pool size cap |
-| Per-tenant connections | `tenant_max_concurrent` | Semaphore per operator |
+| Per-tenant connections | `tenant_max_concurrent` | Semaphore per tenant |
 | Result rows | `max_result_rows` | Row cap per query |
 | Query duration | `statement_timeout_ms` | PostgreSQL `SET LOCAL` |
 | Query cost | `explain_max_cost` | EXPLAIN pre-check |
@@ -175,7 +180,7 @@ GatewayState (shared Arc across all handlers)
 ├── explain_config: ExplainConfig   — Cost/row thresholds for EXPLAIN pre-check
 ├── tenant_semaphore: TenantSemaphore — Per-tenant concurrency limiter
 ├── event_engine: EventTriggerEngine  — Webhook triggers on mutations
-└── user_operator_map: HashMap      — JWT user_id → operator_id resolution cache
+└── user_operator_map: HashMap      — JWT user_id → tenant_id resolution cache
 ```
 
 ---

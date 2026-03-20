@@ -16,10 +16,11 @@ Set `JWT_SECRET` as an environment variable:
 export JWT_SECRET="your-hs256-secret"
 ```
 
-The extracted claims (`operator_id`, `user_id`, `role`) are set as PostgreSQL session variables before every query, enabling native RLS enforcement:
+The extracted claims (`tenant_id`, `user_id`, `role`) are set as PostgreSQL session variables before every query, enabling native RLS enforcement:
 
 ```sql
-set_config('app.current_operator_id', '<from JWT>', false);
+set_config('app.current_tenant_id', '<from JWT>', false);
+set_config('app.current_operator_id', '<from JWT>', false); -- legacy compat alias
 set_config('app.current_user_id', '<from JWT>', false);
 set_config('app.role', '<from JWT>', false);
 ```
@@ -52,6 +53,7 @@ Every query is automatically scoped to the authenticated tenant via PostgreSQL's
 ```sql
 -- Automatically executed before every query:
 set_config('app.current_operator_id', '<from JWT>', false);
+set_config('app.current_tenant_id', '<from JWT>', false);
 set_config('app.current_user_id', '<from JWT>', false);
 set_config('app.role', '<from JWT>', false);
 ```
@@ -61,7 +63,7 @@ Your PostgreSQL RLS policies reference these variables:
 ```sql
 CREATE POLICY tenant_isolation ON orders
   FOR ALL
-  USING (operator_id = current_setting('app.current_operator_id')::uuid);
+  USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders FORCE ROW LEVEL SECURITY;
@@ -83,7 +85,7 @@ policies:
     table: orders
     role: agent
     operations: [read]
-    filter: "operator_id = $tenant_id"
+    filter: "tenant_id = $tenant_id"
     allowed_columns: ["id", "status", "total", "created_at"]
   - name: orders_viewer_read
     table: orders
@@ -91,6 +93,8 @@ policies:
     operations: [read]
     allowed_columns: ["id", "status"]
 ```
+
+> Compatibility: gateway JWT parsing still accepts legacy `operator_id` claims and maps them into `tenant_id` when `tenant_id` is absent.
 
 ### Column Permissions
 

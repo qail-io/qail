@@ -15,7 +15,7 @@ Every SaaS backend has the same three bugs waiting to happen:
 
 1. **N+1 queries** — Your ORM fires 151 queries where 1 would do. You find out in production.
 2. **SQL injection** — One string interpolation mistake. That's all it takes.
-3. **Broken tenant isolation** — A missing `WHERE operator_id = ?` leaks another customer's data.
+3. **Broken tenant isolation** — A missing `WHERE tenant_id = ?` leaks another customer's data.
 
 These aren't edge cases. They're the *default* outcome of string-based SQL.
 
@@ -88,8 +88,8 @@ use qail_pg::PgDriver;
 // Connect
 let mut driver = PgDriver::connect("localhost", 5432, "user", "mydb").await?;
 
-// Multi-tenant: scope every query to this operator
-let ctx = RlsContext::operator(operator_id);
+// Multi-tenant: scope every query to this tenant
+let ctx = RlsContext::tenant(tenant_id);
 
 // Build & execute
 let orders = Qail::get("orders")
@@ -131,10 +131,10 @@ qail types schema.qail > src/generated/schema.rs # Typed codegen
 | IDOR | Must check per endpoint | **Tenant isolation built into protocol** |
 
 ```rust
-// RLS: five scope constructors for real-world SaaS
-let ctx = RlsContext::operator(op_id);              // Single operator
-let ctx = RlsContext::agent(agent_id);              // Single agent
-let ctx = RlsContext::operator_and_agent(op, ag);   // Agent within operator
+// RLS: tenant-first constructors
+let ctx = RlsContext::tenant(tenant_id);            // Single tenant (preferred)
+let ctx = RlsContext::tenant_and_agent(tenant_id, agent_id); // Agent/reseller within tenant
+let ctx = RlsContext::operator(op_id);              // Legacy alias (compat)
 let ctx = RlsContext::global();                     // Shared data (tenant_id IS NULL)
 let token = SuperAdminToken::for_system_process("admin");
 let ctx = RlsContext::super_admin(token);           // Full bypass (internal only)
@@ -213,11 +213,24 @@ qail.rs/
 ├── pg/         PostgreSQL driver (binary wire protocol, connection pool)
 ├── gateway/    Auto-REST API server (Axum)
 ├── cli/        qail exec, pull, diff, migrate, types
-├── encoder/    Wire protocol encoder + C FFI for language bindings
+├── encoder/    Wire protocol encoder + FFI/runtime internals
 ├── qdrant/     Qdrant vector DB driver (optional)
 ├── workflow/   Workflow engine
-└── sdk/        Language bindings (TypeScript, Swift, Kotlin)
+└── sdk/        Direct SDKs (TypeScript, Swift, Kotlin)
 ```
+
+---
+
+## SDK Status
+
+| Platform | Status | Distribution |
+|----------|--------|--------------|
+| TypeScript | ✅ Supported | `npm install @qail/client` |
+| Swift | ✅ Supported | Source package in `sdk/swift` |
+| Kotlin | ✅ Supported | Gradle module in `sdk/kotlin` |
+| Node.js native binding | ⏸ Deferred | Not shipped yet |
+
+`tenant_id` is canonical in new SDK/docs flows. `operator_id` is still accepted only for legacy compatibility (JWT claim fallback and legacy schema column mapping) on gateway/RLS paths.
 
 ---
 

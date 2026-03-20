@@ -182,7 +182,7 @@ curl \
 
 ### Row-Level Security (RLS)
 
-Every query is automatically scoped to the authenticated tenant via PostgreSQL's native RLS. The gateway sets session variables (`app.current_operator_id`, `app.current_user_id`) before each query — **no manual WHERE clauses needed**.
+Every query is automatically scoped to the authenticated tenant via PostgreSQL's native RLS. The gateway sets session variables (`app.current_tenant_id`, `app.current_user_id`) before each query, and also writes legacy `app.current_operator_id` for compatibility — **no manual WHERE clauses needed**.
 
 ### YAML Policy Engine
 
@@ -194,7 +194,7 @@ policies:
     table: orders
     role: agent
     operations: [read]
-    filter: "operator_id = $tenant_id"
+    filter: "tenant_id = $tenant_id"
     allowed_columns: ["id", "status", "total", "created_at"]
   - name: orders_viewer_read
     table: orders
@@ -202,6 +202,8 @@ policies:
     operations: [read]
     allowed_columns: ["id", "status"]
 ```
+
+> Legacy schemas can still use `operator_id` by setting `tenant_column = "operator_id"` in `qail.toml`.
 
 ### Query Allow-Listing
 

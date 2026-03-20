@@ -49,3 +49,4 @@
 
 - [CLI Commands](./reference/cli.md)
 - [API Reference](./reference/api.md)
+- [Changelog](./changelog.md)

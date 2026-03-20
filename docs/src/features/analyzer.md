@@ -6,7 +6,7 @@ Prevents runtime errors by scanning your codebase before running migrations.
 
 Dropping a table or column is easy—but if your code still references it, you'll get runtime errors. The analyzer:
 
-1. **Scans your codebase** for QAIL AST and raw SQL queries
+1. **Scans your codebase** for QAIL AST/text query usage and SQL markers
 2. **Detects breaking changes** like dropped tables/columns
 3. **Shows exact file:line locations** with code snippets
 4. **Prevents downtime** by catching issues before production
@@ -62,14 +62,16 @@ What would you like to do?
   3. Let me fix the code first (exit)
 ```
 
-## Dual-Mode Scanning
+## Semantic Scanning Modes
 
 | Mode | Badge | Detection |
 |------|-------|-----------|
-| **Rust AST** | 🦀 | Full syntax tree analysis for `Qail::get()`, `Qail::add()`, etc. |
-| **Regex** | 📘📍🐍 | Pattern matching for raw SQL in TypeScript, JavaScript, Python |
+| **Rust Semantic** | 🦀 | QAIL semantic scanner for `Qail::get()`, `Qail::add()`, call-flow and loop-aware query diagnostics |
+| **Text Literal** | 📘📍🐍 | String-literal extraction with comment masking for SQL/QAIL marker detection in non-Rust files |
 
 The analyzer auto-detects file types and uses the most appropriate scanning method.
+
+`syn` is no longer required on the runtime analyzer path for this semantic detection flow.
 
 ## Rollback Safety Analysis
 

@@ -4,6 +4,13 @@
 
 QAIL compiles typed query ASTs directly to database wire protocols. No application-level SQL string interpolation on the AST path. Built-in multi-tenant data isolation via RLS. The only Rust PostgreSQL driver with AST-level tenant injection.
 
+## Latest Updates (March 2026)
+
+- Tenant-first naming is now canonical across docs and gateway flows (`tenant_id`), with legacy `operator_id` compatibility retained.
+- Gateway policy evaluation and execution-path fixes were applied to reduce false denies and keep optimized command execution consistent.
+- Direct SDK tracks are now first-class: TypeScript, Swift, and Kotlin.
+- Node.js native binding and WASM packaging remain deferred.
+
 ## Philosophy: AST = Meaning
 
 > **If a database doesn't let us encode semantic intent, we don't fake it.**
