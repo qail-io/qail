@@ -78,7 +78,7 @@ async fn redteam_context_switch_guc_correctness() {
 
     // Step 1: Set Operator A context
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(OPERATOR_A_ID))
         .await
         .unwrap();
 
@@ -95,7 +95,7 @@ async fn redteam_context_switch_guc_correctness() {
 
     // Step 2: Switch to Operator B
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_B_ID))
+        .set_rls_context(RlsContext::tenant(OPERATOR_B_ID))
         .await
         .unwrap();
 
@@ -133,7 +133,7 @@ async fn redteam_guc_state_after_timeout() {
 
     // Set RLS context
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(OPERATOR_A_ID))
         .await
         .unwrap();
 
@@ -214,7 +214,7 @@ async fn redteam_app_filter_with_rls_context() {
 
     // Set operator context
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(OPERATOR_A_ID))
         .await
         .unwrap();
 
@@ -304,7 +304,7 @@ async fn redteam_rapid_context_switching_100x() {
             OPERATOR_B_ID
         };
         driver
-            .set_rls_context(RlsContext::operator(op_id))
+            .set_rls_context(RlsContext::tenant(op_id))
             .await
             .unwrap();
 
@@ -392,7 +392,7 @@ async fn redteam_pipeline_batch_correctness() {
     let mut driver = connect().await;
 
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(OPERATOR_A_ID))
         .await
         .unwrap();
 
@@ -525,7 +525,7 @@ async fn tierx_unicode_torture_in_guc() {
     ];
 
     for (label, op_id) in &test_cases {
-        let result = driver.set_rls_context(RlsContext::operator(op_id)).await;
+        let result = driver.set_rls_context(RlsContext::tenant(op_id)).await;
 
         // Must not panic
         assert!(result.is_ok(), "{} should not panic: {:?}", label, result);
@@ -648,7 +648,7 @@ async fn tierx_very_long_operator_id() {
 
     // 10KB operator_id — way beyond any UUID
     let long_id = "a".repeat(10_000);
-    let result = driver.set_rls_context(RlsContext::operator(&long_id)).await;
+    let result = driver.set_rls_context(RlsContext::tenant(&long_id)).await;
 
     // Should succeed (GUC values can be very long)
     assert!(

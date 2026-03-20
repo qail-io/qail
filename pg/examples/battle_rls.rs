@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for _ in 0..ITERATIONS {
                 let t = Instant::now();
 
-                let ctx = qail_core::rls::RlsContext::operator(&tenant);
+                let ctx = qail_core::rls::RlsContext::tenant(&tenant);
 
                 match pool.acquire_with_rls(ctx).await {
                     Ok(mut conn) => {

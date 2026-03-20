@@ -5,6 +5,7 @@ edition = "2024"
 description = "QAIL driver for Qdrant vector database"
 license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
+readme = "README.md"
 keywords = ["qail", "qdrant", "vector", "database", "ai"]
 categories = ["database"]
 

@@ -2,14 +2,15 @@
 //! Run with: cargo run --example test_binary
 
 use qail_core::ast::Qail;
+use qail_core::wire::encode_cmd_binary;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a QAIL query
     let cmd = Qail::get("harbors").columns(["id", "name"]).limit(3);
 
-    // Serialize to postcard
-    let bytes = postcard::to_allocvec(&cmd)?;
+    // Serialize to QAIL binary wire payload (QWB1)
+    let bytes = encode_cmd_binary(&cmd);
     println!("Binary query size: {} bytes", bytes.len());
 
     // Send to gateway

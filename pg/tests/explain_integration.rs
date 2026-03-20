@@ -68,7 +68,7 @@ async fn test_explain_simple_select() {
 
     // Set operator context for RLS
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(OPERATOR_A_ID))
         .await
         .unwrap();
 
@@ -100,7 +100,7 @@ async fn test_explain_multi_join() {
 
     // Operator A context
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(OPERATOR_A_ID))
         .await
         .unwrap();
 
@@ -161,7 +161,7 @@ async fn test_explain_cache_roundtrip() {
     let mut driver = connect().await;
 
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(OPERATOR_A_ID))
         .await
         .unwrap();
 
@@ -206,7 +206,7 @@ async fn test_explain_full_table_scan() {
 
     // Operator context — RLS will filter, but no LIMIT = seq scan
     driver
-        .set_rls_context(RlsContext::operator(OPERATOR_A_ID))
+        .set_rls_context(RlsContext::tenant(OPERATOR_A_ID))
         .await
         .unwrap();
 

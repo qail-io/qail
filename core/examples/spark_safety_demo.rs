@@ -362,7 +362,7 @@ fn main() {
     // ======================================================================
     println!("━━━ Proof 5: RLS Tenant Isolation (Proof Witness) ━━━");
 
-    let tenant_ctx = RlsContext::operator("550e8400-e29b-41d4-a716-446655440000");
+    let tenant_ctx = RlsContext::tenant("550e8400-e29b-41d4-a716-446655440000");
 
     // 5a. Basic RLS-protected query
     let q = Qail::typed(Orders)
