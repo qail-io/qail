@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-03-20
+
+### Fixed
+
+- **Release CI gate:** fixed publish workflow test breakage caused by removed `RlsContext::operator(...)` usage in examples/tests by migrating remaining call sites to `RlsContext::tenant(...)`.
+- **Gateway binary examples:** updated gateway examples to use QAIL wire-binary (`QWB1`) encoding instead of legacy postcard serialization.
+
+### Changed
+
+- **Crate metadata/readme parity:** all release-track crates now declare explicit `readme` metadata and ship crate-local `README.md` files:
+  - `qail-core`, `qail-pg`, `qail-qdrant`, `qail`, `qail-gateway`, `qail-encoder`, `qail-lsp`, `qail-workflow`
+- **Versioning:** bumped Rust crates to `0.26.1`.
+- **Docs/readmes:** refreshed installation snippets and version references to `0.26.1` across root/docs/crate README files.
+
 ## [0.26.0] - 2026-03-20
 
 ### Breaking Changes ⚠️

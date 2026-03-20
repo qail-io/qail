@@ -1,11 +1,11 @@
 [package]
 name = "qail-lsp"
-version = "0.26.0"
+version = "0.26.1"
 edition = "2024"
 description = "Language Server Protocol implementation for QAIL"
 license = "Apache-2.0"
 repository = "https://github.com/qail-io/qail"
-readme = "../README.md"
+readme = "README.md"
 categories = ["development-tools", "text-editors"]
 keywords = ["qail", "lsp", "language-server", "sql"]
 
@@ -14,7 +14,7 @@ name = "qail-lsp"
 path = "src/main.rs"
 
 [dependencies]
-qail-core = { path = "../core", version = "0.26.0", features = ["analyzer"] }
+qail-core = { path = "../core", version = "0.26.1", features = ["analyzer"] }
 tower-lsp = { version = "0.20", features = ["proposed"] }
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
