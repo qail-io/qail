@@ -27,7 +27,7 @@ QAIL builds queries as an Abstract Syntax Tree that compiles directly to protoco
 
 ```toml
 [dependencies]
-qail-core = "0.26.2"
+qail-core = "0.26.3"
 ```
 
 ## Quick Start

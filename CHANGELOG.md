@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.3] - 2026-03-21
+
+### Changed
+
+- **Versioning:** bumped Rust crates to `0.26.3`.
+- **Docs/readmes:** refreshed installation snippets and version references to `0.26.3`.
+
 ## [0.26.2] - 2026-03-20
 
 ### Added

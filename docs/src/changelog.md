@@ -4,7 +4,7 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v0.26.2)
+## Current Highlights (v0.26.3)
 
 - PostgreSQL startup now requests protocol `3.2` by default, with one-shot downgrade retry to `3.0` on explicit protocol-version rejection.
 - Native startup decode/handling for backend `NegotiateProtocolVersion` (`'v'`) is now implemented.
