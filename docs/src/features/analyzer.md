@@ -71,7 +71,7 @@ What would you like to do?
 
 The analyzer auto-detects file types and uses the most appropriate scanning method.
 
-`syn` is no longer required on the runtime analyzer path for this semantic detection flow.
+Rust analyzer mode and build-time validation share the same semantic QAIL extraction path and query-IR checks.
 
 ## Rollback Safety Analysis
 

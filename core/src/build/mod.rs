@@ -27,7 +27,7 @@ pub(crate) mod nplus1_semantic;
 mod query_ir;
 /// Shared Rust lexical masking helpers.
 mod rust_lex;
-/// Text-based source scanner.
+/// Semantic source scanner for Rust QAIL usage.
 pub mod scanner;
 /// Schema types and parsing.
 pub mod schema;
@@ -38,7 +38,7 @@ mod validate;
 
 // ── Re-exports for public API ────────────────────────────────────────
 pub use codegen::{generate_schema_code, generate_typed_schema};
-pub use scanner::{QailUsage, scan_source_files};
+pub use scanner::{QailUsage, scan_source_files, scan_source_text};
 pub use schema::{ForeignKey, ResourceSchema, Schema, TableSchema};
 pub use validate::{
     ValidationDiagnostic, ValidationDiagnosticKind, validate, validate_against_schema,

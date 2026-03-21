@@ -1,7 +1,11 @@
 //! Shared helpers for recognizing QAIL text queries in source files.
 
 /// Action keywords that can begin a QAIL text query.
-pub const QAIL_ACTION_PREFIXES: [&str; 7] = ["get", "set", "add", "del", "with", "make", "mod"];
+pub const QAIL_ACTION_PREFIXES: [&str; 25] = [
+    "get", "set", "add", "del", "with", "make", "mod", "insert", "delete", "create", "count",
+    "cnt", "export", "put", "truncate", "explain", "lock", "search", "upsert", "scroll", "begin",
+    "commit", "rollback", "call", "session",
+];
 
 /// String literal extracted from a text source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +359,9 @@ mod tests {
         assert!(looks_like_qail_query(
             "  with a as (get users fields id) get a fields id"
         ));
+        assert!(looks_like_qail_query("export users fields id"));
+        assert!(looks_like_qail_query("count users fields id"));
+        assert!(looks_like_qail_query("insert users fields id values :id"));
         assert!(!looks_like_qail_query("SELECT id FROM users"));
     }
 

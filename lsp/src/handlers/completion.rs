@@ -19,6 +19,9 @@ const QAIL_KEYWORDS: &[(&str, &str)] = &[
         "add",
         "INSERT query - add users fields name, email values :name, :email",
     ),
+    ("count", "COUNT query - count users fields id"),
+    ("export", "COPY TO query - export users fields id"),
+    ("make", "DDL query - make users fields id:int"),
     ("del", "DELETE query - del users where id = :id"),
     (
         "with",
@@ -63,15 +66,20 @@ impl QailLanguageServer {
         }
 
         let builder_methods = [
-            ("QailCmd::get", "Start a SELECT query"),
-            ("QailCmd::set", "Start an UPDATE query"),
-            ("QailCmd::add", "Start an INSERT query"),
-            ("QailCmd::del", "Start a DELETE query"),
+            ("Qail::get", "Start a SELECT query"),
+            ("Qail::set", "Start an UPDATE query"),
+            ("Qail::add", "Start an INSERT query"),
+            ("Qail::del", "Start a DELETE query"),
+            ("Qail::put", "Start an UPSERT query"),
+            ("Qail::export", "Start a COPY TO query"),
             (".columns", "Specify columns to select"),
             (".filter", "Add WHERE condition"),
             (".order_by", "Add ORDER BY clause"),
             (".limit", "Add LIMIT clause"),
+            (".offset", "Add OFFSET clause"),
             (".set_value", "Set column value for UPDATE/INSERT"),
+            (".returning", "Add RETURNING clause"),
+            (".with_rls", "Inject RLS context"),
         ];
 
         for (method, doc) in builder_methods {

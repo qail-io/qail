@@ -276,18 +276,17 @@ fn detect_n_plus_one_in_source_with_index(
                 // Inline execute in builder chain inside loop.
                 if let Some(exec) = find_exec_call(&chain)
                     && !batched
+                    && (!scheduler_loop_context || uses_loop_var)
                 {
-                    if !(scheduler_loop_context && !uses_loop_var) {
-                        emit_query_loop_diag(
-                            &mut out,
-                            &mut seen,
-                            file,
-                            line_no,
-                            qail_start_col + exec.column_offset.saturating_sub(1),
-                            work_depth,
-                            uses_loop_var,
-                        );
-                    }
+                    emit_query_loop_diag(
+                        &mut out,
+                        &mut seen,
+                        file,
+                        line_no,
+                        qail_start_col + exec.column_offset.saturating_sub(1),
+                        work_depth,
+                        uses_loop_var,
+                    );
                 }
             }
 
@@ -312,7 +311,7 @@ fn detect_n_plus_one_in_source_with_index(
                         .map(|b| b.uses_loop_var)
                         .or_else(|| arg_shape.as_ref().map(|s| s.uses_loop_var))
                         .unwrap_or_else(|| any_loop_var_in_text(&loop_vars, &exec.first_arg));
-                    if !(scheduler_loop_context && !uses_loop_var) {
+                    if !scheduler_loop_context || uses_loop_var {
                         emit_query_loop_diag(
                             &mut out,
                             &mut seen,

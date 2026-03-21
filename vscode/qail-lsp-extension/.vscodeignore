@@ -1,0 +1,8 @@
+.git/**
+.github/**
+**/.DS_Store
+**/*.log
+node_modules/**/test/**
+node_modules/**/tests/**
+node_modules/**/example/**
+node_modules/**/examples/**

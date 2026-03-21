@@ -1,0 +1,72 @@
+{
+  "name": "qail-lsp",
+  "displayName": "QAIL LSP",
+  "description": "VS Code extension for QAIL Language Server (qail-lsp)",
+  "version": "0.1.0",
+  "publisher": "qail-io",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:qail",
+    "onLanguage:rust",
+    "onCommand:qailLsp.restart"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "qail",
+        "aliases": [
+          "QAIL",
+          "qail"
+        ],
+        "extensions": [
+          ".qail"
+        ],
+        "filenames": [
+          "schema.qail"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "qailLsp.restart",
+        "title": "QAIL: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "title": "QAIL LSP",
+      "properties": {
+        "qailLsp.serverPath": {
+          "type": "string",
+          "default": "qail-lsp",
+          "description": "Path to qail-lsp executable. Relative paths resolve from the first workspace folder."
+        },
+        "qailLsp.serverArgs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra command-line arguments passed to qail-lsp."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^2.27.0"
+  }
+}

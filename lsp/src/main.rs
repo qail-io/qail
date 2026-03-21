@@ -4,6 +4,7 @@
 
 mod handlers;
 mod server;
+mod utf16;
 
 use server::QailLanguageServer;
 use tower_lsp::{LspService, Server};

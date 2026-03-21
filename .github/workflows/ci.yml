@@ -101,8 +101,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace -- -D warnings
 
-  core-syn-scanner:
-    name: qail-core syn-scanner drift gate
+  core-semantic-ir-scanner:
+    name: qail-core semantic IR scanner drift gate
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -112,11 +112,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: core-syn-scanner
-      - name: Run qail-core tests with syn-scanner
-        run: cargo test -p qail-core --lib --features syn-scanner
-      - name: Clippy qail-core with syn-scanner
-        run: cargo clippy -p qail-core --features syn-scanner -- -D warnings
+          key: core-semantic-ir-scanner
+      - name: Run qail-core tests (semantic IR scanner)
+        run: cargo test -p qail-core --lib
+      - name: Clippy qail-core (semantic IR scanner)
+        run: cargo clippy -p qail-core -- -D warnings
 
   wire-fuzz:
     name: qail-pg wire decode fuzz gate

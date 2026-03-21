@@ -656,7 +656,7 @@ fn demo() {
 }
 
 #[test]
-fn test_scan_source_files_uses_text_scanner() {
+fn test_scan_source_files_uses_semantic_scanner() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock before unix epoch")
@@ -688,6 +688,27 @@ fn demo() {
     assert!(!usage.has_rls);
     assert!(!usage.is_cte_ref);
     assert!(!usage.file_uses_super_admin);
+}
+
+#[test]
+fn test_scan_source_text_scans_in_memory_buffer() {
+    let source = r#"
+fn demo() {
+    let _q = Qail::typed(users::table)
+        .column("id")
+        .with_rls(&ctx);
+}
+    "#;
+
+    let scanned = scan_source_text("virtual.rs", source);
+    assert_eq!(scanned.len(), 1, "expected exactly one scanned usage");
+
+    let usage = &scanned[0];
+    assert_eq!(usage.file, "virtual.rs");
+    assert_eq!(usage.table, "users");
+    assert_eq!(usage.action, "TYPED");
+    assert!(usage.columns.iter().any(|c| c == "id"));
+    assert!(usage.has_rls);
 }
 
 #[test]

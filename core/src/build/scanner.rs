@@ -42,6 +42,18 @@ pub fn scan_source_files(src_dir: &str) -> Vec<QailUsage> {
     usages
 }
 
+/// Scan a single Rust source text buffer for QAIL usage patterns.
+///
+/// This is the in-memory counterpart of [`scan_source_files`], used by tools
+/// like LSP servers that work on unsaved editor buffers.
+///
+/// Unlike build-time scanning, this API never emits cargo warnings.
+pub fn scan_source_text(file: &str, content: &str) -> Vec<QailUsage> {
+    let mut usages = Vec::new();
+    scan_file_inner(file, content, &mut usages, false);
+    usages
+}
+
 fn scan_directory(dir: &Path, usages: &mut Vec<QailUsage>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {

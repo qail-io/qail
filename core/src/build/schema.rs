@@ -270,9 +270,9 @@ impl Schema {
     }
 
     /// Merge pending migrations into the schema
-    /// Scans migration directory for .sql files and extracts:
-    /// - CREATE TABLE statements
-    /// - ALTER TABLE ADD COLUMN statements
+    /// Scans migration directory for:
+    /// - legacy SQL migrations (`up.sql` / `*.sql`)
+    /// - native QAIL migrations (`up.qail` / `*.qail`)
     pub fn merge_migrations(&mut self, migrations_dir: &str) -> Result<usize, String> {
         use std::fs;
 
@@ -290,24 +290,99 @@ impl Schema {
         for entry in entries.flatten() {
             let path = entry.path();
 
-            // Check for up.sql in subdirectory
-            let up_sql = if path.is_dir() {
-                path.join("up.sql")
-            } else if path.extension().is_some_and(|e| e == "sql") {
+            // Check for migration file candidates in subdirectory (prefer native QAIL),
+            // or direct file entries.
+            let migration_file = if path.is_dir() {
+                let up_qail = path.join("up.qail");
+                let up_sql = path.join("up.sql");
+                if up_qail.exists() {
+                    up_qail
+                } else if up_sql.exists() {
+                    up_sql
+                } else {
+                    continue;
+                }
+            } else if path.extension().is_some_and(|e| e == "qail" || e == "sql") {
                 path.clone()
             } else {
                 continue;
             };
 
-            if up_sql.exists() {
-                let content = fs::read_to_string(&up_sql)
-                    .map_err(|e| format!("Failed to read {}: {}", up_sql.display(), e))?;
+            if migration_file.exists() {
+                let content = fs::read_to_string(&migration_file)
+                    .map_err(|e| format!("Failed to read {}: {}", migration_file.display(), e))?;
 
-                merged_count += self.parse_sql_migration(&content);
+                if migration_file.extension().is_some_and(|ext| ext == "qail") {
+                    merged_count += self.parse_qail_migration(&content).map_err(|e| {
+                        format!(
+                            "Failed to parse native migration {}: {}",
+                            migration_file.display(),
+                            e
+                        )
+                    })?;
+                } else {
+                    merged_count += self.parse_sql_migration(&content);
+                }
             }
         }
 
         Ok(merged_count)
+    }
+
+    /// Parse native QAIL migration content and merge tables/columns into build schema.
+    pub(crate) fn parse_qail_migration(&mut self, qail: &str) -> Result<usize, String> {
+        let parsed = Schema::parse(qail)?;
+        let mut changes = 0usize;
+
+        for (table_name, parsed_table) in parsed.tables {
+            if let Some(existing) = self.tables.get_mut(&table_name) {
+                for (col_name, col_type) in parsed_table.columns {
+                    if existing
+                        .columns
+                        .insert(col_name.clone(), col_type)
+                        .is_none()
+                    {
+                        changes += 1;
+                    }
+                }
+                for (col_name, policy) in parsed_table.policies {
+                    if existing.policies.insert(col_name, policy).is_none() {
+                        changes += 1;
+                    }
+                }
+                for fk in parsed_table.foreign_keys {
+                    let duplicate = existing.foreign_keys.iter().any(|existing_fk| {
+                        existing_fk.column == fk.column
+                            && existing_fk.ref_table == fk.ref_table
+                            && existing_fk.ref_column == fk.ref_column
+                    });
+                    if !duplicate {
+                        existing.foreign_keys.push(fk);
+                        changes += 1;
+                    }
+                }
+                if parsed_table.rls_enabled && !existing.rls_enabled {
+                    existing.rls_enabled = true;
+                    changes += 1;
+                }
+            } else {
+                changes += 1 + parsed_table.columns.len();
+                self.tables.insert(table_name, parsed_table);
+            }
+        }
+
+        for view_name in parsed.views {
+            if self.views.insert(view_name) {
+                changes += 1;
+            }
+        }
+        for (resource_name, resource) in parsed.resources {
+            if self.resources.insert(resource_name, resource).is_none() {
+                changes += 1;
+            }
+        }
+
+        Ok(changes)
     }
 
     /// Parse SQL migration content and extract schema changes

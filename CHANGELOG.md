@@ -193,8 +193,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Core (build validation):** function-scoped SuperAdmin audit in syn scanner with one-shot `// qail:allow(super_admin)` suppression bound to the next Qail call.
-- **Core (tests):** expanded syn-scanner and RLS audit regression coverage for drift gate, allow-comment semantics, and explicit tenant-scope checks.
+- **Core (build validation):** function-scoped SuperAdmin audit in semantic scanner with one-shot `// qail:allow(super_admin)` suppression bound to the next Qail call.
+- **Core (tests):** expanded semantic-scanner and RLS audit regression coverage for drift gate, allow-comment semantics, and explicit tenant-scope checks.
 - **CI:** new dependency review workflow for pull requests.
 
 ### Changed
