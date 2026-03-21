@@ -142,6 +142,15 @@ impl Validator {
         );
     }
 
+    /// Register a table name only (no column metadata).
+    ///
+    /// Useful for views discovered from schema text where build-time parser
+    /// does not infer projected columns. Table existence is validated, while
+    /// column-level checks are skipped.
+    pub fn add_table_name(&mut self, table: &str) {
+        self.tables.push(table.to_string());
+    }
+
     /// Register a table with column types (for future type validation).
     ///
     /// # Arguments

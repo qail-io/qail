@@ -221,6 +221,9 @@ impl AstEncoder {
             Action::Listen => ddl::encode_listen(cmd, sql_buf),
             Action::Unlisten => ddl::encode_unlisten(cmd, sql_buf),
             Action::Notify => ddl::encode_notify(cmd, sql_buf),
+            Action::Savepoint => ddl::encode_savepoint(cmd, sql_buf),
+            Action::ReleaseSavepoint => ddl::encode_release_savepoint(cmd, sql_buf),
+            Action::RollbackToSavepoint => ddl::encode_rollback_to_savepoint(cmd, sql_buf),
             _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
         Ok(())
@@ -310,6 +313,9 @@ impl AstEncoder {
             Action::Listen => ddl::encode_listen(cmd, &mut sql_buf),
             Action::Unlisten => ddl::encode_unlisten(cmd, &mut sql_buf),
             Action::Notify => ddl::encode_notify(cmd, &mut sql_buf),
+            Action::Savepoint => ddl::encode_savepoint(cmd, &mut sql_buf),
+            Action::ReleaseSavepoint => ddl::encode_release_savepoint(cmd, &mut sql_buf),
+            Action::RollbackToSavepoint => ddl::encode_rollback_to_savepoint(cmd, &mut sql_buf),
             _ => return Err(EncodeError::UnsupportedAction(cmd.action)),
         }
 
@@ -907,6 +913,36 @@ mod tests {
             sql,
             "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" SCHEMA public VERSION '1.1'"
         );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_savepoint_commands() {
+        let savepoint = Qail {
+            action: Action::Savepoint,
+            savepoint_name: Some("sp1".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&savepoint).unwrap();
+        assert_eq!(sql, "SAVEPOINT sp1");
+        assert!(params.is_empty());
+
+        let rollback = Qail {
+            action: Action::RollbackToSavepoint,
+            savepoint_name: Some("sp1".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&rollback).unwrap();
+        assert_eq!(sql, "ROLLBACK TO SAVEPOINT sp1");
+        assert!(params.is_empty());
+
+        let release = Qail {
+            action: Action::ReleaseSavepoint,
+            savepoint_name: Some("sp1".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&release).unwrap();
+        assert_eq!(sql, "RELEASE SAVEPOINT sp1");
         assert!(params.is_empty());
     }
 

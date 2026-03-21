@@ -98,6 +98,22 @@ fn test_administrator_pascal_case_bypasses_rls() {
 }
 
 #[test]
+fn test_tenant_scoped_administrator_does_not_bypass_rls() {
+    let auth = AuthContext {
+        user_id: "tenant-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: Some("tenant-123".to_string()),
+        claims: HashMap::new(),
+    };
+    let rls = auth.to_rls_context();
+    assert!(
+        !rls.bypasses_rls(),
+        "tenant-scoped administrator must NOT bypass RLS"
+    );
+    assert_eq!(rls.tenant_id, "tenant-123");
+}
+
+#[test]
 fn test_super_admin_does_not_bypass_rls() {
     // Tenant-level super_admin should NOT bypass RLS
     let auth = AuthContext {
@@ -473,4 +489,22 @@ fn impersonation_ignored_for_non_administrator() {
     // tenant_id should remain unchanged
     assert_eq!(auth.tenant_id, Some("original-tenant".to_string()));
     assert_eq!(auth.role, "super_admin");
+}
+
+#[test]
+fn impersonation_ignored_for_tenant_scoped_administrator() {
+    // Tenant-scoped "administrator" is not platform admin and must not impersonate.
+    let auth = AuthContext {
+        user_id: "tenant-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: Some("tenant-origin".to_string()),
+        claims: HashMap::new(),
+    };
+
+    let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator")
+        && auth.tenant_id.as_deref().is_none_or(str::is_empty);
+    assert!(
+        !is_platform_admin,
+        "tenant-scoped administrator must not impersonate"
+    );
 }

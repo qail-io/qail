@@ -58,6 +58,30 @@ table users {
 }
 
 #[test]
+fn test_parse_schema_tracks_views() {
+    let content = r#"
+table users {
+  id UUID
+}
+
+view v_users $$
+SELECT id
+FROM users
+$$
+
+materialized view mv_users $$
+SELECT id
+FROM users
+$$
+"#;
+
+    let schema = Schema::parse(content).unwrap();
+    assert!(schema.has_table("users"));
+    assert!(schema.has_table("v_users"));
+    assert!(schema.has_table("mv_users"));
+}
+
+#[test]
 fn test_extract_string_arg() {
     assert_eq!(extract_string_arg(r#""users")"#), Some("users".to_string()));
     assert_eq!(
@@ -239,6 +263,37 @@ let q = Qail::get("users").eq("id::text", "abc");
     assert!(
         errors.is_empty(),
         "casted column should not produce schema error: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_validate_against_schema_view_table_name_is_allowed() {
+    let schema = Schema::parse(
+        r#"
+table users {
+  id UUID
+}
+
+view v_users $$
+SELECT id
+FROM users
+$$
+"#,
+    )
+    .unwrap();
+
+    let content = r#"
+let q = Qail::get("v_users").column("v_users.id").eq("v_users.some_projection", "x");
+"#;
+
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+    let errors = validate_against_schema(&schema, &usages);
+
+    assert!(
+        errors.is_empty(),
+        "view-backed query should not fail table validation: {:?}",
         errors
     );
 }

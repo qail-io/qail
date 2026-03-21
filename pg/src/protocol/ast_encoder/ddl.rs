@@ -492,6 +492,27 @@ pub fn encode_alter_no_force_rls(cmd: &Qail, buf: &mut BytesMut) {
 
 // ── Session & procedural commands ──────────────────────────────────
 
+/// Encode SAVEPOINT name.
+pub fn encode_savepoint(cmd: &Qail, buf: &mut BytesMut) {
+    let name = cmd.savepoint_name.as_deref().unwrap_or("qail_sp");
+    buf.extend_from_slice(b"SAVEPOINT ");
+    buf.extend_from_slice(name.as_bytes());
+}
+
+/// Encode RELEASE SAVEPOINT name.
+pub fn encode_release_savepoint(cmd: &Qail, buf: &mut BytesMut) {
+    let name = cmd.savepoint_name.as_deref().unwrap_or("qail_sp");
+    buf.extend_from_slice(b"RELEASE SAVEPOINT ");
+    buf.extend_from_slice(name.as_bytes());
+}
+
+/// Encode ROLLBACK TO SAVEPOINT name.
+pub fn encode_rollback_to_savepoint(cmd: &Qail, buf: &mut BytesMut) {
+    let name = cmd.savepoint_name.as_deref().unwrap_or("qail_sp");
+    buf.extend_from_slice(b"ROLLBACK TO SAVEPOINT ");
+    buf.extend_from_slice(name.as_bytes());
+}
+
 /// Encode CALL procedure_name.
 pub fn encode_call(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"CALL ");

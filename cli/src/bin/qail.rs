@@ -811,6 +811,7 @@ EXAMPLES:
     qail migrate apply --allow-destructive
     qail migrate apply --allow-lock-risk
     qail migrate apply --allow-no-shadow-receipt
+    qail migrate apply --adopt-existing
 
     # Wait until global migration lock is available
     qail migrate apply --wait-for-lock
@@ -840,6 +841,9 @@ EXAMPLES:
         /// Skip lock-risk preflight guardrails (not recommended)
         #[arg(long)]
         allow_lock_risk: bool,
+        /// Treat duplicate-object create errors as already-adopted during baseline cutover
+        #[arg(long)]
+        adopt_existing: bool,
         /// Default chunk size for chunked backfill runner directives
         #[arg(long, default_value_t = 5000)]
         backfill_chunk_size: usize,
@@ -1169,6 +1173,7 @@ async fn main() -> Result<()> {
                 allow_destructive,
                 allow_no_shadow_receipt,
                 allow_lock_risk,
+                adopt_existing,
                 backfill_chunk_size,
                 wait_for_lock,
                 lock_timeout_secs,
@@ -1183,6 +1188,7 @@ async fn main() -> Result<()> {
                     *allow_destructive,
                     *allow_no_shadow_receipt,
                     *allow_lock_risk,
+                    *adopt_existing,
                     *backfill_chunk_size,
                     *wait_for_lock,
                     *lock_timeout_secs,

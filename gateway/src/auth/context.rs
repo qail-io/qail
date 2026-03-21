@@ -65,9 +65,10 @@ impl AuthContext {
     /// - `claims["agent_id"]` → `agent_id`
     /// - `role == "super_admin"` → `is_super_admin`
     pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {
-        // Only the platform-level "administrator" role bypasses RLS.
-        // Tenant-scoped roles (operator, super_admin) use tenant filtering.
-        let is_super_admin = matches!(self.role.as_str(), "administrator" | "Administrator");
+        // Only platform-level administrators (no tenant scope) bypass RLS.
+        // Tenant-scoped roles (including tenant-bound "administrator") use tenant filtering.
+        let is_super_admin = matches!(self.role.as_str(), "administrator" | "Administrator")
+            && self.tenant_id.as_deref().is_none_or(str::is_empty);
 
         // Audit log: super_admin activation is a high-privilege event
         if is_super_admin {

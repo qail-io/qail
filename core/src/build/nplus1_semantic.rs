@@ -87,6 +87,7 @@ struct LoopFrame {
     exit_depth: i32,
     loop_vars: HashSet<String>,
     query_bindings: HashMap<String, QueryBinding>,
+    has_scheduler_pacing: bool,
 }
 
 impl LoopFrame {
@@ -95,6 +96,7 @@ impl LoopFrame {
             exit_depth,
             loop_vars,
             query_bindings: HashMap::new(),
+            has_scheduler_pacing: false,
         }
     }
 }
@@ -211,7 +213,11 @@ fn detect_n_plus_one_in_source_with_index(
 
         if let Some(vars) = pending_loop_vars.take() {
             if code_line.contains('{') {
-                loop_stack.push(LoopFrame::new(brace_depth, vars));
+                let has_scheduler_pacing =
+                    loop_block_has_scheduler_pacing(&code_lines, idx, brace_depth);
+                let mut frame = LoopFrame::new(brace_depth, vars);
+                frame.has_scheduler_pacing = has_scheduler_pacing;
+                loop_stack.push(frame);
             } else {
                 pending_loop_vars = Some(vars);
             }
@@ -219,7 +225,11 @@ fn detect_n_plus_one_in_source_with_index(
 
         if let Some(work_loop_vars) = parse_work_loop_vars(trimmed) {
             if code_line.contains('{') {
-                loop_stack.push(LoopFrame::new(brace_depth, work_loop_vars));
+                let has_scheduler_pacing =
+                    loop_block_has_scheduler_pacing(&code_lines, idx, brace_depth);
+                let mut frame = LoopFrame::new(brace_depth, work_loop_vars);
+                frame.has_scheduler_pacing = has_scheduler_pacing;
+                loop_stack.push(frame);
             } else {
                 pending_loop_vars = Some(work_loop_vars);
             }
@@ -227,7 +237,17 @@ fn detect_n_plus_one_in_source_with_index(
 
         let work_depth = loop_stack.len();
         if work_depth > 0 {
+            if line_has_scheduler_pacing(trimmed)
+                && let Some(frame) = loop_stack.last_mut()
+            {
+                frame.has_scheduler_pacing = true;
+            }
+
             let loop_vars = active_loop_vars(&loop_stack);
+            let scheduler_loop_context = work_depth == 1
+                && loop_stack
+                    .last()
+                    .is_some_and(|f| f.has_scheduler_pacing && f.loop_vars.is_empty());
 
             if let Some((var_name, qail_start_col, chain)) =
                 extract_query_binding(&lines, &code_lines, idx)
@@ -257,15 +277,17 @@ fn detect_n_plus_one_in_source_with_index(
                 if let Some(exec) = find_exec_call(&chain)
                     && !batched
                 {
-                    emit_query_loop_diag(
-                        &mut out,
-                        &mut seen,
-                        file,
-                        line_no,
-                        qail_start_col + exec.column_offset.saturating_sub(1),
-                        work_depth,
-                        uses_loop_var,
-                    );
+                    if !(scheduler_loop_context && !uses_loop_var) {
+                        emit_query_loop_diag(
+                            &mut out,
+                            &mut seen,
+                            file,
+                            line_no,
+                            qail_start_col + exec.column_offset.saturating_sub(1),
+                            work_depth,
+                            uses_loop_var,
+                        );
+                    }
                 }
             }
 
@@ -290,15 +312,17 @@ fn detect_n_plus_one_in_source_with_index(
                         .map(|b| b.uses_loop_var)
                         .or_else(|| arg_shape.as_ref().map(|s| s.uses_loop_var))
                         .unwrap_or_else(|| any_loop_var_in_text(&loop_vars, &exec.first_arg));
-                    emit_query_loop_diag(
-                        &mut out,
-                        &mut seen,
-                        file,
-                        line_no,
-                        exec.column,
-                        work_depth,
-                        uses_loop_var,
-                    );
+                    if !(scheduler_loop_context && !uses_loop_var) {
+                        emit_query_loop_diag(
+                            &mut out,
+                            &mut seen,
+                            file,
+                            line_no,
+                            exec.column,
+                            work_depth,
+                            uses_loop_var,
+                        );
+                    }
                 }
             }
 
@@ -307,9 +331,10 @@ fn detect_n_plus_one_in_source_with_index(
             {
                 for call in collect_function_calls(code_line) {
                     let resolved = resolve_function_call_targets(caller, &call, index);
-                    if resolved
-                        .iter()
-                        .any(|&target_idx| index.query_executing_functions[target_idx])
+                    if !scheduler_loop_context
+                        && resolved
+                            .iter()
+                            .any(|&target_idx| index.query_executing_functions[target_idx])
                     {
                         emit_indirect_query_loop_diag(
                             &mut out,
@@ -1012,6 +1037,41 @@ fn parse_work_loop_vars(trimmed_line: &str) -> Option<HashSet<String>> {
         .or_else(|| parse_while_loop_vars(trimmed_line))
         .or_else(|| parse_loop_block_vars(trimmed_line))
         .or_else(|| parse_iterator_loop_vars(trimmed_line))
+}
+
+fn line_has_scheduler_pacing(trimmed_line: &str) -> bool {
+    let line = trimmed_line.trim();
+    if line.is_empty() {
+        return false;
+    }
+
+    let has_tick_await =
+        line.contains(".tick().await") || (line.contains(".tick(") && line.contains(".await"));
+    let has_sleep_await = (line.contains("tokio::time::sleep(")
+        || line.contains("tokio::time::sleep_until(")
+        || line.starts_with("sleep(")
+        || line.contains(" sleep("))
+        && line.contains(".await");
+
+    has_tick_await || has_sleep_await
+}
+
+fn loop_block_has_scheduler_pacing(code_lines: &[&str], start_idx: usize, exit_depth: i32) -> bool {
+    let mut depth = exit_depth;
+
+    for (idx, raw) in code_lines.iter().enumerate().skip(start_idx) {
+        let line = raw.trim();
+        if idx > start_idx && line_has_scheduler_pacing(line) {
+            return true;
+        }
+
+        depth += brace_delta(raw);
+        if idx > start_idx && depth <= exit_depth {
+            break;
+        }
+    }
+
+    false
 }
 
 fn parse_for_loop_vars(trimmed_line: &str) -> Option<HashSet<String>> {
@@ -2430,5 +2490,65 @@ fn demo(ids: Vec<i64>) {
 
         let diags = detect_n_plus_one_in_file("demo.rs", source);
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn ignores_indirect_query_call_inside_scheduler_loop() {
+        let source = r#"
+async fn run_once(conn: &Conn) {
+    let _ = conn.fetch_all(&Qail::get("users")).await;
+}
+
+async fn worker(conn: &Conn) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        run_once(conn).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            !diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_direct_query_call_inside_sleep_paced_scheduler_loop() {
+        let source = r#"
+async fn worker(conn: &Conn) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let _ = conn.fetch_all(&Qail::get("users")).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            !diags.iter().any(|d| d.code == NPlusOneCode::N1001),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_loop_variable_detection_even_when_loop_has_sleep() {
+        let source = r#"
+async fn worker(conn: &Conn, ids: Vec<i64>) {
+    for id in ids {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let cmd = Qail::get("users").eq("id", id);
+        let _ = conn.fetch_all(&cmd).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
     }
 }

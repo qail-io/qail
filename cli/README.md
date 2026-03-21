@@ -6,7 +6,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 > [!CAUTION]
-> **Beta Software**: QAIL is currently in **beta**. The API is stabilizing and is battle-tested in production. Breaking changes may still occur between minor versions.
+> **Release Candidate**: QAIL is now in the **release-candidate** phase. The API is near-stable and battle-tested in production. Breaking changes are expected to be rare and limited to critical correctness/security fixes before 1.0.
 
 ## Installation
 

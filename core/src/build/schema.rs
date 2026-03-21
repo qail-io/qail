@@ -1,7 +1,7 @@
 //! Schema types and parsing for build-time validation.
 
 use crate::migrate::types::ColumnType;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Foreign key relationship definition
@@ -36,6 +36,8 @@ pub struct TableSchema {
 pub struct Schema {
     /// Table schemas keyed by table name.
     pub tables: HashMap<String, TableSchema>,
+    /// SQL view names (column-level typing is not available in build schema parser).
+    pub views: HashSet<String>,
     /// Infrastructure resources (bucket, queue, topic)
     pub resources: HashMap<String, ResourceSchema>,
 }
@@ -143,6 +145,15 @@ impl Schema {
                 continue;
             }
 
+            // View declarations: `view name $$` or `materialized view name $$`
+            // Track view names so query-table validation accepts view-backed reads.
+            if current_table.is_none()
+                && let Some(view_name) = extract_view_name(line)
+            {
+                schema.views.insert(view_name.to_string());
+                continue;
+            }
+
             // Table definition: table name { [rls]
             if line.starts_with("table ") && (line.ends_with('{') || line.contains('{')) {
                 // Save previous table if any
@@ -236,7 +247,7 @@ impl Schema {
 
     /// Check if table exists
     pub fn has_table(&self, name: &str) -> bool {
-        self.tables.contains_key(name)
+        self.tables.contains_key(name) || self.views.contains(name)
     }
 
     /// Get all table names that have RLS enabled
@@ -462,6 +473,19 @@ impl Schema {
 
         changes
     }
+}
+
+fn extract_view_name(line: &str) -> Option<&str> {
+    let rest = if let Some(r) = line.strip_prefix("view ") {
+        r
+    } else if let Some(r) = line.strip_prefix("materialized view ") {
+        r
+    } else {
+        return None;
+    };
+
+    let name = rest.split_whitespace().next().unwrap_or_default().trim();
+    if name.is_empty() { None } else { Some(name) }
 }
 
 /// Extract table name from CREATE TABLE statement

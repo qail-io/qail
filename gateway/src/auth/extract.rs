@@ -189,7 +189,8 @@ pub async fn extract_auth_for_state(
     {
         let target_tenant = target_tenant.trim();
         if !target_tenant.is_empty() {
-            let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator");
+            let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator")
+                && auth.tenant_id.as_deref().is_none_or(str::is_empty);
 
             if is_platform_admin {
                 tracing::warn!(

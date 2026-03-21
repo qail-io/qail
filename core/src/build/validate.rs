@@ -92,6 +92,11 @@ pub fn validate_against_schema_diagnostics(
     // Build Validator from Schema with column types
     let mut validator = Validator::new();
     for (table_name, table_schema) in &schema.tables {
+        if table_schema.columns.is_empty() {
+            validator.add_table_name(table_name);
+            continue;
+        }
+
         // Convert HashMap<String, ColumnType> to Vec<(&str, &str)> for validator
         let type_strings: Vec<(String, String)> = table_schema
             .columns
@@ -103,6 +108,9 @@ pub fn validate_against_schema_diagnostics(
             .map(|(name, typ)| (name.as_str(), typ.as_str()))
             .collect();
         validator.add_table_with_types(table_name, &cols_with_types);
+    }
+    for view_name in &schema.views {
+        validator.add_table_name(view_name);
     }
 
     let mut diagnostics = Vec::new();

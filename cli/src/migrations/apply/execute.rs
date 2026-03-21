@@ -34,6 +34,7 @@ pub async fn migrate_apply(
     allow_destructive: bool,
     allow_no_shadow_receipt: bool,
     allow_lock_risk: bool,
+    adopt_existing: bool,
     backfill_chunk_size: usize,
     wait_for_lock: bool,
     lock_timeout_secs: Option<u64>,
@@ -426,9 +427,10 @@ pub async fn migrate_apply(
             None
         };
         risk_summary.push_str(&format!(
-            ";allow_destructive_flag={};allow_lock_risk_flag={};shadow_receipt_required={};policy_destructive={:?};policy_lock_risk={:?};policy_lock_risk_max_score={}",
+            ";allow_destructive_flag={};allow_lock_risk_flag={};adopt_existing_flag={};shadow_receipt_required={};policy_destructive={:?};policy_lock_risk={:?};policy_lock_risk_max_score={}",
             allow_destructive,
             allow_lock_risk,
+            adopt_existing,
             matches!(direction, MigrateDirection::Up) && enforce_shadow_receipt,
             policy.destructive,
             policy.lock_risk,
@@ -466,6 +468,7 @@ pub async fn migrate_apply(
                 checksum_input,
                 risk_summary,
                 affected_rows_est,
+                adopt_existing,
                 None,
             )
             .await
@@ -575,25 +578,161 @@ async fn execute_migration_commands(
     pg: &mut qail_pg::PgDriver,
     cmds: &[Qail],
     migration_name: &str,
+    adopt_existing: bool,
 ) -> Result<()> {
     if cmds.is_empty() {
         return Ok(());
     }
 
     for (idx, cmd) in cmds.iter().enumerate() {
+        let savepoint = if adopt_existing {
+            Some(format!("qail_apply_cmd_{}", idx + 1))
+        } else {
+            None
+        };
+
+        if let Some(ref sp) = savepoint {
+            pg.execute(&savepoint_cmd(sp)).await.map_err(|e| {
+                anyhow!(
+                    "Failed to create savepoint '{}' before migration command {} in '{}': {}",
+                    sp,
+                    idx + 1,
+                    migration_name,
+                    e
+                )
+            })?;
+        }
+
         if let Err(err) = pg.execute(cmd).await {
+            let err_text = err.to_string();
+            if adopt_existing && should_adopt_existing_error(cmd.action, &err_text) {
+                if let Some(ref sp) = savepoint {
+                    pg.execute(&rollback_to_savepoint_cmd(sp))
+                        .await
+                        .map_err(|e| {
+                            anyhow!(
+                                "Failed to rollback to savepoint '{}' after adopting existing object in '{}': {}",
+                                sp,
+                                migration_name,
+                                e
+                            )
+                        })?;
+                    pg.execute(&release_savepoint_cmd(sp)).await.map_err(|e| {
+                        anyhow!(
+                            "Failed to release savepoint '{}' after adopting existing object in '{}': {}",
+                            sp,
+                            migration_name,
+                            e
+                        )
+                    })?;
+                }
+                println!(
+                    "  {} Adopted existing object: action={:?} target='{}' (migration='{}')",
+                    "⚠".yellow(),
+                    cmd.action,
+                    cmd.table.cyan(),
+                    migration_name
+                );
+                continue;
+            }
+            if let Some(ref sp) = savepoint {
+                let _ = pg.execute(&rollback_to_savepoint_cmd(sp)).await;
+            }
             return Err(anyhow!(
                 "Migration command {} failed in '{}': action={:?} table='{}' error={}",
                 idx + 1,
                 migration_name,
                 cmd.action,
                 cmd.table,
-                err
+                err_text
             ));
+        }
+
+        if let Some(ref sp) = savepoint {
+            pg.execute(&release_savepoint_cmd(sp)).await.map_err(|e| {
+                anyhow!(
+                    "Failed to release savepoint '{}' after migration command {} in '{}': {}",
+                    sp,
+                    idx + 1,
+                    migration_name,
+                    e
+                )
+            })?;
         }
     }
 
     Ok(())
+}
+
+fn savepoint_cmd(name: &str) -> Qail {
+    Qail {
+        action: Action::Savepoint,
+        savepoint_name: Some(name.to_string()),
+        ..Default::default()
+    }
+}
+
+fn rollback_to_savepoint_cmd(name: &str) -> Qail {
+    Qail {
+        action: Action::RollbackToSavepoint,
+        savepoint_name: Some(name.to_string()),
+        ..Default::default()
+    }
+}
+
+fn release_savepoint_cmd(name: &str) -> Qail {
+    Qail {
+        action: Action::ReleaseSavepoint,
+        savepoint_name: Some(name.to_string()),
+        ..Default::default()
+    }
+}
+
+fn should_adopt_existing_error(action: Action, error_text: &str) -> bool {
+    if !is_adoptable_create_action(action) {
+        return false;
+    }
+
+    if let Some(code) = extract_sqlstate(error_text)
+        && matches!(code, "42P07" | "42710" | "42701" | "42P06" | "42723")
+    {
+        return true;
+    }
+
+    let lower = error_text.to_ascii_lowercase();
+    lower.contains("already exists")
+        || lower.contains("already has row security enabled")
+        || lower.contains("already has row security forced")
+}
+
+fn is_adoptable_create_action(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Make
+            | Action::Index
+            | Action::CreateMaterializedView
+            | Action::CreateView
+            | Action::CreateFunction
+            | Action::CreateTrigger
+            | Action::CreateExtension
+            | Action::CreateSequence
+            | Action::CreateEnum
+            | Action::CreatePolicy
+            | Action::AlterEnableRls
+            | Action::AlterForceRls
+    )
+}
+
+fn extract_sqlstate(error_text: &str) -> Option<&str> {
+    let start = error_text.find('[')?;
+    let rest = &error_text[start + 1..];
+    let end = rest.find(']')?;
+    let code = &rest[..end];
+    if code.len() == 5 && code.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        Some(code)
+    } else {
+        None
+    }
 }
 
 async fn verify_applied_commands_effects(
@@ -866,13 +1005,14 @@ async fn apply_commands_and_record_receipt_atomic(
     checksum_input: String,
     risk_summary: String,
     affected_rows_est: Option<i64>,
+    adopt_existing: bool,
     failpoint_override: Option<&str>,
 ) -> Result<()> {
     pg.begin()
         .await
         .map_err(|e| anyhow!("Failed to begin migration transaction: {}", e))?;
 
-    if let Err(err) = execute_migration_commands(pg, cmds, migration_name).await {
+    if let Err(err) = execute_migration_commands(pg, cmds, migration_name, adopt_existing).await {
         let _ = pg.rollback().await;
         return Err(err);
     }
@@ -941,7 +1081,7 @@ async fn apply_down_commands_and_reconcile_history_atomic(
         .await
         .map_err(|e| anyhow!("Failed to begin migration transaction: {}", e))?;
 
-    if let Err(err) = execute_migration_commands(pg, cmds, migration_name).await {
+    if let Err(err) = execute_migration_commands(pg, cmds, migration_name, false).await {
         let _ = pg.rollback().await;
         return Err(err);
     }
@@ -1278,8 +1418,8 @@ mod tests {
     use super::{
         apply_commands_and_record_receipt_atomic, apply_down_commands_and_reconcile_history_atomic,
         enforce_apply_destructive_policy, ensure_applied_checksum_matches, ensure_up_down_pairing,
-        parse_rename_expr, split_schema_ident, strip_optional_if_exists_prefix,
-        validate_receipts_against_local,
+        parse_rename_expr, should_adopt_existing_error, split_schema_ident,
+        strip_optional_if_exists_prefix, validate_receipts_against_local,
     };
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
@@ -1349,6 +1489,30 @@ mod tests {
         );
         assert_eq!(parse_rename_expr("  a->b "), Some(("a", "b")));
         assert_eq!(parse_rename_expr("old_name"), None);
+    }
+
+    #[test]
+    fn adopt_existing_accepts_duplicate_relation_errors_for_create_actions() {
+        assert!(should_adopt_existing_error(
+            Action::CreateSequence,
+            "Query error [42P07]: relation \"booking_number_seq\" already exists"
+        ));
+        assert!(should_adopt_existing_error(
+            Action::Make,
+            "relation \"users\" already exists"
+        ));
+    }
+
+    #[test]
+    fn adopt_existing_rejects_non_create_actions_and_other_errors() {
+        assert!(!should_adopt_existing_error(
+            Action::Add,
+            "Query error [42P07]: relation \"booking_number_seq\" already exists"
+        ));
+        assert!(!should_adopt_existing_error(
+            Action::CreateSequence,
+            "Query error [42501]: permission denied for schema public"
+        ));
     }
 
     #[test]
@@ -1557,6 +1721,7 @@ mod tests {
             "-- fp marker".to_string(),
             "source=apply.failpoint.test".to_string(),
             None,
+            false,
             Some("apply.before_receipt"),
         )
         .await
