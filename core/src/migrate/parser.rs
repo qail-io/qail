@@ -382,7 +382,7 @@ fn parse_index(line: &str) -> Result<Index, String> {
 
     let trailing = rest[paren_end + 1..].trim();
     if let Some(pred) = trailing.strip_prefix("where ") {
-        index.where_clause = Some(CheckExpr::Raw(pred.trim().to_string()));
+        index.where_clause = Some(CheckExpr::Sql(pred.trim().to_string()));
     }
 
     Ok(index)
@@ -1147,7 +1147,7 @@ fn parse_check_expr_from_qail(s: &str) -> Option<CheckExpr> {
     if s.is_empty() {
         None
     } else {
-        Some(CheckExpr::Raw(s.to_string()))
+        Some(CheckExpr::Sql(s.to_string()))
     }
 }
 
@@ -1793,7 +1793,7 @@ table vendors {
         let col = &schema.tables["vendors"].columns[0];
         let expr = &col.check.as_ref().unwrap().expr;
         match expr {
-            CheckExpr::Raw(raw) => assert_eq!(raw, "char_length(btrim(name::text)) > 0"),
+            CheckExpr::Sql(raw) => assert_eq!(raw, "char_length(btrim(name::text)) > 0"),
             CheckExpr::GreaterThan { column, value } => {
                 assert_eq!(column, "char_length(btrim(name::text))");
                 assert_eq!(*value, 0);

@@ -295,8 +295,8 @@ pub enum CheckExpr {
     Or(Box<CheckExpr>, Box<CheckExpr>),
     /// Logical NOT of an expression.
     Not(Box<CheckExpr>),
-    /// Raw SQL boolean expression (preserved as-is).
-    Raw(String),
+    /// SQL boolean expression (preserved as-is).
+    Sql(String),
 }
 
 /// CHECK constraint with optional name
@@ -1298,7 +1298,7 @@ fn check_expr_str(expr: &CheckExpr) -> String {
         CheckExpr::And(l, r) => format!("{} and {}", check_expr_str(l), check_expr_str(r)),
         CheckExpr::Or(l, r) => format!("{} or {}", check_expr_str(l), check_expr_str(r)),
         CheckExpr::Not(e) => format!("not {}", check_expr_str(e)),
-        CheckExpr::Raw(sql) => sql.clone(),
+        CheckExpr::Sql(sql) => sql.clone(),
     }
 }
 
@@ -1858,7 +1858,7 @@ fn check_expr_to_sql(expr: &CheckExpr) -> String {
             )
         }
         CheckExpr::Not(inner) => format!("NOT ({})", check_expr_to_sql(inner)),
-        CheckExpr::Raw(sql) => sql.clone(),
+        CheckExpr::Sql(sql) => sql.clone(),
     }
 }
 

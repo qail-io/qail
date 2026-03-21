@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "qail"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "qail-core"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "chrono",
  "nom 8.0.0",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "qail-encoder"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "qail-core",
  "qail-pg",
@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "qail-gateway"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "qail-lsp"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "qail-core",
  "serde",
@@ -2339,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "qail-pg"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2366,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "qail-qdrant"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2391,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "qail-workflow"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "async-trait",
  "chrono",

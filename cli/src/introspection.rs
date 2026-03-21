@@ -358,7 +358,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             && let Some(col) = columns.iter_mut().find(|c| c.check.is_none())
         {
             col.check = Some(qail_core::migrate::CheckConstraint {
-                expr: qail_core::migrate::schema::CheckExpr::Raw(check_clause.clone()),
+                expr: qail_core::migrate::schema::CheckExpr::Sql(check_clause.clone()),
                 name: Some(constraint_name.clone()),
             });
         }
@@ -1150,7 +1150,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             index.unique = true;
         }
         if let Some(predicate) = where_clause {
-            index.where_clause = Some(qail_core::migrate::schema::CheckExpr::Raw(predicate));
+            index.where_clause = Some(qail_core::migrate::schema::CheckExpr::Sql(predicate));
         }
         index.method = method;
         schema.add_index(index);
@@ -1432,7 +1432,7 @@ fn parse_check_expr(
         return cmp_to_check_expr(cmp);
     }
 
-    Some(CheckExpr::Raw(s))
+    Some(CheckExpr::Sql(s))
 }
 
 fn strip_wrapping_parens(mut s: &str) -> &str {
