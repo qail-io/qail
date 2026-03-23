@@ -592,10 +592,11 @@ impl<T: Table> TypedQail<T> {
         self
     }
 
-    /// Apply RLS context (tenant scoping) for non-proof flows.
-    ///
-    /// This is an alias for [`Self::rls`], using `with_*` naming to align
-    /// with the `TypedQail<T: RequiresRls>::with_rls()` proof API.
+    /// Deprecated alias for [`Self::rls`].
+    #[deprecated(
+        since = "0.26.5",
+        note = "use `rls(ctx)` on TypedQail<T>; `with_rls(ctx)` remains the proof-returning API for RequiresRls tables"
+    )]
     pub fn with_rls_scoped(self, ctx: &crate::rls::RlsContext) -> Self {
         self.rls(ctx)
     }
@@ -783,10 +784,11 @@ impl<T: Table> RlsQuery<T> {
         self
     }
 
-    /// Re-apply an RLS context on an already-proven query chain.
-    ///
-    /// This provides naming consistency with `with_rls` entry points when
-    /// chaining through `RlsQuery<T>`.
+    /// Deprecated alias for re-applying RLS context on a proven query chain.
+    #[deprecated(
+        since = "0.26.5",
+        note = "use `with_rls(ctx)` on TypedQail<T> before proof, or continue chaining on RlsQuery<T>"
+    )]
     pub fn with_rls_scoped(mut self, ctx: &crate::rls::RlsContext) -> Self {
         self.inner = self.inner.with_rls(ctx);
         self
@@ -1139,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rls_query_typed_helpers_and_scoped_alias() {
+    fn test_rls_query_supports_typed_columns_and_typed_filter() {
         use crate::ast::Operator;
         use crate::rls::RlsContext;
         use crate::transpiler::ToSql;
@@ -1147,12 +1149,11 @@ mod tests {
         let status: TypedColumn<String> = TypedColumn::new("orders", "status");
         let total: TypedColumn<i64> = TypedColumn::new("orders", "total");
 
-        let ctx = RlsContext::tenant("tenant-789");
+        let ctx = RlsContext::tenant("tenant-typed");
         let query = Qail::typed(Orders)
             .with_rls(&ctx)
             .typed_columns(vec![status])
             .typed_filter(total, Operator::Gt, 100_i64)
-            .with_rls_scoped(&ctx)
             .build();
 
         let sql = query.to_sql();
@@ -1172,6 +1173,7 @@ mod tests {
         assert!(sql.contains("users"), "Should build directly");
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_non_rls_with_rls_scoped_alias_builds() {
         use crate::rls::RlsContext;
@@ -1186,6 +1188,24 @@ mod tests {
         let sql = query.to_sql();
         assert!(sql.contains("users"), "table");
         assert!(sql.contains("email"), "column");
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn test_rls_query_with_rls_scoped_alias_builds() {
+        use crate::rls::RlsContext;
+        use crate::transpiler::ToSql;
+
+        let ctx = RlsContext::tenant("tenant-alias");
+        let query = Qail::typed(Orders)
+            .with_rls(&ctx)
+            .with_rls_scoped(&ctx)
+            .column("id")
+            .build();
+
+        let sql = query.to_sql();
+        assert!(sql.contains("orders"), "table");
+        assert!(sql.contains("id"), "column");
     }
 
     #[test]

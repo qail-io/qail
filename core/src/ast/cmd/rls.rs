@@ -34,6 +34,66 @@ use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Q
 use crate::rls::RlsContext;
 use crate::rls::tenant::lookup_tenant_column;
 
+fn normalize_ident(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('$') {
+        return trimmed.to_string();
+    }
+
+    let segment = trimmed.rsplit('.').next().unwrap_or(trimmed).trim();
+    let unquoted = if segment.len() >= 2 {
+        let bytes = segment.as_bytes();
+        let first = bytes[0] as char;
+        let last = bytes[bytes.len() - 1] as char;
+        if (first == '"' && last == '"')
+            || (first == '`' && last == '`')
+            || (first == '[' && last == ']')
+        {
+            &segment[1..segment.len() - 1]
+        } else {
+            segment
+        }
+    } else {
+        segment
+    };
+    unquoted.to_ascii_lowercase()
+}
+
+fn expr_named_eq(expr: &Expr, name: &str) -> bool {
+    matches!(expr, Expr::Named(existing) if normalize_ident(existing) == normalize_ident(name))
+}
+
+fn is_tenant_column_condition(cond: &Condition, tenant_col: &str) -> bool {
+    expr_named_eq(&cond.left, tenant_col)
+}
+
+fn payload_is_positional(cage: &Cage) -> bool {
+    cage.conditions.iter().all(|cond| {
+        matches!(
+            &cond.left,
+            Expr::Named(name) if name.starts_with('$') && name[1..].chars().all(|c| c.is_ascii_digit())
+        )
+    })
+}
+
+fn make_named_condition(column: &str, value: Value) -> Condition {
+    Condition {
+        left: Expr::Named(column.to_string()),
+        op: Operator::Eq,
+        value,
+        is_array_unnest: false,
+    }
+}
+
+fn make_positional_condition(index: usize, value: Value) -> Condition {
+    Condition {
+        left: Expr::Named(format!("${}", index + 1)),
+        op: Operator::Eq,
+        value,
+        is_array_unnest: false,
+    }
+}
+
 impl Qail {
     /// Apply tenant-scope isolation based on the query action.
     ///
@@ -91,12 +151,7 @@ impl Qail {
     /// Adds the condition to the existing Filter cage (AND), or creates
     /// a new one. Uses the same pattern as `.filter()`.
     fn scope_to_tenant(mut self, tenant_col: &str, ctx: &RlsContext) -> Self {
-        let condition = Condition {
-            left: Expr::Named(tenant_col.to_string()),
-            op: Operator::Eq,
-            value: Value::String(ctx.tenant_id.clone()),
-            is_array_unnest: false,
-        };
+        let condition = make_named_condition(tenant_col, Value::String(ctx.tenant_id.clone()));
 
         // Try to append to existing filter cage
         let existing = self
@@ -105,6 +160,8 @@ impl Qail {
             .find(|c| matches!(c.kind, CageKind::Filter));
 
         if let Some(cage) = existing {
+            cage.conditions
+                .retain(|cond| !is_tenant_column_condition(cond, tenant_col));
             cage.conditions.push(condition);
         } else {
             self.cages.push(Cage {
@@ -132,6 +189,8 @@ impl Qail {
             .find(|c| matches!(c.kind, CageKind::Filter));
 
         if let Some(cage) = existing {
+            cage.conditions
+                .retain(|cond| !is_tenant_column_condition(cond, tenant_col));
             cage.conditions.push(condition);
         } else {
             self.cages.push(Cage {
@@ -148,57 +207,76 @@ impl Qail {
     ///
     /// Adds the tenant column to the Payload cage so the scope id
     /// is always included in INSERT statements.
-    fn scope_insert_tenant(mut self, tenant_col: &str, ctx: &RlsContext) -> Self {
-        let condition = Condition {
-            left: Expr::Named(tenant_col.to_string()),
-            op: Operator::Eq,
-            value: Value::String(ctx.tenant_id.clone()),
-            is_array_unnest: false,
-        };
-
-        // Try to append to existing payload cage
-        let existing = self
-            .cages
-            .iter_mut()
-            .find(|c| matches!(c.kind, CageKind::Payload));
-
-        if let Some(cage) = existing {
-            cage.conditions.push(condition);
-        } else {
-            self.cages.push(Cage {
-                kind: CageKind::Payload,
-                conditions: vec![condition],
-                logical_op: LogicalOp::And,
-            });
-        }
-
-        self
+    fn scope_insert_tenant(self, tenant_col: &str, ctx: &RlsContext) -> Self {
+        self.scope_insert_value(tenant_col, Value::String(ctx.tenant_id.clone()))
     }
 
     /// Auto-set `tenant_col = NULL` in INSERT/UPSERT payload for global rows.
-    fn scope_insert_global(mut self, tenant_col: &str) -> Self {
-        let condition = Condition {
-            left: Expr::Named(tenant_col.to_string()),
-            op: Operator::Eq,
-            value: Value::Null,
-            is_array_unnest: false,
-        };
+    fn scope_insert_global(self, tenant_col: &str) -> Self {
+        self.scope_insert_value(tenant_col, Value::Null)
+    }
 
-        let existing = self
+    fn scope_insert_value(mut self, tenant_col: &str, tenant_value: Value) -> Self {
+        let payload_idx = self
             .cages
-            .iter_mut()
-            .find(|c| matches!(c.kind, CageKind::Payload));
+            .iter()
+            .position(|c| matches!(c.kind, CageKind::Payload));
 
-        if let Some(cage) = existing {
-            cage.conditions.push(condition);
-        } else {
+        let Some(idx) = payload_idx else {
             self.cages.push(Cage {
                 kind: CageKind::Payload,
-                conditions: vec![condition],
+                conditions: vec![make_named_condition(tenant_col, tenant_value)],
                 logical_op: LogicalOp::And,
             });
+            return self;
+        };
+
+        let positional = payload_is_positional(&self.cages[idx]);
+        if positional {
+            if self.columns.is_empty() {
+                panic!(
+                    "QAIL: with_rls requires explicit columns for positional INSERT payloads on table '{}'",
+                    self.table
+                );
+            }
+
+            if let Some(col_idx) = self
+                .columns
+                .iter()
+                .position(|expr| expr_named_eq(expr, tenant_col))
+            {
+                let placeholder = format!("${}", col_idx + 1);
+                let cage = &mut self.cages[idx];
+                if let Some(cond) = cage
+                    .conditions
+                    .iter_mut()
+                    .find(|cond| expr_named_eq(&cond.left, &placeholder))
+                {
+                    cond.value = tenant_value;
+                    cond.op = Operator::Eq;
+                    cond.is_array_unnest = false;
+                } else {
+                    cage.conditions
+                        .push(make_positional_condition(col_idx, tenant_value));
+                }
+                return self;
+            }
+
+            if !self.columns.is_empty() {
+                self.columns.push(Expr::Named(tenant_col.to_string()));
+                let idx_col = self.columns.len() - 1;
+                let cage = &mut self.cages[idx];
+                cage.conditions
+                    .push(make_positional_condition(idx_col, tenant_value));
+                return self;
+            }
         }
 
+        let cage = &mut self.cages[idx];
+        cage.conditions
+            .retain(|cond| !is_tenant_column_condition(cond, tenant_col));
+        cage.conditions
+            .push(make_named_condition(tenant_col, tenant_value));
         self
     }
 }
@@ -207,6 +285,7 @@ impl Qail {
 mod tests {
     use super::*;
     use crate::rls::tenant::register_tenant_table;
+    use crate::transpiler::ToSql;
 
     // Each test uses a UNIQUE table name to avoid parallel-test interference
     // on the global TENANT_TABLES registry.
@@ -415,5 +494,93 @@ mod tests {
             }),
             "Expected tenant_id = NULL in payload"
         );
+    }
+
+    #[test]
+    fn test_with_rls_is_idempotent_on_filter_scope() {
+        register_tenant_table("_rls_idempotent_get_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("t-idempotent");
+        let query = Qail::get("_rls_idempotent_get_orders")
+            .with_rls(&ctx)
+            .with_rls(&ctx);
+
+        let filter = query
+            .cages
+            .iter()
+            .find(|c| matches!(c.kind, CageKind::Filter))
+            .expect("filter cage");
+
+        let tenant_matches = filter
+            .conditions
+            .iter()
+            .filter(|c| matches!(&c.left, Expr::Named(n) if n == "tenant_id"))
+            .count();
+        assert_eq!(tenant_matches, 1, "tenant scope should not duplicate");
+    }
+
+    #[test]
+    fn test_with_rls_add_positional_payload_aligns_insert_columns() {
+        register_tenant_table("_rls_positional_add_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-positional");
+        let query = Qail::add("_rls_positional_add_orders")
+            .columns(["id", "total"])
+            .values([Value::Int(1), Value::Int(100)])
+            .with_rls(&ctx);
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("tenant_id"),
+            "tenant column should be injected"
+        );
+        assert!(
+            sql.contains("VALUES (1, 100, 'tenant-positional')"),
+            "insert payload should include injected tenant value in positional order: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_add_positional_payload_overrides_existing_tenant_column_value() {
+        register_tenant_table("_rls_positional_add_override_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-final");
+        let query = Qail::add("_rls_positional_add_override_orders")
+            .columns(["id", "tenant_id", "total"])
+            .values([
+                Value::Int(1),
+                Value::String("tenant-wrong".to_string()),
+                Value::Int(50),
+            ])
+            .with_rls(&ctx);
+
+        let sql = query.to_sql();
+        assert!(sql.contains("'tenant-final'"));
+        assert!(!sql.contains("'tenant-wrong'"));
+    }
+
+    #[test]
+    #[should_panic(expected = "with_rls requires explicit columns")]
+    fn test_with_rls_add_positional_payload_without_columns_panics() {
+        register_tenant_table("_rls_positional_add_no_columns_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-no-columns");
+        let _ = Qail::add("_rls_positional_add_no_columns_orders")
+            .values([Value::Int(1), Value::Int(100)])
+            .with_rls(&ctx);
+    }
+
+    #[test]
+    fn test_with_rls_replaces_qualified_tenant_filter() {
+        register_tenant_table("_rls_qualified_tenant_filter_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-final");
+        let query = Qail::get("_rls_qualified_tenant_filter_orders")
+            .filter("orders.tenant_id", Operator::Eq, "tenant-wrong")
+            .with_rls(&ctx);
+
+        let sql = query.to_sql();
+        assert!(sql.contains("'tenant-final'"));
+        assert!(!sql.contains("'tenant-wrong'"));
     }
 }

@@ -156,7 +156,8 @@ pub fn migrate_analyze(
                 .unwrap_or(&file_analysis.file);
             let mode_badge = match file_analysis.mode {
                 qail_core::analyzer::AnalysisMode::RustAST => "🦀",
-                qail_core::analyzer::AnalysisMode::Regex => {
+                qail_core::analyzer::AnalysisMode::TextSemantic
+                | qail_core::analyzer::AnalysisMode::Regex => {
                     match file_analysis.file.extension().and_then(|e| e.to_str()) {
                         Some("ts") | Some("tsx") | Some("js") | Some("jsx") => "📘",
                         Some("py") => "🐍",
@@ -166,6 +167,7 @@ pub fn migrate_analyze(
             };
             let mode_name = match file_analysis.mode {
                 qail_core::analyzer::AnalysisMode::RustAST => "AST",
+                qail_core::analyzer::AnalysisMode::TextSemantic => "TextSemantic",
                 qail_core::analyzer::AnalysisMode::Regex => "Regex",
             };
             println!(
@@ -249,6 +251,8 @@ fn build_json_report(
                 .to_string(),
             mode: match f.mode {
                 qail_core::analyzer::AnalysisMode::RustAST => "rust_ast".to_string(),
+                // Keep legacy wire value for compatibility with existing JSON consumers.
+                qail_core::analyzer::AnalysisMode::TextSemantic => "regex".to_string(),
                 qail_core::analyzer::AnalysisMode::Regex => "regex".to_string(),
             },
             references: f.ref_count,

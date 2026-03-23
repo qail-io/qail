@@ -23,6 +23,7 @@ const MODULE_ORDER_FILE: &str = "_order.qail";
 const ORDER_STRICT_DIRECTIVE: &str = "qail: strict-manifest";
 const ORDER_STRICT_SHORTHAND: &str = "!strict";
 const STRICT_ENV_VAR: &str = "QAIL_SCHEMA_STRICT_MANIFEST";
+const STRICT_CONFIG_ERROR_ENV_VAR: &str = "QAIL_SCHEMA_STRICT_MANIFEST_CONFIG_STRICT";
 
 /// Resolved schema source (single file or directory of modules).
 #[derive(Debug, Clone)]
@@ -412,7 +413,7 @@ fn apply_module_order(root: &Path, all_files: Vec<PathBuf>) -> Result<Vec<PathBu
     let strict_manifest = if strict_manifest_from_order {
         true
     } else {
-        strict_manifest_default_enabled(root)
+        strict_manifest_default_enabled(root)?
     };
 
     let mut unlisted = Vec::new();
@@ -462,10 +463,22 @@ fn apply_module_order(root: &Path, all_files: Vec<PathBuf>) -> Result<Vec<PathBu
     Ok(ordered)
 }
 
-fn strict_manifest_default_enabled(schema_root: &Path) -> bool {
+fn env_var_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn strict_manifest_default_enabled(schema_root: &Path) -> Result<bool, String> {
     if let Ok(raw) = std::env::var(STRICT_ENV_VAR) {
         let normalized = raw.trim().to_ascii_lowercase();
-        return matches!(normalized.as_str(), "1" | "true" | "yes" | "on");
+        return Ok(matches!(normalized.as_str(), "1" | "true" | "yes" | "on"));
     }
 
     for dir in schema_root.ancestors() {
@@ -473,17 +486,29 @@ fn strict_manifest_default_enabled(schema_root: &Path) -> bool {
         if !candidate.is_file() {
             continue;
         }
-        if let Ok(cfg) = crate::config::QailConfig::load_from(&candidate) {
-            return cfg.project.schema_strict_manifest.unwrap_or(false);
+        match crate::config::QailConfig::load_from(&candidate) {
+            Ok(cfg) => return Ok(cfg.project.schema_strict_manifest.unwrap_or(false)),
+            Err(err) => {
+                if env_var_enabled(STRICT_CONFIG_ERROR_ENV_VAR) {
+                    return Err(format!(
+                        "Failed to load strict-manifest defaults from '{}': {}",
+                        candidate.display(),
+                        err
+                    ));
+                }
+            }
         }
     }
 
-    false
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn tmp_dir(name: &str) -> PathBuf {
         let base = std::env::temp_dir();
@@ -719,11 +744,12 @@ mod tests {
 
     #[test]
     fn strict_manifest_default_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
         let root = tmp_dir("strict_env");
         fs::create_dir_all(&root).expect("mkdir");
         // SAFETY: test mutates process env, keep scoped and restore after test.
         unsafe { std::env::set_var(STRICT_ENV_VAR, "true") };
-        assert!(strict_manifest_default_enabled(&root));
+        assert!(strict_manifest_default_enabled(&root).expect("strict manifest default"));
         // SAFETY: restore env for test isolation.
         unsafe { std::env::remove_var(STRICT_ENV_VAR) };
         let _ = fs::remove_dir_all(root);
@@ -790,6 +816,35 @@ mod tests {
             resolved.files[1].file_name().and_then(|n| n.to_str()),
             Some("billing.qail")
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn strict_manifest_default_from_malformed_ancestor_qail_toml_can_fail_fast() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let root = tmp_dir("strict_cfg_malformed_fail_fast");
+        let schema_dir = root.join("schema");
+        fs::create_dir_all(&schema_dir).expect("mkdir schema");
+        fs::write(
+            root.join("qail.toml"),
+            "[project\nschema_strict_manifest = true\n",
+        )
+        .expect("write malformed config");
+        fs::write(
+            schema_dir.join("users.qail"),
+            "table users {\n  id uuid primary_key\n}\n",
+        )
+        .expect("write users");
+        fs::write(schema_dir.join(MODULE_ORDER_FILE), "users.qail\n").expect("write order");
+
+        // SAFETY: test mutates process env, keep scoped and restore after test.
+        unsafe { std::env::set_var(STRICT_CONFIG_ERROR_ENV_VAR, "true") };
+        let err = resolve_schema_source(root.join("schema.qail")).expect_err("should fail fast");
+        assert!(err.contains("Failed to load strict-manifest defaults"));
+        assert!(err.contains("qail.toml"));
+        // SAFETY: restore env for test isolation.
+        unsafe { std::env::remove_var(STRICT_CONFIG_ERROR_ENV_VAR) };
 
         let _ = fs::remove_dir_all(root);
     }

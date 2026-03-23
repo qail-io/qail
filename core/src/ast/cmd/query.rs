@@ -364,6 +364,8 @@ impl Qail {
     /// ```
     ///
     /// If no relation is found, this returns `self` unchanged.
+    /// If relation metadata is ambiguous, this method panics with guidance
+    /// to use explicit join conditions.
     ///
     /// Use [`Qail::try_join_on`] when you need a strict error on missing
     /// relation metadata.
@@ -371,14 +373,20 @@ impl Qail {
         let related = related_table.as_ref();
 
         // Try: current table -> related (forward relation)
-        if let Some((from_col, to_col)) = crate::schema::lookup_relation(&self.table, related) {
-            return self.left_join(related, &from_col, &to_col);
+        match crate::schema::lookup_relation_state(&self.table, related) {
+            Ok(Some((from_col, to_col))) => return self.left_join(related, &from_col, &to_col),
+            Ok(None) => {}
+            Err(msg) => panic!("QAIL: join_on failed — {}", msg),
         }
 
         // Try: related -> current table (reverse relation)
-        if let Some((from_col, to_col)) = crate::schema::lookup_relation(related, &self.table) {
-            // Reverse: related.from_col references self.to_col
-            return self.left_join(related, &to_col, &from_col);
+        match crate::schema::lookup_relation_state(related, &self.table) {
+            Ok(Some((from_col, to_col))) => {
+                // Reverse: related.from_col references self.to_col
+                return self.left_join(related, &to_col, &from_col);
+            }
+            Ok(None) => {}
+            Err(msg) => panic!("QAIL: join_on failed — {}", msg),
         }
 
         #[cfg(debug_assertions)]
@@ -395,13 +403,15 @@ impl Qail {
         let related = related_table.as_ref();
 
         // Try: current table -> related (forward relation)
-        if let Some((from_col, to_col)) = crate::schema::lookup_relation(&self.table, related) {
-            return Ok(self.left_join(related, &from_col, &to_col));
+        match crate::schema::lookup_relation_state(&self.table, related)? {
+            Some((from_col, to_col)) => return Ok(self.left_join(related, &from_col, &to_col)),
+            None => {}
         }
 
         // Try: related -> current table (reverse relation)
-        if let Some((from_col, to_col)) = crate::schema::lookup_relation(related, &self.table) {
-            return Ok(self.left_join(related, &to_col, &from_col));
+        match crate::schema::lookup_relation_state(related, &self.table)? {
+            Some((from_col, to_col)) => return Ok(self.left_join(related, &to_col, &from_col)),
+            None => {}
         }
 
         Err(format!(
@@ -412,18 +422,29 @@ impl Qail {
 
     /// Join a related table if relation exists, otherwise no-op.
     ///
-    /// This is the safe version of `join_on()` that doesn't panic.
+    /// This is the panic-free variant of `join_on()`.
+    /// On ambiguous relation metadata it logs and returns `self` unchanged.
     pub fn join_on_optional(self, related_table: impl AsRef<str>) -> Self {
         let related = related_table.as_ref();
 
         // Try forward relation
-        if let Some((from_col, to_col)) = crate::schema::lookup_relation(&self.table, related) {
-            return self.left_join(related, &from_col, &to_col);
+        match crate::schema::lookup_relation_state(&self.table, related) {
+            Ok(Some((from_col, to_col))) => return self.left_join(related, &from_col, &to_col),
+            Ok(None) => {}
+            Err(msg) => {
+                eprintln!("QAIL: join_on_optional skipped — {}", msg);
+                return self;
+            }
         }
 
         // Try reverse relation
-        if let Some((from_col, to_col)) = crate::schema::lookup_relation(related, &self.table) {
-            return self.left_join(related, &to_col, &from_col);
+        match crate::schema::lookup_relation_state(related, &self.table) {
+            Ok(Some((from_col, to_col))) => return self.left_join(related, &to_col, &from_col),
+            Ok(None) => {}
+            Err(msg) => {
+                eprintln!("QAIL: join_on_optional skipped — {}", msg);
+                return self;
+            }
         }
 
         // No relation found, return self unchanged

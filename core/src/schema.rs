@@ -382,6 +382,50 @@ table comments {
     }
 
     #[test]
+    fn test_join_on_panics_on_ambiguous_relation() {
+        use crate::Qail;
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
+            *reg = RelationRegistry::new();
+            reg.register("invoices", "buyer_id", "users", "id");
+            reg.register("invoices", "seller_id", "users", "id");
+        }
+
+        let result = std::panic::catch_unwind(|| {
+            let _ = Qail::get("invoices").join_on("users");
+        });
+        assert!(result.is_err(), "ambiguous relation should panic");
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
+            *reg = RelationRegistry::new();
+        }
+    }
+
+    #[test]
+    fn test_join_on_optional_returns_self_on_ambiguous_relation() {
+        use crate::Qail;
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
+            *reg = RelationRegistry::new();
+            reg.register("invoices", "buyer_id", "users", "id");
+            reg.register("invoices", "seller_id", "users", "id");
+        }
+
+        let query = Qail::get("invoices").join_on_optional("users");
+        assert!(query.joins.is_empty());
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
+            *reg = RelationRegistry::new();
+        }
+    }
+
+    #[test]
     fn test_join_on_returns_self_when_no_relation() {
         use crate::Qail;
         let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
@@ -561,6 +605,7 @@ table posts {
             r#"
 table invoices {
     id UUID primary_key
+    user_id UUID ref:users.id
 }
 "#,
         )
@@ -571,8 +616,69 @@ table invoices {
         assert!(lookup_relation("posts", "users").is_some());
 
         let count2 = load_schema_relations(schema_without_fk.to_str().expect("path utf8")).unwrap();
+        assert_eq!(count2, 1);
+        assert!(lookup_relation("posts", "users").is_some());
+        assert!(lookup_relation("invoices", "users").is_some());
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
+            *reg = RelationRegistry::new();
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_merge_schema_relations_merges_registry_state() {
+        use std::fs;
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
+            *reg = RelationRegistry::new();
+        }
+
+        let base = std::env::temp_dir().join(format!(
+            "qail_schema_relations_merge_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("mkdir temp");
+
+        let schema_with_fk = base.join("schema_with_fk.qail");
+        fs::write(
+            &schema_with_fk,
+            r#"
+table users {
+    id UUID primary_key
+}
+table posts {
+    id UUID primary_key
+    user_id UUID ref:users.id
+}
+"#,
+        )
+        .expect("write schema 1");
+
+        let schema_without_fk = base.join("schema_without_fk.qail");
+        fs::write(
+            &schema_without_fk,
+            r#"
+table invoices {
+    id UUID primary_key
+}
+"#,
+        )
+        .expect("write schema 2");
+
+        let count1 = merge_schema_relations(schema_with_fk.to_str().expect("path utf8")).unwrap();
+        assert_eq!(count1, 1);
+        assert!(lookup_relation("posts", "users").is_some());
+
+        let count2 =
+            merge_schema_relations(schema_without_fk.to_str().expect("path utf8")).unwrap();
         assert_eq!(count2, 0);
-        // additive load preserves previously registered relations.
         assert!(lookup_relation("posts", "users").is_some());
 
         {
@@ -580,6 +686,37 @@ table invoices {
             *reg = RelationRegistry::new();
         }
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_lookup_relation_state_errors_on_ambiguous_multi_fk_pair() {
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
+        let schema_content = r#"
+table users {
+    id UUID primary_key
+}
+
+table invoices {
+    id UUID primary_key
+    buyer_id UUID ref:users.id
+    seller_id UUID ref:users.id
+}
+"#;
+
+        let schema = crate::build::Schema::parse(schema_content).expect("schema parse");
+        let registry = RelationRegistry::from_build_schema(&schema);
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
+            *reg = registry;
+        }
+
+        let err = lookup_relation_state("invoices", "users").expect_err("ambiguous relation");
+        assert!(err.contains("Ambiguous relation"));
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
+            *reg = RelationRegistry::new();
+        }
     }
 }
 
@@ -590,8 +727,8 @@ use std::sync::RwLock;
 /// Registry of table foreign-key relationships for auto-join inference.
 #[derive(Debug, Default)]
 pub struct RelationRegistry {
-    /// Forward lookups: (from_table, to_table) -> (from_col, to_col)
-    forward: HashMap<(String, String), (String, String)>,
+    /// Forward lookups: (from_table, to_table) -> [(from_col, to_col), ...]
+    forward: HashMap<(String, String), Vec<(String, String)>>,
     /// Reverse lookups: to_table -> list of tables that reference it
     reverse: HashMap<String, Vec<String>>,
 }
@@ -611,10 +748,14 @@ impl RelationRegistry {
     /// * `to_table` — Target (referenced) table.
     /// * `to_col` — Primary-key column in the target table.
     pub fn register(&mut self, from_table: &str, from_col: &str, to_table: &str, to_col: &str) {
-        self.forward.insert(
-            (from_table.to_string(), to_table.to_string()),
-            (from_col.to_string(), to_col.to_string()),
-        );
+        let entry = self
+            .forward
+            .entry((from_table.to_string(), to_table.to_string()))
+            .or_default();
+        let pair = (from_col.to_string(), to_col.to_string());
+        if !entry.iter().any(|existing| existing == &pair) {
+            entry.push(pair);
+        }
 
         let entry = self.reverse.entry(to_table.to_string()).or_default();
         if !entry.iter().any(|existing| existing == from_table) {
@@ -631,9 +772,19 @@ impl RelationRegistry {
     /// * `from_table` — Source table name.
     /// * `to_table` — Target table name.
     pub fn get(&self, from_table: &str, to_table: &str) -> Option<(&str, &str)> {
+        let options = self.get_all(from_table, to_table)?;
+        if options.len() != 1 {
+            return None;
+        }
+        let (a, b) = &options[0];
+        Some((a.as_str(), b.as_str()))
+    }
+
+    /// Lookup all join-column candidates for a relation.
+    pub fn get_all(&self, from_table: &str, to_table: &str) -> Option<&[(String, String)]> {
         self.forward
             .get(&(from_table.to_string(), to_table.to_string()))
-            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .map(|pairs| pairs.as_slice())
     }
 
     /// Get all tables that reference this table (for reverse joins).
@@ -664,10 +815,17 @@ pub static RUNTIME_RELATIONS: LazyLock<RwLock<RelationRegistry>> =
 
 /// Load relations from a schema.qail file into the runtime registry.
 ///
-/// This function is additive: loaded relations are merged into existing runtime state.
-/// Existing `(from_table, to_table)` entries are overwritten in-place; unrelated entries remain.
+/// This function merges relations into the existing runtime relation state.
 /// Returns the number of relations parsed from `path`.
 pub fn load_schema_relations(path: &str) -> Result<usize, String> {
+    merge_schema_relations(path)
+}
+
+/// Merge relations from a schema.qail file into the runtime registry.
+///
+/// Use this when multiple schema fragments are loaded incrementally and previously
+/// registered relations should be retained.
+pub fn merge_schema_relations(path: &str) -> Result<usize, String> {
     let schema = crate::build::Schema::parse_file(path)?;
     let count: usize = schema
         .tables
@@ -709,7 +867,30 @@ pub fn replace_schema_relations(path: &str) -> Result<usize, String> {
 /// Lookup join info for implicit join.
 /// Returns (from_col, to_col) if relation exists.
 pub fn lookup_relation(from_table: &str, to_table: &str) -> Option<(String, String)> {
-    let registry = RUNTIME_RELATIONS.read().ok()?;
-    let (fc, tc) = registry.get(from_table, to_table)?;
-    Some((fc.to_string(), tc.to_string()))
+    lookup_relation_state(from_table, to_table).ok().flatten()
+}
+
+/// Lookup join info and return an explicit error when relation metadata is ambiguous.
+pub fn lookup_relation_state(
+    from_table: &str,
+    to_table: &str,
+) -> Result<Option<(String, String)>, String> {
+    let registry = RUNTIME_RELATIONS
+        .read()
+        .map_err(|e| format!("Lock error: {}", e))?;
+    let Some(options) = registry.get_all(from_table, to_table) else {
+        return Ok(None);
+    };
+
+    if options.len() > 1 {
+        return Err(format!(
+            "Ambiguous relation between '{}' and '{}': {} foreign keys registered. Use an explicit join condition.",
+            from_table,
+            to_table,
+            options.len()
+        ));
+    }
+
+    let (fc, tc) = options[0].clone();
+    Ok(Some((fc, tc)))
 }

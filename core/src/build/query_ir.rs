@@ -22,16 +22,20 @@ pub(crate) struct QueryIr {
 }
 
 /// Build canonical query IR from scanned usages.
-pub(crate) fn build_query_ir(usages: &[QailUsage]) -> Vec<QueryIr> {
+///
+/// Returns `(query_ir, errors)` where `errors` contains hard validation
+/// messages (e.g. unknown scanner actions).
+pub(crate) fn build_query_ir(usages: &[QailUsage]) -> (Vec<QueryIr>, Vec<String>) {
     let mut out = Vec::with_capacity(usages.len());
+    let mut errors = Vec::new();
     for usage in usages {
         let action = match usage_action_to_ast(&usage.action) {
             Ok(action) => action,
             Err(err) => {
-                println!(
-                    "cargo:warning=QAIL: {} at {}:{} (table: {})",
-                    err, usage.file, usage.line, usage.table
-                );
+                errors.push(format!(
+                    "{}:{}: {} (table: {})",
+                    usage.file, usage.line, err, usage.table
+                ));
                 continue;
             }
         };
@@ -56,7 +60,7 @@ pub(crate) fn build_query_ir(usages: &[QailUsage]) -> Vec<QueryIr> {
             file_uses_super_admin: usage.file_uses_super_admin,
         });
     }
-    out
+    (out, errors)
 }
 
 #[cfg(test)]
@@ -82,8 +86,10 @@ mod tests {
     #[test]
     fn build_query_ir_skips_unknown_actions() {
         let usages = vec![usage("GET"), usage("UNKNOWN_ACTION")];
-        let ir = build_query_ir(&usages);
+        let (ir, errors) = build_query_ir(&usages);
         assert_eq!(ir.len(), 1);
         assert_eq!(ir[0].action, "GET");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("unknown scanner action"));
     }
 }

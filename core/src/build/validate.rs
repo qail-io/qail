@@ -121,7 +121,11 @@ pub fn validate_against_schema_diagnostics(
             diagnostics.push(diag);
         }
     };
-    let query_ir = super::query_ir::build_query_ir(usages);
+    let (query_ir, query_ir_errors) = super::query_ir::build_query_ir(usages);
+
+    for err in query_ir_errors {
+        push_unique(ValidationDiagnostic::schema_error(err));
+    }
 
     for query in query_ir {
         // Skip CTE alias refs — but only if the name doesn't also exist as a
