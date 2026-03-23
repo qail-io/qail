@@ -10,7 +10,7 @@ use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget};
 
 /// Map QAIL types to PostgreSQL types.
 #[inline]
-pub fn map_type<'a>(t: &'a str) -> &'a str {
+pub fn map_type(t: &str) -> &str {
     match t {
         "str" | "text" | "string" | "TEXT" => "TEXT",
         "smallint" | "SMALLINT" | "int2" | "INT2" => "SMALLINT",

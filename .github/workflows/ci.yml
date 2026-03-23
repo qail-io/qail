@@ -156,17 +156,20 @@ jobs:
       - name: Unit tests qail-pg with io_uring
         run: cargo test -p qail-pg --lib --features io_uring
 
+      - name: Linux io_uring backend smoke test
+        run: cargo test -p qail-pg --test io_uring_backend_smoke --features io_uring
+
       - name: Clippy qail-pg with io_uring
         run: cargo clippy -p qail-pg --features io_uring -- -D warnings
 
       - name: Assert backend-labeled connect metrics are wired
         run: |
-          grep -n 'qail_pg_connect_attempt_total' pg/src/driver/connection.rs
-          grep -n 'qail_pg_connect_duration_seconds' pg/src/driver/connection.rs
-          grep -n 'qail_pg_connect_success_total' pg/src/driver/connection.rs
-          grep -n 'qail_pg_connect_failure_total' pg/src/driver/connection.rs
-          grep -n '"transport" => ' pg/src/driver/connection.rs
-          grep -n '"backend" => ' pg/src/driver/connection.rs
+          grep -n 'qail_pg_connect_attempt_total' pg/src/driver/connection/helpers.rs
+          grep -n 'qail_pg_connect_duration_seconds' pg/src/driver/connection/helpers.rs
+          grep -n 'qail_pg_connect_success_total' pg/src/driver/connection/helpers.rs
+          grep -n 'qail_pg_connect_failure_total' pg/src/driver/connection/helpers.rs
+          grep -n '"transport" => ' pg/src/driver/connection/helpers.rs
+          grep -n '"backend" => ' pg/src/driver/connection/helpers.rs
 
   panic-safety:
     name: Panic Safety Gate

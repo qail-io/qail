@@ -15,7 +15,7 @@ use tokio_rustls::client::TlsStream;
 pub enum PgStream {
     Tcp(TcpStream),
     Tls(Box<TlsStream<TcpStream>>),
-    /// Linux io_uring plain TCP transport (phase 1 rollout).
+    /// Linux io_uring plain TCP transport.
     #[cfg(all(target_os = "linux", feature = "io_uring"))]
     Uring(super::uring::UringTcpStream),
     /// Unix domain socket connection

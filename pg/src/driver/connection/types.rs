@@ -283,4 +283,13 @@ impl PgConnection {
     pub fn negotiated_protocol_minor(&self) -> u16 {
         self.negotiated_protocol_minor
     }
+
+    /// Active transport backend label for this connection.
+    ///
+    /// Returns `"tokio"` or `"io_uring"` for plain TCP connections,
+    /// and `"tokio"` for TLS/Unix/GSSENC paths.
+    #[inline]
+    pub fn transport_backend(&self) -> &'static str {
+        super::helpers::connect_backend_for_stream(&self.stream)
+    }
 }

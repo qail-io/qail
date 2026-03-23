@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.5] - 2026-03-23
+
+### Added
+
+- **Linux io_uring backend smoke test:** added `qail-pg` startup-path smoke coverage for forced `QAIL_PG_IO_BACKEND=io_uring` backend selection.
+- **Cross-target check helper:** added `scripts/check-io-uring-linux-cross.sh` to validate Linux `x86_64-unknown-linux-gnu` build checks with a local zig fallback toolchain.
+- **Connection backend introspection:** added `PgConnection::transport_backend()` for runtime verification/telemetry assertions.
+
+### Changed
+
+- **Native io_uring feature wiring:** `qail-pg` now uses native Linux `io-uring` dependency wiring (removed stale `tokio-uring` feature coupling).
+- **Feature aliasing:** added `native-io-uring` feature alias while keeping `io_uring` backward-compatible.
+- **CI io_uring gate:** Linux io_uring workflow now executes smoke test coverage and updated metrics grep assertions to current source paths.
+- **Versioning:** bumped Rust crates to `0.26.5`.
+
+### Fixed
+
+- **Linux-target compile hardening:** fixed Linux-only typing/import/dead-code regressions surfaced by cross-target checks.
+- **Workspace hygiene guard:** ignore editor swap/backup artifacts (`*.swp`, `*.swo`, `*.swx`, `*.swn`, `*~`, `.#*`) to prevent accidental commits.
+
 ## [0.26.3] - 2026-03-21
 
 ### Changed

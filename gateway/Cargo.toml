@@ -1,6 +1,6 @@
 [package]
 name = "qail-gateway"
-version = "0.26.4"
+version = "0.26.5"
 edition = "2024"
 description = "QAIL Gateway - Native data layer replacing REST/GraphQL"
 license = "Apache-2.0"
@@ -11,9 +11,9 @@ categories = ["database", "web-programming"]
 
 [dependencies]
 # Core QAIL
-qail-core = { path = "../core", version = "0.26.4" }
-qail-pg = { path = "../pg", version = "0.26.4" }
-qail-qdrant = { path = "../qdrant", version = "0.26.4", optional = true }
+qail-core = { path = "../core", version = "0.26.5" }
+qail-pg = { path = "../pg", version = "0.26.5" }
+qail-qdrant = { path = "../qdrant", version = "0.26.5", optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

@@ -28,6 +28,10 @@ py/python/qail/*.so
 # Node
 node_modules/
 
+# VS Code extension release artifacts
+vscode/qail-lsp-extension/*.vsix
+vscode/qail-lsp-extension/*.zip
+
 # PHP build artifacts
 vendor/
 php/ext/qail/autom4te.cache/
@@ -61,6 +65,14 @@ flamegraph*.svg
 *.lo
 *.o
 *.dSYM/
+
+# Editor swap/backup files (prevent accidental commits)
+*.swp
+*.swo
+*.swx
+*.swn
+*~
+.#*
 
 # Compiled binaries
 bench/benchmarks/fifty_million_consume

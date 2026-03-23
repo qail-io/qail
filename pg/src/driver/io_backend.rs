@@ -33,7 +33,7 @@ impl std::fmt::Display for IoBackend {
 static DETECTED_BACKEND: OnceLock<IoBackend> = OnceLock::new();
 
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
-fn probe_uring_support() -> Result<(), io_uring::IoUringBuilderError> {
+fn probe_uring_support() -> Result<(), std::io::Error> {
     io_uring::IoUring::new(32).map(|_| ())
 }
 

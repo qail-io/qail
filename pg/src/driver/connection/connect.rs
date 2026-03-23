@@ -6,8 +6,6 @@ use super::helpers::{
     connect_backend_for_stream, connect_error_kind, plain_connect_attempt_backend,
     record_connect_attempt, record_connect_result,
 };
-#[cfg(all(target_os = "linux", feature = "io_uring"))]
-use super::types::CONNECT_BACKEND_IO_URING;
 use super::types::{
     BUFFER_CAPACITY, CONNECT_BACKEND_TOKIO, CONNECT_TRANSPORT_GSSENC, CONNECT_TRANSPORT_MTLS,
     CONNECT_TRANSPORT_PLAIN, CONNECT_TRANSPORT_TLS, ConnectParams, DEFAULT_CONNECT_TIMEOUT,
@@ -515,12 +513,13 @@ impl PgConnection {
 
     async fn connect_with_password_and_auth_and_gss(params: ConnectParams<'_>) -> PgResult<Self> {
         let first = Self::connect_with_password_and_auth_and_gss_once(params.clone()).await;
-        if let Err(err) = &first {
-            if params.protocol_minor > 0 && is_explicit_protocol_version_rejection(err) {
-                let mut downgraded = params;
-                downgraded.protocol_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
-                return Self::connect_with_password_and_auth_and_gss_once(downgraded).await;
-            }
+        if let Err(err) = &first
+            && params.protocol_minor > 0
+            && is_explicit_protocol_version_rejection(err)
+        {
+            let mut downgraded = params;
+            downgraded.protocol_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+            return Self::connect_with_password_and_auth_and_gss_once(downgraded).await;
         }
         first
     }
@@ -623,7 +622,9 @@ impl PgConnection {
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
         {
             if should_try_uring_plain() {
-                match super::super::uring::UringTcpStream::from_tokio(tcp_stream) {
+                let std_stream = tcp_stream.into_std()?;
+                let fallback_std = std_stream.try_clone()?;
+                match super::super::uring::UringTcpStream::from_std(std_stream) {
                     Ok(uring_stream) => {
                         tracing::info!(
                             addr = %addr,
@@ -637,8 +638,8 @@ impl PgConnection {
                             error = %e,
                             "qail-pg: io_uring stream conversion failed; falling back to tokio TCP"
                         );
-                        let fallback = TcpStream::connect(addr).await?;
-                        fallback.set_nodelay(true)?;
+                        fallback_std.set_nonblocking(true)?;
+                        let fallback = TcpStream::from_std(fallback_std)?;
                         return Ok(PgStream::Tcp(fallback));
                     }
                 }
@@ -702,12 +703,13 @@ impl PgConnection {
         ca_cert_pem: Option<&[u8]>,
     ) -> PgResult<Self> {
         let first = Self::connect_tls_with_auth_and_gss_once(params.clone(), ca_cert_pem).await;
-        if let Err(err) = &first {
-            if params.protocol_minor > 0 && is_explicit_protocol_version_rejection(err) {
-                let mut downgraded = params;
-                downgraded.protocol_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
-                return Self::connect_tls_with_auth_and_gss_once(downgraded, ca_cert_pem).await;
-            }
+        if let Err(err) = &first
+            && params.protocol_minor > 0
+            && is_explicit_protocol_version_rejection(err)
+        {
+            let mut downgraded = params;
+            downgraded.protocol_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+            return Self::connect_tls_with_auth_and_gss_once(downgraded, ca_cert_pem).await;
         }
         first
     }
@@ -924,13 +926,14 @@ impl PgConnection {
         let first =
             Self::connect_mtls_with_password_and_auth_and_gss_once(params.clone(), config.clone())
                 .await;
-        if let Err(err) = &first {
-            if params.protocol_minor > 0 && is_explicit_protocol_version_rejection(err) {
-                let mut downgraded = params;
-                downgraded.protocol_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
-                return Self::connect_mtls_with_password_and_auth_and_gss_once(downgraded, config)
-                    .await;
-            }
+        if let Err(err) = &first
+            && params.protocol_minor > 0
+            && is_explicit_protocol_version_rejection(err)
+        {
+            let mut downgraded = params;
+            downgraded.protocol_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+            return Self::connect_mtls_with_password_and_auth_and_gss_once(downgraded, config)
+                .await;
         }
         first
     }
@@ -1103,18 +1106,19 @@ impl PgConnection {
         let first =
             Self::connect_unix_with_protocol(socket_path, user, database, password, default_minor)
                 .await;
-        if let Err(err) = &first {
-            if default_minor > 0 && is_explicit_protocol_version_rejection(err) {
-                let downgrade_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
-                return Self::connect_unix_with_protocol(
-                    socket_path,
-                    user,
-                    database,
-                    password,
-                    downgrade_minor,
-                )
-                .await;
-            }
+        if let Err(err) = &first
+            && default_minor > 0
+            && is_explicit_protocol_version_rejection(err)
+        {
+            let downgrade_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+            return Self::connect_unix_with_protocol(
+                socket_path,
+                user,
+                database,
+                password,
+                downgrade_minor,
+            )
+            .await;
         }
         first
     }

@@ -41,7 +41,7 @@ pub(super) fn plain_connect_attempt_backend() -> &'static str {
     CONNECT_BACKEND_TOKIO
 }
 
-pub(super) fn connect_backend_for_stream(stream: &PgStream) -> &'static str {
+pub(crate) fn connect_backend_for_stream(stream: &PgStream) -> &'static str {
     match stream {
         PgStream::Tcp(_) => CONNECT_BACKEND_TOKIO,
         #[cfg(all(target_os = "linux", feature = "io_uring"))]
@@ -199,9 +199,9 @@ impl Drop for PgConnection {
             }
             #[cfg(all(target_os = "linux", feature = "io_uring"))]
             PgStream::Uring(stream) => {
-                // io_uring transport uses blocking worker operations;
+                // io_uring transport owns I/O in a dedicated worker thread;
                 // terminate packet in Drop is not viable, but force socket
-                // shutdown so timed-out worker ops unblock promptly.
+                // shutdown so in-flight waits unblock promptly.
                 let _ = stream.abort_inflight();
             }
             PgStream::Tls(_) => {
