@@ -49,8 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         NUM_POINTS
     );
 
-    let categories = vec!["electronics", "books", "clothing", "home", "sports"];
-    let brands = vec!["Apple", "Samsung", "Sony", "Amazon", "Nike"];
+    let categories = ["electronics", "books", "clothing", "home", "sports"];
+    let brands = ["Apple", "Samsung", "Sony", "Amazon", "Nike"];
 
     let points: Vec<Point> = (0..NUM_POINTS)
         .map(|i| {

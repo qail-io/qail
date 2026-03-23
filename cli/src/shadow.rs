@@ -213,18 +213,6 @@ async fn purge_legacy_shadow_state_rows(driver: &mut PgDriver) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod shadow_state_cutover_tests {
-    use super::is_current_shadow_diff_cmds_wire;
-
-    #[test]
-    fn detects_current_shadow_wire_payload() {
-        assert!(is_current_shadow_diff_cmds_wire("QAIL-CMDS/1\n0\n"));
-        assert!(!is_current_shadow_diff_cmds_wire("[]"));
-        assert!(!is_current_shadow_diff_cmds_wire("{\"legacy\":true}"));
-    }
-}
-
 /// Stable checksum for a migration command sequence.
 pub fn diff_cmds_checksum(diff_cmds: &[Qail]) -> String {
     crate::migrations::stable_cmds_checksum(diff_cmds)
@@ -1349,3 +1337,6 @@ async fn apply_base_schema_to_shadow(state: &mut ShadowState, cmds: &[Qail]) -> 
 
     Ok(())
 }
+
+#[cfg(test)]
+mod shadow_state_cutover_tests;

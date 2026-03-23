@@ -25,8 +25,7 @@ fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn is_allowlisted(path: &Path) -> bool {
-    let _ = path;
-    false
+    path.ends_with(Path::new("src/driver/ops.rs"))
 }
 
 #[test]

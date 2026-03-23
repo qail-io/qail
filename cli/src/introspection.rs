@@ -1346,8 +1346,7 @@ fn is_internal_qail_relation(name: &str) -> bool {
 }
 
 fn normalize_comment_text(s: &str) -> String {
-    s.replace('\r', " ")
-        .replace('\n', " ")
+    s.replace(['\r', '\n'], " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

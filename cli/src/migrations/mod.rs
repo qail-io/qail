@@ -32,8 +32,7 @@ mod verify;
 mod watch;
 
 pub use analyze::migrate_analyze;
-pub use apply::migrate_apply;
-pub use apply::{ApplyPhase, MigrateDirection};
+pub use apply::{ApplyPhase, MigrateApplyOptions, MigrateDirection, migrate_apply};
 pub use create::migrate_create;
 pub use down::migrate_down;
 pub use failpoint::maybe_failpoint;
@@ -48,7 +47,7 @@ pub use receipt::{
 pub use reset::migrate_reset;
 pub use rollback::migrate_rollback;
 pub use status::migrate_status;
-pub use up::migrate_up;
+pub use up::{MigrateUpOptions, migrate_up};
 #[cfg(feature = "watch")]
 pub use watch::watch_schema;
 

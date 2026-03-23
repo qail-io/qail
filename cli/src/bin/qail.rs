@@ -24,8 +24,9 @@ use qail::lint::lint_schema;
 #[cfg(feature = "watch")]
 use qail::migrations::watch_schema;
 use qail::migrations::{
-    ApplyPhase, MigrateDirection, migrate_analyze, migrate_apply, migrate_down, migrate_plan,
-    migrate_reset, migrate_rollback, migrate_status, migrate_up,
+    ApplyPhase, MigrateApplyOptions, MigrateDirection, MigrateUpOptions, migrate_analyze,
+    migrate_apply, migrate_down, migrate_plan, migrate_reset, migrate_rollback, migrate_status,
+    migrate_up,
 };
 #[cfg(feature = "repl")]
 use qail::repl::run_repl;
@@ -1119,13 +1120,15 @@ async fn main() -> Result<()> {
                 migrate_up(
                     schema_diff,
                     &db_url,
-                    codebase.as_deref(),
-                    *force,
-                    *allow_destructive,
-                    *allow_no_shadow_receipt,
-                    *allow_lock_risk,
-                    *wait_for_lock,
-                    *lock_timeout_secs,
+                    MigrateUpOptions {
+                        codebase: codebase.as_deref(),
+                        force: *force,
+                        allow_destructive: *allow_destructive,
+                        allow_no_shadow_receipt: *allow_no_shadow_receipt,
+                        allow_lock_risk: *allow_lock_risk,
+                        wait_for_lock: *wait_for_lock,
+                        lock_timeout_secs: *lock_timeout_secs,
+                    },
                 )
                 .await?;
             }
@@ -1181,17 +1184,19 @@ async fn main() -> Result<()> {
                 let db_url = resolve_db_url(url.as_deref())?;
                 migrate_apply(
                     &db_url,
-                    (*direction).into(),
-                    phase.clone().into(),
-                    codebase.as_deref(),
-                    *allow_contract_with_references,
-                    *allow_destructive,
-                    *allow_no_shadow_receipt,
-                    *allow_lock_risk,
-                    *adopt_existing,
-                    *backfill_chunk_size,
-                    *wait_for_lock,
-                    *lock_timeout_secs,
+                    MigrateApplyOptions {
+                        direction: (*direction).into(),
+                        phase_filter: phase.clone().into(),
+                        codebase: codebase.as_deref(),
+                        allow_contract_with_references: *allow_contract_with_references,
+                        allow_destructive: *allow_destructive,
+                        allow_no_shadow_receipt: *allow_no_shadow_receipt,
+                        allow_lock_risk: *allow_lock_risk,
+                        adopt_existing: *adopt_existing,
+                        backfill_chunk_size: *backfill_chunk_size,
+                        wait_for_lock: *wait_for_lock,
+                        lock_timeout_secs: *lock_timeout_secs,
+                    },
                 )
                 .await?;
             }

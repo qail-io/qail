@@ -601,7 +601,6 @@ pub struct QailResponse {
 }
 
 #[cfg(feature = "response")]
-
 /// Decode PostgreSQL response bytes.
 /// Returns a handle that must be freed with qail_response_free.
 #[unsafe(no_mangle)]
@@ -773,13 +772,12 @@ pub extern "C" fn qail_response_get_i32(
 
     unsafe {
         let resp = &*handle;
-        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                if let Ok(v) = s.parse::<i32>() {
-                    *out_value = v;
-                    return 0;
-                }
-            }
+        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
+            && let Ok(s) = std::str::from_utf8(bytes)
+            && let Ok(v) = s.parse::<i32>()
+        {
+            *out_value = v;
+            return 0;
         }
         -1
     }
@@ -800,13 +798,12 @@ pub extern "C" fn qail_response_get_i64(
 
     unsafe {
         let resp = &*handle;
-        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                if let Ok(v) = s.parse::<i64>() {
-                    *out_value = v;
-                    return 0;
-                }
-            }
+        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
+            && let Ok(s) = std::str::from_utf8(bytes)
+            && let Ok(v) = s.parse::<i64>()
+        {
+            *out_value = v;
+            return 0;
         }
         -1
     }
@@ -827,13 +824,12 @@ pub extern "C" fn qail_response_get_f64(
 
     unsafe {
         let resp = &*handle;
-        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                if let Ok(v) = s.parse::<f64>() {
-                    *out_value = v;
-                    return 0;
-                }
-            }
+        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
+            && let Ok(s) = std::str::from_utf8(bytes)
+            && let Ok(v) = s.parse::<f64>()
+        {
+            *out_value = v;
+            return 0;
         }
         -1
     }
@@ -854,15 +850,15 @@ pub extern "C" fn qail_response_get_bool(
 
     unsafe {
         let resp = &*handle;
-        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                *out_value = match s {
-                    "t" | "true" | "1" => 1,
-                    "f" | "false" | "0" => 0,
-                    _ => return -1,
-                };
-                return 0;
-            }
+        if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
+            && let Ok(s) = std::str::from_utf8(bytes)
+        {
+            *out_value = match s {
+                "t" | "true" | "1" => 1,
+                "f" | "false" | "0" => 0,
+                _ => return -1,
+            };
+            return 0;
         }
         -1
     }

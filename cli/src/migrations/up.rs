@@ -15,18 +15,33 @@ use crate::migrations::{
 };
 use crate::util::parse_pg_url;
 
+#[derive(Clone, Copy)]
+pub struct MigrateUpOptions<'a> {
+    pub codebase: Option<&'a str>,
+    pub force: bool,
+    pub allow_destructive: bool,
+    pub allow_no_shadow_receipt: bool,
+    pub allow_lock_risk: bool,
+    pub wait_for_lock: bool,
+    pub lock_timeout_secs: Option<u64>,
+}
+
 /// Apply migrations forward using qail-pg native driver.
 pub async fn migrate_up(
     schema_diff_path: &str,
     url: &str,
-    codebase: Option<&str>,
-    force: bool,
-    allow_destructive: bool,
-    allow_no_shadow_receipt: bool,
-    allow_lock_risk: bool,
-    wait_for_lock: bool,
-    lock_timeout_secs: Option<u64>,
+    options: MigrateUpOptions<'_>,
 ) -> Result<()> {
+    let MigrateUpOptions {
+        codebase,
+        force,
+        allow_destructive,
+        allow_no_shadow_receipt,
+        allow_lock_risk,
+        wait_for_lock,
+        lock_timeout_secs,
+    } = options;
+
     println!("{} {}", "Migrating UP:".cyan().bold(), url.yellow());
 
     let (old_schema, new_schema, cmds) =
@@ -399,7 +414,7 @@ pub async fn migrate_up(
 
 #[cfg(test)]
 mod tests {
-    use super::migrate_up;
+    use super::{MigrateUpOptions, migrate_up};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -450,13 +465,15 @@ table users {
         let result = migrate_up(
             &schema_diff,
             "postgres://localhost/testdb",
-            Some(codebase.to_str().expect("utf-8 codebase path")),
-            false,
-            false,
-            true,
-            true,
-            false,
-            None,
+            MigrateUpOptions {
+                codebase: Some(codebase.to_str().expect("utf-8 codebase path")),
+                force: false,
+                allow_destructive: false,
+                allow_no_shadow_receipt: true,
+                allow_lock_risk: true,
+                wait_for_lock: false,
+                lock_timeout_secs: None,
+            },
         )
         .await;
 

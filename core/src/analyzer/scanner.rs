@@ -24,8 +24,7 @@ pub enum AnalysisMode {
     RustAST,
     /// Text-source semantic scan for non-Rust files.
     TextSemantic,
-    /// Legacy alias retained for API compatibility.
-    #[doc(hidden)]
+    /// Legacy alias for `TextSemantic`.
     Regex,
 }
 

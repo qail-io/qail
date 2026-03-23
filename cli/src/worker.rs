@@ -5,7 +5,7 @@
 
 use crate::colors::*;
 use anyhow::Result;
-use qail_core::ast::builders::{binary, col, count, now, now_minus};
+use qail_core::ast::builders::{binary, col, count, int, now, now_minus};
 use qail_core::ast::{BinaryOp, Operator, Qail, Value};
 use serde::Deserialize;
 use std::fs;
@@ -638,7 +638,7 @@ async fn mark_processed(pg: &mut qail_pg::PgDriver, id: i64) -> Result<()> {
 }
 
 async fn mark_failed(pg: &mut qail_pg::PgDriver, id: i64, error: &str) -> Result<()> {
-    let retry_plus_one = binary(col("retry_count"), BinaryOp::Add, 1).build();
+    let retry_plus_one = binary(col("retry_count"), BinaryOp::Add, int(1)).build();
     let cmd = Qail::set("_qail_queue")
         .set_value("status", "failed")
         .set_value("retry_count", retry_plus_one)
@@ -653,7 +653,7 @@ async fn mark_failed(pg: &mut qail_pg::PgDriver, id: i64, error: &str) -> Result
 async fn recover_stale_jobs(pg: &mut qail_pg::PgDriver) -> Result<u64> {
     // Reset jobs that have been 'processing' for more than 10 minutes
     // These are likely from crashed workers
-    let retry_plus_one = binary(col("retry_count"), BinaryOp::Add, 1).build();
+    let retry_plus_one = binary(col("retry_count"), BinaryOp::Add, int(1)).build();
     let recover_cmd = Qail::set("_qail_queue")
         .set_value("status", "pending")
         .set_value("retry_count", retry_plus_one)

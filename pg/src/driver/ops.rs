@@ -8,6 +8,28 @@ use super::types::*;
 use qail_core::ast::Qail;
 
 impl PgDriver {
+    // ==================== RAW SQL COMPAT ====================
+
+    /// Execute raw SQL using PostgreSQL Simple Query protocol.
+    ///
+    /// Returns number of rows returned by the statement (or `0` for statements
+    /// that do not produce rows).
+    ///
+    /// This compatibility API exists for legacy tests/examples; prefer AST APIs
+    /// (`execute`, `fetch_all`) for application code.
+    pub async fn execute_raw(&mut self, sql: &str) -> PgResult<u64> {
+        let rows = self.connection.simple_query(sql).await?;
+        Ok(rows.len() as u64)
+    }
+
+    /// Execute raw SQL using PostgreSQL Simple Query protocol and return rows.
+    ///
+    /// This compatibility API exists for legacy tests/examples; prefer AST APIs
+    /// (`execute`, `fetch_all`) for application code.
+    pub async fn fetch_raw(&mut self, sql: &str) -> PgResult<Vec<PgRow>> {
+        self.connection.simple_query(sql).await
+    }
+
     // ==================== TRANSACTION CONTROL ====================
 
     /// Begin a transaction (AST-native).

@@ -24,7 +24,6 @@ pub struct TextLiteral {
 /// Best-effort classifier for whether text begins with a QAIL action keyword.
 pub fn looks_like_qail_query(text: &str) -> bool {
     let head = text
-        .trim_start()
         .split_whitespace()
         .next()
         .unwrap_or("")
@@ -36,7 +35,6 @@ pub fn looks_like_qail_query(text: &str) -> bool {
 /// Best-effort classifier for whether text begins like a SQL query.
 pub fn looks_like_sql_query(text: &str) -> bool {
     let head = text
-        .trim_start()
         .split_whitespace()
         .next()
         .unwrap_or("")

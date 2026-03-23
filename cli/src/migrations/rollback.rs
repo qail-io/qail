@@ -538,7 +538,7 @@ fn validate_rollback_receipts(
             .with_context(|| format!("Failed to read {}", up_migration.path.display()))?;
         let expected_checksum =
             compute_expected_migration_checksum(&content, up_migration.phase, 5000)?;
-        if &expected_checksum == stored_checksum {
+        if expected_checksum == *stored_checksum {
             continue;
         }
         let msg = format!(
@@ -572,7 +572,6 @@ mod tests {
     use qail_core::prelude::Qail;
     use std::collections::HashMap;
     use std::fs;
-    use std::path::PathBuf;
 
     #[test]
     fn rollback_plan_dedupes_group_in_reverse_order() {
@@ -636,7 +635,7 @@ mod tests {
                 group_key: "001_add_users".to_string(),
                 sort_key: "001_add_users.up.qail".to_string(),
                 display_name: "001_add_users.up.qail".to_string(),
-                path: PathBuf::from(path),
+                path,
                 phase: MigrationPhase::Expand,
             },
         );

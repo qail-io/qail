@@ -21,6 +21,6 @@ pub(crate) mod types;
 pub(crate) use codegen::{commands_to_sql, parse_qail_to_commands_strict};
 pub(crate) use discovery::discover_migrations;
 pub(crate) use execute::compute_expected_migration_checksum;
-pub use execute::migrate_apply;
+pub use execute::{MigrateApplyOptions, migrate_apply};
 pub(crate) use types::MigrationFile;
 pub use types::{ApplyPhase, MigrateDirection};

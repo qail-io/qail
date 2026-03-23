@@ -403,15 +403,17 @@ impl Qail {
         let related = related_table.as_ref();
 
         // Try: current table -> related (forward relation)
-        match crate::schema::lookup_relation_state(&self.table, related)? {
-            Some((from_col, to_col)) => return Ok(self.left_join(related, &from_col, &to_col)),
-            None => {}
+        if let Some((from_col, to_col)) =
+            crate::schema::lookup_relation_state(&self.table, related)?
+        {
+            return Ok(self.left_join(related, &from_col, &to_col));
         }
 
         // Try: related -> current table (reverse relation)
-        match crate::schema::lookup_relation_state(related, &self.table)? {
-            Some((from_col, to_col)) => return Ok(self.left_join(related, &to_col, &from_col)),
-            None => {}
+        if let Some((from_col, to_col)) =
+            crate::schema::lookup_relation_state(related, &self.table)?
+        {
+            return Ok(self.left_join(related, &to_col, &from_col));
         }
 
         Err(format!(

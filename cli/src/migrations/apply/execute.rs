@@ -21,24 +21,40 @@ use qail_core::prelude::Qail;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 
+#[derive(Clone, Copy)]
+pub struct MigrateApplyOptions<'a> {
+    pub direction: MigrateDirection,
+    pub phase_filter: ApplyPhase,
+    pub codebase: Option<&'a str>,
+    pub allow_contract_with_references: bool,
+    pub allow_destructive: bool,
+    pub allow_no_shadow_receipt: bool,
+    pub allow_lock_risk: bool,
+    pub adopt_existing: bool,
+    pub backfill_chunk_size: usize,
+    pub wait_for_lock: bool,
+    pub lock_timeout_secs: Option<u64>,
+}
+
 /// Apply all pending migrations from the migrations/ folder.
 ///
 /// Tracks applied migrations in `_qail_migrations` table so re-running
 /// is safe (idempotent). Skips migrations that have already been applied.
-pub async fn migrate_apply(
-    url: &str,
-    direction: MigrateDirection,
-    phase_filter: ApplyPhase,
-    codebase: Option<&str>,
-    allow_contract_with_references: bool,
-    allow_destructive: bool,
-    allow_no_shadow_receipt: bool,
-    allow_lock_risk: bool,
-    adopt_existing: bool,
-    backfill_chunk_size: usize,
-    wait_for_lock: bool,
-    lock_timeout_secs: Option<u64>,
-) -> Result<()> {
+pub async fn migrate_apply(url: &str, options: MigrateApplyOptions<'_>) -> Result<()> {
+    let MigrateApplyOptions {
+        direction,
+        phase_filter,
+        codebase,
+        allow_contract_with_references,
+        allow_destructive,
+        allow_no_shadow_receipt,
+        allow_lock_risk,
+        adopt_existing,
+        backfill_chunk_size,
+        wait_for_lock,
+        lock_timeout_secs,
+    } = options;
+
     let migrations_dir = crate::migrations::resolve_deltas_dir(false)?;
     let policy = load_migration_policy()?;
 
@@ -334,22 +350,22 @@ pub async fn migrate_apply(
             };
 
         let expected_checksum = crate::time::md5_hex(&checksum_input);
-        if matches!(direction, MigrateDirection::Up) {
-            if let Some(stored_checksum) = applied_migrations.get(&mig.display_name) {
-                ensure_applied_checksum_matches(
-                    &mig.display_name,
-                    stored_checksum,
-                    &expected_checksum,
-                )?;
-                println!(
-                    "  {} {} {}",
-                    "‒".dimmed(),
-                    mig.display_name.dimmed(),
-                    "(already applied)".dimmed()
-                );
-                skipped += 1;
-                continue;
-            }
+        if matches!(direction, MigrateDirection::Up)
+            && let Some(stored_checksum) = applied_migrations.get(&mig.display_name)
+        {
+            ensure_applied_checksum_matches(
+                &mig.display_name,
+                stored_checksum,
+                &expected_checksum,
+            )?;
+            println!(
+                "  {} {} {}",
+                "‒".dimmed(),
+                mig.display_name.dimmed(),
+                "(already applied)".dimmed()
+            );
+            skipped += 1;
+            continue;
         }
 
         if matches!(direction, MigrateDirection::Up) && !cmds.is_empty() {
@@ -440,13 +456,15 @@ pub async fn migrate_apply(
             apply_down_commands_and_reconcile_history_atomic(
                 &mut pg,
                 &cmds,
-                &mig.display_name,
-                started_ms,
-                executed_sql_for_receipt,
-                checksum_input,
-                risk_summary,
-                versions_to_delete.as_slice(),
-                None,
+                ApplyDownContext {
+                    migration_name: &mig.display_name,
+                    started_ms,
+                    executed_sql_for_receipt,
+                    checksum_input,
+                    risk_summary,
+                    versions_to_delete: versions_to_delete.as_slice(),
+                    failpoint_override: None,
+                },
             )
             .await
             .context(format!(
@@ -462,14 +480,16 @@ pub async fn migrate_apply(
             apply_commands_and_record_receipt_atomic(
                 &mut pg,
                 &cmds,
-                &mig.display_name,
-                started_ms,
-                executed_sql_for_receipt,
-                checksum_input,
-                risk_summary,
-                affected_rows_est,
                 adopt_existing,
-                None,
+                ApplyReceiptContext {
+                    migration_name: &mig.display_name,
+                    started_ms,
+                    executed_sql_for_receipt,
+                    checksum_input,
+                    risk_summary,
+                    affected_rows_est,
+                    failpoint_override: None,
+                },
             )
             .await
             .context(format!("Failed to apply migration {}", mig.display_name))?;
@@ -996,18 +1016,32 @@ async fn table_rls_flags(pg: &mut qail_pg::PgDriver, table: &str) -> Result<Opti
     )))
 }
 
-async fn apply_commands_and_record_receipt_atomic(
-    pg: &mut qail_pg::PgDriver,
-    cmds: &[Qail],
-    migration_name: &str,
+struct ApplyReceiptContext<'a> {
+    migration_name: &'a str,
     started_ms: i64,
     executed_sql_for_receipt: String,
     checksum_input: String,
     risk_summary: String,
     affected_rows_est: Option<i64>,
+    failpoint_override: Option<&'a str>,
+}
+
+async fn apply_commands_and_record_receipt_atomic(
+    pg: &mut qail_pg::PgDriver,
+    cmds: &[Qail],
     adopt_existing: bool,
-    failpoint_override: Option<&str>,
+    context: ApplyReceiptContext<'_>,
 ) -> Result<()> {
+    let ApplyReceiptContext {
+        migration_name,
+        started_ms,
+        executed_sql_for_receipt,
+        checksum_input,
+        risk_summary,
+        affected_rows_est,
+        failpoint_override,
+    } = context;
+
     pg.begin()
         .await
         .map_err(|e| anyhow!("Failed to begin migration transaction: {}", e))?;
@@ -1066,17 +1100,31 @@ async fn apply_commands_and_record_receipt_atomic(
     Ok(())
 }
 
-async fn apply_down_commands_and_reconcile_history_atomic(
-    pg: &mut qail_pg::PgDriver,
-    cmds: &[Qail],
-    migration_name: &str,
+struct ApplyDownContext<'a> {
+    migration_name: &'a str,
     started_ms: i64,
     executed_sql_for_receipt: String,
     checksum_input: String,
     risk_summary: String,
-    versions_to_delete: &[String],
-    failpoint_override: Option<&str>,
+    versions_to_delete: &'a [String],
+    failpoint_override: Option<&'a str>,
+}
+
+async fn apply_down_commands_and_reconcile_history_atomic(
+    pg: &mut qail_pg::PgDriver,
+    cmds: &[Qail],
+    context: ApplyDownContext<'_>,
 ) -> Result<()> {
+    let ApplyDownContext {
+        migration_name,
+        started_ms,
+        executed_sql_for_receipt,
+        checksum_input,
+        risk_summary,
+        versions_to_delete,
+        failpoint_override,
+    } = context;
+
     pg.begin()
         .await
         .map_err(|e| anyhow!("Failed to begin migration transaction: {}", e))?;
@@ -1416,10 +1464,11 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_commands_and_record_receipt_atomic, apply_down_commands_and_reconcile_history_atomic,
-        enforce_apply_destructive_policy, ensure_applied_checksum_matches, ensure_up_down_pairing,
-        parse_rename_expr, should_adopt_existing_error, split_schema_ident,
-        strip_optional_if_exists_prefix, validate_receipts_against_local,
+        ApplyDownContext, ApplyReceiptContext, apply_commands_and_record_receipt_atomic,
+        apply_down_commands_and_reconcile_history_atomic, enforce_apply_destructive_policy,
+        ensure_applied_checksum_matches, ensure_up_down_pairing, parse_rename_expr,
+        should_adopt_existing_error, split_schema_ident, strip_optional_if_exists_prefix,
+        validate_receipts_against_local,
     };
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
@@ -1715,14 +1764,16 @@ mod tests {
         let err = apply_commands_and_record_receipt_atomic(
             &mut pg,
             &[marker_cmd],
-            &migration_name,
-            crate::migrations::now_epoch_ms(),
-            "-- fp marker".to_string(),
-            "-- fp marker".to_string(),
-            "source=apply.failpoint.test".to_string(),
-            None,
             false,
-            Some("apply.before_receipt"),
+            ApplyReceiptContext {
+                migration_name: &migration_name,
+                started_ms: crate::migrations::now_epoch_ms(),
+                executed_sql_for_receipt: "-- fp marker".to_string(),
+                checksum_input: "-- fp marker".to_string(),
+                risk_summary: "source=apply.failpoint.test".to_string(),
+                affected_rows_est: None,
+                failpoint_override: Some("apply.before_receipt"),
+            },
         )
         .await
         .expect_err("failpoint should abort apply transaction");
@@ -1798,13 +1849,15 @@ mod tests {
         apply_down_commands_and_reconcile_history_atomic(
             &mut pg,
             &down_cmds,
-            &down_name,
-            crate::migrations::now_epoch_ms(),
-            format!("drop {};", table),
-            format!("drop {};", table),
-            "source=apply.down.reconcile.test".to_string(),
-            &[up_v1.clone(), up_v2.clone()],
-            None,
+            ApplyDownContext {
+                migration_name: &down_name,
+                started_ms: crate::migrations::now_epoch_ms(),
+                executed_sql_for_receipt: format!("drop {};", table),
+                checksum_input: format!("drop {};", table),
+                risk_summary: "source=apply.down.reconcile.test".to_string(),
+                versions_to_delete: &[up_v1.clone(), up_v2.clone()],
+                failpoint_override: None,
+            },
         )
         .await
         .expect("apply down with history reconciliation");
