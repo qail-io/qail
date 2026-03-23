@@ -206,6 +206,9 @@ impl TableDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static RELATION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_schema_from_qail_schema() {
@@ -335,6 +338,7 @@ table comments {
     #[test]
     fn test_join_on_produces_correct_ast() {
         use crate::Qail;
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
 
         // Setup: Register a relation manually
         {
@@ -364,6 +368,7 @@ table comments {
     #[test]
     fn test_join_on_optional_returns_self_when_no_relation() {
         use crate::Qail;
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
 
         // Clear registry
         {
@@ -379,6 +384,7 @@ table comments {
     #[test]
     fn test_join_on_returns_self_when_no_relation() {
         use crate::Qail;
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
 
         {
             let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
@@ -392,6 +398,7 @@ table comments {
     #[test]
     fn test_try_join_on_returns_error_when_no_relation() {
         use crate::Qail;
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
 
         {
             let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
@@ -450,8 +457,9 @@ table users { -- inline table comment
     }
 
     #[test]
-    fn test_load_schema_relations_replaces_registry_state() {
+    fn test_replace_schema_relations_replaces_registry_state() {
         use std::fs;
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
 
         // Ensure clean global state for this test.
         {
@@ -497,13 +505,75 @@ table posts {
         )
         .expect("write schema 2");
 
+        let count1 = replace_schema_relations(schema_with_fk.to_str().expect("path utf8")).unwrap();
+        assert_eq!(count1, 1);
+        assert!(lookup_relation("posts", "users").is_some());
+
+        let count2 =
+            replace_schema_relations(schema_without_fk.to_str().expect("path utf8")).unwrap();
+        assert_eq!(count2, 0);
+        assert!(lookup_relation("posts", "users").is_none());
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
+            *reg = RelationRegistry::new();
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_load_schema_relations_merges_registry_state() {
+        use std::fs;
+        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
+            *reg = RelationRegistry::new();
+        }
+
+        let base = std::env::temp_dir().join(format!(
+            "qail_schema_relations_merge_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("mkdir temp");
+
+        let schema_with_fk = base.join("schema_with_fk.qail");
+        fs::write(
+            &schema_with_fk,
+            r#"
+table users {
+    id UUID primary_key
+}
+table posts {
+    id UUID primary_key
+    user_id UUID ref:users.id
+}
+"#,
+        )
+        .expect("write schema 1");
+
+        let schema_without_fk = base.join("schema_without_fk.qail");
+        fs::write(
+            &schema_without_fk,
+            r#"
+table invoices {
+    id UUID primary_key
+}
+"#,
+        )
+        .expect("write schema 2");
+
         let count1 = load_schema_relations(schema_with_fk.to_str().expect("path utf8")).unwrap();
         assert_eq!(count1, 1);
         assert!(lookup_relation("posts", "users").is_some());
 
         let count2 = load_schema_relations(schema_without_fk.to_str().expect("path utf8")).unwrap();
         assert_eq!(count2, 0);
-        assert!(lookup_relation("posts", "users").is_none());
+        // additive load preserves previously registered relations.
+        assert!(lookup_relation("posts", "users").is_some());
 
         {
             let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
@@ -546,10 +616,10 @@ impl RelationRegistry {
             (from_col.to_string(), to_col.to_string()),
         );
 
-        self.reverse
-            .entry(to_table.to_string())
-            .or_default()
-            .push(from_table.to_string());
+        let entry = self.reverse.entry(to_table.to_string()).or_default();
+        if !entry.iter().any(|existing| existing == from_table) {
+            entry.push(from_table.to_string());
+        }
     }
 
     /// Lookup join columns for a relation.
@@ -593,8 +663,34 @@ pub static RUNTIME_RELATIONS: LazyLock<RwLock<RelationRegistry>> =
     LazyLock::new(|| RwLock::new(RelationRegistry::new()));
 
 /// Load relations from a schema.qail file into the runtime registry.
-/// Returns the number of relations loaded.
+///
+/// This function is additive: loaded relations are merged into existing runtime state.
+/// Existing `(from_table, to_table)` entries are overwritten in-place; unrelated entries remain.
+/// Returns the number of relations parsed from `path`.
 pub fn load_schema_relations(path: &str) -> Result<usize, String> {
+    let schema = crate::build::Schema::parse_file(path)?;
+    let count: usize = schema
+        .tables
+        .values()
+        .map(|table| table.foreign_keys.len())
+        .sum();
+    let mut registry = RUNTIME_RELATIONS
+        .write()
+        .map_err(|e| format!("Lock error: {}", e))?;
+    for table in schema.tables.values() {
+        for fk in &table.foreign_keys {
+            registry.register(&table.name, &fk.column, &fk.ref_table, &fk.ref_column);
+        }
+    }
+
+    Ok(count)
+}
+
+/// Replace all runtime relations with relations loaded from a schema.qail file.
+///
+/// Use this for hot-reload workflows where runtime registry state should exactly
+/// match a schema snapshot.
+pub fn replace_schema_relations(path: &str) -> Result<usize, String> {
     let schema = crate::build::Schema::parse_file(path)?;
     let replacement = RelationRegistry::from_build_schema(&schema);
     let count: usize = schema

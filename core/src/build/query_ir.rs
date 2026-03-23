@@ -25,7 +25,16 @@ pub(crate) struct QueryIr {
 pub(crate) fn build_query_ir(usages: &[QailUsage]) -> Vec<QueryIr> {
     let mut out = Vec::with_capacity(usages.len());
     for usage in usages {
-        let action = usage_action_to_ast(&usage.action);
+        let action = match usage_action_to_ast(&usage.action) {
+            Ok(action) => action,
+            Err(err) => {
+                println!(
+                    "cargo:warning=QAIL: {} at {}:{} (table: {})",
+                    err, usage.file, usage.line, usage.table
+                );
+                continue;
+            }
+        };
         let mut cmd = crate::ast::Qail {
             action,
             table: usage.table.clone(),
@@ -48,4 +57,33 @@ pub(crate) fn build_query_ir(usages: &[QailUsage]) -> Vec<QueryIr> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage(action: &str) -> QailUsage {
+        QailUsage {
+            file: "src/main.rs".to_string(),
+            line: 42,
+            column: 9,
+            table: "users".to_string(),
+            is_dynamic_table: false,
+            columns: vec!["id".to_string()],
+            action: action.to_string(),
+            is_cte_ref: false,
+            has_rls: false,
+            has_explicit_tenant_scope: false,
+            file_uses_super_admin: false,
+        }
+    }
+
+    #[test]
+    fn build_query_ir_skips_unknown_actions() {
+        let usages = vec![usage("GET"), usage("UNKNOWN_ACTION")];
+        let ir = build_query_ir(&usages);
+        assert_eq!(ir.len(), 1);
+        assert_eq!(ir[0].action, "GET");
+    }
 }

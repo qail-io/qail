@@ -592,6 +592,14 @@ impl<T: Table> TypedQail<T> {
         self
     }
 
+    /// Apply RLS context (tenant scoping) for non-proof flows.
+    ///
+    /// This is an alias for [`Self::rls`], using `with_*` naming to align
+    /// with the `TypedQail<T: RequiresRls>::with_rls()` proof API.
+    pub fn with_rls_scoped(self, ctx: &crate::rls::RlsContext) -> Self {
+        self.rls(ctx)
+    }
+
     /// Get a reference to the inner Qail.
     pub fn inner(&self) -> &Qail {
         &self.inner
@@ -738,6 +746,15 @@ impl<T: Table> RlsQuery<T> {
         self
     }
 
+    /// Add multiple typed columns.
+    pub fn typed_columns<C>(mut self, cols: impl IntoIterator<Item = TypedColumn<C>>) -> Self {
+        use crate::ast::Expr;
+        for col in cols {
+            self.inner.columns.push(Expr::Named(col.name().to_string()));
+        }
+        self
+    }
+
     /// Type-safe equality filter.
     ///
     /// # Arguments
@@ -749,6 +766,29 @@ impl<T: Table> RlsQuery<T> {
         V: Into<crate::ast::Value> + ColumnValue<C>,
     {
         self.inner = self.inner.typed_eq(col, value);
+        self
+    }
+
+    /// Type-safe filter with custom operator.
+    pub fn typed_filter<C, V>(
+        mut self,
+        col: TypedColumn<C>,
+        op: crate::ast::Operator,
+        value: V,
+    ) -> Self
+    where
+        V: Into<crate::ast::Value> + ColumnValue<C>,
+    {
+        self.inner = self.inner.typed_filter(col, op, value);
+        self
+    }
+
+    /// Re-apply an RLS context on an already-proven query chain.
+    ///
+    /// This provides naming consistency with `with_rls` entry points when
+    /// chaining through `RlsQuery<T>`.
+    pub fn with_rls_scoped(mut self, ctx: &crate::rls::RlsContext) -> Self {
+        self.inner = self.inner.with_rls(ctx);
         self
     }
 
@@ -1099,6 +1139,29 @@ mod tests {
     }
 
     #[test]
+    fn test_rls_query_typed_helpers_and_scoped_alias() {
+        use crate::ast::Operator;
+        use crate::rls::RlsContext;
+        use crate::transpiler::ToSql;
+
+        let status: TypedColumn<String> = TypedColumn::new("orders", "status");
+        let total: TypedColumn<i64> = TypedColumn::new("orders", "total");
+
+        let ctx = RlsContext::tenant("tenant-789");
+        let query = Qail::typed(Orders)
+            .with_rls(&ctx)
+            .typed_columns(vec![status])
+            .typed_filter(total, Operator::Gt, 100_i64)
+            .with_rls_scoped(&ctx)
+            .build();
+
+        let sql = query.to_sql();
+        assert!(sql.contains("orders"), "table");
+        assert!(sql.contains("status"), "typed columns");
+        assert!(sql.contains("total"), "typed filter");
+    }
+
+    #[test]
     fn test_non_rls_table_builds_directly() {
         use crate::transpiler::ToSql;
 
@@ -1107,6 +1170,22 @@ mod tests {
 
         let sql = query.to_sql();
         assert!(sql.contains("users"), "Should build directly");
+    }
+
+    #[test]
+    fn test_non_rls_with_rls_scoped_alias_builds() {
+        use crate::rls::RlsContext;
+        use crate::transpiler::ToSql;
+
+        let ctx = RlsContext::tenant("tenant-non-rls");
+        let query = Qail::typed(Users)
+            .with_rls_scoped(&ctx)
+            .column("email")
+            .build();
+
+        let sql = query.to_sql();
+        assert!(sql.contains("users"), "table");
+        assert!(sql.contains("email"), "column");
     }
 
     #[test]

@@ -22,7 +22,10 @@ use super::text_qail::{
 pub enum AnalysisMode {
     /// Semantic Rust source analysis (shared with build scanner)
     RustAST,
-    /// Text-source semantic scan (legacy mode name kept for API stability)
+    /// Text-source semantic scan for non-Rust files.
+    TextSemantic,
+    /// Legacy alias retained for API compatibility.
+    #[doc(hidden)]
     Regex,
 }
 
@@ -89,11 +92,7 @@ impl CodebaseScanner {
             if let Some(ext) = path.extension()
                 && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py")
             {
-                let mode = if ext == "rs" {
-                    AnalysisMode::RustAST
-                } else {
-                    AnalysisMode::Regex
-                };
+                let mode = mode_for_extension(ext);
                 let file_refs = self.scan_file(path);
                 let ref_count = file_refs.len();
 
@@ -138,22 +137,16 @@ impl CodebaseScanner {
             } else if let Some(ext) = path.extension()
                 && (ext == "rs" || ext == "ts" || ext == "js" || ext == "py")
             {
-                let mode = if ext == "rs" {
-                    AnalysisMode::RustAST
-                } else {
-                    AnalysisMode::Regex
-                };
+                let mode = mode_for_extension(ext);
                 let file_refs = self.scan_file(&path);
                 let ref_count = file_refs.len();
 
-                if ref_count > 0 {
-                    result.files.push(FileAnalysis {
-                        file: path.clone(),
-                        mode,
-                        ref_count,
-                        safe: true,
-                    });
-                }
+                result.files.push(FileAnalysis {
+                    file: path.clone(),
+                    mode,
+                    ref_count,
+                    safe: true,
+                });
                 result.refs.extend(file_refs);
             }
         }
@@ -248,6 +241,14 @@ impl CodebaseScanner {
         }
 
         refs
+    }
+}
+
+fn mode_for_extension(ext: &std::ffi::OsStr) -> AnalysisMode {
+    if ext == "rs" {
+        AnalysisMode::RustAST
+    } else {
+        AnalysisMode::TextSemantic
     }
 }
 
@@ -781,5 +782,49 @@ WHERE active = true
         let _ = std::fs::remove_file(&path);
 
         assert!(refs.is_empty(), "{refs:?}");
+    }
+
+    #[test]
+    fn test_scan_with_details_includes_zero_ref_files_in_directories() {
+        let scanner = CodebaseScanner::new();
+        let root = std::env::temp_dir().join(format!(
+            "qail_scanner_details_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir temp root");
+
+        let with_ref = root.join("with_ref.ts");
+        std::fs::write(&with_ref, r#"const q = "get users fields id";"#).expect("write with_ref");
+        let no_ref = root.join("no_ref.ts");
+        std::fs::write(&no_ref, r#"const msg = "hello";"#).expect("write no_ref");
+
+        let result = scanner.scan_with_details(&root);
+
+        let mut entries = result
+            .files
+            .iter()
+            .map(|f| {
+                (
+                    f.file.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                    f.mode,
+                    f.ref_count,
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(name, _, _)| *name);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "no_ref.ts");
+        assert_eq!(entries[0].1, AnalysisMode::TextSemantic);
+        assert_eq!(entries[0].2, 0);
+        assert_eq!(entries[1].0, "with_ref.ts");
+        assert_eq!(entries[1].1, AnalysisMode::TextSemantic);
+        assert_eq!(entries[1].2, 1);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

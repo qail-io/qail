@@ -1403,16 +1403,16 @@ fn is_tenant_identifier(raw_ident: &str) -> bool {
     normalized == "tenant_id"
 }
 
-pub(crate) fn usage_action_to_ast(action: &str) -> crate::ast::Action {
+pub(crate) fn usage_action_to_ast(action: &str) -> Result<crate::ast::Action, String> {
     use crate::ast::Action;
 
     match action {
-        "GET" | "TYPED" => Action::Get,
-        "ADD" => Action::Add,
-        "SET" => Action::Set,
-        "DEL" => Action::Del,
-        "PUT" => Action::Put,
-        _ => Action::Get,
+        "GET" | "TYPED" => Ok(Action::Get),
+        "ADD" => Ok(Action::Add),
+        "SET" => Ok(Action::Set),
+        "DEL" => Ok(Action::Del),
+        "PUT" => Ok(Action::Put),
+        _ => Err(format!("unknown scanner action '{}'", action)),
     }
 }
 
