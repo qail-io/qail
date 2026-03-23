@@ -96,17 +96,19 @@ impl Schema {
                     schema.tables.push(t);
                 }
 
-                // Skip "table "
                 let name = rest
-                    .split('(')
-                    .next()
-                    .map(|s| s.trim())
-                    .ok_or_else(|| format!("Invalid table line: {}", line))?;
+                    .trim()
+                    .trim_end_matches('{')
+                    .trim_end_matches('(')
+                    .trim();
+                if name.is_empty() {
+                    return Err(format!("Invalid table line: {}", line));
+                }
 
                 current_table = Some(TableDef::new(name));
             }
             // Match closing paren
-            else if line == ")" {
+            else if matches!(line.trim_end_matches(';'), ")" | "}") {
                 if let Some(t) = current_table.take() {
                     schema.tables.push(t);
                 }
@@ -117,20 +119,24 @@ impl Schema {
                 let line = line.trim_end_matches(',');
 
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let col_name = parts[0];
-                    let col_type = parts[1];
-                    let not_null = parts.len() > 2
-                        && parts.iter().any(|&p| p.eq_ignore_ascii_case("not"))
-                        && parts.iter().any(|&p| p.eq_ignore_ascii_case("null"));
-
-                    table.columns.push(ColumnDef {
-                        name: col_name.to_string(),
-                        typ: col_type.to_string(),
-                        nullable: !not_null,
-                        primary_key: false,
-                    });
+                if parts.len() < 2 {
+                    return Err(format!(
+                        "Invalid column line in table '{}': {}",
+                        table.name, line
+                    ));
                 }
+                let col_name = parts[0];
+                let col_type = parts[1];
+                let not_null = parts.len() > 2
+                    && parts.iter().any(|&p| p.eq_ignore_ascii_case("not"))
+                    && parts.iter().any(|&p| p.eq_ignore_ascii_case("null"));
+
+                table.columns.push(ColumnDef {
+                    name: col_name.to_string(),
+                    typ: col_type.to_string(),
+                    nullable: !not_null,
+                    primary_key: false,
+                });
             }
         }
 
@@ -392,6 +398,96 @@ table comments {
             .expect_err("expected missing relation error");
         assert!(err.contains("No relation found"));
     }
+
+    #[test]
+    fn test_from_qail_schema_supports_brace_table_blocks() {
+        let qail = r#"
+table users {
+    id uuid not null
+    email varchar
+}
+"#;
+        let schema = Schema::from_qail_schema(qail).expect("brace-style schema should parse");
+        assert_eq!(schema.tables.len(), 1);
+        assert_eq!(schema.tables[0].name, "users");
+        assert_eq!(schema.tables[0].columns.len(), 2);
+    }
+
+    #[test]
+    fn test_from_qail_schema_errors_on_malformed_column_line() {
+        let qail = r#"
+table users (
+    id uuid not null,
+    email,
+)
+"#;
+        let err = Schema::from_qail_schema(qail).expect_err("malformed column should error");
+        assert!(err.contains("Invalid column line"));
+        assert!(err.contains("users"));
+    }
+
+    #[test]
+    fn test_load_schema_relations_replaces_registry_state() {
+        use std::fs;
+
+        // Ensure clean global state for this test.
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
+            *reg = RelationRegistry::new();
+        }
+
+        let base = std::env::temp_dir().join(format!(
+            "qail_schema_relations_reload_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("mkdir temp");
+
+        let schema_with_fk = base.join("schema_with_fk.qail");
+        fs::write(
+            &schema_with_fk,
+            r#"
+table users {
+    id UUID primary_key
+}
+table posts {
+    id UUID primary_key
+    user_id UUID ref:users.id
+}
+"#,
+        )
+        .expect("write schema 1");
+
+        let schema_without_fk = base.join("schema_without_fk.qail");
+        fs::write(
+            &schema_without_fk,
+            r#"
+table users {
+    id UUID primary_key
+}
+table posts {
+    id UUID primary_key
+}
+"#,
+        )
+        .expect("write schema 2");
+
+        let count1 = load_schema_relations(schema_with_fk.to_str().expect("path utf8")).unwrap();
+        assert_eq!(count1, 1);
+        assert!(lookup_relation("posts", "users").is_some());
+
+        let count2 = load_schema_relations(schema_without_fk.to_str().expect("path utf8")).unwrap();
+        assert_eq!(count2, 0);
+        assert!(lookup_relation("posts", "users").is_none());
+
+        {
+            let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
+            *reg = RelationRegistry::new();
+        }
+        let _ = fs::remove_dir_all(base);
+    }
 }
 
 use std::collections::HashMap;
@@ -477,17 +573,16 @@ pub static RUNTIME_RELATIONS: LazyLock<RwLock<RelationRegistry>> =
 /// Returns the number of relations loaded.
 pub fn load_schema_relations(path: &str) -> Result<usize, String> {
     let schema = crate::build::Schema::parse_file(path)?;
+    let replacement = RelationRegistry::from_build_schema(&schema);
+    let count: usize = schema
+        .tables
+        .values()
+        .map(|table| table.foreign_keys.len())
+        .sum();
     let mut registry = RUNTIME_RELATIONS
         .write()
         .map_err(|e| format!("Lock error: {}", e))?;
-
-    let mut count = 0;
-    for table in schema.tables.values() {
-        for fk in &table.foreign_keys {
-            registry.register(&table.name, &fk.column, &fk.ref_table, &fk.ref_column);
-            count += 1;
-        }
-    }
+    *registry = replacement;
 
     Ok(count)
 }
