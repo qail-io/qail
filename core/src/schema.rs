@@ -19,6 +19,11 @@
 
 use crate::validator::Validator;
 
+fn strip_schema_comments(line: &str) -> &str {
+    let line = line.split_once("--").map_or(line, |(left, _)| left);
+    line.split_once('#').map_or(line, |(left, _)| left).trim()
+}
+
 /// A database schema comprising one or more table definitions.
 #[derive(Debug, Clone)]
 pub struct Schema {
@@ -81,11 +86,11 @@ impl Schema {
         let mut schema = Schema::new();
         let mut current_table: Option<TableDef> = None;
 
-        for line in input.lines() {
-            let line = line.trim();
+        for raw_line in input.lines() {
+            let line = strip_schema_comments(raw_line);
 
             // Skip empty lines and comments
-            if line.is_empty() || line.starts_with("--") {
+            if line.is_empty() {
                 continue;
             }
 
@@ -424,6 +429,24 @@ table users (
         let err = Schema::from_qail_schema(qail).expect_err("malformed column should error");
         assert!(err.contains("Invalid column line"));
         assert!(err.contains("users"));
+    }
+
+    #[test]
+    fn test_from_qail_schema_ignores_hash_and_inline_comments() {
+        let qail = r#"
+# top-level comment
+table users { -- inline table comment
+    id uuid not null, # id comment
+    # line comment inside table
+    email varchar -- email comment
+}
+"#;
+        let schema = Schema::from_qail_schema(qail).expect("schema with comments should parse");
+        assert_eq!(schema.tables.len(), 1);
+        assert_eq!(schema.tables[0].name, "users");
+        assert_eq!(schema.tables[0].columns.len(), 2);
+        assert_eq!(schema.tables[0].columns[0].name, "id");
+        assert_eq!(schema.tables[0].columns[1].name, "email");
     }
 
     #[test]

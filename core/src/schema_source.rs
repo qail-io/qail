@@ -293,7 +293,7 @@ fn apply_module_order(root: &Path, all_files: Vec<PathBuf>) -> Result<Vec<PathBu
 
     let mut ordered = Vec::new();
     let mut seen = HashSet::new();
-    let mut strict_manifest = strict_manifest_default_enabled(root)?;
+    let mut strict_manifest_from_order = false;
 
     let mut push_module = |canonical: PathBuf, source_entry: &str| -> Result<(), String> {
         if let Some(original) = known_modules.get(&canonical) {
@@ -319,13 +319,13 @@ fn apply_module_order(root: &Path, all_files: Vec<PathBuf>) -> Result<Vec<PathBu
         if let Some(comment) = line.strip_prefix("--") {
             let comment = comment.trim();
             if comment.eq_ignore_ascii_case(ORDER_STRICT_DIRECTIVE) {
-                strict_manifest = true;
+                strict_manifest_from_order = true;
             }
             continue;
         }
 
         if line.eq_ignore_ascii_case(ORDER_STRICT_SHORTHAND) {
-            strict_manifest = true;
+            strict_manifest_from_order = true;
             continue;
         }
 
@@ -409,6 +409,12 @@ fn apply_module_order(root: &Path, all_files: Vec<PathBuf>) -> Result<Vec<PathBu
         push_module(canonical, line)?;
     }
 
+    let strict_manifest = if strict_manifest_from_order {
+        true
+    } else {
+        strict_manifest_default_enabled(root)
+    };
+
     let mut unlisted = Vec::new();
     for module in all_files {
         let canonical = module.canonicalize().map_err(|e| {
@@ -456,10 +462,10 @@ fn apply_module_order(root: &Path, all_files: Vec<PathBuf>) -> Result<Vec<PathBu
     Ok(ordered)
 }
 
-fn strict_manifest_default_enabled(schema_root: &Path) -> Result<bool, String> {
+fn strict_manifest_default_enabled(schema_root: &Path) -> bool {
     if let Ok(raw) = std::env::var(STRICT_ENV_VAR) {
         let normalized = raw.trim().to_ascii_lowercase();
-        return Ok(matches!(normalized.as_str(), "1" | "true" | "yes" | "on"));
+        return matches!(normalized.as_str(), "1" | "true" | "yes" | "on");
     }
 
     for dir in schema_root.ancestors() {
@@ -467,17 +473,12 @@ fn strict_manifest_default_enabled(schema_root: &Path) -> Result<bool, String> {
         if !candidate.is_file() {
             continue;
         }
-        let cfg = crate::config::QailConfig::load_from(&candidate).map_err(|err| {
-            format!(
-                "Failed to load strict-manifest default from '{}': {}",
-                candidate.display(),
-                err
-            )
-        })?;
-        return Ok(cfg.project.schema_strict_manifest.unwrap_or(false));
+        if let Ok(cfg) = crate::config::QailConfig::load_from(&candidate) {
+            return cfg.project.schema_strict_manifest.unwrap_or(false);
+        }
     }
 
-    Ok(false)
+    false
 }
 
 #[cfg(test)]
@@ -722,7 +723,7 @@ mod tests {
         fs::create_dir_all(&root).expect("mkdir");
         // SAFETY: test mutates process env, keep scoped and restore after test.
         unsafe { std::env::set_var(STRICT_ENV_VAR, "true") };
-        assert!(strict_manifest_default_enabled(&root).expect("strict manifest should parse"));
+        assert!(strict_manifest_default_enabled(&root));
         // SAFETY: restore env for test isolation.
         unsafe { std::env::remove_var(STRICT_ENV_VAR) };
         let _ = fs::remove_dir_all(root);
@@ -758,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_manifest_default_from_malformed_ancestor_qail_toml_errors() {
+    fn strict_manifest_default_from_malformed_ancestor_qail_toml_falls_back_to_non_strict() {
         let root = tmp_dir("strict_cfg_malformed");
         let schema_dir = root.join("schema");
         fs::create_dir_all(&schema_dir).expect("mkdir schema");
@@ -772,11 +773,23 @@ mod tests {
             "table users {\n  id uuid primary_key\n}\n",
         )
         .expect("write users");
+        fs::write(
+            schema_dir.join("billing.qail"),
+            "table invoices {\n  id uuid primary_key\n}\n",
+        )
+        .expect("write billing");
         fs::write(schema_dir.join(MODULE_ORDER_FILE), "users.qail\n").expect("write order");
 
-        let err = resolve_schema_source(root.join("schema.qail")).expect_err("should error");
-        assert!(err.contains("Failed to load strict-manifest default"));
-        assert!(err.contains("qail.toml"));
+        let resolved = resolve_schema_source(root.join("schema.qail")).expect("should resolve");
+        assert_eq!(resolved.files.len(), 2);
+        assert_eq!(
+            resolved.files[0].file_name().and_then(|n| n.to_str()),
+            Some("users.qail")
+        );
+        assert_eq!(
+            resolved.files[1].file_name().and_then(|n| n.to_str()),
+            Some("billing.qail")
+        );
 
         let _ = fs::remove_dir_all(root);
     }
