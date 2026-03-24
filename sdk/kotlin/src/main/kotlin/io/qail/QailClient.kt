@@ -13,8 +13,18 @@ import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 // ─── Configuration ──────────────────────────────────────────────────
+
+enum class WebSocketAuthMode {
+    NONE,
+    HEADER,
+    QUERY,
+}
 
 /**
  * Configuration for the Qail client.
@@ -32,6 +42,8 @@ data class QailConfig(
     val tokenProvider: (suspend () -> String)? = null,
     val headers: Map<String, String> = emptyMap(),
     val timeoutMs: Long = 30_000,
+    val wsAuthMode: WebSocketAuthMode = WebSocketAuthMode.HEADER,
+    val wsTokenQueryParam: String = "access_token",
     val httpClient: HttpClient? = null,
 )
 
@@ -150,26 +162,40 @@ class QailClient(@PublishedApi internal val config: QailConfig) {
         scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
         onMessage: (String) -> Unit,
     ): QailSubscription {
-        val wsUrl = baseUrl.replace(Regex("^http"), "ws") + "/ws"
-        val sub = WebSocketSubscriptionImpl(channel, onMessage)
+        val sub = WebSocketSubscriptionImpl()
 
         sub.job = scope.launch {
-            client.webSocket(wsUrl) {
-                // Send listen command
-                send(Frame.Text("""{ "action": "listen", "channel": "$channel"}"""))
+            val token = config.token ?: config.tokenProvider?.invoke()
+            val wsUrl = buildWebSocketUrl(token)
 
-                for (frame in incoming) {
-                    if (frame is Frame.Text) {
-                        try {
-                            val msg = json.decodeFromString<JsonObject>(frame.readText())
-                            val ch = msg["channel"]?.toString()?.trim('"')
-                            val payload = msg["payload"]?.toString()?.trim('"')
-                            if (ch == channel && payload != null) {
-                                onMessage(payload)
-                            }
-                        } catch (_: Exception) { }
+            try {
+                client.webSocket({
+                    url(wsUrl)
+                    config.headers.forEach { (k, v) -> header(k, v) }
+                    if (config.wsAuthMode == WebSocketAuthMode.HEADER && token != null) {
+                        header(HttpHeaders.Authorization, "Bearer $token")
+                    }
+                }) {
+                    // Send listen command
+                    send(Frame.Text("""{ "action": "listen", "channel": "$channel"}"""))
+
+                    for (frame in incoming) {
+                        if (!sub.active) break
+                        if (frame is Frame.Text) {
+                            try {
+                                val msg = json.decodeFromString<JsonObject>(frame.readText())
+                                val ch = msg["channel"]?.jsonPrimitive?.contentOrNull
+                                val payloadElement = msg["payload"]
+                                val payload = payloadElement?.jsonPrimitive?.contentOrNull ?: payloadElement?.toString()
+                                if (ch == channel && payload != null) {
+                                    onMessage(payload)
+                                }
+                            } catch (_: Exception) { }
+                        }
                     }
                 }
+            } finally {
+                sub.markClosed()
             }
         }
 
@@ -238,4 +264,22 @@ class QailClient(@PublishedApi internal val config: QailConfig) {
         }
         return response.bodyAsText()
     }
+
+    @PublishedApi
+    internal fun buildWebSocketUrl(token: String?): String {
+        val wsBase = baseUrl
+            .replace(Regex("^https"), "wss")
+            .replace(Regex("^http"), "ws")
+        val basePath = "$wsBase/ws"
+        if (token == null || config.wsAuthMode != WebSocketAuthMode.QUERY) {
+            return basePath
+        }
+        val sep = if (basePath.contains("?")) "&" else "?"
+        val key = encodeQueryComponent(config.wsTokenQueryParam)
+        val value = encodeQueryComponent(token)
+        return "$basePath$sep$key=$value"
+    }
+
+    private fun encodeQueryComponent(value: String): String =
+        URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20")
 }

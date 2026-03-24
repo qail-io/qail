@@ -9,18 +9,21 @@ import kotlinx.coroutines.Job
  * Calling [unsubscribe] cancels the coroutine, closing the connection.
  */
 internal class WebSocketSubscriptionImpl(
-    private val channel: String,
-    private val onMessage: (String) -> Unit,
 ) : QailSubscription {
 
     internal var job: Job? = null
-    private var _active = true
+    @Volatile
+    private var subscribed = true
 
     override val active: Boolean
-        get() = _active && (job?.isActive == true)
+        get() = subscribed && (job?.isActive == true)
 
     override fun unsubscribe() {
-        _active = false
+        subscribed = false
         job?.cancel()
+    }
+
+    internal fun markClosed() {
+        subscribed = false
     }
 }

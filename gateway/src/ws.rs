@@ -4,7 +4,10 @@
 
 use axum::{
     extract::{State, ws::WebSocketUpgrade},
-    http::HeaderMap,
+    http::{
+        HeaderMap, Uri,
+        header::{AUTHORIZATION, HeaderValue},
+    },
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -138,6 +141,27 @@ const WS_MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 50;
 const WS_MIN_LIVE_QUERY_INTERVAL_MS: u64 = 1000;
 const WS_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const WS_LISTENER_RETRY_MS: u64 = 500;
+
+fn auth_headers_for_ws(headers: &HeaderMap, uri: &Uri) -> HeaderMap {
+    let mut auth_headers = headers.clone();
+    if auth_headers.contains_key(AUTHORIZATION) {
+        return auth_headers;
+    }
+
+    let token = uri.query().and_then(|q| {
+        url::form_urlencoded::parse(q.as_bytes())
+            .find(|(k, _)| k == "access_token")
+            .map(|(_, v)| v.into_owned())
+    });
+
+    if let Some(token) = token
+        && let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", token))
+    {
+        auth_headers.insert(AUTHORIZATION, value);
+    }
+
+    auth_headers
+}
 const WS_LISTENER_CMD_TIMEOUT_MS: u64 = 3000;
 const WS_LISTENER_UNAVAILABLE_NOTICE_MS: u64 = 5000;
 const WS_NOTIFY_QUEUE_CAPACITY: usize = 256;
@@ -286,8 +310,10 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
+    uri: Uri,
 ) -> impl IntoResponse {
-    let auth = extract_auth_for_state(&headers, state.as_ref()).await;
+    let auth_headers = auth_headers_for_ws(&headers, &uri);
+    let auth = extract_auth_for_state(&auth_headers, state.as_ref()).await;
 
     // SECURITY (P0-3): Enforce authentication policy on WS upgrade.
     if let Err(e) = ensure_request_auth(&auth, state.config.production_strict) {

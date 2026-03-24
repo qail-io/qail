@@ -13,10 +13,10 @@
         }
     },
     "scripts": {
-        "build": "tsup src/index.ts --format cjs,esm --dts",
-        "test": "vitest run",
-        "test:watch": "vitest",
-        "lint": "tsc --noEmit",
+        "build": "node ./node_modules/tsup/dist/cli-default.js src/index.ts --format cjs,esm --dts",
+        "test": "node ./node_modules/vitest/vitest.mjs run",
+        "test:watch": "node ./node_modules/vitest/vitest.mjs",
+        "lint": "node ./node_modules/typescript/bin/tsc --noEmit",
         "prepublishOnly": "npm run build"
     },
     "keywords": [

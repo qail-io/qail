@@ -20,6 +20,45 @@ function createClient(fetchFn: ReturnType<typeof vi.fn>) {
     });
 }
 
+class MockWebSocket {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+
+    url: string;
+    readyState = MockWebSocket.CONNECTING;
+    sent: string[] = [];
+    closeCalled = false;
+    onopen: ((event: Event) => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onclose: ((event: CloseEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+
+    constructor(url: string) {
+        this.url = url;
+    }
+
+    send(data: string) {
+        this.sent.push(data);
+    }
+
+    close() {
+        this.closeCalled = true;
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.({} as CloseEvent);
+    }
+
+    open() {
+        this.readyState = MockWebSocket.OPEN;
+        this.onopen?.({} as Event);
+    }
+
+    emitMessage(data: string) {
+        this.onmessage?.({ data } as MessageEvent);
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────
 
 describe('QailClient', () => {
@@ -120,6 +159,19 @@ describe('QailClient', () => {
 
             const url = fetch.mock.calls[0][0] as string;
             expect(url).toContain('expand=nested%3Aorders');
+        });
+
+        it('encodes reserved characters in filter values', async () => {
+            const fetch = mockFetch({ data: [], count: 0, limit: 50, offset: 0 });
+            const client = createClient(fetch);
+
+            await client.from('users')
+                .where('name', 'eq', 'A&B=1 C')
+                .exec();
+
+            const url = fetch.mock.calls[0][0] as string;
+            expect(url).toContain('name.eq=A%26B%3D1%20C');
+            expect(url).not.toContain('name.eq=A&B=1 C');
         });
     });
 
@@ -259,6 +311,61 @@ describe('QailClient', () => {
             await client.health();
             const headers = fetch.mock.calls[0][1].headers;
             expect(headers['Authorization']).toBe('Bearer dynamic-token');
+        });
+    });
+
+    describe('realtime websocket', () => {
+        it('passes token via query param in subscribe()', async () => {
+            const fetch = mockFetch({ status: 'ok', version: '0.20.1' });
+            let created: MockWebSocket | undefined;
+
+            const client = new QailClient({
+                url: 'http://localhost:8080',
+                token: 'ws-jwt',
+                fetch: fetch as unknown as typeof fetch,
+                wsAuthMode: 'query',
+                webSocketFactory: (url) => {
+                    created = new MockWebSocket(url);
+                    return created as unknown as WebSocket;
+                },
+            });
+
+            const sub = client.subscribe('orders', () => { });
+            await vi.waitFor(() => expect(created).toBeDefined());
+            expect(created!.url).toContain('/ws?access_token=ws-jwt');
+
+            created!.open();
+            expect(created!.sent[0]).toBe(JSON.stringify({ action: 'listen', channel: 'orders' }));
+            sub.unsubscribe();
+        });
+
+        it('unsubscribe() before open prevents listen and callbacks', async () => {
+            const fetch = mockFetch({ status: 'ok', version: '0.20.1' });
+            let created: MockWebSocket | undefined;
+            const onMessage = vi.fn();
+
+            const client = new QailClient({
+                url: 'http://localhost:8080',
+                token: 'ws-jwt',
+                fetch: fetch as unknown as typeof fetch,
+                webSocketFactory: (url) => {
+                    created = new MockWebSocket(url);
+                    return created as unknown as WebSocket;
+                },
+            });
+
+            const sub = client.subscribe('orders', onMessage);
+            await vi.waitFor(() => expect(created).toBeDefined());
+
+            sub.unsubscribe();
+            expect(created!.closeCalled).toBe(true);
+
+            created!.open();
+            created!.emitMessage(JSON.stringify({ channel: 'orders', payload: '{"ok":true}' }));
+
+            expect(created!.sent).toEqual([]);
+            expect(onMessage).not.toHaveBeenCalled();
+            expect(sub.active).toBe(false);
         });
     });
 });

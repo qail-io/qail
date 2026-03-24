@@ -6,7 +6,7 @@ import XCTest
 /// A custom URLProtocol that intercepts all requests for testing.
 final class MockURLProtocol: URLProtocol {
     /// Handler to provide mock responses. Set before each test.
-    static var handler: ((URLRequest) throws -> (Data, HTTPURLResponse))?
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (Data, HTTPURLResponse))?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -337,5 +337,50 @@ final class QailTests: XCTestCase {
             XCTAssertEqual(error.code, "HTTP_500")
             XCTAssert(error.message.contains("Internal Server Error"))
         }
+    }
+
+    func testSelectBuilderEncodesFilterValueSafely() async throws {
+        MockURLProtocol.handler = { request in
+            let url = request.url!.absoluteString
+            XCTAssert(url.contains("name.eq=A%26B%3D1"))
+            XCTAssertFalse(url.contains("name.eq=A&B=1"))
+            return jsonResponse([
+                "data": [["id": 1, "name": "Alice"]],
+                "count": 1,
+                "limit": 50,
+                "offset": 0,
+            ])
+        }
+
+        let client = createClient()
+        let _: [User] = try await client.from("users")
+            .where("name", .eq, "A&B=1")
+            .all()
+    }
+
+    func testWebSocketRequestUsesAuthorizationHeader() throws {
+        let client = QailClient(config: .init(
+            url: "http://localhost:8080",
+            token: .string("ws-token"),
+            webSocketAuthMode: .header
+        ))
+
+        let request = try client.makeWebSocketRequest(token: "ws-token")
+        XCTAssertEqual(request.url?.absoluteString, "ws://localhost:8080/ws")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer ws-token")
+    }
+
+    func testWebSocketRequestSupportsQueryTokenMode() throws {
+        let client = QailClient(config: .init(
+            url: "https://localhost:8443",
+            token: .string("ws-token"),
+            webSocketAuthMode: .query(parameter: "access_token")
+        ))
+
+        let request = try client.makeWebSocketRequest(token: "ws-token")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), nil)
+        let url = request.url!.absoluteString
+        XCTAssert(url.hasPrefix("wss://localhost:8443/ws?"))
+        XCTAssert(url.contains("access_token=ws-token"))
     }
 }

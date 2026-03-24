@@ -1,4 +1,5 @@
 use super::*;
+use axum::http::{HeaderMap, HeaderValue, Uri, header::AUTHORIZATION};
 
 #[test]
 fn live_query_listen_success_registers_channel() {
@@ -135,4 +136,32 @@ async fn prune_finished_live_query_tasks_removes_finished_handles() {
     for (_, handle) in tasks.drain() {
         handle.abort();
     }
+}
+
+#[test]
+fn ws_auth_headers_extracts_query_token_when_authorization_missing() {
+    let headers = HeaderMap::new();
+    let uri: Uri = "/ws?access_token=query-token".parse().expect("uri parse");
+
+    let merged = auth_headers_for_ws(&headers, &uri);
+    assert_eq!(
+        merged.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+        Some("Bearer query-token")
+    );
+}
+
+#[test]
+fn ws_auth_headers_keeps_existing_authorization_header() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_static("Bearer header-token"),
+    );
+    let uri: Uri = "/ws?access_token=query-token".parse().expect("uri parse");
+
+    let merged = auth_headers_for_ws(&headers, &uri);
+    assert_eq!(
+        merged.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
+        Some("Bearer header-token")
+    );
 }

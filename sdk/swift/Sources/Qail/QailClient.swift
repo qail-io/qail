@@ -16,6 +16,8 @@ public struct QailConfig: Sendable {
     public let session: URLSession
     /// Use snake_case ↔ camelCase key conversion (default: true).
     public let snakeCaseKeys: Bool
+    /// WebSocket auth mode for `subscribe` (default: `.header`).
+    public let webSocketAuthMode: WebSocketAuthMode
 
     public init(
         url: String,
@@ -23,7 +25,8 @@ public struct QailConfig: Sendable {
         headers: [String: String] = [:],
         timeout: TimeInterval = 30,
         session: URLSession = .shared,
-        snakeCaseKeys: Bool = true
+        snakeCaseKeys: Bool = true,
+        webSocketAuthMode: WebSocketAuthMode = .header
     ) {
         self.url = url
         self.token = token
@@ -31,7 +34,18 @@ public struct QailConfig: Sendable {
         self.timeout = timeout
         self.session = session
         self.snakeCaseKeys = snakeCaseKeys
+        self.webSocketAuthMode = webSocketAuthMode
     }
+}
+
+/// Authentication mode for WebSocket connections.
+public enum WebSocketAuthMode: Sendable {
+    /// Do not include token during WS handshake.
+    case none
+    /// Send `Authorization: Bearer <token>` header during WS handshake.
+    case header
+    /// Append token as query parameter (default key: `access_token`).
+    case query(parameter: String = "access_token")
 }
 
 /// Token source — either a static string or an async closure.
@@ -75,6 +89,7 @@ public final class QailClient: Sendable {
     private let timeout: TimeInterval
     private let tokenSource: TokenSource?
     private let session: URLSession
+    private let webSocketAuthMode: WebSocketAuthMode
     internal let decoder: JSONDecoder
     internal let encoder: JSONEncoder
 
@@ -87,6 +102,7 @@ public final class QailClient: Sendable {
         self.timeout = config.timeout
         self.tokenSource = config.token
         self.session = config.session
+        self.webSocketAuthMode = config.webSocketAuthMode
 
         let dec = JSONDecoder()
         let enc = JSONEncoder()
@@ -176,18 +192,23 @@ public final class QailClient: Sendable {
     /// sub.unsubscribe()
     /// ```
     public func subscribe(channel: String, onMessage: @escaping @Sendable (String) -> Void) -> QailSubscription {
-        let wsUrl = baseUrl.replacingOccurrences(of: "http", with: "ws") + "/ws"
-        let url = URL(string: wsUrl)!
-        let task = session.webSocketTask(with: url)
-        let subscription = WebSocketSubscription(task: task, channel: channel, onMessage: onMessage)
-        task.resume()
+        let subscription = WebSocketSubscription(channel: channel, onMessage: onMessage)
 
-        // Send listen command once connected
-        let listenMsg = #"{"action":"listen","channel":"\#(channel)"}"#
-        task.send(.string(listenMsg)) { _ in }
+        Task { [weak self] in
+            guard let self else {
+                subscription.markFailed()
+                return
+            }
+            do {
+                let token = try await resolveWebSocketToken()
+                let request = try makeWebSocketRequest(token: token)
+                let task = session.webSocketTask(with: request)
+                subscription.attach(task: task)
+            } catch {
+                subscription.markFailed()
+            }
+        }
 
-        // Start receiving
-        subscription.startReceiving()
         return subscription
     }
 
@@ -330,5 +351,50 @@ public final class QailClient: Sendable {
         }
 
         return data
+    }
+
+    internal func makeWebSocketRequest(token: String?) throws -> URLRequest {
+        guard var components = URLComponents(string: baseUrl) else {
+            throw QailError(code: "INVALID_URL", message: "Bad URL: \(baseUrl)", details: nil, requestId: nil, hint: nil, table: nil, column: nil)
+        }
+
+        switch components.scheme?.lowercased() {
+        case "https": components.scheme = "wss"
+        case "http": components.scheme = "ws"
+        default:
+            throw QailError(code: "INVALID_URL", message: "Unsupported URL scheme for WebSocket: \(baseUrl)", details: nil, requestId: nil, hint: nil, table: nil, column: nil)
+        }
+
+        let existingPath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        components.path = "/" + [existingPath, "ws"].filter { !$0.isEmpty }.joined(separator: "/")
+
+        if let token {
+            switch webSocketAuthMode {
+            case .none, .header:
+                break
+            case .query(let parameter):
+                var items = components.queryItems ?? []
+                items.append(URLQueryItem(name: parameter, value: token))
+                components.queryItems = items
+            }
+        }
+
+        guard let url = components.url else {
+            throw QailError(code: "INVALID_URL", message: "Bad WebSocket URL from: \(baseUrl)", details: nil, requestId: nil, hint: nil, table: nil, column: nil)
+        }
+
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        for (key, value) in defaultHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        if let token, case .header = webSocketAuthMode {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    private func resolveWebSocketToken() async throws -> String? {
+        guard let tokenSource else { return nil }
+        return try await tokenSource.resolve()
     }
 }

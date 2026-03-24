@@ -5,6 +5,20 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+
+@PublishedApi
+internal fun encodeQueryComponent(value: String): String =
+    URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20")
+
+@PublishedApi
+internal fun buildEncodedQuery(params: List<Pair<String, String>>): String {
+    if (params.isEmpty()) return ""
+    val qs = params.joinToString("&") { (key, value) ->
+        "${encodeQueryComponent(key)}=${encodeQueryComponent(value)}"
+    }
+    return "?$qs"
+}
 
 // ─── Select Builder ─────────────────────────────────────────────────
 
@@ -25,8 +39,14 @@ class SelectBuilder<T>(
     @PublishedApi internal val table: String,
     @PublishedApi internal val type: Class<T>,
 ) {
+    private data class FilterClause(
+        val column: String,
+        val op: FilterOp,
+        val value: String,
+    )
+
     private var columns: String? = null
-    private val filters = mutableListOf<String>()
+    private val filters = mutableListOf<FilterClause>()
     private val sorts = mutableListOf<String>()
     private var _limit: Int? = null
     private var _offset: Int? = null
@@ -43,8 +63,7 @@ class SelectBuilder<T>(
 
     /** Add a filter condition. */
     fun where(column: String, op: FilterOp, value: String) = apply {
-        val encoded = URLEncoder.encode(value, "UTF-8")
-        filters += "$column.${op.value}=$encoded"
+        filters += FilterClause(column = column, op = op, value = value)
     }
 
     /** Shorthand: where(column, EQ, value). */
@@ -106,34 +125,36 @@ class SelectBuilder<T>(
         column: String? = null,
         groupBy: List<String>? = null,
     ): AggregateResponse {
-        val params = mutableListOf("func=${func.value}")
-        column?.let { params += "column=$it" }
-        groupBy?.let { params += "group_by=${it.joinToString(",")}" }
+        val params = mutableListOf<Pair<String, String>>("func" to func.value)
+        column?.let { params += "column" to it }
+        groupBy?.let { params += "group_by" to it.joinToString(",") }
+        filters.forEach { filter ->
+            params += "${filter.column}.${filter.op.value}" to filter.value
+        }
 
-        val paramQs = params.joinToString("&")
-        val filterQs = filters.joinToString("&")
-        val fullQs = listOf(paramQs, filterQs).filter { it.isNotEmpty() }.joinToString("&")
-
-        return client.request(HttpMethod.Get, "/api/$table/aggregate?$fullQs")
+        return client.request(HttpMethod.Get, "/api/$table/aggregate${buildEncodedQuery(params)}")
     }
 
     // Internal
 
     @PublishedApi
     internal fun buildQueryString(): String {
-        val params = mutableListOf<String>()
-        columns?.let { params += "select=$it" }
-        if (sorts.isNotEmpty()) params += "sort=${sorts.joinToString(",")}"
-        _limit?.let { params += "limit=$it" }
-        _offset?.let { params += "offset=$it" }
-        if (expands.isNotEmpty()) params += "expand=${expands.joinToString(",")}"
-        _distinct?.let { params += "distinct=$it" }
-        _search?.let { params += "search=$it" }
-        _searchColumns?.let { params += "search_columns=$it" }
-        if (_stream) params += "stream=true"
+        val params = mutableListOf<Pair<String, String>>()
+        columns?.let { params += "select" to it }
+        if (sorts.isNotEmpty()) params += "sort" to sorts.joinToString(",")
+        _limit?.let { params += "limit" to it.toString() }
+        _offset?.let { params += "offset" to it.toString() }
+        if (expands.isNotEmpty()) params += "expand" to expands.joinToString(",")
+        _distinct?.let { params += "distinct" to it }
+        _search?.let { params += "search" to it }
+        _searchColumns?.let { params += "search_columns" to it }
+        if (_stream) params += "stream" to "true"
 
-        val all = (params + filters).filter { it.isNotEmpty() }
-        return if (all.isEmpty()) "" else "?${all.joinToString("&")}"
+        filters.forEach { filter ->
+            params += "${filter.column}.${filter.op.value}" to filter.value
+        }
+
+        return buildEncodedQuery(params)
     }
 }
 
@@ -176,11 +197,11 @@ class InsertBuilder<T>(
 
     /** Execute the insert. */
     suspend inline fun <reified R : T> exec(): MutationResponse<R> {
-        val params = mutableListOf<String>()
-        _returning?.let { params += "returning=$it" }
-        _onConflict?.let { params += "on_conflict=$it" }
-        _onConflictAction?.let { params += "on_conflict_action=$it" }
-        val qs = if (params.isEmpty()) "" else "?${params.joinToString("&")}"
+        val params = mutableListOf<Pair<String, String>>()
+        _returning?.let { params += "returning" to it }
+        _onConflict?.let { params += "on_conflict" to it }
+        _onConflictAction?.let { params += "on_conflict_action" to it }
+        val qs = buildEncodedQuery(params)
 
         return client.request(HttpMethod.Post, "/api/$table$qs") {
             setBody(data)
@@ -217,9 +238,9 @@ class UpdateBuilder<T>(
 
     /** Execute the update on a specific row. */
     suspend inline fun <reified R : T> exec(id: Any): MutationResponse<R> {
-        val params = mutableListOf<String>()
-        _returning?.let { params += "returning=$it" }
-        val qs = if (params.isEmpty()) "" else "?${params.joinToString("&")}"
+        val params = mutableListOf<Pair<String, String>>()
+        _returning?.let { params += "returning" to it }
+        val qs = buildEncodedQuery(params)
 
         return client.request(HttpMethod.Patch, "/api/$table/$id$qs") {
             setBody(data)

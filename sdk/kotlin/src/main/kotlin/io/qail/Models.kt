@@ -7,11 +7,20 @@ import kotlinx.serialization.Serializable
 
 /** Filter operators matching PostgREST-style query params. */
 enum class FilterOp(val value: String) {
-    EQ("eq"), NEQ("neq"),
+    EQ("eq"),
+    NE("ne"),
+    @Deprecated("Use NE instead")
+    NEQ("ne"),
     GT("gt"), GTE("gte"),
     LT("lt"), LTE("lte"),
     LIKE("like"), ILIKE("ilike"),
-    IN("in"), IS("is");
+    IN("in"),
+    NOT_IN("not_in"),
+    IS_NULL("is_null"),
+    IS_NOT_NULL("is_not_null"),
+    CONTAINS("contains"),
+    @Deprecated("Use IS_NULL / IS_NOT_NULL instead")
+    IS("is");
 }
 
 // ─── Responses ──────────────────────────────────────────────────────

@@ -19,7 +19,25 @@ export interface QailConfig {
     timeout?: number;
     /** Custom fetch implementation (default: globalThis.fetch) */
     fetch?: typeof fetch;
+    /** WebSocket auth mode for subscribe() (default: 'query') */
+    wsAuthMode?: WebSocketAuthMode;
+    /** Query param key for wsAuthMode='query' (default: 'access_token') */
+    wsTokenQueryParam?: string;
+    /** Custom WebSocket factory for non-browser runtimes */
+    webSocketFactory?: WebSocketFactory;
 }
+
+export type WebSocketAuthMode = 'none' | 'query';
+
+export interface WebSocketFactoryOptions {
+    token?: string;
+    headers: Record<string, string>;
+}
+
+export type WebSocketFactory = (
+    url: string,
+    options: WebSocketFactoryOptions,
+) => WebSocket;
 
 export interface ListResponse<T = Record<string, unknown>> {
     data: T[];
@@ -87,6 +105,9 @@ export class QailClient {
     private timeout: number;
     private tokenSource?: string | (() => string | Promise<string>);
     private _fetch: typeof fetch;
+    private wsAuthMode: WebSocketAuthMode;
+    private wsTokenQueryParam: string;
+    private webSocketFactory: WebSocketFactory;
 
     constructor(config: QailConfig) {
         this.baseUrl = config.url.replace(/\/+$/, '');
@@ -94,6 +115,15 @@ export class QailClient {
         this.timeout = config.timeout ?? 30_000;
         this.tokenSource = config.token;
         this._fetch = config.fetch ?? globalThis.fetch;
+        this.wsAuthMode = config.wsAuthMode ?? 'query';
+        this.wsTokenQueryParam = config.wsTokenQueryParam ?? 'access_token';
+        this.webSocketFactory = config.webSocketFactory ?? ((url) => {
+            const WsCtor = globalThis.WebSocket;
+            if (!WsCtor) {
+                throw new Error('WebSocket is not available in this runtime. Provide webSocketFactory.');
+            }
+            return new WsCtor(url);
+        });
     }
 
     // ── Query builder entry points ──────────────────────────────────
@@ -126,7 +156,7 @@ export class QailClient {
     }
 
     /** Execute a batch of Qail DSL queries */
-    async batch(queries: string[]): Promise<BatchResult[]> {
+    async batch<T = Record<string, unknown>>(queries: string[]): Promise<BatchResult<T>[]> {
         return this.request('POST', '/qail/batch', JSON.stringify(queries));
     }
 
@@ -167,34 +197,61 @@ export class QailClient {
 
     /** Subscribe to a Postgres LISTEN channel via WebSocket */
     subscribe(channel: string, onMessage: (payload: string) => void): QailSubscription {
-        const wsUrl = this.baseUrl.replace(/^http/, 'ws') + '/ws';
-        const ws = new WebSocket(wsUrl);
         let alive = true;
+        let ws: WebSocket | undefined;
+        const WS_CONNECTING = 0;
+        const WS_OPEN = 1;
 
-        ws.onopen = () => {
-            ws.send(JSON.stringify({ action: 'listen', channel }));
-        };
-
-        ws.onmessage = (event) => {
+        void (async () => {
             try {
-                const msg = JSON.parse(event.data as string);
-                if (msg.channel === channel && msg.payload) {
-                    onMessage(msg.payload);
-                }
+                const token = await this.resolveToken();
+                if (!alive) return;
+
+                const wsUrl = this.buildWebSocketUrl(token);
+                const headers: Record<string, string> = token
+                    ? { Authorization: `Bearer ${token}` }
+                    : {};
+                ws = this.webSocketFactory(wsUrl, { token, headers });
+
+                ws.onopen = () => {
+                    if (!alive) {
+                        ws?.close();
+                        return;
+                    }
+                    ws?.send(JSON.stringify({ action: 'listen', channel }));
+                };
+
+                ws.onmessage = (event) => {
+                    if (!alive || typeof event.data !== 'string') return;
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.channel === channel && msg.payload) {
+                            onMessage(msg.payload);
+                        }
+                    } catch {
+                        // Non-JSON message, ignore
+                    }
+                };
+
+                ws.onclose = () => {
+                    alive = false;
+                };
             } catch {
-                // Non-JSON message, ignore
+                alive = false;
             }
-        };
+        })();
 
         return {
             unsubscribe: () => {
                 alive = false;
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ action: 'unlisten', channel }));
+                if (ws && (ws.readyState === WS_CONNECTING || ws.readyState === WS_OPEN)) {
+                    if (ws.readyState === WS_OPEN) {
+                        ws.send(JSON.stringify({ action: 'unlisten', channel }));
+                    }
                     ws.close();
                 }
             },
-            get active() { return alive && ws.readyState === WebSocket.OPEN; },
+            get active() { return Boolean(alive && ws && ws.readyState === WS_OPEN); },
         };
     }
 
@@ -212,11 +269,8 @@ export class QailClient {
             'Content-Type': contentType ?? 'application/json',
         };
 
-        // Resolve token
-        if (this.tokenSource) {
-            const token = typeof this.tokenSource === 'function'
-                ? await this.tokenSource()
-                : this.tokenSource;
+        const token = await this.resolveToken();
+        if (token) {
             headers['Authorization'] = `Bearer ${token}`;
         }
 
@@ -259,10 +313,8 @@ export class QailClient {
     ): Promise<string> {
         const headers: Record<string, string> = { ...this.defaultHeaders };
 
-        if (this.tokenSource) {
-            const token = typeof this.tokenSource === 'function'
-                ? await this.tokenSource()
-                : this.tokenSource;
+        const token = await this.resolveToken();
+        if (token) {
             headers['Authorization'] = `Bearer ${token}`;
         }
 
@@ -291,6 +343,23 @@ export class QailClient {
         } finally {
             clearTimeout(timer);
         }
+    }
+
+    private async resolveToken(): Promise<string | undefined> {
+        if (!this.tokenSource) return undefined;
+        const token = typeof this.tokenSource === 'function'
+            ? await this.tokenSource()
+            : this.tokenSource;
+        return token || undefined;
+    }
+
+    private buildWebSocketUrl(token?: string): string {
+        const wsBase = this.baseUrl.replace(/^https?/i, (scheme) => scheme.toLowerCase() === 'https' ? 'wss' : 'ws');
+        const url = new URL(`${wsBase}/ws`);
+        if (token && this.wsAuthMode === 'query') {
+            url.searchParams.set(this.wsTokenQueryParam, token);
+        }
+        return url.toString();
     }
 }
 

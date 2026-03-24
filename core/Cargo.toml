@@ -1,6 +1,6 @@
 [package]
 name = "qail-core"
-version = "0.26.6"
+version = "0.26.7"
 edition = "2024"
 description = "AST-native query builder - type-safe expressions, zero SQL strings"
 license = "Apache-2.0"

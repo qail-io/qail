@@ -4,10 +4,15 @@ import Foundation
 
 /// Filter operators matching PostgREST-style query params.
 public enum FilterOp: String, Sendable {
-    case eq, neq, gt, gte, lt, lte
+    case eq, ne, gt, gte, lt, lte
     case like, ilike
     case `in`
-    case `is`
+    case notIn = "not_in"
+    case isNull = "is_null"
+    case isNotNull = "is_not_null"
+    case contains
+    @available(*, deprecated, message: "Use .ne instead.")
+    public static let neq: FilterOp = .ne
 }
 
 // MARK: - Sort Direction
@@ -39,7 +44,18 @@ public struct MutationResponse<T: Decodable>: Decodable, @unchecked Sendable {
 
     enum CodingKeys: String, CodingKey {
         case data
-        case rowsAffected = "rows_affected"
+        case rowsAffected
+        case rowsUnderscored = "rows_affected"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        data = try container.decode(T.self, forKey: .data)
+        if let value = try container.decodeIfPresent(Int.self, forKey: .rowsAffected) {
+            rowsAffected = value
+        } else {
+            rowsAffected = try container.decode(Int.self, forKey: .rowsUnderscored)
+        }
     }
 }
 
@@ -51,8 +67,20 @@ public struct QueryResponse<T: Decodable>: Decodable, @unchecked Sendable {
 
     enum CodingKeys: String, CodingKey {
         case data
-        case rowsAffected = "rows_affected"
+        case rowsAffected
+        case rowsUnderscored = "rows_affected"
         case columns
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        data = try container.decode([T].self, forKey: .data)
+        columns = try container.decode([String].self, forKey: .columns)
+        if let value = try container.decodeIfPresent(Int.self, forKey: .rowsAffected) {
+            rowsAffected = value
+        } else {
+            rowsAffected = try container.decode(Int.self, forKey: .rowsUnderscored)
+        }
     }
 }
 
@@ -110,50 +138,95 @@ public protocol QailSubscription {
 
 /// Concrete WebSocket subscription using URLSessionWebSocketTask.
 public final class WebSocketSubscription: QailSubscription, @unchecked Sendable {
-    private let task: URLSessionWebSocketTask
     private let channel: String
     private let onMessage: @Sendable (String) -> Void
-    private var _active = true
+    private let lock = NSLock()
+    private var task: URLSessionWebSocketTask?
+    private var isSubscribed = true
 
-    init(task: URLSessionWebSocketTask, channel: String, onMessage: @escaping @Sendable (String) -> Void) {
-        self.task = task
+    init(channel: String, onMessage: @escaping @Sendable (String) -> Void) {
         self.channel = channel
         self.onMessage = onMessage
     }
 
-    public var active: Bool { _active && task.state == .running }
+    public var active: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isSubscribed && (task?.state == .running)
+    }
+
+    func attach(task: URLSessionWebSocketTask) {
+        lock.lock()
+        guard isSubscribed else {
+            lock.unlock()
+            task.cancel(with: .goingAway, reason: nil)
+            return
+        }
+        self.task = task
+        lock.unlock()
+
+        task.resume()
+        send(action: "listen", on: task)
+        startReceiving(task: task)
+    }
+
+    func markFailed() {
+        lock.lock()
+        isSubscribed = false
+        lock.unlock()
+    }
 
     public func unsubscribe() {
-        _active = false
-        let msg = #"{"action":"unlisten","channel":"\#(channel)"}"#
-        task.send(.string(msg)) { [weak self] _ in
-            self?.task.cancel(with: .goingAway, reason: nil)
+        let currentTask: URLSessionWebSocketTask? = {
+            lock.lock()
+            defer { lock.unlock() }
+            isSubscribed = false
+            return task
+        }()
+
+        guard let currentTask else { return }
+        if currentTask.state == .running {
+            send(action: "unlisten", on: currentTask)
+        }
+        currentTask.cancel(with: .goingAway, reason: nil)
+    }
+
+    private func send(action: String, on task: URLSessionWebSocketTask) {
+        let msg = #"{"action":"\#(action)","channel":"\#(channel)"}"#
+        task.send(.string(msg)) { _ in }
+    }
+
+    private func shouldContinue(with task: URLSessionWebSocketTask) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isSubscribed && self.task === task
+    }
+
+    private func parseAndDispatch(_ data: Data) {
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let ch = json["channel"] as? String, ch == channel,
+           let payload = json["payload"] as? String {
+            onMessage(payload)
         }
     }
 
-    func startReceiving() {
+    func startReceiving(task: URLSessionWebSocketTask) {
         task.receive { [weak self] result in
-            guard let self, self._active else { return }
+            guard let self else { return }
+            guard shouldContinue(with: task) else { return }
             switch result {
             case .success(.string(let text)):
-                if let data = text.data(using: .utf8),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let ch = json["channel"] as? String, ch == self.channel,
-                   let payload = json["payload"] as? String {
-                    self.onMessage(payload)
+                if let data = text.data(using: .utf8) {
+                    parseAndDispatch(data)
                 }
-                self.startReceiving() // Continue listening
+                startReceiving(task: task) // Continue listening
             case .success(.data(let data)):
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let ch = json["channel"] as? String, ch == self.channel,
-                   let payload = json["payload"] as? String {
-                    self.onMessage(payload)
-                }
-                self.startReceiving()
+                parseAndDispatch(data)
+                startReceiving(task: task)
             case .failure:
-                self._active = false
+                markFailed()
             @unknown default:
-                break
+                markFailed()
             }
         }
     }

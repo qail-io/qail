@@ -114,9 +114,9 @@ class QailClientTest {
         val qail = mockClient { request ->
             val url = request.url.toString()
             assertTrue(url.contains("/api/users?"))
-            assertTrue(url.contains("select=id,name,email"))
+            assertTrue(url.contains("select=id%2Cname%2Cemail"))
             assertTrue(url.contains("limit=10"))
-            assertTrue(url.contains("sort=created_at:desc"))
+            assertTrue(url.contains("sort=created_at%3Adesc"))
             assertTrue(url.contains("active.eq=true"))
             assertEquals(HttpMethod.Get, request.method)
             jsonResponse("""{"data":[{"id":1,"name":"Alice"}],"count":1,"limit":10,"offset":0}""")
@@ -146,12 +146,26 @@ class QailClientTest {
     fun testExpand() = runTest {
         val qail = mockClient { request ->
             val url = request.url.toString()
-            assertTrue(url.contains("expand=users,products"))
+            assertTrue(url.contains("expand=users%2Cproducts"))
             jsonResponse("""{"data":[],"count":0,"limit":50,"offset":0}""")
         }
         qail.from<User>("orders")
             .expand("users")
             .expand("products")
+            .all<User>()
+    }
+
+    @Test
+    fun testFilterEncodingEscapesReservedCharacters() = runTest {
+        val qail = mockClient { request ->
+            val url = request.url.toString()
+            assertTrue(url.contains("name.eq=A%26B%3D1%20C"))
+            assertFalse(url.contains("name.eq=A&B=1 C"))
+            jsonResponse("""{"data":[{"id":1,"name":"Alice"}],"count":1,"limit":50,"offset":0}""")
+        }
+
+        qail.from<User>("users")
+            .where("name", FilterOp.EQ, "A&B=1 C")
             .all<User>()
     }
 
@@ -162,7 +176,7 @@ class QailClientTest {
         val qail = mockClient { request ->
             val url = request.url.toString()
             assertTrue(url.contains("/api/users"))
-            assertTrue(url.contains("returning=*"))
+            assertEquals("*", request.url.parameters["returning"])
             assertEquals(HttpMethod.Post, request.method)
             jsonResponse("""{"data":{"id":1,"name":"New"},"rows_affected":1}""")
         }
@@ -194,7 +208,7 @@ class QailClientTest {
     fun testUpdate() = runTest {
         val qail = mockClient { request ->
             assertEquals("/api/users/1", request.url.encodedPath)
-            assertTrue(request.url.toString().contains("returning=*"))
+            assertEquals("*", request.url.parameters["returning"])
             assertEquals(HttpMethod.Patch, request.method)
             jsonResponse("""{"data":{"id":1,"name":"Updated"},"rows_affected":1}""")
         }
@@ -257,5 +271,30 @@ class QailClientTest {
             assertEquals("HTTP_500", e.code)
             assertTrue(e.message!!.contains("Internal Server Error"))
         }
+    }
+
+    @Test
+    fun testBuildWebSocketUrlQueryMode() {
+        val qail = QailClient(QailConfig(
+            url = "https://localhost:8080",
+            token = "ws token",
+            wsAuthMode = WebSocketAuthMode.QUERY,
+        ))
+
+        val url = qail.buildWebSocketUrl("ws token")
+        assertTrue(url.startsWith("wss://localhost:8080/ws?"))
+        assertTrue(url.contains("access_token=ws%20token"))
+    }
+
+    @Test
+    fun testBuildWebSocketUrlHeaderMode() {
+        val qail = QailClient(QailConfig(
+            url = "http://localhost:8080",
+            token = "ws-token",
+            wsAuthMode = WebSocketAuthMode.HEADER,
+        ))
+
+        val url = qail.buildWebSocketUrl("ws-token")
+        assertEquals("ws://localhost:8080/ws", url)
     }
 }

@@ -12,11 +12,16 @@ import Foundation
 ///     .limit(10)
 ///     .all()
 /// ```
-public final class SelectBuilder<T: Decodable>: @unchecked Sendable {
+public final class SelectBuilder<T: Decodable> {
     private let client: QailClient
     private let table: String
+    private struct FilterClause {
+        let column: String
+        let op: FilterOp
+        let value: String
+    }
     private var columns: String?
-    private var filters: [String] = []
+    private var filters: [FilterClause] = []
     private var sorts: [String] = []
     private var _limit: Int?
     private var _offset: Int?
@@ -41,8 +46,7 @@ public final class SelectBuilder<T: Decodable>: @unchecked Sendable {
     /// Add a filter condition.
     @discardableResult
     public func `where`(_ column: String, _ op: FilterOp, _ value: String) -> Self {
-        let encoded = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
-        filters.append("\(column).\(op.rawValue)=\(encoded)")
+        filters.append(FilterClause(column: column, op: op, value: value))
         return self
     }
 
@@ -172,17 +176,18 @@ public final class SelectBuilder<T: Decodable>: @unchecked Sendable {
         column: String? = nil,
         groupBy: [String]? = nil
     ) async throws -> AggregateResponse {
-        var params: [String] = ["func=\(func_.rawValue)"]
-        if let column { params.append("column=\(column)") }
-        if let groupBy { params.append("group_by=\(groupBy.joined(separator: ","))") }
-
-        let filterQs = filters.joined(separator: "&")
-        let paramQs = params.joined(separator: "&")
-        let fullQs = [paramQs, filterQs].filter { !$0.isEmpty }.joined(separator: "&")
+        var components = URLComponents()
+        var items: [URLQueryItem] = [URLQueryItem(name: "func", value: func_.rawValue)]
+        if let column { items.append(URLQueryItem(name: "column", value: column)) }
+        if let groupBy { items.append(URLQueryItem(name: "group_by", value: groupBy.joined(separator: ","))) }
+        for filter in filters {
+            items.append(URLQueryItem(name: "\(filter.column).\(filter.op.rawValue)", value: filter.value))
+        }
+        components.queryItems = items
 
         return try await client.request(
             method: "GET",
-            path: "/api/\(table)/aggregate?\(fullQs)"
+            path: "/api/\(table)/aggregate" + (components.percentEncodedQuery.map { "?\($0)" } ?? "")
         )
     }
 
@@ -201,19 +206,12 @@ public final class SelectBuilder<T: Decodable>: @unchecked Sendable {
         if let _search { items.append(URLQueryItem(name: "search", value: _search)) }
         if let _searchColumns { items.append(URLQueryItem(name: "search_columns", value: _searchColumns)) }
         if _stream { items.append(URLQueryItem(name: "stream", value: "true")) }
-
-        components.queryItems = items.isEmpty ? nil : items
-
-        // Build the standard query string
-        var qs = components.query ?? ""
-
-        // Append raw filters (they're already percent-encoded)
-        if !filters.isEmpty {
-            let filterQs = filters.joined(separator: "&")
-            qs = qs.isEmpty ? filterQs : "\(qs)&\(filterQs)"
+        for filter in filters {
+            items.append(URLQueryItem(name: "\(filter.column).\(filter.op.rawValue)", value: filter.value))
         }
 
-        return qs.isEmpty ? "" : "?\(qs)"
+        components.queryItems = items.isEmpty ? nil : items
+        return components.percentEncodedQuery.map { "?\($0)" } ?? ""
     }
 }
 
@@ -227,7 +225,7 @@ public final class SelectBuilder<T: Decodable>: @unchecked Sendable {
 ///     .returning("*")
 ///     .exec()
 /// ```
-public final class InsertBuilder<T: Decodable>: @unchecked Sendable {
+public final class InsertBuilder<T: Decodable> {
     private let client: QailClient
     private let table: String
     private var data: Any = [String: Any]()
@@ -294,7 +292,7 @@ public final class InsertBuilder<T: Decodable>: @unchecked Sendable {
 ///     .returning("*")
 ///     .exec(id: 1)
 /// ```
-public final class UpdateBuilder<T: Decodable>: @unchecked Sendable {
+public final class UpdateBuilder<T: Decodable> {
     private let client: QailClient
     private let table: String
     private var data: [String: Any] = [:]
@@ -339,7 +337,7 @@ public final class UpdateBuilder<T: Decodable>: @unchecked Sendable {
 /// ```swift
 /// let res = try await qail.delete("users").exec(id: 42)
 /// ```
-public final class DeleteBuilder: @unchecked Sendable {
+public final class DeleteBuilder {
     private let client: QailClient
     private let table: String
 
