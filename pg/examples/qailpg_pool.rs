@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut conn = pool.acquire_system().await.unwrap();
 
             while start.elapsed() < TARGET_DURATION {
-                let results = conn.pipeline_ast(&batch_cmds).await.unwrap();
+                let results = conn.pipeline_execute_rows_ast(&batch_cmds).await.unwrap();
 
                 let mut batch_rows = 0;
                 for result_set in &results {

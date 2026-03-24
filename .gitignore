@@ -79,6 +79,8 @@ bench/benchmarks/fifty_million_consume
 # Go bench
 go/go/bench/
 pg/examples/*.go
+!pg/examples/pgx_benchmark.go
+pg/examples/pgx_benchmark
 
 # Security: Internal config (not for distribution)
 qail.toml

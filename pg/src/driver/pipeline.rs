@@ -2,12 +2,12 @@
 //!
 //!
 //! Performance hierarchy (fastest to slowest):
-//! 1. `pipeline_ast_cached` - Parse once, Bind+Execute many (275k q/s)
-//! 2. `pipeline_simple_bytes_fast` - Pre-encoded simple query
-//! 3. `pipeline_bytes_fast` - Pre-encoded extended query
-//! 4. `pipeline_simple_fast` - Simple query protocol (~99k q/s)
-//! 5. `pipeline_ast_fast` - Fast extended query, count only
-//! 6. `pipeline_ast` - Full results collection
+//! 1. `pipeline_execute_count_ast_cached` - Parse once, Bind+Execute many (275k q/s)
+//! 2. `pipeline_execute_count_simple_wire` - Pre-encoded simple query
+//! 3. `pipeline_execute_count_wire` - Pre-encoded extended query
+//! 4. `pipeline_execute_count_simple_ast` - Simple query protocol (~99k q/s)
+//! 5. `pipeline_execute_count_ast_oneshot` - Fast extended query, count only
+//! 6. `pipeline_execute_rows_ast` - Full results collection
 //! 7. `query_pipeline` - SQL-based pipelining
 
 use super::{
@@ -16,6 +16,46 @@ use super::{
 };
 use crate::protocol::{AstEncoder, BackendMessage, PgEncoder};
 use bytes::BytesMut;
+
+/// Strategy for AST pipeline execution.
+///
+/// `Auto` favors the cached prepared-statement path for large batches and
+/// one-shot execution for tiny batches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AstPipelineMode {
+    /// Heuristic strategy:
+    /// - small batch => `OneShot`
+    /// - larger batch => `Cached`
+    Auto,
+    /// Parse+Bind+Execute for each command in the batch.
+    OneShot,
+    /// Cache prepared SQL templates and execute Bind+Execute in hot path.
+    Cached,
+}
+
+impl Default for AstPipelineMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl AstPipelineMode {
+    const AUTO_CACHE_MIN_BATCH: usize = 8;
+
+    #[inline]
+    fn resolve_for_batch_len(self, batch_len: usize) -> Self {
+        match self {
+            Self::Auto => {
+                if batch_len >= Self::AUTO_CACHE_MIN_BATCH {
+                    Self::Cached
+                } else {
+                    Self::OneShot
+                }
+            }
+            mode => mode,
+        }
+    }
+}
 
 #[inline]
 fn return_with_desync<T>(conn: &mut PgConnection, err: PgError) -> PgResult<T> {
@@ -37,6 +77,15 @@ fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError
         conn.clear_prepared_statement_state();
     }
     *slot = Some(err);
+}
+
+#[inline]
+fn rollback_new_cached_statements(conn: &mut PgConnection, new_stmt_hashes: &[u64]) {
+    for sql_hash in new_stmt_hashes {
+        if let Some(stmt_name) = conn.stmt_cache.remove(sql_hash) {
+            conn.prepared_statements.remove(&stmt_name);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -433,7 +482,7 @@ impl PgConnection {
     }
 
     /// Execute multiple Qail ASTs in a single network round-trip.
-    pub async fn pipeline_ast(
+    pub async fn pipeline_execute_rows_ast(
         &mut self,
         cmds: &[qail_core::ast::Qail],
     ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
@@ -512,7 +561,10 @@ impl PgConnection {
     }
 
     /// FAST AST pipeline - returns only query count, no result parsing.
-    pub async fn pipeline_ast_fast(&mut self, cmds: &[qail_core::ast::Qail]) -> PgResult<usize> {
+    pub async fn pipeline_execute_count_ast_oneshot(
+        &mut self,
+        cmds: &[qail_core::ast::Qail],
+    ) -> PgResult<usize> {
         let buf = AstEncoder::encode_batch(cmds).map_err(|e| PgError::Encode(e.to_string()))?;
 
         self.write_all_with_timeout(&buf, "stream write").await?;
@@ -533,7 +585,7 @@ impl PgConnection {
                 Ok(msg_type) => {
                     let event = match flow.validate_msg_type(
                         msg_type,
-                        "pipeline_ast_fast",
+                        "pipeline_execute_count_ast_oneshot",
                         error.is_some(),
                     ) {
                         Ok(event) => event,
@@ -560,9 +612,31 @@ impl PgConnection {
         }
     }
 
+    /// Execute AST pipeline with explicit strategy mode.
+    ///
+    /// `Auto` uses a lightweight batch-size heuristic:
+    /// - `< 8` queries: one-shot path (`pipeline_execute_count_ast_oneshot`)
+    /// - `>= 8` queries: cached path (`pipeline_execute_count_ast_cached`)
+    #[inline]
+    pub async fn pipeline_execute_count_ast_with_mode(
+        &mut self,
+        cmds: &[qail_core::ast::Qail],
+        mode: AstPipelineMode,
+    ) -> PgResult<usize> {
+        if cmds.is_empty() {
+            return Ok(0);
+        }
+
+        match mode.resolve_for_batch_len(cmds.len()) {
+            AstPipelineMode::OneShot => self.pipeline_execute_count_ast_oneshot(cmds).await,
+            AstPipelineMode::Cached => self.pipeline_execute_count_ast_cached(cmds).await,
+            AstPipelineMode::Auto => unreachable!("Auto mode must resolve to concrete strategy"),
+        }
+    }
+
     /// FASTEST extended query pipeline - takes pre-encoded wire bytes.
     #[inline]
-    pub async fn pipeline_bytes_fast(
+    pub async fn pipeline_execute_count_wire(
         &mut self,
         wire_bytes: &[u8],
         expected_queries: usize,
@@ -586,7 +660,7 @@ impl PgConnection {
                 Ok(msg_type) => {
                     let event = match flow.validate_msg_type(
                         msg_type,
-                        "pipeline_bytes_fast",
+                        "pipeline_execute_count_wire",
                         error.is_some(),
                     ) {
                         Ok(event) => event,
@@ -615,7 +689,10 @@ impl PgConnection {
 
     /// Simple query protocol pipeline - uses 'Q' message.
     #[inline]
-    pub async fn pipeline_simple_fast(&mut self, cmds: &[qail_core::ast::Qail]) -> PgResult<usize> {
+    pub async fn pipeline_execute_count_simple_ast(
+        &mut self,
+        cmds: &[qail_core::ast::Qail],
+    ) -> PgResult<usize> {
         let buf =
             AstEncoder::encode_batch_simple(cmds).map_err(|e| PgError::Encode(e.to_string()))?;
         self.write_all_with_timeout(&buf, "stream write").await?;
@@ -629,7 +706,7 @@ impl PgConnection {
                 Ok(msg_type) => {
                     let event = match flow.validate_msg_type(
                         msg_type,
-                        "pipeline_simple_fast",
+                        "pipeline_execute_count_simple_ast",
                         error.is_some(),
                     ) {
                         Ok(event) => event,
@@ -658,7 +735,7 @@ impl PgConnection {
 
     /// FASTEST simple query pipeline - takes pre-encoded bytes.
     #[inline]
-    pub async fn pipeline_simple_bytes_fast(
+    pub async fn pipeline_execute_count_simple_wire(
         &mut self,
         wire_bytes: &[u8],
         expected_queries: usize,
@@ -675,7 +752,7 @@ impl PgConnection {
                 Ok(msg_type) => {
                     let event = match flow.validate_msg_type(
                         msg_type,
-                        "pipeline_simple_bytes_fast",
+                        "pipeline_execute_count_simple_wire",
                         error.is_some(),
                     ) {
                         Ok(event) => event,
@@ -707,56 +784,82 @@ impl PgConnection {
     /// 2. Parse template ONCE (cached in PostgreSQL)
     /// 3. Send Bind+Execute for each instance (params differ per query)
     #[inline]
-    pub async fn pipeline_ast_cached(&mut self, cmds: &[qail_core::ast::Qail]) -> PgResult<usize> {
+    pub async fn pipeline_execute_count_ast_cached(
+        &mut self,
+        cmds: &[qail_core::ast::Qail],
+    ) -> PgResult<usize> {
         if cmds.is_empty() {
             return Ok(0);
         }
 
+        use super::prepared::{sql_bytes_hash, stmt_name_from_hash};
+
         let mut buf = BytesMut::with_capacity(cmds.len() * 64);
-        let mut new_stmt_names: Vec<String> = Vec::new();
+        let mut sql_buf = BytesMut::with_capacity(256);
+        let mut params: Vec<Option<Vec<u8>>> = Vec::new();
+        let mut new_stmt_hashes: Vec<u64> = Vec::new();
 
         for cmd in cmds {
-            let (sql, params) =
-                AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
-            let stmt_name = Self::sql_to_stmt_name(&sql);
-
-            if !self.prepared_statements.contains_key(&stmt_name) {
-                self.evict_prepared_if_full();
-                buf.extend(PgEncoder::try_encode_parse(&stmt_name, &sql, &[])?);
-                self.prepared_statements.insert(stmt_name.clone(), sql);
-                new_stmt_names.push(stmt_name.clone());
+            if let Err(e) = AstEncoder::encode_cmd_sql_reuse(cmd, &mut sql_buf, &mut params) {
+                rollback_new_cached_statements(self, &new_stmt_hashes);
+                return Err(PgError::Encode(e.to_string()));
             }
 
-            let bind_msg = match PgEncoder::encode_bind("", &stmt_name, &params) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    for stmt in &new_stmt_names {
-                        self.prepared_statements.remove(stmt);
-                    }
-                    return Err(PgError::Encode(e.to_string()));
+            let sql_hash = sql_bytes_hash(sql_buf.as_ref());
+
+            if self.stmt_cache.contains(&sql_hash) {
+                self.stmt_cache.touch_key(sql_hash);
+            } else {
+                let stmt_name = stmt_name_from_hash(sql_hash);
+                if self.prepared_statements.contains_key(&stmt_name) {
+                    // Recover from old cache states where prepared_statements had
+                    // entries that were not mirrored in stmt_cache.
+                    self.stmt_cache.put(sql_hash, stmt_name.clone());
+                } else {
+                    self.evict_prepared_if_full();
+
+                    let sql = String::from_utf8_lossy(sql_buf.as_ref()).to_string();
+                    let parse_msg = match PgEncoder::try_encode_parse(&stmt_name, &sql, &[]) {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            rollback_new_cached_statements(self, &new_stmt_hashes);
+                            return Err(PgError::Encode(e.to_string()));
+                        }
+                    };
+                    buf.extend(parse_msg);
+                    self.stmt_cache.put(sql_hash, stmt_name.clone());
+                    self.prepared_statements.insert(stmt_name.clone(), sql);
+                    new_stmt_hashes.push(sql_hash);
                 }
+            }
+
+            let Some(stmt_name) = self.stmt_cache.peek(&sql_hash) else {
+                rollback_new_cached_statements(self, &new_stmt_hashes);
+                return Err(PgError::Protocol(
+                    "stmt_cache lookup failed after statement registration".to_string(),
+                ));
             };
-            buf.extend_from_slice(&bind_msg);
-            buf.extend(PgEncoder::try_encode_execute("", 0)?);
+
+            if let Err(e) = PgEncoder::encode_bind_to(&mut buf, stmt_name, &params) {
+                rollback_new_cached_statements(self, &new_stmt_hashes);
+                return Err(PgError::Encode(e.to_string()));
+            }
+            PgEncoder::encode_execute_to(&mut buf);
         }
 
-        buf.extend(PgEncoder::encode_sync());
+        PgEncoder::encode_sync_to(&mut buf);
 
         if let Err(err) = self.write_all_with_timeout(&buf, "stream write").await {
-            for stmt in &new_stmt_names {
-                self.prepared_statements.remove(stmt);
-            }
+            rollback_new_cached_statements(self, &new_stmt_hashes);
             return Err(err);
         }
         if let Err(err) = self.flush_with_timeout("stream flush").await {
-            for stmt in &new_stmt_names {
-                self.prepared_statements.remove(stmt);
-            }
+            rollback_new_cached_statements(self, &new_stmt_hashes);
             return Err(err);
         }
 
         let mut error: Option<PgError> = None;
-        let expected_parse_completes = new_stmt_names.len();
+        let expected_parse_completes = new_stmt_hashes.len();
         let mut flow = FastExtendedFlowTracker::new(FastExtendedFlowConfig {
             expected_queries: cmds.len(),
             allow_parse_complete: true,
@@ -769,21 +872,21 @@ impl PgConnection {
         loop {
             match self.recv_msg_type_fast().await {
                 Ok(msg_type) => {
-                    match flow.validate_msg_type(msg_type, "pipeline_ast_cached", error.is_some()) {
+                    match flow.validate_msg_type(
+                        msg_type,
+                        "pipeline_execute_count_ast_cached",
+                        error.is_some(),
+                    ) {
                         Ok(FastPipelineEvent::Continue) => {}
                         Ok(FastPipelineEvent::ReadyForQuery) => {
                             if let Some(err) = error {
-                                for stmt in &new_stmt_names {
-                                    self.prepared_statements.remove(stmt);
-                                }
+                                rollback_new_cached_statements(self, &new_stmt_hashes);
                                 return Err(err);
                             }
                             return Ok(flow.completed_queries());
                         }
                         Err(err) => {
-                            for stmt in &new_stmt_names {
-                                self.prepared_statements.remove(stmt);
-                            }
+                            rollback_new_cached_statements(self, &new_stmt_hashes);
                             return return_with_desync(self, err);
                         }
                     }
@@ -793,15 +896,12 @@ impl PgConnection {
                         capture_query_server_error(self, &mut error, e);
                         continue;
                     }
-                    for stmt in &new_stmt_names {
-                        self.prepared_statements.remove(stmt);
-                    }
+                    rollback_new_cached_statements(self, &new_stmt_hashes);
                     return Err(e);
                 }
             }
         }
     }
-
     /// ZERO-LOOKUP prepared statement pipeline.
     /// - Hash computation per query
     /// - HashMap lookup per query
@@ -814,10 +914,10 @@ impl PgConnection {
     ///     .map(|i| vec![Some(i.to_string().into_bytes())])
     ///     .collect();
     /// // Execute many (no hash, no lookup!):
-    /// conn.pipeline_prepared_fast(&stmt, &params_batch).await?;
+    /// conn.pipeline_execute_prepared_count(&stmt, &params_batch).await?;
     /// ```
     #[inline]
-    pub async fn pipeline_prepared_fast(
+    pub async fn pipeline_execute_prepared_count(
         &mut self,
         stmt: &super::PreparedStatement,
         params_batch: &[Vec<Option<Vec<u8>>>],
@@ -864,7 +964,7 @@ impl PgConnection {
                 Ok(msg_type) => {
                     let event = match flow.validate_msg_type(
                         msg_type,
-                        "pipeline_prepared_fast",
+                        "pipeline_execute_prepared_count",
                         error.is_some(),
                     ) {
                         Ok(event) => event,
@@ -892,7 +992,7 @@ impl PgConnection {
     }
 
     /// Prepare a statement and return a handle for fast execution.
-    /// PreparedStatement handle for use with pipeline_prepared_fast.
+    /// PreparedStatement handle for use with pipeline_execute_prepared_count.
     pub async fn prepare(&mut self, sql: &str) -> PgResult<super::PreparedStatement> {
         use super::prepared::sql_bytes_to_stmt_name;
 
@@ -961,7 +1061,7 @@ impl PgConnection {
     }
 
     /// Execute a prepared statement pipeline and return all row data.
-    pub async fn pipeline_prepared_results(
+    pub async fn pipeline_execute_prepared_rows(
         &mut self,
         stmt: &super::PreparedStatement,
         params_batch: &[Vec<Option<Vec<u8>>>],
@@ -1008,7 +1108,7 @@ impl PgConnection {
                 Ok((msg_type, data)) => {
                     if let Err(err) = flow.validate_msg_type(
                         msg_type,
-                        "pipeline_prepared_results",
+                        "pipeline_execute_prepared_rows",
                         error.is_some(),
                     ) {
                         return return_with_desync(self, err);
@@ -1052,7 +1152,10 @@ impl PgConnection {
                         other => {
                             return return_with_desync(
                                 self,
-                                unexpected_backend_msg_type("pipeline_prepared_results", other),
+                                unexpected_backend_msg_type(
+                                    "pipeline_execute_prepared_rows",
+                                    other,
+                                ),
                             );
                         }
                     }
@@ -1069,7 +1172,7 @@ impl PgConnection {
     }
 
     /// ZERO-COPY pipeline execution with Bytes for column data.
-    pub async fn pipeline_prepared_zerocopy(
+    pub async fn pipeline_execute_prepared_rows_bytes(
         &mut self,
         stmt: &super::PreparedStatement,
         params_batch: &[Vec<Option<Vec<u8>>>],
@@ -1116,7 +1219,7 @@ impl PgConnection {
                 Ok((msg_type, data)) => {
                     if let Err(err) = flow.validate_msg_type(
                         msg_type,
-                        "pipeline_prepared_zerocopy",
+                        "pipeline_execute_prepared_rows_bytes",
                         error.is_some(),
                     ) {
                         return return_with_desync(self, err);
@@ -1160,7 +1263,10 @@ impl PgConnection {
                         other => {
                             return return_with_desync(
                                 self,
-                                unexpected_backend_msg_type("pipeline_prepared_zerocopy", other),
+                                unexpected_backend_msg_type(
+                                    "pipeline_execute_prepared_rows_bytes",
+                                    other,
+                                ),
                             );
                         }
                     }
@@ -1177,7 +1283,7 @@ impl PgConnection {
     }
 
     /// ULTRA-FAST pipeline for 2-column SELECT queries.
-    pub async fn pipeline_prepared_ultra(
+    pub async fn pipeline_execute_prepared_rows_2cols_bytes(
         &mut self,
         stmt: &super::PreparedStatement,
         params_batch: &[Vec<Option<Vec<u8>>>],
@@ -1222,9 +1328,11 @@ impl PgConnection {
         loop {
             match self.recv_data_ultra().await {
                 Ok((msg_type, data)) => {
-                    if let Err(err) =
-                        flow.validate_msg_type(msg_type, "pipeline_prepared_ultra", error.is_some())
-                    {
+                    if let Err(err) = flow.validate_msg_type(
+                        msg_type,
+                        "pipeline_execute_prepared_rows_2cols_bytes",
+                        error.is_some(),
+                    ) {
                         return return_with_desync(self, err);
                     }
                     match msg_type {
@@ -1262,7 +1370,10 @@ impl PgConnection {
                         other => {
                             return return_with_desync(
                                 self,
-                                unexpected_backend_msg_type("pipeline_prepared_ultra", other),
+                                unexpected_backend_msg_type(
+                                    "pipeline_execute_prepared_rows_2cols_bytes",
+                                    other,
+                                ),
                             );
                         }
                     }
@@ -1282,6 +1393,31 @@ impl PgConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qail_core::ast::Qail;
+
+    #[test]
+    fn ast_pipeline_mode_auto_resolves_by_batch_size() {
+        assert_eq!(
+            AstPipelineMode::Auto.resolve_for_batch_len(0),
+            AstPipelineMode::OneShot
+        );
+        assert_eq!(
+            AstPipelineMode::Auto.resolve_for_batch_len(7),
+            AstPipelineMode::OneShot
+        );
+        assert_eq!(
+            AstPipelineMode::Auto.resolve_for_batch_len(8),
+            AstPipelineMode::Cached
+        );
+        assert_eq!(
+            AstPipelineMode::Cached.resolve_for_batch_len(1),
+            AstPipelineMode::Cached
+        );
+        assert_eq!(
+            AstPipelineMode::OneShot.resolve_for_batch_len(1000),
+            AstPipelineMode::OneShot
+        );
+    }
 
     #[cfg(unix)]
     fn make_test_conn_with_prepared() -> PgConnection {
@@ -1372,5 +1508,28 @@ mod tests {
                 .as_deref(),
             Some("23505")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipeline_ast_cached_rolls_back_new_state_on_encode_error() {
+        let mut conn = make_test_conn_with_prepared();
+        let baseline = conn.prepared_statements.len();
+        let baseline_stmt_cache = conn.stmt_cache.len();
+
+        let cmds = vec![
+            Qail::get("harbors").columns(["id", "name"]).limit(1),
+            Qail::get("bad\0table").columns(["id"]).limit(1),
+        ];
+
+        let err = conn
+            .pipeline_execute_count_ast_cached(&cmds)
+            .await
+            .expect_err("expected encode error for NUL byte in table name");
+
+        assert!(matches!(err, PgError::Encode(_)));
+        assert_eq!(conn.prepared_statements.len(), baseline);
+        assert_eq!(conn.stmt_cache.len(), baseline_stmt_cache);
+        assert!(conn.prepared_statements.contains_key("s1"));
     }
 }

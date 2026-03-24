@@ -25,6 +25,10 @@ pub fn encode_select(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    if try_encode_simple_select_fast(cmd, buf, params) {
+        return Ok(());
+    }
+
     // CTE prefix
     encode_cte_prefix(cmd, buf, params)?;
 
@@ -230,6 +234,77 @@ pub fn encode_select(
     }
 
     Ok(())
+}
+
+/// Fast path for the dominant read shape:
+/// `SELECT <columns> FROM <table> [LIMIT n] [OFFSET n]`
+///
+/// This bypasses the generic cage scans and grouping/order machinery when the
+/// AST shape is simple enough, reducing branch and allocation overhead.
+#[inline]
+fn try_encode_simple_select_fast(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> bool {
+    if !cmd.ctes.is_empty()
+        || cmd.distinct
+        || !cmd.distinct_on.is_empty()
+        || !cmd.joins.is_empty()
+        || !cmd.set_ops.is_empty()
+        || !cmd.having.is_empty()
+        || !matches!(cmd.group_by_mode, GroupByMode::Simple)
+    {
+        return false;
+    }
+
+    if cmd
+        .columns
+        .iter()
+        .any(|expr| matches!(expr, Expr::Aggregate { .. }))
+    {
+        return false;
+    }
+
+    let mut limit: Option<usize> = None;
+    let mut offset: Option<usize> = None;
+
+    for cage in &cmd.cages {
+        if !cage.conditions.is_empty() {
+            return false;
+        }
+
+        match cage.kind {
+            CageKind::Limit(n) => {
+                if limit.is_none() {
+                    limit = Some(n);
+                }
+            }
+            CageKind::Offset(n) => {
+                if offset.is_none() {
+                    offset = Some(n);
+                }
+            }
+            _ => return false,
+        }
+    }
+
+    buf.extend_from_slice(b"SELECT ");
+    encode_columns_with_params(&cmd.columns, buf, Some(params));
+    buf.extend_from_slice(b" FROM ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+
+    if let Some(n) = limit {
+        buf.extend_from_slice(b" LIMIT ");
+        write_usize(buf, n);
+    }
+
+    if let Some(n) = offset {
+        buf.extend_from_slice(b" OFFSET ");
+        write_usize(buf, n);
+    }
+
+    true
 }
 
 /// Encode the CTE prefix (`WITH [RECURSIVE] cte1 AS (...), cte2 AS (...)`).
@@ -510,18 +585,19 @@ fn encode_where(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
-    let and_cage = cmd
-        .cages
-        .iter()
-        .find(|c| c.kind == CageKind::Filter && c.logical_op == LogicalOp::And);
-    let or_cages: Vec<_> = cmd
-        .cages
-        .iter()
-        .filter(|c| c.kind == CageKind::Filter && c.logical_op == LogicalOp::Or)
-        .collect();
-
-    let has_and = and_cage.is_some_and(|c| !c.conditions.is_empty());
-    let has_or = !or_cages.is_empty();
+    // Fast pre-scan: detect whether any AND/OR filter cages exist without
+    // allocating temporary vectors.
+    let mut has_and = false;
+    let mut has_or = false;
+    for cage in &cmd.cages {
+        if cage.kind != CageKind::Filter || cage.conditions.is_empty() {
+            continue;
+        }
+        match cage.logical_op {
+            LogicalOp::And => has_and = true,
+            LogicalOp::Or => has_or = true,
+        }
+    }
 
     if !has_and && !has_or {
         return Ok(());
@@ -529,19 +605,37 @@ fn encode_where(
 
     buf.extend_from_slice(b" WHERE ");
 
-    if let Some(cage) = and_cage
-        && !cage.conditions.is_empty()
-    {
-        encode_conditions(&cage.conditions, buf, params)?;
+    let mut wrote_clause = false;
+
+    if has_and {
+        for cage in &cmd.cages {
+            if cage.kind != CageKind::Filter
+                || cage.logical_op != LogicalOp::And
+                || cage.conditions.is_empty()
+            {
+                continue;
+            }
+            if wrote_clause {
+                buf.extend_from_slice(b" AND ");
+            }
+            encode_conditions(&cage.conditions, buf, params)?;
+            wrote_clause = true;
+        }
     }
 
     if has_or {
-        if has_and {
+        if wrote_clause {
             buf.extend_from_slice(b" AND ");
         }
         buf.extend_from_slice(b"(");
         let mut first = true;
-        for cage in &or_cages {
+        for cage in &cmd.cages {
+            if cage.kind != CageKind::Filter
+                || cage.logical_op != LogicalOp::Or
+                || cage.conditions.is_empty()
+            {
+                continue;
+            }
             for cond in &cage.conditions {
                 if !first {
                     buf.extend_from_slice(b" OR ");

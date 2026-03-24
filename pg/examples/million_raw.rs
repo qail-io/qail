@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let count = conn
-            .pipeline_simple_bytes_fast(&wire_bytes, QUERIES_PER_BATCH)
+            .pipeline_execute_count_simple_wire(&wire_bytes, QUERIES_PER_BATCH)
             .await?;
         successful_queries += count;
     }

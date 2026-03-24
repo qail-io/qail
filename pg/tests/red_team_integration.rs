@@ -400,7 +400,7 @@ async fn redteam_pipeline_batch_correctness() {
         .map(|i| Qail::get("vessels").columns(["id"]).limit(i))
         .collect();
 
-    let results = driver.pipeline_fetch(&cmds).await.unwrap();
+    let results = driver.pipeline_execute_rows(&cmds).await.unwrap();
 
     assert_eq!(results.len(), 5, "Pipeline must return 5 result sets");
     for (i, result_set) in results.iter().enumerate() {

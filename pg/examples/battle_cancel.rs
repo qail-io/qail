@@ -25,11 +25,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPool::connect(config).await?;
     let mut conn = pool.acquire_system().await?;
 
-    // Get backend PID via pipeline_ast
+    // Get backend PID via pipeline_execute_rows_ast
     // SELECT * FROM pg_backend_pid()
     let pid_q = Qail::get("pg_backend_pid()");
-    // pipeline_ast returns Vec<Vec<Vec<Option<Vec<u8>>>>> (Queries -> Rows -> Columns -> Bytes)
-    let results = conn.pipeline_ast(&[pid_q]).await?;
+    // pipeline_execute_rows_ast returns Vec<Vec<Vec<Option<Vec<u8>>>>> (Queries -> Rows -> Columns -> Bytes)
+    let results = conn.pipeline_execute_rows_ast(&[pid_q]).await?;
 
     // Parse PID i32 (binary or text)
     // results[0][0][0]
@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // SELECT * FROM pg_sleep(5)
         let sleep_q = Qail::get("pg_sleep(5)");
         // This should return an Error::QueryCancelled
-        let result = conn.pipeline_ast(&[sleep_q]).await;
+        let result = conn.pipeline_execute_rows_ast(&[sleep_q]).await;
         (conn, result)
     });
 
@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("4️⃣  Checking connection health...");
     // SELECT * FROM generate_series(1,1) -> returns 1 row
     let check_q = Qail::get("generate_series(1,1)");
-    match conn.pipeline_ast(&[check_q]).await {
+    match conn.pipeline_execute_rows_ast(&[check_q]).await {
         Ok(_) => println!("   ✅ PASS: Connection is ready for next query!"),
         Err(e) => {
             println!("   ❌ FAIL: Connection died after cancel. Error: {:?}", e);

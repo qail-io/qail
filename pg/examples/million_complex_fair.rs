@@ -1,6 +1,6 @@
 //! FAIR COMPLEX QUERY BENCHMARK - Using Pre-computed Prepared Statements
 //!
-//! This uses pipeline_prepared_fast for apples-to-apples comparison with Go pgx.
+//! This uses pipeline_execute_prepared_count for apples-to-apples comparison with Go pgx.
 //! Go uses cached prepared statements - so do we!
 //!
 //! Run: cargo run --release --example million_complex_fair
@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("🚀 FAIR COMPLEX QUERY BENCHMARK");
     println!("================================");
-    println!("Using: pipeline_prepared_fast (matches Go pgx)");
+    println!("Using: pipeline_execute_prepared_count (matches Go pgx)");
     println!("Total queries:    {:>12}", TOTAL_QUERIES);
     println!("Batch size:       {:>12}", QUERIES_PER_BATCH);
     println!();
@@ -40,7 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     for _ in 0..BATCHES {
-        conn.pipeline_prepared_fast(&stmt1, &params1).await?;
+        conn.pipeline_execute_prepared_count(&stmt1, &params1)
+            .await?;
     }
     let simple_elapsed = start.elapsed();
     let simple_qps = TOTAL_QUERIES as f64 / simple_elapsed.as_secs_f64();
@@ -65,7 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     for _ in 0..BATCHES {
-        conn.pipeline_prepared_fast(&stmt2, &params2).await?;
+        conn.pipeline_execute_prepared_count(&stmt2, &params2)
+            .await?;
     }
     let where_elapsed = start.elapsed();
     let where_qps = TOTAL_QUERIES as f64 / where_elapsed.as_secs_f64();
@@ -92,7 +94,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     for _ in 0..BATCHES {
-        conn.pipeline_prepared_fast(&stmt3, &params3).await?;
+        conn.pipeline_execute_prepared_count(&stmt3, &params3)
+            .await?;
     }
     let order_elapsed = start.elapsed();
     let order_qps = TOTAL_QUERIES as f64 / order_elapsed.as_secs_f64();
@@ -117,7 +120,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     for _ in 0..BATCHES {
-        conn.pipeline_prepared_fast(&stmt4, &params4).await?;
+        conn.pipeline_execute_prepared_count(&stmt4, &params4)
+            .await?;
     }
     let many_elapsed = start.elapsed();
     let many_qps = TOTAL_QUERIES as f64 / many_elapsed.as_secs_f64();

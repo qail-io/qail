@@ -50,6 +50,10 @@ impl PolicyEngine {
     /// * `auth` — Authenticated user context (role, operator, agent).
     /// * `cmd` — Mutable Qail AST command to inject policy filters into.
     pub fn apply_policies(&self, auth: &AuthContext, cmd: &mut Qail) -> Result<(), GatewayError> {
+        if self.policies.is_empty() {
+            return Ok(());
+        }
+
         let op = OperationType::from_action(cmd.action);
         let mut matched_policy_names: Vec<String> = Vec::new();
         let mut applicable_policies: Vec<&PolicyDef> = Vec::new();
@@ -85,6 +89,13 @@ impl PolicyEngine {
             return Err(GatewayError::AccessDenied(format!(
                 "Operation {:?} not allowed on table '{}' by matching policies {:?}",
                 operation, cmd.table, matched_policy_names
+            )));
+        }
+
+        if applicable_policies.is_empty() {
+            return Err(GatewayError::AccessDenied(format!(
+                "No policy allows {:?} on table '{}'",
+                op, cmd.table
             )));
         }
 

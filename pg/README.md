@@ -42,7 +42,7 @@ This shows the exact protocol-byte path used by the driver.
 
 - **AST-Native** - Compiles QAIL AST directly to PostgreSQL wire protocol
 - **28% Faster** - Benchmarked at 1.36M rows/s COPY (vs asyncpg at 1.06M rows/s)
-- **Query Pipelining** - 24x faster batch operations via `pipeline_batch()`
+- **Query Pipelining** - 24x faster batch operations via `pipeline_execute_count()`
 - **SSL/TLS** - Production-ready with `tokio-rustls`
 - **Password Auth Modes** - Supports SCRAM-SHA-256, MD5, and cleartext server flows
 - **Protocol 3.2 Ready** - Requests startup protocol 3.2 by default with one-shot fallback to 3.0 on explicit protocol rejection
@@ -99,14 +99,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 // Execute 10,000 queries in a single network round-trip
+// pipeline_execute_count() uses AstPipelineMode::Auto by default
 let cmds: Vec<QailCmd> = (0..10_000)
     .map(|i| QailCmd::add("events")
         .columns(["user_id", "event_type"])
         .values([Value::Int(i), Value::String("login".to_string())])
     ).collect();
 
-let count = driver.pipeline_batch(&cmds).await?;
+let count = driver.pipeline_execute_count(&cmds).await?;
 println!("Inserted {} rows", count);
+
+// Override strategy explicitly when needed
+let count_cached = driver
+    .pipeline_execute_count_with_mode(&cmds, qail_pg::AstPipelineMode::Cached)
+    .await?;
 ```
 
 ## COPY Protocol (Bulk Insert)

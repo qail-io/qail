@@ -33,8 +33,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut batch_count = 0;
 
     while start.elapsed() < TARGET_DURATION {
-        // Use pipeline_prepared_results to ensure rows are consumed
-        let results = conn.pipeline_prepared_results(&stmt, &params_batch).await?;
+        // Use pipeline_execute_prepared_rows to ensure rows are consumed
+        let results = conn
+            .pipeline_execute_prepared_rows(&stmt, &params_batch)
+            .await?;
 
         // Count actual rows consumed
         for result_set in &results {

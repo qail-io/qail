@@ -1,6 +1,6 @@
 //! TRUE AST-NATIVE MILLION QUERY BENCHMARK
 //!
-//! This uses pipeline_ast() which encodes directly: AST → Wire Bytes
+//! This uses pipeline_execute_rows_ast() which encodes directly: AST → Wire Bytes
 //! NO SQL STRINGS! Should be faster than Go pgx.
 //!
 //! Run: cargo run --release --example million_ast
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Batch size:       {:>12}", QUERIES_PER_BATCH);
     println!("Batches:          {:>12}", BATCHES);
-    println!("\n⚠️  Using pipeline_ast() - TRUE AST-NATIVE (no SQL strings!)\n");
+    println!("\n⚠️  Using pipeline_execute_rows_ast() - TRUE AST-NATIVE (no SQL strings!)\n");
 
     // ===== AST-NATIVE PIPELINING =====
     println!("📊 Pipelining 1,000,000 queries via AST-native encoder...");
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect();
 
         // Execute using TRUE AST-NATIVE path!
-        let results = conn.pipeline_ast(&cmds).await?;
+        let results = conn.pipeline_execute_rows_ast(&cmds).await?;
         successful_queries += results.len();
     }
 

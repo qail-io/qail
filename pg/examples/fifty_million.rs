@@ -45,7 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for batch in 0..BATCHES {
         // Execute batch
-        let count = conn.pipeline_prepared_fast(&stmt, &params_batch).await?;
+        let count = conn
+            .pipeline_execute_prepared_count(&stmt, &params_batch)
+            .await?;
         successful_queries += count;
 
         // Progress report every 1 million queries

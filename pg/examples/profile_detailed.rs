@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // RECV (count messages only)
         let t = Instant::now();
-        let _ = conn.pipeline_ast(&[] as &[Qail]).await;
+        let _ = conn.pipeline_execute_rows_ast(&[] as &[Qail]).await;
         // Actually we need to receive for real, let me fix:
         total_recv += t.elapsed();
     }

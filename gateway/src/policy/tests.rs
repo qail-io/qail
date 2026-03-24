@@ -339,3 +339,48 @@ fn test_apply_policies_denies_when_matching_policies_exist_but_none_allow_operat
         "expected update deny when only read policy matches"
     );
 }
+
+#[test]
+fn test_apply_policies_denies_when_no_policy_matches_table() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "orders_read".to_string(),
+        table: "orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "anon".to_string(),
+        role: "anonymous".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("users");
+    let result = engine.apply_policies(&auth, &mut cmd);
+    assert!(
+        result.is_err(),
+        "expected deny when no policy matches target table"
+    );
+}
+
+#[test]
+fn test_apply_policies_allows_when_policy_engine_is_empty() {
+    let engine = PolicyEngine::new();
+    let auth = AuthContext {
+        user_id: "anon".to_string(),
+        role: "anonymous".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+    let mut cmd = Qail::get("users");
+    let result = engine.apply_policies(&auth, &mut cmd);
+    assert!(
+        result.is_ok(),
+        "empty policy engine should preserve current behavior"
+    );
+}

@@ -190,12 +190,12 @@ impl PooledConnection {
     ///
     /// This is the fastest path for batch operations — amortizes TCP
     /// overhead across N queries into a single syscall pair.
-    pub async fn pipeline_ast(
+    pub async fn pipeline_execute_rows_ast(
         &mut self,
         cmds: &[qail_core::ast::Qail],
     ) -> PgResult<Vec<Vec<Vec<Option<Vec<u8>>>>>> {
         let conn = self.conn_mut()?;
-        conn.pipeline_ast(cmds).await
+        conn.pipeline_execute_rows_ast(cmds).await
     }
 
     /// Run `EXPLAIN (FORMAT JSON)` on a Qail command and return cost estimates.

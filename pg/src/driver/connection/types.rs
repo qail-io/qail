@@ -64,6 +64,16 @@ impl StatementCache {
         Some(value)
     }
 
+    pub(crate) fn peek(&self, key: &u64) -> Option<&str> {
+        self.entries.get(key).map(String::as_str)
+    }
+
+    pub(crate) fn touch_key(&mut self, key: u64) {
+        if self.entries.contains_key(&key) {
+            self.touch(key);
+        }
+    }
+
     pub(crate) fn put(&mut self, key: u64, value: String) {
         if let std::collections::hash_map::Entry::Occupied(mut e) = self.entries.entry(key) {
             e.insert(value);

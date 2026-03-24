@@ -49,7 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Execute using ZERO-LOOKUP pipeline
-        let count = conn.pipeline_prepared_fast(&stmt, &params_batch).await?;
+        let count = conn
+            .pipeline_execute_prepared_count(&stmt, &params_batch)
+            .await?;
         successful_queries += count;
     }
 

@@ -453,8 +453,7 @@ policy tenant_isolation on reseller_pricing_overrides for all
   using $$ (is_super_admin() OR (tenant_id = get_current_tenant_id())) $$
 "#;
 
-        let cmds =
-            parse_qail_to_commands_strict(input).expect("policy replacement should compile");
+        let cmds = parse_qail_to_commands_strict(input).expect("policy replacement should compile");
 
         let first_create_policy_idx = cmds
             .iter()
@@ -493,7 +492,11 @@ policy tenant_isolation on reseller_pricing_overrides for all
             .iter()
             .filter(|c| matches!(c.action, qail_core::ast::Action::CreatePolicy))
             .collect();
-        assert_eq!(create_policies.len(), 2, "expected two create policy commands");
+        assert_eq!(
+            create_policies.len(),
+            2,
+            "expected two create policy commands"
+        );
         assert!(
             create_policies.iter().any(|c| {
                 c.policy_def
@@ -507,7 +510,9 @@ policy tenant_isolation on reseller_pricing_overrides for all
             create_policies.iter().any(|c| {
                 c.policy_def
                     .as_ref()
-                    .map(|p| p.name == "tenant_isolation" && p.table == "reseller_pricing_overrides")
+                    .map(|p| {
+                        p.name == "tenant_isolation" && p.table == "reseller_pricing_overrides"
+                    })
                     .unwrap_or(false)
             }),
             "expected reseller_pricing_overrides policy create"

@@ -52,7 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let batch_start = Instant::now();
 
         // Execute 1 MILLION queries in one batch!
-        let count = conn.pipeline_prepared_fast(&stmt, &params_batch).await?;
+        let count = conn
+            .pipeline_execute_prepared_count(&stmt, &params_batch)
+            .await?;
         successful_queries += count;
 
         let batch_elapsed = batch_start.elapsed();

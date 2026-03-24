@@ -323,6 +323,19 @@ impl AstEncoder {
         Ok((sql, params))
     }
 
+    /// Encode AST into caller-provided SQL/params buffers (no SQL `String` allocation).
+    ///
+    /// This is useful for hot paths that need SQL bytes + params, but can defer
+    /// `String` creation to cache-miss branches only.
+    #[inline]
+    pub fn encode_cmd_sql_reuse(
+        cmd: &Qail,
+        sql_buf: &mut BytesMut,
+        params: &mut Vec<Option<Vec<u8>>>,
+    ) -> Result<(), EncodeError> {
+        Self::encode_cmd_sql_to(cmd, sql_buf, params)
+    }
+
     /// Extract ONLY params from a Qail (for reusing cached SQL template).
     #[inline]
     pub fn encode_cmd_params_only(cmd: &Qail) -> Result<Vec<Option<Vec<u8>>>, EncodeError> {
@@ -441,6 +454,79 @@ mod tests {
         assert!(wire_str.contains("WHERE"));
         assert!(wire_str.contains("$1"));
         assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_encode_select_with_multiple_and_cages() {
+        use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let mut cmd = Qail::get("orders").filter("id", Operator::Eq, "ord_1");
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("tenant_id".to_string()),
+                op: Operator::Eq,
+                value: Value::String("tenant_a".to_string()),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("id = $1"),
+            "first AND cage condition must be encoded: {}",
+            sql
+        );
+        assert!(
+            sql.contains("tenant_id = $2"),
+            "second AND cage condition must be encoded: {}",
+            sql
+        );
+        assert_eq!(
+            params.len(),
+            2,
+            "both AND-cage filters must produce parameters"
+        );
+    }
+
+    #[test]
+    fn test_encode_select_with_multiple_and_cages_and_or_group() {
+        use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let mut cmd = Qail::get("orders")
+            .filter("status", Operator::Eq, "pending")
+            .or_filter("customer_name", Operator::ILike, "%john%");
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("tenant_id".to_string()),
+                op: Operator::Eq,
+                value: Value::String("tenant_a".to_string()),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("status = $1"),
+            "primary AND condition must be encoded: {}",
+            sql
+        );
+        assert!(
+            sql.contains("tenant_id = $2"),
+            "second AND condition must be encoded before OR group: {}",
+            sql
+        );
+        assert!(
+            sql.contains("(customer_name ILIKE $3)"),
+            "OR group must still be encoded: {}",
+            sql
+        );
+        assert_eq!(params.len(), 3, "expected 3 params for AND+AND+OR");
     }
 
     #[test]

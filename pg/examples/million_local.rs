@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Execute using PRE-ENCODED SIMPLE QUERY bytes (no per-batch encoding!)
         let count = conn
-            .pipeline_simple_bytes_fast(&wire_bytes, expected)
+            .pipeline_execute_count_simple_wire(&wire_bytes, expected)
             .await?;
         successful_queries += count;
     }

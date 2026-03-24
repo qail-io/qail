@@ -53,6 +53,20 @@ impl PreparedStatement {
     }
 }
 
+/// Hash SQL bytes for prepared-statement cache keys.
+#[inline]
+pub fn sql_bytes_hash(sql: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    sql.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Convert a hashed SQL key into a deterministic statement name.
+#[inline]
+pub fn stmt_name_from_hash(hash: u64) -> String {
+    format!("s{hash:016x}")
+}
+
 /// Hash SQL bytes directly to statement name (no String allocation).
 /// This is faster than hashing a String because:
 /// 1. No UTF-8 validation
@@ -60,9 +74,7 @@ impl PreparedStatement {
 /// 3. Direct byte hashing
 #[inline]
 pub fn sql_bytes_to_stmt_name(sql: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    sql.hash(&mut hasher);
-    format!("s{:016x}", hasher.finish())
+    stmt_name_from_hash(sql_bytes_hash(sql))
 }
 
 #[cfg(test)]
@@ -74,7 +86,10 @@ mod tests {
         let sql = b"SELECT id, name FROM users WHERE id = $1";
         let name1 = sql_bytes_to_stmt_name(sql);
         let name2 = sql_bytes_to_stmt_name(sql);
+        let hash = sql_bytes_hash(sql);
+        let name3 = stmt_name_from_hash(hash);
         assert_eq!(name1, name2); // Deterministic
+        assert_eq!(name1, name3);
         assert!(name1.starts_with("s"));
         assert_eq!(name1.len(), 17); // "s" + 16 hex chars
     }

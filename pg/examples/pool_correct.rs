@@ -52,7 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for _ in 0..1000 {
         let mut conn = pool.acquire_system().await?;
-        conn.pipeline_ast(std::slice::from_ref(&query)).await?;
+        conn.pipeline_execute_rows_ast(std::slice::from_ref(&query))
+            .await?;
         drop(conn);
     }
 

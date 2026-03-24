@@ -2,6 +2,7 @@
 //! RLS context, pipeline, COPY bulk/export, and cursor streaming.
 
 use super::core::PgDriver;
+use super::pipeline::AstPipelineMode;
 use super::prepared::PreparedStatement;
 use super::rls;
 use super::types::*;
@@ -181,16 +182,31 @@ impl PgDriver {
     /// let cmds: Vec<Qail> = (1..=1000)
     ///     .map(|i| Qail::get("harbors").columns(["id", "name"]).limit(i))
     ///     .collect();
-    /// let count = driver.pipeline_batch(&cmds).await?;
+    /// let count = driver.pipeline_execute_count(&cmds).await?;
     /// assert_eq!(count, 1000);
     /// ```
-    pub async fn pipeline_batch(&mut self, cmds: &[Qail]) -> PgResult<usize> {
-        self.connection.pipeline_ast_fast(cmds).await
+    pub async fn pipeline_execute_count(&mut self, cmds: &[Qail]) -> PgResult<usize> {
+        self.pipeline_execute_count_with_mode(cmds, AstPipelineMode::Auto)
+            .await
+    }
+
+    /// Execute multiple Qail ASTs with an explicit pipeline strategy.
+    ///
+    /// Use [`AstPipelineMode::Cached`] for repeated templates in large batches,
+    /// or [`AstPipelineMode::OneShot`] for tiny one-off batches.
+    pub async fn pipeline_execute_count_with_mode(
+        &mut self,
+        cmds: &[Qail],
+        mode: AstPipelineMode,
+    ) -> PgResult<usize> {
+        self.connection
+            .pipeline_execute_count_ast_with_mode(cmds, mode)
+            .await
     }
 
     /// Execute multiple Qail ASTs and return full row data.
-    pub async fn pipeline_fetch(&mut self, cmds: &[Qail]) -> PgResult<Vec<Vec<PgRow>>> {
-        let raw_results = self.connection.pipeline_ast(cmds).await?;
+    pub async fn pipeline_execute_rows(&mut self, cmds: &[Qail]) -> PgResult<Vec<Vec<PgRow>>> {
+        let raw_results = self.connection.pipeline_execute_rows_ast(cmds).await?;
 
         let results: Vec<Vec<PgRow>> = raw_results
             .into_iter()
@@ -213,13 +229,13 @@ impl PgDriver {
     }
 
     /// Execute a prepared statement pipeline in FAST mode (count only).
-    pub async fn pipeline_prepared_fast(
+    pub async fn pipeline_execute_prepared_count(
         &mut self,
         stmt: &PreparedStatement,
         params_batch: &[Vec<Option<Vec<u8>>>],
     ) -> PgResult<usize> {
         self.connection
-            .pipeline_prepared_fast(stmt, params_batch)
+            .pipeline_execute_prepared_count(stmt, params_batch)
             .await
     }
 

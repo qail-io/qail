@@ -234,7 +234,7 @@ async fn pipeline_ast_cached_unexpected_backend_invalidates_cache() {
         assert_eq!(
             second.first().copied(),
             Some(b'P'),
-            "pipeline_ast_cached must re-parse after unexpected backend message"
+            "pipeline_execute_count_ast_cached must re-parse after unexpected backend message"
         );
 
         sock.write_all(&parse_complete()).await.unwrap();
@@ -250,11 +250,20 @@ async fn pipeline_ast_cached_unexpected_backend_invalidates_cache() {
             .unwrap();
 
     let first_cmd = Qail::get("(SELECT 1) qail_test_subq");
-    let err = conn.pipeline_ast_cached(&[first_cmd]).await.unwrap_err();
-    assert!(err.to_string().contains("pipeline_ast_cached"));
+    let err = conn
+        .pipeline_execute_count_ast_cached(&[first_cmd])
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("pipeline_execute_count_ast_cached")
+    );
 
     let second_cmd = Qail::get("(SELECT 1) qail_test_subq");
-    let completed = conn.pipeline_ast_cached(&[second_cmd]).await.unwrap();
+    let completed = conn
+        .pipeline_execute_count_ast_cached(&[second_cmd])
+        .await
+        .unwrap();
     assert_eq!(completed, 1);
 
     server.await.unwrap();
@@ -286,7 +295,7 @@ async fn pipeline_ast_cached_parsecomplete_mismatch_invalidates_cache() {
         assert_eq!(
             second.first().copied(),
             Some(b'P'),
-            "pipeline_ast_cached must re-parse after ParseComplete mismatch"
+            "pipeline_execute_count_ast_cached must re-parse after ParseComplete mismatch"
         );
 
         sock.write_all(&parse_complete()).await.unwrap();
@@ -302,11 +311,17 @@ async fn pipeline_ast_cached_parsecomplete_mismatch_invalidates_cache() {
             .unwrap();
 
     let first_cmd = Qail::get("(SELECT 1) qail_test_subq");
-    let err = conn.pipeline_ast_cached(&[first_cmd]).await.unwrap_err();
+    let err = conn
+        .pipeline_execute_count_ast_cached(&[first_cmd])
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("ParseComplete mismatch"));
 
     let second_cmd = Qail::get("(SELECT 1) qail_test_subq");
-    let completed = conn.pipeline_ast_cached(&[second_cmd]).await.unwrap();
+    let completed = conn
+        .pipeline_execute_count_ast_cached(&[second_cmd])
+        .await
+        .unwrap();
     assert_eq!(completed, 1);
 
     server.await.unwrap();
@@ -791,7 +806,7 @@ async fn pipeline_ast_fast_rejects_data_before_bind() {
             .unwrap();
 
     let err = conn
-        .pipeline_ast_fast(&[Qail::get("(SELECT 1) qail_test_subq")])
+        .pipeline_execute_count_ast_oneshot(&[Qail::get("(SELECT 1) qail_test_subq")])
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -830,7 +845,7 @@ async fn pipeline_ast_rejects_data_before_bind() {
             .unwrap();
 
     let err = conn
-        .pipeline_ast(&[Qail::get("(SELECT 1) qail_test_subq")])
+        .pipeline_execute_rows_ast(&[Qail::get("(SELECT 1) qail_test_subq")])
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -909,7 +924,7 @@ async fn pipeline_simple_fast_rejects_data_before_row_description() {
             .unwrap();
 
     let err = conn
-        .pipeline_simple_fast(&[Qail::get("(SELECT 1) qail_test_subq")])
+        .pipeline_execute_count_simple_ast(&[Qail::get("(SELECT 1) qail_test_subq")])
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -939,7 +954,7 @@ async fn pipeline_prepared_fast_rejects_command_before_bind() {
         sock.write_all(&ready_idle()).await.unwrap();
         sock.flush().await.unwrap();
 
-        // pipeline_prepared_fast(): Bind + Execute + Sync
+        // pipeline_execute_prepared_count(): Bind + Execute + Sync
         let seq = read_frontend_msg_types_until_sync(&mut sock).await;
         assert_eq!(seq.first().copied(), Some(b'B'));
         // Out-of-order: completion before BindComplete.
@@ -953,7 +968,7 @@ async fn pipeline_prepared_fast_rejects_command_before_bind() {
             .unwrap();
     let stmt = conn.prepare("SELECT 1").await.unwrap();
     let err = conn
-        .pipeline_prepared_fast(&stmt, &[Vec::new()])
+        .pipeline_execute_prepared_count(&stmt, &[Vec::new()])
         .await
         .unwrap_err();
     let msg = err.to_string();

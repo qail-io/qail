@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
     let count = conn
-        .pipeline_simple_bytes_fast(&wire_bytes, TOTAL_QUERIES)
+        .pipeline_execute_count_simple_wire(&wire_bytes, TOTAL_QUERIES)
         .await?;
 
     let elapsed = start.elapsed();

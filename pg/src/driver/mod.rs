@@ -55,6 +55,7 @@ pub use cancel::CancelToken;
 pub use connection::{PgConnection, TlsConfig};
 pub use core::PgDriver;
 pub use notification::Notification;
+pub use pipeline::AstPipelineMode;
 pub use pool::{
     PgPool, PoolConfig, PoolStats, PooledConnection, ScopedPoolFuture, scope,
     spawn_pool_maintenance,

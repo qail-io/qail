@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Execute using CACHED prepared statement pipeline
-        let results = conn.pipeline_ast(&cmds).await?;
+        let results = conn.pipeline_execute_rows_ast(&cmds).await?;
         successful_queries += results.len();
     }
 
