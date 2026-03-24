@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.6] - 2026-03-24
+
+### Fixed
+
+- **Migration apply ordering:** strict AST compiler now schedules destructive/rename migration hints (`drop*`, `rename`) before declarative create paths so same-file replace patterns (for example `drop policy` + `policy ...`) execute in the intended order.
+- **Post-apply policy verification:** `migrate apply` policy verification now evaluates final expected state per `(table, policy)` after all commands in a migration, preventing false failures when a policy is dropped and recreated in the same migration.
+
+### Changed
+
+- **Versioning:** bumped Rust crates to `0.26.6`.
+
 ## [0.26.5] - 2026-03-23
 
 ### Added

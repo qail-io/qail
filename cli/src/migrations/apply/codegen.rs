@@ -104,6 +104,9 @@ pub(crate) fn commands_to_sql(cmds: &[Qail]) -> String {
 
 fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) -> Result<Vec<Qail>> {
     let (hint_cmds, hint_unsupported) = compile_migration_hints_strict(&schema.migrations)?;
+    let (early_hint_cmds, late_hint_cmds): (Vec<Qail>, Vec<Qail>) = hint_cmds
+        .into_iter()
+        .partition(|cmd| is_early_hint_action(cmd.action));
 
     if !schema.resources.is_empty() {
         bail!(
@@ -142,8 +145,10 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
     }
 
     // Order matters for dependency correctness:
-    // extensions/types/sequences + table-default functions -> tables/indexes ->
-    // views + remaining functions -> triggers/policies/comments -> hints.
+    // explicit drop/rename hints -> extensions/types/sequences + table-default
+    // functions -> tables/indexes -> views + remaining functions ->
+    // triggers/policies/comments -> late hints.
+    cmds.extend(early_hint_cmds);
     cmds.extend(compile_extensions_strict(&schema.extensions)?);
     cmds.extend(compile_enums_strict(&schema.enums)?);
     cmds.extend(compile_sequences_strict(&schema.sequences)?);
@@ -178,13 +183,31 @@ fn compile_migrate_schema_strict(schema: &qail_core::migrate::schema::Schema) ->
     cmds.extend(compile_policies_strict(&schema.policies)?);
     cmds.extend(compile_grants_strict(&schema.grants)?);
     cmds.extend(compile_comments_strict(&schema.comments)?);
-    cmds.extend(hint_cmds);
+    cmds.extend(late_hint_cmds);
 
     if cmds.is_empty() {
         bail!("No executable AST commands found in migration");
     }
 
     Ok(cmds)
+}
+
+fn is_early_hint_action(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Drop
+            | Action::DropIndex
+            | Action::AlterDrop
+            | Action::DropView
+            | Action::DropMaterializedView
+            | Action::DropExtension
+            | Action::DropSequence
+            | Action::DropEnum
+            | Action::DropFunction
+            | Action::DropTrigger
+            | Action::DropPolicy
+            | Action::Mod
+    )
 }
 
 fn compile_migration_hints_strict(

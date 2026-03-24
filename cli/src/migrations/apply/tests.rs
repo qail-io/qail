@@ -440,6 +440,81 @@ drop policy users_isolation on users
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_policy_replace_roundtrip() {
+        let input = r#"
+drop policy tenant_contracts_policy on tenant_contracts
+
+policy tenant_contracts_policy on tenant_contracts for all
+  using $$ ((COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text) OR (principal_tenant_id = (NULLIF(current_setting('app.current_tenant_id'::text, true), ''::text))::uuid) OR ((reseller_tenant_id = (NULLIF(current_setting('app.current_tenant_id'::text, true), ''::text))::uuid) AND (is_active = true))) $$
+
+drop policy tenant_isolation on reseller_pricing_overrides
+
+policy tenant_isolation on reseller_pricing_overrides for all
+  using $$ (is_super_admin() OR (tenant_id = get_current_tenant_id())) $$
+"#;
+
+        let cmds =
+            parse_qail_to_commands_strict(input).expect("policy replacement should compile");
+
+        let first_create_policy_idx = cmds
+            .iter()
+            .position(|c| matches!(c.action, qail_core::ast::Action::CreatePolicy))
+            .expect("expected at least one CREATE POLICY");
+        let last_drop_policy_idx = cmds
+            .iter()
+            .rposition(|c| matches!(c.action, qail_core::ast::Action::DropPolicy))
+            .expect("expected at least one DROP POLICY");
+        assert!(
+            last_drop_policy_idx < first_create_policy_idx,
+            "drop policy hints must execute before create policy commands"
+        );
+
+        let drop_policies: Vec<_> = cmds
+            .iter()
+            .filter(|c| matches!(c.action, qail_core::ast::Action::DropPolicy))
+            .collect();
+        assert_eq!(drop_policies.len(), 2, "expected two drop policy commands");
+        assert!(
+            drop_policies.iter().any(|c| {
+                c.table == "tenant_contracts"
+                    && c.payload.as_deref() == Some("tenant_contracts_policy")
+            }),
+            "expected tenant_contracts policy drop"
+        );
+        assert!(
+            drop_policies.iter().any(|c| {
+                c.table == "reseller_pricing_overrides"
+                    && c.payload.as_deref() == Some("tenant_isolation")
+            }),
+            "expected reseller_pricing_overrides policy drop"
+        );
+
+        let create_policies: Vec<_> = cmds
+            .iter()
+            .filter(|c| matches!(c.action, qail_core::ast::Action::CreatePolicy))
+            .collect();
+        assert_eq!(create_policies.len(), 2, "expected two create policy commands");
+        assert!(
+            create_policies.iter().any(|c| {
+                c.policy_def
+                    .as_ref()
+                    .map(|p| p.name == "tenant_contracts_policy" && p.table == "tenant_contracts")
+                    .unwrap_or(false)
+            }),
+            "expected tenant_contracts policy create"
+        );
+        assert!(
+            create_policies.iter().any(|c| {
+                c.policy_def
+                    .as_ref()
+                    .map(|p| p.name == "tenant_isolation" && p.table == "reseller_pricing_overrides")
+                    .unwrap_or(false)
+            }),
+            "expected reseller_pricing_overrides policy create"
+        );
+    }
+
+    #[test]
     fn test_parse_qail_to_commands_strict_supports_function_args() {
         let input = r#"
 function sum_one(v int) returns int language plpgsql $$ BEGIN RETURN v + 1; END; $$

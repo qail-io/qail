@@ -765,6 +765,7 @@ async fn verify_applied_commands_effects(
     }
 
     let mut failures = Vec::<String>::new();
+    let policy_expectations = collect_policy_final_expectations(cmds);
 
     for cmd in cmds {
         match cmd.action {
@@ -847,27 +848,30 @@ async fn verify_applied_commands_effects(
                 )),
             },
             Action::CreatePolicy => {
-                if let Some(policy) = &cmd.policy_def
-                    && !policy_exists(pg, &policy.table, &policy.name).await?
-                {
-                    failures.push(format!(
-                        "expected policy '{}' on table '{}' to exist",
-                        policy.name, policy.table
-                    ));
-                }
+                // Verified in final-state pass below so mixed drop/create sequences in the
+                // same migration are checked by the last command's intent.
             }
             Action::DropPolicy => {
-                let Some(policy_name) = cmd.payload.as_deref() else {
-                    continue;
-                };
-                if policy_exists(pg, &cmd.table, policy_name).await? {
-                    failures.push(format!(
-                        "expected policy '{}' on table '{}' to be dropped",
-                        policy_name, cmd.table
-                    ));
-                }
+                // Verified in final-state pass below so mixed drop/create sequences in the
+                // same migration are checked by the last command's intent.
             }
             _ => {}
+        }
+    }
+
+    for ((table, policy_name), should_exist) in policy_expectations {
+        let exists = policy_exists(pg, &table, &policy_name).await?;
+        if should_exist && !exists {
+            failures.push(format!(
+                "expected policy '{}' on table '{}' to exist",
+                policy_name, table
+            ));
+        }
+        if !should_exist && exists {
+            failures.push(format!(
+                "expected policy '{}' on table '{}' to be dropped",
+                policy_name, table
+            ));
         }
     }
 
@@ -944,6 +948,26 @@ async fn table_exists(pg: &mut qail_pg::PgDriver, table: &str) -> Result<bool> {
         .await
         .with_context(|| format!("Failed table existence check for '{}'", table))?;
     Ok(!rows.is_empty())
+}
+
+fn collect_policy_final_expectations(cmds: &[Qail]) -> HashMap<(String, String), bool> {
+    let mut expected = HashMap::<(String, String), bool>::new();
+    for cmd in cmds {
+        match cmd.action {
+            Action::CreatePolicy => {
+                if let Some(policy) = &cmd.policy_def {
+                    expected.insert((policy.table.clone(), policy.name.clone()), true);
+                }
+            }
+            Action::DropPolicy => {
+                if let Some(policy_name) = cmd.payload.as_ref() {
+                    expected.insert((cmd.table.clone(), policy_name.clone()), false);
+                }
+            }
+            _ => {}
+        }
+    }
+    expected
 }
 
 async fn column_exists(pg: &mut qail_pg::PgDriver, table: &str, column: &str) -> Result<bool> {
@@ -1465,10 +1489,10 @@ fn ensure_up_down_pairing(up: &[MigrationFile], down: &[MigrationFile]) -> Resul
 mod tests {
     use super::{
         ApplyDownContext, ApplyReceiptContext, apply_commands_and_record_receipt_atomic,
-        apply_down_commands_and_reconcile_history_atomic, enforce_apply_destructive_policy,
-        ensure_applied_checksum_matches, ensure_up_down_pairing, parse_rename_expr,
-        should_adopt_existing_error, split_schema_ident, strip_optional_if_exists_prefix,
-        validate_receipts_against_local,
+        apply_down_commands_and_reconcile_history_atomic, collect_policy_final_expectations,
+        enforce_apply_destructive_policy, ensure_applied_checksum_matches, ensure_up_down_pairing,
+        parse_rename_expr, should_adopt_existing_error, split_schema_ident,
+        strip_optional_if_exists_prefix, validate_receipts_against_local,
     };
     use crate::migrations::apply::MigrationFile;
     use crate::migrations::apply::types::MigrationPhase;
@@ -1712,6 +1736,70 @@ mod tests {
         assert!(
             err.to_string().contains("checksum drift"),
             "error should mention checksum drift"
+        );
+    }
+
+    #[test]
+    fn policy_expectations_follow_last_command_intent() {
+        let cmds = vec![
+            Qail {
+                action: Action::DropPolicy,
+                table: "tenant_contracts".to_string(),
+                payload: Some("tenant_contracts_policy".to_string()),
+                ..Default::default()
+            },
+            Qail {
+                action: Action::CreatePolicy,
+                policy_def: Some(
+                    qail_core::migrate::policy::RlsPolicy::create(
+                        "tenant_contracts_policy",
+                        "tenant_contracts",
+                    )
+                    .for_all(),
+                ),
+                ..Default::default()
+            },
+        ];
+
+        let expected = collect_policy_final_expectations(&cmds);
+        assert_eq!(
+            expected.get(&(
+                "tenant_contracts".to_string(),
+                "tenant_contracts_policy".to_string()
+            )),
+            Some(&true)
+        );
+    }
+
+    #[test]
+    fn policy_expectations_handle_create_then_drop() {
+        let cmds = vec![
+            Qail {
+                action: Action::CreatePolicy,
+                policy_def: Some(
+                    qail_core::migrate::policy::RlsPolicy::create(
+                        "tenant_isolation",
+                        "reseller_pricing_overrides",
+                    )
+                    .for_all(),
+                ),
+                ..Default::default()
+            },
+            Qail {
+                action: Action::DropPolicy,
+                table: "reseller_pricing_overrides".to_string(),
+                payload: Some("tenant_isolation".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let expected = collect_policy_final_expectations(&cmds);
+        assert_eq!(
+            expected.get(&(
+                "reseller_pricing_overrides".to_string(),
+                "tenant_isolation".to_string()
+            )),
+            Some(&false)
         );
     }
 
