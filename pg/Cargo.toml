@@ -52,7 +52,7 @@ metrics = "0.24"
 
 # Optional: Ergonomic row extraction
 chrono = { version = "0.4", optional = true }
-uuid = { version = "1.9", optional = true }
+uuid = { version = "1.22", optional = true }
 
 # io_uring support (Linux only, opt-in via feature flag)
 # Use `--features io_uring` for native Linux builds
@@ -64,7 +64,7 @@ workspace = true
 
 [dev-dependencies]
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros"] }
-uuid = { version = "1.9", features = ["v4"] }
+uuid = { version = "1.22", features = ["v4"] }
 chrono = { version = "0.4" }
 proptest = "1.10.0"
 tokio-postgres = "0.7.13"
