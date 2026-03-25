@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-03-25
+
+### Breaking Changes ⚠️
+
+- **Pipeline API naming consistency (qail-pg):** standardized public pipeline method names around `pipeline_execute_*`:
+  - `PgDriver::pipeline_batch` -> `PgDriver::pipeline_execute_count`
+  - `PgDriver::pipeline_fetch` -> `PgDriver::pipeline_execute_rows`
+  - `PgDriver::pipeline_prepared_fast` -> `PgDriver::pipeline_execute_prepared_count`
+  - `PooledConnection::pipeline_ast` -> `PooledConnection::pipeline_execute_rows_ast`
+  - connection-level pipeline helpers were likewise renamed to consistent `pipeline_execute_*_{ast|wire}` forms.
+
+### Added
+
+- **Pipeline strategy model:** added `AstPipelineMode` (`Auto`, `OneShot`, `Cached`) for explicit AST pipeline execution control.
+- **Auto planner APIs:** added `AutoCountPlan` and `AutoCountPath`, plus:
+  - `PgDriver::execute_count_auto_with_plan(...)`
+  - `PgDriver::execute_count_auto(...)`
+  - `PgPool::plan_auto_count(...)`
+  - `PgPool::execute_count_auto_with_plan(...)`
+  - `PgPool::execute_count_auto(...)`
+- **Prepared AST handle:** added `PreparedAstQuery` with:
+  - `PgDriver::prepare_ast_query(...)`
+  - `PgDriver::fetch_all_prepared_ast(...)`
+  - `PgDriver::fetch_all_prepared_ast_with_format(...)`
+- **AST encoder hot-path API:** added `AstEncoder::encode_cmd_sql_reuse(...)` for caller-buffer SQL/params reuse.
+- **Benchmark harness expansion:** added ABBA/mode benchmark helpers and new runtime comparison examples (`auto_mode_*`, `prepared_ast_vs_cached`, PGX comparison scripts).
+
+### Changed
+
+- **Pipeline/cache hardening:** cached AST pipeline now uses hash-first statement cache lookups and rolls back newly registered statement state on encode/protocol failures.
+- **AST select encoding fast path:** simple read shapes now take a specialized fast path; filter encoding avoids temporary allocation scans.
+- **Gateway policy behavior:** policy engine now denies when policies exist but none match target table/operation, while preserving allow behavior for an empty policy set.
+- **Docs and benchmark reporting:** refreshed benchmark docs/readme to emphasize pattern-cost under RTT with explicit reproducible run metadata.
+- **Versioning:** bumped Rust crates to `0.27.0`.
+
+### Fixed
+
+- **Prepared/cached pipeline desync resilience:** strengthened protocol-state handling and regression tests for parse/bind completion mismatches and encode-failure rollback.
+
 ## [0.26.6] - 2026-03-24
 
 ### Fixed

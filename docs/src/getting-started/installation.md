@@ -6,8 +6,8 @@ Add QAIL to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-qail-core = "0.26.3"    # AST and builder
-qail-pg = "0.26.3"      # PostgreSQL driver
+qail-core = "0.27.0"    # AST and builder
+qail-pg = "0.27.0"      # PostgreSQL driver
 ```
 
 ## CLI
@@ -45,5 +45,5 @@ Use the Gradle module in this repository:
 
 ```bash
 qail --version
-# qail 0.26.x
+# qail 0.27.x
 ```

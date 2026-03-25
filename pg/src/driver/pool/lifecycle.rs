@@ -741,7 +741,7 @@ impl PgPool {
                                 .await
                             };
                             pooled.release().await;
-                            Ok(run_result?)
+                            run_result
                         });
                     }
 

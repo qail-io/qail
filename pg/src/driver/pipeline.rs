@@ -21,22 +21,17 @@ use bytes::BytesMut;
 ///
 /// `Auto` favors the cached prepared-statement path for large batches and
 /// one-shot execution for tiny batches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AstPipelineMode {
     /// Heuristic strategy:
     /// - small batch => `OneShot`
     /// - larger batch => `Cached`
+    #[default]
     Auto,
     /// Parse+Bind+Execute for each command in the batch.
     OneShot,
     /// Cache prepared SQL templates and execute Bind+Execute in hot path.
     Cached,
-}
-
-impl Default for AstPipelineMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl AstPipelineMode {
