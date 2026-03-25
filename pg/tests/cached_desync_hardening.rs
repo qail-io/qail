@@ -404,6 +404,51 @@ async fn query_prepared_single_rejects_data_before_bind() {
 }
 
 #[tokio::test]
+async fn query_prepared_single_count_rejects_data_before_bind() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        // Prepare phase: Parse + Sync
+        let prepare_seq = read_frontend_msg_types_until_sync(&mut sock).await;
+        assert_eq!(prepare_seq.first().copied(), Some(b'P'));
+        sock.write_all(&parse_complete()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        // Execute phase: Bind + Execute + Sync
+        let exec_seq = read_frontend_msg_types_until_sync(&mut sock).await;
+        assert_eq!(exec_seq.first().copied(), Some(b'B'));
+
+        // Adversarial ordering: DataRow before BindComplete.
+        sock.write_all(&data_row_zero_cols()).await.unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let mut conn =
+        PgConnection::connect_with_password("127.0.0.1", port, "test_user", "test_db", None)
+            .await
+            .unwrap();
+    let stmt = conn.prepare("SELECT 1").await.unwrap();
+    let err = conn
+        .query_prepared_single_count(&stmt, &[])
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("DataRow before BindComplete"),
+        "unexpected error message: {msg}"
+    );
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn simple_query_rejects_data_before_row_description() {
     let (listener, port) = mock_listener().await;
 

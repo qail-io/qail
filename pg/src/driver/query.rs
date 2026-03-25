@@ -483,6 +483,65 @@ impl PgConnection {
             .await
     }
 
+    /// ZERO-HASH sequential prepared execution that drains rows without
+    /// materializing them.
+    ///
+    /// Useful for throughput-focused paths where only protocol completion
+    /// matters and result payload is intentionally ignored.
+    #[inline]
+    pub async fn query_prepared_single_count(
+        &mut self,
+        stmt: &super::PreparedStatement,
+        params: &[Option<Vec<u8>>],
+    ) -> PgResult<()> {
+        let params_size: usize = params
+            .iter()
+            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
+            .sum();
+
+        let mut buf = BytesMut::with_capacity(30 + stmt.name.len() + params_size);
+
+        PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_execute_to(&mut buf);
+        PgEncoder::encode_sync_to(&mut buf);
+
+        self.write_all_with_timeout(&buf, "stream write").await?;
+
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
+
+        loop {
+            let msg = self.recv().await?;
+            flow.validate(&msg, "prepared single count execute", error.is_some())?;
+            match msg {
+                BackendMessage::BindComplete => {}
+                BackendMessage::RowDescription(_) => {}
+                BackendMessage::DataRow(_) => {}
+                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::NoData => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    return Ok(());
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::QueryServer(err.into()));
+                    }
+                }
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message(
+                        "prepared single count execute",
+                        &other,
+                    ));
+                }
+            }
+        }
+    }
+
     /// ZERO-HASH sequential query with explicit result-column format.
     #[inline]
     pub async fn query_prepared_single_with_result_format(
@@ -497,7 +556,6 @@ impl PgConnection {
             .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
             .sum();
 
-        // Bind: ~15 + stmt.name.len() + params_size, Execute: 10, Sync: 5
         let mut buf = BytesMut::with_capacity(30 + stmt.name.len() + params_size);
 
         // ZERO HASH, ZERO LOOKUP - just encode and send!
@@ -541,6 +599,68 @@ impl PgConnection {
                 other => {
                     return Err(unexpected_backend_message(
                         "prepared single execute",
+                        &other,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// ZERO-HASH sequential query with explicit result-column format using
+    /// reusable connection buffers (avoids per-call `BytesMut` allocation).
+    #[inline]
+    pub async fn query_prepared_single_reuse_with_result_format(
+        &mut self,
+        stmt: &super::PreparedStatement,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
+        self.write_buf.clear();
+
+        PgEncoder::encode_bind_to_with_result_format(
+            &mut self.write_buf,
+            &stmt.name,
+            params,
+            result_format,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_execute_to(&mut self.write_buf);
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+
+        self.flush_write_buf().await?;
+
+        let mut rows = Vec::with_capacity(32);
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
+
+        loop {
+            let msg = self.recv().await?;
+            flow.validate(&msg, "prepared single reuse execute", error.is_some())?;
+            match msg {
+                BackendMessage::BindComplete => {}
+                BackendMessage::RowDescription(_) => {}
+                BackendMessage::DataRow(data) => {
+                    if error.is_none() {
+                        rows.push(data);
+                    }
+                }
+                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::NoData => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    return Ok(rows);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::QueryServer(err.into()));
+                    }
+                }
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message(
+                        "prepared single reuse execute",
                         &other,
                     ));
                 }

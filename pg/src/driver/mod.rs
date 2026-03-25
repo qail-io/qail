@@ -14,6 +14,7 @@
 
 // ── Internal submodules ─────────────────────────────────────────────
 mod auth_types;
+mod auto_mode;
 pub mod branch_sql;
 mod builder;
 mod cancel;
@@ -50,6 +51,7 @@ pub use auth_types::{
     AuthSettings, ConnectOptions, EnterpriseAuthMechanism, GssEncMode, GssTokenProvider,
     GssTokenProviderEx, GssTokenRequest, ScramChannelBindingMode, TlsMode,
 };
+pub use auto_mode::{AutoCountPath, AutoCountPlan};
 pub use builder::PgDriverBuilder;
 pub use cancel::CancelToken;
 pub use connection::{PgConnection, TlsConfig};
@@ -60,7 +62,7 @@ pub use pool::{
     PgPool, PoolConfig, PoolStats, PooledConnection, ScopedPoolFuture, scope,
     spawn_pool_maintenance,
 };
-pub use prepared::PreparedStatement;
+pub use prepared::{PreparedAstQuery, PreparedStatement};
 pub use replication::{
     IdentifySystem, ReplicationKeepalive, ReplicationOption, ReplicationSlotInfo,
     ReplicationStreamMessage, ReplicationStreamStart, ReplicationXLogData,

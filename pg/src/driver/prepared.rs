@@ -26,6 +26,37 @@ pub struct PreparedStatement {
     pub(crate) param_count: usize,
 }
 
+/// A fully prepared AST query handle.
+///
+/// This stores:
+/// - precomputed prepared statement identity (`stmt`)
+/// - pre-encoded bind parameters (`params`)
+/// - source SQL text (`sql`) for retry re-prepare paths
+///
+/// Use with `PgDriver::fetch_all_prepared_ast()` for the lowest-overhead
+/// repeated execution of an identical AST command.
+#[derive(Clone, Debug)]
+pub struct PreparedAstQuery {
+    pub(crate) stmt: PreparedStatement,
+    pub(crate) params: Vec<Option<Vec<u8>>>,
+    pub(crate) sql: String,
+    pub(crate) sql_hash: u64,
+}
+
+impl PreparedAstQuery {
+    /// Prepared statement name (server-side identity).
+    #[inline]
+    pub fn statement_name(&self) -> &str {
+        self.stmt.name()
+    }
+
+    /// Number of bind parameters encoded in this query.
+    #[inline]
+    pub fn param_count(&self) -> usize {
+        self.params.len()
+    }
+}
+
 impl PreparedStatement {
     /// Create a new prepared statement handle from SQL bytes.
     /// This hashes the SQL bytes directly without String allocation.

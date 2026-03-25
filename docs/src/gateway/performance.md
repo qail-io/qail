@@ -204,15 +204,26 @@ All errors follow a consistent JSON structure:
 
 ## Benchmark: Gateway vs GraphQL
 
-The gateway's `?expand=` does server-side JOINs — same approach as the Qail AST driver but over HTTP:
+The gateway's `?expand=` executes a server-side JOIN over HTTP. In this benchmark, every approach is validated to return the same canonical payload (`id`, `name`, `origin_harbor`, `dest_harbor`) before timing.
 
-| Approach | Avg Latency | DB Queries | vs Qail |
-|----------|------------|------------|---------|
-| **Qail AST** (binary) | **449µs** | 1 | baseline |
-| **Gateway** (`?expand=`) | 635µs | 1 | 1.4× |
-| GraphQL + DataLoader | 1.52ms | 3 | 3.4× |
-| GraphQL naive (N+1) | 18.2ms | 151 | **40×** |
+### Loopback (`BATTLE_SIMULATED_RTT_US=0`)
 
-The 1.4× gap is pure JSON serialization overhead. On the wire, the gateway executes the exact same single-query JOIN as the Qail driver.
+| Approach | Median | p95 | DB Queries / request |
+|----------|--------|-----|----------------------|
+| GraphQL + DataLoader | 146.8us | 168.0us | 2 |
+| Qail AST (uncached) | 146.9us | 163.7us | 1 |
+| Gateway / REST + `?expand=` | 164.5us | 186.3us | 1 |
+| GraphQL naive (N+1) | 4.74ms | 4.88ms | 101 |
 
-> **Unlike GraphQL**, the gateway makes N+1 structurally impossible. `?expand=` always resolves to a server-side JOIN — there's no resolver pattern to misconfigure.
+### Simulated RTT (`BATTLE_SIMULATED_RTT_US=1000`)
+
+| Approach | Median | p95 | DB Queries / request |
+|----------|--------|-----|----------------------|
+| Qail AST (uncached) | 1237.8us | 1252.5us | 1 |
+| Gateway / REST + `?expand=` | 1248.4us | 1262.5us | 1 |
+| GraphQL + DataLoader | 2287.0us | 2507.0us | 2 |
+| GraphQL naive (N+1) | 111.56ms | 112.19ms | 101 |
+
+`?expand=` stays in the same single-query class as AST execution and avoids resolver fan-out.
+
+> The gateway shape avoids resolver-driven N+1 behavior by resolving expansions through a single SQL JOIN plan.

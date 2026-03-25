@@ -5,7 +5,6 @@
 //!   cargo run --release -p qail-pg --example qail_pgx_modes_once -- pipeline --plain
 //!   cargo run --release -p qail-pg --example qail_pgx_modes_once -- pool10 --plain
 
-use qail_core::ast::Qail;
 use qail_pg::driver::PreparedStatement;
 use qail_pg::{PgConnection, PgPool, PoolConfig, TlsMode};
 use std::sync::Arc;
@@ -48,22 +47,13 @@ fn build_param_batch(total: usize) -> Vec<Vec<Option<Vec<u8>>>> {
         .collect()
 }
 
-fn build_ast_batch(total: usize) -> Vec<Qail> {
-    (1..=total)
-        .map(|i| {
-            let id = ((i % 10_000) + 1) as i64;
-            Qail::get("harbors").columns(["id", "name"]).eq("id", id)
-        })
-        .collect()
-}
-
 async fn run_single_iteration(
     conn: &mut PgConnection,
     stmt: &PreparedStatement,
     params: &[Vec<Option<Vec<u8>>>],
 ) -> Result<(), Box<dyn std::error::Error>> {
     for p in params {
-        let _ = conn.query_prepared_single(stmt, p).await?;
+        conn.query_prepared_single_count(stmt, p).await?;
     }
     Ok(())
 }
@@ -86,30 +76,38 @@ async fn run_single_mode(
     Ok((params.len() * ITERATIONS) as f64 / total.as_secs_f64())
 }
 
-async fn run_pipeline_mode(cmds: &[Qail]) -> Result<f64, Box<dyn std::error::Error>> {
+async fn run_pipeline_mode(
+    params: &[Vec<Option<Vec<u8>>>],
+) -> Result<f64, Box<dyn std::error::Error>> {
     let mut conn = PgConnection::connect("127.0.0.1", 5432, "orion", "example_staging").await?;
+    let stmt = conn.prepare(SQL_BY_ID).await?;
 
-    let warm = conn.pipeline_execute_count_ast_cached(cmds).await?;
-    if warm != cmds.len() {
-        return Err(format!("warmup completed {} queries, expected {}", warm, cmds.len()).into());
+    let warm = conn.pipeline_execute_prepared_count(&stmt, params).await?;
+    if warm != params.len() {
+        return Err(format!(
+            "warmup completed {} queries, expected {}",
+            warm,
+            params.len()
+        )
+        .into());
     }
 
     let mut total = Duration::ZERO;
     for _ in 0..ITERATIONS {
         let start = Instant::now();
-        let completed = conn.pipeline_execute_count_ast_cached(cmds).await?;
+        let completed = conn.pipeline_execute_prepared_count(&stmt, params).await?;
         total += start.elapsed();
-        if completed != cmds.len() {
+        if completed != params.len() {
             return Err(format!(
                 "run completed {} queries, expected {}",
                 completed,
-                cmds.len()
+                params.len()
             )
             .into());
         }
     }
 
-    Ok((cmds.len() * ITERATIONS) as f64 / total.as_secs_f64())
+    Ok((params.len() * ITERATIONS) as f64 / total.as_secs_f64())
 }
 
 async fn run_pool10_mode(
@@ -195,8 +193,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_single_mode(&params).await?
         }
         Mode::Pipeline => {
-            let cmds = build_ast_batch(TOTAL_QUERIES);
-            run_pipeline_mode(&cmds).await?
+            let params = build_param_batch(TOTAL_QUERIES);
+            run_pipeline_mode(&params).await?
         }
         Mode::Pool10 => {
             let per_worker = TOTAL_QUERIES / POOL_SIZE;

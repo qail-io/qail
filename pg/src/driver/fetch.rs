@@ -2,9 +2,14 @@
 //! fetch_one, execute, and query_ast.
 
 use super::core::PgDriver;
+use super::prepared::PreparedAstQuery;
 use super::types::*;
 use qail_core::ast::Qail;
 use std::sync::Arc;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 impl PgDriver {
     /// Execute a QAIL command and fetch all rows (CACHED + ZERO-ALLOC).
@@ -28,6 +33,146 @@ impl PgDriver {
     ) -> PgResult<Vec<PgRow>> {
         // Delegate to cached-by-default behavior.
         self.fetch_all_cached_with_format(cmd, result_format).await
+    }
+
+    /// Prepare an AST query once and return a reusable frozen handle.
+    ///
+    /// This is the lowest-overhead path for repeating the **exact same** AST
+    /// command (same SQL text and same bind values). It avoids per-call AST
+    /// encoding and statement-cache hash/lookup in `fetch_all_cached`.
+    pub async fn prepare_ast_query(&mut self, cmd: &Qail) -> PgResult<PreparedAstQuery> {
+        use crate::protocol::AstEncoder;
+
+        let (sql, params) =
+            AstEncoder::encode_cmd_sql(cmd).map_err(|e| PgError::Encode(e.to_string()))?;
+        let stmt = self.connection.prepare(&sql).await?;
+
+        let mut hasher = DefaultHasher::new();
+        sql.hash(&mut hasher);
+        let sql_hash = hasher.finish();
+
+        self.connection
+            .stmt_cache
+            .put(sql_hash, stmt.name().to_string());
+        self.connection
+            .prepared_statements
+            .insert(stmt.name().to_string(), sql.clone());
+
+        Ok(PreparedAstQuery {
+            stmt,
+            params,
+            sql,
+            sql_hash,
+        })
+    }
+
+    /// Execute a precompiled AST query handle and return rows.
+    ///
+    /// Rows are returned without `ColumnInfo` metadata (`column_info = None`),
+    /// so prefer positional access (`row.text(0)`, `row.get_i64(1)`, ...).
+    pub async fn fetch_all_prepared_ast(
+        &mut self,
+        prepared: &PreparedAstQuery,
+    ) -> PgResult<Vec<PgRow>> {
+        self.fetch_all_prepared_ast_with_format(prepared, ResultFormat::Text)
+            .await
+    }
+
+    /// Execute a precompiled AST query handle with explicit result format.
+    pub async fn fetch_all_prepared_ast_with_format(
+        &mut self,
+        prepared: &PreparedAstQuery,
+        result_format: ResultFormat,
+    ) -> PgResult<Vec<PgRow>> {
+        let mut retried = false;
+
+        loop {
+            self.connection.stmt_cache.touch_key(prepared.sql_hash);
+            self.connection.write_buf.clear();
+            if let Err(e) = crate::protocol::PgEncoder::encode_bind_to_with_result_format(
+                &mut self.connection.write_buf,
+                prepared.stmt.name(),
+                &prepared.params,
+                result_format.as_wire_code(),
+            ) {
+                return Err(PgError::Encode(e.to_string()));
+            }
+            crate::protocol::PgEncoder::encode_execute_to(&mut self.connection.write_buf);
+            crate::protocol::PgEncoder::encode_sync_to(&mut self.connection.write_buf);
+
+            if let Err(err) = self.connection.flush_write_buf().await {
+                if !retried && err.is_prepared_statement_retryable() {
+                    retried = true;
+                    let stmt = self.connection.prepare(&prepared.sql).await?;
+                    self.connection
+                        .stmt_cache
+                        .put(prepared.sql_hash, stmt.name().to_string());
+                    self.connection
+                        .prepared_statements
+                        .insert(stmt.name().to_string(), prepared.sql.clone());
+                    continue;
+                }
+                return Err(err);
+            }
+
+            let mut rows: Vec<PgRow> = Vec::with_capacity(32);
+            let mut error: Option<PgError> = None;
+            let mut flow = super::extended_flow::ExtendedFlowTracker::new(
+                super::extended_flow::ExtendedFlowConfig::parse_bind_execute(false),
+            );
+
+            loop {
+                let msg = self.connection.recv().await?;
+                flow.validate(
+                    &msg,
+                    "driver fetch_all_prepared_ast execute",
+                    error.is_some(),
+                )?;
+                match msg {
+                    crate::protocol::BackendMessage::BindComplete => {}
+                    crate::protocol::BackendMessage::RowDescription(_) => {}
+                    crate::protocol::BackendMessage::DataRow(data) => {
+                        if error.is_none() {
+                            rows.push(PgRow {
+                                columns: data,
+                                column_info: None,
+                            });
+                        }
+                    }
+                    crate::protocol::BackendMessage::CommandComplete(_) => {}
+                    crate::protocol::BackendMessage::NoData => {}
+                    crate::protocol::BackendMessage::ReadyForQuery(_) => {
+                        if let Some(err) = error {
+                            if !retried && err.is_prepared_statement_retryable() {
+                                retried = true;
+                                let stmt = self.connection.prepare(&prepared.sql).await?;
+                                self.connection
+                                    .stmt_cache
+                                    .put(prepared.sql_hash, stmt.name().to_string());
+                                self.connection
+                                    .prepared_statements
+                                    .insert(stmt.name().to_string(), prepared.sql.clone());
+                                break;
+                            }
+                            return Err(err);
+                        }
+                        return Ok(rows);
+                    }
+                    crate::protocol::BackendMessage::ErrorResponse(err) => {
+                        if error.is_none() {
+                            error = Some(PgError::QueryServer(err.into()));
+                        }
+                    }
+                    msg if is_ignorable_session_message(&msg) => {}
+                    other => {
+                        return Err(unexpected_backend_message(
+                            "driver fetch_all_prepared_ast execute",
+                            &other,
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     /// Execute a QAIL command and fetch all rows as a typed struct (text format).

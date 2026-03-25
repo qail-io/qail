@@ -13,7 +13,7 @@
 
 Every SaaS backend has the same three bugs waiting to happen:
 
-1. **N+1 queries** — Your ORM fires 151 queries where 1 would do. You find out in production.
+1. **N+1 queries** — Your ORM fires 100+ queries where 1 would do. You find out in production.
 2. **SQL injection** — One string interpolation mistake. That's all it takes.
 3. **Broken tenant isolation** — A missing `WHERE tenant_id = ?` leaks another customer's data.
 
@@ -48,32 +48,31 @@ Qail::get("users").columns(["id", "email"]).eq("active", true)
 
 ---
 
-## Benchmark: Proof, Not Marketing
+## Benchmark: Pattern Cost Under RTT
 
-We ran the same complex query — 3×LEFT JOIN across 4 tables, filtered, sorted, 50 rows — using five approaches against a real PostgreSQL database. 100 iterations, `--release` mode.
+We benchmarked six execution patterns for the same endpoint objective and canonical payload shape (`id`, `name`, `origin_harbor`, `dest_harbor`) on real PostgreSQL data. The pattern differs (single JOIN vs batched vs N+1), but output is validated as equivalent before timing.
 
-| # | Approach | Avg Latency | DB Queries | vs Qail |
-|---|----------|------------|------------|---------|
-| 1 | **Qail AST** | **449µs** | **1** | baseline |
-| 2 | REST + `?expand=` | 635µs | 1 | 1.4× slower |
-| 3 | GraphQL + DataLoader | 1.52ms | 3 | **3.4×** |
-| 4 | GraphQL naive | 18.2ms | 151 | **40×** |
-| 5 | REST naive | 22.5ms | 151 | **50×** |
+Snapshot runs: **March 25, 2026** (`--release`, `BATTLE_ITERATIONS=200`, warmup `15`, global warmup `15`).
 
-> **The headline isn't 0.4ms vs 0.6ms.** It's that many teams ship Approach 4 or 5 — the one that's **40-50× slower** — because their tools allow N+1 by default.
->
-> Qail makes the slow version hard to write and easy to catch in CI. The AST guides you to `.join()`, and N+1 detection closes the gap.
+| Network Profile | Qail AST (uncached, 1 query) | Gateway/REST `?expand=` (1 query) | GraphQL + DataLoader (2 queries) | GraphQL naive (N+1, 101 queries) |
+|---|---:|---:|---:|---:|
+| Loopback (`BATTLE_SIMULATED_RTT_US=0`) | **146.9us** | 164.5us | 146.8us | 4.74ms |
+| +250us/query RTT | **475.4us** | 486.4us | 779.4us | 35.1ms |
+| +1000us/query RTT | **1237.8us** | 1248.4us | 2287.0us | 111.6ms |
+
+> Main signal: on loopback, single-query and DataLoader are close; once RTT is non-trivial, fewer round trips dominate latency.
 
 <details>
 <summary><strong>Methodology notes (click to expand)</strong></summary>
 
-- **Cache equalization:** A 10-iteration global warmup loads all data pages into Postgres buffer cache *before* any timed approach runs. All approaches start from identical cache state.
-- **Fair protocol:** All five approaches use Qail's binary driver internally, isolating the architectural difference (1 query vs N+1) from protocol overhead.
-- **DataLoader:** Realistically batches N lookups into `WHERE id IN (...)` queries — the standard GraphQL optimization.
-- **REST + expand:** Server-side JOIN (same query as Qail) + JSON serialization overhead. The 1.4× gap is pure JSON ser/de cost.
-- **Network latency:** Local benchmark = 0ms latency. In production (app → RDS), each extra round trip adds 1-2ms. The gap between Qail (1 trip) and DataLoader (3 trips) widens significantly.
-- **Benchmark context:** These are snapshot numbers from Feb 2026. Absolute latency varies by hardware/Postgres config; relative N+1 vs single-query behavior is the key signal.
-- Run it yourself: `DATABASE_URL=... cargo run --example battle_comparison --features chrono,uuid --release`
+- **Schema used:** current `swb_staging_local` schema (`odyssey_connections` + `harbors`) with a 2×LEFT JOIN shape.
+- **Equivalence gate:** benchmark aborts if any approach does not produce the same canonical payload.
+- **Cache equalization:** global warmup before timed runs.
+- **Config emitted:** `iterations`, per-approach warmup, and run order are printed in output.
+- **RTT simulation knob:** `BATTLE_SIMULATED_RTT_US` injects per-query transport delay in the harness.
+- **Measured stats:** median + p95 (and avg in raw output), query count per request, JSON bytes for REST variants.
+- **Run it yourself:**  
+  `DATABASE_URL=postgresql://orion@localhost:5432/swb_staging_local?sslmode=disable BATTLE_SIMULATED_RTT_US=1000 cargo run -p qail-pg --example battle_comparison --features chrono,uuid,legacy-raw-examples --release`
 
 </details>
 

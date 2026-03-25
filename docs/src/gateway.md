@@ -325,17 +325,15 @@ GET /api/_schema         # Full schema with tables, columns, types, FKs
 GET /api/_openapi        # Auto-generated OpenAPI 3.0 spec
 ```
 
-## Benchmark: Why Gateway > GraphQL
+## Benchmark: Gateway vs GraphQL (Current)
 
-The gateway's `?expand=` does server-side JOINs — the same approach as Qail AST but over HTTP:
+The gateway's `?expand=` executes server-side JOINs over HTTP (single-query shape).
 
-| Approach | Avg Latency | DB Queries | vs Qail |
-|----------|------------|------------|---------|
-| **Qail AST** (binary) | **449µs** | 1 | baseline |
-| **Gateway** (`?expand=`) | 635µs | 1 | 1.4× |
-| GraphQL + DataLoader | 1.52ms | 3 | 3.4× |
-| GraphQL naive (N+1) | 18.2ms | 151 | **40×** |
+| Network Profile | Qail AST (uncached) | Gateway (`?expand=`) | GraphQL + DataLoader | GraphQL naive (N+1) |
+|----------|------------|------------|---------|---------|
+| Loopback (`RTT=0us`) | 146.9us (1 query) | 164.5us (1 query) | 146.8us (2 queries) | 4.74ms (101 queries) |
+| Simulated RTT (`RTT=1000us/query`) | 1237.8us (1 query) | 1248.4us (1 query) | 2287.0us (2 queries) | 111.56ms (101 queries) |
 
-The 1.4× gap is pure JSON serialization overhead. On the wire, the gateway executes the exact same single-query JOIN as the Qail driver.
+On loopback, DataLoader and single-query paths are very close. As RTT increases, one-query gateway/AST paths pull ahead because they pay fewer round trips.
 
-> **Unlike GraphQL**, the gateway makes N+1 structurally impossible. `?expand=` always resolves to a server-side JOIN — there's no resolver pattern to misconfigure.
+> `?expand=` resolves expansions through JOINs in one SQL execution shape, avoiding resolver-level fan-out.

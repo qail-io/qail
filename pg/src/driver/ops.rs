@@ -6,6 +6,7 @@ use super::pipeline::AstPipelineMode;
 use super::prepared::PreparedStatement;
 use super::rls;
 use super::types::*;
+use super::{AutoCountPath, AutoCountPlan};
 use qail_core::ast::Qail;
 
 impl PgDriver {
@@ -188,6 +189,52 @@ impl PgDriver {
     pub async fn pipeline_execute_count(&mut self, cmds: &[Qail]) -> PgResult<usize> {
         self.pipeline_execute_count_with_mode(cmds, AstPipelineMode::Auto)
             .await
+    }
+
+    /// Execute commands with runtime auto strategy and return both count and plan.
+    ///
+    /// Strategy:
+    /// - `len <= 1`: single cached query path
+    /// - `2..8`: one-shot pipeline
+    /// - `>= 8`: cached pipeline
+    pub async fn execute_count_auto_with_plan(
+        &mut self,
+        cmds: &[Qail],
+    ) -> PgResult<(usize, AutoCountPlan)> {
+        let plan = AutoCountPlan::for_driver(cmds.len());
+
+        let completed = match plan.path {
+            AutoCountPath::SingleCached => {
+                if cmds.is_empty() {
+                    0
+                } else {
+                    let _ = self.fetch_all_cached(&cmds[0]).await?;
+                    1
+                }
+            }
+            AutoCountPath::PipelineOneShot => {
+                self.connection
+                    .pipeline_execute_count_ast_with_mode(cmds, AstPipelineMode::OneShot)
+                    .await?
+            }
+            AutoCountPath::PipelineCached => {
+                self.connection
+                    .pipeline_execute_count_ast_with_mode(cmds, AstPipelineMode::Cached)
+                    .await?
+            }
+            AutoCountPath::PoolParallel => {
+                unreachable!("driver auto planner cannot resolve pool-parallel")
+            }
+        };
+
+        Ok((completed, plan))
+    }
+
+    /// Execute commands with runtime auto strategy.
+    #[inline]
+    pub async fn execute_count_auto(&mut self, cmds: &[Qail]) -> PgResult<usize> {
+        let (completed, _plan) = self.execute_count_auto_with_plan(cmds).await?;
+        Ok(completed)
     }
 
     /// Execute multiple Qail ASTs with an explicit pipeline strategy.

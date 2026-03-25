@@ -11,13 +11,14 @@ use super::connection::PooledConn;
 use super::connection::PooledConnection;
 use super::gss::*;
 use crate::driver::{
-    ConnectOptions, PgConnection, PgError, PgResult, is_ignorable_session_message,
-    unexpected_backend_message,
+    AstPipelineMode, AutoCountPath, AutoCountPlan, ConnectOptions, PgConnection, PgError, PgResult,
+    is_ignorable_session_message, unexpected_backend_message,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinSet;
 
 /// Maximum number of hot statements to track globally.
 pub(super) const MAX_HOT_STATEMENTS: usize = 32;
@@ -668,6 +669,109 @@ impl PgPool {
     /// Get the maximum number of connections.
     pub fn max_connections(&self) -> usize {
         self.inner.config.max_connections
+    }
+
+    /// Plan auto count strategy for a given batch length.
+    pub fn plan_auto_count(&self, batch_len: usize) -> AutoCountPlan {
+        AutoCountPlan::for_pool(
+            batch_len,
+            self.inner.config.max_connections,
+            self.inner.semaphore.available_permits(),
+        )
+    }
+
+    /// Execute commands with runtime auto strategy and return count + plan.
+    pub async fn execute_count_auto_with_plan(
+        &self,
+        cmds: &[qail_core::ast::Qail],
+    ) -> PgResult<(usize, AutoCountPlan)> {
+        let plan = self.plan_auto_count(cmds.len());
+
+        let completed = match plan.path {
+            AutoCountPath::SingleCached => {
+                if cmds.is_empty() {
+                    0
+                } else {
+                    let mut conn = self.acquire_system().await?;
+                    let run_result = conn.fetch_all_cached(&cmds[0]).await;
+                    conn.release().await;
+                    let _ = run_result?;
+                    1
+                }
+            }
+            AutoCountPath::PipelineOneShot | AutoCountPath::PipelineCached => {
+                let mode = if matches!(plan.path, AutoCountPath::PipelineOneShot) {
+                    AstPipelineMode::OneShot
+                } else {
+                    AstPipelineMode::Cached
+                };
+
+                let mut pooled = self.acquire_system().await?;
+                let run_result = {
+                    let conn = pooled.get_mut()?;
+                    conn.pipeline_execute_count_ast_with_mode(cmds, mode).await
+                };
+                pooled.release().await;
+                run_result?
+            }
+            AutoCountPath::PoolParallel => {
+                if cmds.is_empty() {
+                    0
+                } else {
+                    let all_cmds = Arc::new(cmds.to_vec());
+                    let mut tasks: JoinSet<PgResult<usize>> = JoinSet::new();
+
+                    for worker in 0..plan.workers {
+                        let start = worker * plan.chunk_size;
+                        if start >= all_cmds.len() {
+                            break;
+                        }
+                        let end = (start + plan.chunk_size).min(all_cmds.len());
+                        let pool = self.clone();
+                        let all_cmds = Arc::clone(&all_cmds);
+
+                        tasks.spawn(async move {
+                            let mut pooled = pool.acquire_system().await?;
+                            let run_result = {
+                                let conn = pooled.get_mut()?;
+                                conn.pipeline_execute_count_ast_with_mode(
+                                    &all_cmds[start..end],
+                                    AstPipelineMode::Auto,
+                                )
+                                .await
+                            };
+                            pooled.release().await;
+                            Ok(run_result?)
+                        });
+                    }
+
+                    let mut total = 0usize;
+                    while let Some(joined) = tasks.join_next().await {
+                        match joined {
+                            Ok(Ok(count)) => {
+                                total += count;
+                            }
+                            Ok(Err(err)) => return Err(err),
+                            Err(err) => {
+                                return Err(PgError::Connection(format!(
+                                    "auto pool worker join failed: {err}"
+                                )));
+                            }
+                        }
+                    }
+                    total
+                }
+            }
+        };
+
+        Ok((completed, plan))
+    }
+
+    /// Execute commands with runtime auto strategy.
+    #[inline]
+    pub async fn execute_count_auto(&self, cmds: &[qail_core::ast::Qail]) -> PgResult<usize> {
+        let (completed, _plan) = self.execute_count_auto_with_plan(cmds).await?;
+        Ok(completed)
     }
 
     /// Get comprehensive pool statistics.
