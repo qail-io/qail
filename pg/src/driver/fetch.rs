@@ -16,7 +16,8 @@ impl PgDriver {
     /// **Default method** - uses prepared statement caching for best performance.
     /// On first call: sends Parse + Bind + Execute + Sync
     /// On subsequent calls with same SQL: sends only Bind + Execute (SKIPS Parse!)
-    /// Uses LRU cache with max 1000 statements (auto-evicts oldest).
+    /// Uses per-connection LRU cache with max 100 statements (auto-evicts oldest),
+    /// with a hard prepared-statement cap of 128 per connection.
     pub async fn fetch_all(&mut self, cmd: &Qail) -> PgResult<Vec<PgRow>> {
         self.fetch_all_with_format(cmd, ResultFormat::Text).await
     }

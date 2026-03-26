@@ -112,14 +112,24 @@ pub fn encode_cmd_binary(cmd: &Qail) -> Vec<u8> {
 ///
 /// Also accepts raw UTF-8 QAIL query text as fallback.
 pub fn decode_cmd_binary(input: &[u8]) -> Result<Qail, String> {
-    if input.len() < 8 {
-        let text = std::str::from_utf8(input).map_err(|_| "invalid wire header".to_string())?;
-        return crate::parse(text).map_err(|e| e.to_string());
+    match decode_cmd_binary_payload(input) {
+        Ok(payload) => crate::parse(payload).map_err(|e| e.to_string()),
+        Err(_) => {
+            let text = std::str::from_utf8(input).map_err(|_| "invalid wire header".to_string())?;
+            crate::parse(text).map_err(|e| e.to_string())
+        }
     }
+}
 
+/// Decode a strict QWB1-framed binary payload into canonical QAIL text.
+///
+/// This does **not** parse the query. It only validates framing and UTF-8.
+pub fn decode_cmd_binary_payload(input: &[u8]) -> Result<&str, String> {
+    if input.len() < 8 {
+        return Err("invalid wire header".to_string());
+    }
     if input[0..4] != CMD_BIN_MAGIC {
-        let text = std::str::from_utf8(input).map_err(|_| "invalid wire header".to_string())?;
-        return crate::parse(text).map_err(|e| e.to_string());
+        return Err("invalid wire header".to_string());
     }
 
     let len = u32::from_be_bytes([input[4], input[5], input[6], input[7]]) as usize;
@@ -130,9 +140,7 @@ pub fn decode_cmd_binary(input: &[u8]) -> Result<Qail, String> {
         ));
     }
 
-    let payload =
-        std::str::from_utf8(&input[8..]).map_err(|_| "payload is not valid UTF-8".to_string())?;
-    crate::parse(payload).map_err(|e| e.to_string())
+    std::str::from_utf8(&input[8..]).map_err(|_| "payload is not valid UTF-8".to_string())
 }
 
 fn read_line<'a>(bytes: &'a [u8], idx: &mut usize) -> Result<&'a str, String> {
@@ -194,6 +202,27 @@ mod tests {
         let encoded = encode_cmd_binary(&cmd);
         let decoded = decode_cmd_binary(&encoded).unwrap();
         assert_eq!(decoded.to_string(), cmd.to_string());
+    }
+
+    #[test]
+    fn cmd_binary_payload_roundtrip() {
+        let cmd = crate::ast::Qail::get("users").limit(3);
+        let encoded = encode_cmd_binary(&cmd);
+        let payload = decode_cmd_binary_payload(&encoded).unwrap();
+        assert_eq!(payload, cmd.to_string());
+    }
+
+    #[test]
+    fn cmd_binary_payload_rejects_raw_text_without_qwb1_header() {
+        let err = decode_cmd_binary_payload(b"get users limit 1").unwrap_err();
+        assert!(err.contains("invalid wire header"));
+    }
+
+    #[test]
+    fn cmd_binary_decode_keeps_raw_text_fallback_for_compatibility() {
+        let decoded = decode_cmd_binary(b"get users limit 1").unwrap();
+        assert_eq!(decoded.action, crate::ast::Action::Get);
+        assert_eq!(decoded.table, "users");
     }
 
     #[test]

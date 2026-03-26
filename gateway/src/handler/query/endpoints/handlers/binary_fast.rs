@@ -3,8 +3,8 @@ use super::*;
 
 /// Execute a QAIL query (BINARY format)
 ///
-/// Accepts QAIL wire-binary payload and returns JSON results.
-/// This is faster than text format since it skips parsing.
+/// Accepts strict QWB1-framed payloads and returns JSON results.
+/// Uses parse-cache on repeated canonical payloads to reduce parser overhead.
 pub async fn execute_query_binary(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -29,8 +29,8 @@ pub async fn execute_query_binary(
         ));
     }
 
-    let mut cmd: qail_core::ast::Qail = match qail_core::wire::decode_cmd_binary(&body) {
-        Ok(cmd) => cmd,
+    let query_text = match qail_core::wire::decode_cmd_binary_payload(&body) {
+        Ok(text) => text,
         Err(e) => {
             tracing::warn!("Wire decode error: {}", e);
             return Err(ApiError::bad_request(
@@ -39,6 +39,7 @@ pub async fn execute_query_binary(
             ));
         }
     };
+    let mut cmd = parse_cached_query(&state, query_text)?;
 
     if let Err(e) = qail_core::sanitize::validate_ast(&cmd) {
         tracing::warn!("Binary AST rejected by structural validation: {}", e);
@@ -61,7 +62,7 @@ pub async fn execute_query_binary(
 
     reject_dangerous_action(&cmd)?;
 
-    if !is_query_allowed(&state.allow_list, None, &cmd) {
+    if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
         tracing::warn!("Binary query rejected by allow-list");
         return Err(ApiError::with_code(
             "QUERY_NOT_ALLOWED",

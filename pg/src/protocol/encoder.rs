@@ -25,6 +25,35 @@ impl PgEncoder {
     pub const FORMAT_BINARY: i16 = 1;
 
     #[inline(always)]
+    fn param_format_wire_len(param_format: i16) -> usize {
+        if param_format == Self::FORMAT_TEXT {
+            2 // parameter format count = 0 (server default text)
+        } else {
+            4 // parameter format count = 1 + one format code for all parameters
+        }
+    }
+
+    #[inline(always)]
+    fn encode_param_formats_vec(content: &mut Vec<u8>, param_format: i16) {
+        if param_format == Self::FORMAT_TEXT {
+            content.extend_from_slice(&0i16.to_be_bytes());
+        } else {
+            content.extend_from_slice(&1i16.to_be_bytes());
+            content.extend_from_slice(&param_format.to_be_bytes());
+        }
+    }
+
+    #[inline(always)]
+    fn encode_param_formats_bytesmut(buf: &mut BytesMut, param_format: i16) {
+        if param_format == Self::FORMAT_TEXT {
+            buf.extend_from_slice(&0i16.to_be_bytes());
+        } else {
+            buf.extend_from_slice(&1i16.to_be_bytes());
+            buf.extend_from_slice(&param_format.to_be_bytes());
+        }
+    }
+
+    #[inline(always)]
     fn result_format_wire_len(result_format: i16) -> usize {
         if result_format == Self::FORMAT_TEXT {
             2 // result format count = 0
@@ -148,7 +177,7 @@ impl PgEncoder {
     /// - length (4 bytes)
     /// - portal name (null-terminated)
     /// - statement name (null-terminated)
-    /// - format code count (2 bytes) - we use 0 (all text)
+    /// - format code section (2-4 bytes) - default path uses 0 (all text)
     /// - parameter count (2 bytes)
     /// - for each parameter: length (4 bytes, -1 for NULL), data
     /// - result format count + codes
@@ -177,6 +206,24 @@ impl PgEncoder {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> Result<BytesMut, EncodeError> {
+        Self::encode_bind_with_formats(portal, statement, params, Self::FORMAT_TEXT, result_format)
+    }
+
+    /// Encode a Bind message with explicit parameter and result format codes.
+    ///
+    /// `param_format` / `result_format` are PostgreSQL wire format codes:
+    /// `0 = text`, `1 = binary`.
+    ///
+    /// For `param_format = 0`, this encodes "parameter format count = 0"
+    /// (server default text). For non-zero, this encodes one explicit format
+    /// code applied to all parameters.
+    pub fn encode_bind_with_formats(
+        portal: &str,
+        statement: &str,
+        params: &[Option<Vec<u8>>],
+        param_format: i16,
+        result_format: i16,
+    ) -> Result<BytesMut, EncodeError> {
         if Self::has_nul(portal) || Self::has_nul(statement) {
             return Err(EncodeError::NullByte);
         }
@@ -199,8 +246,8 @@ impl PgEncoder {
         content.extend_from_slice(statement.as_bytes());
         content.push(0);
 
-        // Format codes count (0 = use default text format)
-        content.extend_from_slice(&0i16.to_be_bytes());
+        // Parameter format codes
+        Self::encode_param_formats_vec(&mut content, param_format);
 
         // Parameter count
         let param_count = Self::usize_to_i16(params.len())?;
@@ -293,6 +340,19 @@ impl PgEncoder {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> Result<BytesMut, EncodeError> {
+        Self::encode_extended_query_with_formats(sql, params, Self::FORMAT_TEXT, result_format)
+    }
+
+    /// Encode a complete extended query pipeline with explicit parameter and result formats.
+    ///
+    /// `param_format` / `result_format` are PostgreSQL wire format codes:
+    /// `0 = text`, `1 = binary`.
+    pub fn encode_extended_query_with_formats(
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+        param_format: i16,
+        result_format: i16,
+    ) -> Result<BytesMut, EncodeError> {
         if Self::has_nul(sql) {
             return Err(EncodeError::NullByte);
         }
@@ -301,7 +361,7 @@ impl PgEncoder {
         }
 
         // Calculate total size upfront to avoid reallocations
-        // Bind: 1 + 4 + 1 + 1 + 2 + 2 + params_data + result_formats
+        // Bind: 1 + 4 + 1 + 1 + param_formats + 2 + params_data + result_formats
         // Execute: 1 + 4 + 1 + 4 = 10
         // Sync: 5
         let params_size = params.iter().try_fold(0usize, |acc, p| {
@@ -311,11 +371,13 @@ impl PgEncoder {
             acc.checked_add(field_size)
                 .ok_or(EncodeError::MessageTooLarge(usize::MAX))
         })?;
+        let param_formats_size = Self::param_format_wire_len(param_format);
         let result_formats_size = Self::result_format_wire_len(result_format);
         let total_size = 9usize
             .checked_add(sql.len())
-            .and_then(|v| v.checked_add(11))
+            .and_then(|v| v.checked_add(9))
             .and_then(|v| v.checked_add(params_size))
+            .and_then(|v| v.checked_add(param_formats_size))
             .and_then(|v| v.checked_add(result_formats_size))
             .and_then(|v| v.checked_add(10))
             .and_then(|v| v.checked_add(5))
@@ -342,7 +404,7 @@ impl PgEncoder {
         let bind_content_len = 1usize
             .checked_add(1)
             .and_then(|v| v.checked_add(2))
-            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(param_formats_size))
             .and_then(|v| v.checked_add(params_size))
             .and_then(|v| v.checked_add(result_formats_size))
             .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
@@ -350,7 +412,7 @@ impl PgEncoder {
         buf.extend_from_slice(&bind_len.to_be_bytes());
         buf.extend_from_slice(&[0]); // Unnamed portal
         buf.extend_from_slice(&[0]); // Unnamed statement
-        buf.extend_from_slice(&0i16.to_be_bytes()); // Format codes (default text)
+        Self::encode_param_formats_bytesmut(&mut buf, param_format);
         let param_count = Self::usize_to_i16(params.len())?;
         buf.extend_from_slice(&param_count.to_be_bytes());
         for param in params {
@@ -464,6 +526,24 @@ impl PgEncoder {
         params: &[Param<'a>],
         result_format: i16,
     ) -> Result<(), EncodeError> {
+        Self::encode_bind_ultra_with_formats(
+            buf,
+            statement,
+            params,
+            Self::FORMAT_TEXT,
+            result_format,
+        )
+    }
+
+    /// Encode Bind message with explicit parameter and result format codes.
+    #[inline]
+    pub fn encode_bind_ultra_with_formats<'a>(
+        buf: &mut BytesMut,
+        statement: &str,
+        params: &[Param<'a>],
+        param_format: i16,
+        result_format: i16,
+    ) -> Result<(), EncodeError> {
         if Self::has_nul(statement) {
             return Err(EncodeError::NullByte);
         }
@@ -482,12 +562,13 @@ impl PgEncoder {
             acc.checked_add(field_size)
                 .ok_or(EncodeError::MessageTooLarge(usize::MAX))
         })?;
+        let param_formats_size = Self::param_format_wire_len(param_format);
         let result_formats_size = Self::result_format_wire_len(result_format);
         let content_len = 1usize
             .checked_add(statement.len())
             .and_then(|v| v.checked_add(1))
             .and_then(|v| v.checked_add(2))
-            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(param_formats_size))
             .and_then(|v| v.checked_add(params_size))
             .and_then(|v| v.checked_add(result_formats_size))
             .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
@@ -509,8 +590,8 @@ impl PgEncoder {
         buf.extend_from_slice(statement.as_bytes());
         buf.put_u8(0);
 
-        // Format codes count (0 = default text)
-        Self::put_i16_be(buf, 0);
+        // Parameter format codes
+        Self::encode_param_formats_bytesmut(buf, param_format);
 
         // Parameter count
         let param_count = Self::usize_to_i16(params.len())?;
@@ -568,6 +649,18 @@ impl PgEncoder {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> Result<(), EncodeError> {
+        Self::encode_bind_to_with_formats(buf, statement, params, Self::FORMAT_TEXT, result_format)
+    }
+
+    /// Encode Bind into existing buffer with explicit parameter and result formats.
+    #[inline]
+    pub fn encode_bind_to_with_formats(
+        buf: &mut BytesMut,
+        statement: &str,
+        params: &[Option<Vec<u8>>],
+        param_format: i16,
+        result_format: i16,
+    ) -> Result<(), EncodeError> {
         if Self::has_nul(statement) {
             return Err(EncodeError::NullByte);
         }
@@ -576,7 +669,7 @@ impl PgEncoder {
         }
 
         // Calculate content length upfront
-        // portal(1) + statement(len+1) + format_codes(2) + param_count(2)
+        // portal(1) + statement(len+1) + param_formats + param_count(2)
         // + params_data + result_formats(2 or 4)
         let params_size = params.iter().try_fold(0usize, |acc, p| {
             let field_size = 4usize
@@ -585,12 +678,13 @@ impl PgEncoder {
             acc.checked_add(field_size)
                 .ok_or(EncodeError::MessageTooLarge(usize::MAX))
         })?;
+        let param_formats_size = Self::param_format_wire_len(param_format);
         let result_formats_size = Self::result_format_wire_len(result_format);
         let content_len = 1usize
             .checked_add(statement.len())
             .and_then(|v| v.checked_add(1))
             .and_then(|v| v.checked_add(2))
-            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(param_formats_size))
             .and_then(|v| v.checked_add(params_size))
             .and_then(|v| v.checked_add(result_formats_size))
             .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
@@ -611,8 +705,8 @@ impl PgEncoder {
         buf.extend_from_slice(statement.as_bytes());
         buf.put_u8(0);
 
-        // Format codes count (0 = default text)
-        Self::put_i16_be(buf, 0);
+        // Parameter format codes
+        Self::encode_param_formats_bytesmut(buf, param_format);
 
         // Parameter count
         let param_count = Self::usize_to_i16(params.len())?;
@@ -725,6 +819,23 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_bind_binary_param_and_result_format() {
+        let bytes = PgEncoder::encode_bind_with_formats(
+            "",
+            "",
+            &[],
+            PgEncoder::FORMAT_BINARY,
+            PgEncoder::FORMAT_BINARY,
+        )
+        .unwrap();
+
+        // portal, statement, param formats(count+code), param count, result formats(count+code)
+        assert_eq!(&bytes[7..11], &[0, 1, 0, 1]);
+        assert_eq!(&bytes[11..13], &[0, 0]);
+        assert_eq!(&bytes[13..17], &[0, 1, 0, 1]);
+    }
+
+    #[test]
     fn test_encode_execute() {
         let bytes = PgEncoder::try_encode_execute("", 0).unwrap();
 
@@ -780,6 +891,32 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_extended_query_binary_param_and_result_format() {
+        let bytes = PgEncoder::encode_extended_query_with_formats(
+            "SELECT 1",
+            &[],
+            PgEncoder::FORMAT_BINARY,
+            PgEncoder::FORMAT_BINARY,
+        )
+        .unwrap();
+
+        let parse_len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        let bind_start = 1 + parse_len;
+        let bind_len = i32::from_be_bytes([
+            bytes[bind_start + 1],
+            bytes[bind_start + 2],
+            bytes[bind_start + 3],
+            bytes[bind_start + 4],
+        ]);
+        assert_eq!(bind_len, 16);
+
+        let bind_content = &bytes[bind_start + 5..bind_start + 1 + bind_len as usize];
+        assert_eq!(&bind_content[2..6], &[0, 1, 0, 1]);
+        assert_eq!(&bind_content[6..8], &[0, 0]);
+        assert_eq!(&bind_content[8..12], &[0, 1, 0, 1]);
+    }
+
+    #[test]
     fn test_encode_copy_fail() {
         let bytes = PgEncoder::try_encode_copy_fail("bad data").unwrap();
         assert_eq!(bytes[0], b'f');
@@ -824,6 +961,23 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_bind_to_binary_param_and_result_format() {
+        let mut buf = BytesMut::new();
+        PgEncoder::encode_bind_to_with_formats(
+            &mut buf,
+            "",
+            &[],
+            PgEncoder::FORMAT_BINARY,
+            PgEncoder::FORMAT_BINARY,
+        )
+        .unwrap();
+
+        assert_eq!(&buf[7..11], &[0, 1, 0, 1]);
+        assert_eq!(&buf[11..13], &[0, 0]);
+        assert_eq!(&buf[13..17], &[0, 1, 0, 1]);
+    }
+
+    #[test]
     fn test_encode_bind_ultra_binary_result_format() {
         let mut buf = BytesMut::new();
         PgEncoder::encode_bind_ultra_with_result_format(
@@ -835,6 +989,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(&buf[11..15], &[0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn test_encode_bind_ultra_binary_param_and_result_format() {
+        let mut buf = BytesMut::new();
+        PgEncoder::encode_bind_ultra_with_formats(
+            &mut buf,
+            "",
+            &[],
+            PgEncoder::FORMAT_BINARY,
+            PgEncoder::FORMAT_BINARY,
+        )
+        .unwrap();
+
+        assert_eq!(&buf[7..11], &[0, 1, 0, 1]);
+        assert_eq!(&buf[11..13], &[0, 0]);
+        assert_eq!(&buf[13..17], &[0, 1, 0, 1]);
     }
 
     #[test]

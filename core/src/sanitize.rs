@@ -1,8 +1,8 @@
 //! AST structural sanitization for untrusted input.
 //!
 //! The text parser enforces identifier constraints (alphanumeric + `_` + `.`),
-//! but the binary/postcard path deserializes directly into `Qail` — an attacker
-//! can craft identifiers that inject SQL fragments.
+//! but externally provided ASTs (binary endpoints, APIs, generated payloads, etc.)
+//! may bypass parser-level identifier checks and still reach execution.
 //!
 //! Call [`validate_ast`] on any `Qail` obtained from an untrusted source
 //! (binary endpoint, external API, etc.) before execution.

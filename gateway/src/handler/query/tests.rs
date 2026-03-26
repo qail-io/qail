@@ -347,6 +347,38 @@ async fn binary_handler_rejects_invalid_binary_payload() {
 }
 
 #[tokio::test]
+async fn binary_handler_rejects_raw_text_payload_without_qwb1_header() {
+    let _serial = crate::metrics::txn_test_serial_guard().await;
+    let config = GatewayConfig {
+        production_strict: false,
+        ..GatewayConfig::default()
+    };
+
+    let state = build_test_state(config, QueryAllowList::new()).await;
+    let app = Router::new()
+        .route("/qail/binary", post(execute_query_binary))
+        .with_state(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/qail/binary")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from("get users limit 1"))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should execute");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    assert_eq!(parse_error_code(&body), "DECODE_ERROR");
+}
+
+#[tokio::test]
 async fn binary_handler_rejects_legacy_postcard_like_payload() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
