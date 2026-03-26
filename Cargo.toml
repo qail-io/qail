@@ -12,6 +12,7 @@ members = [
 ]
 exclude = [
     "pg/fuzz",
+    "core/fuzz",
     "codegen",
 ]
 
@@ -33,4 +34,3 @@ inherits = "release"
 strip = false
 debug = true
 lto = false
-

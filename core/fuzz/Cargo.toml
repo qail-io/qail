@@ -1,0 +1,23 @@
+[package]
+name = "qail-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.qail-core]
+path = ".."
+
+[[bin]]
+name = "wire_decode"
+path = "fuzz_targets/wire_decode.rs"
+test = false
+doc = false
+bench = false

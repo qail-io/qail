@@ -4,7 +4,7 @@ use crate::ast::{
 };
 
 /// The core Qail AST node representing a single database operation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Qail {
     /// SQL action to perform.
     pub action: Action,
@@ -87,7 +87,7 @@ pub struct Qail {
 }
 
 /// Common Table Expression (WITH clause) definition.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CTEDef {
     /// Alias name used to reference this CTE elsewhere in the query.
     pub name: String,
@@ -104,7 +104,7 @@ pub struct CTEDef {
 }
 
 /// ON CONFLICT clause for upsert.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OnConflict {
     /// Conflict target columns.
     pub columns: Vec<String>,
@@ -113,7 +113,7 @@ pub struct OnConflict {
 }
 
 /// Action to take on an INSERT conflict.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ConflictAction {
     /// DO NOTHING.
     DoNothing,
@@ -129,6 +129,15 @@ impl Default for OnConflict {
         Self {
             columns: vec![],
             action: ConflictAction::DoNothing,
+        }
+    }
+}
+
+impl ConflictAction {
+    pub(crate) fn update_assignments(&self) -> Option<&[(String, Expr)]> {
+        match self {
+            Self::DoNothing => None,
+            Self::DoUpdate { assignments } => Some(assignments),
         }
     }
 }

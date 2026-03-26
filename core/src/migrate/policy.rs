@@ -33,7 +33,7 @@
 use crate::ast::Expr;
 
 /// What the policy applies to (SELECT, INSERT, UPDATE, DELETE, or ALL).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PolicyTarget {
     /// Applies to all operations.
     All,
@@ -60,7 +60,7 @@ impl std::fmt::Display for PolicyTarget {
 }
 
 /// Whether this is permissive (default) or restrictive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PolicyPermissiveness {
     /// Rows matching ANY permissive policy are visible (OR).
     Permissive,
@@ -81,7 +81,7 @@ impl std::fmt::Display for PolicyPermissiveness {
 ///
 /// All expressions use typed `Expr` nodes — no raw SQL strings.
 /// The transpiler converts these to `CREATE POLICY ... USING (...) WITH CHECK (...)`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RlsPolicy {
     /// Policy name (e.g., "orders_operator_isolation")
     pub name: String,

@@ -1,7 +1,7 @@
 use crate::ast::{Condition, LogicalOp, SortOrder};
 
 /// A cage (constraint block) in the query.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cage {
     /// Kind of constraint.
     pub kind: CageKind,
@@ -12,7 +12,7 @@ pub struct Cage {
 }
 
 /// The type of cage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CageKind {
     /// WHERE filter.
     Filter,

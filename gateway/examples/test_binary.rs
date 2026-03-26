@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a QAIL query
     let cmd = Qail::get("harbors").columns(["id", "name"]).limit(3);
 
-    // Serialize to QAIL binary wire payload (QWB1)
+    // Serialize to QAIL binary wire payload (QWB2 AST binary)
     let bytes = encode_cmd_binary(&cmd);
     println!("Binary query size: {} bytes", bytes.len());
 

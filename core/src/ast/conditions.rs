@@ -1,7 +1,7 @@
 use crate::ast::{Expr, Operator, Value};
 
 /// A single condition within a cage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Condition {
     /// Left-hand expression.
     pub left: Expr,

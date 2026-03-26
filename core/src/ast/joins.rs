@@ -1,7 +1,7 @@
 use crate::ast::{Condition, JoinKind};
 
 /// A JOIN clause in the query.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Join {
     /// Target table (may include alias).
     pub table: String,

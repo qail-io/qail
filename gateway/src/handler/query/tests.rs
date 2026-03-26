@@ -283,7 +283,7 @@ async fn export_handler_enforces_allow_list_before_db_acquire() {
 }
 
 #[tokio::test]
-async fn binary_handler_accepts_qwb1_then_enforces_binary_allow_list_gate() {
+async fn binary_handler_accepts_qwb2_then_enforces_binary_allow_list_gate() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
@@ -347,7 +347,7 @@ async fn binary_handler_rejects_invalid_binary_payload() {
 }
 
 #[tokio::test]
-async fn binary_handler_rejects_raw_text_payload_without_qwb1_header() {
+async fn binary_handler_rejects_raw_text_payload_without_qwb2_header() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
@@ -379,6 +379,48 @@ async fn binary_handler_rejects_raw_text_payload_without_qwb1_header() {
 }
 
 #[tokio::test]
+async fn binary_handler_rejects_legacy_qwb1_text_payload() {
+    let _serial = crate::metrics::txn_test_serial_guard().await;
+    let config = GatewayConfig {
+        production_strict: false,
+        ..GatewayConfig::default()
+    };
+
+    let state = build_test_state(config, QueryAllowList::new()).await;
+    let app = Router::new()
+        .route("/qail/binary", post(execute_query_binary))
+        .with_state(Arc::clone(&state));
+
+    let legacy_text = b"get users limit 1";
+    let mut legacy_payload = Vec::new();
+    legacy_payload.extend_from_slice(b"QWB1");
+    legacy_payload.extend_from_slice(&(legacy_text.len() as u32).to_be_bytes());
+    legacy_payload.extend_from_slice(legacy_text);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/qail/binary")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(legacy_payload))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should execute");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    assert_eq!(parse_error_code(&body), "DECODE_ERROR");
+    assert!(
+        parse_error_message(&body).contains("legacy QWB1"),
+        "error message should indicate legacy wire rejection"
+    );
+}
+
+#[tokio::test]
 async fn binary_handler_rejects_legacy_postcard_like_payload() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
@@ -391,7 +433,7 @@ async fn binary_handler_rejects_legacy_postcard_like_payload() {
         .route("/qail/binary", post(execute_query_binary))
         .with_state(Arc::clone(&state));
 
-    // Legacy postcard-style payloads do not carry QWB1 magic and must be rejected.
+    // Legacy postcard-style payloads do not carry QWB2 framing and must be rejected.
     let legacy_payload = vec![0x82, 0xA6, 0x61, 0x63, 0x74, 0x69, 0x6F, 0x6E];
     let response = app
         .oneshot(

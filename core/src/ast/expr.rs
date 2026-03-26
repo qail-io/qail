@@ -1,7 +1,7 @@
 use crate::ast::{AggregateFunc, Cage, Condition, ModKind, Value};
 
 /// Binary operators for expressions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BinaryOp {
     // Arithmetic
     /// String concatenation `||`.
@@ -65,7 +65,7 @@ impl std::fmt::Display for BinaryOp {
 }
 
 /// An expression node in the AST.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Expr {
     /// All columns (*)
     Star,
@@ -501,7 +501,7 @@ impl std::fmt::Display for Expr {
 }
 
 /// Column constraint.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Constraint {
     /// PRIMARY KEY.
     PrimaryKey,
@@ -522,7 +522,7 @@ pub enum Constraint {
 }
 
 /// Generated column type (STORED or VIRTUAL)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ColumnGeneration {
     /// GENERATED ALWAYS AS (expr) STORED - computed and stored
     Stored(String),
@@ -531,7 +531,7 @@ pub enum ColumnGeneration {
 }
 
 /// Window frame definition for window functions
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum WindowFrame {
     /// ROWS BETWEEN start AND end
     Rows {
@@ -550,7 +550,7 @@ pub enum WindowFrame {
 }
 
 /// Window frame boundary
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FrameBound {
     /// UNBOUNDED PRECEDING.
     UnboundedPreceding,
@@ -583,7 +583,7 @@ impl std::fmt::Display for Constraint {
 }
 
 /// Index definition for CREATE INDEX
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct IndexDef {
     /// Index name
     pub name: String,
@@ -600,7 +600,7 @@ pub struct IndexDef {
 }
 
 /// Table-level constraints for composite keys
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TableConstraint {
     /// Composite UNIQUE constraint.
     Unique(Vec<String>),
@@ -633,7 +633,7 @@ impl From<&String> for Expr {
 // ==================== Function and Trigger Definitions ====================
 
 /// PostgreSQL function definition
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FunctionDef {
     /// Function name.
     pub name: String,
@@ -650,7 +650,7 @@ pub struct FunctionDef {
 }
 
 /// Trigger timing (BEFORE or AFTER)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TriggerTiming {
     /// BEFORE.
     Before,
@@ -661,7 +661,7 @@ pub enum TriggerTiming {
 }
 
 /// Trigger event types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TriggerEvent {
     /// INSERT.
     Insert,
@@ -674,7 +674,7 @@ pub enum TriggerEvent {
 }
 
 /// PostgreSQL trigger definition
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TriggerDef {
     /// Trigger name.
     pub name: String,
