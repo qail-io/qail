@@ -11,6 +11,52 @@ use super::{
     reject_ddl_in_transaction, txn_err_to_api,
 };
 
+fn run_savepoint_action<'a>(
+    session: &'a mut crate::transaction::TransactionSession,
+    action: String,
+    name: String,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<(), crate::transaction::TransactionError>>
+            + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let conn = session
+            .conn
+            .as_mut()
+            .ok_or(crate::transaction::TransactionError::SessionNotFound)?;
+        match action.as_str() {
+            "create" => conn.savepoint(&name).await.map_err(|e: qail_pg::PgError| {
+                crate::transaction::TransactionError::Database(e.to_string())
+            }),
+            "rollback" => {
+                let result = conn
+                    .rollback_to(&name)
+                    .await
+                    .map_err(|e: qail_pg::PgError| {
+                        crate::transaction::TransactionError::Database(e.to_string())
+                    });
+                if result.is_ok() {
+                    session.pg_aborted = false;
+                }
+                result
+            }
+            "release" => conn
+                .release_savepoint(&name)
+                .await
+                .map_err(|e: qail_pg::PgError| {
+                    crate::transaction::TransactionError::Database(e.to_string())
+                }),
+            _ => Err(crate::transaction::TransactionError::Rejected(format!(
+                "Invalid savepoint action '{}'. Use 'create', 'rollback', or 'release'",
+                action
+            ))),
+        }
+    })
+}
+
 /// `POST /txn/begin` — Start a new transaction session.
 ///
 /// Acquires a connection from the pool, sets RLS context, and issues BEGIN.
@@ -214,42 +260,23 @@ pub async fn txn_savepoint(
     let action = request.action.clone();
     let name = request.name.clone();
 
-    state
-        .transaction_manager
-        .with_session(&txn_id, &tenant_id, |session| {
-            let action = action.clone();
-            let name = name.clone();
-            Box::pin(async move {
-                let conn = session
-                    .conn
-                    .as_mut()
-                    .ok_or(crate::transaction::TransactionError::SessionNotFound)?;
-                match action.as_str() {
-                    "create" => conn.savepoint(&name).await.map_err(|e: qail_pg::PgError| {
-                        crate::transaction::TransactionError::Database(e.to_string())
-                    }),
-                    "rollback" => conn
-                        .rollback_to(&name)
-                        .await
-                        .map_err(|e: qail_pg::PgError| {
-                            crate::transaction::TransactionError::Database(e.to_string())
-                        }),
-                    "release" => {
-                        conn.release_savepoint(&name)
-                            .await
-                            .map_err(|e: qail_pg::PgError| {
-                                crate::transaction::TransactionError::Database(e.to_string())
-                            })
-                    }
-                    _ => Err(crate::transaction::TransactionError::Rejected(format!(
-                        "Invalid savepoint action '{}'. Use 'create', 'rollback', or 'release'",
-                        action
-                    ))),
-                }
+    let run_result = if request.action == "rollback" {
+        state
+            .transaction_manager
+            .with_session_allow_aborted(&txn_id, &tenant_id, |session| {
+                run_savepoint_action(session, action.clone(), name.clone())
             })
-        })
-        .await
-        .map_err(txn_err_to_api)?;
+            .await
+    } else {
+        state
+            .transaction_manager
+            .with_session(&txn_id, &tenant_id, |session| {
+                run_savepoint_action(session, action.clone(), name.clone())
+            })
+            .await
+    };
+
+    run_result.map_err(txn_err_to_api)?;
 
     Ok(Json(SavepointResponse {
         action: request.action,

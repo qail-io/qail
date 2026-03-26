@@ -974,11 +974,20 @@ impl PgPool {
         }
 
         let idle_count = self.inner.connections.lock().await.len();
-        if idle_count >= min {
+        let checked_out_slots = self
+            .inner
+            .config
+            .max_connections
+            .saturating_sub(self.inner.semaphore.available_permits());
+        let deficit = maintenance_backfill_deficit(
+            self.inner.config.max_connections,
+            min,
+            idle_count,
+            checked_out_slots,
+        );
+        if deficit == 0 {
             return;
         }
-
-        let deficit = min - idle_count;
         let mut created = 0usize;
         for _ in 0..deficit {
             match Self::create_connection(&self.inner.config).await {
@@ -1030,6 +1039,23 @@ pub fn spawn_pool_maintenance(pool: PgPool) {
             pool.maintain().await;
         }
     });
+}
+
+pub(super) fn maintenance_backfill_deficit(
+    max_connections: usize,
+    min_connections: usize,
+    idle_count: usize,
+    checked_out_slots: usize,
+) -> usize {
+    let target_idle = min_connections.min(max_connections);
+    if idle_count >= target_idle {
+        return 0;
+    }
+
+    let needed_idle = target_idle - idle_count;
+    let available_slots =
+        max_connections.saturating_sub(idle_count.saturating_add(checked_out_slots));
+    needed_idle.min(available_slots)
 }
 
 pub(super) fn validate_pool_config(config: &PoolConfig) -> PgResult<()> {

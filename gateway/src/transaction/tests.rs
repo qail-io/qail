@@ -145,3 +145,41 @@ async fn test_reap_expired_records_idle_timeout_metrics() {
     assert_eq!(snapshot.forced_idle, 1);
     assert_eq!(snapshot.active, 0);
 }
+
+#[tokio::test]
+async fn test_with_session_allow_aborted_enables_recovery_flow() {
+    let mgr = TransactionSessionManager::new(10, 30, 900, 1000);
+    insert_test_session(
+        &mgr,
+        "s_aborted",
+        "tenant_d",
+        Duration::from_secs(0),
+        Duration::from_secs(0),
+        0,
+    )
+    .await;
+
+    {
+        let sessions = mgr.sessions.lock().await;
+        let session = sessions.get("s_aborted").expect("session exists").clone();
+        drop(sessions);
+        let mut guard = session.lock().await;
+        guard.pg_aborted = true;
+    }
+
+    let blocked = mgr
+        .with_session("s_aborted", "tenant_d", |_session| {
+            Box::pin(async move { Ok(()) })
+        })
+        .await;
+    assert!(matches!(blocked, Err(TransactionError::Aborted)));
+
+    let recovered = mgr
+        .with_session_allow_aborted("s_aborted", "tenant_d", |_session| {
+            Box::pin(async move { Ok(()) })
+        })
+        .await;
+    // Test helper sessions have no pinned connection. Reaching SessionNotFound
+    // here confirms we passed the aborted-state guard.
+    assert!(matches!(recovered, Err(TransactionError::SessionNotFound)));
+}

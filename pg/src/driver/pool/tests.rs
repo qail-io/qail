@@ -746,6 +746,15 @@ mod tests {
     }
 
     #[test]
+    fn test_maintenance_backfill_deficit_respects_capacity() {
+        assert_eq!(maintenance_backfill_deficit(10, 5, 5, 0), 0);
+        assert_eq!(maintenance_backfill_deficit(10, 5, 3, 0), 2);
+        assert_eq!(maintenance_backfill_deficit(10, 5, 0, 8), 2);
+        assert_eq!(maintenance_backfill_deficit(1, 1, 0, 1), 0);
+        assert_eq!(maintenance_backfill_deficit(4, 10, 0, 0), 4);
+    }
+
+    #[test]
     fn test_pool_churn_circuit_opens_after_threshold() {
         let host = unique_pool_host("pool-churn");
         let config = PoolConfig::new(&host, 5432, "user", "db");

@@ -3,13 +3,11 @@ use super::{TransactionSession, TransactionSessionManager};
 use std::time::Instant;
 
 impl TransactionSessionManager {
-    /// Get a mutable reference to a session, validating tenant ownership.
-    ///
-    /// The returned closure holds only the per-session lock.
-    pub async fn with_session<F, R>(
+    async fn with_session_inner<F, R>(
         &self,
         session_id: &str,
         tenant_id: &str,
+        allow_aborted: bool,
         f: F,
     ) -> Result<R, TransactionError>
     where
@@ -36,7 +34,7 @@ impl TransactionSessionManager {
             return Err(TransactionError::TenantMismatch);
         }
 
-        if session.pg_aborted {
+        if session.pg_aborted && !allow_aborted {
             return Err(TransactionError::Aborted);
         }
 
@@ -46,12 +44,13 @@ impl TransactionSessionManager {
             let tenant_id = session.tenant_id.clone();
             session.closed = true;
             let conn = session.conn.take();
+            drop(session);
+
             {
                 let mut sessions = self.sessions.lock().await;
                 sessions.remove(session_id);
                 crate::metrics::record_txn_active_sessions(sessions.len());
             }
-            drop(session);
             tracing::warn!(
                 reason = "lifetime_limit",
                 session_id = %session_id,
@@ -75,12 +74,13 @@ impl TransactionSessionManager {
             let tenant_id = session.tenant_id.clone();
             session.closed = true;
             let conn = session.conn.take();
+            drop(session);
+
             {
                 let mut sessions = self.sessions.lock().await;
                 sessions.remove(session_id);
                 crate::metrics::record_txn_active_sessions(sessions.len());
             }
-            drop(session);
             tracing::warn!(
                 reason = "statement_limit",
                 session_id = %session_id,
@@ -114,6 +114,48 @@ impl TransactionSessionManager {
         result
     }
 
+    /// Get a mutable reference to a session, validating tenant ownership.
+    ///
+    /// The returned closure holds only the per-session lock.
+    pub async fn with_session<F, R>(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        f: F,
+    ) -> Result<R, TransactionError>
+    where
+        F: FnOnce(
+            &mut TransactionSession,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<R, TransactionError>> + Send + '_>,
+        >,
+    {
+        self.with_session_inner(session_id, tenant_id, false, f)
+            .await
+    }
+
+    /// Like [`Self::with_session`], but allows access when the session is in
+    /// aborted-transaction state.
+    ///
+    /// Intended for abort-safe recovery operations (for example:
+    /// `ROLLBACK TO SAVEPOINT`).
+    pub async fn with_session_allow_aborted<F, R>(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        f: F,
+    ) -> Result<R, TransactionError>
+    where
+        F: FnOnce(
+            &mut TransactionSession,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<R, TransactionError>> + Send + '_>,
+        >,
+    {
+        self.with_session_inner(session_id, tenant_id, true, f)
+            .await
+    }
+
     /// Close a session: COMMIT or ROLLBACK, then release connection.
     pub async fn close_session(
         &self,
@@ -122,36 +164,33 @@ impl TransactionSessionManager {
         commit: bool,
     ) -> Result<(), TransactionError> {
         let session = {
-            let mut sessions = self.sessions.lock().await;
-            let arc = sessions
+            let sessions = self.sessions.lock().await;
+            sessions
                 .get(session_id)
                 .cloned()
-                .ok_or(TransactionError::SessionNotFound)?;
-
-            {
-                let guard = arc.lock().await;
-                if guard.closed {
-                    return Err(TransactionError::SessionNotFound);
-                }
-                if guard.tenant_id != tenant_id {
-                    return Err(TransactionError::TenantMismatch);
-                }
-            }
-
-            sessions.remove(session_id);
-            crate::metrics::record_txn_active_sessions(sessions.len());
-            arc
+                .ok_or(TransactionError::SessionNotFound)?
         };
 
         let mut session = session.lock().await;
         if session.closed {
             return Err(TransactionError::SessionNotFound);
         }
+        if session.tenant_id != tenant_id {
+            return Err(TransactionError::TenantMismatch);
+        }
+
         session.closed = true;
         let mut conn = session
             .conn
             .take()
             .ok_or(TransactionError::SessionNotFound)?;
+        drop(session);
+
+        {
+            let mut sessions = self.sessions.lock().await;
+            sessions.remove(session_id);
+            crate::metrics::record_txn_active_sessions(sessions.len());
+        }
 
         let action = if commit { "COMMIT" } else { "ROLLBACK" };
 

@@ -688,6 +688,10 @@ impl PgConnection {
         &mut self,
         cmds: &[qail_core::ast::Qail],
     ) -> PgResult<usize> {
+        if cmds.is_empty() {
+            return Ok(0);
+        }
+
         let buf =
             AstEncoder::encode_batch_simple(cmds).map_err(|e| PgError::Encode(e.to_string()))?;
         self.write_all_with_timeout(&buf, "stream write").await?;
@@ -1526,5 +1530,17 @@ mod tests {
         assert_eq!(conn.prepared_statements.len(), baseline);
         assert_eq!(conn.stmt_cache.len(), baseline_stmt_cache);
         assert!(conn.prepared_statements.contains_key("s1"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipeline_simple_ast_empty_batch_returns_zero_without_io() {
+        let mut conn = make_test_conn_with_prepared();
+        let res = conn
+            .pipeline_execute_count_simple_ast(&[])
+            .await
+            .expect("empty batch should be a fast no-op");
+        assert_eq!(res, 0);
+        assert!(!conn.is_io_desynced());
     }
 }
