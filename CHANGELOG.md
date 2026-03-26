@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-03-26
+
+### Added
+
+- **Gateway binary benchmark flow:** added explicit text-vs-binary gateway benchmark coverage to validate strict QWB2 ingress behavior under the same endpoint shape.
+
+### Changed
+
+- **QWB2 parse-free ingress path:** `/qail/binary` now runs on strict QWB2 AST binary decode and rejects legacy QWB1/raw-text payloads on the binary endpoint.
+- **Release docs/version references:** updated crate/docs/readme version references to `0.27.1`.
+- **Versioning:** bumped Rust crates to `0.27.1`.
+
+### Fixed
+
+- **QWB2 decode allocation safety:** bounded bincode decode with explicit payload limits on the binary AST wire path to prevent unbounded allocation on malformed input.
+
 ## [0.27.0] - 2026-03-25
 
 ### Breaking Changes ⚠️
