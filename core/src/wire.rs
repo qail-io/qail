@@ -10,7 +10,8 @@ const CMDS_TEXT_MAGIC: &str = "QAIL-CMDS/1";
 const CMD_BIN_MAGIC: [u8; 4] = *b"QWB2";
 const CMD_BIN_LEGACY_MAGIC: [u8; 4] = *b"QWB1";
 
-const MAX_BIN_AST_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Maximum allowed QWB2 payload size (bytes).
+pub const MAX_CMD_BINARY_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_AST_DEPTH: usize = 64;
 const MAX_AST_NODES: usize = 16_384;
 const MAX_AST_COLLECTION_LEN: usize = 2_048;
@@ -111,13 +112,13 @@ pub fn encode_cmd_binary(cmd: &Qail) -> Vec<u8> {
 
 /// Fallible QWB2 AST-binary encoder.
 pub fn try_encode_cmd_binary(cmd: &Qail) -> Result<Vec<u8>, String> {
-    let payload = bincode::serde::encode_to_vec(cmd, bincode::config::standard())
+    let payload = bincode::serde::encode_to_vec(cmd, binary_ast_bincode_config())
         .map_err(|e| format!("binary AST encode failed: {e}"))?;
-    if payload.len() > MAX_BIN_AST_PAYLOAD_BYTES {
+    if payload.len() > MAX_CMD_BINARY_PAYLOAD_BYTES {
         return Err(format!(
             "binary AST payload too large: {} bytes (max {})",
             payload.len(),
-            MAX_BIN_AST_PAYLOAD_BYTES
+            MAX_CMD_BINARY_PAYLOAD_BYTES
         ));
     }
 
@@ -136,7 +137,7 @@ pub fn try_encode_cmd_binary(cmd: &Qail) -> Result<Vec<u8>, String> {
 pub fn decode_cmd_binary(input: &[u8]) -> Result<Qail, String> {
     let payload = decode_cmd_binary_payload(input)?;
     let (cmd, consumed): (Qail, usize) =
-        bincode::serde::decode_from_slice(payload, bincode::config::standard())
+        bincode::serde::decode_from_slice(payload, binary_ast_bincode_config())
             .map_err(|e| format!("binary AST decode failed: {e}"))?;
     if consumed != payload.len() {
         return Err("trailing bytes after AST payload".to_string());
@@ -162,9 +163,9 @@ pub fn decode_cmd_binary_payload(input: &[u8]) -> Result<&[u8], String> {
     }
 
     let len = u32::from_be_bytes([input[4], input[5], input[6], input[7]]) as usize;
-    if len > MAX_BIN_AST_PAYLOAD_BYTES {
+    if len > MAX_CMD_BINARY_PAYLOAD_BYTES {
         return Err(format!(
-            "binary AST payload too large: header={len}, max={MAX_BIN_AST_PAYLOAD_BYTES}"
+            "binary AST payload too large: header={len}, max={MAX_CMD_BINARY_PAYLOAD_BYTES}"
         ));
     }
     if input.len() != 8 + len {
@@ -174,6 +175,11 @@ pub fn decode_cmd_binary_payload(input: &[u8]) -> Result<&[u8], String> {
         ));
     }
     Ok(&input[8..])
+}
+
+#[inline(always)]
+fn binary_ast_bincode_config() -> impl bincode::config::Config {
+    bincode::config::standard().with_limit::<MAX_CMD_BINARY_PAYLOAD_BYTES>()
 }
 
 #[derive(Default)]
@@ -873,6 +879,14 @@ mod tests {
         let encoded = encode_cmd_binary(&cmd);
         let decoded = decode_cmd_binary(&encoded).unwrap();
         assert_eq!(decoded.to_string(), cmd.to_string());
+    }
+
+    #[test]
+    fn cmd_binary_bincode_config_has_hard_limit() {
+        use bincode::config::Config;
+
+        let cfg = binary_ast_bincode_config();
+        assert_eq!(cfg.limit(), Some(MAX_CMD_BINARY_PAYLOAD_BYTES));
     }
 
     #[test]

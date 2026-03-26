@@ -43,7 +43,7 @@ pub mod transpiler;
 pub mod typed;
 /// Schema validator.
 pub mod validator;
-/// Serde-free AST wire codec.
+/// Versioned AST wire codecs (text + QWB2 binary).
 pub mod wire;
 
 #[cfg(test)]

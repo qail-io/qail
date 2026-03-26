@@ -674,8 +674,9 @@ impl PooledConnection {
         conn.write_buf.clear();
 
         // ── Prepend RLS Simple Query message ─────────────────────────
-        // This is the key optimization: RLS setup bytes go first in the
-        // same buffer as the query messages.
+        // NOTE: this is PostgreSQL SimpleQuery text, so the backend still
+        // parses this segment on every request. The optimization here is
+        // batching RLS + query protocol messages into one network flush.
         let rls_msg = crate::protocol::PgEncoder::try_encode_query_string(rls_sql)?;
         conn.write_buf.extend_from_slice(&rls_msg);
 

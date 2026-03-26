@@ -19,7 +19,7 @@ Auto-REST + WebSocket gateway for QAIL with direct PostgreSQL execution via `qai
 
 - `POST /qail` accepts **text DSL** input (string request body).
 - `POST /qail/binary` accepts **binary AST** payloads (no text-SQL interpolation path).
-- Both paths execute through `qail-pg`; use binary mode when you want strict AST-only semantics end-to-end.
+- Both paths execute through `qail-pg`; use binary mode when you want strict AST ingress semantics. PostgreSQL still parses SQL text on execution.
 
 ## Installation
 
