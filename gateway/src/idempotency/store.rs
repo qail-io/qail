@@ -11,6 +11,9 @@ pub(crate) struct CachedResponse {
     pub body: Vec<u8>,
     /// Content-Type header value.
     pub content_type: String,
+    /// Safe response headers preserved for replay parity.
+    #[serde(default)]
+    pub replay_headers: Vec<(String, String)>,
     /// SECURITY: Request fingerprint (method+path) — used to detect
     /// key reuse across different mutation routes.
     pub request_fingerprint: String,

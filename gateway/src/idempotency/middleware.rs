@@ -147,6 +147,7 @@ pub async fn idempotency_middleware(
         status: parts.status.as_u16(),
         body: body_bytes.to_vec(),
         content_type,
+        replay_headers: capture_replay_headers(&parts.headers),
         request_fingerprint,
     };
 

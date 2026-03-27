@@ -99,6 +99,33 @@ impl AuthContext {
         self.role == "denied"
     }
 
+    /// Extract JWT expiration (`exp`) Unix timestamp from claims when present.
+    pub fn token_expiry_unix(&self) -> Option<i64> {
+        let exp = self.claims.get("exp")?;
+        match exp {
+            serde_json::Value::Number(n) => n
+                .as_i64()
+                .or_else(|| n.as_u64().and_then(|v| i64::try_from(v).ok())),
+            serde_json::Value::String(s) => s.trim().parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    /// Returns true when the JWT has expired according to `exp`.
+    ///
+    /// Contexts without `exp` are treated as non-expiring for compatibility
+    /// (for example dev-mode header auth).
+    pub fn is_token_expired_now(&self) -> bool {
+        let Some(exp) = self.token_expiry_unix() else {
+            return false;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+            .unwrap_or(i64::MAX);
+        now >= exp
+    }
+
     /// Resolve tenant_id from the user→tenant cache when the JWT doesn't include it.
     ///
     /// Engine-style JWTs often only contain `user_id` and `role` — the tenant id

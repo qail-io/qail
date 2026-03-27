@@ -211,6 +211,48 @@ fn test_operator_role_does_not_bypass_rls() {
     assert_eq!(rls.tenant_id, "op-test-001");
 }
 
+#[test]
+fn token_expiry_helpers_parse_numeric_and_string_exp() {
+    let numeric = AuthContext {
+        user_id: "u".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: {
+            let mut c = HashMap::new();
+            c.insert("exp".to_string(), serde_json::Value::from(1_900_000_000u64));
+            c
+        },
+    };
+    assert_eq!(numeric.token_expiry_unix(), Some(1_900_000_000));
+
+    let stringy = AuthContext {
+        user_id: "u".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: {
+            let mut c = HashMap::new();
+            c.insert("exp".to_string(), serde_json::Value::from("1900000000"));
+            c
+        },
+    };
+    assert_eq!(stringy.token_expiry_unix(), Some(1_900_000_000));
+}
+
+#[test]
+fn token_expiry_helper_marks_past_exp_as_expired() {
+    let auth = AuthContext {
+        user_id: "u".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: {
+            let mut c = HashMap::new();
+            c.insert("exp".to_string(), serde_json::Value::from(1u64));
+            c
+        },
+    };
+    assert!(auth.is_token_expired_now());
+}
+
 // ══════════════════════════════════════════════════════════════════
 // RED-TEAM: JWT Edge Cases (#6 from adversarial checklist)
 // ══════════════════════════════════════════════════════════════════

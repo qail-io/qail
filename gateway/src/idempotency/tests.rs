@@ -1,4 +1,5 @@
 use super::*;
+use axum::http::HeaderMap;
 use std::time::Duration;
 
 #[test]
@@ -12,6 +13,7 @@ fn store_insert_and_get() {
             status: 201,
             body: b"created".to_vec(),
             content_type: "application/json".to_string(),
+            replay_headers: vec![],
             request_fingerprint: "POST:/test".to_string(),
         },
     );
@@ -35,6 +37,7 @@ fn store_scoped_by_tenant() {
             status: 201,
             body: b"op1-response".to_vec(),
             content_type: "application/json".to_string(),
+            replay_headers: vec![],
             request_fingerprint: "POST:/test".to_string(),
         },
     );
@@ -89,6 +92,7 @@ fn store_different_keys_independent() {
             status: 201,
             body: b"a".to_vec(),
             content_type: "application/json".to_string(),
+            replay_headers: vec![],
             request_fingerprint: "POST:/test".to_string(),
         },
     );
@@ -99,6 +103,7 @@ fn store_different_keys_independent() {
             status: 200,
             body: b"b".to_vec(),
             content_type: "application/json".to_string(),
+            replay_headers: vec![],
             request_fingerprint: "POST:/test".to_string(),
         },
     );
@@ -152,6 +157,7 @@ fn cached_response_serde_roundtrip() {
         status: 201,
         body: b"{\"id\":1}".to_vec(),
         content_type: "application/json".to_string(),
+        replay_headers: vec![],
         request_fingerprint: "POST:/test".to_string(),
     };
     let json = serde_json::to_string(&original).unwrap();
@@ -166,6 +172,7 @@ fn build_response_includes_replay_header() {
         status: 200,
         body: b"ok".to_vec(),
         content_type: "application/json".to_string(),
+        replay_headers: vec![],
         request_fingerprint: "POST:/test".to_string(),
     };
     let response = build_response_from_cache(cached);
@@ -178,6 +185,49 @@ fn build_response_includes_replay_header() {
             .to_str()
             .unwrap(),
         "true"
+    );
+}
+
+#[test]
+fn capture_replay_headers_preserves_safe_subset_only() {
+    let mut headers = HeaderMap::new();
+    headers.insert("location", "/v1/orders/1".parse().unwrap());
+    headers.insert("etag", "\"v1\"".parse().unwrap());
+    headers.insert("set-cookie", "session=abc".parse().unwrap());
+
+    let captured = capture_replay_headers(&headers);
+    assert!(
+        captured
+            .iter()
+            .any(|(k, v)| k == "location" && v == "/v1/orders/1")
+    );
+    assert!(captured.iter().any(|(k, v)| k == "etag" && v == "\"v1\""));
+    assert!(!captured.iter().any(|(k, _)| k == "set-cookie"));
+}
+
+#[test]
+fn build_response_replays_safe_headers() {
+    let response = build_response_from_cache(CachedResponse {
+        status: 201,
+        body: b"created".to_vec(),
+        content_type: "application/json".to_string(),
+        replay_headers: vec![
+            ("location".to_string(), "/v1/orders/1".to_string()),
+            ("etag".to_string(), "\"v1\"".to_string()),
+        ],
+        request_fingerprint: "POST:/v1/orders".to_string(),
+    });
+
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok()),
+        Some("/v1/orders/1")
+    );
+    assert_eq!(
+        response.headers().get("etag").and_then(|v| v.to_str().ok()),
+        Some("\"v1\"")
     );
 }
 

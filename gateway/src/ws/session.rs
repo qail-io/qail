@@ -59,6 +59,16 @@ pub(super) async fn handle_socket(
     };
 
     loop {
+        if auth.is_token_expired_now() {
+            let _ = tx
+                .send(WsServerMessage::Error {
+                    message: "Authentication token expired; reconnect with a fresh token"
+                        .to_string(),
+                })
+                .await;
+            break;
+        }
+
         // Keep task tracking bounded when pollers exit due transient failures.
         prune_finished_live_query_tasks(&mut conn_state.live_query_tasks);
         let stale_tables: Vec<String> = conn_state

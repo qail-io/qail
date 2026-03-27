@@ -14,7 +14,7 @@ use axum::{
     body::Body,
     http::{
         HeaderMap, Method, Request, StatusCode, Uri,
-        header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue},
+        header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue},
     },
     response::{IntoResponse, Response},
 };
@@ -76,6 +76,26 @@ fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
         .get(CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<usize>().ok())
+}
+
+const IDEMPOTENCY_REPLAY_SAFE_HEADERS: &[&str] = &[
+    "location",
+    "etag",
+    "cache-control",
+    "content-location",
+    "content-disposition",
+];
+
+fn capture_replay_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    IDEMPOTENCY_REPLAY_SAFE_HEADERS
+        .iter()
+        .filter_map(|name| {
+            headers
+                .get(*name)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| ((*name).to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 /// Decide whether a response is safe to capture for idempotency replay.
@@ -160,6 +180,15 @@ fn build_response_from_cache(cached: CachedResponse) -> Response {
     let mut response = (status, Bytes::from(cached.body)).into_response();
     if let Ok(ct) = cached.content_type.parse() {
         response.headers_mut().insert("content-type", ct);
+    }
+    for (name, value) in cached.replay_headers {
+        let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Ok(header_value) = HeaderValue::from_str(&value) else {
+            continue;
+        };
+        response.headers_mut().insert(header_name, header_value);
     }
     response
         .headers_mut()

@@ -62,12 +62,17 @@ pub fn validate_jwt(token: &str, config: &JwtConfig) -> Result<AuthContext, Gate
         .map_err(|e| GatewayError::Auth(format!("Invalid token: {}", e)))?;
 
     let claims = token_data.claims;
+    let mut extra_claims = claims.extra;
+    extra_claims.insert(
+        "exp".to_string(),
+        serde_json::Value::from(claims.exp as u64),
+    );
 
     Ok(AuthContext {
         user_id: claims.sub,
         role: claims.role.unwrap_or_else(|| "user".to_string()),
         tenant_id: claims.tenant_id,
-        claims: claims.extra,
+        claims: extra_claims,
     })
 }
 

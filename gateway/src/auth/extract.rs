@@ -63,6 +63,11 @@ pub fn extract_auth_from_headers_with_jwks(
                 match decode::<JwtClaims>(token, &decoding_key, &validation) {
                     Ok(token_data) => {
                         let claims = token_data.claims;
+                        let mut extra_claims = claims.extra;
+                        extra_claims.insert(
+                            "exp".to_string(),
+                            serde_json::Value::from(claims.exp as u64),
+                        );
                         tracing::debug!(
                             "JWT validated via JWKS (kid={}): user={}",
                             kid,
@@ -72,7 +77,7 @@ pub fn extract_auth_from_headers_with_jwks(
                             user_id: claims.sub,
                             role: claims.role.unwrap_or_else(|| "user".to_string()),
                             tenant_id: claims.tenant_id,
-                            claims: claims.extra,
+                            claims: extra_claims,
                         };
                     }
                     Err(e) => {
