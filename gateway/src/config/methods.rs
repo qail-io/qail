@@ -97,6 +97,7 @@ impl GatewayConfig {
             config_root: None,
             require_auth: true,
             admin_token: None,
+            ws_allow_query_token: false,
             cache_enabled,
             cache_max_entries,
             cache_ttl_seconds,

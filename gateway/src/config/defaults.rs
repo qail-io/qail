@@ -146,6 +146,7 @@ impl Default for GatewayConfig {
             config_root: None,
             require_auth: true,
             admin_token: None,
+            ws_allow_query_token: false,
             cache_enabled: true,
             cache_max_entries: 1000,
             cache_ttl_seconds: 60,

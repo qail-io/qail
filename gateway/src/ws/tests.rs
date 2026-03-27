@@ -188,11 +188,20 @@ fn ws_auth_headers_extracts_query_token_when_authorization_missing() {
     let headers = HeaderMap::new();
     let uri: Uri = "/ws?access_token=query-token".parse().expect("uri parse");
 
-    let merged = auth_headers_for_ws(&headers, &uri);
+    let merged = auth_headers_for_ws(&headers, &uri, true);
     assert_eq!(
         merged.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
         Some("Bearer query-token")
     );
+}
+
+#[test]
+fn ws_auth_headers_ignores_query_token_when_disabled() {
+    let headers = HeaderMap::new();
+    let uri: Uri = "/ws?access_token=query-token".parse().expect("uri parse");
+
+    let merged = auth_headers_for_ws(&headers, &uri, false);
+    assert!(merged.get(AUTHORIZATION).is_none());
 }
 
 #[test]
@@ -204,7 +213,7 @@ fn ws_auth_headers_keeps_existing_authorization_header() {
     );
     let uri: Uri = "/ws?access_token=query-token".parse().expect("uri parse");
 
-    let merged = auth_headers_for_ws(&headers, &uri);
+    let merged = auth_headers_for_ws(&headers, &uri, false);
     assert_eq!(
         merged.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
         Some("Bearer header-token")

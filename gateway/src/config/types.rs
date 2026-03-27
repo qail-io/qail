@@ -89,6 +89,11 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub admin_token: Option<String>,
 
+    /// Allow `access_token` query parameter for WebSocket upgrades.
+    /// Disabled by default to avoid bearer token leakage via URLs.
+    #[serde(default)]
+    pub ws_allow_query_token: bool,
+
     /// Enable query caching
     #[serde(default = "default_true")]
     pub cache_enabled: bool,

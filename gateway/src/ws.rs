@@ -143,9 +143,12 @@ const WS_MIN_LIVE_QUERY_INTERVAL_MS: u64 = 1000;
 const WS_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const WS_LISTENER_RETRY_MS: u64 = 500;
 
-fn auth_headers_for_ws(headers: &HeaderMap, uri: &Uri) -> HeaderMap {
+fn auth_headers_for_ws(headers: &HeaderMap, uri: &Uri, allow_query_token: bool) -> HeaderMap {
     let mut auth_headers = headers.clone();
     if auth_headers.contains_key(AUTHORIZATION) {
+        return auth_headers;
+    }
+    if !allow_query_token {
         return auth_headers;
     }
 
@@ -365,7 +368,7 @@ pub async fn ws_handler(
     headers: HeaderMap,
     uri: Uri,
 ) -> impl IntoResponse {
-    let auth_headers = auth_headers_for_ws(&headers, &uri);
+    let auth_headers = auth_headers_for_ws(&headers, &uri, state.config.ws_allow_query_token);
     let auth = extract_auth_for_state(&auth_headers, state.as_ref()).await;
 
     // SECURITY (P0-3): Enforce authentication policy on WS upgrade.
