@@ -240,7 +240,7 @@ impl PolicyEngine {
         columns.is_empty() || (columns.len() == 1 && matches!(columns[0], Expr::Star))
     }
 
-    fn projection_column_name<'a>(expr: &'a Expr) -> Option<&'a str> {
+    fn projection_column_name(expr: &Expr) -> Option<&str> {
         match expr {
             Expr::Named(name) => Some(name.as_str()),
             Expr::Aliased { name, .. } => Some(name.as_str()),
