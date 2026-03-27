@@ -116,6 +116,30 @@ fn channel_refcount_tracks_unique_channels() {
     );
 }
 
+#[test]
+fn manual_notify_channel_rejects_over_pg_identifier_limit() {
+    let fragment = "a".repeat(WS_PG_CHANNEL_MAX_BYTES);
+    let err = build_manual_notify_channel("tenant", &fragment).expect_err("must reject overflow");
+    assert!(err.contains("63 bytes"));
+}
+
+#[test]
+fn live_query_notify_channel_rejects_over_pg_identifier_limit() {
+    let tenant = "t".repeat(32);
+    let table = "orders_snapshot_partitioned_2026_region_alpha";
+    let err =
+        build_live_query_notify_channel(Some(&tenant), table).expect_err("must reject overflow");
+    assert!(err.contains("63 bytes"));
+}
+
+#[test]
+fn live_query_notify_channel_allows_exact_pg_identifier_limit() {
+    let table = "a".repeat(WS_PG_CHANNEL_MAX_BYTES - "qail_table_".len());
+    let channel =
+        build_live_query_notify_channel(None, &table).expect("exact 63-byte channel should pass");
+    assert_eq!(channel.len(), WS_PG_CHANNEL_MAX_BYTES);
+}
+
 #[tokio::test]
 async fn prune_finished_live_query_tasks_removes_finished_handles() {
     let mut tasks: std::collections::HashMap<String, tokio::task::JoinHandle<()>> =

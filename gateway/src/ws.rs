@@ -138,6 +138,7 @@ const WS_ERR_LIVE_QUERY_STOPPED_DB_UNAVAILABLE: &str = "Live query stopped: data
 const WS_ERR_LIVE_QUERY_UNSUB_FAILED: &str = "Live query unsubscribe failed";
 const WS_OUTBOX_CAPACITY: usize = 32;
 const WS_MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 50;
+const WS_PG_CHANNEL_MAX_BYTES: usize = 63;
 const WS_MIN_LIVE_QUERY_INTERVAL_MS: u64 = 1000;
 const WS_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const WS_LISTENER_RETRY_MS: u64 = 500;
@@ -222,6 +223,39 @@ fn decrement_channel_refcount(conn_state: &mut WsConnectionState, channel: &str)
         }
         None => false,
     }
+}
+
+fn ensure_pg_channel_name_limit(channel: &str) -> Result<(), String> {
+    if channel.len() <= WS_PG_CHANNEL_MAX_BYTES {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Channel name too long for PostgreSQL LISTEN/NOTIFY ({} bytes > {} bytes)",
+        channel.len(),
+        WS_PG_CHANNEL_MAX_BYTES
+    ))
+}
+
+pub(super) fn build_manual_notify_channel(
+    tenant_id: &str,
+    channel_fragment: &str,
+) -> Result<String, String> {
+    let scoped = format!("{}_{}", tenant_id, channel_fragment);
+    ensure_pg_channel_name_limit(&scoped)?;
+    Ok(scoped)
+}
+
+pub(super) fn build_live_query_notify_channel(
+    tenant_id: Option<&str>,
+    table: &str,
+) -> Result<String, String> {
+    let channel = match tenant_id {
+        Some(tid) if !tid.is_empty() => format!("{}_qail_table_{}", tid, table),
+        _ => format!("qail_table_{}", table),
+    };
+    ensure_pg_channel_name_limit(&channel)?;
+    Ok(channel)
 }
 
 fn dispatch_live_query_update(

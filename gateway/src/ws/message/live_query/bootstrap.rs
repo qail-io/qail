@@ -8,8 +8,9 @@ use crate::auth::AuthContext;
 use super::super::super::listener::listener_rpc;
 use super::super::super::{
     ListenControl, WS_ERR_LIVE_QUERY_SUB_FAILED, WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
-    WS_MIN_LIVE_QUERY_INTERVAL_MS, WsConnectionState, WsServerMessage, decrement_channel_refcount,
-    increment_channel_refcount, tracked_channel_count,
+    WS_MIN_LIVE_QUERY_INTERVAL_MS, WsConnectionState, WsServerMessage,
+    build_live_query_notify_channel, decrement_channel_refcount, increment_channel_refcount,
+    tracked_channel_count,
 };
 use super::poller::{LiveQueryPollerConfig, spawn_live_query_poller};
 
@@ -28,9 +29,12 @@ pub(super) async fn subscribe_and_spawn_live_query(
     auth: &AuthContext,
     conn_state: &mut WsConnectionState,
 ) {
-    let notify_channel = match &auth.tenant_id {
-        Some(tid) if !tid.is_empty() => format!("{}_qail_table_{}", tid, table),
-        _ => format!("qail_table_{}", table),
+    let notify_channel = match build_live_query_notify_channel(auth.tenant_id.as_deref(), table) {
+        Ok(channel) => channel,
+        Err(message) => {
+            let _ = tx.send(WsServerMessage::Error { message }).await;
+            return;
+        }
     };
 
     // Enforce per-connection poller cap before mutating LISTEN/refcount state.

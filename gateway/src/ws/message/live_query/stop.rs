@@ -5,7 +5,7 @@ use crate::auth::AuthContext;
 use super::super::super::listener::listener_rpc;
 use super::super::super::{
     ListenControl, WS_ERR_LIVE_QUERY_UNSUB_FAILED, WsConnectionState, WsServerMessage,
-    decrement_channel_refcount,
+    build_live_query_notify_channel, decrement_channel_refcount,
 };
 
 pub(super) async fn handle_stop_live_query(
@@ -53,10 +53,8 @@ pub(super) async fn handle_stop_live_query(
                 .await;
         }
     } else {
-        let fallback_channel = match &auth.tenant_id {
-            Some(tid) if !tid.is_empty() => format!("{}_qail_table_{}", tid, table),
-            _ => format!("qail_table_{}", table),
-        };
+        let fallback_channel = build_live_query_notify_channel(auth.tenant_id.as_deref(), &table)
+            .unwrap_or_else(|_| "qail_table_unknown".to_string());
         let _ = tx
             .send(WsServerMessage::Unsubscribed {
                 channel: fallback_channel,

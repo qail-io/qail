@@ -9,7 +9,7 @@ use crate::policy::PolicyEngine;
 use crate::schema::SchemaRegistry;
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::routing::post;
 use jsonwebtoken::Algorithm;
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -156,6 +156,30 @@ fn parse_error_code(bytes: &[u8]) -> String {
         .to_string()
 }
 
+#[test]
+fn extract_txn_id_rejects_invalid_uuid() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-transaction-id",
+        HeaderValue::from_static("not-a-valid-uuid"),
+    );
+
+    let err = extract_txn_id(&headers).expect_err("invalid ID must be rejected");
+    assert_eq!(err.code, "INVALID_TXN_ID");
+}
+
+#[test]
+fn extract_txn_id_normalizes_uuid_format() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-transaction-id",
+        HeaderValue::from_static("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    );
+
+    let txn_id = extract_txn_id(&headers).expect("valid UUID should parse");
+    assert_eq!(txn_id, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+}
+
 #[tokio::test]
 async fn txn_query_returns_conflict_when_session_lifetime_exceeded() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
@@ -168,10 +192,11 @@ async fn txn_query_returns_conflict_when_session_lifetime_exceeded() {
     };
 
     let state = build_test_state(config).await;
+    let txn_id = "11111111-1111-1111-1111-111111111111";
     state
         .transaction_manager
         .insert_test_session_no_conn(
-            "txn-expired-1",
+            txn_id,
             "",
             Duration::from_secs(5),
             Duration::from_secs(0),
@@ -188,7 +213,7 @@ async fn txn_query_returns_conflict_when_session_lifetime_exceeded() {
             Request::builder()
                 .method("POST")
                 .uri("/txn/query")
-                .header("x-transaction-id", "txn-expired-1")
+                .header("x-transaction-id", txn_id)
                 .header("content-type", "text/plain")
                 .body(Body::from("get users"))
                 .expect("request should build"),
@@ -215,10 +240,11 @@ async fn txn_savepoint_returns_conflict_when_statement_limit_exceeded() {
     };
 
     let state = build_test_state(config).await;
+    let txn_id = "22222222-2222-2222-2222-222222222222";
     state
         .transaction_manager
         .insert_test_session_no_conn(
-            "txn-stmt-limit-1",
+            txn_id,
             "",
             Duration::from_secs(0),
             Duration::from_secs(0),
@@ -235,7 +261,7 @@ async fn txn_savepoint_returns_conflict_when_statement_limit_exceeded() {
             Request::builder()
                 .method("POST")
                 .uri("/txn/savepoint")
-                .header("x-transaction-id", "txn-stmt-limit-1")
+                .header("x-transaction-id", txn_id)
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"action":"create","name":"sp1"}"#))
                 .expect("request should build"),

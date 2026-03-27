@@ -51,11 +51,21 @@ pub struct SavepointResponse {
 
 /// Extract the transaction session ID from headers.
 fn extract_txn_id(headers: &HeaderMap) -> Result<String, ApiError> {
-    headers
+    let txn_id = headers
         .get("x-transaction-id")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .ok_or_else(|| ApiError::bad_request("MISSING_TXN_ID", "Missing X-Transaction-Id header"))
+        .ok_or_else(|| {
+            ApiError::bad_request("MISSING_TXN_ID", "Missing X-Transaction-Id header")
+        })?;
+
+    let parsed = uuid::Uuid::parse_str(txn_id).map_err(|_| {
+        ApiError::bad_request(
+            "INVALID_TXN_ID",
+            "Invalid X-Transaction-Id header (expected UUID)",
+        )
+    })?;
+
+    Ok(parsed.to_string())
 }
 
 use guard::{reject_ddl_in_transaction, txn_err_to_api};

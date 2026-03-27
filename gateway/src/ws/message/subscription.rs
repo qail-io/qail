@@ -6,7 +6,8 @@ use super::super::listener::listener_rpc;
 use super::super::{
     ListenControl, WS_ERR_DB_UNAVAILABLE, WS_ERR_DB_UNAVAILABLE_UNSUBSCRIBE,
     WS_MAX_SUBSCRIPTIONS_PER_CONNECTION, WsConnectionState, WsServerMessage,
-    decrement_channel_refcount, increment_channel_refcount, tracked_channel_count,
+    build_manual_notify_channel, decrement_channel_refcount, increment_channel_refcount,
+    tracked_channel_count,
 };
 
 pub(super) async fn handle_subscribe(
@@ -39,7 +40,13 @@ pub(super) async fn handle_subscribe(
         return;
     }
 
-    let scoped_channel = format!("{}_{}", tenant_id, channel);
+    let scoped_channel = match build_manual_notify_channel(tenant_id, &channel) {
+        Ok(scoped) => scoped,
+        Err(message) => {
+            let _ = tx.send(WsServerMessage::Error { message }).await;
+            return;
+        }
+    };
 
     if conn_state.manual_subscriptions.contains(&scoped_channel) {
         let _ = tx.send(WsServerMessage::Subscribed { channel }).await;
@@ -97,7 +104,13 @@ pub(super) async fn handle_unsubscribe(
     );
 
     let scoped_channel = match &auth.tenant_id {
-        Some(tid) if !tid.is_empty() => format!("{}_{}", tid, channel),
+        Some(tid) if !tid.is_empty() => match build_manual_notify_channel(tid, &channel) {
+            Ok(scoped) => scoped,
+            Err(_) => {
+                let _ = tx.send(WsServerMessage::Unsubscribed { channel }).await;
+                return;
+            }
+        },
         _ => {
             let _ = tx
                 .send(WsServerMessage::Error {
