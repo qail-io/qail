@@ -136,7 +136,7 @@ pub fn write_overlay_sql(
         "INSERT INTO _qail_branch_rows (branch_id, table_name, row_pk, operation, row_data) \
          VALUES (\
            (SELECT id FROM _qail_branches WHERE name = {}), \
-           {}, {}, {}, $1\
+           {}, {}, {}, $1::jsonb\
          ) RETURNING id;",
         safe_branch, safe_table, safe_pk, safe_op
     )
@@ -236,6 +236,7 @@ mod tests {
         assert!(sql.contains("'orders'"));
         assert!(sql.contains("'123'"));
         assert!(sql.contains("'insert'"));
+        assert!(sql.contains("$1::jsonb"));
     }
 
     #[test]

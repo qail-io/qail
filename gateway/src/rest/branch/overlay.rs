@@ -98,12 +98,10 @@ pub(crate) async fn redirect_to_overlay(
 ) -> Result<(), ApiError> {
     let sql =
         qail_pg::driver::branch_sql::write_overlay_sql(branch_name, table_name, row_pk, operation);
-    let data_str = serde_json::to_string(row_data).unwrap_or_default();
-    let safe_data = qail_pg::driver::branch_sql::escape_literal(&data_str);
-    let full_sql = sql.replace("$1", &format!("{}::jsonb", safe_data));
-    conn.get_mut()
-        .map_err(|e| ApiError::internal(format!("Branch overlay write failed: {}", e)))?
-        .execute_simple(&full_sql)
+    let data_str = serde_json::to_string(row_data)
+        .map_err(|e| ApiError::internal(format!("Branch overlay JSON encode failed: {}", e)))?;
+    let params = vec![Some(data_str.into_bytes())];
+    conn.query_raw_with_params(&sql, &params)
         .await
         .map_err(|e| ApiError::internal(format!("Branch overlay write failed: {}", e)))?;
     Ok(())
