@@ -209,3 +209,52 @@ fn fingerprint_changes_with_query_value() {
     );
     assert_ne!(a, b);
 }
+
+#[test]
+fn should_capture_response_requires_success_status() {
+    let headers = HeaderMap::new();
+    assert!(!should_capture_response_for_idempotency(
+        StatusCode::BAD_REQUEST,
+        &headers,
+        1024
+    ));
+}
+
+#[test]
+fn should_capture_response_requires_known_content_length() {
+    let headers = HeaderMap::new();
+    assert!(!should_capture_response_for_idempotency(
+        StatusCode::OK,
+        &headers,
+        1024
+    ));
+}
+
+#[test]
+fn should_capture_response_enforces_body_limit() {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-length", "2048".parse().unwrap());
+    assert!(!should_capture_response_for_idempotency(
+        StatusCode::OK,
+        &headers,
+        1024
+    ));
+}
+
+#[test]
+fn should_capture_response_accepts_bounded_success() {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-length", "512".parse().unwrap());
+    assert!(should_capture_response_for_idempotency(
+        StatusCode::OK,
+        &headers,
+        1024
+    ));
+}
+
+#[test]
+fn parse_content_length_rejects_invalid_value() {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-length", "not-a-number".parse().unwrap());
+    assert_eq!(parse_content_length(&headers), None);
+}

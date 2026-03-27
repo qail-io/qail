@@ -36,14 +36,15 @@ pub async fn idempotency_middleware(
     };
 
     let tenant_scope = extract_tenant_scope(state.as_ref(), request.headers().clone()).await;
+    let body_limit = state.config.max_request_body_bytes;
 
     let (parts_req, body_req) = request.into_parts();
-    let body_bytes_req = match axum::body::to_bytes(body_req, 10 * 1024 * 1024).await {
+    let body_bytes_req = match axum::body::to_bytes(body_req, body_limit).await {
         Ok(b) => b,
         Err(_) => {
             return json_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                r#"{"error":"payload_too_large","message":"Request body exceeds 10MB limit for idempotent mutations"}"#,
+                r#"{"error":"payload_too_large","message":"Request body exceeds configured limit for idempotent mutations"}"#,
             );
         }
     };
@@ -109,18 +110,22 @@ pub async fn idempotency_middleware(
     let response = next.run(request).await;
 
     let (parts, body) = response.into_parts();
-    let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+    if !should_capture_response_for_idempotency(parts.status, &parts.headers, body_limit) {
+        return Response::from_parts(parts, body);
+    }
+
+    let body_bytes = match axum::body::to_bytes(body, body_limit).await {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::error!(
                 error = %e,
                 idempotency_key = %idempotency_key,
                 status = %parts.status,
-                "Failed to capture response body for idempotency cache — returning original status without caching"
+                "Failed to capture bounded response body for idempotency cache"
             );
             let mut resp = Response::from_parts(parts, Body::empty());
             resp.headers_mut().insert(
-                "x-idempotency-body-truncated",
+                "x-idempotency-body-capture-failed",
                 HeaderValue::from_static("true"),
             );
             return resp;
@@ -134,31 +139,22 @@ pub async fn idempotency_middleware(
         .unwrap_or("application/json")
         .to_string();
 
-    if parts.status.is_success() {
-        let cached = CachedResponse {
-            status: parts.status.as_u16(),
-            body: body_bytes.to_vec(),
-            content_type,
-            request_fingerprint,
-        };
+    let cached = CachedResponse {
+        status: parts.status.as_u16(),
+        body: body_bytes.to_vec(),
+        content_type,
+        request_fingerprint,
+    };
 
-        state
-            .idempotency_store
-            .insert(&tenant_scope, &idempotency_key, cached);
+    state
+        .idempotency_store
+        .insert(&tenant_scope, &idempotency_key, cached);
 
-        tracing::debug!(
-            tenant_scope = %tenant_scope,
-            idempotency_key = %idempotency_key,
-            "Idempotency key stored"
-        );
-    } else {
-        tracing::debug!(
-            tenant_scope = %tenant_scope,
-            idempotency_key = %idempotency_key,
-            status = %parts.status,
-            "Idempotency: skipping cache for non-2xx response"
-        );
-    }
+    tracing::debug!(
+        tenant_scope = %tenant_scope,
+        idempotency_key = %idempotency_key,
+        "Idempotency key stored"
+    );
 
     Response::from_parts(parts, Body::from(body_bytes))
 }

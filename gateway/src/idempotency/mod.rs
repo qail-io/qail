@@ -13,7 +13,7 @@ use axum::{
     body::Body,
     http::{
         HeaderMap, Method, Request, StatusCode, Uri,
-        header::{CONTENT_TYPE, HeaderValue},
+        header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue},
     },
     response::{IntoResponse, Response},
 };
@@ -68,6 +68,32 @@ fn canonical_query(query: Option<&str>) -> String {
     url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(pairs)
         .finish()
+}
+
+fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+}
+
+/// Decide whether a response is safe to capture for idempotency replay.
+///
+/// We only capture successful responses with a known bounded content length.
+/// Unknown/streaming responses are passed through without buffering to avoid
+/// truncation risk.
+fn should_capture_response_for_idempotency(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body_limit: usize,
+) -> bool {
+    if !status.is_success() {
+        return false;
+    }
+    let Some(content_length) = parse_content_length(headers) else {
+        return false;
+    };
+    content_length <= body_limit
 }
 
 fn request_fingerprint(

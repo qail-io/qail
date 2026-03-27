@@ -38,7 +38,7 @@ pub(crate) async fn create_handler(
     };
 
     // Parse JSON body
-    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
         .await
         .map_err(|e| ApiError::parse_error(e.to_string()))?;
     let body: Value =
