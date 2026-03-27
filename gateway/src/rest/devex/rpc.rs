@@ -8,6 +8,28 @@ use crate::auth::authenticate_request;
 use crate::middleware::ApiError;
 use crate::rest::handlers::parse_rpc_input_arg_names;
 
+fn is_callable_rpc_ident(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn callable_rpc_allow_list_key(schema_name: &str, function_name: &str) -> Option<String> {
+    if !is_callable_rpc_ident(schema_name) || !is_callable_rpc_ident(function_name) {
+        return None;
+    }
+    Some(format!(
+        "{}.{}",
+        schema_name.to_ascii_lowercase(),
+        function_name.to_ascii_lowercase()
+    ))
+}
+
 /// GET /api/_rpc/contracts — Introspect callable PostgreSQL function contracts.
 ///
 /// Returns schema-qualified function signatures, argument defaults, and result types.
@@ -27,6 +49,11 @@ pub(crate) async fn rpc_contracts_handler(
             "Platform administrator role required for RPC contract introspection",
         ));
     }
+    let Some(rpc_allow_list) = state.rpc_allow_list.as_ref() else {
+        return Err(ApiError::forbidden(
+            "RPC contract endpoint is disabled until rpc_allowlist_path is configured",
+        ));
+    };
 
     let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
 
@@ -86,6 +113,12 @@ pub(crate) async fn rpc_contracts_handler(
             .ok()
             .or_else(|| row.get_string(1))
             .unwrap_or_default();
+        let Some(canonical_name) = callable_rpc_allow_list_key(&schema_name, &function_name) else {
+            continue;
+        };
+        if !rpc_allow_list.contains(&canonical_name) {
+            continue;
+        }
         let total_args = row
             .try_get_by_name::<i32>("total_args")
             .ok()
@@ -156,7 +189,7 @@ pub(crate) async fn rpc_contracts_handler(
         functions.push(json!({
             "schema": schema_name,
             "function": function_name,
-            "name": format!("{}.{}", schema_name, function_name),
+            "name": canonical_name,
             "identity_args": identity_args,
             "result_type": result_type,
             "total_args": total_args,
@@ -169,6 +202,25 @@ pub(crate) async fn rpc_contracts_handler(
 
     Ok(Json(json!({
         "functions": functions,
-        "count": rows.len(),
+        "count": functions.len(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::callable_rpc_allow_list_key;
+
+    #[test]
+    fn callable_rpc_allow_list_key_normalizes_safe_identifiers() {
+        assert_eq!(
+            callable_rpc_allow_list_key("API", "Search_Orders"),
+            Some("api.search_orders".to_string())
+        );
+    }
+
+    #[test]
+    fn callable_rpc_allow_list_key_rejects_non_callable_identifiers() {
+        assert_eq!(callable_rpc_allow_list_key("api", "search-orders"), None);
+        assert_eq!(callable_rpc_allow_list_key("quoted.schema", "fn"), None);
+    }
 }
