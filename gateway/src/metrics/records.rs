@@ -3,6 +3,17 @@ use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
 use std::time::Instant;
 
+fn constant_time_eq(expected: &str, provided: &str) -> bool {
+    if expected.len() != provided.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in expected.as_bytes().iter().zip(provided.as_bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 /// Metrics handler - returns Prometheus format metrics
 ///
 /// SECURITY (M4): When `admin_token` is configured, requires
@@ -11,20 +22,26 @@ pub async fn metrics_handler(
     State(state): State<Arc<crate::GatewayState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    if let Some(ref expected) = state.config.admin_token {
-        let provided = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
-        match provided {
-            Some(token) if token == expected => {}
-            _ => {
-                return (
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    "Unauthorized: admin_token required",
-                )
-                    .into_response();
-            }
+    let Some(expected) = state.config.admin_token.as_deref() else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "Metrics endpoint disabled: configure admin_token to enable /metrics",
+        )
+            .into_response();
+    };
+
+    let provided = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match provided {
+        Some(token) if constant_time_eq(expected, token) => {}
+        _ => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Unauthorized: admin_token required",
+            )
+                .into_response();
         }
     }
     state.prometheus_handle.render().into_response()

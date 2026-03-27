@@ -1,5 +1,19 @@
 use super::*;
 
+fn reject_tenant_column_update(
+    obj: &serde_json::Map<String, Value>,
+    tenant_column: &str,
+    tenant_id: Option<&str>,
+) -> Result<(), ApiError> {
+    if tenant_id.is_some() && obj.contains_key(tenant_column) {
+        return Err(ApiError::forbidden(format!(
+            "Field '{}' is server-managed and cannot be updated",
+            tenant_column
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn update_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -53,6 +67,11 @@ pub(crate) async fn update_handler(
             )));
         }
     }
+    reject_tenant_column_update(
+        obj,
+        &state.config.tenant_column,
+        auth.tenant_id.as_deref(),
+    )?;
 
     // Build: set table { col1 = val1 } [pk = $id]
     let mut cmd = qail_core::ast::Qail::set(&table_name).filter(
@@ -60,6 +79,13 @@ pub(crate) async fn update_handler(
         Operator::Eq,
         QailValue::String(id.clone()),
     );
+    if let Some(ref tid) = auth.tenant_id {
+        cmd = cmd.filter(
+            &state.config.tenant_column,
+            Operator::Eq,
+            QailValue::String(tid.clone()),
+        );
+    }
 
     for (key, value) in obj {
         let qail_val = json_to_qail_value(value);
@@ -136,4 +162,27 @@ pub(crate) async fn update_handler(
         .fire(&table_name, OperationType::Update, Some(data.clone()), None);
 
     Ok(Json(SingleResponse { data }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reject_tenant_column_update;
+    use serde_json::{Map, json};
+
+    #[test]
+    fn reject_tenant_column_update_blocks_scoped_mutation() {
+        let mut obj = Map::new();
+        obj.insert("tenant_id".to_string(), json!("tenant_b"));
+
+        let err = reject_tenant_column_update(&obj, "tenant_id", Some("tenant_a")).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn reject_tenant_column_update_allows_unscoped_payloads() {
+        let mut obj = Map::new();
+        obj.insert("tenant_id".to_string(), json!("tenant_b"));
+
+        assert!(reject_tenant_column_update(&obj, "tenant_id", None).is_ok());
+    }
 }

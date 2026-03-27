@@ -142,6 +142,94 @@ fn test_column_blacklist() {
     assert!(cmd.columns.contains(&Expr::Named("name".to_string())));
 }
 
+#[test]
+fn test_column_blacklist_rejects_wildcard_projection() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "hide_password".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("users");
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(err.to_string().contains("wildcard projection"));
+}
+
+#[test]
+fn test_column_whitelist_rejects_expression_projection() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_whitelist".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec!["id".into(), "name".into()],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("users");
+    cmd.columns = vec![Expr::FunctionCall {
+        name: "coalesce".to_string(),
+        args: vec![
+            Expr::Named("name".to_string()),
+            Expr::Literal(Value::String("n/a".to_string())),
+        ],
+        alias: Some("display_name".to_string()),
+    }];
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(err.to_string().contains("expression projections"));
+}
+
+#[test]
+fn test_column_blacklist_rejects_expression_projection() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_blacklist".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec!["password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("users");
+    cmd.columns = vec![Expr::FunctionCall {
+        name: "lower".to_string(),
+        args: vec![Expr::Named("email".to_string())],
+        alias: Some("email_lc".to_string()),
+    }];
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(err.to_string().contains("expression projections"));
+}
+
 // ══════════════════════════════════════════════════════════════════
 // SECURITY: expand_filter SQL injection hardening (G1)
 // ══════════════════════════════════════════════════════════════════

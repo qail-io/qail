@@ -168,6 +168,25 @@ const WS_LISTENER_UNAVAILABLE_NOTICE_MS: u64 = 5000;
 const WS_NOTIFY_QUEUE_CAPACITY: usize = 256;
 const WS_NOTIFY_DROP_NOTICE_MS: u64 = 5000;
 
+fn tenant_scoped_channel(tenant_id: &str, suffix: &str) -> Result<String, String> {
+    if tenant_id.is_empty() {
+        return Err("Tenant identifier is required for scoped channel names".to_string());
+    }
+    if !tenant_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(
+            "Tenant identifier contains unsupported characters for channel scoping".to_string(),
+        );
+    }
+
+    // Include tenant length as an unambiguous delimiter component.
+    // Without this, tuples like ("acme", "eu_orders") and ("acme_eu", "orders")
+    // collide when flattened with underscores.
+    Ok(format!("{}_{}_{}", tenant_id.len(), tenant_id, suffix))
+}
+
 enum ListenControl {
     Listen {
         channel: String,
@@ -241,7 +260,7 @@ pub(super) fn build_manual_notify_channel(
     tenant_id: &str,
     channel_fragment: &str,
 ) -> Result<String, String> {
-    let scoped = format!("{}_{}", tenant_id, channel_fragment);
+    let scoped = tenant_scoped_channel(tenant_id, channel_fragment)?;
     ensure_pg_channel_name_limit(&scoped)?;
     Ok(scoped)
 }
@@ -251,7 +270,7 @@ pub(super) fn build_live_query_notify_channel(
     table: &str,
 ) -> Result<String, String> {
     let channel = match tenant_id {
-        Some(tid) if !tid.is_empty() => format!("{}_qail_table_{}", tid, table),
+        Some(tid) if !tid.is_empty() => tenant_scoped_channel(tid, &format!("qail_table_{}", table))?,
         _ => format!("qail_table_{}", table),
     };
     ensure_pg_channel_name_limit(&channel)?;

@@ -110,11 +110,18 @@ impl PolicyEngine {
             tracing::debug!("Applied policy '{}' filter: {}", policy_name, filter);
         }
 
-        // Apply column-level permissions
+        let projection_restricted_action =
+            matches!(cmd.action, Action::Get | Action::Export | Action::With);
+
+        // Apply column-level permissions for projection-bearing reads.
         for policy in &applicable_policies {
+            if !projection_restricted_action {
+                continue;
+            }
+
             // Whitelist: restrict to allowed columns only
             if !policy.allowed_columns.is_empty() {
-                self.apply_column_whitelist(cmd, &policy.allowed_columns);
+                self.apply_column_whitelist(cmd, &policy.allowed_columns)?;
                 tracing::debug!(
                     "Policy '{}' restricts columns to: {:?}",
                     policy.name,
@@ -124,7 +131,7 @@ impl PolicyEngine {
 
             // Blacklist: strip denied columns
             if !policy.denied_columns.is_empty() {
-                self.apply_column_blacklist(cmd, &policy.denied_columns);
+                self.apply_column_blacklist(cmd, &policy.denied_columns)?;
                 tracing::debug!(
                     "Policy '{}' denies columns: {:?}",
                     policy.name,
@@ -229,33 +236,108 @@ impl PolicyEngine {
         Ok(())
     }
 
-    /// Apply column whitelist: replace SELECT columns with only the allowed set
-    fn apply_column_whitelist(&self, cmd: &mut Qail, allowed: &[String]) {
-        if cmd.columns.is_empty() || cmd.columns == vec![Expr::Star] {
-            // SELECT * → restrict to allowed columns
-            cmd.columns = allowed.iter().map(|c| Expr::Named(c.clone())).collect();
-        } else {
-            // Filter existing columns to only allowed ones
-            cmd.columns.retain(|expr| match expr {
-                Expr::Named(name) => allowed.iter().any(|a| a == name),
-                Expr::Aliased { name, .. } => allowed.iter().any(|a| a == name),
-                _ => true, // Keep aggregates, casts, etc.
-            });
+    fn is_star_projection(columns: &[Expr]) -> bool {
+        columns.is_empty() || (columns.len() == 1 && matches!(columns[0], Expr::Star))
+    }
+
+    fn projection_column_name<'a>(expr: &'a Expr) -> Option<&'a str> {
+        match expr {
+            Expr::Named(name) => Some(name.as_str()),
+            Expr::Aliased { name, .. } => Some(name.as_str()),
+            _ => None,
         }
     }
 
-    /// Apply column blacklist: remove denied columns from SELECT
-    fn apply_column_blacklist(&self, cmd: &mut Qail, denied: &[String]) {
-        if cmd.columns.is_empty() || cmd.columns == vec![Expr::Star] {
-            // Can't strip from *, leave as-is (blacklist is best-effort with SELECT *)
-            // The caller should use allowed_columns for strict enforcement
-            return;
+    fn is_safe_policy_column_name(name: &str) -> bool {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    }
+
+    /// Apply column whitelist: replace SELECT columns with only the allowed set.
+    /// Fails closed when projection expressions prevent deterministic enforcement.
+    fn apply_column_whitelist(
+        &self,
+        cmd: &mut Qail,
+        allowed: &[String],
+    ) -> Result<(), GatewayError> {
+        if Self::is_star_projection(&cmd.columns) {
+            // SELECT * → restrict to allowed columns
+            cmd.columns = allowed.iter().map(|c| Expr::Named(c.clone())).collect();
+            return Ok(());
         }
-        cmd.columns.retain(|expr| match expr {
-            Expr::Named(name) => !denied.iter().any(|d| d == name),
-            Expr::Aliased { name, .. } => !denied.iter().any(|d| d == name),
-            _ => true,
-        });
+
+        let mut filtered = Vec::with_capacity(cmd.columns.len());
+        for expr in &cmd.columns {
+            let name = Self::projection_column_name(expr).ok_or_else(|| {
+                GatewayError::AccessDenied(
+                    "Policy column whitelist cannot be enforced on expression projections"
+                        .to_string(),
+                )
+            })?;
+            if !Self::is_safe_policy_column_name(name) {
+                return Err(GatewayError::AccessDenied(format!(
+                    "Policy column whitelist rejected unsupported projection '{}'",
+                    name
+                )));
+            }
+            if allowed.iter().any(|a| a == name) {
+                filtered.push(expr.clone());
+            }
+        }
+
+        if filtered.is_empty() {
+            return Err(GatewayError::AccessDenied(
+                "No selected columns are allowed by policy".to_string(),
+            ));
+        }
+
+        cmd.columns = filtered;
+        Ok(())
+    }
+
+    /// Apply column blacklist: remove denied columns from SELECT.
+    /// Fails closed for wildcard/expression projections.
+    fn apply_column_blacklist(
+        &self,
+        cmd: &mut Qail,
+        denied: &[String],
+    ) -> Result<(), GatewayError> {
+        if Self::is_star_projection(&cmd.columns) {
+            return Err(GatewayError::AccessDenied(
+                "Policy denied_columns cannot be enforced on wildcard projection; select explicit columns"
+                    .to_string(),
+            ));
+        }
+
+        let mut filtered = Vec::with_capacity(cmd.columns.len());
+        for expr in &cmd.columns {
+            let name = Self::projection_column_name(expr).ok_or_else(|| {
+                GatewayError::AccessDenied(
+                    "Policy denied_columns cannot be enforced on expression projections"
+                        .to_string(),
+                )
+            })?;
+            if !Self::is_safe_policy_column_name(name) {
+                return Err(GatewayError::AccessDenied(format!(
+                    "Policy denied_columns rejected unsupported projection '{}'",
+                    name
+                )));
+            }
+            if !denied.iter().any(|d| d == name) {
+                filtered.push(expr.clone());
+            }
+        }
+
+        if filtered.is_empty() {
+            return Err(GatewayError::AccessDenied(
+                "All selected columns are denied by policy".to_string(),
+            ));
+        }
+
+        cmd.columns = filtered;
+        Ok(())
     }
 
     /// Check if any policy denies access (before filter injection).

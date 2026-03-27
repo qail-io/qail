@@ -1,5 +1,28 @@
 use super::*;
 
+fn normalize_create_object_for_tenant(
+    obj: &serde_json::Map<String, Value>,
+    tenant_column: &str,
+    tenant_id: Option<&str>,
+) -> Result<serde_json::Map<String, Value>, ApiError> {
+    let Some(tid) = tenant_id else {
+        return Ok(obj.clone());
+    };
+
+    if let Some(existing) = obj.get(tenant_column)
+        && existing != &Value::String(tid.to_string())
+    {
+        return Err(ApiError::forbidden(format!(
+            "Field '{}' must match authenticated tenant context",
+            tenant_column
+        )));
+    }
+
+    let mut normalized = obj.clone();
+    normalized.insert(tenant_column.to_string(), Value::String(tid.to_string()));
+    Ok(normalized)
+}
+
 pub(crate) async fn create_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -91,6 +114,17 @@ pub(crate) async fn create_handler(
         }
     }
 
+    let normalized_objects: Vec<serde_json::Map<String, Value>> = objects
+        .iter()
+        .map(|obj| {
+            normalize_create_object_for_tenant(
+                obj,
+                &state.config.tenant_column,
+                auth.tenant_id.as_deref(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers);
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
@@ -106,9 +140,9 @@ pub(crate) async fn create_handler(
 
     // Branch CoW Write: redirect inserts to overlay table
     if let Some(branch_name) = branch_ctx.branch_name() {
-        let mut all_results: Vec<Value> = Vec::with_capacity(objects.len());
-        for obj in &objects {
-            let row_data: Value = Value::Object((*obj).clone());
+        let mut all_results: Vec<Value> = Vec::with_capacity(normalized_objects.len());
+        for obj in &normalized_objects {
+            let row_data: Value = Value::Object(obj.clone());
             let pk_col = table.primary_key.as_deref().unwrap_or("id");
             let row_pk = obj
                 .get(pk_col)
@@ -164,24 +198,16 @@ pub(crate) async fn create_handler(
             None
         };
 
-    let mut all_results: Vec<Value> = Vec::with_capacity(objects.len());
+    let mut all_results: Vec<Value> = Vec::with_capacity(normalized_objects.len());
+    let enforce_tenant_column = auth.tenant_id.is_some();
+    let tenant_column = state.config.tenant_column.as_str();
 
-    for obj in &objects {
+    for obj in &normalized_objects {
         let mut cmd = qail_core::ast::Qail::add(&table_name);
 
-        for (key, value) in *obj {
+        for (key, value) in obj {
             let qail_val = json_to_qail_value(value);
             cmd = cmd.set_value(key, qail_val);
-        }
-
-        // Auto-inject tenant_id from auth context if not provided by client.
-        // This ensures multi-tenant tables get the correct tenant_id without
-        // requiring every frontend form to explicitly include it.
-        if let Some(ref tid) = auth.tenant_id {
-            let tc = &state.config.tenant_column;
-            if !obj.contains_key(tc) {
-                cmd = cmd.set_value(tc, QailValue::String(tid.clone()));
-            }
         }
 
         // Upsert support: explicit on_conflict param takes precedence
@@ -205,6 +231,7 @@ pub(crate) async fn create_handler(
                 let updates: Vec<(&str, Expr)> = obj
                     .keys()
                     .filter(|k| !conflict_cols.contains(&k.as_str()))
+                    .filter(|k| !enforce_tenant_column || k.as_str() != tenant_column)
                     .filter(|k| crate::rest::filters::is_safe_identifier(k))
                     .map(|k| (k.as_str(), Expr::Named(format!("EXCLUDED.{}", k))))
                     .collect();
@@ -223,6 +250,7 @@ pub(crate) async fn create_handler(
             let updates: Vec<(&str, Expr)> = obj
                 .keys()
                 .filter(|k| k.as_str() != pk_col.as_str())
+                .filter(|k| !enforce_tenant_column || k.as_str() != tenant_column)
                 .filter(|k| crate::rest::filters::is_safe_identifier(k))
                 .map(|k| (k.as_str(), Expr::Named(format!("EXCLUDED.{}", k))))
                 .collect();
@@ -303,5 +331,46 @@ pub(crate) async fn create_handler(
             .event_engine
             .fire(&table_name, OperationType::Create, Some(data.clone()), None);
         Ok((StatusCode::CREATED, Json(json!({ "data": data }))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_create_object_for_tenant;
+    use serde_json::{Map, Value, json};
+
+    #[test]
+    fn normalize_create_object_injects_tenant_column() {
+        let mut obj = Map::new();
+        obj.insert("name".to_string(), json!("alice"));
+
+        let normalized =
+            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap();
+        assert_eq!(
+            normalized.get("tenant_id"),
+            Some(&Value::String("tenant_a".to_string()))
+        );
+    }
+
+    #[test]
+    fn normalize_create_object_rejects_mismatched_tenant_column() {
+        let mut obj = Map::new();
+        obj.insert("tenant_id".to_string(), json!("tenant_b"));
+
+        let err =
+            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn normalize_create_object_preserves_matching_tenant_column() {
+        let mut obj = Map::new();
+        obj.insert("tenant_id".to_string(), json!("tenant_a"));
+        obj.insert("name".to_string(), json!("alice"));
+
+        let normalized =
+            normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap();
+        assert_eq!(normalized.get("tenant_id"), Some(&json!("tenant_a")));
+        assert_eq!(normalized.get("name"), Some(&json!("alice")));
     }
 }

@@ -14,6 +14,16 @@ use super::{
     decrement_channel_refcount, prune_finished_live_query_tasks,
 };
 
+const WS_ERR_TOKEN_EXPIRED: &str = "Authentication token expired; reconnect with a fresh token";
+
+async fn send_token_expired(tx: &mpsc::Sender<WsServerMessage>) {
+    let _ = tx
+        .send(WsServerMessage::Error {
+            message: WS_ERR_TOKEN_EXPIRED.to_string(),
+        })
+        .await;
+}
+
 pub(super) async fn handle_socket(
     socket: WebSocket,
     state: Arc<GatewayState>,
@@ -60,12 +70,7 @@ pub(super) async fn handle_socket(
 
     loop {
         if auth.is_token_expired_now() {
-            let _ = tx
-                .send(WsServerMessage::Error {
-                    message: "Authentication token expired; reconnect with a fresh token"
-                        .to_string(),
-                })
-                .await;
+            send_token_expired(&tx).await;
             break;
         }
 
@@ -106,6 +111,10 @@ pub(super) async fn handle_socket(
                 };
                 match msg {
                     Message::Text(text) => {
+                        if auth.is_token_expired_now() {
+                            send_token_expired(&tx).await;
+                            break;
+                        }
                         if text.len() > WS_MAX_MESSAGE_BYTES {
                             let _ = tx
                                 .send(WsServerMessage::Error {
@@ -150,6 +159,10 @@ pub(super) async fn handle_socket(
                 let Some(notification) = maybe_notification else {
                     break;
                 };
+                if auth.is_token_expired_now() {
+                    send_token_expired(&tx).await;
+                    break;
+                }
                 match tx.try_send(WsServerMessage::Notification {
                     channel: notification.channel.clone(),
                     payload: notification.payload,

@@ -124,12 +124,33 @@ fn manual_notify_channel_rejects_over_pg_identifier_limit() {
 }
 
 #[test]
+fn manual_notify_channel_prevents_tenant_channel_collisions() {
+    let a = build_manual_notify_channel("acme", "eu_orders").expect("first channel");
+    let b = build_manual_notify_channel("acme_eu", "orders").expect("second channel");
+    assert_ne!(a, b, "tenant/channel tuples must map to distinct channels");
+}
+
+#[test]
+fn manual_notify_channel_rejects_unsafe_tenant_identifier() {
+    let err = build_manual_notify_channel("tenant.with.dot", "orders")
+        .expect_err("unsafe tenant identifiers must be rejected");
+    assert!(err.contains("unsupported characters"));
+}
+
+#[test]
 fn live_query_notify_channel_rejects_over_pg_identifier_limit() {
     let tenant = "t".repeat(32);
     let table = "orders_snapshot_partitioned_2026_region_alpha";
     let err =
         build_live_query_notify_channel(Some(&tenant), table).expect_err("must reject overflow");
     assert!(err.contains("63 bytes"));
+}
+
+#[test]
+fn live_query_notify_channel_prevents_tenant_table_collisions() {
+    let a = build_live_query_notify_channel(Some("acme"), "eu_orders").expect("first channel");
+    let b = build_live_query_notify_channel(Some("acme_eu"), "orders").expect("second channel");
+    assert_ne!(a, b, "tenant/table tuples must map to distinct channels");
 }
 
 #[test]

@@ -16,9 +16,6 @@ impl GatewayState {
     /// (e.g., workers) that already has its own `PgPool`. The gateway will share
     /// the provided pool instead of creating a new one.
     ///
-    /// This skips dev-mode safety and production-strict checks — the host app
-    /// is responsible for those.
-    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -29,6 +26,9 @@ impl GatewayState {
     /// ```
     pub async fn new_embedded(pool: PgPool, config: GatewayConfig) -> Result<Self, GatewayError> {
         tracing::info!("Initializing QAIL Gateway (embedded mode)...");
+        let safety_gateway = super::Gateway::new(config.clone());
+        safety_gateway.check_dev_mode_safety()?;
+        safety_gateway.check_production_strict()?;
 
         let policy_engine = helpers::load_policy_engine(&config)?;
         let schema = helpers::load_schema_registry(&config)?;

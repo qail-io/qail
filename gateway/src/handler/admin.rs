@@ -6,6 +6,17 @@ use std::sync::Arc;
 use super::{HealthCheckPublic, HealthResponse};
 use crate::GatewayState;
 
+fn constant_time_eq(expected: &str, provided: &str) -> bool {
+    if expected.len() != provided.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in expected.as_bytes().iter().zip(provided.as_bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 /// Public health check endpoint — returns status and version.
 pub async fn health_check() -> Json<HealthCheckPublic> {
     Json(HealthCheckPublic {
@@ -81,20 +92,26 @@ pub async fn health_check_internal(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
 
-    if let Some(ref expected) = state.config.admin_token {
-        let provided = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
-        match provided {
-            Some(token) if token == expected => {}
-            _ => {
-                return (
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    "Unauthorized: admin_token required",
-                )
-                    .into_response();
-            }
+    let Some(expected) = state.config.admin_token.as_deref() else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "Internal endpoint disabled: configure admin_token to enable /health/internal",
+        )
+            .into_response();
+    };
+
+    let provided = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match provided {
+        Some(token) if constant_time_eq(expected, token) => {}
+        _ => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Unauthorized: admin_token required",
+            )
+                .into_response();
         }
     }
 
