@@ -139,25 +139,31 @@ pub async fn txn_query(
     // Execute within the pinned session
     let rows = state
         .transaction_manager
-        .with_session(&txn_id, &tenant_id, |session| {
-            Box::pin(async move {
-                use crate::handler::convert::row_to_json;
-                let conn = session
-                    .conn
-                    .as_mut()
-                    .ok_or(crate::transaction::TransactionError::SessionNotFound)?;
-                let result =
-                    conn.fetch_all_uncached(&cmd)
-                        .await
-                        .map_err(|e: qail_pg::PgError| {
-                            crate::transaction::TransactionError::Database(e.to_string())
-                        })?;
+        .with_session(
+            &txn_id,
+            &tenant_id,
+            Some(auth.user_id.as_str()),
+            |session| {
+                Box::pin(async move {
+                    use crate::handler::convert::row_to_json;
+                    let conn = session
+                        .conn
+                        .as_mut()
+                        .ok_or(crate::transaction::TransactionError::SessionNotFound)?;
+                    let result =
+                        conn.fetch_all_uncached(&cmd)
+                            .await
+                            .map_err(|e: qail_pg::PgError| {
+                                crate::transaction::TransactionError::Database(e.to_string())
+                            })?;
 
-                let json_rows: Vec<serde_json::Value> = result.iter().map(row_to_json).collect();
+                    let json_rows: Vec<serde_json::Value> =
+                        result.iter().map(row_to_json).collect();
 
-                Ok(json_rows)
-            })
-        })
+                    Ok(json_rows)
+                })
+            },
+        )
         .await
         .map_err(txn_err_to_api)?;
 
@@ -193,7 +199,7 @@ pub async fn txn_commit(
 
     state
         .transaction_manager
-        .close_session(&txn_id, &tenant_id, true)
+        .close_session(&txn_id, &tenant_id, Some(auth.user_id.as_str()), true)
         .await
         .map_err(txn_err_to_api)?;
 
@@ -216,7 +222,7 @@ pub async fn txn_rollback(
 
     state
         .transaction_manager
-        .close_session(&txn_id, &tenant_id, false)
+        .close_session(&txn_id, &tenant_id, Some(auth.user_id.as_str()), false)
         .await
         .map_err(txn_err_to_api)?;
 
@@ -263,16 +269,22 @@ pub async fn txn_savepoint(
     let run_result = if request.action == "rollback" {
         state
             .transaction_manager
-            .with_session_allow_aborted(&txn_id, &tenant_id, |session| {
-                run_savepoint_action(session, action.clone(), name.clone())
-            })
+            .with_session_allow_aborted(
+                &txn_id,
+                &tenant_id,
+                Some(auth.user_id.as_str()),
+                |session| run_savepoint_action(session, action.clone(), name.clone()),
+            )
             .await
     } else {
         state
             .transaction_manager
-            .with_session(&txn_id, &tenant_id, |session| {
-                run_savepoint_action(session, action.clone(), name.clone())
-            })
+            .with_session(
+                &txn_id,
+                &tenant_id,
+                Some(auth.user_id.as_str()),
+                |session| run_savepoint_action(session, action.clone(), name.clone()),
+            )
             .await
     };
 

@@ -59,9 +59,11 @@ impl OperationType {
     /// Map a Qail AST [`Action`] to the corresponding operation type.
     pub fn from_action(action: Action) -> Option<Self> {
         match action {
-            Action::Get => Some(OperationType::Read),
+            Action::Get | Action::Cnt | Action::Export | Action::With => Some(OperationType::Read),
             Action::Add => Some(OperationType::Create),
-            Action::Set => Some(OperationType::Update),
+            Action::Set | Action::Put | Action::Over | Action::Upsert => {
+                Some(OperationType::Update)
+            }
             Action::Del => Some(OperationType::Delete),
             _ => None,
         }

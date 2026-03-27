@@ -7,6 +7,8 @@ pub enum TransactionError {
     SessionNotFound,
     /// Authenticated tenant_id doesn't match session owner.
     TenantMismatch,
+    /// Authenticated user_id doesn't match session owner.
+    UserMismatch,
     /// Connection pool error.
     Pool(String),
     /// Database query error.
@@ -30,6 +32,7 @@ impl std::fmt::Display for TransactionError {
             }
             Self::SessionNotFound => write!(f, "Transaction session not found or expired"),
             Self::TenantMismatch => write!(f, "Transaction session belongs to a different tenant"),
+            Self::UserMismatch => write!(f, "Transaction session belongs to a different user"),
             Self::Pool(e) => write!(f, "Pool error: {}", e),
             Self::Database(e) => write!(f, "Database error: {}", e),
             Self::Rejected(e) => write!(f, "Query rejected: {}", e),

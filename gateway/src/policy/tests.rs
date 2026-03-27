@@ -1,6 +1,6 @@
 use super::*;
 use crate::auth::AuthContext;
-use qail_core::ast::{CageKind, Expr, Qail, Value};
+use qail_core::ast::{Action, CageKind, Expr, Qail, Value};
 
 #[test]
 fn test_policy_expands_user_id() {
@@ -58,6 +58,32 @@ fn test_apply_policies_adds_filter() {
     let condition = &cmd.cages[0].conditions[0];
     assert_eq!(condition.left, Expr::Named("user_id".to_string()));
     assert_eq!(condition.value, Value::String("user456".to_string()));
+}
+
+#[test]
+fn test_apply_policies_treats_cnt_as_read_operation() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "orders_read".to_string(),
+        table: "orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user_cnt".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("orders");
+    cmd.action = Action::Cnt;
+    let result = engine.apply_policies(&auth, &mut cmd);
+    assert!(result.is_ok(), "cnt should be treated as read");
 }
 
 #[test]
@@ -382,5 +408,34 @@ fn test_apply_policies_allows_when_policy_engine_is_empty() {
     assert!(
         result.is_ok(),
         "empty policy engine should preserve current behavior"
+    );
+}
+
+#[test]
+fn test_apply_policies_denies_unmapped_action_when_policies_exist() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "wildcard_read".to_string(),
+        table: "*".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+    let mut cmd = Qail::get("users");
+    cmd.action = Action::Make;
+
+    let result = engine.apply_policies(&auth, &mut cmd);
+    assert!(
+        result.is_err(),
+        "unmapped actions must be denied when policy engine is enabled"
     );
 }

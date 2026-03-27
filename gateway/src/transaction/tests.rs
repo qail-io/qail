@@ -37,6 +37,9 @@ fn test_transaction_error_display() {
     let err = TransactionError::TenantMismatch;
     assert!(err.to_string().contains("different tenant"));
 
+    let err = TransactionError::UserMismatch;
+    assert!(err.to_string().contains("different user"));
+
     let err = TransactionError::SessionLifetimeExceeded(900);
     assert!(err.to_string().contains("900"));
 
@@ -58,6 +61,31 @@ async fn test_reap_expired_empty() {
 }
 
 #[tokio::test]
+async fn test_with_session_rejects_user_mismatch() {
+    let mgr = TransactionSessionManager::new(10, 30, 900, 1000);
+    insert_test_session(
+        &mgr,
+        "s_user_mismatch",
+        "tenant_um",
+        Duration::from_secs(0),
+        Duration::from_secs(0),
+        0,
+    )
+    .await;
+
+    let result = mgr
+        .with_session(
+            "s_user_mismatch",
+            "tenant_um",
+            Some("other-user"),
+            |_session| Box::pin(async move { Ok(()) }),
+        )
+        .await;
+
+    assert!(matches!(result, Err(TransactionError::UserMismatch)));
+}
+
+#[tokio::test]
 async fn test_with_session_enforces_lifetime_limit_and_records_metrics() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     reset_txn_test_metrics();
@@ -73,7 +101,7 @@ async fn test_with_session_enforces_lifetime_limit_and_records_metrics() {
     .await;
 
     let result = mgr
-        .with_session("s_lifetime", "tenant_a", |_session| {
+        .with_session("s_lifetime", "tenant_a", Some("test-user"), |_session| {
             Box::pin(async move { Ok(()) })
         })
         .await;
@@ -106,7 +134,7 @@ async fn test_with_session_enforces_statement_limit_and_records_metrics() {
     .await;
 
     let result = mgr
-        .with_session("s_stmt", "tenant_b", |_session| {
+        .with_session("s_stmt", "tenant_b", Some("test-user"), |_session| {
             Box::pin(async move { Ok(()) })
         })
         .await;
@@ -168,14 +196,14 @@ async fn test_with_session_allow_aborted_enables_recovery_flow() {
     }
 
     let blocked = mgr
-        .with_session("s_aborted", "tenant_d", |_session| {
+        .with_session("s_aborted", "tenant_d", Some("test-user"), |_session| {
             Box::pin(async move { Ok(()) })
         })
         .await;
     assert!(matches!(blocked, Err(TransactionError::Aborted)));
 
     let recovered = mgr
-        .with_session_allow_aborted("s_aborted", "tenant_d", |_session| {
+        .with_session_allow_aborted("s_aborted", "tenant_d", Some("test-user"), |_session| {
             Box::pin(async move { Ok(()) })
         })
         .await;

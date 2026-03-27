@@ -4,12 +4,7 @@ pub(super) fn parse_cached_query(
     state: &Arc<GatewayState>,
     query_text: &str,
 ) -> Result<qail_core::ast::Qail, ApiError> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut h = DefaultHasher::new();
-    query_text.hash(&mut h);
-    let key = h.finish();
+    let key = query_text.to_owned();
 
     if let Some(cached) = state.parse_cache.get(&key) {
         return Ok(cached);

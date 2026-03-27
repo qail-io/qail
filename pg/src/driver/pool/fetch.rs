@@ -3,11 +3,38 @@
 use super::connection::PooledConnection;
 use super::lifecycle::MAX_HOT_STATEMENTS;
 use crate::driver::{
-    PgError, PgResult, ResultFormat,
+    PgConnection, PgError, PgResult, ResultFormat,
     extended_flow::{ExtendedFlowConfig, ExtendedFlowTracker},
     is_ignorable_session_message, unexpected_backend_message,
 };
 use std::sync::Arc;
+
+#[inline]
+fn rollback_cache_miss_statement_registration(
+    conn: &mut PgConnection,
+    is_cache_miss: bool,
+    sql_hash: u64,
+    stmt_name: &str,
+) {
+    if is_cache_miss {
+        conn.stmt_cache.remove(&sql_hash);
+        conn.prepared_statements.remove(stmt_name);
+        conn.column_info_cache.remove(&sql_hash);
+    }
+}
+
+async fn drain_extended_responses_after_rls_setup_error(conn: &mut PgConnection) -> PgResult<()> {
+    loop {
+        let msg = conn.recv().await?;
+        match msg {
+            crate::protocol::BackendMessage::ReadyForQuery(_) => return Ok(()),
+            crate::protocol::BackendMessage::ErrorResponse(_) => {}
+            msg if is_ignorable_session_message(&msg) => {}
+            // Best-effort drain: consume everything until Sync's ReadyForQuery.
+            _ => {}
+        }
+    }
+}
 
 impl PooledConnection {
     /// Execute a QAIL command and fetch all rows (UNCACHED).
@@ -595,10 +622,12 @@ impl PooledConnection {
                             || err.is_prepared_statement_already_exists()) =>
                 {
                     retried = true;
-                    if err.is_prepared_statement_retryable()
-                        && let Some(conn) = self.conn.as_mut()
-                    {
-                        conn.clear_prepared_statement_state();
+                    if let Some(conn) = self.conn.as_mut() {
+                        if err.is_prepared_statement_retryable() {
+                            conn.clear_prepared_statement_state();
+                        }
+                        // Always rollback transaction state before a retried RLS pipeline
+                        // attempt, including 42P05 "prepared statement already exists".
                         let _ = conn.execute_simple("ROLLBACK").await;
                     }
                     self.rls_dirty = false;
@@ -716,11 +745,7 @@ impl PooledConnection {
             &conn.params_buf,
             result_format.as_wire_code(),
         ) {
-            if is_cache_miss {
-                conn.stmt_cache.remove(&sql_hash);
-                conn.prepared_statements.remove(&stmt_name);
-                conn.column_info_cache.remove(&sql_hash);
-            }
+            rollback_cache_miss_statement_registration(conn, is_cache_miss, sql_hash, &stmt_name);
             return Err(PgError::Encode(e.to_string()));
         }
         PgEncoder::encode_execute_to(&mut conn.write_buf);
@@ -728,11 +753,7 @@ impl PooledConnection {
 
         // ── Single write_all for RLS + Query ────────────────────────
         if let Err(err) = conn.flush_write_buf().await {
-            if is_cache_miss {
-                conn.stmt_cache.remove(&sql_hash);
-                conn.prepared_statements.remove(&stmt_name);
-                conn.column_info_cache.remove(&sql_hash);
-            }
+            rollback_cache_miss_statement_registration(conn, is_cache_miss, sql_hash, &stmt_name);
             return Err(err);
         }
 
@@ -747,11 +768,12 @@ impl PooledConnection {
             let msg = match conn.recv().await {
                 Ok(msg) => msg,
                 Err(err) => {
-                    if is_cache_miss {
-                        conn.stmt_cache.remove(&sql_hash);
-                        conn.prepared_statements.remove(&stmt_name);
-                        conn.column_info_cache.remove(&sql_hash);
-                    }
+                    rollback_cache_miss_statement_registration(
+                        conn,
+                        is_cache_miss,
+                        sql_hash,
+                        &stmt_name,
+                    );
                     return Err(err);
                 }
             };
@@ -759,6 +781,20 @@ impl PooledConnection {
                 crate::protocol::BackendMessage::ReadyForQuery(_) => {
                     // RLS setup done — break to Extended Query phase
                     if let Some(err) = rls_error {
+                        rollback_cache_miss_statement_registration(
+                            conn,
+                            is_cache_miss,
+                            sql_hash,
+                            &stmt_name,
+                        );
+                        if let Err(drain_err) =
+                            drain_extended_responses_after_rls_setup_error(conn).await
+                        {
+                            tracing::warn!(
+                                error = %drain_err,
+                                "failed to drain pipelined extended responses after RLS setup error"
+                            );
+                        }
                         return Err(err);
                     }
                     break;
@@ -794,9 +830,12 @@ impl PooledConnection {
                 Ok(msg) => msg,
                 Err(err) => {
                     if is_cache_miss && !flow.saw_parse_complete() {
-                        conn.stmt_cache.remove(&sql_hash);
-                        conn.prepared_statements.remove(&stmt_name);
-                        conn.column_info_cache.remove(&sql_hash);
+                        rollback_cache_miss_statement_registration(
+                            conn,
+                            is_cache_miss,
+                            sql_hash,
+                            &stmt_name,
+                        );
                     }
                     return Err(err);
                 }
@@ -805,9 +844,12 @@ impl PooledConnection {
                 flow.validate(&msg, "pool fetch_all_with_rls execute", error.is_some())
             {
                 if is_cache_miss && !flow.saw_parse_complete() {
-                    conn.stmt_cache.remove(&sql_hash);
-                    conn.prepared_statements.remove(&stmt_name);
-                    conn.column_info_cache.remove(&sql_hash);
+                    rollback_cache_miss_statement_registration(
+                        conn,
+                        is_cache_miss,
+                        sql_hash,
+                        &stmt_name,
+                    );
                 }
                 return Err(err);
             }
@@ -837,16 +879,22 @@ impl PooledConnection {
                             && !flow.saw_parse_complete()
                             && !err.is_prepared_statement_already_exists()
                         {
-                            conn.stmt_cache.remove(&sql_hash);
-                            conn.prepared_statements.remove(&stmt_name);
-                            conn.column_info_cache.remove(&sql_hash);
+                            rollback_cache_miss_statement_registration(
+                                conn,
+                                is_cache_miss,
+                                sql_hash,
+                                &stmt_name,
+                            );
                         }
                         return Err(err);
                     }
                     if is_cache_miss && !flow.saw_parse_complete() {
-                        conn.stmt_cache.remove(&sql_hash);
-                        conn.prepared_statements.remove(&stmt_name);
-                        conn.column_info_cache.remove(&sql_hash);
+                        rollback_cache_miss_statement_registration(
+                            conn,
+                            is_cache_miss,
+                            sql_hash,
+                            &stmt_name,
+                        );
                         return Err(PgError::Protocol(
                             "Cache miss query reached ReadyForQuery without ParseComplete"
                                 .to_string(),
@@ -862,9 +910,12 @@ impl PooledConnection {
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
                     if is_cache_miss && !flow.saw_parse_complete() {
-                        conn.stmt_cache.remove(&sql_hash);
-                        conn.prepared_statements.remove(&stmt_name);
-                        conn.column_info_cache.remove(&sql_hash);
+                        rollback_cache_miss_statement_registration(
+                            conn,
+                            is_cache_miss,
+                            sql_hash,
+                            &stmt_name,
+                        );
                     }
                     return Err(unexpected_backend_message(
                         "pool fetch_all_with_rls execute",

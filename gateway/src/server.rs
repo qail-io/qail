@@ -96,9 +96,9 @@ pub struct GatewayState {
     pub rpc_allow_list: Option<HashSet<String>>,
     /// RPC signature cache — normalized function name to callable overload metadata.
     pub rpc_signature_cache: moka::sync::Cache<String, Arc<Vec<RpcCallableSignature>>>,
-    /// DSL parse cache — hash(query_text) → parsed Qail AST.
+    /// DSL parse cache — exact query text → parsed Qail AST.
     /// Skips re-parsing for repeated identical queries.
-    pub parse_cache: moka::sync::Cache<u64, qail_core::ast::Qail>,
+    pub parse_cache: moka::sync::Cache<String, qail_core::ast::Qail>,
     /// Idempotency store — caches mutation responses by Idempotency-Key header.
     pub idempotency_store: crate::idempotency::IdempotencyStore,
     /// JWKS key store — caches JWT public keys from a JWKS endpoint (Phase 6a).

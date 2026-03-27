@@ -32,6 +32,7 @@ pub(super) fn txn_err_to_api(err: crate::transaction::TransactionError) -> ApiEr
         }
         TransactionError::SessionNotFound => ApiError::not_found("Transaction session"),
         TransactionError::TenantMismatch => ApiError::forbidden(err.to_string()),
+        TransactionError::UserMismatch => ApiError::forbidden(err.to_string()),
         TransactionError::Pool(e) => ApiError::connection_error(e),
         TransactionError::Database(e) => ApiError::internal(e),
         TransactionError::Rejected(e) => ApiError::bad_request("TXN_REJECTED", e),

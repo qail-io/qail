@@ -51,7 +51,7 @@ impl TransactionSessionManager {
         let session = TransactionSession {
             conn: None,
             tenant_id: tenant_id.to_string(),
-            user_id: Some("test-user".to_string()),
+            user_id: Some("anonymous".to_string()),
             created_at: now - created_ago,
             last_used: now - last_used_ago,
             closed: false,

@@ -7,6 +7,7 @@ impl TransactionSessionManager {
         &self,
         session_id: &str,
         tenant_id: &str,
+        user_id: Option<&str>,
         allow_aborted: bool,
         f: F,
     ) -> Result<R, TransactionError>
@@ -32,6 +33,9 @@ impl TransactionSessionManager {
 
         if session.tenant_id != tenant_id {
             return Err(TransactionError::TenantMismatch);
+        }
+        if session.user_id.as_deref() != user_id {
+            return Err(TransactionError::UserMismatch);
         }
 
         if session.pg_aborted && !allow_aborted {
@@ -121,6 +125,7 @@ impl TransactionSessionManager {
         &self,
         session_id: &str,
         tenant_id: &str,
+        user_id: Option<&str>,
         f: F,
     ) -> Result<R, TransactionError>
     where
@@ -130,7 +135,7 @@ impl TransactionSessionManager {
             Box<dyn std::future::Future<Output = Result<R, TransactionError>> + Send + '_>,
         >,
     {
-        self.with_session_inner(session_id, tenant_id, false, f)
+        self.with_session_inner(session_id, tenant_id, user_id, false, f)
             .await
     }
 
@@ -143,6 +148,7 @@ impl TransactionSessionManager {
         &self,
         session_id: &str,
         tenant_id: &str,
+        user_id: Option<&str>,
         f: F,
     ) -> Result<R, TransactionError>
     where
@@ -152,7 +158,7 @@ impl TransactionSessionManager {
             Box<dyn std::future::Future<Output = Result<R, TransactionError>> + Send + '_>,
         >,
     {
-        self.with_session_inner(session_id, tenant_id, true, f)
+        self.with_session_inner(session_id, tenant_id, user_id, true, f)
             .await
     }
 
@@ -161,6 +167,7 @@ impl TransactionSessionManager {
         &self,
         session_id: &str,
         tenant_id: &str,
+        user_id: Option<&str>,
         commit: bool,
     ) -> Result<(), TransactionError> {
         let session = {
@@ -177,6 +184,9 @@ impl TransactionSessionManager {
         }
         if session.tenant_id != tenant_id {
             return Err(TransactionError::TenantMismatch);
+        }
+        if session.user_id.as_deref() != user_id {
+            return Err(TransactionError::UserMismatch);
         }
 
         session.closed = true;
