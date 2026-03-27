@@ -24,6 +24,11 @@ pub(crate) async fn typescript_types_handler(
             "Authentication required for type generation",
         ));
     }
+    if !auth.can_use_branching() {
+        return Err(ApiError::forbidden(
+            "Platform administrator role required for type generation",
+        ));
+    }
 
     let tables = state.schema.tables();
     let mut output = String::with_capacity(4096);

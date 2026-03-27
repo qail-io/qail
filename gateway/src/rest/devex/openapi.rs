@@ -21,6 +21,11 @@ pub(crate) async fn openapi_spec_handler(
             "Authentication required for OpenAPI spec",
         ));
     }
+    if !auth.can_use_branching() {
+        return Err(ApiError::forbidden(
+            "Platform administrator role required for OpenAPI spec",
+        ));
+    }
     let tables = state.schema.tables();
     let mut paths = serde_json::Map::new();
     let mut schemas = serde_json::Map::new();

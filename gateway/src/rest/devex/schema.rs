@@ -23,6 +23,11 @@ pub(crate) async fn schema_introspection_handler(
             "Authentication required for schema introspection",
         ));
     }
+    if !auth.can_use_branching() {
+        return Err(ApiError::forbidden(
+            "Platform administrator role required for schema introspection",
+        ));
+    }
     let tables = state.schema.tables();
     let mut result = serde_json::Map::new();
 

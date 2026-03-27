@@ -21,6 +21,11 @@ pub(crate) async fn rpc_contracts_handler(
             "Authentication required for RPC contract introspection",
         ));
     }
+    if !auth.can_use_branching() {
+        return Err(ApiError::forbidden(
+            "Platform administrator role required for RPC contract introspection",
+        ));
+    }
 
     let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
 
