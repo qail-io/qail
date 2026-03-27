@@ -158,6 +158,10 @@ fn ssrf_rejects_localhost_variations() {
     assert!(validate_webhook_url("http://localhost/hook").is_err());
     assert!(validate_webhook_url("http://localhost:8080/hook").is_err());
     assert!(validate_webhook_url("http://LOCALHOST/hook").is_err());
+    assert!(validate_webhook_url("http://api.localhost/hook").is_err());
+    assert!(validate_webhook_url("http://printer.local/hook").is_err());
+    assert!(validate_webhook_url("http://router.localdomain/hook").is_err());
+    assert!(validate_webhook_url("http://internal.home.arpa/hook").is_err());
     assert!(validate_webhook_url("http://127.0.0.1/hook").is_err());
     assert!(validate_webhook_url("http://127.0.0.1:3000/hook").is_err());
     assert!(validate_webhook_url("http://[::1]/hook").is_err());

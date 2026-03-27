@@ -29,6 +29,10 @@ pub(super) fn validate_webhook_url(url: &str) -> Result<(), String> {
     // Reject localhost (case-insensitive)
     let lower_host = host.to_ascii_lowercase();
     if lower_host == "localhost"
+        || lower_host.ends_with(".localhost")
+        || lower_host.ends_with(".local")
+        || lower_host.ends_with(".localdomain")
+        || lower_host.ends_with(".home.arpa")
         || lower_host == "127.0.0.1"
         || lower_host == "::1"
         || lower_host == "[::1]"
