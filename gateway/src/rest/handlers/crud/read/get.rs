@@ -29,6 +29,12 @@ pub(crate) async fn get_by_id_handler(
         .ok_or_else(|| ApiError::internal("Table has no primary key"))?;
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let branch_ctx = extract_branch_from_headers(&headers);
+    if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
+        return Err(ApiError::forbidden(
+            "Platform administrator role required for branch overlay reads",
+        ));
+    }
 
     // Build: get table[pk = $id] — use String value; PG handles type coercion
     let mut cmd = qail_core::ast::Qail::get(&table_name)
@@ -57,15 +63,8 @@ pub(crate) async fn get_by_id_handler(
 
     let mut data = rows.first().map(row_to_json);
 
-    // Branch overlay: check if this row is overridden on the branch — admin-gated
-    let branch_ctx = extract_branch_from_headers(&headers);
+    // Branch overlay: check if this row is overridden on the branch.
     if let Some(branch_name) = branch_ctx.branch_name() {
-        if !auth.can_use_branching() {
-            conn.release().await;
-            return Err(ApiError::forbidden(
-                "Platform administrator role required for branch overlay reads",
-            ));
-        }
         let sql = qail_pg::driver::branch_sql::read_overlay_sql(branch_name, &table_name);
         if let Ok(pg_conn) = conn.get_mut()
             && let Ok(overlay_rows) = pg_conn.simple_query(&sql).await

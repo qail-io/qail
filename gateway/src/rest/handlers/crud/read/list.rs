@@ -16,6 +16,12 @@ pub(crate) async fn list_handler(
         .ok_or_else(|| ApiError::not_found(&table_name))?;
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let branch_ctx = extract_branch_from_headers(&headers);
+    if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
+        return Err(ApiError::forbidden(
+            "Platform administrator role required for branch overlay reads",
+        ));
+    }
 
     // Build Qail AST
     let max_rows = state.config.max_result_rows.min(1000) as i64;
@@ -189,7 +195,7 @@ pub(crate) async fn list_handler(
 
     // Build cache key from full URI + user identity
     let is_streaming = params.stream.unwrap_or(false);
-    let has_branch = headers.get("x-branch-id").is_some();
+    let has_branch = branch_ctx.branch_name().is_some();
     let has_nested = params
         .expand
         .as_deref()
@@ -372,15 +378,8 @@ pub(crate) async fn list_handler(
         Err(_) => Vec::new(),
     };
 
-    // Branch overlay merge (CoW Read) — admin-gated
-    let branch_ctx = extract_branch_from_headers(&headers);
+    // Branch overlay merge (CoW Read)
     if let Some(branch_name) = branch_ctx.branch_name() {
-        if !auth.can_use_branching() {
-            conn.release().await;
-            return Err(ApiError::forbidden(
-                "Platform administrator role required for branch overlay reads",
-            ));
-        }
         let pk_col = _table.primary_key.as_deref().unwrap_or("id");
         apply_branch_overlay(&mut conn, branch_name, &table_name, &mut data, pk_col).await;
     }

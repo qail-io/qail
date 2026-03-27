@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::GatewayState;
 use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
+use crate::rest::branch::validate_branch_name;
 
 /// POST /api/_branch — Create a new branch.
 pub(crate) async fn branch_create_handler(
@@ -46,7 +47,26 @@ pub(crate) async fn branch_create_handler(
         }
     };
 
-    let parent = body.get("parent").and_then(|v| v.as_str());
+    if let Err(e) = validate_branch_name(name) {
+        return e.into_response();
+    }
+
+    let parent = match body.get("parent").and_then(|v| v.as_str()) {
+        Some("main") | None => None,
+        Some(parent_name) => {
+            if let Err(e) = validate_branch_name(parent_name) {
+                return e.into_response();
+            }
+            Some(parent_name)
+        }
+    };
+    if parent.is_some_and(|p| p == name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Parent branch must differ from branch name"})),
+        )
+            .into_response();
+    }
 
     let mut conn = match state.acquire_with_auth_rls_guarded(&auth, None).await {
         Ok(c) => c,
@@ -164,6 +184,9 @@ pub(crate) async fn branch_delete_handler(
             Json(json!({"error": "Platform administrator role required for branch operations"})),
         )
             .into_response();
+    }
+    if let Err(e) = validate_branch_name(&name) {
+        return e.into_response();
     }
 
     let mut conn = match state.acquire_with_auth_rls_guarded(&auth, None).await {

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::GatewayState;
 use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
+use crate::rest::branch::validate_branch_name;
 use crate::rest::filters::json_to_qail_value;
 
 /// POST /api/_branch/:name/merge — Merge branch overlay into main tables.
@@ -34,6 +35,9 @@ pub(crate) async fn branch_merge_handler(
             Json(json!({"error": "Platform administrator role required for branch merge"})),
         )
             .into_response();
+    }
+    if let Err(e) = validate_branch_name(&name) {
+        return e.into_response();
     }
 
     let mut conn = match state.acquire_with_auth_rls_guarded(&auth, None).await {
