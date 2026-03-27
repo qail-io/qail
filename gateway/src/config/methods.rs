@@ -95,6 +95,7 @@ impl GatewayConfig {
                 .unwrap_or_default(),
             cors_strict: false,
             config_root: None,
+            require_auth: true,
             admin_token: None,
             cache_enabled,
             cache_max_entries,

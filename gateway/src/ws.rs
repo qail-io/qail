@@ -369,7 +369,10 @@ pub async fn ws_handler(
     let auth = extract_auth_for_state(&auth_headers, state.as_ref()).await;
 
     // SECURITY (P0-3): Enforce authentication policy on WS upgrade.
-    if let Err(e) = ensure_request_auth(&auth, state.config.production_strict) {
+    if let Err(e) = ensure_request_auth(
+        &auth,
+        state.config.require_auth || state.config.production_strict,
+    ) {
         return e.into_response();
     }
     if let Err(e) = ensure_tenant_rate_limit(state.as_ref(), &auth).await {

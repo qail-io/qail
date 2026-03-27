@@ -5,6 +5,10 @@ pub(super) fn default_true() -> bool {
     true
 }
 
+pub(super) fn default_require_auth() -> bool {
+    true
+}
+
 pub(super) fn default_cache_max() -> usize {
     1000
 }
@@ -140,6 +144,7 @@ impl Default for GatewayConfig {
             cors_allowed_origins: Vec::new(),
             cors_strict: false,
             config_root: None,
+            require_auth: true,
             admin_token: None,
             cache_enabled: true,
             cache_max_entries: 1000,

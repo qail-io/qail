@@ -78,6 +78,11 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub config_root: Option<String>,
 
+    /// SECURITY: Require authentication for all request paths by default.
+    /// Set to `false` only for explicitly public/demo deployments.
+    #[serde(default = "default_require_auth")]
+    pub require_auth: bool,
+
     /// SECURITY (M4): Optional bearer token to protect internal endpoints
     /// (`/metrics`, `/health/internal`). When set, requests must include
     /// `Authorization: Bearer <admin_token>`.

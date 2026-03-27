@@ -4,10 +4,10 @@ use axum::http::HeaderMap;
 /// Enforce request authentication policy.
 ///
 /// - Always reject denied credentials
-/// - Reject anonymous access when `production_strict=true`
+/// - Reject anonymous access when `require_auth=true`
 pub fn ensure_request_auth(
     auth: &AuthContext,
-    production_strict: bool,
+    require_auth: bool,
 ) -> Result<(), crate::middleware::ApiError> {
     if auth.is_denied() {
         return Err(crate::middleware::ApiError::with_code(
@@ -15,7 +15,7 @@ pub fn ensure_request_auth(
             "Invalid credentials",
         ));
     }
-    if !auth.is_authenticated() && production_strict {
+    if !auth.is_authenticated() && require_auth {
         return Err(crate::middleware::ApiError::with_code(
             "AUTH_REQUIRED",
             "Authentication required",
@@ -54,7 +54,7 @@ pub async fn authenticate_request(
     headers: &HeaderMap,
 ) -> Result<AuthContext, crate::middleware::ApiError> {
     let auth = super::extract_auth_for_state(headers, state).await;
-    ensure_request_auth(&auth, state.config.production_strict)?;
+    ensure_request_auth(&auth, state.config.require_auth || state.config.production_strict)?;
     ensure_tenant_rate_limit(state, &auth).await?;
     Ok(auth)
 }
