@@ -32,24 +32,7 @@ pub async fn execute_batch(
 
     let mut results = Vec::with_capacity(request.queries.len());
     let mut success_count = 0;
-
-    let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
-
-    if request.transaction {
-        match conn.get_mut() {
-            Ok(pg_conn) => {
-                if let Err(e) = pg_conn.execute_simple("BEGIN;").await {
-                    tracing::error!("Transaction start failed: {}", e);
-                    conn.release().await;
-                    return Err(ApiError::with_code("TXN_ERROR", "Transaction start failed"));
-                }
-            }
-            Err(e) => {
-                conn.release().await;
-                return Err(ApiError::from_pg_driver_error(&e, None));
-            }
-        }
-    }
+    let mut conn: Option<qail_pg::PooledConnection> = None;
 
     let mut had_error = false;
 
@@ -139,8 +122,36 @@ pub async fn execute_batch(
 
         clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
+        if conn.is_none() {
+            let mut acquired = state.acquire_with_auth_rls_guarded(&auth, None).await?;
+            if request.transaction {
+                match acquired.get_mut() {
+                    Ok(pg_conn) => {
+                        if let Err(e) = pg_conn.execute_simple("BEGIN;").await {
+                            tracing::error!("Transaction start failed: {}", e);
+                            acquired.release().await;
+                            return Err(ApiError::with_code(
+                                "TXN_ERROR",
+                                "Transaction start failed",
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        acquired.release().await;
+                        return Err(ApiError::from_pg_driver_error(&e, None));
+                    }
+                }
+            }
+            conn = Some(acquired);
+        }
+        let Some(conn_ref) = conn.as_mut() else {
+            return Err(ApiError::internal(
+                "Batch connection initialization failed unexpectedly",
+            ));
+        };
+
         let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
-        match conn.fetch_all_uncached(&cmd).await {
+        match conn_ref.fetch_all_uncached(&cmd).await {
             Ok(rows) => {
                 timer.finish(true);
                 let json_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
@@ -198,7 +209,7 @@ pub async fn execute_batch(
                     had_error = true;
                     break;
                 }
-                if let Ok(pg_conn) = conn.get_mut() {
+                if let Ok(pg_conn) = conn_ref.get_mut() {
                     let rls_sql = qail_pg::rls_sql_with_timeouts(
                         &auth.to_rls_context(),
                         state.config.statement_timeout_ms,
@@ -217,33 +228,34 @@ pub async fn execute_batch(
         }
     }
 
-    if request.transaction {
-        if had_error {
-            if let Ok(pg_conn) = conn.get_mut() {
-                let _ = pg_conn.execute_simple("ROLLBACK;").await;
-            }
-            tracing::warn!("Batch transaction rolled back due to error");
-        } else {
-            match conn.get_mut() {
-                Ok(pg_conn) => {
-                    if let Err(e) = pg_conn.execute_simple("COMMIT;").await {
-                        tracing::error!("Transaction commit failed: {}", e);
-                        conn.release().await;
-                        return Err(ApiError::with_code(
-                            "TXN_ERROR",
-                            "Transaction commit failed",
-                        ));
-                    }
+    if let Some(mut conn) = conn {
+        if request.transaction {
+            if had_error {
+                if let Ok(pg_conn) = conn.get_mut() {
+                    let _ = pg_conn.execute_simple("ROLLBACK;").await;
                 }
-                Err(e) => {
-                    conn.release().await;
-                    return Err(ApiError::from_pg_driver_error(&e, None));
+                tracing::warn!("Batch transaction rolled back due to error");
+            } else {
+                match conn.get_mut() {
+                    Ok(pg_conn) => {
+                        if let Err(e) = pg_conn.execute_simple("COMMIT;").await {
+                            tracing::error!("Transaction commit failed: {}", e);
+                            conn.release().await;
+                            return Err(ApiError::with_code(
+                                "TXN_ERROR",
+                                "Transaction commit failed",
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        conn.release().await;
+                        return Err(ApiError::from_pg_driver_error(&e, None));
+                    }
                 }
             }
         }
+        conn.release().await;
     }
-
-    conn.release().await;
 
     let total = results.len();
 
