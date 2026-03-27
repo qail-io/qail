@@ -9,6 +9,8 @@
 //! - Cached responses expire after a configurable TTL (default: 24 hours).
 //! - Only mutation methods (POST, PATCH, DELETE) are checked; GET/HEAD are ignored.
 //! - The store uses an in-memory moka cache with bounded capacity.
+//! - Unauthenticated requests bypass idempotency caching to avoid cross-client
+//!   key collisions when auth is disabled.
 
 use axum::{
     body::Body,

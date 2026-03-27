@@ -37,6 +37,10 @@ pub async fn idempotency_middleware(
 
     let idempotency_scope =
         extract_idempotency_scope(state.as_ref(), request.headers().clone()).await;
+    if idempotency_scope == "anonymous" {
+        // SECURITY: avoid cross-client idempotency key collisions when auth is disabled.
+        return next.run(request).await;
+    }
     let body_limit = state.config.max_request_body_bytes;
 
     let (parts_req, body_req) = request.into_parts();
