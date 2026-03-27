@@ -96,6 +96,49 @@ fn test_or_conditions() {
 }
 
 #[test]
+fn test_chained_or_filter_builder_conditions_remain_or() {
+    use crate::ast::{Operator, Qail};
+
+    let sql = Qail::get("kb")
+        .or_filter("topic", Operator::ILike, "%test%")
+        .or_filter("question", Operator::ILike, "%test%")
+        .to_sql();
+
+    assert!(
+        sql.contains("(topic ILIKE '%test%' OR question ILIKE '%test%')"),
+        "Expected grouped OR conditions from chained or_filter(), got: {sql}"
+    );
+    assert!(
+        !sql.contains("topic ILIKE '%test%' AND question ILIKE '%test%'"),
+        "chained or_filter() must not degrade into AND chain: {sql}"
+    );
+}
+
+#[test]
+fn test_or_filter_and_filter_do_not_mix_cages() {
+    use crate::ast::{Operator, Qail};
+
+    let sql = Qail::get("kb")
+        .or_filter("topic", Operator::ILike, "%test%")
+        .filter("is_active", Operator::Eq, true)
+        .or_filter("question", Operator::ILike, "%test%")
+        .to_sql();
+
+    assert!(
+        sql.contains("topic ILIKE '%test%' OR question ILIKE '%test%'"),
+        "OR filters should stay grouped together: {sql}"
+    );
+    assert!(
+        sql.contains("is_active = true"),
+        "AND filter should remain a separate clause: {sql}"
+    );
+    assert!(
+        sql.contains(" AND "),
+        "Expected OR group to combine with AND filter via AND: {sql}"
+    );
+}
+
+#[test]
 fn test_array_unnest() {
     use crate::ast::*;
     let mut cmd = Qail::get("users");

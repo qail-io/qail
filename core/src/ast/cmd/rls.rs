@@ -157,7 +157,7 @@ impl Qail {
         let existing = self
             .cages
             .iter_mut()
-            .find(|c| matches!(c.kind, CageKind::Filter));
+            .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::And);
 
         if let Some(cage) = existing {
             cage.conditions
@@ -186,7 +186,7 @@ impl Qail {
         let existing = self
             .cages
             .iter_mut()
-            .find(|c| matches!(c.kind, CageKind::Filter));
+            .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::And);
 
         if let Some(cage) = existing {
             cage.conditions
@@ -402,6 +402,54 @@ mod tests {
             filters[0].conditions.len(),
             2,
             "Should have 2 conditions: status + tenant_id"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_does_not_merge_tenant_scope_into_or_filter_cage() {
+        register_tenant_table("_rls_or_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("t-or");
+        let query = Qail::get("_rls_or_orders")
+            .or_filter("status", Operator::Eq, "active")
+            .or_filter("status", Operator::Eq, "pending")
+            .with_rls(&ctx);
+
+        let or_filter = query
+            .cages
+            .iter()
+            .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::Or)
+            .expect("Expected OR filter cage");
+        assert_eq!(or_filter.conditions.len(), 2, "OR cage should keep only OR terms");
+        assert!(
+            !or_filter
+                .conditions
+                .iter()
+                .any(|c| is_tenant_column_condition(c, "tenant_id")),
+            "tenant scope must not be injected into OR cage"
+        );
+
+        let and_filter = query
+            .cages
+            .iter()
+            .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::And)
+            .expect("Expected AND filter cage for tenant scope");
+        assert!(
+            and_filter
+                .conditions
+                .iter()
+                .any(|c| is_tenant_column_condition(c, "tenant_id")),
+            "tenant scope must be enforced via AND cage"
+        );
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("tenant_id = 't-or'"),
+            "Expected tenant scope in SQL: {sql}"
+        );
+        assert!(
+            !sql.contains("OR tenant_id = 't-or'"),
+            "tenant scope must not be OR-ed with user conditions: {sql}"
         );
     }
 

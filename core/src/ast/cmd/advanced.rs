@@ -50,7 +50,7 @@ impl Qail {
         let filter_cage = self
             .cages
             .iter_mut()
-            .find(|c| matches!(c.kind, CageKind::Filter));
+            .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::And);
 
         if let Some(cage) = filter_cage {
             cage.conditions.push(condition);

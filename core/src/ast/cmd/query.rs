@@ -113,7 +113,7 @@ impl Qail {
         let filter_cage = self
             .cages
             .iter_mut()
-            .find(|c| matches!(c.kind, CageKind::Filter));
+            .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::And);
 
         let condition = Condition {
             left: Expr::Named(column.as_ref().to_string()),
@@ -141,16 +141,27 @@ impl Qail {
         op: Operator,
         value: impl Into<Value>,
     ) -> Self {
-        self.cages.push(Cage {
-            kind: CageKind::Filter,
-            conditions: vec![Condition {
-                left: Expr::Named(column.as_ref().to_string()),
-                op,
-                value: value.into(),
-                is_array_unnest: false,
-            }],
-            logical_op: LogicalOp::Or,
-        });
+        let condition = Condition {
+            left: Expr::Named(column.as_ref().to_string()),
+            op,
+            value: value.into(),
+            is_array_unnest: false,
+        };
+
+        let or_filter_cage = self
+            .cages
+            .iter_mut()
+            .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::Or);
+
+        if let Some(cage) = or_filter_cage {
+            cage.conditions.push(condition);
+        } else {
+            self.cages.push(Cage {
+                kind: CageKind::Filter,
+                conditions: vec![condition],
+                logical_op: LogicalOp::Or,
+            });
+        }
         self
     }
 
