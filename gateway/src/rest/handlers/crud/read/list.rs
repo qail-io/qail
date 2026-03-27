@@ -375,10 +375,10 @@ pub(crate) async fn list_handler(
     // Branch overlay merge (CoW Read) — admin-gated
     let branch_ctx = extract_branch_from_headers(&headers);
     if let Some(branch_name) = branch_ctx.branch_name() {
-        if auth.role != "admin" && auth.role != "super_admin" {
+        if !auth.can_use_branching() {
             conn.release().await;
             return Err(ApiError::forbidden(
-                "Admin role required for branch overlay reads",
+                "Platform administrator role required for branch overlay reads",
             ));
         }
         let pk_col = _table.primary_key.as_deref().unwrap_or("id");

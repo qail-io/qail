@@ -31,6 +31,39 @@ impl AuthContext {
         self.role == role
     }
 
+    /// Returns `true` when the caller is a platform-level administrator.
+    ///
+    /// Platform admin is strictly `administrator` (case-insensitive) with no
+    /// tenant scope. Tenant-scoped administrator users are not platform admin.
+    pub fn is_platform_admin(&self) -> bool {
+        self.role.eq_ignore_ascii_case("administrator")
+            && self.tenant_id.as_deref().is_none_or(str::is_empty)
+    }
+
+    /// Returns `true` for legacy gateway admin aliases.
+    ///
+    /// These roles are still accepted for compatibility on non-branch
+    /// admin surfaces (for example EXPLAIN ANALYZE).
+    pub fn has_legacy_admin_role(&self) -> bool {
+        self.role.eq_ignore_ascii_case("admin") || self.role.eq_ignore_ascii_case("super_admin")
+    }
+
+    /// Returns `true` when the caller can execute branch virtualization APIs.
+    ///
+    /// Branch metadata tables are global (not tenant-scoped), so this path is
+    /// restricted to platform administrators only.
+    pub fn can_use_branching(&self) -> bool {
+        self.is_platform_admin()
+    }
+
+    /// Returns `true` when the caller can run EXPLAIN ANALYZE.
+    ///
+    /// Kept compatible with existing `admin` / `super_admin` deployments while
+    /// also allowing canonical `administrator`.
+    pub fn can_run_explain_analyze(&self) -> bool {
+        self.is_platform_admin() || self.has_legacy_admin_role()
+    }
+
     /// Returns `true` if the context represents a real (non-anonymous) user.
     pub fn is_authenticated(&self) -> bool {
         !self.user_id.is_empty() && self.user_id != "anonymous" && self.user_id != "denied"
@@ -63,12 +96,11 @@ impl AuthContext {
     /// Mapping:
     /// - `tenant_id` → tenant scope
     /// - `claims["agent_id"]` → `agent_id`
-    /// - `role == "super_admin"` → `is_super_admin`
+    /// - `role == "administrator"` with empty tenant scope → `is_super_admin`
     pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {
         // Only platform-level administrators (no tenant scope) bypass RLS.
         // Tenant-scoped roles (including tenant-bound "administrator") use tenant filtering.
-        let is_super_admin = matches!(self.role.as_str(), "administrator" | "Administrator")
-            && self.tenant_id.as_deref().is_none_or(str::is_empty);
+        let is_super_admin = self.is_platform_admin();
 
         // Audit log: super_admin activation is a high-privilege event
         if is_super_admin {

@@ -46,9 +46,9 @@ pub(crate) async fn delete_handler(
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers);
-    if branch_ctx.branch_name().is_some() && auth.role != "admin" && auth.role != "super_admin" {
+    if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
         return Err(ApiError::forbidden(
-            "Admin role required for branch overlay writes",
+            "Platform administrator role required for branch overlay writes",
         ));
     }
 

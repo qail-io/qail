@@ -83,6 +83,35 @@ mod tests {
     }
 
     #[test]
+    fn build_rpc_sql_escapes_backslashes_in_string_args() {
+        let args = serde_json::json!({
+            "path": "C:\\temp\\logs\\today.txt"
+        });
+        let function = RpcFunctionName::parse("api.read_file").unwrap();
+        let sql = build_rpc_sql(&function, Some(&args)).unwrap();
+        assert!(
+            sql.contains("\"path\" => 'C:\\\\temp\\\\logs\\\\today.txt'"),
+            "RPC SQL must escape backslashes in string literals: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn build_rpc_sql_strips_nul_from_string_args() {
+        let args = serde_json::json!({
+            "payload": "ab\u{0000}cd"
+        });
+        let function = RpcFunctionName::parse("api.process_payload").unwrap();
+        let sql = build_rpc_sql(&function, Some(&args)).unwrap();
+        assert!(!sql.contains('\0'), "RPC SQL must not contain NUL bytes");
+        assert!(
+            sql.contains("'abcd'"),
+            "NUL bytes must be stripped: {}",
+            sql
+        );
+    }
+
+    #[test]
     fn build_rpc_sql_rejects_unsafe_function_name() {
         let err = RpcFunctionName::parse("search_orders;DROP TABLE users").unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);

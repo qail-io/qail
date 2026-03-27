@@ -27,10 +27,10 @@ pub(crate) async fn branch_create_handler(
         )
             .into_response();
     }
-    if auth.role != "admin" && auth.role != "super_admin" {
+    if !auth.can_use_branching() {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": "Admin role required for branch operations"})),
+            Json(json!({"error": "Platform administrator role required for branch operations"})),
         )
             .into_response();
     }
@@ -106,10 +106,10 @@ pub(crate) async fn branch_list_handler(
         )
             .into_response();
     }
-    if auth.role != "admin" && auth.role != "super_admin" {
+    if !auth.can_use_branching() {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": "Admin role required for branch operations"})),
+            Json(json!({"error": "Platform administrator role required for branch operations"})),
         )
             .into_response();
     }
@@ -158,10 +158,10 @@ pub(crate) async fn branch_delete_handler(
         )
             .into_response();
     }
-    if auth.role != "admin" && auth.role != "super_admin" {
+    if !auth.can_use_branching() {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": "Admin role required for branch operations"})),
+            Json(json!({"error": "Platform administrator role required for branch operations"})),
         )
             .into_response();
     }

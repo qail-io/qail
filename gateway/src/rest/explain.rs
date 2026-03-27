@@ -39,8 +39,10 @@ pub(crate) async fn explain_handler(
 
     // SECURITY: Restrict EXPLAIN ANALYZE to admin roles only.
     // This endpoint executes the query and reveals plan internals (costs, indexes, row counts).
-    if auth.role != "admin" && auth.role != "super_admin" {
-        return Err(ApiError::forbidden("EXPLAIN ANALYZE requires admin role"));
+    if !auth.can_run_explain_analyze() {
+        return Err(ApiError::forbidden(
+            "EXPLAIN ANALYZE requires administrator/admin role",
+        ));
     }
 
     // Build query (same as list_handler)

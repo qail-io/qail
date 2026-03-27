@@ -128,6 +128,46 @@ fn test_super_admin_does_not_bypass_rls() {
 }
 
 #[test]
+fn test_platform_admin_helper_requires_empty_tenant() {
+    let platform = AuthContext {
+        user_id: "platform-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: None,
+        claims: HashMap::new(),
+    };
+    assert!(platform.is_platform_admin());
+    assert!(platform.can_use_branching());
+
+    let tenant_scoped = AuthContext {
+        user_id: "tenant-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: Some("tenant-123".to_string()),
+        claims: HashMap::new(),
+    };
+    assert!(!tenant_scoped.is_platform_admin());
+    assert!(!tenant_scoped.can_use_branching());
+}
+
+#[test]
+fn test_explain_admin_helper_accepts_legacy_roles() {
+    let admin = AuthContext {
+        user_id: "legacy-admin".to_string(),
+        role: "admin".to_string(),
+        tenant_id: Some("tenant-123".to_string()),
+        claims: HashMap::new(),
+    };
+    assert!(admin.can_run_explain_analyze());
+
+    let super_admin = AuthContext {
+        user_id: "legacy-super-admin".to_string(),
+        role: "super_admin".to_string(),
+        tenant_id: Some("tenant-123".to_string()),
+        claims: HashMap::new(),
+    };
+    assert!(super_admin.can_run_explain_analyze());
+}
+
+#[test]
 fn test_operator_role_does_not_bypass_rls() {
     let auth = AuthContext {
         user_id: "test-user-001".to_string(),

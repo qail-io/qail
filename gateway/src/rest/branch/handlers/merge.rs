@@ -28,10 +28,10 @@ pub(crate) async fn branch_merge_handler(
         )
             .into_response();
     }
-    if auth.role != "admin" && auth.role != "super_admin" {
+    if !auth.can_use_branching() {
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": "Admin role required for branch merge"})),
+            Json(json!({"error": "Platform administrator role required for branch merge"})),
         )
             .into_response();
     }

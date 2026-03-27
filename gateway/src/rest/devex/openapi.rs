@@ -192,6 +192,7 @@ pub(crate) async fn openapi_spec_handler(
                         }
                     },
                     "400": {"description": "Invalid arguments or ambiguous overload"},
+                    "401": {"description": "Authentication required"},
                     "403": {"description": "Blocked by policy or RPC allow-list"},
                     "503": {"$ref": "#/components/responses/PoolBackpressure"}
                 }

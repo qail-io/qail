@@ -68,10 +68,10 @@ pub(crate) async fn get_by_id_handler(
     // Branch overlay: check if this row is overridden on the branch — admin-gated
     let branch_ctx = extract_branch_from_headers(&headers);
     if let Some(branch_name) = branch_ctx.branch_name() {
-        if auth.role != "admin" && auth.role != "super_admin" {
+        if !auth.can_use_branching() {
             conn.release().await;
             return Err(ApiError::forbidden(
-                "Admin role required for branch overlay reads",
+                "Platform administrator role required for branch overlay reads",
             ));
         }
         let sql = qail_pg::driver::branch_sql::read_overlay_sql(branch_name, &table_name);

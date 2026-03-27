@@ -67,15 +67,23 @@ impl RpcFunctionName {
 }
 
 pub(in super::super) fn json_literal_sql(value: &Value) -> Result<String, ApiError> {
+    fn escape_sql_literal(val: &str) -> String {
+        let clean = val
+            .replace('\0', "")
+            .replace('\\', "\\\\")
+            .replace('\'', "''");
+        format!("'{}'", clean)
+    }
+
     match value {
         Value::Null => Ok("NULL".to_string()),
         Value::Bool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
         Value::Number(n) => Ok(n.to_string()),
-        Value::String(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+        Value::String(s) => Ok(escape_sql_literal(s)),
         Value::Array(_) | Value::Object(_) => {
             let json = serde_json::to_string(value)
                 .map_err(|e| ApiError::parse_error(format!("Invalid JSON value: {}", e)))?;
-            Ok(format!("'{}'::jsonb", json.replace('\'', "''")))
+            Ok(format!("{}::jsonb", escape_sql_literal(&json)))
         }
     }
 }

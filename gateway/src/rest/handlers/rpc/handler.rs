@@ -15,6 +15,12 @@ pub(crate) async fn rpc_handler(
 ) -> Result<Json<Value>, ApiError> {
     let started_at = Instant::now();
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    if !auth.is_authenticated() {
+        crate::metrics::record_rpc_call(started_at.elapsed().as_secs_f64() * 1000.0, false, "text");
+        return Err(ApiError::auth_error(
+            "Authentication required for RPC invocation",
+        ));
+    }
     let function = RpcFunctionName::parse(&function_name)?;
     enforce_rpc_name_contract(
         state.config.rpc_require_schema_qualified,
@@ -28,7 +34,7 @@ pub(crate) async fn rpc_handler(
         .apply_policies(&auth, &mut policy_probe)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
-    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+    let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
         .await
         .map_err(|e| ApiError::parse_error(e.to_string()))?;
     let args: Option<Value> = if body.is_empty() {
