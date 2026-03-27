@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-03-27
+
+### Added
+
+- **Branch validation contract:** added shared branch-name validation for branch management endpoints, including explicit rejection of reserved `main` and invalid branch identifiers.
+
+### Changed
+
+- **Idempotency fingerprint scope:** mutation replay fingerprints now include behavior-changing headers (`prefer`, `x-transaction-id`, `x-branch-id`, `x-qail-result-format`) to isolate txn/branch/request-mode semantics under the same idempotency key.
+- **Branch overlay semantics:** branch CoW update overlays now apply as patches over matching primary-key rows, while preserving PK identity when materializing branch-only rows.
+- **Branch lifecycle SQL guards:** branch overlay read/write/stats/merge SQL now targets `status='active'` branches only.
+- **Branch management behavior:** branch create now fails closed when parent branch is missing/inactive, and branch delete returns not found when no active branch matches.
+- **Versioning/docs:** bumped Rust workspace crates and installation/docs/readme references to `0.27.2`.
+
+### Fixed
+
+- **Replay isolation hardening:** prevented idempotency key collisions across transaction sessions, branch contexts, and mutation preference modes.
+- **Anonymous idempotency safety:** unauthenticated requests now bypass idempotency caching to avoid cross-client key collisions when auth is disabled.
+- **Branch read-path correctness:** REST get/list branch reads now enforce branch-admin authorization before database execution and correctly surface branch-only overlay rows.
+
 ## [0.27.1] - 2026-03-26
 
 ### Added

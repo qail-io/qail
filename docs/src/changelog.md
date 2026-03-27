@@ -4,10 +4,10 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v0.27.1)
+## Current Highlights (v0.27.2)
 
-- Pipeline APIs are now consistently named around `pipeline_execute_*` across driver/connection/pool surfaces.
-- Added `AstPipelineMode` (`Auto`/`OneShot`/`Cached`) and auto planner surfaces (`AutoCountPlan`, `AutoCountPath`) for runtime strategy introspection.
-- Added prepared AST handle execution (`PreparedAstQuery`) for repeated zero-reencode hot-path calls.
-- Strengthened cached pipeline state rollback and protocol desync guards.
-- Refreshed benchmark docs with reproducible RTT-aware pattern measurements.
+- Idempotency replay fingerprints now include transaction/branch/prefer/result-format headers, preventing cross-context replay collisions.
+- Branch overlay reads/writes are constrained to active branches, with stricter merge/create/delete behavior for missing/inactive branches.
+- Branch update overlays now patch matching rows and preserve PK identity for branch-only materialization paths.
+- REST branch read paths now enforce branch-admin authorization before query execution.
+- Workspace crates and docs references were bumped to `0.27.2`.
