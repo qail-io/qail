@@ -159,11 +159,19 @@ pub fn extract_auth_from_headers_with_jwks(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
+    let mut claims = HashMap::new();
+    // Preserve existing dev-mode ergonomics while production JWT auth remains
+    // fail-closed via explicit platform-admin claims.
+    if role.eq_ignore_ascii_case("administrator") && tenant_id.as_deref().is_none_or(str::is_empty)
+    {
+        claims.insert("platform_admin".to_string(), serde_json::Value::Bool(true));
+    }
+
     AuthContext {
         user_id,
         role,
         tenant_id,
-        claims: HashMap::new(),
+        claims,
     }
 }
 
@@ -183,6 +191,20 @@ pub async fn extract_auth_for_state(
         &state.jwt_allowed_algorithms,
     );
     auth.enrich_with_tenant_map(&state.user_tenant_map).await;
+
+    // SECURITY: do not infer platform admin from a missing tenant map entry.
+    if auth.role.eq_ignore_ascii_case("administrator")
+        && auth.tenant_id.as_deref().is_none_or(str::is_empty)
+        && !auth.has_platform_admin_claim()
+    {
+        tracing::warn!(
+            user_id = %auth.user_id,
+            role = %auth.role,
+            event = "administrator_without_platform_claim_denied",
+            "Rejecting administrator auth without explicit platform-admin claim"
+        );
+        return AuthContext::denied();
+    }
 
     if let Some(impersonate_header) = headers.get("x-impersonate-tenant")
         && let Ok(target_tenant) = impersonate_header.to_str()

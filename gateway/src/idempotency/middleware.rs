@@ -35,7 +35,8 @@ pub async fn idempotency_middleware(
         return next.run(request).await;
     };
 
-    let tenant_scope = extract_tenant_scope(state.as_ref(), request.headers().clone()).await;
+    let idempotency_scope =
+        extract_idempotency_scope(state.as_ref(), request.headers().clone()).await;
     let body_limit = state.config.max_request_body_bytes;
 
     let (parts_req, body_req) = request.into_parts();
@@ -59,10 +60,13 @@ pub async fn idempotency_middleware(
     );
     let request = Request::from_parts(parts_req, Body::from(body_bytes_req));
 
-    if let Some(cached) = state.idempotency_store.get(&tenant_scope, &idempotency_key) {
+    if let Some(cached) = state
+        .idempotency_store
+        .get(&idempotency_scope, &idempotency_key)
+    {
         if cached.request_fingerprint != request_fingerprint {
             tracing::warn!(
-                tenant_scope = %tenant_scope,
+                idempotency_scope = %idempotency_scope,
                 idempotency_key = %idempotency_key,
                 stored = %cached.request_fingerprint,
                 current = %request_fingerprint,
@@ -75,7 +79,7 @@ pub async fn idempotency_middleware(
         }
 
         tracing::info!(
-            tenant_scope = %tenant_scope,
+            idempotency_scope = %idempotency_scope,
             idempotency_key = %idempotency_key,
             "Idempotency key hit — replaying cached response"
         );
@@ -83,12 +87,12 @@ pub async fn idempotency_middleware(
         return build_response_from_cache(cached);
     }
 
-    let cache_key = IdempotencyStore::cache_key(&tenant_scope, &idempotency_key);
+    let cache_key = IdempotencyStore::cache_key(&idempotency_scope, &idempotency_key);
     {
         let mut in_flight = lock_in_flight_set(&state.idempotency_store.in_flight);
         if !in_flight.insert(cache_key.clone()) {
             tracing::warn!(
-                tenant_scope = %tenant_scope,
+                idempotency_scope = %idempotency_scope,
                 idempotency_key = %idempotency_key,
                 "Idempotency key in-flight — concurrent request rejected"
             );
@@ -148,10 +152,10 @@ pub async fn idempotency_middleware(
 
     state
         .idempotency_store
-        .insert(&tenant_scope, &idempotency_key, cached);
+        .insert(&idempotency_scope, &idempotency_key, cached);
 
     tracing::debug!(
-        tenant_scope = %tenant_scope,
+        idempotency_scope = %idempotency_scope,
         idempotency_key = %idempotency_key,
         "Idempotency key stored"
     );

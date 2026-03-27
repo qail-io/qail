@@ -40,11 +40,22 @@ impl QueryAllowList {
     /// Load allow-list from a file (one pattern per line)
     pub fn load_from_file(&mut self, path: &str) -> Result<(), std::io::Error> {
         let content = std::fs::read_to_string(path)?;
+        // SECURITY: fail closed once an allow-list file is configured.
+        // Empty/comment-only files should deny all queries instead of allowing all.
+        self.enabled = true;
+        let mut loaded = 0usize;
         for line in content.lines() {
             let trimmed = line.trim();
             if !trimmed.is_empty() && !trimmed.starts_with('#') {
                 self.allow(trimmed);
+                loaded = loaded.saturating_add(1);
             }
+        }
+        if loaded == 0 {
+            tracing::warn!(
+                path = %path,
+                "Allow-list file loaded with zero active patterns; all queries will be denied"
+            );
         }
         Ok(())
     }

@@ -4,7 +4,8 @@
 //! or client bugs. Clients send `Idempotency-Key: <uuid>` header; the gateway
 //! caches the response and replays it on subsequent requests with the same key.
 //!
-//! - Keys are scoped per-operator (tenant) to prevent cross-tenant replay.
+//! - Keys are scoped per principal (`tenant_id + user_id`) to prevent
+//!   cross-tenant and cross-user replay.
 //! - Cached responses expire after a configurable TTL (default: 24 hours).
 //! - Only mutation methods (POST, PATCH, DELETE) are checked; GET/HEAD are ignored.
 //! - The store uses an in-memory moka cache with bounded capacity.
@@ -121,25 +122,36 @@ fn request_fingerprint(
     format!("{:x}", fp_hasher.finalize())
 }
 
-/// Extract tenant scope from validated auth context.
-/// Returns tenant_id (multi-tenant), user_id (single-user), or "anonymous".
+/// Build idempotency scope from validated auth context.
+///
+/// Authenticated requests are isolated per principal:
+/// - `tenant_id + user_id` when tenant exists
+/// - `_ + user_id` when tenant is absent
+///
+/// Unauthenticated requests fall back to `anonymous`.
 ///
 /// **Security (F3):** Uses the JWT-validated tenant_id — the real SaaS tenant
 /// boundary — not the spoofable `x-tenant-id` request header.
-async fn extract_tenant_scope(state: &crate::GatewayState, headers: HeaderMap) -> String {
+fn idempotency_scope_from_auth(auth: &crate::auth::AuthContext) -> String {
+    if !auth.is_authenticated() {
+        return "anonymous".to_string();
+    }
+    let tenant_scope = auth
+        .tenant_id
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .unwrap_or("_");
+    format!("{}:{}", tenant_scope, auth.user_id)
+}
+
+async fn extract_idempotency_scope(state: &crate::GatewayState, headers: HeaderMap) -> String {
     let mut auth = crate::auth::extract_auth_from_headers_with_jwks(
         &headers,
         state.jwks_store.as_ref(),
         &state.jwt_allowed_algorithms,
     );
     auth.enrich_with_tenant_map(&state.user_tenant_map).await;
-    auth.tenant_id.clone().unwrap_or_else(|| {
-        if auth.is_authenticated() {
-            auth.user_id.clone()
-        } else {
-            "anonymous".to_string()
-        }
-    })
+    idempotency_scope_from_auth(&auth)
 }
 
 /// Build an HTTP response from a cached entry.

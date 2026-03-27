@@ -37,6 +37,32 @@ fn test_allow_list() {
 }
 
 #[test]
+fn allow_list_empty_file_enables_fail_closed_mode() {
+    let tmp_path = std::env::temp_dir().join(format!(
+        "qail_allowlist_empty_{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::write(&tmp_path, "\n# comments only\n\n").expect("should write allow-list file");
+
+    let mut allow_list = QueryAllowList::new();
+    allow_list
+        .load_from_file(tmp_path.to_str().expect("utf8 path"))
+        .expect("load should succeed");
+
+    assert!(
+        allow_list.is_enabled(),
+        "allow-list should be enabled after load"
+    );
+    assert_eq!(allow_list.len(), 0);
+    assert!(!allow_list.is_allowed("SELECT users"), "must fail closed");
+
+    let _ = std::fs::remove_file(tmp_path);
+}
+
+#[test]
 fn test_complexity_guard() {
     let guard = QueryComplexityGuard::new(3, 10, 5);
 
@@ -92,6 +118,14 @@ fn test_from_pg_driver_error_query_canceled_sqlstate() {
 fn error_code_rate_limited_is_429() {
     assert_eq!(
         ApiError::rate_limited().status_code(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[test]
+fn error_code_tenant_rate_limited_is_429() {
+    assert_eq!(
+        ApiError::with_code("TENANT_RATE_LIMIT", "slow down").status_code(),
         StatusCode::TOO_MANY_REQUESTS
     );
 }
@@ -177,7 +211,12 @@ fn error_code_unauthorized_is_401() {
 
 #[test]
 fn error_code_forbidden_variants_are_403() {
-    for code in ["FORBIDDEN", "QUERY_NOT_ALLOWED", "POLICY_DENIED"] {
+    for code in [
+        "FORBIDDEN",
+        "QUERY_NOT_ALLOWED",
+        "POLICY_DENIED",
+        "ACTION_DENIED",
+    ] {
         let err = ApiError::with_code(code, "test");
         assert_eq!(
             err.status_code(),
@@ -203,6 +242,7 @@ fn error_code_connection_errors_are_503() {
         "POOL_BACKPRESSURE",
         "QDRANT_NOT_CONFIGURED",
         "QDRANT_CONNECTION_ERROR",
+        "BINARY_REQUIRES_ALLOW_LIST",
     ] {
         let err = ApiError::with_code(code, "test");
         assert_eq!(
@@ -269,6 +309,18 @@ fn pool_backpressure_unknown_message_falls_back_to_unknown_metadata() {
 fn error_code_batch_too_large_is_413() {
     let err = ApiError::bad_request("BATCH_TOO_LARGE", "test");
     assert_eq!(err.status_code(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[test]
+fn error_code_payload_too_large_is_413() {
+    let err = ApiError::bad_request("PAYLOAD_TOO_LARGE", "test");
+    assert_eq!(err.status_code(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[test]
+fn error_code_qdrant_disabled_is_501() {
+    let err = ApiError::bad_request("QDRANT_DISABLED", "test");
+    assert_eq!(err.status_code(), StatusCode::NOT_IMPLEMENTED);
 }
 
 #[test]

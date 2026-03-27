@@ -19,7 +19,7 @@ pub(crate) struct CachedResponse {
 /// In-memory idempotency store backed by moka cache.
 #[derive(Debug)]
 pub struct IdempotencyStore {
-    /// Cache: compound key (tenant_scope + idempotency_key) → cached response.
+    /// Cache: compound key (idempotency_scope + idempotency_key) → cached response.
     cache: moka::sync::Cache<String, CachedResponse>,
     /// SECURITY: In-flight keys currently being processed.
     /// Prevents concurrent duplicate execution of the same idempotency key.
@@ -46,26 +46,32 @@ impl IdempotencyStore {
         Self::new(100_000, Duration::from_secs(86400))
     }
 
-    /// Build the composite cache key: `{tenant_scope}:{idempotency_key}`.
-    pub(crate) fn cache_key(tenant_scope: &str, idempotency_key: &str) -> String {
-        format!("{}:{}", tenant_scope, idempotency_key)
+    /// Build the composite cache key: `{idempotency_scope}:{idempotency_key}`.
+    pub(crate) fn cache_key(idempotency_scope: &str, idempotency_key: &str) -> String {
+        format!("{}:{}", idempotency_scope, idempotency_key)
     }
 
-    /// Look up a cached response by tenant scope + idempotency key.
-    pub(crate) fn get(&self, tenant_scope: &str, idempotency_key: &str) -> Option<CachedResponse> {
+    /// Look up a cached response by idempotency scope + idempotency key.
+    pub(crate) fn get(
+        &self,
+        idempotency_scope: &str,
+        idempotency_key: &str,
+    ) -> Option<CachedResponse> {
         self.cache
-            .get(&Self::cache_key(tenant_scope, idempotency_key))
+            .get(&Self::cache_key(idempotency_scope, idempotency_key))
     }
 
     /// Store a response in the idempotency cache.
     pub(crate) fn insert(
         &self,
-        tenant_scope: &str,
+        idempotency_scope: &str,
         idempotency_key: &str,
         response: CachedResponse,
     ) {
-        self.cache
-            .insert(Self::cache_key(tenant_scope, idempotency_key), response);
+        self.cache.insert(
+            Self::cache_key(idempotency_scope, idempotency_key),
+            response,
+        );
     }
 
     /// Number of entries currently cached (for metrics).

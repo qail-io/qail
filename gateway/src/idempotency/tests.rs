@@ -44,6 +44,41 @@ fn store_scoped_by_tenant() {
 }
 
 #[test]
+fn idempotency_scope_includes_tenant_and_user() {
+    let auth = crate::auth::AuthContext {
+        user_id: "user-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-a".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+    assert_eq!(idempotency_scope_from_auth(&auth), "tenant-a:user-1");
+}
+
+#[test]
+fn idempotency_scope_keeps_users_isolated_without_tenant() {
+    let auth_a = crate::auth::AuthContext {
+        user_id: "user-a".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+    let auth_b = crate::auth::AuthContext {
+        user_id: "user-b".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims: std::collections::HashMap::new(),
+    };
+    assert_eq!(idempotency_scope_from_auth(&auth_a), "_:user-a");
+    assert_eq!(idempotency_scope_from_auth(&auth_b), "_:user-b");
+}
+
+#[test]
+fn idempotency_scope_for_anonymous_is_shared_literal() {
+    let auth = crate::auth::AuthContext::anonymous();
+    assert_eq!(idempotency_scope_from_auth(&auth), "anonymous");
+}
+
+#[test]
 fn store_different_keys_independent() {
     let store = IdempotencyStore::new(100, Duration::from_secs(60));
 

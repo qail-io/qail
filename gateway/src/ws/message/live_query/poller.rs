@@ -68,6 +68,16 @@ pub(super) fn spawn_live_query_poller(
             // Burst coalescing: one refresh is enough for many notifications.
             while trigger_rx.try_recv().is_ok() {}
 
+            if state.tenant_rate_limiter.check(&waiter_key).await.is_err() {
+                tracing::warn!(
+                    table = %table,
+                    waiter_key = %waiter_key,
+                    "Live query poll skipped due to tenant rate limit"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                continue;
+            }
+
             if let Ok(mut conn) = state
                 .acquire_with_rls_timeouts_guarded(
                     &waiter_key,

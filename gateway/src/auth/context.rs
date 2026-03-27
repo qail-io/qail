@@ -1,6 +1,21 @@
 use super::AuthContext;
 use std::collections::HashMap;
 
+fn has_truthy_claim(claims: &HashMap<String, serde_json::Value>, key: &str) -> bool {
+    let Some(value) = claims.get(key) else {
+        return false;
+    };
+    match value {
+        serde_json::Value::Bool(v) => *v,
+        serde_json::Value::Number(v) => v.as_u64() == Some(1),
+        serde_json::Value::String(v) => {
+            let normalized = v.trim().to_ascii_lowercase();
+            normalized == "true" || normalized == "1" || normalized == "yes"
+        }
+        _ => false,
+    }
+}
+
 impl AuthContext {
     /// Create an unauthenticated anonymous context.
     pub fn anonymous() -> Self {
@@ -31,13 +46,23 @@ impl AuthContext {
         self.role == role
     }
 
-    /// Returns `true` when the caller is a platform-level administrator.
+    /// Returns `true` when the caller has an explicit platform-admin grant.
     ///
-    /// Platform admin is strictly `administrator` (case-insensitive) with no
-    /// tenant scope. Tenant-scoped administrator users are not platform admin.
+    /// This is intentionally fail-closed:
+    /// - role must be `administrator` (case-insensitive)
+    /// - tenant scope must be empty
+    /// - JWT must explicitly assert platform admin via claim
+    ///   (`platform_admin=true` or `qail_platform_admin=true`)
     pub fn is_platform_admin(&self) -> bool {
         self.role.eq_ignore_ascii_case("administrator")
             && self.tenant_id.as_deref().is_none_or(str::is_empty)
+            && self.has_platform_admin_claim()
+    }
+
+    /// Returns `true` when JWT claims explicitly grant platform-admin authority.
+    pub fn has_platform_admin_claim(&self) -> bool {
+        has_truthy_claim(&self.claims, "platform_admin")
+            || has_truthy_claim(&self.claims, "qail_platform_admin")
     }
 
     /// Returns `true` for legacy gateway admin aliases.
@@ -96,7 +121,8 @@ impl AuthContext {
     /// Mapping:
     /// - `tenant_id` → tenant scope
     /// - `claims["agent_id"]` → `agent_id`
-    /// - `role == "administrator"` with empty tenant scope → `is_super_admin`
+    /// - explicit platform-admin claim + role `administrator` + empty tenant
+    ///   scope → `is_super_admin`
     pub fn to_rls_context(&self) -> qail_core::rls::RlsContext {
         // Only platform-level administrators (no tenant scope) bypass RLS.
         // Tenant-scoped roles (including tenant-bound "administrator") use tenant filtering.

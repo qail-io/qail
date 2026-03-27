@@ -288,7 +288,7 @@ impl ApiError {
     /// Get HTTP status code for this error.
     pub fn status_code(&self) -> StatusCode {
         match self.code.as_str() {
-            "RATE_LIMITED" => StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED" | "TENANT_RATE_LIMIT" => StatusCode::TOO_MANY_REQUESTS,
             "TIMEOUT" => StatusCode::GATEWAY_TIMEOUT,
             "PARSE_ERROR"
             | "VALIDATION_ERROR"
@@ -298,8 +298,8 @@ impl ApiError {
             | "UNSUPPORTED_ACTION"
             | "MISSING_VECTOR"
             | "EXPORT_ONLY"
-            | "AST_VALIDATION_FAILED"
-            | "PAYLOAD_TOO_LARGE" => StatusCode::BAD_REQUEST,
+            | "AST_VALIDATION_FAILED" => StatusCode::BAD_REQUEST,
+            "PAYLOAD_TOO_LARGE" | "BATCH_TOO_LARGE" => StatusCode::PAYLOAD_TOO_LARGE,
             "CONFLICT" | "TXN_SESSION_EXPIRED" | "TXN_STATEMENT_LIMIT" | "TXN_ABORTED" => {
                 StatusCode::CONFLICT
             }
@@ -308,14 +308,17 @@ impl ApiError {
             }
             "QUERY_TOO_EXPENSIVE" | "QUERY_TOO_COMPLEX" => StatusCode::UNPROCESSABLE_ENTITY,
             "UNAUTHORIZED" | "AUTH_DENIED" | "AUTH_REQUIRED" => StatusCode::UNAUTHORIZED,
-            "FORBIDDEN" | "QUERY_NOT_ALLOWED" | "POLICY_DENIED" => StatusCode::FORBIDDEN,
+            "FORBIDDEN" | "QUERY_NOT_ALLOWED" | "POLICY_DENIED" | "ACTION_DENIED" => {
+                StatusCode::FORBIDDEN
+            }
             "NOT_FOUND" => StatusCode::NOT_FOUND,
             "CONNECTION_ERROR"
             | "POOL_BACKPRESSURE"
             | "TXN_SESSION_LIMIT"
             | "QDRANT_NOT_CONFIGURED"
-            | "QDRANT_CONNECTION_ERROR" => StatusCode::SERVICE_UNAVAILABLE,
-            "BATCH_TOO_LARGE" => StatusCode::PAYLOAD_TOO_LARGE,
+            | "QDRANT_CONNECTION_ERROR"
+            | "BINARY_REQUIRES_ALLOW_LIST" => StatusCode::SERVICE_UNAVAILABLE,
+            "QDRANT_DISABLED" => StatusCode::NOT_IMPLEMENTED,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

@@ -4,6 +4,12 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
 use super::jwt::detect_jwt_algorithm;
 
+fn platform_admin_claims() -> HashMap<String, serde_json::Value> {
+    let mut claims = HashMap::new();
+    claims.insert("platform_admin".to_string(), serde_json::Value::Bool(true));
+    claims
+}
+
 #[test]
 fn test_jwt_validation() {
     let secret = "test-secret-key-12345";
@@ -76,7 +82,7 @@ fn test_administrator_bypasses_rls() {
         user_id: "master-user".to_string(),
         role: "administrator".to_string(),
         tenant_id: None,
-        claims: HashMap::new(),
+        claims: platform_admin_claims(),
     };
     let rls = auth.to_rls_context();
     assert!(rls.bypasses_rls(), "administrator role should bypass RLS");
@@ -88,13 +94,26 @@ fn test_administrator_pascal_case_bypasses_rls() {
         user_id: "master-user".to_string(),
         role: "Administrator".to_string(),
         tenant_id: None,
-        claims: HashMap::new(),
+        claims: platform_admin_claims(),
     };
     let rls = auth.to_rls_context();
     assert!(
         rls.bypasses_rls(),
         "Administrator (PascalCase) role should bypass RLS"
     );
+}
+
+#[test]
+fn test_administrator_without_platform_claim_does_not_bypass_rls() {
+    let auth = AuthContext {
+        user_id: "tenant-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: None,
+        claims: HashMap::new(),
+    };
+    assert!(!auth.is_platform_admin());
+    let rls = auth.to_rls_context();
+    assert!(!rls.bypasses_rls());
 }
 
 #[test]
@@ -133,7 +152,7 @@ fn test_platform_admin_helper_requires_empty_tenant() {
         user_id: "platform-admin".to_string(),
         role: "administrator".to_string(),
         tenant_id: None,
-        claims: HashMap::new(),
+        claims: platform_admin_claims(),
     };
     assert!(platform.is_platform_admin());
     assert!(platform.can_use_branching());
@@ -146,6 +165,18 @@ fn test_platform_admin_helper_requires_empty_tenant() {
     };
     assert!(!tenant_scoped.is_platform_admin());
     assert!(!tenant_scoped.can_use_branching());
+}
+
+#[test]
+fn test_platform_admin_helper_requires_explicit_claim() {
+    let no_claim = AuthContext {
+        user_id: "platform-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: None,
+        claims: HashMap::new(),
+    };
+    assert!(!no_claim.is_platform_admin());
+    assert!(!no_claim.can_use_branching());
 }
 
 #[test]
@@ -489,13 +520,12 @@ fn impersonation_downgrades_administrator_role() {
         user_id: "master-user".to_string(),
         role: "administrator".to_string(),
         tenant_id: None,
-        claims: HashMap::new(),
+        claims: platform_admin_claims(),
     };
 
     // Apply impersonation logic (same as in extract_auth_for_state)
     let target_tenant = "tenant-abc-123";
-    let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator");
-    assert!(is_platform_admin);
+    assert!(auth.is_platform_admin());
     auth.tenant_id = Some(target_tenant.to_string());
     auth.role = "operator".to_string();
 
@@ -523,8 +553,10 @@ fn impersonation_ignored_for_non_administrator() {
     };
 
     // Apply same check — should NOT match
-    let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator");
-    assert!(!is_platform_admin, "super_admin is NOT platform admin");
+    assert!(
+        !auth.is_platform_admin(),
+        "super_admin is NOT platform admin"
+    );
 
     // tenant_id should remain unchanged
     assert_eq!(auth.tenant_id, Some("original-tenant".to_string()));
@@ -541,10 +573,8 @@ fn impersonation_ignored_for_tenant_scoped_administrator() {
         claims: HashMap::new(),
     };
 
-    let is_platform_admin = matches!(auth.role.as_str(), "administrator" | "Administrator")
-        && auth.tenant_id.as_deref().is_none_or(str::is_empty);
     assert!(
-        !is_platform_admin,
+        !auth.is_platform_admin(),
         "tenant-scoped administrator must not impersonate"
     );
 }

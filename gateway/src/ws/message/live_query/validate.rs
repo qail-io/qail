@@ -54,6 +54,18 @@ pub(super) async fn prepare_and_send_initial_snapshot(
         return None;
     }
 
+    if cmd.table != table {
+        let _ = tx
+            .send(WsServerMessage::Error {
+                message: format!(
+                    "Live query table mismatch: message table '{}' does not match query table '{}'",
+                    table, cmd.table
+                ),
+            })
+            .await;
+        return None;
+    }
+
     if !crate::handler::is_query_allowed(&state.allow_list, Some(qail), &cmd) {
         tracing::warn!("WS LiveQuery rejected by allow-list: {}", qail);
         let _ = tx

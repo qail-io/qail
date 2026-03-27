@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::GatewayState;
-use crate::auth::{ensure_request_auth, extract_auth_for_state};
+use crate::auth::{ensure_request_auth, ensure_tenant_rate_limit, extract_auth_for_state};
 
 mod listener;
 mod message;
@@ -351,6 +351,9 @@ pub async fn ws_handler(
 
     // SECURITY (P0-3): Enforce authentication policy on WS upgrade.
     if let Err(e) = ensure_request_auth(&auth, state.config.production_strict) {
+        return e.into_response();
+    }
+    if let Err(e) = ensure_tenant_rate_limit(state.as_ref(), &auth).await {
         return e.into_response();
     }
 
