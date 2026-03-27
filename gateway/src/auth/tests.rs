@@ -10,6 +10,12 @@ fn platform_admin_claims() -> HashMap<String, serde_json::Value> {
     claims
 }
 
+fn legacy_is_platform_admin_claims() -> HashMap<String, serde_json::Value> {
+    let mut claims = HashMap::new();
+    claims.insert("is_platform_admin".to_string(), serde_json::Value::Bool(true));
+    claims
+}
+
 #[test]
 fn test_jwt_validation() {
     let secret = "test-secret-key-12345";
@@ -177,6 +183,19 @@ fn test_platform_admin_helper_requires_explicit_claim() {
     };
     assert!(!no_claim.is_platform_admin());
     assert!(!no_claim.can_use_branching());
+}
+
+#[test]
+fn test_platform_admin_helper_accepts_legacy_is_platform_admin_claim() {
+    let auth = AuthContext {
+        user_id: "platform-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: None,
+        claims: legacy_is_platform_admin_claims(),
+    };
+    assert!(auth.has_platform_admin_claim());
+    assert!(auth.is_platform_admin());
+    assert!(auth.can_use_branching());
 }
 
 #[test]

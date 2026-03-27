@@ -62,6 +62,7 @@ impl AuthContext {
     /// Returns `true` when JWT claims explicitly grant platform-admin authority.
     pub fn has_platform_admin_claim(&self) -> bool {
         has_truthy_claim(&self.claims, "platform_admin")
+            || has_truthy_claim(&self.claims, "is_platform_admin")
             || has_truthy_claim(&self.claims, "qail_platform_admin")
     }
 
