@@ -67,10 +67,17 @@ pub(super) fn rpc_signature_lookup_cmd(function_name: &RpcFunctionName) -> Resul
             Expr::Named("p.pronargdefaults::int4 AS default_args".to_string()),
             Expr::Named("(p.provariadic <> 0) AS is_variadic".to_string()),
             Expr::Named(
+                "CASE WHEN p.provariadic = 0 THEN NULL ELSE p.provariadic::int8 END AS variadic_element_oid"
+                    .to_string(),
+            ),
+            Expr::Named(
                 "COALESCE(to_jsonb(COALESCE(p.proargnames, ARRAY[]::text[])), '[]'::jsonb)::text AS arg_names_json".to_string(),
             ),
             Expr::Named(
                 "COALESCE(to_jsonb(COALESCE(p.proargmodes, ARRAY[]::\"char\"[])), '[]'::jsonb)::text AS arg_modes_json".to_string(),
+            ),
+            Expr::Named(
+                "COALESCE((SELECT jsonb_agg(arg_oid ORDER BY ord) FROM unnest(CASE WHEN p.pronargs = 0 THEN ARRAY[]::oid[] ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] END) WITH ORDINALITY AS args(arg_oid, ord)), '[]'::jsonb)::text AS arg_type_oids_json".to_string(),
             ),
             Expr::Named(
                 "COALESCE((SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord) FROM unnest(CASE WHEN p.pronargs = 0 THEN ARRAY[]::oid[] ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] END) WITH ORDINALITY AS args(arg_oid, ord)), '[]'::jsonb)::text AS arg_types_json".to_string(),
@@ -114,20 +121,28 @@ pub(super) fn parse_rpc_signatures(
         let raw_arg_names_json = row
             .try_get_by_name::<String>("arg_names_json")
             .ok()
-            .or_else(|| row.get_string(3))
+            .or_else(|| row.get_string(4))
             .unwrap_or_else(|| "[]".to_string());
         let raw_arg_modes_json = row
             .try_get_by_name::<String>("arg_modes_json")
             .ok()
-            .or_else(|| row.get_string(4))
+            .or_else(|| row.get_string(5))
             .unwrap_or_else(|| "[]".to_string());
         let mut arg_names =
             parse_rpc_input_arg_names(&raw_arg_names_json, &raw_arg_modes_json, total_args)?;
 
+        let raw_arg_type_oids = row
+            .try_get_by_name::<String>("arg_type_oids_json")
+            .ok()
+            .or_else(|| row.get_string(6))
+            .unwrap_or_else(|| "[]".to_string());
+        let mut arg_type_oids: Vec<u32> = serde_json::from_str(&raw_arg_type_oids)
+            .map_err(|e| ApiError::internal(format!("Invalid RPC arg type OID metadata: {}", e)))?;
+
         let raw_arg_types = row
             .try_get_by_name::<String>("arg_types_json")
             .ok()
-            .or_else(|| row.get_string(5))
+            .or_else(|| row.get_string(7))
             .unwrap_or_else(|| "[]".to_string());
         let mut arg_types: Vec<String> = serde_json::from_str(&raw_arg_types)
             .map_err(|e| ApiError::internal(format!("Invalid RPC arg type metadata: {}", e)))?;
@@ -146,6 +161,11 @@ pub(super) fn parse_rpc_signatures(
         } else if arg_types.len() > total_args {
             arg_types.truncate(total_args);
         }
+        if arg_type_oids.len() < total_args {
+            arg_type_oids.resize(total_args, 0);
+        } else if arg_type_oids.len() > total_args {
+            arg_type_oids.truncate(total_args);
+        }
 
         signatures.push(RpcCallableSignature {
             total_args,
@@ -153,15 +173,21 @@ pub(super) fn parse_rpc_signatures(
             variadic,
             arg_names,
             arg_types,
+            arg_type_oids,
+            variadic_element_oid: row
+                .try_get_by_name::<i64>("variadic_element_oid")
+                .ok()
+                .or_else(|| row.get_i64(3))
+                .and_then(|oid| u32::try_from(oid).ok()),
             identity_args: row
                 .try_get_by_name::<String>("identity_args")
                 .ok()
-                .or_else(|| row.get_string(6))
+                .or_else(|| row.get_string(8))
                 .unwrap_or_default(),
             result_type: row
                 .try_get_by_name::<String>("result_type")
                 .ok()
-                .or_else(|| row.get_string(7))
+                .or_else(|| row.get_string(9))
                 .unwrap_or_default(),
         });
     }

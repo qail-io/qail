@@ -6,7 +6,9 @@ use std::sync::Arc;
 use crate::GatewayState;
 use crate::auth::authenticate_request;
 use crate::middleware::ApiError;
-use crate::rest::handlers::parse_rpc_input_arg_names;
+use crate::rest::handlers::{
+    minimum_required_rpc_args, normalize_pg_type_name, parse_rpc_input_arg_names,
+};
 
 fn is_callable_rpc_ident(segment: &str) -> bool {
     let mut chars = segment.chars();
@@ -28,6 +30,22 @@ fn callable_rpc_allow_list_key(schema_name: &str, function_name: &str) -> Option
         schema_name.to_ascii_lowercase(),
         function_name.to_ascii_lowercase()
     ))
+}
+
+fn normalize_contract_arg_types(raw_arg_types_json: &str, total_args: usize) -> Vec<String> {
+    let mut arg_types: Vec<String> = serde_json::from_str(raw_arg_types_json).unwrap_or_default();
+    arg_types = arg_types
+        .into_iter()
+        .map(|t| normalize_pg_type_name(&t))
+        .collect();
+
+    if arg_types.len() < total_args {
+        arg_types.resize(total_args, "unknown".to_string());
+    } else if arg_types.len() > total_args {
+        arg_types.truncate(total_args);
+    }
+
+    arg_types
 }
 
 /// GET /api/_rpc/contracts — Introspect callable PostgreSQL function contracts.
@@ -146,6 +164,7 @@ pub(crate) async fn rpc_contracts_handler(
             .ok()
             .or_else(|| row.get_string(9))
             .unwrap_or_default();
+        let required_args = minimum_required_rpc_args(total_args, default_args, variadic);
 
         let arg_names: Vec<Option<String>> = parse_rpc_input_arg_names(
             &row.try_get_by_name::<String>("arg_names_json")
@@ -159,13 +178,13 @@ pub(crate) async fn rpc_contracts_handler(
             total_args,
         )
         .unwrap_or_default();
-        let arg_types: Vec<String> = serde_json::from_str(
+        let arg_types = normalize_contract_arg_types(
             &row.try_get_by_name::<String>("arg_types_json")
                 .ok()
                 .or_else(|| row.get_string(7))
                 .unwrap_or_else(|| "[]".to_string()),
-        )
-        .unwrap_or_default();
+            total_args,
+        );
 
         let mut args_json: Vec<Value> = Vec::with_capacity(total_args);
         for idx in 0..total_args {
@@ -181,7 +200,7 @@ pub(crate) async fn rpc_contracts_handler(
                 "position": idx + 1,
                 "name": name,
                 "type": arg_type,
-                "required": idx < total_args.saturating_sub(default_args),
+                "required": idx < required_args,
                 "variadic": variadic && idx + 1 == total_args,
             }));
         }
@@ -193,7 +212,7 @@ pub(crate) async fn rpc_contracts_handler(
             "identity_args": identity_args,
             "result_type": result_type,
             "total_args": total_args,
-            "required_args": total_args.saturating_sub(default_args),
+            "required_args": required_args,
             "default_args": default_args,
             "variadic": variadic,
             "args": args_json,
@@ -208,7 +227,8 @@ pub(crate) async fn rpc_contracts_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::callable_rpc_allow_list_key;
+    use super::{callable_rpc_allow_list_key, normalize_contract_arg_types};
+    use crate::rest::handlers::minimum_required_rpc_args;
 
     #[test]
     fn callable_rpc_allow_list_key_normalizes_safe_identifiers() {
@@ -222,5 +242,18 @@ mod tests {
     fn callable_rpc_allow_list_key_rejects_non_callable_identifiers() {
         assert_eq!(callable_rpc_allow_list_key("api", "search-orders"), None);
         assert_eq!(callable_rpc_allow_list_key("quoted.schema", "fn"), None);
+    }
+
+    #[test]
+    fn normalize_contract_arg_types_matches_runtime_type_canonicalization() {
+        let arg_types = normalize_contract_arg_types(r#"["UUID","\"Api\".\"My_Enum\""]"#, 2);
+        assert_eq!(arg_types, vec!["uuid", "api.my_enum"]);
+    }
+
+    #[test]
+    fn minimum_required_rpc_args_treats_variadic_tail_as_optional() {
+        assert_eq!(minimum_required_rpc_args(1, 0, true), 0);
+        assert_eq!(minimum_required_rpc_args(2, 0, true), 1);
+        assert_eq!(minimum_required_rpc_args(2, 1, true), 1);
     }
 }

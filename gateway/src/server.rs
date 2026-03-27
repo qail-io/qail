@@ -41,6 +41,10 @@ pub struct RpcCallableSignature {
     pub arg_names: Vec<Option<String>>,
     /// Input argument PostgreSQL type names, aligned to input argument order.
     pub arg_types: Vec<String>,
+    /// Input argument PostgreSQL type OIDs, aligned to input argument order.
+    pub arg_type_oids: Vec<u32>,
+    /// Variadic element OID when the final input argument is variadic.
+    pub variadic_element_oid: Option<u32>,
     /// Identity argument text from `pg_get_function_identity_arguments`.
     pub identity_args: String,
     /// Result type text from `pg_get_function_result`.

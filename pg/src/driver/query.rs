@@ -89,6 +89,17 @@ impl SimpleFlowTracker {
 }
 
 impl PgConnection {
+    fn validate_param_type_arity(params: &[Option<Vec<u8>>], param_types: &[u32]) -> PgResult<()> {
+        if !param_types.is_empty() && param_types.len() != params.len() {
+            return Err(PgError::Encode(format!(
+                "parameter type count {} does not match parameter count {}",
+                param_types.len(),
+                params.len()
+            )));
+        }
+        Ok(())
+    }
+
     /// Execute a query with binary parameters (crate-internal).
     /// This uses the Extended Query Protocol (Parse/Bind/Execute/Sync):
     /// - Parameters are sent as binary bytes, skipping the string layer
@@ -148,6 +159,165 @@ impl PgConnection {
                 msg if is_ignorable_session_message(&msg) => {}
                 other => {
                     return Err(unexpected_backend_message("extended-query execute", &other));
+                }
+            }
+        }
+    }
+
+    /// Execute a query with bind parameters and return rows with column metadata.
+    ///
+    /// Uses the Extended Query Protocol without prepared statement caching.
+    /// This is intended for raw SQL compatibility paths that still need
+    /// `PgRow` + `ColumnInfo` for name-aware JSON conversion.
+    pub async fn query_rows(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+    ) -> PgResult<Vec<super::PgRow>> {
+        self.query_rows_with_result_format(sql, params, PgEncoder::FORMAT_TEXT)
+            .await
+    }
+
+    /// Execute a query with bind parameters and explicit result-column format,
+    /// returning rows with column metadata.
+    pub async fn query_rows_with_result_format(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> PgResult<Vec<super::PgRow>> {
+        self.query_rows_with_param_types_and_result_format(sql, &[], params, result_format)
+            .await
+    }
+
+    /// Execute a query with explicit PostgreSQL parameter type OIDs and return
+    /// rows with column metadata.
+    pub async fn query_rows_with_param_types_and_result_format(
+        &mut self,
+        sql: &str,
+        param_types: &[u32],
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+    ) -> PgResult<Vec<super::PgRow>> {
+        use std::sync::Arc;
+
+        Self::validate_param_type_arity(params, param_types)?;
+
+        let parse = PgEncoder::try_encode_parse("", sql, param_types)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        let bind = PgEncoder::encode_bind_with_result_format("", "", params, result_format)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        let mut bytes = BytesMut::with_capacity(parse.len() + bind.len() + 10 + 5);
+        bytes.extend_from_slice(&parse);
+        bytes.extend_from_slice(&bind);
+        PgEncoder::encode_execute_to(&mut bytes);
+        PgEncoder::encode_sync_to(&mut bytes);
+        self.write_all_with_timeout(&bytes, "stream write").await?;
+
+        let mut rows: Vec<super::PgRow> = Vec::new();
+        let mut column_info: Option<Arc<super::ColumnInfo>> = None;
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(true));
+
+        loop {
+            let msg = self.recv().await?;
+            flow.validate(&msg, "extended-query rows execute", error.is_some())?;
+            match msg {
+                BackendMessage::ParseComplete => {}
+                BackendMessage::BindComplete => {}
+                BackendMessage::RowDescription(fields) => {
+                    column_info = Some(Arc::new(super::ColumnInfo::from_fields(&fields)));
+                }
+                BackendMessage::DataRow(data) => {
+                    if error.is_none() {
+                        rows.push(super::PgRow {
+                            columns: data,
+                            column_info: column_info.clone(),
+                        });
+                    }
+                }
+                BackendMessage::CommandComplete(_) => {}
+                BackendMessage::NoData => {}
+                BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    return Ok(rows);
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::QueryServer(err.into()));
+                    }
+                }
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message(
+                        "extended-query rows execute",
+                        &other,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Validate a query with explicit PostgreSQL parameter type OIDs without
+    /// executing it. Uses Parse + Bind + Describe(Portal) + Sync.
+    pub async fn probe_query_with_param_types(
+        &mut self,
+        sql: &str,
+        param_types: &[u32],
+        params: &[Option<Vec<u8>>],
+    ) -> PgResult<()> {
+        Self::validate_param_type_arity(params, param_types)?;
+
+        let parse = PgEncoder::try_encode_parse("", sql, param_types)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        let bind =
+            PgEncoder::encode_bind("", "", params).map_err(|e| PgError::Encode(e.to_string()))?;
+        let describe =
+            PgEncoder::try_encode_describe(true, "").map_err(|e| PgError::Encode(e.to_string()))?;
+        let sync = PgEncoder::encode_sync();
+        let mut bytes =
+            BytesMut::with_capacity(parse.len() + bind.len() + describe.len() + sync.len());
+        bytes.extend_from_slice(&parse);
+        bytes.extend_from_slice(&bind);
+        bytes.extend_from_slice(&describe);
+        bytes.extend_from_slice(&sync);
+        self.write_all_with_timeout(&bytes, "stream write").await?;
+
+        let mut saw_describe_response = false;
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_describe_portal());
+
+        loop {
+            let msg = self.recv().await?;
+            flow.validate(&msg, "extended-query probe", error.is_some())?;
+            match msg {
+                BackendMessage::ParseComplete => {}
+                BackendMessage::BindComplete => {}
+                BackendMessage::RowDescription(_) | BackendMessage::NoData => {
+                    saw_describe_response = true;
+                }
+                BackendMessage::ReadyForQuery(_) => {
+                    if let Some(err) = error {
+                        return Err(err);
+                    }
+                    if !saw_describe_response {
+                        return Err(PgError::Protocol(
+                            "extended-query probe finished without RowDescription/NoData"
+                                .to_string(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                BackendMessage::ErrorResponse(err) => {
+                    if error.is_none() {
+                        error = Some(PgError::QueryServer(err.into()));
+                    }
+                }
+                msg if is_ignorable_session_message(&msg) => {}
+                other => {
+                    return Err(unexpected_backend_message("extended-query probe", &other));
                 }
             }
         }

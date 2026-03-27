@@ -63,6 +63,65 @@ impl PooledConnection {
         conn.query(sql, params).await
     }
 
+    /// Execute raw SQL with bind parameters and return rows with column metadata.
+    ///
+    /// Uses the Extended Query Protocol so parameters are never interpolated
+    /// into the SQL string. Intended for compatibility paths that need
+    /// `PgRow` decoding and stable column names, not just raw bytes.
+    pub async fn query_rows_with_params(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+    ) -> PgResult<Vec<crate::driver::PgRow>> {
+        self.query_rows_with_params_with_format(sql, params, ResultFormat::Text)
+            .await
+    }
+
+    /// Execute raw SQL with bind parameters and explicit result format,
+    /// returning rows with column metadata.
+    pub async fn query_rows_with_params_with_format(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: ResultFormat,
+    ) -> PgResult<Vec<crate::driver::PgRow>> {
+        let conn = self.conn_mut()?;
+        conn.query_rows_with_result_format(sql, params, result_format.as_wire_code())
+            .await
+    }
+
+    /// Execute raw SQL with explicit PostgreSQL parameter type OIDs and return
+    /// rows with column metadata.
+    pub async fn query_rows_with_param_types_with_format(
+        &mut self,
+        sql: &str,
+        param_types: &[u32],
+        params: &[Option<Vec<u8>>],
+        result_format: ResultFormat,
+    ) -> PgResult<Vec<crate::driver::PgRow>> {
+        let conn = self.conn_mut()?;
+        conn.query_rows_with_param_types_and_result_format(
+            sql,
+            param_types,
+            params,
+            result_format.as_wire_code(),
+        )
+        .await
+    }
+
+    /// Validate raw SQL with explicit PostgreSQL parameter type OIDs without
+    /// executing it.
+    pub async fn probe_query_with_param_types(
+        &mut self,
+        sql: &str,
+        param_types: &[u32],
+        params: &[Option<Vec<u8>>],
+    ) -> PgResult<()> {
+        let conn = self.conn_mut()?;
+        conn.probe_query_with_param_types(sql, param_types, params)
+            .await
+    }
+
     /// Export data using AST-native COPY TO STDOUT and collect parsed rows.
     pub async fn copy_export(&mut self, cmd: &qail_core::ast::Qail) -> PgResult<Vec<Vec<String>>> {
         self.conn_mut()?.copy_export(cmd).await

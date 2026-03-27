@@ -27,10 +27,14 @@ mod signature;
 
 pub(crate) use handler::rpc_handler;
 pub(super) use name::{
-    RpcFunctionName, build_rpc_call_target, build_rpc_sql, enforce_rpc_name_contract,
+    RpcBoundQuery, RpcFunctionName, build_rpc_bound_sql, enforce_rpc_name_contract,
 };
-pub(crate) use signature::parse_rpc_input_arg_names;
+#[cfg(test)]
+pub(super) use name::{build_rpc_probe_sql, build_rpc_sql};
 #[cfg(test)]
 pub(super) use signature::{
     matches_positional_signature, select_matching_rpc_signature, signature_matches_call,
+};
+pub(crate) use signature::{
+    minimum_required_rpc_args, normalize_pg_type_name, parse_rpc_input_arg_names,
 };

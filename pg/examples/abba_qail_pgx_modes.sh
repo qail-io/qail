@@ -4,11 +4,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-ROUNDS="${ROUNDS:-4}"
+ROUNDS="${ROUNDS:-6}"
 if ! [[ "${ROUNDS}" =~ ^[0-9]+$ ]] || [[ "${ROUNDS}" -lt 1 ]]; then
   echo "ROUNDS must be a positive integer" >&2
   exit 1
 fi
+
+ZIG_REPO_ROOT="${ZIG_REPO_ROOT:-$(cd "${REPO_ROOT}/.." && pwd)/qail-zig}"
+if [[ ! -d "${ZIG_REPO_ROOT}" ]]; then
+  echo "ZIG_REPO_ROOT not found: ${ZIG_REPO_ROOT}" >&2
+  exit 1
+fi
+
+ZIG_BIN="${ZIG_BIN:-/tmp/qail_zig_modes_once}"
+ZIG_CACHE_DIR="${ZIG_CACHE_DIR:-/tmp/qail-zig-bench-cache}"
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64) DEFAULT_ZIG_TARGET="aarch64-macos.15.0" ;;
+  Darwin:x86_64) DEFAULT_ZIG_TARGET="x86_64-macos.15.0" ;;
+  *) DEFAULT_ZIG_TARGET="" ;;
+esac
+ZIG_TARGET="${ZIG_TARGET:-${DEFAULT_ZIG_TARGET}}"
 
 calc_median() {
   printf '%s\n' "$@" | LC_ALL=C sort -n | awk '
@@ -40,7 +55,21 @@ calc_percentile() {
   '
 }
 
-run_qail_once() {
+calc_delta() {
+  local lhs="$1"
+  local rhs="$2"
+  awk -v l="${lhs}" -v r="${rhs}" '
+    BEGIN {
+      if (r == 0) {
+        print "nan"
+        exit
+      }
+      printf "%.2f", ((l / r) - 1) * 100
+    }
+  '
+}
+
+run_qail_rust_once() {
   local mode="$1"
   "${REPO_ROOT}/target/release/examples/qail_pgx_modes_once" "${mode}" --plain
 }
@@ -50,18 +79,57 @@ run_pgx_once() {
   /tmp/pgx_modes_once -mode "${mode}" -plain
 }
 
-echo "🏁 QAIL vs PGX ABBA (single/pipeline/pool10)"
-echo "=============================================="
-echo "rounds=${ROUNDS} (order pattern repeats ABBA)"
+run_qail_zig_once() {
+  local mode="$1"
+  "${ZIG_BIN}" "${mode}" --plain
+}
+
+run_once() {
+  local runner="$1"
+  local mode="$2"
+  case "${runner}" in
+    pgx) run_pgx_once "${mode}" ;;
+    qail_rs) run_qail_rust_once "${mode}" ;;
+    qail_zig) run_qail_zig_once "${mode}" ;;
+    *)
+      echo "unknown runner: ${runner}" >&2
+      return 1
+      ;;
+  esac
+}
+
+echo "🏁 PGX vs QAIL (Go/Rust/Zig)"
+echo "============================"
+echo "rounds=${ROUNDS} (order rotates: pgx -> qail-rs -> qail-zig)"
 echo
 
-echo "Building QAIL runner..."
-cargo build --release -p qail-pg --example qail_pgx_modes_once >/dev/null
+echo "Building QAIL Rust runner..."
+(
+  cd "${REPO_ROOT}"
+  cargo build --release -p qail-pg --example qail_pgx_modes_once >/dev/null
+)
 
 echo "Building PGX runner..."
 (
   cd "${REPO_ROOT}/pg/examples"
   GOCACHE=/tmp/go-build-cache GOFLAGS=-mod=readonly go build -o /tmp/pgx_modes_once ./pgx_benchmark.go
+)
+
+echo "Building QAIL Zig runner..."
+(
+  cd "${ZIG_REPO_ROOT}"
+  zig_cmd=(
+    zig build-exe
+    src/qail_pgx_modes_once.zig
+    -O ReleaseFast
+    --cache-dir
+    "${ZIG_CACHE_DIR}"
+    "-femit-bin=${ZIG_BIN}"
+  )
+  if [[ -n "${ZIG_TARGET}" ]]; then
+    zig_cmd+=(-target "${ZIG_TARGET}")
+  fi
+  "${zig_cmd[@]}" >/dev/null
 )
 
 echo
@@ -75,45 +143,58 @@ for mode in single pipeline pool10; do
 
   echo "${label}"
 
-  qail_runs=()
+  qail_rs_runs=()
+  qail_zig_runs=()
   pgx_runs=()
 
   for ((i = 0; i < ROUNDS; i++)); do
-    idx=$((i % 4))
-    if [[ "${idx}" -eq 0 || "${idx}" -eq 3 ]]; then
-      first="pgx"
-      second="qail"
-    else
-      first="qail"
-      second="pgx"
-    fi
+    case $((i % 3)) in
+      0) order=(pgx qail_rs qail_zig) ;;
+      1) order=(qail_rs qail_zig pgx) ;;
+      2) order=(qail_zig pgx qail_rs) ;;
+    esac
 
-    echo "  Round $((i + 1)) (${first} -> ${second})"
+    echo "  Round $((i + 1)) (${order[0]} -> ${order[1]} -> ${order[2]})"
 
-    if [[ "${first}" == "pgx" ]]; then
-      pgx_qps="$(run_pgx_once "${mode}")"
-      qail_qps="$(run_qail_once "${mode}")"
-    else
-      qail_qps="$(run_qail_once "${mode}")"
-      pgx_qps="$(run_pgx_once "${mode}")"
-    fi
+    unset pgx_qps qail_rs_qps qail_zig_qps
+    for runner in "${order[@]}"; do
+      qps="$(run_once "${runner}" "${mode}")"
+      case "${runner}" in
+        pgx)
+          pgx_qps="${qps}"
+          pgx_runs+=("${qps}")
+          ;;
+        qail_rs)
+          qail_rs_qps="${qps}"
+          qail_rs_runs+=("${qps}")
+          ;;
+        qail_zig)
+          qail_zig_qps="${qps}"
+          qail_zig_runs+=("${qps}")
+          ;;
+      esac
+    done
 
-    qail_runs+=("${qail_qps}")
-    pgx_runs+=("${pgx_qps}")
-
-    printf "    pgx : %8.0f q/s\n" "${pgx_qps}"
-    printf "    qail: %8.0f q/s\n" "${qail_qps}"
+    printf "    pgx      : %8.0f q/s\n" "${pgx_qps}"
+    printf "    qail-rs  : %8.0f q/s\n" "${qail_rs_qps}"
+    printf "    qail-zig : %8.0f q/s\n" "${qail_zig_qps}"
   done
 
   pgx_median="$(calc_median "${pgx_runs[@]}")"
   pgx_p95="$(calc_percentile 0.95 "${pgx_runs[@]}")"
-  qail_median="$(calc_median "${qail_runs[@]}")"
-  qail_p95="$(calc_percentile 0.95 "${qail_runs[@]}")"
-  delta="$(awk -v q="${qail_median}" -v p="${pgx_median}" 'BEGIN { printf "%.2f", ((q / p) - 1) * 100 }')"
+  qail_rs_median="$(calc_median "${qail_rs_runs[@]}")"
+  qail_rs_p95="$(calc_percentile 0.95 "${qail_rs_runs[@]}")"
+  qail_zig_median="$(calc_median "${qail_zig_runs[@]}")"
+  qail_zig_p95="$(calc_percentile 0.95 "${qail_zig_runs[@]}")"
+  delta_rs_vs_pgx="$(calc_delta "${qail_rs_median}" "${pgx_median}")"
+  delta_zig_vs_pgx="$(calc_delta "${qail_zig_median}" "${pgx_median}")"
+  delta_zig_vs_rs="$(calc_delta "${qail_zig_median}" "${qail_rs_median}")"
 
-  printf "  pgx  median/p95: %8.0f / %8.0f q/s\n" "${pgx_median}" "${pgx_p95}"
-  printf "  qail median/p95: %8.0f / %8.0f q/s\n" "${qail_median}" "${qail_p95}"
-  printf "  delta (qail vs pgx, median): %+0.2f%%\n" "${delta}"
+  printf "  pgx       median/p95: %8.0f / %8.0f q/s\n" "${pgx_median}" "${pgx_p95}"
+  printf "  qail-rs   median/p95: %8.0f / %8.0f q/s\n" "${qail_rs_median}" "${qail_rs_p95}"
+  printf "  qail-zig  median/p95: %8.0f / %8.0f q/s\n" "${qail_zig_median}" "${qail_zig_p95}"
+  printf "  delta (qail-rs vs pgx, median): %+0.2f%%\n" "${delta_rs_vs_pgx}"
+  printf "  delta (qail-zig vs pgx, median): %+0.2f%%\n" "${delta_zig_vs_pgx}"
+  printf "  delta (qail-zig vs qail-rs, median): %+0.2f%%\n" "${delta_zig_vs_rs}"
   echo
 done
-

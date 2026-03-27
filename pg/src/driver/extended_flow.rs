@@ -53,6 +53,19 @@ impl ExtendedFlowConfig {
         }
     }
 
+    /// Parse + Bind + Describe(Portal) + Sync.
+    pub(crate) fn parse_bind_describe_portal() -> Self {
+        Self {
+            expect_parse_complete: true,
+            allow_parameter_description: false,
+            allow_row_description_before_bind: false,
+            allow_no_data_before_bind: false,
+            allow_no_data_after_bind: true,
+            require_bind_complete_on_success: true,
+            require_completion_on_success: false,
+        }
+    }
+
     /// Parse + Describe(Statement) + Bind + Execute + Sync.
     pub(crate) fn parse_describe_statement_bind_execute(expect_parse_complete: bool) -> Self {
         Self {

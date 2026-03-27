@@ -1,5 +1,7 @@
 use super::super::is_safe_ident_segment;
-use super::types::{is_json_value_compatible_with_pg_type, variadic_element_type};
+use super::types::{
+    is_json_value_compatible_with_pg_type, minimum_required_rpc_args, variadic_element_type,
+};
 use crate::middleware::ApiError;
 use crate::server::RpcCallableSignature;
 use serde_json::Value;
@@ -8,26 +10,12 @@ pub(in super::super::super) fn matches_positional_signature(
     signature: &RpcCallableSignature,
     values: &[Value],
 ) -> bool {
-    let provided = values.len();
-    let min_required = if signature.variadic && signature.total_args > 0 {
-        signature
-            .required_args()
-            .min(signature.total_args.saturating_sub(1))
-    } else {
-        signature.required_args()
-    };
-    let max_allowed = if signature.variadic {
-        usize::MAX
-    } else {
-        signature.total_args
-    };
-
-    if provided < min_required || provided > max_allowed {
+    if !matches_positional_signature_shape(signature, values.len()) {
         return false;
     }
 
     if signature.total_args == 0 {
-        return provided == 0;
+        return values.is_empty();
     }
 
     for (idx, value) in values.iter().enumerate() {
@@ -53,39 +41,43 @@ pub(in super::super::super) fn matches_positional_signature(
     true
 }
 
+pub(super) fn matches_positional_signature_shape(
+    signature: &RpcCallableSignature,
+    provided: usize,
+) -> bool {
+    let min_required = minimum_required_rpc_args(
+        signature.total_args,
+        signature.default_args,
+        signature.variadic,
+    );
+    let max_allowed = if signature.variadic {
+        usize::MAX
+    } else {
+        signature.total_args
+    };
+
+    if provided < min_required || provided > max_allowed {
+        return false;
+    }
+
+    true
+}
+
 fn matches_named_signature(
     signature: &RpcCallableSignature,
     named_args: &serde_json::Map<String, Value>,
 ) -> bool {
-    if named_args.len() > signature.total_args {
+    let Some(normalized_args) = normalize_named_args(named_args) else {
         return false;
-    }
-
-    let mut normalized_args: std::collections::HashMap<String, &Value> =
-        std::collections::HashMap::with_capacity(named_args.len());
-    for (raw_key, value) in named_args {
-        if !is_safe_ident_segment(raw_key) {
-            return false;
-        }
-        let normalized_key = raw_key.to_ascii_lowercase();
-        if normalized_args.insert(normalized_key, value).is_some() {
-            return false;
-        }
+    };
+    if !matches_named_signature_shape(signature, &normalized_args) {
+        return false;
     }
 
     let mut name_to_index = std::collections::HashMap::with_capacity(signature.arg_names.len());
     for (idx, maybe_name) in signature.arg_names.iter().enumerate() {
         if let Some(name) = maybe_name {
             name_to_index.insert(name.as_str(), idx);
-        }
-    }
-
-    for idx in 0..signature.required_args().min(signature.total_args) {
-        let Some(required_name) = signature.arg_names.get(idx).and_then(|v| v.as_ref()) else {
-            return false;
-        };
-        if !normalized_args.contains_key(required_name) {
-            return false;
         }
     }
 
@@ -106,6 +98,61 @@ fn matches_named_signature(
     true
 }
 
+fn normalize_named_args(
+    named_args: &serde_json::Map<String, Value>,
+) -> Option<std::collections::HashMap<String, &Value>> {
+    let mut normalized_args: std::collections::HashMap<String, &Value> =
+        std::collections::HashMap::with_capacity(named_args.len());
+    for (raw_key, value) in named_args {
+        if !is_safe_ident_segment(raw_key) {
+            return None;
+        }
+        let normalized_key = raw_key.to_ascii_lowercase();
+        if normalized_args.insert(normalized_key, value).is_some() {
+            return None;
+        }
+    }
+    Some(normalized_args)
+}
+
+pub(super) fn matches_named_signature_shape(
+    signature: &RpcCallableSignature,
+    normalized_args: &std::collections::HashMap<String, &Value>,
+) -> bool {
+    if normalized_args.len() > signature.total_args {
+        return false;
+    }
+
+    let mut name_to_index = std::collections::HashMap::with_capacity(signature.arg_names.len());
+    for (idx, maybe_name) in signature.arg_names.iter().enumerate() {
+        if let Some(name) = maybe_name {
+            name_to_index.insert(name.as_str(), idx);
+        }
+    }
+
+    let min_required = minimum_required_rpc_args(
+        signature.total_args,
+        signature.default_args,
+        signature.variadic,
+    );
+    for idx in 0..min_required.min(signature.total_args) {
+        let Some(required_name) = signature.arg_names.get(idx).and_then(|v| v.as_ref()) else {
+            return false;
+        };
+        if !normalized_args.contains_key(required_name) {
+            return false;
+        }
+    }
+
+    for normalized_key in normalized_args.keys() {
+        let Some(_idx) = name_to_index.get(normalized_key.as_str()) else {
+            return false;
+        };
+    }
+
+    true
+}
+
 pub(in super::super::super) fn signature_matches_call(
     signature: &RpcCallableSignature,
     args: Option<&Value>,
@@ -115,6 +162,20 @@ pub(in super::super::super) fn signature_matches_call(
         Some(Value::Object(map)) => matches_named_signature(signature, map),
         Some(Value::Array(values)) => matches_positional_signature(signature, values),
         Some(single) => matches_positional_signature(signature, std::slice::from_ref(single)),
+    }
+}
+
+pub(super) fn signature_matches_call_shape(
+    signature: &RpcCallableSignature,
+    args: Option<&Value>,
+) -> bool {
+    match args {
+        None => matches_positional_signature_shape(signature, 0),
+        Some(Value::Object(map)) => normalize_named_args(map)
+            .map(|normalized| matches_named_signature_shape(signature, &normalized))
+            .unwrap_or(false),
+        Some(Value::Array(values)) => matches_positional_signature_shape(signature, values.len()),
+        Some(_) => matches_positional_signature_shape(signature, 1),
     }
 }
 

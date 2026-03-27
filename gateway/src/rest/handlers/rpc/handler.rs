@@ -1,5 +1,39 @@
 use super::*;
 
+fn is_rpc_void_context_error(err: &qail_pg::PgError) -> bool {
+    let Some(server) = err.server_error() else {
+        return false;
+    };
+
+    let message = server.message.to_ascii_lowercase();
+    server.code.eq_ignore_ascii_case("42809")
+        || (message.contains("void") && message.contains("cannot accept type"))
+        || message.contains("function returning void")
+}
+
+fn query_has_typed_params(query: &super::RpcBoundQuery) -> bool {
+    query.param_type_oids.len() == query.params.len() && !query.param_type_oids.contains(&0)
+}
+
+async fn execute_rpc_rows(
+    conn: &mut qail_pg::PooledConnection,
+    query: &super::RpcBoundQuery,
+    result_format: qail_pg::ResultFormat,
+) -> Result<Vec<qail_pg::PgRow>, qail_pg::PgError> {
+    if query_has_typed_params(query) {
+        conn.query_rows_with_param_types_with_format(
+            &query.sql,
+            &query.param_type_oids,
+            &query.params,
+            result_format,
+        )
+        .await
+    } else {
+        conn.query_rows_with_params_with_format(&query.sql, &query.params, result_format)
+            .await
+    }
+}
+
 /// POST /api/rpc/{function} — invoke PostgreSQL functions with JSON args.
 ///
 /// Body forms:
@@ -76,57 +110,125 @@ pub(crate) async fn rpc_handler(
         "text"
     };
 
-    let call_target = match build_rpc_call_target(&function, args.as_ref()) {
-        Ok(target) => target,
-        Err(err) => {
-            crate::metrics::record_rpc_call(
-                started_at.elapsed().as_secs_f64() * 1000.0,
-                false,
-                result_format_label,
-            );
-            return Err(err);
-        }
-    };
-    let sql = match build_rpc_sql(&function, args.as_ref()) {
-        Ok(sql) => sql,
-        Err(err) => {
-            crate::metrics::record_rpc_call(
-                started_at.elapsed().as_secs_f64() * 1000.0,
-                false,
-                result_format_label,
-            );
-            return Err(err);
-        }
-    };
-
     let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
 
-    if let Err(err) = super::signature::enforce_rpc_signature_contract(
+    let contract = match super::signature::enforce_rpc_signature_contract(
         &state,
         &mut conn,
         &function,
         args.as_ref(),
-        &sql,
     )
     .await
     {
+        Ok(contract) => contract,
+        Err(err) => {
+            conn.release().await;
+            crate::metrics::record_rpc_call(
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                false,
+                result_format_label,
+            );
+            return Err(err);
+        }
+    };
+    let execution_mode = contract.execution_mode;
+    let signature = contract.signature;
+
+    if matches!(execution_mode, super::signature::RpcExecutionMode::Void) {
+        let scalar_query =
+            match build_rpc_bound_sql(&function, args.as_ref(), signature.as_ref(), true) {
+                Ok(query) => query,
+                Err(err) => {
+                    conn.release().await;
+                    crate::metrics::record_rpc_call(
+                        started_at.elapsed().as_secs_f64() * 1000.0,
+                        false,
+                        result_format_label,
+                    );
+                    return Err(err);
+                }
+            };
+
+        if let Err(e) = execute_rpc_rows(&mut conn, &scalar_query, result_format).await {
+            conn.release().await;
+            crate::metrics::record_rpc_call(
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                false,
+                result_format_label,
+            );
+            return Err(ApiError::from_pg_driver_error(&e, None));
+        }
+
         conn.release().await;
         crate::metrics::record_rpc_call(
             started_at.elapsed().as_secs_f64() * 1000.0,
-            false,
+            true,
             result_format_label,
         );
-        return Err(err);
+        return Ok(Json(json!({
+            "data": [],
+            "count": 0,
+            "function": function.canonical(),
+            "result_format": result_format_label,
+        })));
     }
 
-    let mut cmd = qail_core::ast::Qail::get(call_target);
-    state.optimize_qail_for_execution(&mut cmd);
+    let row_query = match build_rpc_bound_sql(&function, args.as_ref(), signature.as_ref(), false) {
+        Ok(query) => query,
+        Err(err) => {
+            conn.release().await;
+            crate::metrics::record_rpc_call(
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                false,
+                result_format_label,
+            );
+            return Err(err);
+        }
+    };
 
-    let rows = match conn
-        .fetch_all_uncached_with_format(&cmd, result_format)
-        .await
-    {
+    let rows = match execute_rpc_rows(&mut conn, &row_query, result_format).await {
         Ok(rows) => rows,
+        Err(e)
+            if matches!(execution_mode, super::signature::RpcExecutionMode::Unknown)
+                && is_rpc_void_context_error(&e) =>
+        {
+            let scalar_query =
+                match build_rpc_bound_sql(&function, args.as_ref(), signature.as_ref(), true) {
+                    Ok(query) => query,
+                    Err(err) => {
+                        conn.release().await;
+                        crate::metrics::record_rpc_call(
+                            started_at.elapsed().as_secs_f64() * 1000.0,
+                            false,
+                            result_format_label,
+                        );
+                        return Err(err);
+                    }
+                };
+
+            if let Err(void_err) = execute_rpc_rows(&mut conn, &scalar_query, result_format).await {
+                conn.release().await;
+                crate::metrics::record_rpc_call(
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                    false,
+                    result_format_label,
+                );
+                return Err(ApiError::from_pg_driver_error(&void_err, None));
+            }
+
+            conn.release().await;
+            crate::metrics::record_rpc_call(
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                true,
+                result_format_label,
+            );
+            return Ok(Json(json!({
+                "data": [],
+                "count": 0,
+                "function": function.canonical(),
+                "result_format": result_format_label,
+            })));
+        }
         Err(e) => {
             conn.release().await;
             crate::metrics::record_rpc_call(
@@ -154,4 +256,34 @@ pub(crate) async fn rpc_handler(
         "function": function.canonical(),
         "result_format": result_format_label,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_rpc_void_context_error;
+
+    #[test]
+    fn detects_void_context_server_error() {
+        let err = qail_pg::PgError::QueryServer(qail_pg::PgServerError {
+            severity: "ERROR".to_string(),
+            code: "42809".to_string(),
+            message: "function returning void called in context that cannot accept type void"
+                .to_string(),
+            detail: None,
+            hint: None,
+        });
+        assert!(is_rpc_void_context_error(&err));
+    }
+
+    #[test]
+    fn ignores_non_void_server_error() {
+        let err = qail_pg::PgError::QueryServer(qail_pg::PgServerError {
+            severity: "ERROR".to_string(),
+            code: "23505".to_string(),
+            message: "duplicate key value violates unique constraint".to_string(),
+            detail: None,
+            hint: None,
+        });
+        assert!(!is_rpc_void_context_error(&err));
+    }
 }

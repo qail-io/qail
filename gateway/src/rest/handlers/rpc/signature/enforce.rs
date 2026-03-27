@@ -1,59 +1,137 @@
-use super::super::RpcFunctionName;
-use super::matcher::{format_signature_brief, select_matching_rpc_signature};
+use super::super::{RpcFunctionName, build_rpc_bound_sql};
+use super::matcher::{
+    format_signature_brief, select_matching_rpc_signature, signature_matches_call_shape,
+};
 use super::parse::{parse_rpc_signatures, rpc_signature_lookup_cmd};
 use crate::GatewayState;
 use crate::middleware::ApiError;
 use crate::server::RpcCallableSignature;
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-fn next_rpc_probe_stmt_name() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    format!("qail_rpc_probe_{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in super::super) enum RpcExecutionMode {
+    Rows,
+    Void,
+    Unknown,
+}
+
+impl RpcExecutionMode {
+    fn from_signature(signature: &RpcCallableSignature) -> Self {
+        if signature.result_type.trim().eq_ignore_ascii_case("void") {
+            Self::Void
+        } else {
+            Self::Rows
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(in super::super) struct RpcSignatureContract {
+    pub execution_mode: RpcExecutionMode,
+    pub signature: Option<RpcCallableSignature>,
+}
+
+fn available_overloads(signatures: &[RpcCallableSignature]) -> String {
+    signatures
+        .iter()
+        .map(format_signature_brief)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn is_rpc_probe_candidate_rejection(err: &qail_pg::PgError) -> bool {
+    let Some(server) = err.server_error() else {
+        return false;
+    };
+
+    let code = server.code.trim();
+    code.starts_with("22")
+        || matches!(
+            code,
+            // Overload/type-resolution failures.
+            "42725"
+                | "42804"
+                | "42846"
+                | "42P08"
+                | "42P18"
+                // Preserve legacy behavior for defensive void-context mismatches.
+                | "42809"
+        )
+}
+
+async fn probe_rpc_signature_candidate(
+    conn: &mut qail_pg::PooledConnection,
+    function_name: &RpcFunctionName,
+    args: Option<&Value>,
+    signature: &RpcCallableSignature,
+) -> Result<bool, qail_pg::PgError> {
+    let scalar_context = signature.result_type.trim().eq_ignore_ascii_case("void");
+    let Ok(query) = build_rpc_bound_sql(function_name, args, Some(signature), scalar_context)
+    else {
+        return Ok(false);
+    };
+
+    if query.param_type_oids.len() != query.params.len() || query.param_type_oids.contains(&0) {
+        return Ok(false);
+    }
+
+    match conn
+        .probe_query_with_param_types(&query.sql, &query.param_type_oids, &query.params)
+        .await
+    {
+        Ok(()) => Ok(true),
+        Err(err) if is_rpc_probe_candidate_rejection(&err) => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 async fn probe_rpc_overload_resolution(
     conn: &mut qail_pg::PooledConnection,
-    sql: &str,
-) -> Result<(), qail_pg::PgError> {
-    let stmt = next_rpc_probe_stmt_name();
-    let probe = format!("PREPARE {} AS {}; DEALLOCATE {}", stmt, sql, stmt);
-    conn.get_mut()?.execute_simple(&probe).await
-}
-
-fn map_probe_resolution_error(
-    err: &qail_pg::PgError,
-    function_name: &str,
+    function_name: &RpcFunctionName,
+    args: Option<&Value>,
     signatures: &[RpcCallableSignature],
-) -> ApiError {
-    let available = signatures
+) -> Result<Option<RpcCallableSignature>, ApiError> {
+    let candidates: Vec<&RpcCallableSignature> = signatures
         .iter()
-        .map(format_signature_brief)
-        .collect::<Vec<_>>()
-        .join(", ");
+        .filter(|sig| signature_matches_call_shape(sig, args))
+        .collect();
 
-    if let Some(server) = err.server_error() {
-        match server.code.as_str() {
-            "42725" => {
-                crate::metrics::record_rpc_signature_rejection("ambiguous");
-                return ApiError::parse_error(format!(
-                    "RPC call is ambiguous for '{}'. Available overloads: {}",
-                    function_name, available
-                ));
-            }
-            "42883" | "42703" => {
-                crate::metrics::record_rpc_signature_rejection("no_match");
-                return ApiError::parse_error(format!(
-                    "RPC arguments do not match any overload for '{}'. Available overloads: {}",
-                    function_name, available
-                ));
-            }
-            _ => {}
+    if candidates.is_empty() {
+        crate::metrics::record_rpc_signature_rejection("no_match");
+        return Ok(None);
+    }
+
+    let mut matched: Vec<RpcCallableSignature> = Vec::new();
+    for signature in candidates {
+        match probe_rpc_signature_candidate(conn, function_name, args, signature).await {
+            Ok(true) => matched.push(signature.clone()),
+            Ok(false) => {}
+            Err(err) => return Err(ApiError::from_pg_driver_error(&err, None)),
         }
     }
 
-    ApiError::from_pg_driver_error(err, None)
+    if matched.is_empty() {
+        crate::metrics::record_rpc_signature_rejection("no_match");
+        return Ok(None);
+    }
+
+    if matched.len() > 1 {
+        crate::metrics::record_rpc_signature_rejection("ambiguous");
+        let matched_overloads = matched
+            .iter()
+            .map(format_signature_brief)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApiError::parse_error(format!(
+            "RPC call is ambiguous for '{}'. Matching overloads: {}",
+            function_name.canonical(),
+            matched_overloads
+        )));
+    }
+
+    crate::metrics::record_rpc_signature_local_mismatch();
+    Ok(matched.into_iter().next())
 }
 
 pub(in super::super) async fn enforce_rpc_signature_contract(
@@ -61,10 +139,12 @@ pub(in super::super) async fn enforce_rpc_signature_contract(
     conn: &mut qail_pg::PooledConnection,
     function_name: &RpcFunctionName,
     args: Option<&Value>,
-    sql: &str,
-) -> Result<(), ApiError> {
+) -> Result<RpcSignatureContract, ApiError> {
     if !state.config.rpc_signature_check {
-        return Ok(());
+        return Ok(RpcSignatureContract {
+            execution_mode: RpcExecutionMode::Unknown,
+            signature: None,
+        });
     }
 
     let key = function_name.canonical();
@@ -93,15 +173,61 @@ pub(in super::super) async fn enforce_rpc_signature_contract(
         cached
     };
 
-    if select_matching_rpc_signature(&key, signatures.as_ref(), args).is_ok() {
-        return Ok(());
+    if let Ok(signature) = select_matching_rpc_signature(&key, signatures.as_ref(), args) {
+        return Ok(RpcSignatureContract {
+            execution_mode: RpcExecutionMode::from_signature(signature),
+            signature: Some(signature.clone()),
+        });
     }
 
-    match probe_rpc_overload_resolution(conn, sql).await {
-        Ok(()) => {
-            crate::metrics::record_rpc_signature_local_mismatch();
-            Ok(())
-        }
-        Err(err) => Err(map_probe_resolution_error(&err, &key, signatures.as_ref())),
+    match probe_rpc_overload_resolution(conn, function_name, args, signatures.as_ref()).await? {
+        Some(signature) => Ok(RpcSignatureContract {
+            execution_mode: RpcExecutionMode::from_signature(&signature),
+            signature: Some(signature),
+        }),
+        None => Err(ApiError::parse_error(format!(
+            "RPC arguments do not match any overload for '{}'. Available overloads: {}",
+            key,
+            available_overloads(signatures.as_ref())
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_rpc_probe_candidate_rejection;
+
+    fn server_error(code: &str, message: &str) -> qail_pg::PgError {
+        qail_pg::PgError::QueryServer(qail_pg::PgServerError {
+            severity: "ERROR".to_string(),
+            code: code.to_string(),
+            message: message.to_string(),
+            detail: None,
+            hint: None,
+        })
+    }
+
+    #[test]
+    fn treats_data_exception_as_candidate_rejection() {
+        let err = server_error("22P02", "invalid input syntax for type uuid");
+        assert!(is_rpc_probe_candidate_rejection(&err));
+    }
+
+    #[test]
+    fn treats_type_resolution_errors_as_candidate_rejection() {
+        let err = server_error("42804", "datatype mismatch");
+        assert!(is_rpc_probe_candidate_rejection(&err));
+    }
+
+    #[test]
+    fn does_not_hide_privilege_errors_as_candidate_rejection() {
+        let err = server_error("42501", "permission denied for function secure_fn");
+        assert!(!is_rpc_probe_candidate_rejection(&err));
+    }
+
+    #[test]
+    fn does_not_hide_non_server_errors_as_candidate_rejection() {
+        let err = qail_pg::PgError::Connection("socket closed".to_string());
+        assert!(!is_rpc_probe_candidate_rejection(&err));
     }
 }

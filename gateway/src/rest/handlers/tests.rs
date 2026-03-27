@@ -4,8 +4,9 @@
 #[allow(clippy::module_inception)]
 mod tests {
     use super::super::rpc::{
-        RpcFunctionName, build_rpc_sql, enforce_rpc_name_contract, matches_positional_signature,
-        select_matching_rpc_signature, signature_matches_call as signature_matches,
+        RpcFunctionName, build_rpc_bound_sql, build_rpc_probe_sql, build_rpc_sql,
+        enforce_rpc_name_contract, matches_positional_signature, select_matching_rpc_signature,
+        signature_matches_call as signature_matches,
     };
     use super::super::{parse_prefer_header, primary_sort_for_cursor};
     use crate::server::RpcCallableSignature;
@@ -29,6 +30,8 @@ mod tests {
                 .map(|n| n.map(|v| v.to_ascii_lowercase()))
                 .collect(),
             arg_types: arg_types.iter().map(|t| t.to_ascii_lowercase()).collect(),
+            arg_type_oids: vec![0; arg_types.len()],
+            variadic_element_oid: None,
             identity_args: identity.to_string(),
             result_type: "jsonb".to_string(),
         }
@@ -80,6 +83,73 @@ mod tests {
         assert!(sql.starts_with("SELECT * FROM \"api\".\"search_orders\"("));
         assert!(sql.contains("\"limit\" => 10"));
         assert!(sql.contains("\"tenant_id\" => 'abc'"));
+    }
+
+    #[test]
+    fn build_rpc_probe_sql_uses_scalar_select_context() {
+        let args = serde_json::json!({
+            "tenant_id": "abc",
+            "limit": 10
+        });
+        let function = RpcFunctionName::parse("api.search_orders").unwrap();
+        let sql = build_rpc_probe_sql(&function, Some(&args)).unwrap();
+        assert!(sql.starts_with("SELECT \"api\".\"search_orders\"("));
+        assert!(!sql.contains("SELECT * FROM"));
+    }
+
+    #[test]
+    fn build_rpc_bound_sql_uses_typed_placeholders_for_named_args() {
+        let args = serde_json::json!({
+            "tenant_id": "550e8400-e29b-41d4-a716-446655440000",
+            "limit": 10
+        });
+        let signature = sig(
+            2,
+            0,
+            false,
+            &[Some("tenant_id"), Some("limit")],
+            &["uuid", "integer"],
+            "tenant_id uuid, limit integer",
+        );
+        let function = RpcFunctionName::parse("api.search_orders").unwrap();
+        let query = build_rpc_bound_sql(&function, Some(&args), Some(&signature), false).unwrap();
+
+        assert_eq!(
+            query.sql,
+            "SELECT * FROM \"api\".\"search_orders\"(\"limit\" => $1, \"tenant_id\" => $2)"
+        );
+        assert_eq!(query.params[0].as_deref(), Some(b"10".as_slice()));
+        assert_eq!(
+            query.params[1].as_deref(),
+            Some(b"550e8400-e29b-41d4-a716-446655440000".as_slice())
+        );
+        assert_eq!(query.param_type_oids, vec![0, 0]);
+    }
+
+    #[test]
+    fn build_rpc_bound_sql_encodes_json_arguments_as_json_text() {
+        let args = serde_json::json!({
+            "payload": "abc"
+        });
+        let signature = sig(1, 0, false, &[Some("payload")], &["jsonb"], "payload jsonb");
+        let function = RpcFunctionName::parse("api.echo_json").unwrap();
+        let query = build_rpc_bound_sql(&function, Some(&args), Some(&signature), true).unwrap();
+
+        assert_eq!(query.sql, "SELECT \"api\".\"echo_json\"(\"payload\" => $1)");
+        assert_eq!(query.params[0].as_deref(), Some(br#""abc""#.as_slice()));
+        assert_eq!(query.param_type_oids, vec![0]);
+    }
+
+    #[test]
+    fn build_rpc_bound_sql_encodes_native_pg_array_arguments() {
+        let args = serde_json::json!([[1, 2, 3]]);
+        let signature = sig(1, 0, false, &[Some("ids")], &["integer[]"], "ids integer[]");
+        let function = RpcFunctionName::parse("api.lookup_many").unwrap();
+        let query = build_rpc_bound_sql(&function, Some(&args), Some(&signature), false).unwrap();
+
+        assert_eq!(query.sql, "SELECT * FROM \"api\".\"lookup_many\"($1)");
+        assert_eq!(query.params[0].as_deref(), Some(b"{1,2,3}".as_slice()));
+        assert_eq!(query.param_type_oids, vec![0]);
     }
 
     #[test]
@@ -174,6 +244,20 @@ mod tests {
         );
         let args = vec![json!("pre"), json!(1), json!(2), json!(3)];
         assert!(matches_positional_signature(&signature, &args));
+    }
+
+    #[test]
+    fn rpc_signature_named_allows_omitting_variadic_tail() {
+        let signature = sig(
+            2,
+            0,
+            true,
+            &[Some("prefix"), Some("ids")],
+            &["text", "integer[]"],
+            "prefix text, variadic ids integer[]",
+        );
+        let args = json!({ "prefix": "pre" });
+        assert!(signature_matches(&signature, Some(&args)));
     }
 
     #[test]

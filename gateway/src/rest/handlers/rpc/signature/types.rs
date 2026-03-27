@@ -1,7 +1,20 @@
 use serde_json::Value;
 
-pub(super) fn normalize_pg_type_name(input: &str) -> String {
-    input.trim().trim_matches('"').to_ascii_lowercase()
+pub(crate) fn normalize_pg_type_name(input: &str) -> String {
+    input.trim().replace('"', "").to_ascii_lowercase()
+}
+
+pub(crate) fn minimum_required_rpc_args(
+    total_args: usize,
+    default_args: usize,
+    variadic: bool,
+) -> usize {
+    let required = total_args.saturating_sub(default_args);
+    if variadic && total_args > 0 {
+        required.min(total_args.saturating_sub(1))
+    } else {
+        required
+    }
 }
 
 fn is_pg_any_type(type_name: &str) -> bool {

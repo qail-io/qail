@@ -16,10 +16,16 @@
 //! to avoid interference from previous runs.
 #![cfg(feature = "legacy-raw-tests")]
 
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
 use qail_core::ast::Qail;
-use qail_pg::ResultFormat;
+use qail_gateway::{GatewayConfig, GatewayState, create_router};
+use qail_pg::{PgPool, PoolConfig, ResultFormat};
 use serde_json::Value;
-use std::sync::Once;
+use std::sync::{Arc, Once, OnceLock};
+use std::time::Duration;
+use tower::util::ServiceExt;
+use url::Url;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Helpers
@@ -36,6 +42,111 @@ async fn connect() -> qail_pg::PgDriver {
     qail_pg::PgDriver::connect_env()
         .await
         .expect("PG connection")
+}
+
+fn pool_config_from_database_url(database_url: &str) -> PoolConfig {
+    let parsed = Url::parse(database_url).expect("valid DATABASE_URL");
+    let host = parsed.host_str().expect("database host");
+    let port = parsed.port().unwrap_or(5432);
+    let user = if parsed.username().is_empty() {
+        "postgres"
+    } else {
+        parsed.username()
+    };
+    let database = parsed.path().trim_start_matches('/');
+    assert!(
+        !database.is_empty(),
+        "database name required in DATABASE_URL"
+    );
+
+    let mut config = PoolConfig::new_dev(host, port, user, database)
+        .min_connections(0)
+        .max_connections(4)
+        .connect_timeout(Duration::from_secs(5))
+        .acquire_timeout(Duration::from_secs(5));
+
+    if let Some(password) = parsed.password() {
+        config = config.password(password);
+    }
+
+    config
+}
+
+fn write_rpc_allowlist(entries: &[&str]) -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "qail_rpc_allowlist_{}_{}.txt",
+        std::process::id(),
+        unique
+    ));
+    std::fs::write(&path, entries.join("\n")).expect("write rpc allowlist");
+    path
+}
+
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => unsafe {
+                std::env::set_var(self.key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(self.key);
+            },
+        }
+    }
+}
+
+async fn build_rpc_router(allowlist: &[&str]) -> axum::Router {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = PgPool::connect(pool_config_from_database_url(&database_url))
+        .await
+        .expect("pool");
+    let allowlist_path = write_rpc_allowlist(allowlist);
+    let config = GatewayConfig {
+        production_strict: false,
+        require_auth: false,
+        database_url,
+        rpc_allowlist_path: Some(allowlist_path.to_string_lossy().into_owned()),
+        ..GatewayConfig::default()
+    };
+    let state = GatewayState::new_embedded(pool, config)
+        .await
+        .expect("embedded gateway state");
+    create_router(Arc::new(state), &[])
+}
+
+async fn response_json(response: axum::response::Response) -> Value {
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read response body");
+    serde_json::from_slice(&body).expect("valid json response")
+}
+
+async fn integration_test_serial_guard() -> tokio::sync::OwnedSemaphorePermit {
+    static SEM: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SEM.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("serial permit")
 }
 
 /// One-time schema setup guard — prevents parallel test DDL races.
@@ -96,6 +207,27 @@ async fn ensure_schema() {
         )
         .await
         .expect("create sum_all");
+
+        pg.execute_raw("CREATE TYPE qail_test.priority AS ENUM ('low', 'high')")
+            .await
+            .expect("create priority enum");
+        pg.execute_raw(
+            "CREATE DOMAIN qail_test.short_text AS text CHECK (char_length(VALUE) <= 16)",
+        )
+        .await
+        .expect("create short_text domain");
+        pg.execute_raw(
+            "CREATE FUNCTION qail_test.echo_priority(v qail_test.priority)
+             RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT v::text $$",
+        )
+        .await
+        .expect("create echo_priority");
+        pg.execute_raw(
+            "CREATE FUNCTION qail_test.echo_short(v qail_test.short_text)
+             RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT v::text $$",
+        )
+        .await
+        .expect("create echo_short");
 
         // ── Typed return functions for binary decode ──
         for ddl in [
@@ -595,4 +727,109 @@ async fn binary_decode_jsonb_inline() {
     let rows = query_binary(&mut pg, r#"SELECT '{"a":1,"b":[2,3]}'::jsonb AS j"#).await;
     assert_eq!(rows[0]["j"]["a"], 1);
     assert_eq!(rows[0]["j"]["b"][0], 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 6. Real Router RPC Coverage
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn rpc_route_variadic_empty_object_executes_without_required_arg_error() {
+    let _serial = integration_test_serial_guard().await;
+    require_db!();
+    let _dev_mode = EnvGuard::set("QAIL_DEV_MODE", "1");
+    let app = build_rpc_router(&["qail_test.sum_all"]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/rpc/qail_test.sum_all")
+                .header("content-type", "application/json")
+                .header("x-user-id", "rpc-user")
+                .header("x-user-role", "operator")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("router response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["data"][0]["sum_all"], 0);
+}
+
+#[tokio::test]
+async fn rpc_route_custom_enum_and_domain_use_typed_probe_fallback() {
+    let _serial = integration_test_serial_guard().await;
+    require_db!();
+    let _dev_mode = EnvGuard::set("QAIL_DEV_MODE", "1");
+
+    let enum_app = build_rpc_router(&["qail_test.echo_priority"]).await;
+    let enum_response = enum_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/rpc/qail_test.echo_priority")
+                .header("content-type", "application/json")
+                .header("x-user-id", "rpc-user")
+                .header("x-user-role", "operator")
+                .body(Body::from(r#""high""#))
+                .expect("enum request"),
+        )
+        .await
+        .expect("enum response");
+    assert_eq!(enum_response.status(), StatusCode::OK);
+    let enum_body = response_json(enum_response).await;
+    assert_eq!(enum_body["data"][0]["echo_priority"], "high");
+
+    let domain_app = build_rpc_router(&["qail_test.echo_short"]).await;
+    let domain_response = domain_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/rpc/qail_test.echo_short")
+                .header("content-type", "application/json")
+                .header("x-user-id", "rpc-user")
+                .header("x-user-role", "operator")
+                .body(Body::from(r#""hello""#))
+                .expect("domain request"),
+        )
+        .await
+        .expect("domain response");
+    assert_eq!(domain_response.status(), StatusCode::OK);
+    let domain_body = response_json(domain_response).await;
+    assert_eq!(domain_body["data"][0]["echo_short"], "hello");
+}
+
+#[tokio::test]
+async fn rpc_contracts_route_marks_variadic_tail_optional() {
+    let _serial = integration_test_serial_guard().await;
+    require_db!();
+    let _dev_mode = EnvGuard::set("QAIL_DEV_MODE", "1");
+    let app = build_rpc_router(&["qail_test.sum_all"]).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/_rpc/contracts")
+                .header("x-user-id", "admin-user")
+                .header("x-user-role", "administrator")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("router response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let functions = body["functions"].as_array().expect("functions array");
+    let sum_all = functions
+        .iter()
+        .find(|f| f["name"] == "qail_test.sum_all")
+        .expect("sum_all contract");
+    assert_eq!(sum_all["required_args"], 0);
+    assert_eq!(sum_all["args"][0]["required"], false);
+    assert_eq!(sum_all["args"][0]["variadic"], true);
 }
