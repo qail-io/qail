@@ -82,7 +82,12 @@ pub(crate) async fn branch_create_handler(
 
     let sql = qail_pg::driver::branch_sql::create_branch_sql(name, parent);
     let result = match conn.get_mut() {
-        Ok(pg_conn) => match pg_conn.execute_simple(&sql).await {
+        Ok(pg_conn) => match pg_conn.simple_query(&sql).await {
+            Ok(rows) if rows.is_empty() => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Parent branch not found or not active"})),
+            )
+                .into_response(),
             Ok(_) => (
                 StatusCode::CREATED,
                 Json(json!({"branch": name, "status": "created"})),
@@ -196,7 +201,12 @@ pub(crate) async fn branch_delete_handler(
 
     let sql = qail_pg::driver::branch_sql::delete_branch_sql(&name);
     let result = match conn.get_mut() {
-        Ok(pg_conn) => match pg_conn.execute_simple(&sql).await {
+        Ok(pg_conn) => match pg_conn.simple_query(&sql).await {
+            Ok(rows) if rows.is_empty() => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Branch not found or not active"})),
+            )
+                .into_response(),
             Ok(_) => Json(json!({"branch": name, "status": "deleted"})).into_response(),
             Err(e) => {
                 tracing::error!("Failed to delete branch '{}': {}", name, e);

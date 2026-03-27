@@ -70,7 +70,9 @@ pub fn create_branch_sql(name: &str, parent: Option<&str>) -> String {
             let safe_parent = escape_literal(parent_name);
             format!(
                 "INSERT INTO _qail_branches (name, parent_branch_id) \
-                 VALUES ({}, (SELECT id FROM _qail_branches WHERE name = {})) \
+                 SELECT {}, b.id \
+                 FROM _qail_branches b \
+                 WHERE b.name = {} AND b.status = 'active' \
                  RETURNING id, name, created_at;",
                 safe_name, safe_parent
             )
@@ -92,7 +94,9 @@ pub fn list_branches_sql() -> &'static str {
 pub fn delete_branch_sql(name: &str) -> String {
     let safe_name = escape_literal(name);
     format!(
-        "UPDATE _qail_branches SET status = 'deleted' WHERE name = {} AND status = 'active';",
+        "UPDATE _qail_branches SET status = 'deleted' \
+         WHERE name = {} AND status = 'active' \
+         RETURNING id;",
         safe_name
     )
 }
