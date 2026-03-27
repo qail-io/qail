@@ -233,15 +233,18 @@ fn build_response_replays_safe_headers() {
 
 #[test]
 fn fingerprint_changes_with_body() {
+    let headers = HeaderMap::new();
     let a = request_fingerprint(
         &Method::POST,
         &"/v1/orders?limit=10".parse::<Uri>().expect("valid uri"),
+        &headers,
         Some("application/json"),
         br#"{"id":1}"#,
     );
     let b = request_fingerprint(
         &Method::POST,
         &"/v1/orders?limit=10".parse::<Uri>().expect("valid uri"),
+        &headers,
         Some("application/json"),
         br#"{"id":2}"#,
     );
@@ -251,10 +254,18 @@ fn fingerprint_changes_with_body() {
 #[test]
 fn fingerprint_changes_with_content_type() {
     let uri = "/v1/orders".parse::<Uri>().expect("valid uri");
-    let json = request_fingerprint(&Method::POST, &uri, Some("application/json"), b"{}");
+    let headers = HeaderMap::new();
+    let json = request_fingerprint(
+        &Method::POST,
+        &uri,
+        &headers,
+        Some("application/json"),
+        b"{}",
+    );
     let form = request_fingerprint(
         &Method::POST,
         &uri,
+        &headers,
         Some("application/x-www-form-urlencoded"),
         b"{}",
     );
@@ -263,15 +274,18 @@ fn fingerprint_changes_with_content_type() {
 
 #[test]
 fn fingerprint_canonicalizes_query_pair_order() {
+    let headers = HeaderMap::new();
     let a = request_fingerprint(
         &Method::POST,
         &"/v1/orders?a=1&b=2".parse::<Uri>().expect("valid uri"),
+        &headers,
         Some("application/json"),
         br#"{"id":1}"#,
     );
     let b = request_fingerprint(
         &Method::POST,
         &"/v1/orders?b=2&a=1".parse::<Uri>().expect("valid uri"),
+        &headers,
         Some("application/json"),
         br#"{"id":1}"#,
     );
@@ -280,17 +294,80 @@ fn fingerprint_canonicalizes_query_pair_order() {
 
 #[test]
 fn fingerprint_changes_with_query_value() {
+    let headers = HeaderMap::new();
     let a = request_fingerprint(
         &Method::POST,
         &"/v1/orders?a=1".parse::<Uri>().expect("valid uri"),
+        &headers,
         Some("application/json"),
         br#"{"id":1}"#,
     );
     let b = request_fingerprint(
         &Method::POST,
         &"/v1/orders?a=2".parse::<Uri>().expect("valid uri"),
+        &headers,
         Some("application/json"),
         br#"{"id":1}"#,
+    );
+    assert_ne!(a, b);
+}
+
+#[test]
+fn fingerprint_changes_with_transaction_id_header() {
+    let uri = "/txn/commit".parse::<Uri>().expect("valid uri");
+    let mut h1 = HeaderMap::new();
+    let mut h2 = HeaderMap::new();
+    h1.insert(
+        "x-transaction-id",
+        "11111111-1111-1111-1111-111111111111".parse().unwrap(),
+    );
+    h2.insert(
+        "x-transaction-id",
+        "22222222-2222-2222-2222-222222222222".parse().unwrap(),
+    );
+    let a = request_fingerprint(&Method::POST, &uri, &h1, None, b"");
+    let b = request_fingerprint(&Method::POST, &uri, &h2, None, b"");
+    assert_ne!(a, b);
+}
+
+#[test]
+fn fingerprint_changes_with_branch_id_header() {
+    let uri = "/api/orders/1".parse::<Uri>().expect("valid uri");
+    let mut base = HeaderMap::new();
+    base.insert("x-branch-id", "alpha".parse().unwrap());
+    let mut other = HeaderMap::new();
+    other.insert("x-branch-id", "beta".parse().unwrap());
+    let a = request_fingerprint(&Method::PATCH, &uri, &base, Some("application/json"), b"{}");
+    let b = request_fingerprint(
+        &Method::PATCH,
+        &uri,
+        &other,
+        Some("application/json"),
+        b"{}",
+    );
+    assert_ne!(a, b);
+}
+
+#[test]
+fn fingerprint_changes_with_prefer_header() {
+    let uri = "/api/orders".parse::<Uri>().expect("valid uri");
+    let mut merge = HeaderMap::new();
+    merge.insert("prefer", "resolution=merge-duplicates".parse().unwrap());
+    let mut ignore = HeaderMap::new();
+    ignore.insert("prefer", "resolution=ignore-duplicates".parse().unwrap());
+    let a = request_fingerprint(
+        &Method::POST,
+        &uri,
+        &merge,
+        Some("application/json"),
+        br#"{"id":"1"}"#,
+    );
+    let b = request_fingerprint(
+        &Method::POST,
+        &uri,
+        &ignore,
+        Some("application/json"),
+        br#"{"id":"1"}"#,
     );
     assert_ne!(a, b);
 }

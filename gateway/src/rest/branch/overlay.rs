@@ -2,11 +2,34 @@ use serde_json::Value;
 
 use crate::middleware::ApiError;
 
+fn json_value_to_pk(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Array(_) | Value::Object(_) => Some(value.to_string()),
+    }
+}
+
+fn row_matches_pk(row: &Value, pk_column: &str, row_pk: &str) -> bool {
+    row.get(pk_column)
+        .and_then(json_value_to_pk)
+        .is_some_and(|pk| pk == row_pk)
+}
+
+fn ensure_pk_on_overlay_row(row: &mut Value, pk_column: &str, row_pk: &str) {
+    if let Some(obj) = row.as_object_mut() {
+        obj.entry(pk_column.to_string())
+            .or_insert_with(|| Value::String(row_pk.to_string()));
+    }
+}
+
 /// Apply branch overlay to main table data (CoW Read).
 ///
 /// When a branch is active, reads from `_qail_branch_rows` and merges:
 /// - `insert` overlays → appended to results
-/// - `update` overlays → replace matching PK rows
+/// - `update` overlays → patch matching PK rows
 /// - `delete` overlays → remove matching PK rows
 pub(crate) async fn apply_branch_overlay(
     conn: &mut qail_pg::driver::PooledConnection,
@@ -51,34 +74,29 @@ pub(crate) async fn apply_branch_overlay(
                 if let Ok(new_val) = serde_json::from_str::<Value>(&row_data_str) {
                     let mut found = false;
                     for existing in data.iter_mut() {
-                        if let Some(existing_pk) = existing.get(pk_column).and_then(|v| {
-                            v.as_str()
-                                .map(|s| s.to_string())
-                                .or_else(|| Some(v.to_string()))
-                        }) && existing_pk == row_pk
-                        {
-                            *existing = new_val.clone();
+                        if row_matches_pk(existing, pk_column, &row_pk) {
+                            if let (Some(existing_obj), Some(patch_obj)) =
+                                (existing.as_object_mut(), new_val.as_object())
+                            {
+                                for (k, v) in patch_obj {
+                                    existing_obj.insert(k.clone(), v.clone());
+                                }
+                            } else {
+                                *existing = new_val.clone();
+                            }
                             found = true;
                             break;
                         }
                     }
                     if !found {
-                        data.push(new_val);
+                        let mut row = new_val;
+                        ensure_pk_on_overlay_row(&mut row, pk_column, &row_pk);
+                        data.push(row);
                     }
                 }
             }
             "delete" => {
-                data.retain(|existing| {
-                    existing
-                        .get(pk_column)
-                        .and_then(|v| {
-                            v.as_str()
-                                .map(|s| s.to_string())
-                                .or_else(|| Some(v.to_string()))
-                        })
-                        .map(|pk| pk != row_pk)
-                        .unwrap_or(true)
-                });
+                data.retain(|existing| !row_matches_pk(existing, pk_column, &row_pk));
             }
             _ => {}
         }

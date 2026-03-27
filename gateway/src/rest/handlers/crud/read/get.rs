@@ -55,15 +55,7 @@ pub(crate) async fn get_by_id_handler(
         }
     };
 
-    let row = match rows.first() {
-        Some(row) => row,
-        None => {
-            conn.release().await;
-            return Err(ApiError::not_found(format!("{}/{}", table_name, id)));
-        }
-    };
-
-    let mut data = row_to_json(row);
+    let mut data = rows.first().map(row_to_json);
 
     // Branch overlay: check if this row is overridden on the branch — admin-gated
     let branch_ctx = extract_branch_from_headers(&headers);
@@ -92,11 +84,7 @@ pub(crate) async fn get_by_id_handler(
                         .unwrap_or_default();
                     match operation.as_str() {
                         "delete" => {
-                            conn.release().await;
-                            return Err(ApiError::not_found(format!(
-                                "{}/{} (deleted on branch)",
-                                table_name, id
-                            )));
+                            data = None;
                         }
                         "update" | "insert" => {
                             let row_data_str = orow
@@ -104,8 +92,12 @@ pub(crate) async fn get_by_id_handler(
                                 .ok()
                                 .or_else(|| orow.get_string(2))
                                 .unwrap_or_default();
-                            if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
-                                data = val;
+                            if let Ok(mut val) = serde_json::from_str::<Value>(&row_data_str) {
+                                if let Some(obj) = val.as_object_mut() {
+                                    obj.entry(pk.to_string())
+                                        .or_insert_with(|| Value::String(id.clone()));
+                                }
+                                data = Some(val);
                             }
                         }
                         _ => {}
@@ -117,6 +109,8 @@ pub(crate) async fn get_by_id_handler(
     }
 
     conn.release().await;
+
+    let data = data.ok_or_else(|| ApiError::not_found(format!("{}/{}", table_name, id)))?;
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
     let is_exempt = state

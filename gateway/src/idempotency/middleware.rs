@@ -52,6 +52,7 @@ pub async fn idempotency_middleware(
     let request_fingerprint = request_fingerprint(
         &parts_req.method,
         &parts_req.uri,
+        &parts_req.headers,
         parts_req
             .headers
             .get(CONTENT_TYPE)

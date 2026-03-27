@@ -85,6 +85,31 @@ const IDEMPOTENCY_REPLAY_SAFE_HEADERS: &[&str] = &[
     "content-location",
     "content-disposition",
 ];
+const IDEMPOTENCY_FINGERPRINT_HEADERS: &[&str] = &[
+    "prefer",
+    "x-transaction-id",
+    "x-branch-id",
+    "x-branch",
+    "x-qail-result-format",
+];
+
+fn canonical_fingerprint_headers(headers: &HeaderMap) -> String {
+    let mut pairs: Vec<(&str, String)> = IDEMPOTENCY_FINGERPRINT_HEADERS
+        .iter()
+        .filter_map(|name| {
+            headers
+                .get(*name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| (*name, v.to_string()))
+        })
+        .collect();
+    pairs.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs)
+        .finish()
+}
 
 fn capture_replay_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     IDEMPOTENCY_REPLAY_SAFE_HEADERS
@@ -120,6 +145,7 @@ fn should_capture_response_for_idempotency(
 fn request_fingerprint(
     method: &Method,
     uri: &Uri,
+    headers: &HeaderMap,
     content_type: Option<&str>,
     body: &[u8],
 ) -> String {
@@ -129,10 +155,11 @@ fn request_fingerprint(
 
     let ct = content_type.unwrap_or("").trim().to_ascii_lowercase();
     let canonical = format!(
-        "{}|{}|{}|{}|{:x}",
+        "{}|{}|{}|{}|{}|{:x}",
         method.as_str(),
         uri.path(),
         canonical_query(uri.query()),
+        canonical_fingerprint_headers(headers),
         ct,
         body_hash
     );

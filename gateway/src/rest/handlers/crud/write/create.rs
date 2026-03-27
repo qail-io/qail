@@ -23,6 +23,16 @@ fn normalize_create_object_for_tenant(
     Ok(normalized)
 }
 
+fn pk_to_overlay_key(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
 pub(crate) async fn create_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -146,8 +156,7 @@ pub(crate) async fn create_handler(
             let pk_col = table.primary_key.as_deref().unwrap_or("id");
             let row_pk = obj
                 .get(pk_col)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .and_then(pk_to_overlay_key)
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
 
             let overlay_result = redirect_to_overlay(
@@ -336,7 +345,7 @@ pub(crate) async fn create_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_create_object_for_tenant;
+    use super::{normalize_create_object_for_tenant, pk_to_overlay_key};
     use serde_json::{Map, Value, json};
 
     #[test]
@@ -372,5 +381,22 @@ mod tests {
             normalize_create_object_for_tenant(&obj, "tenant_id", Some("tenant_a")).unwrap();
         assert_eq!(normalized.get("tenant_id"), Some(&json!("tenant_a")));
         assert_eq!(normalized.get("name"), Some(&json!("alice")));
+    }
+
+    #[test]
+    fn pk_to_overlay_key_accepts_scalar_json() {
+        assert_eq!(
+            pk_to_overlay_key(&json!("user-1")),
+            Some("user-1".to_string())
+        );
+        assert_eq!(pk_to_overlay_key(&json!(42)), Some("42".to_string()));
+        assert_eq!(pk_to_overlay_key(&json!(true)), Some("true".to_string()));
+    }
+
+    #[test]
+    fn pk_to_overlay_key_rejects_non_scalar_json() {
+        assert_eq!(pk_to_overlay_key(&json!(null)), None);
+        assert_eq!(pk_to_overlay_key(&json!([1, 2, 3])), None);
+        assert_eq!(pk_to_overlay_key(&json!({"id": 1})), None);
     }
 }

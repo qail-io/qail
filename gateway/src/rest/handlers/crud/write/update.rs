@@ -14,6 +14,25 @@ fn reject_tenant_column_update(
     Ok(())
 }
 
+fn build_branch_update_overlay_row(
+    obj: &serde_json::Map<String, Value>,
+    pk_column: &str,
+    row_id: &str,
+    tenant_column: &str,
+    tenant_id: Option<&str>,
+) -> Value {
+    let mut overlay_obj = obj.clone();
+    overlay_obj
+        .entry(pk_column.to_string())
+        .or_insert_with(|| Value::String(row_id.to_string()));
+    if let Some(tid) = tenant_id {
+        overlay_obj
+            .entry(tenant_column.to_string())
+            .or_insert_with(|| Value::String(tid.to_string()));
+    }
+    Value::Object(overlay_obj)
+}
+
 pub(crate) async fn update_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -67,11 +86,7 @@ pub(crate) async fn update_handler(
             )));
         }
     }
-    reject_tenant_column_update(
-        obj,
-        &state.config.tenant_column,
-        auth.tenant_id.as_deref(),
-    )?;
+    reject_tenant_column_update(obj, &state.config.tenant_column, auth.tenant_id.as_deref())?;
 
     // Build: set table { col1 = val1 } [pk = $id]
     let mut cmd = qail_core::ast::Qail::set(&table_name).filter(
@@ -117,7 +132,13 @@ pub(crate) async fn update_handler(
 
     // Branch CoW Write: redirect updates to overlay
     if let Some(branch_name) = branch_ctx.branch_name() {
-        let row_data: Value = Value::Object(obj.clone());
+        let row_data = build_branch_update_overlay_row(
+            obj,
+            &pk,
+            &id,
+            &state.config.tenant_column,
+            auth.tenant_id.as_deref(),
+        );
         let overlay_result = redirect_to_overlay(
             &mut conn,
             branch_name,
@@ -166,7 +187,7 @@ pub(crate) async fn update_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::reject_tenant_column_update;
+    use super::{build_branch_update_overlay_row, reject_tenant_column_update};
     use serde_json::{Map, json};
 
     #[test]
@@ -184,5 +205,33 @@ mod tests {
         obj.insert("tenant_id".to_string(), json!("tenant_b"));
 
         assert!(reject_tenant_column_update(&obj, "tenant_id", None).is_ok());
+    }
+
+    #[test]
+    fn build_branch_update_overlay_row_injects_pk_and_tenant() {
+        let mut obj = Map::new();
+        obj.insert("name".to_string(), json!("new-name"));
+
+        let row = build_branch_update_overlay_row(&obj, "id", "42", "tenant_id", Some("tenant-a"));
+        assert_eq!(row.get("id"), Some(&json!("42")));
+        assert_eq!(row.get("tenant_id"), Some(&json!("tenant-a")));
+        assert_eq!(row.get("name"), Some(&json!("new-name")));
+    }
+
+    #[test]
+    fn build_branch_update_overlay_row_preserves_existing_fields() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("existing-id"));
+        obj.insert("tenant_id".to_string(), json!("tenant-explicit"));
+
+        let row = build_branch_update_overlay_row(
+            &obj,
+            "id",
+            "ignored-id",
+            "tenant_id",
+            Some("ignored-tenant"),
+        );
+        assert_eq!(row.get("id"), Some(&json!("existing-id")));
+        assert_eq!(row.get("tenant_id"), Some(&json!("tenant-explicit")));
     }
 }

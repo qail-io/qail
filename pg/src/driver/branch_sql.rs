@@ -107,7 +107,7 @@ pub fn read_overlay_sql(branch_name: &str, table_name: &str) -> String {
     format!(
         "SELECT DISTINCT ON (row_pk) row_pk, operation, row_data \
          FROM _qail_branch_rows \
-         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {}) \
+         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {} AND status = 'active') \
            AND table_name = {} \
          ORDER BY row_pk, created_at DESC;",
         safe_branch, safe_table
@@ -135,7 +135,7 @@ pub fn write_overlay_sql(
     format!(
         "INSERT INTO _qail_branch_rows (branch_id, table_name, row_pk, operation, row_data) \
          VALUES (\
-           (SELECT id FROM _qail_branches WHERE name = {}), \
+           (SELECT id FROM _qail_branches WHERE name = {} AND status = 'active'), \
            {}, {}, {}, $1::jsonb\
          ) RETURNING id;",
         safe_branch, safe_table, safe_pk, safe_op
@@ -167,7 +167,7 @@ pub fn branch_stats_sql(name: &str) -> String {
     format!(
         "SELECT table_name, operation, COUNT(*) as count \
          FROM _qail_branch_rows \
-         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {}) \
+         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {} AND status = 'active') \
          GROUP BY table_name, operation \
          ORDER BY table_name, operation;",
         safe_name
@@ -183,7 +183,7 @@ pub fn merge_overlay_rows_sql(name: &str) -> String {
     format!(
         "SELECT DISTINCT ON (table_name, row_pk) table_name, row_pk, operation, row_data::text \
          FROM _qail_branch_rows \
-         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {}) \
+         WHERE branch_id = (SELECT id FROM _qail_branches WHERE name = {} AND status = 'active') \
          ORDER BY table_name, row_pk, created_at DESC;",
         safe_name
     )
@@ -227,6 +227,7 @@ mod tests {
         assert!(sql.contains("DISTINCT ON (row_pk)"));
         assert!(sql.contains("'feature-1'"));
         assert!(sql.contains("'users'"));
+        assert!(sql.contains("status = 'active'"));
     }
 
     #[test]
@@ -237,6 +238,7 @@ mod tests {
         assert!(sql.contains("'123'"));
         assert!(sql.contains("'insert'"));
         assert!(sql.contains("$1::jsonb"));
+        assert!(sql.contains("status = 'active'"));
     }
 
     #[test]
@@ -244,5 +246,17 @@ mod tests {
         let sql = mark_merged_sql("dev");
         assert!(sql.contains("status = 'merged'"));
         assert!(sql.contains("merged_at = now()"));
+    }
+
+    #[test]
+    fn test_merge_overlay_rows_sql_filters_active_branch() {
+        let sql = merge_overlay_rows_sql("dev");
+        assert!(sql.contains("status = 'active'"));
+    }
+
+    #[test]
+    fn test_branch_stats_sql_filters_active_branch() {
+        let sql = branch_stats_sql("dev");
+        assert!(sql.contains("status = 'active'"));
     }
 }

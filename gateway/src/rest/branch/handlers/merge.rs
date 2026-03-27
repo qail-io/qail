@@ -182,46 +182,43 @@ pub(crate) async fn branch_merge_handler(
 
     let merge_sql = qail_pg::driver::branch_sql::mark_merged_sql(&name);
     let result = match conn.get_mut() {
-        Ok(pg_conn) => match pg_conn.execute_simple(&merge_sql).await {
-            Ok(_) => match conn.get_mut() {
-                Ok(pg_conn) => match pg_conn.execute_simple("COMMIT;").await {
-                    Ok(_) => {
-                        let mut response = json!({
-                            "branch": name,
-                            "status": "merged",
-                            "applied": applied,
-                            "overlay_stats": stats,
-                        });
-                        if !errors.is_empty() {
-                            response["merge_errors"] = json!(errors);
-                        }
-                        Json(response).into_response()
-                    }
-                    Err(e) => {
-                        tracing::error!("Branch merge COMMIT failed for '{}': {}", name, e);
-                        if let Ok(pg_conn) = conn.get_mut() {
-                            let _ = pg_conn.execute_simple("ROLLBACK;").await;
-                        }
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": "Merge transaction failed to commit"})),
-                        )
-                            .into_response()
-                    }
-                },
-                Err(e) => {
-                    tracing::error!("Branch connection released unexpectedly: {}", e);
+        Ok(pg_conn) => match pg_conn.simple_query(&merge_sql).await {
+            Ok(rows) => {
+                if rows.is_empty() {
+                    let _ = pg_conn.execute_simple("ROLLBACK;").await;
                     (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": "Database connection unavailable"})),
+                        StatusCode::CONFLICT,
+                        Json(json!({"error": "Branch not found or not active"})),
                     )
                         .into_response()
+                } else {
+                    match pg_conn.execute_simple("COMMIT;").await {
+                        Ok(_) => {
+                            let mut response = json!({
+                                "branch": name,
+                                "status": "merged",
+                                "applied": applied,
+                                "overlay_stats": stats,
+                            });
+                            if !errors.is_empty() {
+                                response["merge_errors"] = json!(errors);
+                            }
+                            Json(response).into_response()
+                        }
+                        Err(e) => {
+                            tracing::error!("Branch merge COMMIT failed for '{}': {}", name, e);
+                            let _ = pg_conn.execute_simple("ROLLBACK;").await;
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error": "Merge transaction failed to commit"})),
+                            )
+                                .into_response()
+                        }
+                    }
                 }
-            },
+            }
             Err(e) => {
-                if let Ok(pg_conn) = conn.get_mut() {
-                    let _ = pg_conn.execute_simple("ROLLBACK;").await;
-                }
+                let _ = pg_conn.execute_simple("ROLLBACK;").await;
                 tracing::error!("Failed to merge branch '{}': {}", name, e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
