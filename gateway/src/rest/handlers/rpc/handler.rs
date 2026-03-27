@@ -21,10 +21,19 @@ pub(crate) async fn rpc_handler(
             "Authentication required for RPC invocation",
         ));
     }
+
+    let Some(rpc_allow_list) = state.rpc_allow_list.as_ref() else {
+        crate::metrics::record_rpc_allowlist_rejection();
+        crate::metrics::record_rpc_call(started_at.elapsed().as_secs_f64() * 1000.0, false, "text");
+        return Err(ApiError::forbidden(
+            "RPC endpoint is disabled until rpc_allowlist_path is configured",
+        ));
+    };
+
     let function = RpcFunctionName::parse(&function_name)?;
     enforce_rpc_name_contract(
         state.config.rpc_require_schema_qualified,
-        state.rpc_allow_list.as_ref(),
+        Some(rpc_allow_list),
         &function,
     )?;
 
