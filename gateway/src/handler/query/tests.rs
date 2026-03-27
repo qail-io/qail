@@ -189,6 +189,7 @@ async fn export_handler_rejects_empty_query() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         ..GatewayConfig::default()
     };
 
@@ -221,6 +222,7 @@ async fn export_handler_rejects_non_export_query() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         ..GatewayConfig::default()
     };
 
@@ -253,6 +255,7 @@ async fn export_handler_enforces_allow_list_before_db_acquire() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         ..GatewayConfig::default()
     };
     let mut allow_list = QueryAllowList::new();
@@ -287,6 +290,7 @@ async fn binary_handler_accepts_qwb2_then_enforces_binary_allow_list_gate() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         ..GatewayConfig::default()
     };
 
@@ -319,6 +323,7 @@ async fn binary_handler_rejects_invalid_binary_payload() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         ..GatewayConfig::default()
     };
 
@@ -351,6 +356,7 @@ async fn binary_handler_rejects_raw_text_payload_without_qwb2_header() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         ..GatewayConfig::default()
     };
 
@@ -383,6 +389,7 @@ async fn binary_handler_rejects_legacy_qwb1_text_payload() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         ..GatewayConfig::default()
     };
 
@@ -425,6 +432,7 @@ async fn binary_handler_rejects_legacy_postcard_like_payload() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         ..GatewayConfig::default()
     };
 

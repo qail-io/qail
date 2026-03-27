@@ -185,6 +185,7 @@ async fn txn_query_returns_conflict_when_session_lifetime_exceeded() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         txn_max_sessions: 4,
         txn_max_lifetime_secs: 1,
         txn_max_statements_per_session: 100,
@@ -233,6 +234,7 @@ async fn txn_savepoint_returns_conflict_when_statement_limit_exceeded() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     let config = GatewayConfig {
         production_strict: false,
+        require_auth: false,
         txn_max_sessions: 4,
         txn_max_lifetime_secs: 600,
         txn_max_statements_per_session: 1,
