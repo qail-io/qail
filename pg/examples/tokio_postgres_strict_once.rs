@@ -35,8 +35,7 @@ impl Workload {
 async fn run_literal_once(client: &Client, stmts: &[Statement]) -> Result<usize, tokio_postgres::Error> {
     let mut futs = Vec::with_capacity(BATCH_SIZE);
     for i in 1..=BATCH_SIZE {
-        let idx = (i % 10) as usize;
-        let client = client;
+        let idx = i % 10;
         let stmt = stmts[idx].clone();
         futs.push(async move {
             let stream = client.query_raw(&stmt, std::iter::empty::<i32>()).await?;
@@ -56,7 +55,6 @@ async fn run_param_once(client: &Client, stmt: &Statement) -> Result<usize, toki
     let ids: Vec<i64> = (1..=BATCH_SIZE).map(|i| ((i % 10_000) + 1) as i64).collect();
     let mut futs = Vec::with_capacity(BATCH_SIZE);
     for id in ids {
-        let client = client;
         let stmt = stmt.clone();
         futs.push(async move {
             let stream = client.query_raw(&stmt, vec![id]).await?;
