@@ -4,8 +4,8 @@
 //!   cargo run --release -p qail-pg --example tokio_postgres_strict_once -- literal --plain
 //!   cargo run --release -p qail-pg --example tokio_postgres_strict_once -- param --plain
 
-use futures_util::future::try_join_all;
 use futures_util::TryStreamExt;
+use futures_util::future::try_join_all;
 use std::time::Duration;
 use std::time::Instant;
 use tokio_postgres::{Client, NoTls, Statement};
@@ -32,7 +32,10 @@ impl Workload {
     }
 }
 
-async fn run_literal_once(client: &Client, stmts: &[Statement]) -> Result<usize, tokio_postgres::Error> {
+async fn run_literal_once(
+    client: &Client,
+    stmts: &[Statement],
+) -> Result<usize, tokio_postgres::Error> {
     let mut futs = Vec::with_capacity(BATCH_SIZE);
     for i in 1..=BATCH_SIZE {
         let idx = i % 10;
@@ -52,7 +55,9 @@ async fn run_literal_once(client: &Client, stmts: &[Statement]) -> Result<usize,
 }
 
 async fn run_param_once(client: &Client, stmt: &Statement) -> Result<usize, tokio_postgres::Error> {
-    let ids: Vec<i64> = (1..=BATCH_SIZE).map(|i| ((i % 10_000) + 1) as i64).collect();
+    let ids: Vec<i64> = (1..=BATCH_SIZE)
+        .map(|i| ((i % 10_000) + 1) as i64)
+        .collect();
     let mut futs = Vec::with_capacity(BATCH_SIZE);
     for id in ids {
         let stmt = stmt.clone();

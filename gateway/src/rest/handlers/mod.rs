@@ -14,6 +14,7 @@ pub(crate) use crud::{
     aggregate_handler, create_handler, delete_handler, get_by_id_handler, list_handler,
     update_handler,
 };
+pub(crate) use rpc::parse_rpc_input_arg_names;
 pub(crate) use rpc::rpc_handler;
 
 // ── Shared helpers (used by crud + rpc sub-modules) ─────────────────

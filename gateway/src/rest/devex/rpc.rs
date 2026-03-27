@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::GatewayState;
 use crate::auth::authenticate_request;
 use crate::middleware::ApiError;
+use crate::rest::handlers::parse_rpc_input_arg_names;
 
 /// GET /api/_rpc/contracts — Introspect callable PostgreSQL function contracts.
 ///
@@ -37,7 +38,10 @@ pub(crate) async fn rpc_contracts_handler(
             Expr::Named("p.pronargdefaults::int4 AS default_args".to_string()),
             Expr::Named("(p.provariadic <> 0) AS is_variadic".to_string()),
             Expr::Named(
-                "COALESCE((SELECT jsonb_agg(NULLIF(BTRIM(arg_name), '') ORDER BY ord) FROM unnest((COALESCE(p.proargnames, ARRAY[]::text[]))[1:p.pronargs]) WITH ORDINALITY AS names(arg_name, ord)), '[]'::jsonb)::text AS arg_names_json".to_string(),
+                "COALESCE(to_jsonb(COALESCE(p.proargnames, ARRAY[]::text[])), '[]'::jsonb)::text AS arg_names_json".to_string(),
+            ),
+            Expr::Named(
+                "COALESCE(to_jsonb(COALESCE(p.proargmodes, ARRAY[]::\"char\"[])), '[]'::jsonb)::text AS arg_modes_json".to_string(),
             ),
             Expr::Named(
                 "COALESCE((SELECT jsonb_agg((arg_oid)::regtype::text ORDER BY ord) FROM unnest(CASE WHEN p.pronargs = 0 THEN ARRAY[]::oid[] ELSE string_to_array(BTRIM(p.proargtypes::text), ' ')::oid[] END) WITH ORDINALITY AS args(arg_oid, ord)), '[]'::jsonb)::text AS arg_types_json".to_string(),
@@ -49,6 +53,7 @@ pub(crate) async fn rpc_contracts_handler(
             Expr::Named("pg_catalog.pg_get_function_result(p.oid) AS result_type".to_string()),
         ])
         .inner_join("pg_catalog.pg_namespace n", "n.oid", "p.pronamespace")
+        .eq("p.prokind", "f")
         .filter(
             "n.nspname",
             Operator::NotIn,
@@ -101,25 +106,30 @@ pub(crate) async fn rpc_contracts_handler(
         let identity_args = row
             .try_get_by_name::<String>("identity_args")
             .ok()
-            .or_else(|| row.get_string(7))
+            .or_else(|| row.get_string(8))
             .unwrap_or_default();
         let result_type = row
             .try_get_by_name::<String>("result_type")
             .ok()
-            .or_else(|| row.get_string(8))
+            .or_else(|| row.get_string(9))
             .unwrap_or_default();
 
-        let arg_names: Vec<Option<String>> = serde_json::from_str(
+        let arg_names: Vec<Option<String>> = parse_rpc_input_arg_names(
             &row.try_get_by_name::<String>("arg_names_json")
                 .ok()
                 .or_else(|| row.get_string(5))
                 .unwrap_or_else(|| "[]".to_string()),
+            &row.try_get_by_name::<String>("arg_modes_json")
+                .ok()
+                .or_else(|| row.get_string(6))
+                .unwrap_or_else(|| "[]".to_string()),
+            total_args,
         )
         .unwrap_or_default();
         let arg_types: Vec<String> = serde_json::from_str(
             &row.try_get_by_name::<String>("arg_types_json")
                 .ok()
-                .or_else(|| row.get_string(6))
+                .or_else(|| row.get_string(7))
                 .unwrap_or_else(|| "[]".to_string()),
         )
         .unwrap_or_default();

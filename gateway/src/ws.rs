@@ -273,7 +273,9 @@ pub(super) fn build_live_query_notify_channel(
     table: &str,
 ) -> Result<String, String> {
     let channel = match tenant_id {
-        Some(tid) if !tid.is_empty() => tenant_scoped_channel(tid, &format!("qail_table_{}", table))?,
+        Some(tid) if !tid.is_empty() => {
+            tenant_scoped_channel(tid, &format!("qail_table_{}", table))?
+        }
         _ => format!("qail_table_{}", table),
     };
     ensure_pg_channel_name_limit(&channel)?;

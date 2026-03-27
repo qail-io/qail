@@ -73,12 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let warm = conn.pipeline_execute_count_ast_cached(&cmds).await?;
     if warm != cmds.len() {
-        return Err(format!(
-            "warmup completed {} queries, expected {}",
-            warm,
-            cmds.len()
-        )
-        .into());
+        return Err(format!("warmup completed {} queries, expected {}", warm, cmds.len()).into());
     }
 
     let mut total = Duration::ZERO;
@@ -110,4 +105,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

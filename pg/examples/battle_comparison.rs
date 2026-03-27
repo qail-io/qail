@@ -334,7 +334,8 @@ async fn run_graphql_naive_once(
     root_query: &Qail,
     cfg: BenchConfig,
 ) -> Result<IterationOutput, Box<dyn std::error::Error>> {
-    let roots = root_rows_to_connections(fetch_all_uncached_with_rtt(driver, root_query, cfg).await?);
+    let roots =
+        root_rows_to_connections(fetch_all_uncached_with_rtt(driver, root_query, cfg).await?);
     let mut payload = Vec::with_capacity(roots.len());
     let mut queries = 1usize;
 
@@ -384,7 +385,8 @@ async fn run_graphql_dataloader_once(
     root_query: &Qail,
     cfg: BenchConfig,
 ) -> Result<IterationOutput, Box<dyn std::error::Error>> {
-    let roots = root_rows_to_connections(fetch_all_uncached_with_rtt(driver, root_query, cfg).await?);
+    let roots =
+        root_rows_to_connections(fetch_all_uncached_with_rtt(driver, root_query, cfg).await?);
     let mut queries = 1usize;
 
     let mut harbor_ids = HashSet::new();
@@ -443,7 +445,8 @@ async fn run_rest_naive_once(
     root_query: &Qail,
     cfg: BenchConfig,
 ) -> Result<IterationOutput, Box<dyn std::error::Error>> {
-    let roots = root_rows_to_connections(fetch_all_uncached_with_rtt(driver, root_query, cfg).await?);
+    let roots =
+        root_rows_to_connections(fetch_all_uncached_with_rtt(driver, root_query, cfg).await?);
     let mut payload = Vec::with_capacity(roots.len());
     let mut queries = 1usize;
 
@@ -727,14 +730,18 @@ async fn validate_payload_equivalence(
     root_query: &Qail,
     cfg: BenchConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let baseline = run_qail_uncached_once(driver, join_query, cfg).await?.payload;
+    let baseline = run_qail_uncached_once(driver, join_query, cfg)
+        .await?
+        .payload;
 
     let prepared_rows = run_qail_prepared_once(driver, prepared, cfg).await?.payload;
     if let Some(msg) = find_payload_mismatch(&baseline, &prepared_rows, "qail_prepared") {
         return Err(msg.into());
     }
 
-    let gql_naive = run_graphql_naive_once(driver, root_query, cfg).await?.payload;
+    let gql_naive = run_graphql_naive_once(driver, root_query, cfg)
+        .await?
+        .payload;
     if let Some(msg) = find_payload_mismatch(&baseline, &gql_naive, "graphql_naive") {
         return Err(msg.into());
     }

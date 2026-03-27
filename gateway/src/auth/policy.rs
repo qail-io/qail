@@ -54,7 +54,10 @@ pub async fn authenticate_request(
     headers: &HeaderMap,
 ) -> Result<AuthContext, crate::middleware::ApiError> {
     let auth = super::extract_auth_for_state(headers, state).await;
-    ensure_request_auth(&auth, state.config.require_auth || state.config.production_strict)?;
+    ensure_request_auth(
+        &auth,
+        state.config.require_auth || state.config.production_strict,
+    )?;
     ensure_tenant_rate_limit(state, &auth).await?;
     Ok(auth)
 }
