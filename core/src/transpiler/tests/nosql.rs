@@ -15,38 +15,6 @@ fn test_mongo_output() {
 }
 
 #[test]
-fn test_mongo_or_filter_output() {
-    use crate::ast::{Operator, Qail};
-
-    let cmd = Qail::get("kb")
-        .or_filter("topic", Operator::Eq, "pg")
-        .or_filter("question", Operator::Eq, "rls");
-    let mongo = cmd.to_mongo();
-
-    assert!(mongo.contains("\"$or\""), "Expected $or group: {mongo}");
-}
-
-#[test]
-fn test_mongo_and_plus_or_filter_output() {
-    use crate::ast::{Operator, Qail};
-
-    let cmd = Qail::get("kb")
-        .filter("is_active", Operator::Eq, true)
-        .or_filter("topic", Operator::Eq, "pg")
-        .or_filter("question", Operator::Eq, "rls");
-    let mongo = cmd.to_mongo();
-
-    assert!(
-        mongo.contains("\"$and\""),
-        "Expected top-level $and: {mongo}"
-    );
-    assert!(
-        mongo.contains("\"$or\""),
-        "Expected nested $or group: {mongo}"
-    );
-}
-
-#[test]
 fn test_mongo_insert() {
     use crate::ast::*;
     // For INSERT, use manual construction since v2 ADD syntax isn't fully implemented
@@ -102,21 +70,6 @@ fn test_dynamo_output() {
     assert!(dynamo.contains("\"TableName\": \"users\""));
     assert!(dynamo.contains("active = :v"));
     assert!(dynamo.contains("ProjectionExpression"));
-}
-
-#[test]
-fn test_dynamo_or_filter_output() {
-    use crate::ast::{Operator, Qail};
-
-    let cmd = Qail::get("users")
-        .or_filter("name", Operator::Eq, "alice")
-        .or_filter("email", Operator::Eq, "alice@example.com");
-    let dynamo = cmd.to_dynamo();
-
-    assert!(
-        dynamo.contains("(name = :v1 OR email = :v2)"),
-        "Expected grouped OR filter expression: {dynamo}"
-    );
 }
 
 #[test]

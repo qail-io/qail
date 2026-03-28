@@ -116,13 +116,12 @@ fn build_delete_item(cmd: &Qail) -> String {
 }
 
 fn build_expression(cmd: &Qail) -> (String, String) {
-    let mut where_groups = Vec::new();
+    let mut expr_parts = Vec::new();
     let mut values_parts = Vec::new();
     let mut counter = 0;
 
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
-            let mut group_parts = Vec::new();
             for cond in &cage.conditions {
                 let col_name = match &cond.left {
                     Expr::Named(name) => name.clone(),
@@ -148,28 +147,15 @@ fn build_expression(cmd: &Qail) -> (String, String) {
                     _ => "=",
                 };
 
-                group_parts.push(format!("{} {} {}", col_name, op, placeholder));
+                expr_parts.push(format!("{} {} {}", col_name, op, placeholder));
 
                 let val_json = value_to_dynamo(&cond.value);
                 values_parts.push(format!("\"{}\": {}", placeholder, val_json));
             }
-
-            if !group_parts.is_empty() {
-                let joiner = match cage.logical_op {
-                    LogicalOp::And => " AND ",
-                    LogicalOp::Or => " OR ",
-                };
-                let group = group_parts.join(joiner);
-                if cage.logical_op == LogicalOp::Or && group_parts.len() > 1 {
-                    where_groups.push(format!("({})", group));
-                } else {
-                    where_groups.push(group);
-                }
-            }
         }
     }
 
-    (where_groups.join(" AND "), values_parts.join(", "))
+    (expr_parts.join(" AND "), values_parts.join(", "))
 }
 
 fn build_item_json(cmd: &Qail) -> String {
