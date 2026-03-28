@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.3] - 2026-03-28
+
+### Changed
+
+- **Versioning/docs:** bumped Rust workspace crates and installation/docs/readme references to `0.27.3`.
+
+### Fixed
+
+- **Filter-cage semantic parity:** reinforced qail.rs OR-filter cage behavior so chained `.or_filter(...)` intent is preserved as grouped `AND ( ... OR ... )` predicates across execution paths.
+- **Regression safety:** expanded parser/transpiler/encoder parity coverage to guard against accidental OR-to-AND degradation in future changes.
+
 ## [0.27.2] - 2026-03-27
 
 ### Added
