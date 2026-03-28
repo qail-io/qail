@@ -224,46 +224,80 @@ fn build_delete(cmd: &Qail) -> String {
 }
 
 fn build_query_filter(cmd: &Qail) -> String {
-    let mut query_parts = Vec::new();
+    let mut and_terms: Vec<String> = Vec::new();
+    let mut or_terms: Vec<String> = Vec::new();
 
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
             for cond in &cage.conditions {
-                let op = match cond.op {
-                    Operator::Eq => "$eq",
-                    Operator::Ne => "$ne",
-                    Operator::Gt => "$gt",
-                    Operator::Lt => "$lt",
-                    Operator::Gte => "$gte",
-                    Operator::Lte => "$lte",
-                    _ => "$eq", // Fallback
-                };
-
-                let col_str = match &cond.left {
-                    Expr::Named(name) => name.clone(),
-                    expr => expr.to_string(),
-                };
-
-                // If simple equality, clean syntax { key: val }
-                if let Operator::Eq = cond.op {
-                    query_parts.push(format!("\"{}\": {}", col_str, value_to_json(&cond.value)));
-                } else {
-                    query_parts.push(format!(
-                        "\"{}\": {{ \"{}\": {} }}",
-                        col_str,
-                        op,
-                        value_to_json(&cond.value)
-                    ));
+                let predicate = condition_to_mongo_predicate(cond);
+                match cage.logical_op {
+                    LogicalOp::And => and_terms.push(predicate),
+                    LogicalOp::Or => or_terms.push(predicate),
                 }
             }
         }
     }
 
-    if query_parts.is_empty() {
+    if and_terms.is_empty() && or_terms.is_empty() {
         return "{}".to_string();
     }
 
-    format!("{{ {} }}", query_parts.join(", "))
+    if and_terms.is_empty() {
+        return if or_terms.len() == 1 {
+            or_terms[0].clone()
+        } else {
+            format!("{{ \"$or\": [{}] }}", or_terms.join(", "))
+        };
+    }
+
+    if or_terms.is_empty() {
+        return if and_terms.len() == 1 {
+            and_terms[0].clone()
+        } else {
+            format!("{{ \"$and\": [{}] }}", and_terms.join(", "))
+        };
+    }
+
+    let and_group = if and_terms.len() == 1 {
+        and_terms[0].clone()
+    } else {
+        format!("{{ \"$and\": [{}] }}", and_terms.join(", "))
+    };
+
+    format!(
+        "{{ \"$and\": [{}, {{ \"$or\": [{}] }}] }}",
+        and_group,
+        or_terms.join(", ")
+    )
+}
+
+fn condition_to_mongo_predicate(cond: &Condition) -> String {
+    let op = match cond.op {
+        Operator::Eq => "$eq",
+        Operator::Ne => "$ne",
+        Operator::Gt => "$gt",
+        Operator::Lt => "$lt",
+        Operator::Gte => "$gte",
+        Operator::Lte => "$lte",
+        _ => "$eq",
+    };
+
+    let col_str = match &cond.left {
+        Expr::Named(name) => name.clone(),
+        expr => expr.to_string(),
+    };
+
+    if let Operator::Eq = cond.op {
+        format!("{{ \"{}\": {} }}", col_str, value_to_json(&cond.value))
+    } else {
+        format!(
+            "{{ \"{}\": {{ \"{}\": {} }} }}",
+            col_str,
+            op,
+            value_to_json(&cond.value)
+        )
+    }
 }
 
 fn build_projection(cmd: &Qail) -> String {

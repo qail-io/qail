@@ -12,7 +12,10 @@ fn platform_admin_claims() -> HashMap<String, serde_json::Value> {
 
 fn legacy_is_platform_admin_claims() -> HashMap<String, serde_json::Value> {
     let mut claims = HashMap::new();
-    claims.insert("is_platform_admin".to_string(), serde_json::Value::Bool(true));
+    claims.insert(
+        "is_platform_admin".to_string(),
+        serde_json::Value::Bool(true),
+    );
     claims
 }
 

@@ -143,14 +143,41 @@ pub fn parse_where_clause(input: &str) -> IResult<&str, Vec<Cage>> {
     let (input, _) = tag_no_case("where").parse(input)?;
     let (input, _) = multispace1(input)?;
 
-    let (input, conditions) = parse_conditions(input)?;
+    let chain_start = input;
+    let (input, (first, rest)) = parse_condition_chain(input)?;
+
+    let mut saw_and = false;
+    let mut saw_or = false;
+    let mut conditions = Vec::with_capacity(1 + rest.len());
+    conditions.push(first);
+
+    for (op, cond) in rest {
+        match op {
+            LogicalOp::And => saw_and = true,
+            LogicalOp::Or => saw_or = true,
+        }
+        conditions.push(cond);
+    }
+
+    if saw_and && saw_or {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            chain_start,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    let logical_op = if saw_or {
+        LogicalOp::Or
+    } else {
+        LogicalOp::And
+    };
 
     Ok((
         input,
         vec![Cage {
             kind: CageKind::Filter,
             conditions,
-            logical_op: LogicalOp::And, // Default, actual logic handled in conditions
+            logical_op,
         }],
     ))
 }
@@ -161,9 +188,41 @@ pub fn parse_having_clause(input: &str) -> IResult<&str, Vec<Condition>> {
     let (input, _) = tag_no_case("having").parse(input)?;
     let (input, _) = multispace1(input)?;
 
-    let (input, conditions) = parse_conditions(input)?;
+    let chain_start = input;
+    let (input, (first, rest)) = parse_condition_chain(input)?;
+
+    if rest.iter().any(|(op, _)| *op == LogicalOp::Or) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            chain_start,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    let mut conditions = Vec::with_capacity(1 + rest.len());
+    conditions.push(first);
+    conditions.extend(rest.into_iter().map(|(_, cond)| cond));
 
     Ok((input, conditions))
+}
+
+fn parse_condition_chain(input: &str) -> IResult<&str, (Condition, Vec<(LogicalOp, Condition)>)> {
+    let (input, first) = parse_condition(input)?;
+    let (input, rest) = many0((
+        multispace0,
+        alt((
+            value(LogicalOp::And, tag_no_case("and")),
+            value(LogicalOp::Or, tag_no_case("or")),
+        )),
+        multispace1,
+        parse_condition,
+    ))
+    .parse(input)?;
+
+    let chain = rest
+        .into_iter()
+        .map(|(_, op, _, cond)| (op, cond))
+        .collect();
+    Ok((input, (first, chain)))
 }
 
 /// Parse conditions with and/or

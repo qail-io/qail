@@ -420,7 +420,11 @@ mod tests {
             .iter()
             .find(|c| matches!(c.kind, CageKind::Filter) && c.logical_op == LogicalOp::Or)
             .expect("Expected OR filter cage");
-        assert_eq!(or_filter.conditions.len(), 2, "OR cage should keep only OR terms");
+        assert_eq!(
+            or_filter.conditions.len(),
+            2,
+            "OR cage should keep only OR terms"
+        );
         assert!(
             !or_filter
                 .conditions

@@ -581,6 +581,44 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_update_with_or_filter() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::set("kb")
+            .set_value("archived", true)
+            .or_filter("topic", Operator::ILike, "%test%")
+            .or_filter("question", Operator::ILike, "%test%");
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(sql.contains("UPDATE kb SET archived = $1"), "{}", sql);
+        assert!(
+            sql.contains("WHERE (topic ILIKE $2 OR question ILIKE $3)"),
+            "{}",
+            sql
+        );
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn test_encode_delete_with_or_filter() {
+        use qail_core::ast::Operator;
+
+        let cmd = Qail::del("kb")
+            .or_filter("topic", Operator::ILike, "%test%")
+            .or_filter("question", Operator::ILike, "%test%");
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("DELETE FROM kb WHERE (topic ILIKE $1 OR question ILIKE $2)"),
+            "{}",
+            sql
+        );
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
     fn test_encode_export() {
         let cmd = Qail::export("users").columns(["id", "name"]);
 

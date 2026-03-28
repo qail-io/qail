@@ -174,6 +174,7 @@ fn build_qdrant_search(cmd: &Qail) -> String {
 fn build_filter(cmd: &Qail) -> String {
     // Qdrant Filter structure: { "must": [ { "key": "city", "match": { "value": "London" } } ] }
     let mut musts = Vec::new();
+    let mut shoulds = Vec::new();
 
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
@@ -220,16 +221,26 @@ fn build_filter(cmd: &Qail) -> String {
                         col_str, val
                     ),
                 };
-                musts.push(clause);
+                match cage.logical_op {
+                    LogicalOp::And => musts.push(clause),
+                    LogicalOp::Or => shoulds.push(clause),
+                }
             }
         }
     }
 
-    if musts.is_empty() {
+    if musts.is_empty() && shoulds.is_empty() {
         return String::new();
     }
 
-    format!("{{ \"must\": [{}] }}", musts.join(", "))
+    let mut parts = Vec::new();
+    if !musts.is_empty() {
+        parts.push(format!("\"must\": [{}]", musts.join(", ")));
+    }
+    if !shoulds.is_empty() {
+        parts.push(format!("\"should\": [{}]", shoulds.join(", ")));
+    }
+    format!("{{ {} }}", parts.join(", "))
 }
 
 fn get_cage_val(cmd: &Qail, kind_example: CageKind) -> Option<usize> {

@@ -27,19 +27,33 @@ pub fn build_delete(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     // Process WHERE clauses
-    let mut where_clauses: Vec<String> = Vec::new();
+    let mut where_groups: Vec<String> = Vec::new();
 
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
-            for cond in &cage.conditions {
-                where_clauses.push(cond.to_sql(&generator, Some(cmd)));
+            if !cage.conditions.is_empty() {
+                let joiner = match cage.logical_op {
+                    LogicalOp::And => " AND ",
+                    LogicalOp::Or => " OR ",
+                };
+                let conditions: Vec<String> = cage
+                    .conditions
+                    .iter()
+                    .map(|c| c.to_sql(&generator, Some(cmd)))
+                    .collect();
+                let group = conditions.join(joiner);
+                if cage.logical_op == LogicalOp::Or && cage.conditions.len() > 1 {
+                    where_groups.push(format!("({})", group));
+                } else {
+                    where_groups.push(group);
+                }
             }
         }
     }
 
-    if !where_clauses.is_empty() {
+    if !where_groups.is_empty() {
         sql.push_str(" WHERE ");
-        sql.push_str(&where_clauses.join(" AND "));
+        sql.push_str(&where_groups.join(" AND "));
     }
 
     sql

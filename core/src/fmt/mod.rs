@@ -131,9 +131,16 @@ impl Formatter {
             write!(self.buffer, "where ")?;
             for (i, cage) in filters.iter().enumerate() {
                 if i > 0 {
-                    write!(self.buffer, " and ")?; // Assuming AND between cages for now
+                    write!(self.buffer, " and ")?;
+                }
+                let wrap_or_group = cage.logical_op == LogicalOp::Or && cage.conditions.len() > 1;
+                if wrap_or_group {
+                    write!(self.buffer, "(")?;
                 }
                 self.format_conditions(&cage.conditions, cage.logical_op)?;
+                if wrap_or_group {
+                    write!(self.buffer, ")")?;
+                }
             }
             writeln!(self.buffer)?;
         }

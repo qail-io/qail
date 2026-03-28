@@ -157,6 +157,21 @@ fn test_v2_multiple_conditions() {
 }
 
 #[test]
+fn test_v2_get_with_or_conditions() {
+    let cmd = parse("get users fields * where active = true or role = \"admin\"").unwrap();
+    assert_eq!(cmd.cages.len(), 1);
+    assert_eq!(cmd.cages[0].kind, CageKind::Filter);
+    assert_eq!(cmd.cages[0].logical_op, LogicalOp::Or);
+    assert_eq!(cmd.cages[0].conditions.len(), 2);
+}
+
+#[test]
+fn test_v2_get_mixed_and_or_rejected() {
+    let result = parse("get users fields * where active = true and role = \"admin\" or age > 18");
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_v2_full_query() {
     let cmd = parse(
         "get users fields id, name, email where active = true order by created_at desc limit 10",

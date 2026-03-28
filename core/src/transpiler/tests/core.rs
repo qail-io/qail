@@ -139,6 +139,65 @@ fn test_or_filter_and_filter_do_not_mix_cages() {
 }
 
 #[test]
+fn test_update_with_or_filter_grouping() {
+    use crate::ast::{Operator, Qail};
+
+    let sql = Qail::set("kb")
+        .set_value("archived", true)
+        .or_filter("topic", Operator::ILike, "%test%")
+        .or_filter("question", Operator::ILike, "%test%")
+        .to_sql();
+
+    assert!(
+        sql.contains("WHERE (topic ILIKE '%test%' OR question ILIKE '%test%')"),
+        "Expected grouped OR in UPDATE WHERE: {sql}"
+    );
+    assert!(
+        !sql.contains("topic ILIKE '%test%' AND question ILIKE '%test%'"),
+        "UPDATE OR filters must not degrade into AND chain: {sql}"
+    );
+}
+
+#[test]
+fn test_delete_with_or_filter_grouping() {
+    use crate::ast::{Operator, Qail};
+
+    let sql = Qail::del("kb")
+        .or_filter("topic", Operator::ILike, "%test%")
+        .or_filter("question", Operator::ILike, "%test%")
+        .to_sql();
+
+    assert!(
+        sql.contains("WHERE (topic ILIKE '%test%' OR question ILIKE '%test%')"),
+        "Expected grouped OR in DELETE WHERE: {sql}"
+    );
+    assert!(
+        !sql.contains("topic ILIKE '%test%' AND question ILIKE '%test%'"),
+        "DELETE OR filters must not degrade into AND chain: {sql}"
+    );
+}
+
+#[test]
+fn test_window_with_or_filter_grouping() {
+    use crate::ast::{Action, Expr, Operator, Qail};
+
+    let sql = Qail {
+        action: Action::Over,
+        table: "kb".to_string(),
+        columns: vec![Expr::Named("id".to_string())],
+        ..Default::default()
+    }
+    .or_filter("topic", Operator::ILike, "%test%")
+    .or_filter("question", Operator::ILike, "%test%")
+    .to_sql();
+
+    assert!(
+        sql.contains("WHERE (topic ILIKE '%test%' OR question ILIKE '%test%')"),
+        "Expected grouped OR in WINDOW WHERE: {sql}"
+    );
+}
+
+#[test]
 fn test_array_unnest() {
     use crate::ast::*;
     let mut cmd = Qail::get("users");
