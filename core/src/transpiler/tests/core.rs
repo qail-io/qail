@@ -54,9 +54,27 @@ fn test_update() {
 }
 
 #[test]
+fn test_update_with_where_or() {
+    let cmd = parse("set users values verified = true where id = $1 or email = :email").unwrap();
+    assert_eq!(
+        cmd.to_sql(),
+        "UPDATE users SET verified = true WHERE (id = $1 OR email = :email)"
+    );
+}
+
+#[test]
 fn test_delete() {
     let cmd = parse("del users where id = $1").unwrap();
     assert_eq!(cmd.to_sql(), "DELETE FROM users WHERE id = $1");
+}
+
+#[test]
+fn test_delete_with_where_or() {
+    let cmd = parse("del users where id = $1 or email = :email").unwrap();
+    assert_eq!(
+        cmd.to_sql(),
+        "DELETE FROM users WHERE (id = $1 OR email = :email)"
+    );
 }
 
 #[test]

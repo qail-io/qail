@@ -47,3 +47,19 @@ fn test_delete_with_filter() {
     assert_eq!(cmd.action, Action::Del);
     assert_eq!(cmd.cages[0].conditions.len(), 2);
 }
+
+#[test]
+fn test_delete_with_or_filter() {
+    let cmd = parse("del sessions where user_id = $1 or expired = true").unwrap();
+    assert_eq!(cmd.action, Action::Del);
+    assert_eq!(cmd.cages[0].logical_op, LogicalOp::Or);
+    assert_eq!(cmd.cages[0].conditions.len(), 2);
+}
+
+#[test]
+fn test_set_mixed_and_or_rejected() {
+    let result = parse(
+        "set users values verified = true where id = $1 and active = true or role = \"admin\"",
+    );
+    assert!(result.is_err());
+}
