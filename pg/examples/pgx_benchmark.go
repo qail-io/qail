@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,10 +17,37 @@ import (
 
 const (
 	connString = "host=127.0.0.1 port=5432 user=orion dbname=example_staging sslmode=disable"
-	batchSize  = 10_000
-	iterations = 5
 	poolSize   = 10
-	sqlByID    = "SELECT id, name FROM harbors WHERE id = $1"
+
+	sqlByID = "SELECT id, name FROM harbors WHERE id = $1"
+
+	wideRowsSQL = "SELECT gs AS id, " +
+		"('harbor-' || gs)::text AS name, " +
+		"repeat(md5(gs::text), 4) AS bio, " +
+		"repeat(md5((gs * 17)::text), 3) AS region, " +
+		"(gs * 11) AS visits, " +
+		"(gs % 2 = 0) AS active, " +
+		"round((gs::numeric / 7.0), 3) AS ratio, " +
+		"CASE WHEN gs % 5 = 0 THEN NULL ELSE repeat(md5((gs * 3)::text), 2) END AS optional_note " +
+		"FROM generate_series(1, $1::int) AS gs"
+
+	manyParamsParamCount = 32
+	manyParamsSQL        = "SELECT " +
+		"$1::int + $2::int + $3::int + $4::int + $5::int + $6::int + $7::int + $8::int + " +
+		"$9::int + $10::int + $11::int + $12::int + $13::int + $14::int + $15::int + $16::int + " +
+		"$17::int + $18::int + $19::int + $20::int + $21::int + $22::int + $23::int + $24::int + " +
+		"$25::int + $26::int + $27::int + $28::int + $29::int + $30::int + $31::int + $32::int " +
+		"AS total"
+
+	pointBatchSize       = 10_000
+	pointIterations      = 5
+	wideRowsBatchSize    = 100
+	wideRowsIterations   = 3
+	manyParamsBatchSize  = 5_000
+	manyParamsIterations = 5
+
+	fnvOffset = uint64(0xcbf29ce484222325)
+	fnvPrime  = uint64(1099511628211)
 )
 
 type preparedCall struct {
@@ -27,8 +55,47 @@ type preparedCall struct {
 	params [][]byte
 }
 
+type resultMode int
+
+const (
+	resultModeCompleteOnly resultMode = iota
+	resultModeScalarInt
+	resultModeWideRows
+)
+
+type modeWorkload struct {
+	name       string
+	sql        string
+	batchSize  int
+	iterations int
+	mode       resultMode
+}
+
+type batchStats struct {
+	completed int
+	rows      int
+	bytes     int
+	checksum  uint64
+}
+
+func (s *batchStats) add(other batchStats) {
+	s.completed += other.completed
+	s.rows += other.rows
+	s.bytes += other.bytes
+	s.checksum += other.checksum
+}
+
+type benchmarkResult struct {
+	qps        float64
+	rowsPerSec float64
+	mibPerSec  float64
+	hasRows    bool
+	hasMiB     bool
+	checksum   uint64
+}
+
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: pgx_benchmark [--mode strict|once|single|pipeline|pool10] [--workload literal|param] [--plain]\n")
+	fmt.Fprintf(os.Stderr, "Usage: pgx_benchmark [--mode strict|once|single|pipeline|pool10] [--workload literal|param|point|wide_rows|many_params] [--plain]\n")
 	flag.PrintDefaults()
 }
 
@@ -59,6 +126,87 @@ func percentile(values []float64, p float64) float64 {
 		rank = len(sorted)
 	}
 	return sorted[rank-1]
+}
+
+func modeWorkloadFromName(name string) (modeWorkload, error) {
+	switch name {
+	case "point", "lookup":
+		return modeWorkload{
+			name:       "point",
+			sql:        sqlByID,
+			batchSize:  pointBatchSize,
+			iterations: pointIterations,
+			mode:       resultModeCompleteOnly,
+		}, nil
+	case "wide_rows", "wide":
+		return modeWorkload{
+			name:       "wide_rows",
+			sql:        wideRowsSQL,
+			batchSize:  wideRowsBatchSize,
+			iterations: wideRowsIterations,
+			mode:       resultModeWideRows,
+		}, nil
+	case "many_params", "params":
+		return modeWorkload{
+			name:       "many_params",
+			sql:        manyParamsSQL,
+			batchSize:  manyParamsBatchSize,
+			iterations: manyParamsIterations,
+			mode:       resultModeScalarInt,
+		}, nil
+	default:
+		return modeWorkload{}, fmt.Errorf("unknown workload %q (expected point, wide_rows, or many_params)", name)
+	}
+}
+
+func buildModeParamBatch(spec modeWorkload) [][][]byte {
+	switch spec.name {
+	case "point":
+		params := make([][][]byte, 0, spec.batchSize)
+		for i := 1; i <= spec.batchSize; i++ {
+			id := (i % 10_000) + 1
+			params = append(params, [][]byte{[]byte(strconv.Itoa(id))})
+		}
+		return params
+	case "wide_rows":
+		rowCounts := []string{"128", "256", "384", "512"}
+		params := make([][][]byte, 0, spec.batchSize)
+		for i := 0; i < spec.batchSize; i++ {
+			params = append(params, [][]byte{[]byte(rowCounts[i%len(rowCounts)])})
+		}
+		return params
+	case "many_params":
+		cache := make([][]byte, 256)
+		for i := range cache {
+			cache[i] = []byte(strconv.Itoa(i + 1))
+		}
+
+		params := make([][][]byte, 0, spec.batchSize)
+		for queryIdx := 0; queryIdx < spec.batchSize; queryIdx++ {
+			row := make([][]byte, manyParamsParamCount)
+			for paramIdx := 0; paramIdx < manyParamsParamCount; paramIdx++ {
+				valueIdx := (queryIdx + paramIdx*7) % len(cache)
+				row[paramIdx] = cache[valueIdx]
+			}
+			params = append(params, row)
+		}
+		return params
+	default:
+		return nil
+	}
+}
+
+func buildModeCalls(spec modeWorkload) ([]preparedCall, map[string]string, []string, [][][]byte) {
+	params := buildModeParamBatch(spec)
+	calls := make([]preparedCall, 0, len(params))
+	for _, paramSet := range params {
+		calls = append(calls, preparedCall{
+			stmt:   "mode_stmt",
+			params: paramSet,
+		})
+	}
+
+	return calls, map[string]string{"mode_stmt": spec.sql}, []string{"mode_stmt"}, params
 }
 
 func prepareTemplates(p *pgconn.Pipeline, templates map[string]string, orderedNames []string) error {
@@ -92,44 +240,148 @@ func prepareTemplates(p *pgconn.Pipeline, templates map[string]string, orderedNa
 	}
 }
 
-func runOnce(p *pgconn.Pipeline, calls []preparedCall) error {
+func consumeValues(mode resultMode, values [][]byte, stats *batchStats) {
+	switch mode {
+	case resultModeCompleteOnly:
+		return
+	case resultModeScalarInt:
+		stats.rows++
+		if len(values) == 0 || values[0] == nil {
+			stats.checksum++
+			return
+		}
+
+		value := values[0]
+		stats.bytes += len(value)
+		parsed, err := strconv.ParseInt(string(value), 10, 64)
+		if err != nil {
+			parsed = int64(len(value))
+		}
+		stats.checksum += uint64(parsed)
+	case resultModeWideRows:
+		rowHash := fnvOffset
+		for idx, value := range values {
+			if value == nil {
+				rowHash = mixHash(rowHash, []byte("NULL"))
+				rowHash += uint64(idx)
+				continue
+			}
+
+			stats.bytes += len(value)
+			switch idx {
+			case 0, 4:
+				parsed, err := strconv.ParseInt(string(value), 10, 64)
+				if err != nil {
+					parsed = int64(len(value))
+				}
+				rowHash += uint64(parsed)
+			case 5:
+				if len(value) > 0 && (value[0] == 't' || value[0] == 'T') {
+					rowHash++
+				}
+			case 6:
+				parsed, err := strconv.ParseFloat(string(value), 64)
+				if err == nil {
+					rowHash += uint64(parsed * 1000.0)
+				}
+			default:
+				rowHash = mixHash(rowHash, value)
+			}
+		}
+		stats.rows++
+		stats.checksum += rowHash
+	}
+}
+
+func consumeResultReader(rr *pgconn.ResultReader, mode resultMode) (batchStats, error) {
+	stats := batchStats{}
+
+	if mode == resultModeCompleteOnly {
+		_, err := rr.Close()
+		if err != nil {
+			return batchStats{}, err
+		}
+		stats.completed = 1
+		return stats, nil
+	}
+
+	for rr.NextRow() {
+		consumeValues(mode, rr.Values(), &stats)
+	}
+
+	_, err := rr.Close()
+	if err != nil {
+		return batchStats{}, err
+	}
+	stats.completed = 1
+	return stats, nil
+}
+
+func runPipelineOnce(p *pgconn.Pipeline, calls []preparedCall, mode resultMode) (batchStats, error) {
 	for _, call := range calls {
 		p.SendQueryPrepared(call.stmt, call.params, nil, nil)
 	}
 	if err := p.Sync(); err != nil {
-		return err
+		return batchStats{}, err
 	}
+
 	expected := len(calls)
-	completed := 0
+	stats := batchStats{}
+
 	for {
 		results, err := p.GetResults()
 		if err != nil {
-			return err
+			return batchStats{}, err
 		}
+
 		switch r := results.(type) {
 		case *pgconn.ResultReader:
-			if _, err := r.Close(); err != nil {
-				return err
+			readerStats, err := consumeResultReader(r, mode)
+			if err != nil {
+				return batchStats{}, err
 			}
-			completed++
+			stats.add(readerStats)
 		case *pgconn.PipelineSync:
-			if completed != expected {
-				return fmt.Errorf("completed mismatch: got %d want %d", completed, expected)
+			if stats.completed != expected {
+				return batchStats{}, fmt.Errorf("completed mismatch: got %d want %d", stats.completed, expected)
 			}
-			return nil
+			return stats, nil
 		case nil:
 			continue
 		default:
-			return fmt.Errorf("unexpected result type %T", r)
+			return batchStats{}, fmt.Errorf("unexpected result type %T", r)
 		}
 	}
 }
 
-func runPreparedPipelineBenchmark(calls []preparedCall, templates map[string]string, orderedNames []string) (float64, error) {
+func makeBenchmarkResult(stats batchStats, elapsed time.Duration) benchmarkResult {
+	seconds := elapsed.Seconds()
+	result := benchmarkResult{
+		qps:      float64(stats.completed) / seconds,
+		checksum: stats.checksum,
+	}
+	if stats.rows > 0 {
+		result.hasRows = true
+		result.rowsPerSec = float64(stats.rows) / seconds
+	}
+	if stats.bytes > 0 {
+		result.hasMiB = true
+		result.mibPerSec = (float64(stats.bytes) / (1024.0 * 1024.0)) / seconds
+	}
+	return result
+}
+
+func runPreparedPipelineModeBenchmark(
+	calls []preparedCall,
+	templates map[string]string,
+	orderedNames []string,
+	mode resultMode,
+	iterations int,
+) (benchmarkResult, error) {
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, connString)
 	if err != nil {
-		return 0, err
+		return benchmarkResult{}, err
 	}
 	defer conn.Close(ctx)
 
@@ -137,170 +389,222 @@ func runPreparedPipelineBenchmark(calls []preparedCall, templates map[string]str
 	defer p.Close()
 
 	if err := prepareTemplates(p, templates, orderedNames); err != nil {
-		return 0, err
+		return benchmarkResult{}, err
 	}
 
-	// Warmup (untimed)
-	if err := runOnce(p, calls); err != nil {
-		return 0, err
+	warmup, err := runPipelineOnce(p, calls, mode)
+	if err != nil {
+		return benchmarkResult{}, err
+	}
+	if warmup.completed != len(calls) {
+		return benchmarkResult{}, fmt.Errorf("warmup completed %d queries, expected %d", warmup.completed, len(calls))
 	}
 
 	total := time.Duration(0)
+	aggregate := batchStats{}
 	for i := 0; i < iterations; i++ {
 		start := time.Now()
-		if err := runOnce(p, calls); err != nil {
-			return 0, err
+		stats, err := runPipelineOnce(p, calls, mode)
+		if err != nil {
+			return benchmarkResult{}, err
 		}
 		total += time.Since(start)
-	}
-
-	qps := float64(len(calls)*iterations) / total.Seconds()
-	return qps, nil
-}
-
-func buildParamValues(total int) [][]byte {
-	params := make([][]byte, 0, total)
-	for i := 1; i <= total; i++ {
-		id := (i % 10_000) + 1
-		params = append(params, []byte(fmt.Sprintf("%d", id)))
-	}
-	return params
-}
-
-func runSinglePreparedOnce(conn *pgconn.PgConn, stmtName string, params [][]byte) error {
-	ctx := context.Background()
-	for _, p := range params {
-		rr := conn.ExecPrepared(ctx, stmtName, [][]byte{p}, nil, nil)
-		if _, err := rr.Close(); err != nil {
-			return err
+		if stats.completed != len(calls) {
+			return benchmarkResult{}, fmt.Errorf("run completed %d queries, expected %d", stats.completed, len(calls))
 		}
+		aggregate.add(stats)
 	}
-	return nil
+
+	return makeBenchmarkResult(aggregate, total), nil
 }
 
-func runSingleMode() (float64, error) {
+func runPreparedPipelineBenchmark(calls []preparedCall, templates map[string]string, orderedNames []string) (float64, error) {
+	result, err := runPreparedPipelineModeBenchmark(calls, templates, orderedNames, resultModeCompleteOnly, 5)
+	if err != nil {
+		return 0, err
+	}
+	return result.qps, nil
+}
+
+func runSinglePreparedOnce(conn *pgconn.PgConn, stmtName string, params [][][]byte, mode resultMode) (batchStats, error) {
+	ctx := context.Background()
+	stats := batchStats{}
+
+	for _, paramSet := range params {
+		rr := conn.ExecPrepared(ctx, stmtName, paramSet, nil, nil)
+		readerStats, err := consumeResultReader(rr, mode)
+		if err != nil {
+			return batchStats{}, err
+		}
+		stats.add(readerStats)
+	}
+
+	return stats, nil
+}
+
+func runSingleMode(spec modeWorkload) (benchmarkResult, error) {
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, connString)
 	if err != nil {
-		return 0, err
+		return benchmarkResult{}, err
 	}
 	defer conn.Close(ctx)
 
 	pgConn := conn.PgConn()
-	if _, err := pgConn.Prepare(ctx, "single_stmt", sqlByID, nil); err != nil {
-		return 0, err
+	if _, err := pgConn.Prepare(ctx, "single_stmt", spec.sql, nil); err != nil {
+		return benchmarkResult{}, err
 	}
 
-	params := buildParamValues(batchSize)
-	if err := runSinglePreparedOnce(pgConn, "single_stmt", params); err != nil {
-		return 0, err
+	params := buildModeParamBatch(spec)
+	warmup, err := runSinglePreparedOnce(pgConn, "single_stmt", params, spec.mode)
+	if err != nil {
+		return benchmarkResult{}, err
+	}
+	if warmup.completed != len(params) {
+		return benchmarkResult{}, fmt.Errorf("warmup completed %d queries, expected %d", warmup.completed, len(params))
 	}
 
 	total := time.Duration(0)
-	for i := 0; i < iterations; i++ {
+	aggregate := batchStats{}
+	for i := 0; i < spec.iterations; i++ {
 		start := time.Now()
-		if err := runSinglePreparedOnce(pgConn, "single_stmt", params); err != nil {
-			return 0, err
+		stats, err := runSinglePreparedOnce(pgConn, "single_stmt", params, spec.mode)
+		if err != nil {
+			return benchmarkResult{}, err
 		}
 		total += time.Since(start)
+		if stats.completed != len(params) {
+			return benchmarkResult{}, fmt.Errorf("run completed %d queries, expected %d", stats.completed, len(params))
+		}
+		aggregate.add(stats)
 	}
 
-	qps := float64(batchSize*iterations) / total.Seconds()
-	return qps, nil
+	return makeBenchmarkResult(aggregate, total), nil
 }
 
-func runPipelineMode() (float64, error) {
-	calls, templates, ordered := buildParameterizedWorkload()
-	return runPreparedPipelineBenchmark(calls, templates, ordered)
+func runPipelineMode(spec modeWorkload) (benchmarkResult, error) {
+	calls, templates, ordered, _ := buildModeCalls(spec)
+	return runPreparedPipelineModeBenchmark(calls, templates, ordered, spec.mode, spec.iterations)
 }
 
-func runPool10Mode() (float64, error) {
+func runPool10Mode(spec modeWorkload) (benchmarkResult, error) {
 	ctx := context.Background()
 	cfg, err := pgxpool.ParseConfig(connString)
 	if err != nil {
-		return 0, err
+		return benchmarkResult{}, err
 	}
 	cfg.MaxConns = poolSize
 	cfg.MinConns = poolSize
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		return 0, err
+		return benchmarkResult{}, err
 	}
 	defer pool.Close()
 
-	perWorker := batchSize / poolSize
-	workerParams := make([][][]byte, poolSize)
-	for w := 0; w < poolSize; w++ {
-		start := w * perWorker
-		vals := make([][]byte, 0, perWorker)
-		for i := 0; i < perWorker; i++ {
-			id := ((start + i) % 10_000) + 1
-			vals = append(vals, []byte(fmt.Sprintf("%d", id)))
-		}
-		workerParams[w] = vals
+	params := buildModeParamBatch(spec)
+	if len(params)%poolSize != 0 {
+		return benchmarkResult{}, fmt.Errorf("workload %q produced %d params, not divisible by pool size %d", spec.name, len(params), poolSize)
 	}
 
-	startBarrier := make(chan struct{})
+	perWorker := len(params) / poolSize
+	workerParams := make([][][][]byte, poolSize)
+	for w := 0; w < poolSize; w++ {
+		startIdx := w * perWorker
+		workerParams[w] = params[startIdx : startIdx+perWorker]
+	}
+
+	startSignal := make(chan struct{})
+	readyCh := make(chan struct{}, poolSize)
+	statsCh := make(chan batchStats, poolSize)
+	errCh := make(chan error, poolSize)
 
 	var wg sync.WaitGroup
-	var once sync.Once
-	var workerErr error
-
 	for w := 0; w < poolSize; w++ {
 		params := workerParams[w]
 		wg.Add(1)
-		go func(idx int, vals [][]byte) {
+		go func(idx int, vals [][][]byte) {
 			defer wg.Done()
 
 			poolConn, err := pool.Acquire(ctx)
 			if err != nil {
-				once.Do(func() { workerErr = err })
+				readyCh <- struct{}{}
+				errCh <- err
 				return
 			}
 			defer poolConn.Release()
 
 			pgConn := poolConn.Conn().PgConn()
 			stmtName := fmt.Sprintf("pool_stmt_%d", idx)
-			if _, err := pgConn.Prepare(ctx, stmtName, sqlByID, nil); err != nil {
-				once.Do(func() { workerErr = err })
+			if _, err := pgConn.Prepare(ctx, stmtName, spec.sql, nil); err != nil {
+				readyCh <- struct{}{}
+				errCh <- err
 				return
 			}
 
-			if err := runSinglePreparedOnce(pgConn, stmtName, vals); err != nil {
-				once.Do(func() { workerErr = err })
+			warmup, err := runSinglePreparedOnce(pgConn, stmtName, vals, spec.mode)
+			if err != nil {
+				readyCh <- struct{}{}
+				errCh <- err
+				return
+			}
+			if warmup.completed != len(vals) {
+				readyCh <- struct{}{}
+				errCh <- fmt.Errorf("worker %d warmup completed %d queries, expected %d", idx, warmup.completed, len(vals))
 				return
 			}
 
-			<-startBarrier
-			for i := 0; i < iterations; i++ {
-				if err := runSinglePreparedOnce(pgConn, stmtName, vals); err != nil {
-					once.Do(func() { workerErr = err })
+			readyCh <- struct{}{}
+			<-startSignal
+
+			measured := batchStats{}
+			for i := 0; i < spec.iterations; i++ {
+				stats, err := runSinglePreparedOnce(pgConn, stmtName, vals, spec.mode)
+				if err != nil {
+					errCh <- err
 					return
 				}
+				if stats.completed != len(vals) {
+					errCh <- fmt.Errorf("worker %d run completed %d queries, expected %d", idx, stats.completed, len(vals))
+					return
+				}
+				measured.add(stats)
 			}
+
+			statsCh <- measured
 		}(w, params)
 	}
 
-	close(startBarrier)
+	for i := 0; i < poolSize; i++ {
+		<-readyCh
+	}
+
 	start := time.Now()
+	close(startSignal)
 	wg.Wait()
 	elapsed := time.Since(start)
 
-	if workerErr != nil {
-		return 0, workerErr
+	select {
+	case err := <-errCh:
+		return benchmarkResult{}, err
+	default:
 	}
 
-	qps := float64(batchSize*iterations) / elapsed.Seconds()
-	return qps, nil
+	close(statsCh)
+	aggregate := batchStats{}
+	for stats := range statsCh {
+		aggregate.add(stats)
+	}
+
+	return makeBenchmarkResult(aggregate, elapsed), nil
 }
 
 func buildLiteralWorkload() ([]preparedCall, map[string]string, []string) {
 	templates := map[string]string{}
 	ordered := make([]string, 0, 10)
-	calls := make([]preparedCall, 0, batchSize)
+	calls := make([]preparedCall, 0, pointBatchSize)
 
-	for i := 1; i <= batchSize; i++ {
+	for i := 1; i <= pointBatchSize; i++ {
 		limit := (i % 10) + 1
 		name := fmt.Sprintf("lit_%d", limit)
 		if _, ok := templates[name]; !ok {
@@ -318,13 +622,13 @@ func buildParameterizedWorkload() ([]preparedCall, map[string]string, []string) 
 		"param_id": "SELECT id, name FROM harbors WHERE id = $1",
 	}
 	ordered := []string{"param_id"}
-	calls := make([]preparedCall, 0, batchSize)
+	calls := make([]preparedCall, 0, pointBatchSize)
 
-	for i := 1; i <= batchSize; i++ {
+	for i := 1; i <= pointBatchSize; i++ {
 		id := (i % 10_000) + 1
 		calls = append(calls, preparedCall{
 			stmt:   "param_id",
-			params: [][]byte{[]byte(fmt.Sprintf("%d", id))},
+			params: [][]byte{[]byte(strconv.Itoa(id))},
 		})
 	}
 
@@ -349,11 +653,7 @@ func runStrict(name string, calls []preparedCall, templates map[string]string, o
 	runs := make([]float64, 0, len(orders))
 
 	fmt.Printf("  %s\n", name)
-	for round, first := range orders {
-		// Keep ABBA shape (A/B/B/A). For single-driver benchmark this just
-		// forces repeated independent runs and preserves comparability with
-		// existing strict harness style.
-		_ = first
+	for round := range orders {
 		qps, err := runPreparedPipelineBenchmark(calls, templates, orderedNames)
 		if err != nil {
 			return 0, 0, fmt.Errorf("round %d failed: %w", round+1, err)
@@ -365,51 +665,74 @@ func runStrict(name string, calls []preparedCall, templates map[string]string, o
 	return median(runs), percentile(runs, 0.95), nil
 }
 
+func printModeResult(label string, result benchmarkResult, plain bool, mode resultMode) {
+	if plain {
+		fmt.Printf("%.3f\n", result.qps)
+		return
+	}
+
+	fmt.Printf("%s: %.0f q/s", label, result.qps)
+	if result.hasRows {
+		fmt.Printf(" | %.0f rows/s", result.rowsPerSec)
+	}
+	if result.hasMiB {
+		fmt.Printf(" | %.2f MiB/s", result.mibPerSec)
+	}
+	if mode != resultModeCompleteOnly {
+		fmt.Printf(" | checksum=0x%x", result.checksum)
+	}
+	fmt.Println()
+}
+
+func mixHash(seed uint64, bytes []byte) uint64 {
+	hash := seed
+	for _, b := range bytes {
+		hash ^= uint64(b)
+		hash *= fnvPrime
+	}
+	return hash
+}
+
 func main() {
 	mode := flag.String("mode", "strict", "benchmark mode: strict, once, single, pipeline, or pool10")
-	workload := flag.String("workload", "literal", "workload for --mode once: literal or param")
-	plain := flag.Bool("plain", false, "print only numeric q/s in --mode once")
+	workload := flag.String("workload", "", "workload name: strict/once use literal|param; single/pipeline/pool10 use point|wide_rows|many_params")
+	plain := flag.Bool("plain", false, "print only numeric q/s in single-run modes")
 	flag.Usage = usage
 	flag.Parse()
 
 	switch *mode {
-	case "single":
-		qps, err := runSingleMode()
-		if err != nil {
-			panic(err)
+	case "single", "pipeline", "pool10":
+		workloadName := *workload
+		if workloadName == "" {
+			workloadName = "point"
 		}
-		if *plain {
-			fmt.Printf("%.3f\n", qps)
-		} else {
-			fmt.Printf("single: %.0f q/s\n", qps)
-		}
-		return
-	case "pipeline":
-		qps, err := runPipelineMode()
-		if err != nil {
-			panic(err)
-		}
-		if *plain {
-			fmt.Printf("%.3f\n", qps)
-		} else {
-			fmt.Printf("pipeline: %.0f q/s\n", qps)
-		}
-		return
-	case "pool10":
-		qps, err := runPool10Mode()
-		if err != nil {
-			panic(err)
-		}
-		if *plain {
-			fmt.Printf("%.3f\n", qps)
-		} else {
-			fmt.Printf("pool10: %.0f q/s\n", qps)
-		}
-		return
-	}
 
-	if *mode == "once" {
-		calls, templates, ordered, title, err := workloadFromName(*workload)
+		spec, err := modeWorkloadFromName(workloadName)
+		if err != nil {
+			panic(err)
+		}
+
+		var result benchmarkResult
+		switch *mode {
+		case "single":
+			result, err = runSingleMode(spec)
+		case "pipeline":
+			result, err = runPipelineMode(spec)
+		case "pool10":
+			result, err = runPool10Mode(spec)
+		}
+		if err != nil {
+			panic(err)
+		}
+
+		printModeResult(fmt.Sprintf("%s/%s", *mode, spec.name), result, *plain, spec.mode)
+		return
+	case "once":
+		workloadName := *workload
+		if workloadName == "" {
+			workloadName = "literal"
+		}
+		calls, templates, ordered, title, err := workloadFromName(workloadName)
 		if err != nil {
 			panic(err)
 		}
@@ -423,14 +746,14 @@ func main() {
 			fmt.Printf("%s: %.0f q/s\n", title, qps)
 		}
 		return
-	}
-	if *mode != "strict" {
+	case "strict":
+	default:
 		panic(fmt.Errorf("unknown mode %q (expected strict, once, single, pipeline, or pool10)", *mode))
 	}
 
 	fmt.Println("🏁 PGX STRICT BENCHMARK (pipeline + prepared)")
 	fmt.Println("============================================")
-	fmt.Printf("batch=%d iterations=%d (per round)\n\n", batchSize, iterations)
+	fmt.Printf("batch=%d iterations=%d (per round)\n\n", pointBatchSize, 5)
 
 	litCalls, litTemplates, litOrdered := buildLiteralWorkload()
 	paramCalls, paramTemplates, paramOrdered := buildParameterizedWorkload()

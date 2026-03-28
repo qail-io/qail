@@ -10,6 +10,9 @@ if ! [[ "${ROUNDS}" =~ ^[0-9]+$ ]] || [[ "${ROUNDS}" -lt 1 ]]; then
   exit 1
 fi
 
+WORKLOADS="${WORKLOADS:-point wide_rows many_params}"
+MODES="${MODES:-single pipeline pool10}"
+
 ZIG_REPO_ROOT="${ZIG_REPO_ROOT:-$(cd "${REPO_ROOT}/.." && pwd)/qail-zig}"
 if [[ ! -d "${ZIG_REPO_ROOT}" ]]; then
   echo "ZIG_REPO_ROOT not found: ${ZIG_REPO_ROOT}" >&2
@@ -71,26 +74,30 @@ calc_delta() {
 
 run_qail_rust_once() {
   local mode="$1"
-  "${REPO_ROOT}/target/release/examples/qail_pgx_modes_once" "${mode}" --plain
+  local workload="$2"
+  "${REPO_ROOT}/target/release/examples/qail_pgx_modes_once" "${mode}" --workload "${workload}" --plain
 }
 
 run_pgx_once() {
   local mode="$1"
-  /tmp/pgx_modes_once -mode "${mode}" -plain
+  local workload="$2"
+  /tmp/pgx_modes_once -mode "${mode}" -workload "${workload}" -plain
 }
 
 run_qail_zig_once() {
   local mode="$1"
-  "${ZIG_BIN}" "${mode}" --plain
+  local workload="$2"
+  "${ZIG_BIN}" "${mode}" --workload "${workload}" --plain
 }
 
 run_once() {
   local runner="$1"
   local mode="$2"
+  local workload="$3"
   case "${runner}" in
-    pgx) run_pgx_once "${mode}" ;;
-    qail_rs) run_qail_rust_once "${mode}" ;;
-    qail_zig) run_qail_zig_once "${mode}" ;;
+    pgx) run_pgx_once "${mode}" "${workload}" ;;
+    qail_rs) run_qail_rust_once "${mode}" "${workload}" ;;
+    qail_zig) run_qail_zig_once "${mode}" "${workload}" ;;
     *)
       echo "unknown runner: ${runner}" >&2
       return 1
@@ -101,6 +108,8 @@ run_once() {
 echo "🏁 PGX vs QAIL (Go/Rust/Zig)"
 echo "============================"
 echo "rounds=${ROUNDS} (order rotates: pgx -> qail-rs -> qail-zig)"
+echo "modes=${MODES}"
+echo "workloads=${WORKLOADS}"
 echo
 
 echo "Building QAIL Rust runner..."
@@ -133,68 +142,78 @@ echo "Building QAIL Zig runner..."
 )
 
 echo
-for mode in single pipeline pool10; do
-  case "${mode}" in
-    single) label="Mode 1: multi single-query (1 conn, prepared)" ;;
-    pipeline) label="Mode 2: pipelined batch (1 conn, prepared pipeline)" ;;
-    pool10) label="Mode 3: pooling (10 open conns, per-conn prepared singles)" ;;
-    *) label="${mode}" ;;
+for workload in ${WORKLOADS}; do
+  case "${workload}" in
+    point) workload_label="Workload: point lookup (1 row, prepared)" ;;
+    wide_rows) workload_label="Workload: wide rows (128-512 rows/query, mixed types)" ;;
+    many_params) workload_label="Workload: many params (32 binds/query, scalar result)" ;;
+    *) workload_label="Workload: ${workload}" ;;
   esac
+  echo "${workload_label}"
 
-  echo "${label}"
-
-  qail_rs_runs=()
-  qail_zig_runs=()
-  pgx_runs=()
-
-  for ((i = 0; i < ROUNDS; i++)); do
-    case $((i % 3)) in
-      0) order=(pgx qail_rs qail_zig) ;;
-      1) order=(qail_rs qail_zig pgx) ;;
-      2) order=(qail_zig pgx qail_rs) ;;
+  for mode in ${MODES}; do
+    case "${mode}" in
+      single) label="  Mode 1: multi single-query (1 conn, prepared)" ;;
+      pipeline) label="  Mode 2: pipelined batch (1 conn, prepared pipeline)" ;;
+      pool10) label="  Mode 3: pooling (10 open conns, per-conn prepared singles)" ;;
+      *) label="  ${mode}" ;;
     esac
 
-    echo "  Round $((i + 1)) (${order[0]} -> ${order[1]} -> ${order[2]})"
+    echo "${label}"
 
-    unset pgx_qps qail_rs_qps qail_zig_qps
-    for runner in "${order[@]}"; do
-      qps="$(run_once "${runner}" "${mode}")"
-      case "${runner}" in
-        pgx)
-          pgx_qps="${qps}"
-          pgx_runs+=("${qps}")
-          ;;
-        qail_rs)
-          qail_rs_qps="${qps}"
-          qail_rs_runs+=("${qps}")
-          ;;
-        qail_zig)
-          qail_zig_qps="${qps}"
-          qail_zig_runs+=("${qps}")
-          ;;
+    qail_rs_runs=()
+    qail_zig_runs=()
+    pgx_runs=()
+
+    for ((i = 0; i < ROUNDS; i++)); do
+      case $((i % 3)) in
+        0) order=(pgx qail_rs qail_zig) ;;
+        1) order=(qail_rs qail_zig pgx) ;;
+        2) order=(qail_zig pgx qail_rs) ;;
       esac
+
+      echo "    Round $((i + 1)) (${order[0]} -> ${order[1]} -> ${order[2]})"
+
+      unset pgx_qps qail_rs_qps qail_zig_qps
+      for runner in "${order[@]}"; do
+        qps="$(run_once "${runner}" "${mode}" "${workload}")"
+        case "${runner}" in
+          pgx)
+            pgx_qps="${qps}"
+            pgx_runs+=("${qps}")
+            ;;
+          qail_rs)
+            qail_rs_qps="${qps}"
+            qail_rs_runs+=("${qps}")
+            ;;
+          qail_zig)
+            qail_zig_qps="${qps}"
+            qail_zig_runs+=("${qps}")
+            ;;
+        esac
+      done
+
+      printf "      pgx      : %8.0f q/s\n" "${pgx_qps}"
+      printf "      qail-rs  : %8.0f q/s\n" "${qail_rs_qps}"
+      printf "      qail-zig : %8.0f q/s\n" "${qail_zig_qps}"
     done
 
-    printf "    pgx      : %8.0f q/s\n" "${pgx_qps}"
-    printf "    qail-rs  : %8.0f q/s\n" "${qail_rs_qps}"
-    printf "    qail-zig : %8.0f q/s\n" "${qail_zig_qps}"
+    pgx_median="$(calc_median "${pgx_runs[@]}")"
+    pgx_p95="$(calc_percentile 0.95 "${pgx_runs[@]}")"
+    qail_rs_median="$(calc_median "${qail_rs_runs[@]}")"
+    qail_rs_p95="$(calc_percentile 0.95 "${qail_rs_runs[@]}")"
+    qail_zig_median="$(calc_median "${qail_zig_runs[@]}")"
+    qail_zig_p95="$(calc_percentile 0.95 "${qail_zig_runs[@]}")"
+    delta_rs_vs_pgx="$(calc_delta "${qail_rs_median}" "${pgx_median}")"
+    delta_zig_vs_pgx="$(calc_delta "${qail_zig_median}" "${pgx_median}")"
+    delta_zig_vs_rs="$(calc_delta "${qail_zig_median}" "${qail_rs_median}")"
+
+    printf "    pgx       median/p95: %8.0f / %8.0f q/s\n" "${pgx_median}" "${pgx_p95}"
+    printf "    qail-rs   median/p95: %8.0f / %8.0f q/s\n" "${qail_rs_median}" "${qail_rs_p95}"
+    printf "    qail-zig  median/p95: %8.0f / %8.0f q/s\n" "${qail_zig_median}" "${qail_zig_p95}"
+    printf "    delta (qail-rs vs pgx, median): %+0.2f%%\n" "${delta_rs_vs_pgx}"
+    printf "    delta (qail-zig vs pgx, median): %+0.2f%%\n" "${delta_zig_vs_pgx}"
+    printf "    delta (qail-zig vs qail-rs, median): %+0.2f%%\n" "${delta_zig_vs_rs}"
+    echo
   done
-
-  pgx_median="$(calc_median "${pgx_runs[@]}")"
-  pgx_p95="$(calc_percentile 0.95 "${pgx_runs[@]}")"
-  qail_rs_median="$(calc_median "${qail_rs_runs[@]}")"
-  qail_rs_p95="$(calc_percentile 0.95 "${qail_rs_runs[@]}")"
-  qail_zig_median="$(calc_median "${qail_zig_runs[@]}")"
-  qail_zig_p95="$(calc_percentile 0.95 "${qail_zig_runs[@]}")"
-  delta_rs_vs_pgx="$(calc_delta "${qail_rs_median}" "${pgx_median}")"
-  delta_zig_vs_pgx="$(calc_delta "${qail_zig_median}" "${pgx_median}")"
-  delta_zig_vs_rs="$(calc_delta "${qail_zig_median}" "${qail_rs_median}")"
-
-  printf "  pgx       median/p95: %8.0f / %8.0f q/s\n" "${pgx_median}" "${pgx_p95}"
-  printf "  qail-rs   median/p95: %8.0f / %8.0f q/s\n" "${qail_rs_median}" "${qail_rs_p95}"
-  printf "  qail-zig  median/p95: %8.0f / %8.0f q/s\n" "${qail_zig_median}" "${qail_zig_p95}"
-  printf "  delta (qail-rs vs pgx, median): %+0.2f%%\n" "${delta_rs_vs_pgx}"
-  printf "  delta (qail-zig vs pgx, median): %+0.2f%%\n" "${delta_zig_vs_pgx}"
-  printf "  delta (qail-zig vs qail-rs, median): %+0.2f%%\n" "${delta_zig_vs_rs}"
-  echo
 done
