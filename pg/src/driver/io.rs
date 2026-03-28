@@ -83,6 +83,100 @@ fn parse_data_row_payload_owned(payload: &[u8]) -> PgResult<Vec<Option<Vec<u8>>>
     Ok(columns)
 }
 
+#[inline]
+fn parse_data_row_payload_reuse(
+    payload: &[u8],
+    columns: &mut Vec<Option<Vec<u8>>>,
+) -> PgResult<()> {
+    if payload.len() < 2 {
+        return Err(PgError::Protocol("DataRow payload too short".into()));
+    }
+
+    let raw_count = i16::from_be_bytes([payload[0], payload[1]]);
+    if raw_count < 0 {
+        return Err(PgError::Protocol(format!(
+            "DataRow invalid column count: {}",
+            raw_count
+        )));
+    }
+    let column_count = raw_count as usize;
+    if column_count > (payload.len() - 2) / 4 + 1 {
+        return Err(PgError::Protocol(format!(
+            "DataRow claims {} columns but payload is only {} bytes",
+            column_count,
+            payload.len()
+        )));
+    }
+
+    let previous_len = columns.len();
+    if previous_len < column_count {
+        columns.reserve(column_count - previous_len);
+    }
+
+    let mut pos = 2usize;
+    for idx in 0..column_count {
+        if pos + 4 > payload.len() {
+            return Err(PgError::Protocol(
+                "DataRow truncated: missing column length".into(),
+            ));
+        }
+
+        let len = i32::from_be_bytes([
+            payload[pos],
+            payload[pos + 1],
+            payload[pos + 2],
+            payload[pos + 3],
+        ]);
+        pos += 4;
+
+        if len == -1 {
+            if idx < previous_len {
+                columns[idx] = None;
+            } else {
+                columns.push(None);
+            }
+            continue;
+        }
+        if len < -1 {
+            return Err(PgError::Protocol(format!(
+                "DataRow invalid column length: {}",
+                len
+            )));
+        }
+
+        let len = len as usize;
+        if len > payload.len().saturating_sub(pos) {
+            return Err(PgError::Protocol(
+                "DataRow truncated: column data exceeds payload".into(),
+            ));
+        }
+        let value = &payload[pos..pos + len];
+        pos += len;
+
+        if idx < previous_len {
+            match &mut columns[idx] {
+                Some(buf) => {
+                    buf.clear();
+                    buf.extend_from_slice(value);
+                }
+                None => columns[idx] = Some(value.to_vec()),
+            }
+        } else {
+            columns.push(Some(value.to_vec()));
+        }
+    }
+
+    if columns.len() > column_count {
+        columns.truncate(column_count);
+    }
+
+    if pos != payload.len() {
+        return Err(PgError::Protocol("DataRow has trailing bytes".into()));
+    }
+
+    Ok(())
+}
+
 impl PgConnection {
     #[inline]
     pub(crate) fn mark_io_desynced(&mut self) {
@@ -864,6 +958,95 @@ impl PgConnection {
                     // Other messages - skip
                     let _ = self.buffer.split_to(msg_len + 1);
                     return Ok((msg_type, None));
+                }
+            }
+
+            let n = self.read_with_timeout().await?;
+            if n == 0 {
+                return self.connection_desync("Connection closed".to_string());
+            }
+        }
+    }
+
+    /// FAST receive for result consumption into a reusable row buffer.
+    ///
+    /// This preserves owned row semantics while reusing allocations across
+    /// `DataRow` messages.
+    #[inline]
+    pub(crate) async fn recv_fill_data_row_fast(
+        &mut self,
+        row_buf: &mut Vec<Option<Vec<u8>>>,
+    ) -> PgResult<u8> {
+        loop {
+            if self.buffer.len() >= 5 {
+                let msg_len = u32::from_be_bytes([
+                    self.buffer[1],
+                    self.buffer[2],
+                    self.buffer[3],
+                    self.buffer[4],
+                ]) as usize;
+
+                if msg_len < 4 {
+                    return self.protocol_desync(format!(
+                        "Invalid message length: {} (minimum 4)",
+                        msg_len
+                    ));
+                }
+
+                if msg_len > MAX_MESSAGE_SIZE {
+                    return self.protocol_desync(format!(
+                        "Message too large: {} bytes (max {})",
+                        msg_len, MAX_MESSAGE_SIZE
+                    ));
+                }
+
+                if self.buffer.len() > msg_len {
+                    let msg_type = self.buffer[0];
+
+                    if msg_type == b'E' || msg_type == b'A' {
+                        let msg_bytes = self.buffer.split_to(msg_len + 1);
+                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
+                            Ok(decoded) => decoded,
+                            Err(e) => return self.protocol_desync(e),
+                        };
+                        match msg {
+                            BackendMessage::ErrorResponse(err) => {
+                                return Err(PgError::QueryServer(err.into()));
+                            }
+                            BackendMessage::NotificationResponse {
+                                process_id,
+                                channel,
+                                payload,
+                            } => {
+                                self.notifications
+                                    .push_back(super::notification::Notification {
+                                        process_id,
+                                        channel,
+                                        payload,
+                                    });
+                                continue;
+                            }
+                            _ => {
+                                return Err(PgError::Protocol(
+                                    "Unexpected fast-path message".into(),
+                                ));
+                            }
+                        }
+                    }
+
+                    if msg_type == b'D' {
+                        let parse_result = {
+                            let payload = &self.buffer[5..msg_len + 1];
+                            parse_data_row_payload_reuse(payload, row_buf)
+                        };
+
+                        let _ = self.buffer.split_to(msg_len + 1);
+                        parse_result?;
+                        return Ok(msg_type);
+                    }
+
+                    let _ = self.buffer.split_to(msg_len + 1);
+                    return Ok(msg_type);
                 }
             }
 

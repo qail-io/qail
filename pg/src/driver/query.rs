@@ -21,7 +21,6 @@ fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError
     }
     *slot = Some(err);
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimpleStatementState {
     AwaitingResult,
@@ -880,12 +879,13 @@ impl PgConnection {
         self.flush_write_buf().await?;
 
         let mut row_count = 0usize;
+        let mut row_buf: Vec<Option<Vec<u8>>> = Vec::new();
         let mut error: Option<PgError> = None;
         let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
 
         loop {
-            match self.recv_with_data_fast().await {
-                Ok((msg_type, data)) => {
+            match self.recv_fill_data_row_fast(&mut row_buf).await {
+                Ok(msg_type) => {
                     flow.validate_msg_type(
                         msg_type,
                         "prepared single reuse visit execute",
@@ -894,10 +894,8 @@ impl PgConnection {
                     match msg_type {
                         b'2' | b'T' | b'n' => {}
                         b'D' => {
-                            if error.is_none()
-                                && let Some(row) = data.as_deref()
-                            {
-                                on_row(row)?;
+                            if error.is_none() {
+                                on_row(row_buf.as_slice())?;
                                 row_count += 1;
                             }
                         }

@@ -1317,6 +1317,7 @@ impl PgConnection {
         self.write_all_with_timeout(&buf, "stream write").await?;
         self.flush_with_timeout("stream flush").await?;
 
+        let mut row_buf: Vec<Option<Vec<u8>>> = Vec::new();
         let mut error: Option<PgError> = None;
         let mut flow = FastExtendedFlowTracker::new(FastExtendedFlowConfig {
             expected_queries: params_batch.len(),
@@ -1328,8 +1329,8 @@ impl PgConnection {
         });
 
         loop {
-            match self.recv_with_data_fast().await {
-                Ok((msg_type, data)) => {
+            match self.recv_fill_data_row_fast(&mut row_buf).await {
+                Ok(msg_type) => {
                     if let Err(err) = flow.validate_msg_type(
                         msg_type,
                         "pipeline_execute_prepared_visit_rows",
@@ -1340,10 +1341,8 @@ impl PgConnection {
                     match msg_type {
                         b'2' | b'T' | b'C' | b'n' => {}
                         b'D' => {
-                            if error.is_none()
-                                && let Some(row) = data.as_deref()
-                            {
-                                on_row(row)?;
+                            if error.is_none() {
+                                on_row(row_buf.as_slice())?;
                             }
                         }
                         b'Z' => {
