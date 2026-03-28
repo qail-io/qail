@@ -925,4 +925,81 @@ impl PgConnection {
             }
         }
     }
+
+    /// Sequential prepared query using reusable connection buffers and zero-copy row visitor.
+    ///
+    /// Rows are backed by a shared payload buffer plus column offsets, avoiding
+    /// per-cell byte copies during receive.
+    #[inline]
+    pub async fn query_prepared_single_reuse_visit_bytes_rows_with_result_format<F>(
+        &mut self,
+        stmt: &super::PreparedStatement,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+        mut on_row: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(&super::PgBytesRow) -> PgResult<()>,
+    {
+        self.write_buf.clear();
+
+        PgEncoder::encode_bind_to_with_result_format(
+            &mut self.write_buf,
+            &stmt.name,
+            params,
+            result_format,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_execute_to(&mut self.write_buf);
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+
+        self.flush_write_buf().await?;
+
+        let mut row_count = 0usize;
+        let mut row = super::PgBytesRow::default();
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
+
+        loop {
+            match self.recv_fill_zerocopy_row_fast(&mut row).await {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(
+                        msg_type,
+                        "prepared single reuse visit bytes execute",
+                        error.is_some(),
+                    )?;
+                    match msg_type {
+                        b'2' | b'T' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_row(&row)?;
+                                row_count += 1;
+                            }
+                        }
+                        b'C' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(row_count);
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "prepared single reuse visit bytes execute",
+                                other,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
 }

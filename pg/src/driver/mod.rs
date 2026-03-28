@@ -69,7 +69,9 @@ pub use replication::{
 };
 pub use rls::RlsContext;
 pub use row::QailRow;
-pub use types::{ColumnInfo, PgError, PgResult, PgRow, PgServerError, QueryResult, ResultFormat};
+pub use types::{
+    ColumnInfo, PgBytesRow, PgError, PgResult, PgRow, PgServerError, QueryResult, ResultFormat,
+};
 
 // ── Crate-internal re-exports ───────────────────────────────────────
 pub(crate) use connection::{CANCEL_REQUEST_CODE, parse_affected_rows};

@@ -1374,6 +1374,99 @@ impl PgConnection {
         }
     }
 
+    /// Pipeline execution with zero-copy row visitor.
+    ///
+    /// Rows are backed by one shared payload buffer plus column offsets,
+    /// avoiding per-cell byte copies during receive.
+    pub async fn pipeline_execute_prepared_visit_bytes_rows<F>(
+        &mut self,
+        stmt: &super::PreparedStatement,
+        params_batch: &[Vec<Option<Vec<u8>>>],
+        mut on_row: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(&super::PgBytesRow) -> PgResult<()>,
+    {
+        if params_batch.is_empty() {
+            return Ok(0);
+        }
+
+        if !self.prepared_statements.contains_key(&stmt.name) {
+            return Err(PgError::Query(
+                "Statement not prepared. Call prepare() first.".to_string(),
+            ));
+        }
+
+        let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
+
+        for params in params_batch {
+            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+                .map_err(|e| PgError::Encode(e.to_string()))?;
+            PgEncoder::encode_execute_to(&mut buf);
+        }
+
+        PgEncoder::encode_sync_to(&mut buf);
+
+        self.write_all_with_timeout(&buf, "stream write").await?;
+        self.flush_with_timeout("stream flush").await?;
+
+        let mut row = super::PgBytesRow::default();
+        let mut error: Option<PgError> = None;
+        let mut flow = FastExtendedFlowTracker::new(FastExtendedFlowConfig {
+            expected_queries: params_batch.len(),
+            allow_parse_complete: false,
+            require_parse_before_bind: false,
+            no_data_counts_as_completion: true,
+            allow_no_data_nonterminal: false,
+            expected_parse_completes: Some(0),
+        });
+
+        loop {
+            match self.recv_fill_zerocopy_row_fast(&mut row).await {
+                Ok(msg_type) => {
+                    if let Err(err) = flow.validate_msg_type(
+                        msg_type,
+                        "pipeline_execute_prepared_visit_bytes_rows",
+                        error.is_some(),
+                    ) {
+                        return return_with_desync(self, err);
+                    }
+                    match msg_type {
+                        b'2' | b'T' | b'C' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_row(&row)?;
+                            }
+                        }
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(flow.completed_queries());
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "pipeline_execute_prepared_visit_bytes_rows",
+                                    other,
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
     /// ULTRA-FAST pipeline for 2-column SELECT queries.
     pub async fn pipeline_execute_prepared_rows_2cols_bytes(
         &mut self,

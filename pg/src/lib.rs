@@ -22,11 +22,12 @@ pub use driver::gss::{
 pub use driver::{
     AstPipelineMode, AuthSettings, AutoCountPath, AutoCountPlan, ConnectOptions,
     EnterpriseAuthMechanism, GssEncMode, GssTokenProvider, GssTokenProviderEx, GssTokenRequest,
-    IdentifySystem, Notification, PgConnection, PgDriver, PgDriverBuilder, PgError, PgPool,
-    PgResult, PgRow, PgServerError, PoolConfig, PoolStats, PooledConnection, PreparedAstQuery,
-    QailRow, QueryResult, ReplicationKeepalive, ReplicationOption, ReplicationSlotInfo,
-    ReplicationStreamMessage, ReplicationStreamStart, ReplicationXLogData, ResultFormat,
-    ScopedPoolFuture, ScramChannelBindingMode, TlsConfig, TlsMode, scope, spawn_pool_maintenance,
+    IdentifySystem, Notification, PgBytesRow, PgConnection, PgDriver, PgDriverBuilder, PgError,
+    PgPool, PgResult, PgRow, PgServerError, PoolConfig, PoolStats, PooledConnection,
+    PreparedAstQuery, QailRow, QueryResult, ReplicationKeepalive, ReplicationOption,
+    ReplicationSlotInfo, ReplicationStreamMessage, ReplicationStreamStart, ReplicationXLogData,
+    ResultFormat, ScopedPoolFuture, ScramChannelBindingMode, TlsConfig, TlsMode, scope,
+    spawn_pool_maintenance,
 };
 pub use protocol::PgEncoder;
 pub use types::{

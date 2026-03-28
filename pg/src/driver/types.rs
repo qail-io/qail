@@ -1,6 +1,7 @@
 //! Core types: ColumnInfo, PgRow, PgError, PgResult, QueryResult, ResultFormat,
 //! and wire-protocol message utilities.
 
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -44,6 +45,18 @@ impl ColumnInfo {
 pub struct PgRow {
     /// Raw column values — `None` represents SQL `NULL`.
     pub columns: Vec<Option<Vec<u8>>>,
+    /// Shared column metadata for decoding values by name or type.
+    pub column_info: Option<Arc<ColumnInfo>>,
+}
+
+/// PostgreSQL row backed by a single shared payload buffer.
+///
+/// This avoids per-cell byte copies by storing one `Bytes` payload plus
+/// column offsets into that payload.
+#[derive(Debug, Clone, Default)]
+pub struct PgBytesRow {
+    pub(crate) payload: Bytes,
+    pub(crate) spans: Vec<Option<(usize, usize)>>,
     /// Shared column metadata for decoding values by name or type.
     pub column_info: Option<Arc<ColumnInfo>>,
 }

@@ -8,7 +8,7 @@
 //!   cargo run --release -p qail-pg --example qail_pgx_modes_once -- pipeline --workload many_params --plain
 
 use qail_pg::driver::PreparedStatement;
-use qail_pg::{PgConnection, PgEncoder, PgPool, PoolConfig, TlsMode};
+use qail_pg::{PgBytesRow, PgConnection, PgEncoder, PgPool, PoolConfig, TlsMode};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Barrier;
@@ -230,12 +230,12 @@ async fn run_single_iteration(
                 consume_scalar_rows(&rows, &mut stats);
             }
             ResultMode::WideRows => {
-                conn.query_prepared_single_reuse_visit_rows_with_result_format(
+                conn.query_prepared_single_reuse_visit_bytes_rows_with_result_format(
                     stmt,
                     p,
                     PgEncoder::FORMAT_TEXT,
                     |row| {
-                        consume_wide_row(row, &mut stats);
+                        consume_wide_bytes_row(row, &mut stats);
                         Ok(())
                     },
                 )
@@ -280,8 +280,8 @@ async fn run_pipeline_iteration(
         ResultMode::WideRows => {
             let mut stats = BatchStats::default();
             stats.completed = conn
-                .pipeline_execute_prepared_visit_rows(stmt, params, |row| {
-                    consume_wide_row(row, &mut stats);
+                .pipeline_execute_prepared_visit_bytes_rows(stmt, params, |row| {
+                    consume_wide_bytes_row(row, &mut stats);
                     Ok(())
                 })
                 .await?;
@@ -499,41 +499,39 @@ fn consume_scalar_row(row: &[Option<Vec<u8>>], stats: &mut BatchStats) {
     }
 }
 
-fn consume_wide_row(row: &[Option<Vec<u8>>], stats: &mut BatchStats) {
+fn consume_wide_bytes_row(row: &PgBytesRow, stats: &mut BatchStats) {
     let mut row_hash = FNV_OFFSET;
-    for (idx, value) in row.iter().enumerate() {
-        match value.as_deref() {
-            Some(bytes) => {
-                stats.bytes += bytes.len();
-                match idx {
-                    0 | 4 => {
-                        let parsed = std::str::from_utf8(bytes)
-                            .ok()
-                            .and_then(|s| s.parse::<i64>().ok())
-                            .unwrap_or(bytes.len() as i64);
-                        row_hash = row_hash.wrapping_add(parsed as u64);
-                    }
-                    5 => {
-                        row_hash = row_hash.wrapping_add(usize::from(
-                            bytes.first().is_some_and(|b| matches!(*b, b't' | b'T')),
-                        ) as u64);
-                    }
-                    6 => {
-                        let parsed = std::str::from_utf8(bytes)
-                            .ok()
-                            .and_then(|s| s.parse::<f64>().ok())
-                            .unwrap_or(0.0);
-                        row_hash = row_hash.wrapping_add((parsed * 1000.0) as u64);
-                    }
-                    _ => row_hash = mix_hash(row_hash, bytes),
+    row.for_each_column(|idx, value| match value {
+        Some(bytes) => {
+            stats.bytes += bytes.len();
+            match idx {
+                0 | 4 => {
+                    let parsed = std::str::from_utf8(bytes)
+                        .ok()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(bytes.len() as i64);
+                    row_hash = row_hash.wrapping_add(parsed as u64);
                 }
-            }
-            None => {
-                row_hash = mix_hash(row_hash, b"NULL");
-                row_hash = row_hash.wrapping_add(idx as u64);
+                5 => {
+                    row_hash = row_hash.wrapping_add(usize::from(
+                        bytes.first().is_some_and(|b| matches!(*b, b't' | b'T')),
+                    ) as u64);
+                }
+                6 => {
+                    let parsed = std::str::from_utf8(bytes)
+                        .ok()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    row_hash = row_hash.wrapping_add((parsed * 1000.0) as u64);
+                }
+                _ => row_hash = mix_hash(row_hash, bytes),
             }
         }
-    }
+        None => {
+            row_hash = mix_hash(row_hash, b"NULL");
+            row_hash = row_hash.wrapping_add(idx as u64);
+        }
+    });
     stats.rows += 1;
     stats.checksum = stats.checksum.wrapping_add(row_hash);
 }

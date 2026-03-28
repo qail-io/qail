@@ -2,9 +2,9 @@
 //!
 //! This module provides low-level send/receive methods.
 
-use super::{PgConnection, PgError, PgResult, is_ignorable_session_message};
+use super::{PgBytesRow, PgConnection, PgError, PgResult, is_ignorable_session_message};
 use crate::protocol::{BackendMessage, FrontendMessage, PgEncoder};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(crate) const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024; // 64 MB — prevents OOM from malicious server messages
@@ -171,6 +171,78 @@ fn parse_data_row_payload_reuse(
     }
 
     if pos != payload.len() {
+        return Err(PgError::Protocol("DataRow has trailing bytes".into()));
+    }
+
+    Ok(())
+}
+
+#[inline]
+fn parse_data_row_payload_zerocopy(payload: Bytes, row: &mut PgBytesRow) -> PgResult<()> {
+    if payload.len() < 2 {
+        return Err(PgError::Protocol("DataRow payload too short".into()));
+    }
+
+    let raw_count = i16::from_be_bytes([payload[0], payload[1]]);
+    if raw_count < 0 {
+        return Err(PgError::Protocol(format!(
+            "DataRow invalid column count: {}",
+            raw_count
+        )));
+    }
+    let column_count = raw_count as usize;
+    if column_count > (payload.len() - 2) / 4 + 1 {
+        return Err(PgError::Protocol(format!(
+            "DataRow claims {} columns but payload is only {} bytes",
+            column_count,
+            payload.len()
+        )));
+    }
+
+    row.payload = payload;
+    row.spans.clear();
+    if row.spans.capacity() < column_count {
+        row.spans.reserve(column_count - row.spans.capacity());
+    }
+
+    let mut pos = 2usize;
+    for _ in 0..column_count {
+        if pos + 4 > row.payload.len() {
+            return Err(PgError::Protocol(
+                "DataRow truncated: missing column length".into(),
+            ));
+        }
+
+        let len = i32::from_be_bytes([
+            row.payload[pos],
+            row.payload[pos + 1],
+            row.payload[pos + 2],
+            row.payload[pos + 3],
+        ]);
+        pos += 4;
+
+        if len == -1 {
+            row.spans.push(None);
+            continue;
+        }
+        if len < -1 {
+            return Err(PgError::Protocol(format!(
+                "DataRow invalid column length: {}",
+                len
+            )));
+        }
+
+        let len = len as usize;
+        if len > row.payload.len().saturating_sub(pos) {
+            return Err(PgError::Protocol(
+                "DataRow truncated: column data exceeds payload".into(),
+            ));
+        }
+        row.spans.push(Some((pos, len)));
+        pos += len;
+    }
+
+    if pos != row.payload.len() {
         return Err(PgError::Protocol("DataRow has trailing bytes".into()));
     }
 
@@ -1042,6 +1114,88 @@ impl PgConnection {
 
                         let _ = self.buffer.split_to(msg_len + 1);
                         parse_result?;
+                        return Ok(msg_type);
+                    }
+
+                    let _ = self.buffer.split_to(msg_len + 1);
+                    return Ok(msg_type);
+                }
+            }
+
+            let n = self.read_with_timeout().await?;
+            if n == 0 {
+                return self.connection_desync("Connection closed".to_string());
+            }
+        }
+    }
+
+    /// FAST receive for result consumption into a reusable zero-copy row.
+    #[inline]
+    pub(crate) async fn recv_fill_zerocopy_row_fast(
+        &mut self,
+        row: &mut PgBytesRow,
+    ) -> PgResult<u8> {
+        loop {
+            if self.buffer.len() >= 5 {
+                let msg_len = u32::from_be_bytes([
+                    self.buffer[1],
+                    self.buffer[2],
+                    self.buffer[3],
+                    self.buffer[4],
+                ]) as usize;
+
+                if msg_len < 4 {
+                    return self.protocol_desync(format!(
+                        "Invalid message length: {} (minimum 4)",
+                        msg_len
+                    ));
+                }
+
+                if msg_len > MAX_MESSAGE_SIZE {
+                    return self.protocol_desync(format!(
+                        "Message too large: {} bytes (max {})",
+                        msg_len, MAX_MESSAGE_SIZE
+                    ));
+                }
+
+                if self.buffer.len() > msg_len {
+                    let msg_type = self.buffer[0];
+
+                    if msg_type == b'E' || msg_type == b'A' {
+                        let msg_bytes = self.buffer.split_to(msg_len + 1);
+                        let (msg, _) = match BackendMessage::decode(&msg_bytes) {
+                            Ok(decoded) => decoded,
+                            Err(e) => return self.protocol_desync(e),
+                        };
+                        match msg {
+                            BackendMessage::ErrorResponse(err) => {
+                                return Err(PgError::QueryServer(err.into()));
+                            }
+                            BackendMessage::NotificationResponse {
+                                process_id,
+                                channel,
+                                payload,
+                            } => {
+                                self.notifications
+                                    .push_back(super::notification::Notification {
+                                        process_id,
+                                        channel,
+                                        payload,
+                                    });
+                                continue;
+                            }
+                            _ => {
+                                return Err(PgError::Protocol(
+                                    "Unexpected fast-path message".into(),
+                                ));
+                            }
+                        }
+                    }
+
+                    if msg_type == b'D' {
+                        let msg_bytes = self.buffer.split_to(msg_len + 1).freeze();
+                        let payload = msg_bytes.slice(5..);
+                        parse_data_row_payload_zerocopy(payload, row)?;
                         return Ok(msg_type);
                     }
 
