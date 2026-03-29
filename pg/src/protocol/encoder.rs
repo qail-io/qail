@@ -831,6 +831,16 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_parse_to_matches_allocate_variant() {
+        let expected = PgEncoder::try_encode_parse("stmt", "SELECT $1::int4", &[23]).unwrap();
+
+        let mut buf = BytesMut::from(&b"prefix"[..]);
+        PgEncoder::try_encode_parse_to(&mut buf, "stmt", "SELECT $1::int4", &[23]).unwrap();
+
+        assert_eq!(&buf[6..], expected.as_ref());
+    }
+
+    #[test]
     fn test_encode_bind() {
         let params = vec![
             Some(b"42".to_vec()),
@@ -988,6 +998,14 @@ mod tests {
         let err =
             PgEncoder::try_encode_parse("s", "SELECT 1", &param_types).expect_err("must reject");
         assert_eq!(err, EncodeError::TooManyParameters(param_types.len()));
+    }
+
+    #[test]
+    fn test_encode_parse_to_with_nul_rejected() {
+        let mut buf = BytesMut::new();
+        let err =
+            PgEncoder::try_encode_parse_to(&mut buf, "s", "SELECT 1\0", &[]).expect_err("reject");
+        assert_eq!(err, EncodeError::NullByte);
     }
 
     #[test]
