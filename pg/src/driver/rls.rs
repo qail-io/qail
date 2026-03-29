@@ -40,12 +40,10 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
         "BEGIN; SET LOCAL app.is_global = '{}'; \
          SELECT set_config('app.current_user_id', '{}', true), \
                 set_config('app.current_tenant_id', '{}', true), \
-                set_config('app.tenant_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         is_global,
         u_id,
-        t_id,
         t_id,
         ag_id,
         ctx.bypasses_rls(),
@@ -101,14 +99,12 @@ pub(crate) fn context_to_sql_with_timeouts(
          SET LOCAL app.is_global = '{}'; \
          SELECT set_config('app.current_user_id', '{}', true), \
                 set_config('app.current_tenant_id', '{}', true), \
-                set_config('app.tenant_id', '{}', true), \
                 set_config('app.current_agent_id', '{}', true), \
                 set_config('app.is_super_admin', '{}', true)",
         statement_timeout_ms,
         lock_clause,
         is_global,
         u_id,
-        t_id,
         t_id,
         ag_id,
         ctx.bypasses_rls(),
@@ -158,7 +154,6 @@ mod tests {
         let sql = context_to_sql(&ctx);
         assert!(sql.contains("'abc-123'"));
         assert!(sql.contains("app.current_tenant_id"));
-        assert!(sql.contains("app.tenant_id"));
         assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
         assert!(sql.contains("'false'")); // is_super_admin
     }

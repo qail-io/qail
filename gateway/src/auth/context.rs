@@ -62,16 +62,7 @@ impl AuthContext {
     /// Returns `true` when JWT claims explicitly grant platform-admin authority.
     pub fn has_platform_admin_claim(&self) -> bool {
         has_truthy_claim(&self.claims, "platform_admin")
-            || has_truthy_claim(&self.claims, "is_platform_admin")
             || has_truthy_claim(&self.claims, "qail_platform_admin")
-    }
-
-    /// Returns `true` for legacy gateway admin aliases.
-    ///
-    /// These roles are still accepted for compatibility on non-branch
-    /// admin surfaces (for example EXPLAIN ANALYZE).
-    pub fn has_legacy_admin_role(&self) -> bool {
-        self.role.eq_ignore_ascii_case("admin") || self.role.eq_ignore_ascii_case("super_admin")
     }
 
     /// Returns `true` when the caller can execute branch virtualization APIs.
@@ -84,10 +75,9 @@ impl AuthContext {
 
     /// Returns `true` when the caller can run EXPLAIN ANALYZE.
     ///
-    /// Kept compatible with existing `admin` / `super_admin` deployments while
-    /// also allowing canonical `administrator`.
+    /// Uses canonical platform-admin semantics only.
     pub fn can_run_explain_analyze(&self) -> bool {
-        self.is_platform_admin() || self.has_legacy_admin_role()
+        self.is_platform_admin()
     }
 
     /// Returns `true` if the context represents a real (non-anonymous) user.

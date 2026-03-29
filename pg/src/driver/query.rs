@@ -21,6 +21,26 @@ fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError
     }
     *slot = Some(err);
 }
+
+#[inline]
+fn reserve_prepared_single_write_buf(
+    conn: &mut PgConnection,
+    stmt: &super::PreparedStatement,
+    params: &[Option<Vec<u8>>],
+    result_format: i16,
+) -> PgResult<()> {
+    conn.write_buf.clear();
+    let needed = PgEncoder::bind_execute_sync_wire_len_with_formats(
+        &stmt.name,
+        params,
+        PgEncoder::FORMAT_TEXT,
+        result_format,
+    )
+    .map_err(|e| PgError::Encode(e.to_string()))?;
+    conn.write_buf.reserve(needed);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimpleStatementState {
     AwaitingResult,
@@ -1049,7 +1069,7 @@ impl PgConnection {
         params: &[Option<Vec<u8>>],
         result_format: i16,
     ) -> PgResult<Vec<Vec<Option<Vec<u8>>>>> {
-        self.write_buf.clear();
+        reserve_prepared_single_write_buf(self, stmt, params, result_format)?;
 
         PgEncoder::encode_bind_to_with_result_format(
             &mut self.write_buf,
@@ -1117,7 +1137,7 @@ impl PgConnection {
     where
         F: FnMut(&[Option<Vec<u8>>]) -> PgResult<()>,
     {
-        self.write_buf.clear();
+        reserve_prepared_single_write_buf(self, stmt, params, result_format)?;
 
         PgEncoder::encode_bind_to_with_result_format(
             &mut self.write_buf,
@@ -1194,7 +1214,7 @@ impl PgConnection {
     where
         F: FnMut(&super::PgBytesRow) -> PgResult<()>,
     {
-        self.write_buf.clear();
+        reserve_prepared_single_write_buf(self, stmt, params, result_format)?;
 
         PgEncoder::encode_bind_to_with_result_format(
             &mut self.write_buf,
@@ -1269,7 +1289,7 @@ impl PgConnection {
     where
         F: FnMut(Option<&[u8]>) -> PgResult<()>,
     {
-        self.write_buf.clear();
+        reserve_prepared_single_write_buf(self, stmt, params, result_format)?;
 
         PgEncoder::encode_bind_to_with_result_format(
             &mut self.write_buf,

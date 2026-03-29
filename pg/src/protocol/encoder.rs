@@ -63,6 +63,17 @@ impl PgEncoder {
     }
 
     #[inline(always)]
+    fn params_wire_len(params: &[Option<Vec<u8>>]) -> Result<usize, EncodeError> {
+        params.iter().try_fold(0usize, |acc, p| {
+            let field_size = 4usize
+                .checked_add(p.as_ref().map_or(0usize, |v| v.len()))
+                .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+            acc.checked_add(field_size)
+                .ok_or(EncodeError::MessageTooLarge(usize::MAX))
+        })
+    }
+
+    #[inline(always)]
     fn encode_result_formats_vec(content: &mut Vec<u8>, result_format: i16) {
         if result_format == Self::FORMAT_TEXT {
             content.extend_from_slice(&0i16.to_be_bytes());
@@ -103,6 +114,64 @@ impl PgEncoder {
     #[inline(always)]
     fn has_nul(s: &str) -> bool {
         s.as_bytes().contains(&0)
+    }
+
+    /// Wire length of a single Bind message, including the type byte.
+    #[inline]
+    pub fn bind_wire_len_with_formats(
+        statement: &str,
+        params: &[Option<Vec<u8>>],
+        param_format: i16,
+        result_format: i16,
+    ) -> Result<usize, EncodeError> {
+        if Self::has_nul(statement) {
+            return Err(EncodeError::NullByte);
+        }
+        if params.len() > i16::MAX as usize {
+            return Err(EncodeError::TooManyParameters(params.len()));
+        }
+
+        let params_size = Self::params_wire_len(params)?;
+        let param_formats_size = Self::param_format_wire_len(param_format);
+        let result_formats_size = Self::result_format_wire_len(result_format);
+        let content_len = 1usize
+            .checked_add(statement.len())
+            .and_then(|v| v.checked_add(1))
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(param_formats_size))
+            .and_then(|v| v.checked_add(params_size))
+            .and_then(|v| v.checked_add(result_formats_size))
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        let wire_len = Self::content_len_to_wire_len(content_len)? as usize;
+        1usize
+            .checked_add(wire_len)
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))
+    }
+
+    /// Wire length of Bind + Execute, including message type bytes.
+    #[inline]
+    pub fn bind_execute_wire_len_with_formats(
+        statement: &str,
+        params: &[Option<Vec<u8>>],
+        param_format: i16,
+        result_format: i16,
+    ) -> Result<usize, EncodeError> {
+        Self::bind_wire_len_with_formats(statement, params, param_format, result_format)?
+            .checked_add(10)
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))
+    }
+
+    /// Wire length of Bind + Execute + Sync, including message type bytes.
+    #[inline]
+    pub fn bind_execute_sync_wire_len_with_formats(
+        statement: &str,
+        params: &[Option<Vec<u8>>],
+        param_format: i16,
+        result_format: i16,
+    ) -> Result<usize, EncodeError> {
+        Self::bind_execute_wire_len_with_formats(statement, params, param_format, result_format)?
+            .checked_add(5)
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))
     }
 
     /// Fallible simple-query encoder.
@@ -710,13 +779,7 @@ impl PgEncoder {
         // Calculate content length upfront
         // portal(1) + statement(len+1) + param_formats + param_count(2)
         // + params_data + result_formats(2 or 4)
-        let params_size = params.iter().try_fold(0usize, |acc, p| {
-            let field_size = 4usize
-                .checked_add(p.as_ref().map_or(0usize, |v| v.len()))
-                .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
-            acc.checked_add(field_size)
-                .ok_or(EncodeError::MessageTooLarge(usize::MAX))
-        })?;
+        let params_size = Self::params_wire_len(params)?;
         let param_formats_size = Self::param_format_wire_len(param_format);
         let result_formats_size = Self::result_format_wire_len(result_format);
         let content_len = 1usize
@@ -1032,6 +1095,49 @@ mod tests {
         assert_eq!(&buf[7..11], &[0, 1, 0, 1]);
         assert_eq!(&buf[11..13], &[0, 0]);
         assert_eq!(&buf[13..17], &[0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn test_bind_execute_sync_wire_len_matches_encoded_bytes() {
+        let params = vec![Some(b"abc".to_vec()), None, Some(b"defghi".to_vec())];
+        let mut buf = BytesMut::new();
+        PgEncoder::encode_bind_to_with_result_format(&mut buf, "stmt", &params, PgEncoder::FORMAT_TEXT)
+            .unwrap();
+        PgEncoder::encode_execute_to(&mut buf);
+        PgEncoder::encode_sync_to(&mut buf);
+
+        let expected = PgEncoder::bind_execute_sync_wire_len_with_formats(
+            "stmt",
+            &params,
+            PgEncoder::FORMAT_TEXT,
+            PgEncoder::FORMAT_TEXT,
+        )
+        .unwrap();
+        assert_eq!(buf.len(), expected);
+    }
+
+    #[test]
+    fn test_bind_execute_wire_len_matches_encoded_bytes_binary_formats() {
+        let params = vec![Some(vec![1, 2, 3, 4]), Some(vec![5, 6])];
+        let mut buf = BytesMut::new();
+        PgEncoder::encode_bind_to_with_formats(
+            &mut buf,
+            "stmt",
+            &params,
+            PgEncoder::FORMAT_BINARY,
+            PgEncoder::FORMAT_BINARY,
+        )
+        .unwrap();
+        PgEncoder::encode_execute_to(&mut buf);
+
+        let expected = PgEncoder::bind_execute_wire_len_with_formats(
+            "stmt",
+            &params,
+            PgEncoder::FORMAT_BINARY,
+            PgEncoder::FORMAT_BINARY,
+        )
+        .unwrap();
+        assert_eq!(buf.len(), expected);
     }
 
     #[test]

@@ -83,6 +83,31 @@ fn rollback_new_cached_statements(conn: &mut PgConnection, new_stmt_hashes: &[u6
     }
 }
 
+#[inline]
+fn reserve_prepared_pipeline_write_buf(
+    conn: &mut PgConnection,
+    stmt: &super::PreparedStatement,
+    params_batch: &[Vec<Option<Vec<u8>>>],
+    result_format: i16,
+) -> PgResult<()> {
+    conn.write_buf.clear();
+    let mut needed = 5usize;
+    for params in params_batch {
+        let bind_execute = PgEncoder::bind_execute_wire_len_with_formats(
+            &stmt.name,
+            params,
+            PgEncoder::FORMAT_TEXT,
+            result_format,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
+        needed = needed
+            .checked_add(bind_execute)
+            .ok_or_else(|| PgError::Encode("prepared pipeline batch too large".to_string()))?;
+    }
+    conn.write_buf.reserve(needed);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 struct FastExtendedFlowConfig {
     expected_queries: usize,
@@ -1420,18 +1445,16 @@ impl PgConnection {
             ));
         }
 
-        let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
+        reserve_prepared_pipeline_write_buf(self, stmt, params_batch, PgEncoder::FORMAT_TEXT)?;
 
         for params in params_batch {
-            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+            PgEncoder::encode_bind_to(&mut self.write_buf, &stmt.name, params)
                 .map_err(|e| PgError::Encode(e.to_string()))?;
-            PgEncoder::encode_execute_to(&mut buf);
+            PgEncoder::encode_execute_to(&mut self.write_buf);
         }
 
-        PgEncoder::encode_sync_to(&mut buf);
-
-        self.write_all_with_timeout(&buf, "stream write").await?;
-        self.flush_with_timeout("stream flush").await?;
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+        self.flush_write_buf().await?;
 
         // Collect results using ZERO-COPY Bytes
         let mut all_results: Vec<Vec<Vec<Option<bytes::Bytes>>>> =
@@ -1538,18 +1561,16 @@ impl PgConnection {
             ));
         }
 
-        let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
+        reserve_prepared_pipeline_write_buf(self, stmt, params_batch, PgEncoder::FORMAT_TEXT)?;
 
         for params in params_batch {
-            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+            PgEncoder::encode_bind_to(&mut self.write_buf, &stmt.name, params)
                 .map_err(|e| PgError::Encode(e.to_string()))?;
-            PgEncoder::encode_execute_to(&mut buf);
+            PgEncoder::encode_execute_to(&mut self.write_buf);
         }
 
-        PgEncoder::encode_sync_to(&mut buf);
-
-        self.write_all_with_timeout(&buf, "stream write").await?;
-        self.flush_with_timeout("stream flush").await?;
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+        self.flush_write_buf().await?;
 
         let mut row_buf: Vec<Option<Vec<u8>>> = Vec::new();
         let mut error: Option<PgError> = None;
@@ -1631,18 +1652,16 @@ impl PgConnection {
             ));
         }
 
-        let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
+        reserve_prepared_pipeline_write_buf(self, stmt, params_batch, PgEncoder::FORMAT_TEXT)?;
 
         for params in params_batch {
-            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+            PgEncoder::encode_bind_to(&mut self.write_buf, &stmt.name, params)
                 .map_err(|e| PgError::Encode(e.to_string()))?;
-            PgEncoder::encode_execute_to(&mut buf);
+            PgEncoder::encode_execute_to(&mut self.write_buf);
         }
 
-        PgEncoder::encode_sync_to(&mut buf);
-
-        self.write_all_with_timeout(&buf, "stream write").await?;
-        self.flush_with_timeout("stream flush").await?;
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+        self.flush_write_buf().await?;
 
         let mut row = super::PgBytesRow::default();
         let mut error: Option<PgError> = None;
@@ -1722,7 +1741,7 @@ impl PgConnection {
             ));
         }
 
-        self.write_buf.clear();
+        reserve_prepared_pipeline_write_buf(self, stmt, params_batch, PgEncoder::FORMAT_TEXT)?;
         for params in params_batch {
             PgEncoder::encode_bind_to(&mut self.write_buf, &stmt.name, params)
                 .map_err(|e| PgError::Encode(e.to_string()))?;
@@ -1809,18 +1828,16 @@ impl PgConnection {
             ));
         }
 
-        let mut buf = BytesMut::with_capacity(params_batch.len() * 64);
+        reserve_prepared_pipeline_write_buf(self, stmt, params_batch, PgEncoder::FORMAT_TEXT)?;
 
         for params in params_batch {
-            PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+            PgEncoder::encode_bind_to(&mut self.write_buf, &stmt.name, params)
                 .map_err(|e| PgError::Encode(e.to_string()))?;
-            PgEncoder::encode_execute_to(&mut buf);
+            PgEncoder::encode_execute_to(&mut self.write_buf);
         }
 
-        PgEncoder::encode_sync_to(&mut buf);
-
-        self.write_all_with_timeout(&buf, "stream write").await?;
-        self.flush_with_timeout("stream flush").await?;
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+        self.flush_write_buf().await?;
 
         // Pre-allocate with expected capacity
         let mut all_results: Vec<Vec<(bytes::Bytes, bytes::Bytes)>> =

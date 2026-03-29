@@ -15,6 +15,16 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Default write timeout for individual socket writes/flushes.
 /// Prevents indefinitely blocked writes from pinning pool slots.
 const DEFAULT_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const READ_SPARE_LOW_WATERMARK: usize = 64 * 1024;
+
+#[inline]
+fn reserve_read_spare_capacity(buffer: &mut BytesMut) {
+    let spare = buffer.capacity().saturating_sub(buffer.len());
+    if spare < READ_SPARE_LOW_WATERMARK {
+        let target_spare = READ_SPARE_LOW_WATERMARK.max(buffer.capacity());
+        buffer.reserve(target_spare.saturating_sub(spare));
+    }
+}
 
 #[inline]
 fn parse_data_row_payload_owned(payload: &[u8]) -> PgResult<Vec<Option<Vec<u8>>>> {
@@ -805,9 +815,7 @@ impl PgConnection {
     /// partial data then goes silent, causing the driver to hang forever.
     #[inline]
     pub(crate) async fn read_with_timeout(&mut self) -> PgResult<usize> {
-        if self.buffer.capacity() - self.buffer.len() < 65536 {
-            self.buffer.reserve(131072);
-        }
+        reserve_read_spare_capacity(&mut self.buffer);
 
         use super::stream::PgStream;
         let (stream, buffer) = (&mut self.stream, &mut self.buffer);
@@ -910,9 +918,7 @@ impl PgConnection {
     ///
     /// Used for long-idle LISTEN/NOTIFY connections.
     pub(crate) async fn read_without_timeout(&mut self) -> PgResult<usize> {
-        if self.buffer.capacity() - self.buffer.len() < 65536 {
-            self.buffer.reserve(131072);
-        }
+        reserve_read_spare_capacity(&mut self.buffer);
 
         use super::stream::PgStream;
         let (stream, buffer) = (&mut self.stream, &mut self.buffer);
@@ -958,7 +964,7 @@ impl PgConnection {
     /// The flush is critical for TLS connections.
     pub async fn flush_write_buf(&mut self) -> PgResult<()> {
         if !self.write_buf.is_empty() {
-            let payload = std::mem::take(&mut self.write_buf);
+            let payload = self.write_buf.split().freeze();
             self.write_all_with_timeout(&payload, "flush write buffer")
                 .await?;
             self.flush_with_timeout("flush write buffer").await?;

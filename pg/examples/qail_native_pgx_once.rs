@@ -22,7 +22,7 @@ const LARGE_ROWS_TOTAL_QUERIES: usize = 20;
 const LARGE_ROWS_ITERATIONS: usize = 2;
 const MANY_PARAMS_TOTAL_QUERIES: usize = 5_000;
 const MANY_PARAMS_ITERATIONS: usize = 5;
-const AGGREGATE_TOTAL_QUERIES: usize = 100;
+const AGGREGATE_TOTAL_QUERIES: usize = 2000;
 const AGGREGATE_ITERATIONS: usize = 3;
 const MANY_PARAMS_PARAM_COUNT: usize = 32;
 const POOL_SIZE: usize = 10;
@@ -115,7 +115,7 @@ struct WorkloadSpec {
 
 impl WorkloadSpec {
     fn new(workload: Workload) -> Self {
-        match workload {
+        let spec = match workload {
             Workload::Point => Self {
                 workload,
                 name: "point",
@@ -166,7 +166,16 @@ impl WorkloadSpec {
                 requires_payload: true,
                 requires_many_params: false,
             },
-        }
+        };
+
+        spec.with_env_scale()
+    }
+
+    fn with_env_scale(mut self) -> Self {
+        let scale = env_usize("QAIL_BENCH_SCALE").unwrap_or(1).max(1);
+        self.total_queries = self.total_queries.saturating_mul(scale);
+        self.latency_samples = self.latency_samples.saturating_mul(scale);
+        self
     }
 }
 
@@ -330,6 +339,12 @@ fn env_override(primary: &str, fallback: &str) -> Option<String> {
     std::env::var(primary)
         .ok()
         .or_else(|| std::env::var(fallback).ok())
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
 }
 
 fn percent_decode(s: &str) -> String {

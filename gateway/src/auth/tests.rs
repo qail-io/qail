@@ -10,15 +10,6 @@ fn platform_admin_claims() -> HashMap<String, serde_json::Value> {
     claims
 }
 
-fn legacy_is_platform_admin_claims() -> HashMap<String, serde_json::Value> {
-    let mut claims = HashMap::new();
-    claims.insert(
-        "is_platform_admin".to_string(),
-        serde_json::Value::Bool(true),
-    );
-    claims
-}
-
 #[test]
 fn test_jwt_validation() {
     let secret = "test-secret-key-12345";
@@ -189,27 +180,34 @@ fn test_platform_admin_helper_requires_explicit_claim() {
 }
 
 #[test]
-fn test_platform_admin_helper_accepts_legacy_is_platform_admin_claim() {
+fn test_platform_admin_helper_rejects_legacy_is_platform_admin_claim() {
     let auth = AuthContext {
         user_id: "platform-admin".to_string(),
         role: "administrator".to_string(),
         tenant_id: None,
-        claims: legacy_is_platform_admin_claims(),
+        claims: {
+            let mut claims = HashMap::new();
+            claims.insert(
+                "is_platform_admin".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            claims
+        },
     };
-    assert!(auth.has_platform_admin_claim());
-    assert!(auth.is_platform_admin());
-    assert!(auth.can_use_branching());
+    assert!(!auth.has_platform_admin_claim());
+    assert!(!auth.is_platform_admin());
+    assert!(!auth.can_use_branching());
 }
 
 #[test]
-fn test_explain_admin_helper_accepts_legacy_roles() {
+fn test_explain_admin_helper_rejects_legacy_roles() {
     let admin = AuthContext {
         user_id: "legacy-admin".to_string(),
         role: "admin".to_string(),
         tenant_id: Some("tenant-123".to_string()),
         claims: HashMap::new(),
     };
-    assert!(admin.can_run_explain_analyze());
+    assert!(!admin.can_run_explain_analyze());
 
     let super_admin = AuthContext {
         user_id: "legacy-super-admin".to_string(),
@@ -217,7 +215,7 @@ fn test_explain_admin_helper_accepts_legacy_roles() {
         tenant_id: Some("tenant-123".to_string()),
         claims: HashMap::new(),
     };
-    assert!(super_admin.can_run_explain_analyze());
+    assert!(!super_admin.can_run_explain_analyze());
 }
 
 #[test]

@@ -41,7 +41,7 @@ pub(crate) async fn explain_handler(
     // This endpoint executes the query and reveals plan internals (costs, indexes, row counts).
     if !auth.can_run_explain_analyze() {
         return Err(ApiError::forbidden(
-            "EXPLAIN ANALYZE requires administrator/admin role",
+            "EXPLAIN ANALYZE requires platform administrator access",
         ));
     }
 
