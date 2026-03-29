@@ -610,11 +610,17 @@ async fn run_single_iteration_prepared(
                 stats.completed += 1;
             }
             ResultMode::ScalarInt => {
-                let rows = conn
-                    .query_prepared_single_reuse_with_result_format(stmt, p, PgEncoder::FORMAT_TEXT)
-                    .await?;
+                conn.query_prepared_single_reuse_visit_first_column_bytes_with_result_format(
+                    stmt,
+                    p,
+                    PgEncoder::FORMAT_TEXT,
+                    |value| {
+                        consume_scalar_value(value, &mut stats);
+                        Ok(())
+                    },
+                )
+                .await?;
                 stats.completed += 1;
-                consume_scalar_rows(&rows, &mut stats);
             }
             ResultMode::WideRows => {
                 conn.query_prepared_single_reuse_visit_bytes_rows_with_result_format(
@@ -646,18 +652,21 @@ async fn run_single_iteration_unprepared(
     for p in params {
         match result_mode {
             ResultMode::CompleteOnly => {
-                let rows = conn
-                    .query_rows_with_result_format(sql, p, PgEncoder::FORMAT_TEXT)
-                    .await?;
-                let _ = rows;
+                conn.query_count(sql, p).await?;
                 stats.completed += 1;
             }
             ResultMode::ScalarInt => {
-                let rows = conn
-                    .query_rows_with_result_format(sql, p, PgEncoder::FORMAT_TEXT)
-                    .await?;
+                conn.query_visit_first_column_bytes_with_result_format(
+                    sql,
+                    p,
+                    PgEncoder::FORMAT_TEXT,
+                    |value| {
+                        consume_scalar_value(value, &mut stats);
+                        Ok(())
+                    },
+                )
+                .await?;
                 stats.completed += 1;
-                consume_scalar_pg_rows(&rows, &mut stats);
             }
             ResultMode::WideRows => {
                 conn.query_visit_bytes_rows_with_result_format(
@@ -789,20 +798,20 @@ async fn run_pipeline_iteration_prepared(
             ..BatchStats::default()
         }),
         ResultMode::ScalarInt => {
-            let results = conn.pipeline_execute_prepared_rows(stmt, params).await?;
-            if results.len() != params.len() {
+            let mut stats = BatchStats::default();
+            stats.completed = conn
+                .pipeline_execute_prepared_visit_first_column_bytes(stmt, params, |value| {
+                    consume_scalar_value(value, &mut stats);
+                    Ok(())
+                })
+                .await?;
+            if stats.completed != params.len() {
                 return Err(format!(
-                    "pipeline returned {} results, expected {}",
-                    results.len(),
+                    "pipeline completed {} queries, expected {}",
+                    stats.completed,
                     params.len()
                 )
                 .into());
-            }
-
-            let mut stats = BatchStats::default();
-            stats.completed = results.len();
-            for rows in &results {
-                consume_scalar_rows(rows, &mut stats);
             }
             Ok(stats)
         }
@@ -832,34 +841,35 @@ async fn run_pipeline_iteration_unprepared(
 
     match result_mode {
         ResultMode::CompleteOnly => {
-            let results = conn.query_pipeline(&queries).await?;
-            if results.len() != params.len() {
+            let completed = conn.query_pipeline_count(&queries).await?;
+            if completed != params.len() {
                 return Err(format!(
-                    "pipeline returned {} results, expected {}",
-                    results.len(),
+                    "pipeline completed {} queries, expected {}",
+                    completed,
                     params.len()
                 )
                 .into());
             }
             Ok(BatchStats {
-                completed: results.len(),
+                completed,
                 ..BatchStats::default()
             })
         }
         ResultMode::ScalarInt => {
-            let results = conn.query_pipeline(&queries).await?;
-            if results.len() != params.len() {
+            let mut stats = BatchStats::default();
+            stats.completed = conn
+                .query_pipeline_visit_first_column_bytes(&queries, |value| {
+                    consume_scalar_value(value, &mut stats);
+                    Ok(())
+                })
+                .await?;
+            if stats.completed != params.len() {
                 return Err(format!(
-                    "pipeline returned {} results, expected {}",
-                    results.len(),
+                    "pipeline completed {} queries, expected {}",
+                    stats.completed,
                     params.len()
                 )
                 .into());
-            }
-            let mut stats = BatchStats::default();
-            stats.completed = results.len();
-            for rows in &results {
-                consume_scalar_rows(rows, &mut stats);
             }
             Ok(stats)
         }
@@ -1148,35 +1158,9 @@ async fn run_pool10_mode(
     Ok(make_benchmark_result(aggregate, elapsed))
 }
 
-fn consume_scalar_rows(rows: &[Vec<Option<Vec<u8>>>], stats: &mut BatchStats) {
-    for row in rows {
-        consume_scalar_row(row, stats);
-    }
-}
-
-fn consume_scalar_pg_rows(rows: &[PgRow], stats: &mut BatchStats) {
-    for row in rows {
-        consume_scalar_pg_row(row, stats);
-    }
-}
-
-fn consume_scalar_row(row: &[Option<Vec<u8>>], stats: &mut BatchStats) {
+fn consume_scalar_value(value: Option<&[u8]>, stats: &mut BatchStats) {
     stats.rows += 1;
-    if let Some(value) = row.first().and_then(|col| col.as_deref()) {
-        stats.bytes += value.len();
-        let parsed = std::str::from_utf8(value)
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(value.len() as i64);
-        stats.checksum = stats.checksum.wrapping_add(parsed as u64);
-    } else {
-        stats.checksum = stats.checksum.wrapping_add(1);
-    }
-}
-
-fn consume_scalar_pg_row(row: &PgRow, stats: &mut BatchStats) {
-    stats.rows += 1;
-    if let Some(value) = row.get_bytes(0) {
+    if let Some(value) = value {
         stats.bytes += value.len();
         let parsed = std::str::from_utf8(value)
             .ok()

@@ -171,6 +171,45 @@ impl PgEncoder {
         Ok(buf)
     }
 
+    /// Encode a Parse message directly into an existing buffer.
+    pub fn try_encode_parse_to(
+        buf: &mut BytesMut,
+        name: &str,
+        sql: &str,
+        param_types: &[u32],
+    ) -> Result<(), EncodeError> {
+        if Self::has_nul(name) || Self::has_nul(sql) {
+            return Err(EncodeError::NullByte);
+        }
+        if param_types.len() > i16::MAX as usize {
+            return Err(EncodeError::TooManyParameters(param_types.len()));
+        }
+
+        let content_len = name
+            .len()
+            .checked_add(1)
+            .and_then(|v| v.checked_add(sql.len()))
+            .and_then(|v| v.checked_add(1))
+            .and_then(|v| v.checked_add(2))
+            .and_then(|v| v.checked_add(param_types.len().checked_mul(4)?))
+            .ok_or(EncodeError::MessageTooLarge(usize::MAX))?;
+        let wire_len = Self::content_len_to_wire_len(content_len)?;
+
+        buf.reserve(1 + 4 + content_len);
+        buf.extend_from_slice(b"P");
+        buf.extend_from_slice(&wire_len.to_be_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(&[0]);
+        buf.extend_from_slice(sql.as_bytes());
+        buf.extend_from_slice(&[0]);
+        let param_count = Self::usize_to_i16(param_types.len())?;
+        buf.extend_from_slice(&param_count.to_be_bytes());
+        for &oid in param_types {
+            buf.extend_from_slice(&oid.to_be_bytes());
+        }
+        Ok(())
+    }
+
     /// Encode a Bind message (bind parameters to a prepared statement).
     /// Wire format:
     /// - 'B' (1 byte) - message type

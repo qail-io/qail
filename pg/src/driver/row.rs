@@ -5,6 +5,7 @@
 
 use super::{PgBytesRow, PgRow};
 use crate::types::{FromPg, TypeError};
+use bytes::Bytes;
 
 #[inline]
 fn column_type_meta(
@@ -414,6 +415,11 @@ impl PgRow {
 }
 
 impl PgBytesRow {
+    #[inline]
+    pub(crate) fn release_payload(&mut self) {
+        self.payload = Bytes::new();
+    }
+
     /// Decode a non-null column into any `FromPg` type using backend OID/format metadata.
     pub fn try_get<T: FromPg>(&self, idx: usize) -> Result<T, TypeError> {
         let bytes = self.get_bytes(idx).ok_or(TypeError::UnexpectedNull)?;

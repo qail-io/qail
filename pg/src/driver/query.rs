@@ -9,7 +9,7 @@ use super::{
     unexpected_backend_msg_type,
 };
 use crate::protocol::{BackendMessage, PgEncoder};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 
 #[inline]
 fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError>, err: PgError) {
@@ -175,6 +175,70 @@ impl PgConnection {
         }
     }
 
+    /// Execute an uncached query and drain completion without materializing rows.
+    pub async fn query_count(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+    ) -> PgResult<()> {
+        self.query_count_with_param_types(sql, &[], params).await
+    }
+
+    /// Execute an uncached query with explicit PostgreSQL parameter type OIDs
+    /// and drain completion without materializing rows.
+    pub async fn query_count_with_param_types(
+        &mut self,
+        sql: &str,
+        param_types: &[u32],
+        params: &[Option<Vec<u8>>],
+    ) -> PgResult<()> {
+        Self::validate_param_type_arity(params, param_types)?;
+
+        self.write_buf.clear();
+        PgEncoder::try_encode_parse_to(&mut self.write_buf, "", sql, param_types)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_bind_to(&mut self.write_buf, "", params)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_execute_to(&mut self.write_buf);
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+
+        self.flush_write_buf().await?;
+
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(true));
+
+        loop {
+            match self.recv_msg_type_fast().await {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(msg_type, "extended-query count execute", error.is_some())?;
+                    match msg_type {
+                        b'1' | b'2' | b'T' | b'D' | b'C' | b'n' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(());
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "extended-query count execute",
+                                other,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
     /// Execute a query with bind parameters and return rows with column metadata.
     ///
     /// Uses the Extended Query Protocol without prepared statement caching.
@@ -225,6 +289,27 @@ impl PgConnection {
         .await
     }
 
+    /// Execute an uncached query and stream only the first column of each row.
+    pub async fn query_visit_first_column_bytes_with_result_format<F>(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+        on_value: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(Option<&[u8]>) -> PgResult<()>,
+    {
+        self.query_visit_first_column_bytes_with_param_types_and_result_format(
+            sql,
+            &[],
+            params,
+            result_format,
+            on_value,
+        )
+        .await
+    }
+
     /// Execute a query with explicit PostgreSQL parameter type OIDs and return
     /// rows with column metadata.
     pub async fn query_rows_with_param_types_and_result_format(
@@ -238,16 +323,14 @@ impl PgConnection {
 
         Self::validate_param_type_arity(params, param_types)?;
 
-        let parse = PgEncoder::try_encode_parse("", sql, param_types)
+        self.write_buf.clear();
+        PgEncoder::try_encode_parse_to(&mut self.write_buf, "", sql, param_types)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        let bind = PgEncoder::encode_bind_with_result_format("", "", params, result_format)
+        PgEncoder::encode_bind_to_with_result_format(&mut self.write_buf, "", params, result_format)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        let mut bytes = BytesMut::with_capacity(parse.len() + bind.len() + 10 + 5);
-        bytes.extend_from_slice(&parse);
-        bytes.extend_from_slice(&bind);
-        PgEncoder::encode_execute_to(&mut bytes);
-        PgEncoder::encode_sync_to(&mut bytes);
-        self.write_all_with_timeout(&bytes, "stream write").await?;
+        PgEncoder::encode_execute_to(&mut self.write_buf);
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+        self.flush_write_buf().await?;
 
         let mut rows: Vec<super::PgRow> = Vec::new();
         let mut column_info: Option<Arc<super::ColumnInfo>> = None;
@@ -314,14 +397,10 @@ impl PgConnection {
         Self::validate_param_type_arity(params, param_types)?;
 
         self.write_buf.clear();
-        self.write_buf.extend_from_slice(
-            &PgEncoder::try_encode_parse("", sql, param_types)
-                .map_err(|e| PgError::Encode(e.to_string()))?,
-        );
-        self.write_buf.extend_from_slice(
-            &PgEncoder::encode_bind_with_result_format("", "", params, result_format)
-                .map_err(|e| PgError::Encode(e.to_string()))?,
-        );
+        PgEncoder::try_encode_parse_to(&mut self.write_buf, "", sql, param_types)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_bind_to_with_result_format(&mut self.write_buf, "", params, result_format)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut self.write_buf);
         PgEncoder::encode_sync_to(&mut self.write_buf);
 
@@ -346,6 +425,7 @@ impl PgConnection {
                             if error.is_none() {
                                 on_row(&row)?;
                                 row_count += 1;
+                                row.release_payload();
                             }
                         }
                         b'C' => {}
@@ -359,6 +439,80 @@ impl PgConnection {
                         other => {
                             return Err(unexpected_backend_msg_type(
                                 "extended-query visit bytes execute",
+                                other,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Execute an uncached query with explicit PostgreSQL parameter types and
+    /// stream only the first column of each row.
+    pub async fn query_visit_first_column_bytes_with_param_types_and_result_format<F>(
+        &mut self,
+        sql: &str,
+        param_types: &[u32],
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+        mut on_value: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(Option<&[u8]>) -> PgResult<()>,
+    {
+        Self::validate_param_type_arity(params, param_types)?;
+
+        self.write_buf.clear();
+        PgEncoder::try_encode_parse_to(&mut self.write_buf, "", sql, param_types)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_bind_to_with_result_format(&mut self.write_buf, "", params, result_format)
+            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_execute_to(&mut self.write_buf);
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+
+        self.flush_write_buf().await?;
+
+        let mut row_count = 0usize;
+        let mut first_column: Option<Bytes> = None;
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(true));
+
+        loop {
+            match self.recv_fill_first_column_zerocopy_fast(&mut first_column).await {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(
+                        msg_type,
+                        "extended-query visit first-column execute",
+                        error.is_some(),
+                    )?;
+                    match msg_type {
+                        b'1' | b'2' | b'T' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_value(first_column.as_deref())?;
+                                row_count += 1;
+                                first_column = None;
+                            }
+                        }
+                        b'C' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(row_count);
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "extended-query visit first-column execute",
                                 other,
                             ));
                         }
@@ -779,49 +933,44 @@ impl PgConnection {
         stmt: &super::PreparedStatement,
         params: &[Option<Vec<u8>>],
     ) -> PgResult<()> {
-        let params_size: usize = params
-            .iter()
-            .map(|p| 4 + p.as_ref().map_or(0, |v| v.len()))
-            .sum();
-
-        let mut buf = BytesMut::with_capacity(30 + stmt.name.len() + params_size);
-
-        PgEncoder::encode_bind_to(&mut buf, &stmt.name, params)
+        self.write_buf.clear();
+        PgEncoder::encode_bind_to(&mut self.write_buf, &stmt.name, params)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        PgEncoder::encode_execute_to(&mut buf);
-        PgEncoder::encode_sync_to(&mut buf);
+        PgEncoder::encode_execute_to(&mut self.write_buf);
+        PgEncoder::encode_sync_to(&mut self.write_buf);
 
-        self.write_all_with_timeout(&buf, "stream write").await?;
+        self.flush_write_buf().await?;
 
         let mut error: Option<PgError> = None;
         let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
 
         loop {
-            let msg = self.recv().await?;
-            flow.validate(&msg, "prepared single count execute", error.is_some())?;
-            match msg {
-                BackendMessage::BindComplete => {}
-                BackendMessage::RowDescription(_) => {}
-                BackendMessage::DataRow(_) => {}
-                BackendMessage::CommandComplete(_) => {}
-                BackendMessage::NoData => {}
-                BackendMessage::ReadyForQuery(_) => {
-                    if let Some(err) = error {
-                        return Err(err);
+            match self.recv_msg_type_fast().await {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(msg_type, "prepared single count execute", error.is_some())?;
+                    match msg_type {
+                        b'2' | b'T' | b'D' | b'C' | b'n' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(());
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "prepared single count execute",
+                                other,
+                            ));
+                        }
                     }
-                    return Ok(());
                 }
-                BackendMessage::ErrorResponse(err) => {
-                    if error.is_none() {
-                        error = Some(PgError::QueryServer(err.into()));
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
                     }
-                }
-                msg if is_ignorable_session_message(&msg) => {}
-                other => {
-                    return Err(unexpected_backend_message(
-                        "prepared single count execute",
-                        &other,
-                    ));
+                    return Err(e);
                 }
             }
         }
@@ -1078,6 +1227,7 @@ impl PgConnection {
                             if error.is_none() {
                                 on_row(&row)?;
                                 row_count += 1;
+                                row.release_payload();
                             }
                         }
                         b'C' => {}
@@ -1091,6 +1241,84 @@ impl PgConnection {
                         other => {
                             return Err(unexpected_backend_msg_type(
                                 "prepared single reuse visit bytes execute",
+                                other,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Sequential prepared query using reusable buffers and first-column visitor.
+    #[inline]
+    pub async fn query_prepared_single_reuse_visit_first_column_bytes_with_result_format<F>(
+        &mut self,
+        stmt: &super::PreparedStatement,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+        mut on_value: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(Option<&[u8]>) -> PgResult<()>,
+    {
+        self.write_buf.clear();
+
+        PgEncoder::encode_bind_to_with_result_format(
+            &mut self.write_buf,
+            &stmt.name,
+            params,
+            result_format,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_execute_to(&mut self.write_buf);
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+
+        self.flush_write_buf().await?;
+
+        let mut row_count = 0usize;
+        let mut first_column: Option<Bytes> = None;
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
+
+        loop {
+            match self
+                .recv_fill_first_column_zerocopy_fast(&mut first_column)
+                .await
+            {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(
+                        msg_type,
+                        "prepared single reuse visit first-column execute",
+                        error.is_some(),
+                    )?;
+                    match msg_type {
+                        b'2' | b'T' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_value(first_column.as_deref())?;
+                                row_count += 1;
+                                first_column = None;
+                            }
+                        }
+                        b'C' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(row_count);
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "prepared single reuse visit first-column execute",
                                 other,
                             ));
                         }
