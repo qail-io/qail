@@ -201,6 +201,30 @@ impl PgConnection {
             .await
     }
 
+    /// Execute an uncached query and stream zero-copy rows to `on_row`.
+    ///
+    /// This is the lowest-allocation raw-SQL path for large result sets when
+    /// the caller does not need `PgRow` materialization or column-name metadata.
+    pub async fn query_visit_bytes_rows_with_result_format<F>(
+        &mut self,
+        sql: &str,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+        on_row: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(&super::PgBytesRow) -> PgResult<()>,
+    {
+        self.query_visit_bytes_rows_with_param_types_and_result_format(
+            sql,
+            &[],
+            params,
+            result_format,
+            on_row,
+        )
+        .await
+    }
+
     /// Execute a query with explicit PostgreSQL parameter type OIDs and return
     /// rows with column metadata.
     pub async fn query_rows_with_param_types_and_result_format(
@@ -266,6 +290,86 @@ impl PgConnection {
                         "extended-query rows execute",
                         &other,
                     ));
+                }
+            }
+        }
+    }
+
+    /// Execute an uncached query with explicit PostgreSQL parameter types and
+    /// stream zero-copy rows to `on_row`.
+    ///
+    /// Rows are backed by one shared payload buffer plus column offsets, so the
+    /// callback must not hold references past the current invocation.
+    pub async fn query_visit_bytes_rows_with_param_types_and_result_format<F>(
+        &mut self,
+        sql: &str,
+        param_types: &[u32],
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+        mut on_row: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(&super::PgBytesRow) -> PgResult<()>,
+    {
+        Self::validate_param_type_arity(params, param_types)?;
+
+        self.write_buf.clear();
+        self.write_buf.extend_from_slice(
+            &PgEncoder::try_encode_parse("", sql, param_types)
+                .map_err(|e| PgError::Encode(e.to_string()))?,
+        );
+        self.write_buf.extend_from_slice(
+            &PgEncoder::encode_bind_with_result_format("", "", params, result_format)
+                .map_err(|e| PgError::Encode(e.to_string()))?,
+        );
+        PgEncoder::encode_execute_to(&mut self.write_buf);
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+
+        self.flush_write_buf().await?;
+
+        let mut row_count = 0usize;
+        let mut row = super::PgBytesRow::default();
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(true));
+
+        loop {
+            match self.recv_fill_zerocopy_row_fast(&mut row).await {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(
+                        msg_type,
+                        "extended-query visit bytes execute",
+                        error.is_some(),
+                    )?;
+                    match msg_type {
+                        b'1' | b'2' | b'T' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_row(&row)?;
+                                row_count += 1;
+                            }
+                        }
+                        b'C' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(row_count);
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "extended-query visit bytes execute",
+                                other,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
                 }
             }
         }

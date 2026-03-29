@@ -396,10 +396,19 @@ impl PgConnection {
         let mut buf = BytesMut::new();
         for (sql, params) in queries {
             buf.extend_from_slice(
-                &PgEncoder::encode_extended_query(sql, params)
+                &PgEncoder::try_encode_parse("", sql, &[])
+                    .map_err(|e| PgError::Encode(e.to_string()))?,
+            );
+            buf.extend_from_slice(
+                &PgEncoder::encode_bind("", "", params)
+                    .map_err(|e| PgError::Encode(e.to_string()))?,
+            );
+            buf.extend_from_slice(
+                &PgEncoder::try_encode_execute("", 0)
                     .map_err(|e| PgError::Encode(e.to_string()))?,
             );
         }
+        buf.extend_from_slice(&PgEncoder::encode_sync());
 
         // Send all queries in ONE write
         self.write_all_with_timeout(&buf, "stream write").await?;
@@ -471,6 +480,96 @@ impl PgConnection {
                         self,
                         unexpected_backend_message("pipeline query", &other),
                     );
+                }
+            }
+        }
+    }
+
+    /// Execute multiple uncached SQL queries in one round-trip and stream
+    /// result rows through a zero-copy visitor.
+    pub async fn query_pipeline_visit_bytes_rows<F>(
+        &mut self,
+        queries: &[(&str, &[Option<Vec<u8>>])],
+        mut on_row: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(&super::PgBytesRow) -> PgResult<()>,
+    {
+        if queries.is_empty() {
+            return Ok(0);
+        }
+
+        self.write_buf.clear();
+        for (sql, params) in queries {
+            self.write_buf.extend_from_slice(
+                &PgEncoder::try_encode_parse("", sql, &[])
+                    .map_err(|e| PgError::Encode(e.to_string()))?,
+            );
+            self.write_buf.extend_from_slice(
+                &PgEncoder::encode_bind("", "", params)
+                    .map_err(|e| PgError::Encode(e.to_string()))?,
+            );
+            self.write_buf.extend_from_slice(
+                &PgEncoder::try_encode_execute("", 0)
+                    .map_err(|e| PgError::Encode(e.to_string()))?,
+            );
+        }
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+
+        self.flush_write_buf().await?;
+
+        let mut row = super::PgBytesRow::default();
+        let mut error: Option<PgError> = None;
+        let mut flow = FastExtendedFlowTracker::new(FastExtendedFlowConfig {
+            expected_queries: queries.len(),
+            allow_parse_complete: true,
+            require_parse_before_bind: true,
+            no_data_counts_as_completion: true,
+            allow_no_data_nonterminal: false,
+            expected_parse_completes: Some(queries.len()),
+        });
+
+        loop {
+            match self.recv_fill_zerocopy_row_fast(&mut row).await {
+                Ok(msg_type) => {
+                    if let Err(err) = flow.validate_msg_type(
+                        msg_type,
+                        "query_pipeline_visit_bytes_rows",
+                        error.is_some(),
+                    ) {
+                        return return_with_desync(self, err);
+                    }
+                    match msg_type {
+                        b'1' | b'2' | b'T' | b'C' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_row(&row)?;
+                            }
+                        }
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(flow.completed_queries());
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return return_with_desync(
+                                self,
+                                unexpected_backend_msg_type(
+                                    "query_pipeline_visit_bytes_rows",
+                                    other,
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
                 }
             }
         }
