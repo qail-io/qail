@@ -545,12 +545,14 @@ impl PgConnection {
         loop {
             match self.recv_msg_type_fast().await {
                 Ok(msg_type) => {
-                    let event =
-                        match flow.validate_msg_type(msg_type, "query_pipeline_count", error.is_some())
-                        {
-                            Ok(event) => event,
-                            Err(err) => return return_with_desync(self, err),
-                        };
+                    let event = match flow.validate_msg_type(
+                        msg_type,
+                        "query_pipeline_count",
+                        error.is_some(),
+                    ) {
+                        Ok(event) => event,
+                        Err(err) => return return_with_desync(self, err),
+                    };
                     match event {
                         FastPipelineEvent::Continue => {}
                         FastPipelineEvent::ReadyForQuery => {

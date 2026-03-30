@@ -30,23 +30,23 @@ pub fn build_delete(cmd: &Qail, dialect: Dialect) -> String {
     let mut where_groups: Vec<String> = Vec::new();
 
     for cage in &cmd.cages {
-        if let CageKind::Filter = cage.kind {
-            if !cage.conditions.is_empty() {
-                let joiner = match cage.logical_op {
-                    LogicalOp::And => " AND ",
-                    LogicalOp::Or => " OR ",
-                };
-                let conditions: Vec<String> = cage
-                    .conditions
-                    .iter()
-                    .map(|c| c.to_sql(&generator, Some(cmd)))
-                    .collect();
-                let group = conditions.join(joiner);
-                if cage.logical_op == LogicalOp::Or && cage.conditions.len() > 1 {
-                    where_groups.push(format!("({})", group));
-                } else {
-                    where_groups.push(group);
-                }
+        if let CageKind::Filter = cage.kind
+            && !cage.conditions.is_empty()
+        {
+            let joiner = match cage.logical_op {
+                LogicalOp::And => " AND ",
+                LogicalOp::Or => " OR ",
+            };
+            let conditions: Vec<String> = cage
+                .conditions
+                .iter()
+                .map(|c| c.to_sql(&generator, Some(cmd)))
+                .collect();
+            let group = conditions.join(joiner);
+            if cage.logical_op == LogicalOp::Or && cage.conditions.len() > 1 {
+                where_groups.push(format!("({})", group));
+            } else {
+                where_groups.push(group);
             }
         }
     }

@@ -11,6 +11,8 @@ use nom::{
     sequence::{delimited, preceded},
 };
 
+type ConditionChain = (Condition, Vec<(LogicalOp, Condition)>);
+
 /// Parse: fields id, name, email  OR  fields *
 pub fn parse_fields_clause(input: &str) -> IResult<&str, Vec<Expr>> {
     let (input, _) = tag_no_case("fields").parse(input)?;
@@ -205,7 +207,7 @@ pub fn parse_having_clause(input: &str) -> IResult<&str, Vec<Condition>> {
     Ok((input, conditions))
 }
 
-fn parse_condition_chain(input: &str) -> IResult<&str, (Condition, Vec<(LogicalOp, Condition)>)> {
+fn parse_condition_chain(input: &str) -> IResult<&str, ConditionChain> {
     let (input, first) = parse_condition(input)?;
     let (input, rest) = many0((
         multispace0,

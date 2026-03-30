@@ -196,11 +196,7 @@ impl PgConnection {
     }
 
     /// Execute an uncached query and drain completion without materializing rows.
-    pub async fn query_count(
-        &mut self,
-        sql: &str,
-        params: &[Option<Vec<u8>>],
-    ) -> PgResult<()> {
+    pub async fn query_count(&mut self, sql: &str, params: &[Option<Vec<u8>>]) -> PgResult<()> {
         self.query_count_with_param_types(sql, &[], params).await
     }
 
@@ -230,7 +226,11 @@ impl PgConnection {
         loop {
             match self.recv_msg_type_fast().await {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(msg_type, "extended-query count execute", error.is_some())?;
+                    flow.validate_msg_type(
+                        msg_type,
+                        "extended-query count execute",
+                        error.is_some(),
+                    )?;
                     match msg_type {
                         b'1' | b'2' | b'T' | b'D' | b'C' | b'n' => {}
                         b'Z' => {
@@ -346,8 +346,13 @@ impl PgConnection {
         self.write_buf.clear();
         PgEncoder::try_encode_parse_to(&mut self.write_buf, "", sql, param_types)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        PgEncoder::encode_bind_to_with_result_format(&mut self.write_buf, "", params, result_format)
-            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_bind_to_with_result_format(
+            &mut self.write_buf,
+            "",
+            params,
+            result_format,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut self.write_buf);
         PgEncoder::encode_sync_to(&mut self.write_buf);
         self.flush_write_buf().await?;
@@ -419,8 +424,13 @@ impl PgConnection {
         self.write_buf.clear();
         PgEncoder::try_encode_parse_to(&mut self.write_buf, "", sql, param_types)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        PgEncoder::encode_bind_to_with_result_format(&mut self.write_buf, "", params, result_format)
-            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_bind_to_with_result_format(
+            &mut self.write_buf,
+            "",
+            params,
+            result_format,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut self.write_buf);
         PgEncoder::encode_sync_to(&mut self.write_buf);
 
@@ -493,8 +503,13 @@ impl PgConnection {
         self.write_buf.clear();
         PgEncoder::try_encode_parse_to(&mut self.write_buf, "", sql, param_types)
             .map_err(|e| PgError::Encode(e.to_string()))?;
-        PgEncoder::encode_bind_to_with_result_format(&mut self.write_buf, "", params, result_format)
-            .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_bind_to_with_result_format(
+            &mut self.write_buf,
+            "",
+            params,
+            result_format,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
         PgEncoder::encode_execute_to(&mut self.write_buf);
         PgEncoder::encode_sync_to(&mut self.write_buf);
 
@@ -506,7 +521,10 @@ impl PgConnection {
         let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(true));
 
         loop {
-            match self.recv_fill_first_column_zerocopy_fast(&mut first_column).await {
+            match self
+                .recv_fill_first_column_zerocopy_fast(&mut first_column)
+                .await
+            {
                 Ok(msg_type) => {
                     flow.validate_msg_type(
                         msg_type,
@@ -967,7 +985,11 @@ impl PgConnection {
         loop {
             match self.recv_msg_type_fast().await {
                 Ok(msg_type) => {
-                    flow.validate_msg_type(msg_type, "prepared single count execute", error.is_some())?;
+                    flow.validate_msg_type(
+                        msg_type,
+                        "prepared single count execute",
+                        error.is_some(),
+                    )?;
                     match msg_type {
                         b'2' | b'T' | b'D' | b'C' | b'n' => {}
                         b'Z' => {

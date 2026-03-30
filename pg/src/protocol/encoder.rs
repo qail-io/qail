@@ -1101,8 +1101,13 @@ mod tests {
     fn test_bind_execute_sync_wire_len_matches_encoded_bytes() {
         let params = vec![Some(b"abc".to_vec()), None, Some(b"defghi".to_vec())];
         let mut buf = BytesMut::new();
-        PgEncoder::encode_bind_to_with_result_format(&mut buf, "stmt", &params, PgEncoder::FORMAT_TEXT)
-            .unwrap();
+        PgEncoder::encode_bind_to_with_result_format(
+            &mut buf,
+            "stmt",
+            &params,
+            PgEncoder::FORMAT_TEXT,
+        )
+        .unwrap();
         PgEncoder::encode_execute_to(&mut buf);
         PgEncoder::encode_sync_to(&mut buf);
 

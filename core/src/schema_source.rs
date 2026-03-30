@@ -506,9 +506,59 @@ fn strict_manifest_default_enabled(schema_root: &Path) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct StrictEnvGuard {
+        strict_manifest: Option<String>,
+        strict_manifest_config: Option<String>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for StrictEnvGuard {
+        fn drop(&mut self) {
+            match &self.strict_manifest {
+                Some(value) => {
+                    // SAFETY: test-only restoration while holding the env lock.
+                    unsafe { std::env::set_var(STRICT_ENV_VAR, value) };
+                }
+                None => {
+                    // SAFETY: test-only restoration while holding the env lock.
+                    unsafe { std::env::remove_var(STRICT_ENV_VAR) };
+                }
+            }
+
+            match &self.strict_manifest_config {
+                Some(value) => {
+                    // SAFETY: test-only restoration while holding the env lock.
+                    unsafe { std::env::set_var(STRICT_CONFIG_ERROR_ENV_VAR, value) };
+                }
+                None => {
+                    // SAFETY: test-only restoration while holding the env lock.
+                    unsafe { std::env::remove_var(STRICT_CONFIG_ERROR_ENV_VAR) };
+                }
+            }
+        }
+    }
+
+    fn strict_env_guard() -> StrictEnvGuard {
+        let lock = ENV_LOCK.lock().expect("env lock");
+        let strict_manifest = std::env::var(STRICT_ENV_VAR).ok();
+        let strict_manifest_config = std::env::var(STRICT_CONFIG_ERROR_ENV_VAR).ok();
+
+        // SAFETY: test-only env isolation while holding the env lock.
+        unsafe {
+            std::env::remove_var(STRICT_ENV_VAR);
+            std::env::remove_var(STRICT_CONFIG_ERROR_ENV_VAR);
+        }
+
+        StrictEnvGuard {
+            strict_manifest,
+            strict_manifest_config,
+            _lock: lock,
+        }
+    }
 
     fn tmp_dir(name: &str) -> PathBuf {
         let base = std::env::temp_dir();
@@ -744,19 +794,18 @@ mod tests {
 
     #[test]
     fn strict_manifest_default_from_env() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _env = strict_env_guard();
         let root = tmp_dir("strict_env");
         fs::create_dir_all(&root).expect("mkdir");
         // SAFETY: test mutates process env, keep scoped and restore after test.
         unsafe { std::env::set_var(STRICT_ENV_VAR, "true") };
         assert!(strict_manifest_default_enabled(&root).expect("strict manifest default"));
-        // SAFETY: restore env for test isolation.
-        unsafe { std::env::remove_var(STRICT_ENV_VAR) };
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn strict_manifest_default_from_ancestor_qail_toml() {
+        let _env = strict_env_guard();
         let root = tmp_dir("strict_cfg");
         let schema_dir = root.join("schema");
         fs::create_dir_all(&schema_dir).expect("mkdir schema");
@@ -786,6 +835,7 @@ mod tests {
 
     #[test]
     fn strict_manifest_default_from_malformed_ancestor_qail_toml_falls_back_to_non_strict() {
+        let _env = strict_env_guard();
         let root = tmp_dir("strict_cfg_malformed");
         let schema_dir = root.join("schema");
         fs::create_dir_all(&schema_dir).expect("mkdir schema");
@@ -822,7 +872,7 @@ mod tests {
 
     #[test]
     fn strict_manifest_default_from_malformed_ancestor_qail_toml_can_fail_fast() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _env = strict_env_guard();
         let root = tmp_dir("strict_cfg_malformed_fail_fast");
         let schema_dir = root.join("schema");
         fs::create_dir_all(&schema_dir).expect("mkdir schema");
@@ -843,8 +893,6 @@ mod tests {
         let err = resolve_schema_source(root.join("schema.qail")).expect_err("should fail fast");
         assert!(err.contains("Failed to load strict-manifest defaults"));
         assert!(err.contains("qail.toml"));
-        // SAFETY: restore env for test isolation.
-        unsafe { std::env::remove_var(STRICT_CONFIG_ERROR_ENV_VAR) };
 
         let _ = fs::remove_dir_all(root);
     }

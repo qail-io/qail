@@ -6,9 +6,7 @@
 use qail_core::ast::Qail;
 use qail_core::ast::builders::{count, count_filter, eq as cond_eq, max, sum};
 use qail_pg::protocol::AstEncoder;
-use qail_pg::{
-    ConnectOptions, PgBytesRow, PgConnection, PgRow, PgPool, PoolConfig, TlsMode,
-};
+use qail_pg::{ConnectOptions, PgBytesRow, PgConnection, PgPool, PgRow, PoolConfig, TlsMode};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Barrier;
@@ -439,9 +437,7 @@ fn build_many_params_index_sql() -> String {
 
 fn build_many_params_insert_sql(start_slot: usize, end_slot: usize) -> String {
     let sum_coeff: i64 = (1..=MANY_PARAMS_PARAM_COUNT as i64).sum();
-    let mut sql = String::from(
-        "INSERT INTO qail_bench_many_params (slot, total",
-    );
+    let mut sql = String::from("INSERT INTO qail_bench_many_params (slot, total");
     for idx in 0..MANY_PARAMS_PARAM_COUNT {
         sql.push_str(", ");
         sql.push_str(&many_param_column_name(idx));
@@ -604,9 +600,9 @@ fn build_inputs(spec: WorkloadSpec) -> Vec<BenchInput> {
 
 fn build_qail_command(spec: WorkloadSpec, input: &BenchInput) -> Qail {
     match (spec.workload, input) {
-        (Workload::Point, BenchInput::Id(id)) => Qail::get("harbors")
-            .columns(["id", "name"])
-            .eq("id", *id),
+        (Workload::Point, BenchInput::Id(id)) => {
+            Qail::get("harbors").columns(["id", "name"]).eq("id", *id)
+        }
         (Workload::WideRows | Workload::LargeRows, BenchInput::Limit(limit)) => {
             Qail::get("qail_bench_payload")
                 .columns([
@@ -1025,17 +1021,18 @@ async fn run_pool10_mode(
                         .as_ref()
                         .ok_or_else(|| "missing prepared batch".to_string())?;
                     let conn = pooled.get_mut().map_err(|e| e.to_string())?;
-                    let prepared_stmt =
-                        conn.prepare(&prepared.sql).await.map_err(|e| e.to_string())?;
-                    let warmup =
-                        run_single_iteration(
-                            conn,
-                            &prepared_stmt,
-                            &prepared.params_batch,
-                            spec.result_mode,
-                        )
-                            .await
-                            .map_err(|e| e.to_string())?;
+                    let prepared_stmt = conn
+                        .prepare(&prepared.sql)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let warmup = run_single_iteration(
+                        conn,
+                        &prepared_stmt,
+                        &prepared.params_batch,
+                        spec.result_mode,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
                     if warmup.completed != prepared.params_batch.len() {
                         return Err(format!(
                             "warmup completed {} queries, expected {}",
@@ -1067,10 +1064,14 @@ async fn run_pool10_mode(
                         .as_ref()
                         .ok_or_else(|| "missing prepared statement".to_string())?;
                     for _ in 0..spec.iterations {
-                        let stats =
-                            run_single_iteration(conn, stmt, &prepared.params_batch, spec.result_mode)
-                                .await
-                                .map_err(|e| e.to_string())?;
+                        let stats = run_single_iteration(
+                            conn,
+                            stmt,
+                            &prepared.params_batch,
+                            spec.result_mode,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
                         if stats.completed != prepared.params_batch.len() {
                             return Err(format!(
                                 "run completed {} queries, expected {}",
@@ -1149,7 +1150,12 @@ async fn run_latency_mode(
 
     let mut samples = Vec::with_capacity(spec.latency_samples);
     let mut total = Duration::ZERO;
-    for params in prepared.params_batch.iter().cycle().take(spec.latency_samples) {
+    for params in prepared
+        .params_batch
+        .iter()
+        .cycle()
+        .take(spec.latency_samples)
+    {
         let start = Instant::now();
         let stats = run_single_iteration(
             &mut conn,
