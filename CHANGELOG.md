@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.6] - 2026-03-31
+
+### Changed
+
+- **Versioning/docs:** bumped Rust workspace crates and docs/install/readme references to `0.27.6`.
+- **Release surface:** this patch release is non-breaking; no API contract changes versus `0.27.5`.
+
 ## [0.27.5] - 2026-03-30
 
 ### Changed
