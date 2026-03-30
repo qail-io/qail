@@ -24,6 +24,23 @@ QAIL compiles typed query ASTs directly to database wire protocols with typed va
 - **QAIL guarantee**: AST flow removes app-side SQL interpolation as an injection surface.
 - **PostgreSQL behavior**: server parse/plan/execute still applies normally.
 
+## Legacy Syntax Notice
+
+Some search engines still surface old QAIL pages showing symbolic forms such as `get::users•@id@email@role[active=true][lim=10]` or macro snippets such as `qail!("get::users:'id'email [ 'active == true ]")`.
+
+Those pages are from historical pre-1.0 releases and are not the current API guidance.
+
+Current QAIL `0.27.x` application code should use the native AST/DSL path:
+
+```rust
+let query = Qail::get("users")
+    .columns(["id", "email", "role"])
+    .eq("active", true)
+    .limit(10);
+
+let rows = driver.fetch_all(&query).await?;
+```
+
 ### Supported Databases
 
 | Tier | Category | Supported | Driver |

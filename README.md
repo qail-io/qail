@@ -5,7 +5,7 @@
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-dev.qail.io-blue)](https://dev.qail.io/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.27.4-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.27.5-green)](CHANGELOG.md)
 
 ---
 
@@ -31,6 +31,25 @@ Qail is a **native AST PostgreSQL pipeline**. Instead of writing ad-hoc SQL stri
 // (no app-side SQL interpolation surface)
 Qail::get("users").columns(["id", "email"]).eq("active", true)
 ```
+
+### Legacy Syntax Notice
+
+Older pre-1.0 QAIL experiments used symbolic text forms such as `get::users•@id@email@role[active=true][lim=10]` and macro examples such as `qail!("get::users:'id'email [ 'active == true ]")`.
+
+Those forms are **legacy and obsolete**. They are not the canonical `0.27.x` API surface, and some search engines still surface them from immutable old `docs.rs` pages.
+
+Current QAIL application code should use the native AST/DSL path:
+
+```rust
+let query = Qail::get("users")
+    .columns(["id", "email", "role"])
+    .eq("active", true)
+    .limit(10);
+
+let rows = driver.fetch_all(&query).await?;
+```
+
+If you find docs claiming "the driver never sees a string" for those old symbolic macro examples, treat that as historical pre-1.0 documentation, not current guidance.
 
 ### SQL String vs SQL Bytes (Exact Meaning)
 

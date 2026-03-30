@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.5] - 2026-03-30
+
+### Changed
+
+- **Docs/search guidance:** current root and crate READMEs now explicitly mark the old symbolic pre-1.0 syntax (`get::users•...`) and historical macro examples as legacy, and point users to the native `Qail` AST/DSL path.
+- **Versioning/docs:** bumped Rust workspace crates and current docs references to `0.27.5`, including stale install snippets that still referenced `0.26.3`.
+
 ## [0.27.4] - 2026-03-30
 
 ### Changed

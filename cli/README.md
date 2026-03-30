@@ -64,6 +64,14 @@ SELECT id, name FROM users WHERE active = true
 - Runtime execution with `qail-pg` is AST-first and protocol-byte based.
 - In other words: SQL text is a tooling view here, not the required authoring model for app code.
 
+## Legacy Syntax Notice
+
+Old QAIL releases experimented with symbolic text syntax such as `get::users•@id@email@role[active=true][lim=10]` and macro snippets such as `qail!("get::users:'id'email [ 'active == true ]")`.
+
+Those examples are **legacy** and may still appear on old `docs.rs` pages in search results. They are not the current `0.27.x` recommendation.
+
+Current QAIL application code should use the native AST builder API, while the `qail` CLI remains a tooling surface for schema work, REPL inspection, and migration operations.
+
 ## Schema Format
 
 QAIL uses a concise, version-controlled schema format:

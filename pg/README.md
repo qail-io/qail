@@ -14,6 +14,21 @@ A high-performance PostgreSQL driver that speaks the wire protocol directly. AST
 - **What qail-pg does**: compiles QAIL AST into protocol messages and typed values.
 - **What PostgreSQL still does**: server-side parse/plan/execute is still normal PostgreSQL behavior.
 
+## Legacy Syntax Notice
+
+You may still find pre-1.0 search results showing symbolic QAIL strings like `get::users•@id@email@role[active=true][lim=10]` or old macro examples like `qail!("get::users:'id'email [ 'active == true ]")`.
+
+Those are historical docs from older releases. `qail-pg 0.27.x` is documented and optimized around the native AST path:
+
+```rust
+let query = Qail::get("users")
+    .columns(["id", "email", "role"])
+    .eq("active", true)
+    .limit(10);
+
+let rows = driver.fetch_all(&query).await?;
+```
+
 ## Inspect Real Wire Bytes
 
 Run the built-in demo:
@@ -57,8 +72,8 @@ This shows the exact protocol-byte path used by the driver.
 
 ```toml
 [dependencies]
-qail-pg = "0.26.3"
-qail-core = "0.26.3"
+qail-pg = "0.27.5"
+qail-core = "0.27.5"
 ```
 
 `qail-pg` is AST-only. Raw SQL helper APIs were removed.

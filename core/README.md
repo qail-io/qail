@@ -19,6 +19,19 @@ QAIL builds queries as an Abstract Syntax Tree that compiles directly to protoco
 - **SQL bytes** = protocol frames + typed values emitted from AST.
 - **Scope** = QAIL removes app-side SQL interpolation on the AST path.
 
+## Legacy Syntax Notice
+
+If search engines send you to old QAIL pages showing symbolic forms like `get::users•@id@email@role[active=true][lim=10]` or old macro snippets like `qail!("get::users:'id'email [ 'active == true ]")`, those are historical pre-1.0 docs from immutable old releases.
+
+For `qail-core 0.27.x`, the canonical path is the native AST builder API, for example:
+
+```rust
+Qail::get("users")
+    .columns(["id", "email", "role"])
+    .eq("active", true)
+    .limit(10)
+```
+
 ## Installation
 
 > [!CAUTION]
@@ -27,7 +40,7 @@ QAIL builds queries as an Abstract Syntax Tree that compiles directly to protoco
 
 ```toml
 [dependencies]
-qail-core = "0.26.3"
+qail-core = "0.27.5"
 ```
 
 ## Quick Start
