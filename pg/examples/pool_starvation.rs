@@ -1,6 +1,7 @@
 //! Pool Starvation Test: Tiny pool with many concurrent tasks
 //! Tests that connection pool handles starvation gracefully
 
+use qail_core::ast::Qail;
 use qail_pg::driver::PgDriver;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -35,10 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Connection failed");
 
             // Simulate work (10ms sleep in DB)
-            driver
-                .execute_raw("SELECT pg_sleep(0.01)")
-                .await
-                .expect("Query failed");
+            let sleep = Qail::do_block("BEGIN PERFORM pg_sleep(0.01); END;", "plpgsql");
+            driver.execute(&sleep).await.expect("Query failed");
 
             if i % 10 == 0 {
                 println!("    Task {} completed", i);

@@ -12,6 +12,7 @@
 //! cargo run -p qail-pg --example triad_demo
 //! ```
 
+use qail_core::ast::{Action, Constraint, Expr};
 use qail_core::prelude::*;
 use qail_pg::{PgDriver, PgResult};
 
@@ -32,18 +33,46 @@ async fn main() -> PgResult<()> {
 
     // Create and populate demo table
     println!("   📌 Creating demo table...");
-    pg.execute_raw("DROP TABLE IF EXISTS qail_triad_demo")
-        .await?;
-    pg.execute_raw(
-        "CREATE TABLE qail_triad_demo (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        price NUMERIC(10,2) NOT NULL
-    )",
-    )
-    .await?;
+    let drop_cmd = Qail {
+        action: Action::Drop,
+        table: "qail_triad_demo".to_string(),
+        ..Default::default()
+    };
+    let make_cmd = Qail {
+        action: Action::Make,
+        table: "qail_triad_demo".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "price".to_string(),
+                data_type: "numeric(10,2)".to_string(),
+                constraints: vec![],
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = pg.execute(&drop_cmd).await;
+    pg.execute(&make_cmd).await?;
 
-    pg.execute_raw("INSERT INTO qail_triad_demo (name, price) VALUES ('Rust Book', 49.99), ('Keyboard', 149.99)").await?;
+    let insert_rows = [
+        ("Rust Book".to_string(), Value::Float(49.99)),
+        ("Keyboard".to_string(), Value::Float(149.99)),
+    ];
+    for (name, price) in insert_rows {
+        let insert = Qail::add("qail_triad_demo")
+            .columns(["name", "price"])
+            .values([Value::String(name), price]);
+        pg.execute(&insert).await?;
+    }
     println!("      ✅ Table created and data inserted\n");
 
     // Query using QAIL AST - this is the key demonstration
@@ -63,7 +92,7 @@ async fn main() -> PgResult<()> {
     }
 
     // Cleanup
-    pg.execute_raw("DROP TABLE qail_triad_demo").await?;
+    pg.execute(&drop_cmd).await?;
     println!("\n      ✅ Cleaned up");
 
     // =========================================================================

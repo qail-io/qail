@@ -21,12 +21,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start a transaction
     println!("\n2️⃣  Starting transaction with BEGIN...");
-    driver.execute_raw("BEGIN").await?;
+    driver.begin().await?;
     println!("   ✓ Transaction started");
 
-    // Run a BAD query that will cause a syntax error
-    println!("\n3️⃣  Running intentional bad query: 'SELEC * FROM users'...");
-    let bad_result = driver.execute_raw("SELEC * FROM users").await;
+    // Run a BAD query that will fail inside the transaction
+    println!("\n3️⃣  Running intentional bad query against nonexistent table...");
+    let bad_result = driver
+        .fetch_all(&Qail::get("__zombie_bad_table__").columns(["id"]).limit(1))
+        .await;
     match &bad_result {
         Ok(_) => println!("   ✗ Unexpectedly succeeded?!"),
         Err(e) => println!("   ✓ Got expected error: {}", e),
@@ -52,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test ROLLBACK
     println!("\n5️⃣  Testing ROLLBACK...");
-    match driver.execute_raw("ROLLBACK").await {
+    match driver.rollback().await {
         Ok(_) => println!("   ✓ ROLLBACK succeeded"),
         Err(e) => {
             // Try again - PostgreSQL sometimes needs a second ROLLBACK
@@ -80,7 +82,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n📊 BATTLE TEST SUMMARY:");
     println!("   - Transaction state IS tracked correctly");
-    println!("   - execute_raw uses Simple Query protocol");
     println!("   - fetch_all uses Extended Query protocol");
     println!("   - Pool MUST issue ROLLBACK before reuse");
 

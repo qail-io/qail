@@ -15,12 +15,31 @@
 //!   - Postgres accessible via DATABASE_URL env var
 
 use qail_core::prelude::*;
-use qail_pg::PgDriver;
+use qail_pg::PgConnection;
 use qail_qdrant::prelude::*;
+use url::Url;
 
 const COLLECTION: &str = "hybrid_kb_embeddings";
 const TABLE: &str = "hybrid_test_kb";
 const VECTOR_DIM: u64 = 8;
+
+async fn connect_pg() -> PgConnection {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let parsed = Url::parse(&database_url).expect("valid DATABASE_URL");
+    let host = parsed.host_str().expect("database host");
+    let port = parsed.port().unwrap_or(5432);
+    let user = if parsed.username().is_empty() {
+        "postgres"
+    } else {
+        parsed.username()
+    };
+    let database = parsed.path().trim_start_matches('/');
+    let password = parsed.password();
+
+    PgConnection::connect_with_password(host, port, user, database, password)
+        .await
+        .expect("Failed to connect to Postgres")
+}
 
 /// Fake "embedding" function — deterministic based on keywords.
 /// In production this would be an OpenAI/Cohere API call.
@@ -73,9 +92,7 @@ async fn hybrid_rag_search_flow() {
 
     // ── 1. Connect to both backends ─────────────────────────────────
     println!("▸ Phase 1: Connecting to Postgres + Qdrant...");
-    let mut pg = PgDriver::connect_env()
-        .await
-        .expect("Failed to connect to Postgres — set DATABASE_URL");
+    let mut pg = connect_pg().await;
     let mut qd = QdrantDriver::connect("localhost", 6334)
         .await
         .expect("Failed to connect to Qdrant — is it running?");
@@ -86,14 +103,14 @@ async fn hybrid_rag_search_flow() {
     println!("\n▸ Phase 2: Setting up schema...");
 
     // Cleanup from previous runs
-    pg.execute_raw(&format!("DROP TABLE IF EXISTS {} CASCADE", TABLE))
+    pg.execute_simple(&format!("DROP TABLE IF EXISTS {} CASCADE", TABLE))
         .await
         .ok();
     let _ = qd.delete_collection(COLLECTION).await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Create PG table
-    pg.execute_raw(&format!(
+    pg.execute_simple(&format!(
         "CREATE TABLE {} (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
@@ -181,13 +198,13 @@ async fn hybrid_rag_search_flow() {
     ];
 
     for (id, title, content, origin, dest, price) in &documents {
-        pg.execute_raw(&format!(
+        pg.execute_simple(&format!(
             "INSERT INTO {} (id, title, content, origin, destination, price_idr) VALUES ({}, '{}', '{}', '{}', '{}', {})",
             TABLE, id, title, content, origin, dest, price
         )).await.unwrap();
     }
     // Reset sequence
-    pg.execute_raw(&format!(
+    pg.execute_simple(&format!(
         "SELECT setval(pg_get_serial_sequence('{}', 'id'), 7)",
         TABLE
     ))
@@ -252,7 +269,7 @@ async fn hybrid_rag_search_flow() {
         .collect::<Vec<_>>()
         .join(",");
     let pg_rows = pg
-        .fetch_raw(&format!(
+        .simple_query(&format!(
             "SELECT id, title, content, origin, destination, price_idr FROM {} WHERE id IN ({})",
             TABLE, id_list
         ))
@@ -328,7 +345,7 @@ async fn hybrid_rag_search_flow() {
 
     // ── 10. Cleanup ─────────────────────────────────────────────────
     println!("\n▸ Phase 10: Cleanup...");
-    pg.execute_raw(&format!("DROP TABLE IF EXISTS {}", TABLE))
+    pg.execute_simple(&format!("DROP TABLE IF EXISTS {}", TABLE))
         .await
         .ok();
     qd.delete_collection(COLLECTION).await.ok();

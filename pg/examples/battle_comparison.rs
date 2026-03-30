@@ -795,9 +795,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut driver = PgDriver::connect_url(&url).await?;
-    driver
-        .execute_raw("SET app.is_super_admin = 'true'")
-        .await?;
+    let super_admin = Qail::session_set("app.is_super_admin", "true");
+    driver.execute(&super_admin).await?;
 
     let join_query = build_join_query();
     let root_query = build_root_query();

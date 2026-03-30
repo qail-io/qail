@@ -41,20 +41,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // ── Setup ────────────────────────────────────────────────
-    let mut driver = PgDriver::connect("127.0.0.1", 5432, "postgres", "qail_e2e_test").await?;
+    let mut setup_conn =
+        PgConnection::connect("127.0.0.1", 5432, "postgres", "qail_e2e_test").await?;
     println!("  Connected\n");
 
     println!("  Setting up benchmark tables...");
-    driver
-        .execute_raw("DROP TABLE IF EXISTS pipe_orders")
+    setup_conn
+        .execute_simple("DROP TABLE IF EXISTS pipe_orders")
         .await
         .ok();
-    driver
-        .execute_raw("DROP TABLE IF EXISTS pipe_users")
+    setup_conn
+        .execute_simple("DROP TABLE IF EXISTS pipe_users")
         .await
         .ok();
-    driver
-        .execute_raw(
+    setup_conn
+        .execute_simple(
             "CREATE TABLE pipe_users (
               id SERIAL PRIMARY KEY,
               name TEXT NOT NULL,
@@ -63,8 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )",
         )
         .await?;
-    driver
-        .execute_raw(
+    setup_conn
+        .execute_simple(
             "CREATE TABLE pipe_orders (
               id SERIAL PRIMARY KEY,
               user_id INTEGER REFERENCES pipe_users(id),
@@ -77,8 +78,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Seed 100 users
     for i in 1..=100 {
-        driver
-            .execute_raw(&format!(
+        setup_conn
+            .execute_simple(&format!(
                 "INSERT INTO pipe_users (name, email, active) VALUES ('User {}', 'u{}@t.com', {})",
                 i,
                 i,
@@ -91,8 +92,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let statuses = ["pending", "completed", "shipped", "cancelled", "refunded"];
     for uid in 1..=100u32 {
         for j in 0..5u32 {
-            driver
-                .execute_raw(&format!(
+            setup_conn
+                .execute_simple(&format!(
                     "INSERT INTO pipe_orders (user_id, product, amount, status) \
                      VALUES ({}, 'P{}-{}', {}.99, '{}')",
                     uid,
@@ -105,16 +106,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    driver
-        .execute_raw("CREATE INDEX IF NOT EXISTS idx_pu_active ON pipe_users (active)")
+    setup_conn
+        .execute_simple("CREATE INDEX IF NOT EXISTS idx_pu_active ON pipe_users (active)")
         .await
         .ok();
-    driver
-        .execute_raw("CREATE INDEX IF NOT EXISTS idx_po_status ON pipe_orders (status)")
+    setup_conn
+        .execute_simple("CREATE INDEX IF NOT EXISTS idx_po_status ON pipe_orders (status)")
         .await
         .ok();
-    driver
-        .execute_raw("CREATE INDEX IF NOT EXISTS idx_po_user ON pipe_orders (user_id)")
+    setup_conn
+        .execute_simple("CREATE INDEX IF NOT EXISTS idx_po_user ON pipe_orders (user_id)")
         .await
         .ok();
 
@@ -392,12 +393,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Cleanup ──────────────────────────────────────────────
     print!("\n  Cleaning up...");
-    driver
-        .execute_raw("DROP TABLE IF EXISTS pipe_orders")
+    setup_conn
+        .execute_simple("DROP TABLE IF EXISTS pipe_orders")
         .await
         .ok();
-    driver
-        .execute_raw("DROP TABLE IF EXISTS pipe_users")
+    setup_conn
+        .execute_simple("DROP TABLE IF EXISTS pipe_users")
         .await
         .ok();
     println!(" done\n");

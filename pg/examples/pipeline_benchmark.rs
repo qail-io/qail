@@ -7,6 +7,7 @@
 //!
 //! Run with: cargo run --example pipeline_benchmark --release
 
+use qail_core::ast::{Action, Constraint, Expr, Qail, Value};
 use qail_core::prelude::*;
 use qail_pg::driver::{PgConnection, PgDriver, PgPool, PoolConfig};
 use std::time::Instant;
@@ -27,21 +28,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create test table
     println!("📦 Setting up test data...");
-    driver
-        .execute_raw("DROP TABLE IF EXISTS bench_data")
-        .await
-        .ok();
-    driver
-        .execute_raw("CREATE TABLE bench_data (id SERIAL PRIMARY KEY, name TEXT, value INT)")
-        .await?;
+    let drop_bench = Qail {
+        action: Action::Drop,
+        table: "bench_data".to_string(),
+        ..Default::default()
+    };
+    let create_bench = Qail {
+        action: Action::Make,
+        table: "bench_data".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+            Expr::Def {
+                name: "value".to_string(),
+                data_type: "int".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = driver.execute(&drop_bench).await;
+    driver.execute(&create_bench).await?;
     for i in 0..100 {
-        driver
-            .execute_raw(&format!(
-                "INSERT INTO bench_data (name, value) VALUES ('item{}', {})",
-                i,
-                i * 100
-            ))
-            .await?;
+        let insert = Qail::add("bench_data").columns(["name", "value"]).values([
+            Value::String(format!("item{}", i)),
+            Value::Int((i * 100) as i64),
+        ]);
+        driver.execute(&insert).await?;
     }
     println!("   Created bench_data table with 100 rows\n");
 
@@ -131,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool_qps = (BATCH_SIZE * BATCH_ITERATIONS * POOL_SIZE) as f64 / (pool_time / 1000.0);
     println!("{:.0} q/s", pool_qps);
 
-    driver.execute_raw("DROP TABLE bench_data").await?;
+    driver.execute(&drop_bench).await?;
     println!("\n🧹 Cleanup complete");
 
     // ============================================

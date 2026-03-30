@@ -1,6 +1,7 @@
 //! Buffer Boundary Stress Test
 //! Tests BytesMut resize with large data
 
+use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_pg::driver::PgDriver;
 
 #[tokio::main]
@@ -20,31 +21,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Created {} KB of test data", size_kb);
 
     // Create test table
-    driver.execute_raw("DROP TABLE IF EXISTS big_text").await?;
-    driver
-        .execute_raw("CREATE TABLE big_text (id serial primary key, data text)")
-        .await?;
+    let drop_cmd = Qail {
+        action: Action::Drop,
+        table: "big_text".to_string(),
+        ..Default::default()
+    };
+    let make_cmd = Qail {
+        action: Action::Make,
+        table: "big_text".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "data".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = driver.execute(&drop_cmd).await;
+    driver.execute(&make_cmd).await?;
 
     // Insert using TEXT (simpler than bytea)
     let start = std::time::Instant::now();
 
-    // Escape single quotes
-    let escaped = huge_string.replace('\'', "''");
-    let sql = format!("INSERT INTO big_text (data) VALUES ('{}')", escaped);
-
-    println!("  SQL size: {} KB", sql.len() / 1024);
+    println!("  Payload size: {} KB", huge_string.len() / 1024);
     println!("  Inserting...");
 
-    driver.execute_raw(&sql).await?;
+    let insert = Qail::add("big_text")
+        .columns(["data"])
+        .values([huge_string]);
+    driver.execute(&insert).await?;
 
     let elapsed = start.elapsed();
     println!("  ✓ Insert completed in {:?}", elapsed);
 
-    // Verify by selecting length
-    driver
-        .execute_raw("SELECT length(data) FROM big_text ORDER BY id DESC LIMIT 1")
+    // Verify by selecting data
+    let rows = driver
+        .fetch_all(
+            &Qail::get("big_text")
+                .columns(["data"])
+                .order_desc("id")
+                .limit(1),
+        )
         .await?;
-    println!("  ✓ Verified in database");
+    let stored_len = rows
+        .first()
+        .and_then(|r| r.get_string(0))
+        .map(|s| s.len())
+        .unwrap_or(0);
+    println!("  ✓ Verified in database (len={})", stored_len);
 
     println!();
     println!("✓ Buffer Boundary Test (1MB) PASSED!");

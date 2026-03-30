@@ -11,7 +11,7 @@
 //! Run with: cargo run --example migration_battle_test
 
 use qail_core::migrate::*;
-use qail_pg::PgDriver;
+use qail_pg::driver::PgConnection;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // Connect to PostgreSQL
-    let mut driver = PgDriver::connect("127.0.0.1", 5432, "orion", "postgres").await?;
+    let mut conn = PgConnection::connect("127.0.0.1", 5432, "orion", "postgres").await?;
     println!("✅ Connected to PostgreSQL\n");
 
     let mut passed = 0;
@@ -28,13 +28,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Helper to test SQL execution
     async fn test_sql(
-        driver: &mut PgDriver,
+        conn: &mut PgConnection,
         name: &str,
         sql: &str,
         passed: &mut i32,
         failed: &mut i32,
     ) {
-        match driver.execute_raw(sql).await {
+        match conn.execute_simple(sql).await {
             Ok(_) => {
                 println!("✅ {} - SQL: {}", name, &sql[..sql.len().min(60)]);
                 *passed += 1;
@@ -51,14 +51,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CLEANUP
     // ========================================================================
     println!("━━━ CLEANUP ━━━");
-    let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS battle_posts CASCADE")
+    let _ = conn
+        .execute_simple("DROP TABLE IF EXISTS battle_posts CASCADE")
         .await;
-    let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS battle_users CASCADE")
+    let _ = conn
+        .execute_simple("DROP TABLE IF EXISTS battle_users CASCADE")
         .await;
-    let _ = driver
-        .execute_raw("DROP TYPE IF EXISTS order_status CASCADE")
+    let _ = conn
+        .execute_simple("DROP TYPE IF EXISTS order_status CASCADE")
         .await;
     println!("✅ Cleaned up existing tables\n");
 
@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     "#;
     test_sql(
-        &mut driver,
+        &mut conn,
         "CREATE TABLE with CHECK",
         create_users_sql,
         &mut passed,
@@ -107,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let insert_valid =
         "INSERT INTO battle_users (name, age, email) VALUES ('Alice', 25, 'alice@example.com')";
     test_sql(
-        &mut driver,
+        &mut conn,
         "INSERT valid data",
         insert_valid,
         &mut passed,
@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This should fail due to CHECK constraint
     let insert_invalid =
         "INSERT INTO battle_users (name, age, email) VALUES ('Bob', 200, 'bob@example.com')";
-    match driver.execute_raw(insert_invalid).await {
+    match conn.execute_simple(insert_invalid).await {
         Ok(_) => {
             println!("❌ CHECK constraint should have rejected age=200");
             failed += 1;
@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     "#;
     test_sql(
-        &mut driver,
+        &mut conn,
         "CREATE TABLE with DEFERRABLE FK",
         create_posts_sql,
         &mut passed,
@@ -158,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         COMMIT;
     "#;
     test_sql(
-        &mut driver,
+        &mut conn,
         "DEFERRABLE FK allows out-of-order insert",
         deferred_test,
         &mut passed,
@@ -176,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ADD COLUMN full_info TEXT GENERATED ALWAYS AS (name || ' (' || COALESCE(email, 'no email') || ')') STORED
     "#;
     test_sql(
-        &mut driver,
+        &mut conn,
         "ADD GENERATED STORED column",
         alter_generated,
         &mut passed,
@@ -186,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify generated column works
     let check_generated = "SELECT full_info FROM battle_users WHERE name = 'Alice'";
-    match driver.execute_raw(check_generated).await {
+    match conn.execute_simple(check_generated).await {
         Ok(_) => {
             println!("✅ GENERATED column returns data");
             passed += 1;
@@ -203,14 +203,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ PHASE 4: ADVANCED INDEXES ━━━");
 
     // Add JSONB column for GIN index test
-    let _ = driver
-        .execute_raw("ALTER TABLE battle_users ADD COLUMN metadata JSONB DEFAULT '{}'")
+    let _ = conn
+        .execute_simple("ALTER TABLE battle_users ADD COLUMN metadata JSONB DEFAULT '{}'")
         .await;
 
     let gin_index =
         "CREATE INDEX CONCURRENTLY idx_users_metadata ON battle_users USING GIN (metadata)";
     test_sql(
-        &mut driver,
+        &mut conn,
         "CREATE INDEX USING GIN CONCURRENTLY",
         gin_index,
         &mut passed,
@@ -220,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let partial_index = "CREATE INDEX idx_users_active ON battle_users (name) WHERE age > 18";
     test_sql(
-        &mut driver,
+        &mut conn,
         "CREATE partial index",
         partial_index,
         &mut passed,
@@ -231,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let covering_index =
         "CREATE INDEX idx_users_covering ON battle_users (name) INCLUDE (email, age)";
     test_sql(
-        &mut driver,
+        &mut conn,
         "CREATE covering index (INCLUDE)",
         covering_index,
         &mut passed,
@@ -246,7 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let add_column = "ALTER TABLE battle_users ADD COLUMN bio TEXT";
     test_sql(
-        &mut driver,
+        &mut conn,
         "ADD COLUMN",
         add_column,
         &mut passed,
@@ -256,7 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let set_not_null = "ALTER TABLE battle_users ALTER COLUMN bio SET DEFAULT 'No bio yet'";
     test_sql(
-        &mut driver,
+        &mut conn,
         "SET DEFAULT",
         set_not_null,
         &mut passed,
@@ -266,7 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rename_column = "ALTER TABLE battle_users RENAME COLUMN bio TO biography";
     test_sql(
-        &mut driver,
+        &mut conn,
         "RENAME COLUMN",
         rename_column,
         &mut passed,
@@ -277,7 +277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let add_constraint =
         "ALTER TABLE battle_users ADD CONSTRAINT chk_name_len CHECK (LENGTH(name) >= 2)";
     test_sql(
-        &mut driver,
+        &mut conn,
         "ADD CONSTRAINT",
         add_constraint,
         &mut passed,
@@ -293,7 +293,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let create_enum =
         "CREATE TYPE order_status AS ENUM ('pending', 'shipped', 'delivered', 'cancelled')";
     test_sql(
-        &mut driver,
+        &mut conn,
         "CREATE ENUM type",
         create_enum,
         &mut passed,
@@ -303,7 +303,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let add_enum_col = "ALTER TABLE battle_users ADD COLUMN status order_status DEFAULT 'pending'";
     test_sql(
-        &mut driver,
+        &mut conn,
         "ADD ENUM column",
         add_enum_col,
         &mut passed,
@@ -313,7 +313,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let add_array_col = "ALTER TABLE battle_users ADD COLUMN tags TEXT[] DEFAULT '{}'";
     test_sql(
-        &mut driver,
+        &mut conn,
         "ADD ARRAY column",
         add_array_col,
         &mut passed,
@@ -324,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test ARRAY operations
     let update_array = "UPDATE battle_users SET tags = ARRAY['admin', 'vip'] WHERE name = 'Alice'";
     test_sql(
-        &mut driver,
+        &mut conn,
         "UPDATE ARRAY column",
         update_array,
         &mut passed,
@@ -334,7 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let query_array = "SELECT * FROM battle_users WHERE 'admin' = ANY(tags)";
     test_sql(
-        &mut driver,
+        &mut conn,
         "Query ARRAY with ANY",
         query_array,
         &mut passed,
@@ -358,14 +358,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n⚠️  Some tests failed - review output above");
     }
 
-    let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS battle_posts CASCADE")
+    let _ = conn
+        .execute_simple("DROP TABLE IF EXISTS battle_posts CASCADE")
         .await;
-    let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS battle_users CASCADE")
+    let _ = conn
+        .execute_simple("DROP TABLE IF EXISTS battle_users CASCADE")
         .await;
-    let _ = driver
-        .execute_raw("DROP TYPE IF EXISTS order_status CASCADE")
+    let _ = conn
+        .execute_simple("DROP TYPE IF EXISTS order_status CASCADE")
         .await;
     println!("\n✅ Cleaned up test tables");
 

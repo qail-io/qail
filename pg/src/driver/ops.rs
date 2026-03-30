@@ -8,30 +8,9 @@ use super::rls;
 use super::types::*;
 use super::{AutoCountPath, AutoCountPlan};
 use qail_core::ast::Qail;
+use qail_core::transpiler::ToSql;
 
 impl PgDriver {
-    // ==================== RAW SQL COMPAT ====================
-
-    /// Execute raw SQL using PostgreSQL Simple Query protocol.
-    ///
-    /// Returns number of rows returned by the statement (or `0` for statements
-    /// that do not produce rows).
-    ///
-    /// This compatibility API exists for legacy tests/examples; prefer AST APIs
-    /// (`execute`, `fetch_all`) for application code.
-    pub async fn execute_raw(&mut self, sql: &str) -> PgResult<u64> {
-        let rows = self.connection.simple_query(sql).await?;
-        Ok(rows.len() as u64)
-    }
-
-    /// Execute raw SQL using PostgreSQL Simple Query protocol and return rows.
-    ///
-    /// This compatibility API exists for legacy tests/examples; prefer AST APIs
-    /// (`execute`, `fetch_all`) for application code.
-    pub async fn fetch_raw(&mut self, sql: &str) -> PgResult<Vec<PgRow>> {
-        self.connection.simple_query(sql).await
-    }
-
     // ==================== TRANSACTION CONTROL ====================
 
     /// Begin a transaction (AST-native).
@@ -268,6 +247,28 @@ impl PgDriver {
             .collect();
 
         Ok(results)
+    }
+
+    /// Run `EXPLAIN (FORMAT JSON)` on a Qail AST command and return parsed estimates.
+    ///
+    /// Returns `Ok(None)` when PostgreSQL returns an unexpected JSON shape.
+    pub async fn explain_estimate(
+        &mut self,
+        cmd: &Qail,
+    ) -> PgResult<Option<crate::driver::explain::ExplainEstimate>> {
+        let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", cmd.to_sql());
+        let rows = self.connection.simple_query(&explain_sql).await?;
+
+        let mut json_output = String::new();
+        for row in &rows {
+            if let Some(Some(val)) = row.columns.first()
+                && let Ok(text) = std::str::from_utf8(val)
+            {
+                json_output.push_str(text);
+            }
+        }
+
+        Ok(crate::driver::explain::parse_explain_json(&json_output))
     }
 
     /// Prepare a SQL statement for repeated execution.

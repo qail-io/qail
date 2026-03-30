@@ -3,8 +3,10 @@
 //!
 //! Run with: cargo run --example complex_test
 
-use qail_core::ast::{AggregateFunc, Condition, Expr, FrameBound, Operator, Value, WindowFrame};
-use qail_core::prelude::Qail;
+use qail_core::ast::{
+    Action, AggregateFunc, Condition, Constraint, Expr, FrameBound, Operator, Qail, Value,
+    WindowFrame,
+};
 use qail_pg::driver::PgDriver;
 
 #[tokio::main]
@@ -18,36 +20,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🛠  Setup Test Data");
     println!("-------------------");
 
-    driver
-        .execute_raw("DROP TABLE IF EXISTS messages CASCADE")
-        .await
-        .ok();
+    let drop_cmd = Qail {
+        action: Action::Drop,
+        table: "messages".to_string(),
+        ..Default::default()
+    };
+    let make_cmd = Qail {
+        action: Action::Make,
+        table: "messages".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "phone_number".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "direction".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "content".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+            Expr::Def {
+                name: "amount".to_string(),
+                data_type: "int".to_string(),
+                constraints: vec![Constraint::Default("0".to_string())],
+            },
+            Expr::Def {
+                name: "created_at".to_string(),
+                data_type: "timestamptz".to_string(),
+                constraints: vec![Constraint::Default("now()".to_string())],
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = driver.execute(&drop_cmd).await;
+    driver.execute(&make_cmd).await?;
 
-    driver
-        .execute_raw(
-            "CREATE TABLE messages (
-            id SERIAL PRIMARY KEY,
-            phone_number TEXT NOT NULL,
-            direction TEXT NOT NULL,
-            content TEXT,
-            amount INT DEFAULT 0,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )",
-        )
-        .await?;
-
-    // Insert test data with various timestamps
-    driver
-        .execute_raw(
-            "INSERT INTO messages (phone_number, direction, content, amount, created_at) VALUES 
-            ('628123456789', 'inbound', 'Hello', 100, NOW() - INTERVAL '1 hour'),
-            ('628123456789', 'outbound', 'Hi there', 50, NOW() - INTERVAL '30 minutes'),
-            ('628123456789', 'inbound', 'Thanks', 75, NOW() - INTERVAL '10 minutes'),
-            ('628987654321', 'outbound', 'Welcome', 200, NOW() - INTERVAL '2 hours'),
-            ('628987654321', 'inbound', 'Got it', 150, NOW() - INTERVAL '1 hour'),
-            ('628111222333', 'outbound', 'Test', 300, NOW() - INTERVAL '25 hours')",
-        )
-        .await?;
+    // Insert test data
+    let rows = [
+        ("628123456789", "inbound", "Hello", 100_i64),
+        ("628123456789", "outbound", "Hi there", 50_i64),
+        ("628123456789", "inbound", "Thanks", 75_i64),
+        ("628987654321", "outbound", "Welcome", 200_i64),
+        ("628987654321", "inbound", "Got it", 150_i64),
+        ("628111222333", "outbound", "Test", 300_i64),
+    ];
+    for (phone, direction, content, amount) in rows {
+        let insert = Qail::add("messages")
+            .columns(["phone_number", "direction", "content", "amount"])
+            .values([
+                Value::String(phone.to_string()),
+                Value::String(direction.to_string()),
+                Value::String(content.to_string()),
+                Value::Int(amount),
+            ]);
+        driver.execute(&insert).await?;
+    }
     println!("  ✓ Created messages table with 6 rows");
 
     // =====================================================
@@ -158,27 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     //   ) AS running_total
     // FROM messages
-    // Note: Using raw query to verify FRAME encoding works
-    let frame_result = driver
-        .execute_raw(
-            "SELECT id, phone_number, amount,
-         SUM(amount) OVER (
-           PARTITION BY phone_number 
-           ORDER BY created_at
-           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-         ) AS running_total
-         FROM messages ORDER BY phone_number, created_at",
-        )
-        .await;
-
-    match frame_result {
-        Ok(_) => {
-            println!("  ✓ Window FRAME (raw SQL verification): works");
-        }
-        Err(e) => println!("  ✗ Window FRAME: {}", e),
-    }
-
-    // Now test the AST encoding produces correct SQL
+    // Test the AST encoding for FRAME clause
     let mut window_frame_query = Qail::get("messages");
     window_frame_query.columns = vec![
         Expr::Named("id".to_string()),
@@ -235,9 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =====================================================
     println!("\n🧹 Cleanup");
     println!("-----------");
-    driver
-        .execute_raw("DROP TABLE IF EXISTS messages CASCADE")
-        .await?;
+    driver.execute(&drop_cmd).await?;
     println!("  ✓ Cleanup complete");
 
     println!("\n✅ Complex query battle test complete!");

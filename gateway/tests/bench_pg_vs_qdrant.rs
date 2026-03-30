@@ -9,9 +9,10 @@
 //!     cargo test -p qail-gateway --test bench_pg_vs_qdrant -- --nocapture
 
 use qail_core::prelude::*;
-use qail_pg::PgDriver;
+use qail_pg::PgConnection;
 use qail_qdrant::prelude::*;
 use std::time::{Duration, Instant};
+use url::Url;
 
 const COLLECTION: &str = "bench_vectors";
 const TABLE: &str = "bench_routes";
@@ -19,6 +20,24 @@ const DIM: u64 = 128;
 const NUM_ROUTES: usize = 500;
 const ITERATIONS: usize = 200;
 const WARMUP: usize = 20;
+
+async fn connect_pg() -> PgConnection {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let parsed = Url::parse(&database_url).expect("valid DATABASE_URL");
+    let host = parsed.host_str().expect("database host");
+    let port = parsed.port().unwrap_or(5432);
+    let user = if parsed.username().is_empty() {
+        "postgres"
+    } else {
+        parsed.username()
+    };
+    let database = parsed.path().trim_start_matches('/');
+    let password = parsed.password();
+
+    PgConnection::connect_with_password(host, port, user, database, password)
+        .await
+        .expect("Failed to connect to Postgres")
+}
 
 /// Deterministic fake embedding from an integer seed.
 fn fake_embed(seed: usize) -> Vec<f32> {
@@ -68,20 +87,20 @@ async fn bench_pg_vs_qdrant() {
 
     // ── Setup ────────────────────────────────────────────────────────
     println!("▸ Setting up...");
-    let mut pg = PgDriver::connect_env().await.expect("PG: set DATABASE_URL");
+    let mut pg = connect_pg().await;
     let mut qd = QdrantDriver::connect("localhost", 6334)
         .await
         .expect("Qdrant: not running");
 
     // Cleanup
-    pg.execute_raw(&format!("DROP TABLE IF EXISTS {} CASCADE", TABLE))
+    pg.execute_simple(&format!("DROP TABLE IF EXISTS {} CASCADE", TABLE))
         .await
         .ok();
     let _ = qd.delete_collection(COLLECTION).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Create PG table with index
-    pg.execute_raw(&format!(
+    pg.execute_simple(&format!(
         "CREATE TABLE {} (
             id INTEGER PRIMARY KEY,
             title TEXT NOT NULL,
@@ -94,7 +113,7 @@ async fn bench_pg_vs_qdrant() {
     ))
     .await
     .unwrap();
-    pg.execute_raw(&format!(
+    pg.execute_simple(&format!(
         "CREATE INDEX idx_{}_cat ON {} (category)",
         TABLE, TABLE
     ))
@@ -137,7 +156,7 @@ async fn bench_pg_vs_qdrant() {
     }
     // Insert in chunks of 100
     for chunk in values.chunks(100) {
-        pg.execute_raw(&format!(
+        pg.execute_simple(&format!(
             "INSERT INTO {} (id, title, origin, destination, price_idr, category) VALUES {}",
             TABLE,
             chunk.join(",")
@@ -182,7 +201,7 @@ async fn bench_pg_vs_qdrant() {
     for i in 0..WARMUP + ITERATIONS {
         let cat = categories[i % categories.len()];
         let t = Instant::now();
-        let rows = pg.fetch_raw(&format!(
+        let rows = pg.simple_query(&format!(
             "SELECT id, title, origin, destination, price_idr FROM {} WHERE category = '{}' LIMIT 10",
             TABLE, cat
         )).await.unwrap();
@@ -229,7 +248,7 @@ async fn bench_pg_vs_qdrant() {
         // Step B: PG fetch
         let id_list = ids.join(",");
         let _rows = pg
-            .fetch_raw(&format!(
+            .simple_query(&format!(
                 "SELECT id, title, origin, destination, price_idr FROM {} WHERE id IN ({})",
                 TABLE, id_list
             ))
@@ -252,7 +271,7 @@ async fn bench_pg_vs_qdrant() {
     for i in 0..WARMUP + ITERATIONS {
         let term = search_terms[i % search_terms.len()];
         let t = Instant::now();
-        let rows = pg.fetch_raw(&format!(
+        let rows = pg.simple_query(&format!(
             "SELECT id, title, origin, destination, price_idr FROM {} WHERE title ILIKE '%{}%' LIMIT 5",
             TABLE, term
         )).await.unwrap();
@@ -343,7 +362,7 @@ async fn bench_pg_vs_qdrant() {
     }
 
     // ── Cleanup ─────────────────────────────────────────────────────
-    pg.execute_raw(&format!("DROP TABLE IF EXISTS {}", TABLE))
+    pg.execute_simple(&format!("DROP TABLE IF EXISTS {}", TABLE))
         .await
         .ok();
     qd.delete_collection(COLLECTION).await.ok();

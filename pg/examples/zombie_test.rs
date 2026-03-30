@@ -1,7 +1,7 @@
 //! Zombie Client Test: SIGINT and lock cleanup verification
 //! Tests that locks are released when connection is terminated
 
-use qail_pg::driver::PgDriver;
+use qail_pg::driver::PgConnection;
 use std::time::Duration;
 
 #[tokio::main]
@@ -10,19 +10,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "━".repeat(40));
 
     // Connect
-    let mut driver = PgDriver::connect("localhost", 5432, "orion", "postgres").await?;
+    let mut driver = PgConnection::connect("localhost", 5432, "orion", "postgres").await?;
 
     // 1. Begin a transaction (takes locks)
     println!("  Starting transaction with locks...");
-    driver.execute_raw("BEGIN").await?;
+    driver.execute_simple("BEGIN").await?;
     driver
-        .execute_raw("LOCK TABLE zombie_test IN ACCESS EXCLUSIVE MODE")
+        .execute_simple("LOCK TABLE zombie_test IN ACCESS EXCLUSIVE MODE")
         .await?;
     println!("    ✓ Exclusive lock acquired on zombie_test");
 
     // 2. Check that lock exists
-    let mut check_driver = PgDriver::connect("localhost", 5432, "orion", "postgres").await?;
-    check_driver.execute_raw("SELECT relation::regclass, mode FROM pg_locks WHERE relation::regclass::text = 'zombie_test'").await?;
+    let mut check_driver = PgConnection::connect("localhost", 5432, "orion", "postgres").await?;
+    check_driver.execute_simple("SELECT relation::regclass, mode FROM pg_locks WHERE relation::regclass::text = 'zombie_test'").await?;
     println!("    ✓ Lock confirmed in pg_locks");
 
     // 3. Simulate SIGINT by dropping connection without commit
@@ -35,18 +35,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Verify lock is released
     println!("  Verifying lock cleanup...");
     check_driver
-        .execute_raw(
+        .execute_simple(
             "SELECT COUNT(*) FROM pg_locks WHERE relation::regclass::text = 'zombie_test' AND mode = 'AccessExclusiveLock'",
         )
         .await?;
 
     // If we can take a new lock, the old one is gone
-    let mut verify_driver = PgDriver::connect("localhost", 5432, "orion", "postgres").await?;
-    verify_driver.execute_raw("BEGIN").await?;
+    let mut verify_driver = PgConnection::connect("localhost", 5432, "orion", "postgres").await?;
+    verify_driver.execute_simple("BEGIN").await?;
     verify_driver
-        .execute_raw("LOCK TABLE zombie_test IN ACCESS EXCLUSIVE MODE NOWAIT")
+        .execute_simple("LOCK TABLE zombie_test IN ACCESS EXCLUSIVE MODE NOWAIT")
         .await?;
-    verify_driver.execute_raw("ROLLBACK").await?;
+    verify_driver.execute_simple("ROLLBACK").await?;
     println!("    ✓ Lock released - new exclusive lock acquired successfully");
 
     println!();

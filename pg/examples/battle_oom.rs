@@ -18,6 +18,7 @@
 //!
 //! Run: cargo run --release -p qail-pg --example battle_oom
 
+use qail_core::ast::Qail;
 use qail_pg::PgDriver;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -86,7 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n2️⃣  Running query to trigger bomb...");
     println!("   Expecting immediate error due to size check...");
 
-    let result = tokio::time::timeout(Duration::from_secs(2), driver.fetch_raw("SELECT 1")).await;
+    let bomb_query = Qail::get("pg_catalog.pg_type").columns(["oid"]).limit(1);
+    let result = tokio::time::timeout(Duration::from_secs(2), driver.fetch_all(&bomb_query)).await;
 
     match result {
         Ok(res) => match res {

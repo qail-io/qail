@@ -378,7 +378,7 @@ async fn tierz_connection_exhaustion_100_rapid() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// TIER Z: "The Payload Bomb" — Oversized SQL via execute_raw
+// TIER Z: "The Payload Bomb" — Oversized DSL bind payloads
 // ══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -389,20 +389,23 @@ async fn tierz_oversized_sql_payload() {
             .await
             .unwrap();
 
-    // 1MB SQL string — SELECT 'AAAA...AAAA'
+    // 1MB bind value payload
     let payload = "A".repeat(1_000_000);
-    let sql = format!("SELECT '{}'", payload);
-
-    let result = driver.execute_raw(&sql).await;
-    // Postgres max query size is typically ~1GB, so 1MB should be fine
-    // But this tests the driver's ability to send large payloads
+    let query = Qail::get("vessels")
+        .columns(["id"])
+        .filter("name", Operator::Eq, payload)
+        .limit(1);
+    let result = driver.fetch_all(&query).await;
+    // Tests encode/bind path with very large parameter payload.
     println!("  1MB SQL result: {:?}", result.is_ok());
 
-    // 10MB SQL string
+    // 10MB bind value payload
     let payload_10mb = "B".repeat(10_000_000);
-    let sql_10mb = format!("SELECT '{}'", payload_10mb);
-
-    let result_10mb = driver.execute_raw(&sql_10mb).await;
+    let query_10mb = Qail::get("vessels")
+        .columns(["id"])
+        .filter("name", Operator::Eq, payload_10mb)
+        .limit(1);
+    let result_10mb = driver.fetch_all(&query_10mb).await;
     println!("  10MB SQL result: {:?}", result_10mb.is_ok());
 
     // Connection must still work

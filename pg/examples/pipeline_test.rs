@@ -9,7 +9,7 @@
 //! Run with: cargo run --example pipeline_test
 
 use qail_core::ast::builders::*;
-use qail_core::ast::{Qail, SortOrder};
+use qail_core::ast::{Action, Constraint, Expr, Qail, SortOrder, Value};
 use qail_core::transpiler::ToSql;
 use qail_pg::PgDriver;
 
@@ -26,36 +26,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     // Create test table with proper types for all operators
-    driver
-        .execute_raw("DROP TABLE IF EXISTS qail_test CASCADE")
-        .await
-        .ok();
-    driver
-        .execute_raw(
-            r#"
-        CREATE TABLE qail_test (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            tags INTEGER[] NOT NULL DEFAULT '{}',
-            data JSONB NOT NULL DEFAULT '{}'
-        )
-    "#,
-        )
-        .await?;
+    let drop_cmd = Qail {
+        action: Action::Drop,
+        table: "qail_test".to_string(),
+        ..Default::default()
+    };
+    let make_cmd = Qail {
+        action: Action::Make,
+        table: "qail_test".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "tags".to_string(),
+                data_type: "integer[]".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+            Expr::Def {
+                name: "data".to_string(),
+                data_type: "jsonb".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = driver.execute(&drop_cmd).await;
+    driver.execute(&make_cmd).await?;
 
     // Seed test data
-    driver
-        .execute_raw(
-            r#"
-        INSERT INTO qail_test (name, tags, data) VALUES
-        ('Harbor 1', ARRAY[1, 2, 3], '{"key": "value1", "nested": {"a": 1}}'),
-        ('Harbor 2', ARRAY[2, 3, 4], '{"key": "value2", "nested": {"b": 2}}'),
-        ('Harbor 3', ARRAY[3, 4, 5], '{"key": "value3", "nested": {"c": 3}}'),
-        ('Port Alpha', ARRAY[10, 20], '{"type": "port", "active": true}'),
-        ('Port Beta', ARRAY[20, 30], '{"type": "port", "active": false}')
-    "#,
-        )
-        .await?;
+    let seed_rows = [
+        (
+            "Harbor 1",
+            vec![1, 2, 3],
+            r#"{"key": "value1", "nested": {"a": 1}}"#,
+        ),
+        (
+            "Harbor 2",
+            vec![2, 3, 4],
+            r#"{"key": "value2", "nested": {"b": 2}}"#,
+        ),
+        (
+            "Harbor 3",
+            vec![3, 4, 5],
+            r#"{"key": "value3", "nested": {"c": 3}}"#,
+        ),
+        (
+            "Port Alpha",
+            vec![10, 20],
+            r#"{"type": "port", "active": true}"#,
+        ),
+        (
+            "Port Beta",
+            vec![20, 30],
+            r#"{"type": "port", "active": false}"#,
+        ),
+    ];
+    for (name, tags, json) in seed_rows {
+        let tag_vals = Value::Array(tags.into_iter().map(Value::Int).collect());
+        let insert = Qail::add("qail_test")
+            .columns(["name", "tags", "data"])
+            .values([
+                Value::String(name.to_string()),
+                tag_vals,
+                Value::Json(json.to_string()),
+            ]);
+        driver.execute(&insert).await?;
+    }
     println!("✅ Created qail_test table with JSONB and array columns\n");
 
     let mut passed = 0;
@@ -540,10 +584,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test INSERT - SQL generation only (values API is for simple types)
     {
-        let sql = "INSERT INTO qail_test (name) VALUES ('Test Insert')";
-        driver.execute_raw(sql).await.ok();
+        let q = Qail::add("qail_test").set_value("name", "Test Insert");
+        driver.execute(&q).await.ok();
         passed += 1;
-        println!("✅ INSERT (raw) - Executed raw INSERT");
+        println!("✅ INSERT - Executed AST INSERT");
     }
 
     // Test INSERT via AST - check SQL generation

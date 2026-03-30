@@ -30,6 +30,16 @@ async fn connect() -> PgDriver {
         .expect("DATABASE_URL must point to qail_test")
 }
 
+async fn current_operator_id(driver: &mut PgDriver) -> String {
+    let rows = driver
+        .fetch_all(&Qail::session_show("app.current_operator_id"))
+        .await
+        .unwrap();
+    rows.first()
+        .and_then(|row| row.get_string(0))
+        .unwrap_or_default()
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // #2: Connection Reuse After Statement Timeout
 // ══════════════════════════════════════════════════════════════════════
@@ -83,11 +93,7 @@ async fn redteam_context_switch_guc_correctness() {
         .unwrap();
 
     // Verify GUC is set correctly by reading it back
-    let rows = driver
-        .fetch_raw("SELECT current_setting('app.current_operator_id')")
-        .await
-        .unwrap();
-    let guc_val = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
+    let guc_val = current_operator_id(&mut driver).await;
     assert_eq!(
         guc_val, OPERATOR_A_ID,
         "GUC must contain Operator A's operator_id"
@@ -99,11 +105,7 @@ async fn redteam_context_switch_guc_correctness() {
         .await
         .unwrap();
 
-    let rows = driver
-        .fetch_raw("SELECT current_setting('app.current_operator_id')")
-        .await
-        .unwrap();
-    let guc_val = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
+    let guc_val = current_operator_id(&mut driver).await;
     assert_eq!(
         guc_val, OPERATOR_B_ID,
         "GUC must switch to Operator B's operator_id"
@@ -112,11 +114,7 @@ async fn redteam_context_switch_guc_correctness() {
     // Step 3: Clear context
     driver.clear_rls_context().await.unwrap();
 
-    let rows = driver
-        .fetch_raw("SELECT current_setting('app.current_operator_id')")
-        .await
-        .unwrap();
-    let guc_val = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
+    let guc_val = current_operator_id(&mut driver).await;
     assert_eq!(guc_val, "", "GUC must be empty after clear_rls_context");
 
     println!("✅ GUC context switches verified: Operator A → Operator B → cleared");
@@ -149,11 +147,7 @@ async fn redteam_guc_state_after_timeout() {
     driver.reset_statement_timeout().await.unwrap();
 
     // Check if GUC survived the timeout
-    let rows = driver
-        .fetch_raw("SELECT current_setting('app.current_operator_id')")
-        .await
-        .unwrap();
-    let guc_val = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
+    let guc_val = current_operator_id(&mut driver).await;
 
     // GUC variables persist within a session even across statement timeouts
     println!("  GUC after timeout: '{}'", guc_val);
@@ -181,7 +175,7 @@ async fn redteam_transaction_rollback_preserves_data() {
     driver.begin().await.unwrap();
 
     let result = driver
-        .fetch_raw("SELECT * FROM __nonexistent_table_xyz__")
+        .fetch_all(&Qail::get("__nonexistent_table_xyz__").columns(["id"]))
         .await;
 
     assert!(result.is_err(), "Query to non-existent table must fail");
@@ -317,11 +311,7 @@ async fn redteam_rapid_context_switching_100x() {
     }
 
     // Verify final state is correct
-    let rows = driver
-        .fetch_raw("SELECT current_setting('app.current_operator_id')")
-        .await
-        .unwrap();
-    let final_guc = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
+    let final_guc = current_operator_id(&mut driver).await;
     assert_eq!(
         final_guc, OPERATOR_B_ID,
         "Final GUC should be Operator B (last odd iteration)"
@@ -357,7 +347,9 @@ async fn redteam_savepoint_partial_rollback() {
     driver.savepoint("sp1").await.unwrap();
 
     // Second query fails
-    let result = driver.fetch_raw("SELECT * FROM __nonexistent__").await;
+    let result = driver
+        .fetch_all(&Qail::get("__nonexistent__").columns(["id"]))
+        .await;
     assert!(result.is_err());
 
     // Rollback to savepoint (not the whole transaction)
@@ -531,11 +523,7 @@ async fn tierx_unicode_torture_in_guc() {
         assert!(result.is_ok(), "{} should not panic: {:?}", label, result);
 
         // Read back the GUC
-        let rows = driver
-            .fetch_raw("SELECT current_setting('app.current_operator_id')")
-            .await
-            .unwrap();
-        let guc_val = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
+        let guc_val = current_operator_id(&mut driver).await;
         println!("  {}: set='{}' → got='{}'", label, op_id, guc_val);
     }
 
@@ -543,7 +531,7 @@ async fn tierx_unicode_torture_in_guc() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// TIER X: NULL Byte Injection in execute_raw
+// TIER X: NULL Byte Injection in RLS Context
 // ══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -551,8 +539,10 @@ async fn tierx_unicode_torture_in_guc() {
 async fn tierx_null_byte_rejection() {
     let mut driver = connect().await;
 
-    // execute_raw should reject SQL with embedded NULL bytes
-    let result = driver.execute_raw("SELECT 1\0; DROP TABLE vessels").await;
+    // set_rls_context should reject generated SQL containing embedded NULL bytes
+    let result = driver
+        .set_rls_context(RlsContext::tenant("bad\0tenant"))
+        .await;
 
     assert!(result.is_err(), "NULL byte in SQL must be rejected");
     let err = format!("{}", result.unwrap_err());
@@ -657,13 +647,9 @@ async fn tierx_very_long_operator_id() {
         result
     );
 
-    // Read it back
-    let rows = driver
-        .fetch_raw("SELECT length(current_setting('app.current_operator_id'))")
-        .await
-        .unwrap();
-    let len_str = std::str::from_utf8(rows[0].columns[0].as_ref().unwrap()).unwrap();
-    let len: usize = len_str.parse().unwrap();
+    // Read it back via session SHOW
+    let guc_val = current_operator_id(&mut driver).await;
+    let len = guc_val.len();
     assert_eq!(len, 10_000, "GUC must store the full 10KB value");
     println!("✅ 10KB operator_id stored and retrieved correctly");
 }

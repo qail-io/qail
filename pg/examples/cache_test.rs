@@ -1,5 +1,6 @@
 //! LRU Cache Stress Test
 
+use qail_core::ast::{Action, Constraint, Expr};
 use qail_core::prelude::*;
 use qail_pg::driver::PgDriver;
 
@@ -11,14 +12,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut driver = PgDriver::connect("127.0.0.1", 5432, "orion", "qail_test_migration").await?;
 
     // Create test table
+    let drop_cmd = Qail {
+        action: Action::Drop,
+        table: "cache_test".to_string(),
+        ..Default::default()
+    };
+    let make_cmd = Qail {
+        action: Action::Make,
+        table: "cache_test".to_string(),
+        columns: vec![Expr::Def {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            constraints: vec![Constraint::Nullable],
+        }],
+        ..Default::default()
+    };
+    let _ = driver.execute(&drop_cmd).await;
+    driver.execute(&make_cmd).await?;
     driver
-        .execute_raw("DROP TABLE IF EXISTS cache_test")
-        .await?;
-    driver
-        .execute_raw("CREATE TABLE cache_test (id INT)")
-        .await?;
-    driver
-        .execute_raw("INSERT INTO cache_test VALUES (1)")
+        .execute(&Qail::add("cache_test").columns(["id"]).values([1]))
         .await?;
 
     let (size, cap) = driver.cache_stats();
@@ -47,6 +59,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (size, _) = driver.cache_stats();
     println!("\nAfter clear_cache(): {} ✅", size);
 
-    driver.execute_raw("DROP TABLE cache_test").await?;
+    driver.execute(&drop_cmd).await?;
     Ok(())
 }

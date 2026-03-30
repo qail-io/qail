@@ -5,6 +5,7 @@
 //!
 //! Run: cargo run --release -p qail-pg --example battle_math
 
+use qail_core::ast::{Action, Constraint, Expr, Qail, Value};
 use qail_pg::PgDriver;
 
 #[tokio::main]
@@ -17,11 +18,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PgDriver::connect_with_password("localhost", 5432, "postgres", "postgres", "postgres")
             .await?;
 
-    println!("1️⃣  Fetching special floats from Postgres...");
-    // We don't need a table, we can select literals
-    let sql = "SELECT 'NaN'::float8, 'Infinity'::float8, '-Infinity'::float8";
+    let drop_cmd = Qail {
+        action: Action::Drop,
+        table: "battle_math_values".to_string(),
+        ..Default::default()
+    };
+    let create_cmd = Qail {
+        action: Action::Make,
+        table: "battle_math_values".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "nan_val".to_string(),
+                data_type: "float8".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+            Expr::Def {
+                name: "inf_val".to_string(),
+                data_type: "float8".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+            Expr::Def {
+                name: "neg_inf_val".to_string(),
+                data_type: "float8".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = driver.execute(&drop_cmd).await;
+    driver.execute(&create_cmd).await?;
 
-    let rows = driver.fetch_raw(sql).await?;
+    let insert = Qail::add("battle_math_values")
+        .columns(["nan_val", "inf_val", "neg_inf_val"])
+        .values([
+            Value::Float(f64::NAN),
+            Value::Float(f64::INFINITY),
+            Value::Float(f64::NEG_INFINITY),
+        ]);
+    driver.execute(&insert).await?;
+
+    println!("1️⃣  Fetching special floats from Postgres...");
+    let rows = driver
+        .fetch_all(
+            &Qail::get("battle_math_values")
+                .columns(["nan_val", "inf_val", "neg_inf_val"])
+                .limit(1),
+        )
+        .await?;
 
     if rows.is_empty() {
         println!("   ❌ FAIL: No rows returned.");
@@ -80,6 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n   ✅ ALL NaN/Infinity tests completed without panic.");
+    let _ = driver.execute(&drop_cmd).await;
 
     Ok(())
 }

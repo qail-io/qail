@@ -1,6 +1,7 @@
 //! Pool Overhead Analysis: 1000 tasks to measure scaling
 //! Expected: 10s. If 14s+, pool is broken.
 
+use qail_core::ast::Qail;
 use qail_pg::driver::PgDriver;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -37,10 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .expect("Connection failed");
 
-            driver
-                .execute_raw("SELECT pg_sleep(0.01)")
-                .await
-                .expect("Query failed");
+            let sleep = Qail::do_block("BEGIN PERFORM pg_sleep(0.01); END;", "plpgsql");
+            driver.execute(&sleep).await.expect("Query failed");
 
             if i % 100 == 0 {
                 println!("    Task {} done", i);

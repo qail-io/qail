@@ -3,7 +3,7 @@
 //! Run:
 //! DATABASE_URL="postgresql://orion@localhost:5432/swb_staging_local?sslmode=disable" \
 //! cargo run -p qail-pg --example prepared_ast_vs_cached \
-//!   --features chrono,uuid,legacy-raw-examples --release
+//!   --features chrono,uuid --release
 
 use qail_core::ast::{JoinKind, Operator, SortOrder};
 use qail_core::prelude::*;
@@ -85,9 +85,8 @@ async fn run_prepared_ast(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let mut driver = PgDriver::connect_url(&db_url).await?;
-    driver
-        .execute_raw("SET app.is_super_admin = 'true'")
-        .await?;
+    let super_admin = Qail::session_set("app.is_super_admin", "true");
+    driver.execute(&super_admin).await?;
 
     let cmd = build_join_query();
 

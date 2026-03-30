@@ -5,7 +5,30 @@
 //!
 //! Run: cargo run --release -p qail-pg --example battle_stack
 
+use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+use qail_core::transpiler::ToSql;
 use qail_pg::PgDriver;
+
+fn build_recursive_subquery(depth: usize) -> Qail {
+    let mut inner = Qail::get("vessels").columns(["id"]).limit(1);
+
+    for _ in 0..depth {
+        let mut outer = Qail::get("vessels").columns(["id"]);
+        outer.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("id".to_string()),
+                op: Operator::In,
+                value: Value::Subquery(Box::new(inner)),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+        inner = outer.limit(1);
+    }
+
+    inner
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,50 +40,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PgDriver::connect_with_password("localhost", 5432, "postgres", "postgres", "postgres")
             .await?;
 
-    // 1. Construct a JSONB From Hell
-    // {"a": {"a": {"a": ... }}} nested 5,000 times
-    let depth = 5000;
+    // 1. Construct a recursive subquery chain 2,000 levels deep.
+    let depth = 2_000;
+    println!("1️⃣  Building recursive subquery {} levels deep...", depth);
+
+    let deep_cmd = build_recursive_subquery(depth);
+    let sql = deep_cmd.to_sql();
+    println!("   Generated SQL length: {} bytes", sql.len());
+
+    println!("2️⃣  Executing deep query...");
+
+    match driver.fetch_all_uncached(&deep_cmd).await {
+        Ok(rows) => {
+            println!(
+                "   ✅ Deep query executed without driver crash (rows={})",
+                rows.len()
+            );
+        }
+        Err(err) => {
+            // PostgreSQL may reject very deep queries; that's acceptable here.
+            println!("   ⚠️  Deep query rejected by server: {}", err);
+        }
+    }
+
+    // 3. Connection health check after deep query attempt.
+    let health = driver
+        .fetch_all(&Qail::get("vessels").columns(["id"]).limit(1))
+        .await?;
     println!(
-        "1️⃣  Asking Postgres for JSON nested {} levels deep...",
-        depth
+        "\n   ✅ PASS: No Stack Overflow / Panic. Connection healthy (rows={}).",
+        health.len()
     );
-
-    // We use standard SQL generation to avoid sending 5000 params
-    // '{"a":' repeated 5000 times + '1' + '}' repeated 5000 times
-    let sql = format!(
-        "SELECT (repeat('{{\"a\":', {}) || '1' || repeat('}}', {}))::jsonb::text",
-        depth, depth
-    );
-
-    println!("2️⃣  Parsing response...");
-
-    // QAIL receives this as a String (via get_string or get_json).
-    // Since we return the raw string without recursive parsing, this should pass.
-    let rows = driver.fetch_raw(&sql).await?;
-
-    if rows.is_empty() {
-        println!("   ❌ FAIL: No rows returned.");
-        return Err("No rows".into());
-    }
-
-    let json_str = rows[0].get_string(0);
-
-    match json_str {
-        Some(s) => {
-            if s.len() > depth {
-                println!("   ✅ PASS: Driver survived the stack depth!");
-                println!("   (Length received: {} chars)", s.len());
-            } else {
-                println!("   ⚠️  Received short string?");
-            }
-        }
-        None => {
-            println!("   ❌ FAIL: Could not parse response as string.");
-            return Err("Parse failed".into());
-        }
-    }
-
-    println!("\n   ✅ PASS: No Stack Overflow, No Panic.");
 
     Ok(())
 }

@@ -20,7 +20,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use qail_core::ast::Qail;
 use qail_gateway::{GatewayConfig, GatewayState, create_router};
-use qail_pg::{PgPool, PoolConfig, ResultFormat};
+use qail_pg::{PgConnection, PgPool, PoolConfig, ResultFormat};
 use serde_json::Value;
 use std::sync::{Arc, Once, OnceLock};
 use std::time::Duration;
@@ -42,6 +42,24 @@ async fn connect() -> qail_pg::PgDriver {
     qail_pg::PgDriver::connect_env()
         .await
         .expect("PG connection")
+}
+
+async fn connect_sql() -> PgConnection {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let parsed = Url::parse(&database_url).expect("valid DATABASE_URL");
+    let host = parsed.host_str().expect("database host");
+    let port = parsed.port().unwrap_or(5432);
+    let user = if parsed.username().is_empty() {
+        "postgres"
+    } else {
+        parsed.username()
+    };
+    let database = parsed.path().trim_start_matches('/');
+    let password = parsed.password();
+
+    PgConnection::connect_with_password(host, port, user, database, password)
+        .await
+        .expect("PG SQL connection")
 }
 
 fn pool_config_from_database_url(database_url: &str) -> PoolConfig {
@@ -173,17 +191,17 @@ async fn ensure_schema() {
     });
 
     if did_init {
-        let mut pg = connect().await;
+        let mut pg = connect_sql().await;
         // Drop and recreate to guarantee a clean slate.
-        pg.execute_raw("DROP SCHEMA IF EXISTS qail_test CASCADE")
+        pg.execute_simple("DROP SCHEMA IF EXISTS qail_test CASCADE")
             .await
             .ok();
-        pg.execute_raw("CREATE SCHEMA qail_test")
+        pg.execute_simple("CREATE SCHEMA qail_test")
             .await
             .expect("create schema");
 
         // ── Simple two-arg function ──
-        pg.execute_raw(
+        pg.execute_simple(
             "CREATE FUNCTION qail_test.add(a int, b int) RETURNS int
              LANGUAGE sql IMMUTABLE AS $$ SELECT a + b $$",
         )
@@ -191,7 +209,7 @@ async fn ensure_schema() {
         .expect("create add");
 
         // ── Function with default ──
-        pg.execute_raw(
+        pg.execute_simple(
             "CREATE FUNCTION qail_test.greet(name text, greeting text DEFAULT 'hi')
              RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT greeting || ' ' || name $$",
         )
@@ -199,7 +217,7 @@ async fn ensure_schema() {
         .expect("create greet");
 
         // ── Variadic function ──
-        pg.execute_raw(
+        pg.execute_simple(
             "CREATE FUNCTION qail_test.sum_all(VARIADIC nums int[])
              RETURNS int LANGUAGE sql IMMUTABLE AS $$
                SELECT COALESCE((SELECT sum(n) FROM unnest(nums) AS n), 0)::int
@@ -208,21 +226,21 @@ async fn ensure_schema() {
         .await
         .expect("create sum_all");
 
-        pg.execute_raw("CREATE TYPE qail_test.priority AS ENUM ('low', 'high')")
+        pg.execute_simple("CREATE TYPE qail_test.priority AS ENUM ('low', 'high')")
             .await
             .expect("create priority enum");
-        pg.execute_raw(
+        pg.execute_simple(
             "CREATE DOMAIN qail_test.short_text AS text CHECK (char_length(VALUE) <= 16)",
         )
         .await
         .expect("create short_text domain");
-        pg.execute_raw(
+        pg.execute_simple(
             "CREATE FUNCTION qail_test.echo_priority(v qail_test.priority)
              RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT v::text $$",
         )
         .await
         .expect("create echo_priority");
-        pg.execute_raw(
+        pg.execute_simple(
             "CREATE FUNCTION qail_test.echo_short(v qail_test.short_text)
              RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT v::text $$",
         )
@@ -243,7 +261,7 @@ async fn ensure_schema() {
             "CREATE FUNCTION qail_test.multi_ret(x int, y text DEFAULT 'z')
              RETURNS TABLE(sum_val int, label text) LANGUAGE sql IMMUTABLE AS $$ SELECT x, y $$",
         ] {
-            pg.execute_raw(ddl).await.expect(ddl);
+            pg.execute_simple(ddl).await.expect(ddl);
         }
 
         SCHEMA_READY.store(true, std::sync::atomic::Ordering::Release);
@@ -392,9 +410,10 @@ async fn sig_nonexistent_function_returns_empty() {
 async fn sig_multiple_overloads() {
     require_db!();
     let mut pg = connect().await;
+    let mut sql = connect_sql().await;
 
     // Create a second overload of 'add' with 3 args (scoped within this test).
-    pg.execute_raw(
+    sql.execute_simple(
         "CREATE OR REPLACE FUNCTION qail_test.add(a int, b int, c int) RETURNS int
          LANGUAGE sql IMMUTABLE AS $$ SELECT a + b + c $$",
     )
@@ -417,7 +436,7 @@ async fn sig_multiple_overloads() {
     assert!(arg_counts.contains(&3), "should include 3-arg overload");
 
     // Cleanup: drop the extra overload.
-    pg.execute_raw("DROP FUNCTION IF EXISTS qail_test.add(int, int, int)")
+    sql.execute_simple("DROP FUNCTION IF EXISTS qail_test.add(int, int, int)")
         .await
         .ok();
 }

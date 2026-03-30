@@ -24,12 +24,8 @@ fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn is_allowlisted(path: &Path) -> bool {
-    path.ends_with(Path::new("src/driver/ops.rs"))
-}
-
 #[test]
-fn raw_sql_callsites_are_confined_to_allowlist() {
+fn raw_sql_callsites_are_forbidden_in_pg_runtime_source() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src_root = root.join("src");
 
@@ -43,14 +39,14 @@ fn raw_sql_callsites_are_confined_to_allowlist() {
         let Ok(src) = fs::read_to_string(&file) else {
             continue;
         };
-        if needles.iter().any(|needle| src.contains(needle)) && !is_allowlisted(&file) {
+        if needles.iter().any(|needle| src.contains(needle)) {
             offenders.push(file.display().to_string());
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "Raw SQL API usage escaped allowlist:\n{}",
+        "Raw SQL API usage found in pg runtime source:\n{}",
         offenders.join("\n")
     );
 }

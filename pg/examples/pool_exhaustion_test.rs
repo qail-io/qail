@@ -9,17 +9,25 @@
 //!   DATABASE_URL=postgresql://qail_user@localhost:5432/qail_test \
 //!     cargo run -p qail-pg --example pool_exhaustion_test --release
 
+use qail_core::Qail;
 use qail_pg::PgDriver;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Barrier;
 
-/// Slow query to occupy a connection for ~100ms
-const SLOW_QUERY: &str = "SELECT pg_sleep(0.1), 'alive' AS status";
+fn slow_query(seconds: f64) -> Qail {
+    Qail::get("pg_catalog.pg_class")
+        .column(&format!("pg_sleep({seconds}) AS slept"))
+        .column("'alive' AS status")
+        .limit(1)
+}
 
-/// Very fast query to test recovery
-const FAST_QUERY: &str = "SELECT 1 AS ping";
+fn fast_query() -> Qail {
+    Qail::get("pg_catalog.pg_class")
+        .column("1 AS ping")
+        .limit(1)
+}
 
 #[tokio::main]
 async fn main() {
@@ -41,9 +49,10 @@ async fn main() {
         let start = Instant::now();
         let mut successes = 0u32;
         let mut errors = 0u32;
+        let slow = slow_query(0.1);
 
         for _ in 0..5 {
-            match driver.fetch_raw(SLOW_QUERY).await {
+            match driver.fetch_all(&slow).await {
                 Ok(_) => successes += 1,
                 Err(e) => {
                     errors += 1;
@@ -85,6 +94,7 @@ async fn main() {
             let successes = successes.clone();
             let errors = errors.clone();
             let max_lat = max_latency_us.clone();
+            let slow = slow_query(0.1);
 
             handles.push(tokio::spawn(async move {
                 // Each worker gets its own connection
@@ -101,7 +111,7 @@ async fn main() {
 
                 for _ in 0..queries_per_worker {
                     let qstart = Instant::now();
-                    match driver.fetch_raw(SLOW_QUERY).await {
+                    match driver.fetch_all(&slow).await {
                         Ok(_) => {
                             successes.fetch_add(1, Ordering::Relaxed);
                             let lat = qstart.elapsed().as_micros() as u64;
@@ -147,11 +157,12 @@ async fn main() {
         let mut driver = PgDriver::connect_url(&db_url)
             .await
             .expect("Failed to connect for recovery test");
+        let fast = fast_query();
 
         let mut latencies = Vec::new();
         for _ in 0..20 {
             let start = Instant::now();
-            match driver.fetch_raw(FAST_QUERY).await {
+            match driver.fetch_all(&fast).await {
                 Ok(_) => latencies.push(start.elapsed()),
                 Err(e) => {
                     eprintln!("  ❌ Recovery query failed: {}", e);
@@ -178,13 +189,10 @@ async fn main() {
         let mut driver = PgDriver::connect_url(&db_url)
             .await
             .expect("Failed to connect for timeout test");
+        let slow = slow_query(3.0);
 
         let start = Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            driver.fetch_raw("SELECT pg_sleep(3), 'slow' AS status"),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_secs(5), driver.fetch_all(&slow)).await;
 
         match result {
             Ok(Ok(_)) => {
@@ -215,11 +223,12 @@ async fn main() {
         let start = Instant::now();
         let mut ok = 0u32;
         let mut err = 0u32;
+        let fast = fast_query();
 
         for _ in 0..50 {
             match PgDriver::connect_url(&db_url).await {
                 Ok(mut driver) => {
-                    match driver.fetch_raw(FAST_QUERY).await {
+                    match driver.fetch_all(&fast).await {
                         Ok(_) => ok += 1,
                         Err(_) => err += 1,
                     }

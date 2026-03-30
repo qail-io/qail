@@ -10,7 +10,7 @@
 //! Run with: cargo run --example data_safety_stress_test
 
 use qail_core::migrate::*;
-use qail_pg::PgDriver;
+use qail_pg::PgConnection;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("DATA SAFETY STRESS TEST");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    let mut driver = PgDriver::connect("127.0.0.1", 5432, "orion", "postgres").await?;
+    let mut driver = PgConnection::connect("127.0.0.1", 5432, "orion", "postgres").await?;
     println!("✅ Connected to PostgreSQL\n");
 
     let mut passed = 0;
@@ -29,13 +29,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ========================================================================
     println!("━━━ CLEANUP ━━━");
     let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS stress_orders CASCADE")
+        .execute_simple("DROP TABLE IF EXISTS stress_orders CASCADE")
         .await;
     let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS stress_users CASCADE")
+        .execute_simple("DROP TABLE IF EXISTS stress_users CASCADE")
         .await;
     let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS stress_audit CASCADE")
+        .execute_simple("DROP TABLE IF EXISTS stress_audit CASCADE")
         .await;
     println!("✅ Cleaned up existing tables\n");
 
@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create real tables
     driver
-        .execute_raw(
+        .execute_simple(
             "
         CREATE TABLE stress_users (
             id SERIAL PRIMARY KEY,
@@ -153,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     driver
-        .execute_raw(
+        .execute_simple(
             "
         CREATE TABLE stress_orders (
             id SERIAL PRIMARY KEY,
@@ -166,14 +166,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Insert valid data
     driver
-        .execute_raw("INSERT INTO stress_users (name) VALUES ('Alice')")
+        .execute_simple("INSERT INTO stress_users (name) VALUES ('Alice')")
         .await?;
     println!("✅ Inserted user Alice (id=1)");
     passed += 1;
 
     // Valid FK insert
     match driver
-        .execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (1, 100)")
+        .execute_simple("INSERT INTO stress_orders (user_id, amount) VALUES (1, 100)")
         .await
     {
         Ok(_) => {
@@ -188,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Invalid FK insert (user_id=999 doesn't exist)
     match driver
-        .execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (999, 100)")
+        .execute_simple("INSERT INTO stress_orders (user_id, amount) VALUES (999, 100)")
         .await
     {
         Ok(_) => {
@@ -207,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 4: CHECK CONSTRAINT ENFORCEMENT ━━━");
 
     driver
-        .execute_raw(
+        .execute_simple(
             "
         ALTER TABLE stress_orders ADD CONSTRAINT chk_amount CHECK (amount > 0)
     ",
@@ -218,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Valid amount
     match driver
-        .execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (1, 50)")
+        .execute_simple("INSERT INTO stress_orders (user_id, amount) VALUES (1, 50)")
         .await
     {
         Ok(_) => {
@@ -233,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Invalid amount (violates CHECK)
     match driver
-        .execute_raw("INSERT INTO stress_orders (user_id, amount) VALUES (1, -10)")
+        .execute_simple("INSERT INTO stress_orders (user_id, amount) VALUES (1, -10)")
         .await
     {
         Ok(_) => {
@@ -253,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Transaction that should fail due to invalid FK
     let result = driver
-        .execute_raw(
+        .execute_simple(
             "
         BEGIN;
         INSERT INTO stress_orders (user_id, amount) VALUES (1, 200);
@@ -278,7 +278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Delete user should cascade to orders
     driver
-        .execute_raw("DELETE FROM stress_users WHERE name = 'Alice'")
+        .execute_simple("DELETE FROM stress_users WHERE name = 'Alice'")
         .await?;
     println!("✅ CASCADE DELETE executed (dependent orders removed)");
     passed += 1;
@@ -289,17 +289,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n━━━ TEST 7: UNIQUE CONSTRAINT ENFORCEMENT ━━━");
 
     driver
-        .execute_raw("ALTER TABLE stress_users ADD COLUMN email TEXT UNIQUE")
+        .execute_simple("ALTER TABLE stress_users ADD COLUMN email TEXT UNIQUE")
         .await?;
     driver
-        .execute_raw("INSERT INTO stress_users (name, email) VALUES ('Bob', 'bob@test.com')")
+        .execute_simple("INSERT INTO stress_users (name, email) VALUES ('Bob', 'bob@test.com')")
         .await?;
     println!("✅ Inserted user with unique email");
     passed += 1;
 
     // Duplicate email should fail
     match driver
-        .execute_raw("INSERT INTO stress_users (name, email) VALUES ('Carol', 'bob@test.com')")
+        .execute_simple("INSERT INTO stress_users (name, email) VALUES ('Carol', 'bob@test.com')")
         .await
     {
         Ok(_) => {
@@ -323,7 +323,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Bob was inserted with id=2 in Test 7, use that
     // First get the user_id properly
     driver
-        .execute_raw("INSERT INTO stress_users (name) VALUES ('StressUser')")
+        .execute_simple("INSERT INTO stress_users (name) VALUES ('StressUser')")
         .await?;
 
     // Use last insert ID (should be 3)
@@ -333,7 +333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "INSERT INTO stress_orders (user_id, amount) VALUES (3, {})",
             i * 10 + 1
         );
-        match driver.execute_raw(&sql).await {
+        match driver.execute_simple(&sql).await {
             Ok(_) => success_count += 1,
             Err(_) => error_count += 1,
         }
@@ -372,10 +372,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS stress_orders CASCADE")
+        .execute_simple("DROP TABLE IF EXISTS stress_orders CASCADE")
         .await;
     let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS stress_users CASCADE")
+        .execute_simple("DROP TABLE IF EXISTS stress_users CASCADE")
         .await;
     println!("\n✅ Cleaned up test tables");
 

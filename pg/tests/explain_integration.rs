@@ -18,9 +18,7 @@ use qail_core::ast::{JoinKind, Qail};
 use qail_core::rls::RlsContext;
 use qail_core::transpiler::ToSql;
 use qail_pg::PgDriver;
-use qail_pg::explain::{
-    ExplainCache, ExplainConfig, ExplainMode, check_estimate, parse_explain_json,
-};
+use qail_pg::explain::{ExplainCache, ExplainConfig, ExplainMode, check_estimate};
 
 use std::time::Duration;
 
@@ -33,32 +31,12 @@ async fn connect() -> PgDriver {
         .expect("DATABASE_URL must point to qail_test with qail_user (superuser)")
 }
 
-/// Run EXPLAIN (FORMAT JSON) via driver's fetch_raw and parse the result
+/// Run EXPLAIN (FORMAT JSON) via driver's AST-native explain API.
 async fn run_explain(
     driver: &mut PgDriver,
     cmd: &Qail,
 ) -> Option<qail_pg::explain::ExplainEstimate> {
-    let sql = cmd.to_sql();
-    let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", sql);
-    let rows = driver.fetch_raw(&explain_sql).await.unwrap();
-
-    let mut json_output = String::new();
-    for row in &rows {
-        if let Some(Some(val)) = row.columns.first()
-            && let Ok(text) = std::str::from_utf8(val)
-        {
-            json_output.push_str(text);
-        }
-    }
-
-    if !json_output.is_empty() {
-        println!(
-            "  EXPLAIN JSON: {}",
-            &json_output[..json_output.len().min(200)]
-        );
-    }
-
-    parse_explain_json(&json_output)
+    driver.explain_estimate(cmd).await.unwrap()
 }
 
 #[tokio::test]

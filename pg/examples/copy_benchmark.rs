@@ -5,6 +5,7 @@
 //!
 //! Run: cargo run --example copy_benchmark --release
 
+use qail_core::ast::{Action, Constraint, Expr};
 use qail_core::prelude::*;
 use qail_pg::driver::PgDriver;
 use std::time::Instant;
@@ -26,13 +27,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create test table
     println!("📦 Setting up test table...");
-    driver
-        .execute_raw("DROP TABLE IF EXISTS copy_bench")
-        .await
-        .ok();
-    driver
-        .execute_raw("CREATE TABLE copy_bench (id INT, name TEXT, value FLOAT)")
-        .await?;
+    let drop_cmd = Qail {
+        action: Action::Drop,
+        table: "copy_bench".to_string(),
+        ..Default::default()
+    };
+    let make_cmd = Qail {
+        action: Action::Make,
+        table: "copy_bench".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+            Expr::Def {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+            Expr::Def {
+                name: "value".to_string(),
+                data_type: "float".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = driver.execute(&drop_cmd).await;
+    driver.execute(&make_cmd).await?;
     println!("   Created copy_bench table\n");
 
     // Build COPY command
@@ -105,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n🧹 Cleaning up...");
-    driver.execute_raw("DROP TABLE copy_bench").await?;
+    driver.execute(&drop_cmd).await?;
     println!("   Done!");
 
     Ok(())

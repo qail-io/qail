@@ -5,7 +5,7 @@
 
 use qail_core::ast::CTEDef;
 use qail_core::prelude::{JoinKind, Operator, Qail, SortOrder};
-use qail_pg::driver::PgDriver;
+use qail_pg::driver::{PgConnection, PgDriver};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,22 +13,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("========================\n");
 
     let mut driver = PgDriver::connect("127.0.0.1", 5432, "orion", "qail_test_migration").await?;
+    let mut setup_conn =
+        PgConnection::connect("127.0.0.1", 5432, "orion", "qail_test_migration").await?;
 
     // Setup: create test tables
     println!("🛠  Setup Test Tables");
     println!("---------------------");
 
-    driver
-        .execute_raw("DROP TABLE IF EXISTS employees CASCADE")
+    setup_conn
+        .execute_simple("DROP TABLE IF EXISTS employees CASCADE")
         .await
         .ok();
-    driver
-        .execute_raw("DROP TABLE IF EXISTS departments CASCADE")
+    setup_conn
+        .execute_simple("DROP TABLE IF EXISTS departments CASCADE")
         .await
         .ok();
 
-    driver
-        .execute_raw(
+    setup_conn
+        .execute_simple(
             "CREATE TABLE departments (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL
@@ -36,8 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-    driver
-        .execute_raw(
+    setup_conn
+        .execute_simple(
             "CREATE TABLE employees (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
@@ -49,11 +51,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Insert test data
-    driver
-        .execute_raw("INSERT INTO departments (name) VALUES ('Engineering'), ('Sales'), ('HR')")
+    setup_conn
+        .execute_simple("INSERT INTO departments (name) VALUES ('Engineering'), ('Sales'), ('HR')")
         .await?;
-    driver
-        .execute_raw(
+    setup_conn
+        .execute_simple(
             "INSERT INTO employees (name, department_id, manager_id, salary) VALUES 
          ('CEO', 1, NULL, 200000),
          ('CTO', 1, 1, 150000),
@@ -247,11 +249,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =====================================================
     println!("\n🧹 Cleanup");
     println!("-----------");
-    driver
-        .execute_raw("DROP TABLE IF EXISTS employees CASCADE")
+    setup_conn
+        .execute_simple("DROP TABLE IF EXISTS employees CASCADE")
         .await?;
-    driver
-        .execute_raw("DROP TABLE IF EXISTS departments CASCADE")
+    setup_conn
+        .execute_simple("DROP TABLE IF EXISTS departments CASCADE")
         .await?;
     println!("  ✓ Cleanup complete");
 

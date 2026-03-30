@@ -5,9 +5,9 @@
 //! under concurrent stress.
 //!
 //! Tests three approaches using ONLY public PgDriver API:
-//!   1. fetch_raw       — Raw SQL, Parse+Execute every call (like SQLx default)
-//!   2. fetch_all_cached — Qail AST, prepared statement (Parse once, Bind+Execute after)
-//!   3. fetch_all_uncached — Qail AST, full Parse+Bind+Execute every call
+//!   1. fetch_all_prepared_ast — AST precompiled once, execute fast path
+//!   2. fetch_all_cached       — AST cached path (default)
+//!   3. fetch_all_uncached     — AST full Parse+Bind+Execute every call
 //!
 //! The "chaos" element: N concurrent workers each hammering the DB
 //! with back-to-back queries, measuring latency under contention.
@@ -30,37 +30,6 @@ use tokio::sync::Barrier;
 const WORKERS: usize = 10; // Concurrent connections
 const ITERATIONS: usize = 200; // Queries per worker
 const WARMUP: usize = 5; // Warmup iterations (excluded from stats)
-
-/// The EXACT SQL from PostgresHarborRepository::list_active()
-const LIST_ACTIVE_SQL: &str = r"
-SELECT 
-    h.id,
-    h.name,
-    h.slug,
-    h.is_active,
-    dh.destination_id,
-    d.name as destination_name,
-    (h.photo_url IS NOT NULL OR EXISTS (
-        SELECT 1 FROM harbor_images hi
-        WHERE hi.harbor_id = h.id AND hi.deleted_at IS NULL
-    )) as has_photo,
-    COALESCE(
-        (
-            SELECT hi.image_url
-            FROM harbor_images hi
-            WHERE hi.harbor_id = h.id
-              AND hi.deleted_at IS NULL
-            ORDER BY hi.is_featured DESC, hi.updated_at DESC
-            LIMIT 1
-        ),
-        h.photo_url
-    ) as featured_image
-FROM harbors h
-LEFT JOIN destination_harbors dh ON h.id = dh.harbor_id
-LEFT JOIN destinations d ON dh.destination_id = d.id
-WHERE h.is_active = true
-ORDER BY h.position ASC, h.name ASC
-";
 
 // ==================== STATS ====================
 
@@ -233,29 +202,31 @@ async fn connect(db_url: &str) -> PgDriver {
         .await
         .expect("Failed to connect");
     // Bypass RLS for fair benchmark comparison
-    driver
-        .execute_raw("SET app.is_super_admin = 'true'")
-        .await
-        .ok();
+    let super_admin = Qail::session_set("app.is_super_admin", "true");
+    let _ = driver.execute(&super_admin).await;
     driver
 }
 
-/// Worker 1: fetch_raw — Raw SQL, Simple Query Protocol (Parse every time)
-/// This simulates what SQLx does by default.
-async fn worker_fetch_raw(db_url: String, barrier: Arc<Barrier>) -> LatencyStats {
+/// Worker 1: Qail AST precompiled handle.
+async fn worker_qail_prepared_ast(db_url: String, barrier: Arc<Barrier>) -> LatencyStats {
     let mut driver = connect(&db_url).await;
-    let mut stats = LatencyStats::new("fetch_raw (Parse+Execute every call — like SQLx)");
+    let cmd = build_harbor_list_query();
+    let prepared = driver
+        .prepare_ast_query(&cmd)
+        .await
+        .expect("prepare_ast_query failed");
+    let mut stats = LatencyStats::new("Qail AST fetch_all_prepared_ast (precompiled handle)");
 
     // Warmup
     for _ in 0..WARMUP {
-        let _ = driver.fetch_raw(LIST_ACTIVE_SQL).await;
+        let _ = driver.fetch_all_prepared_ast(&prepared).await;
     }
 
     barrier.wait().await;
 
     for _ in 0..ITERATIONS {
         let start = Instant::now();
-        match driver.fetch_raw(LIST_ACTIVE_SQL).await {
+        match driver.fetch_all_prepared_ast(&prepared).await {
             Ok(rows) => stats.record(start.elapsed(), rows.len()),
             Err(e) => stats.record_error(format!("{e}")),
         }
@@ -360,14 +331,14 @@ async fn main() {
     // Pre-flight check
     {
         let mut driver = connect(&db_url).await;
-        let rows = driver.fetch_raw(LIST_ACTIVE_SQL).await.unwrap();
+        let rows = driver.fetch_all(&build_harbor_list_query()).await.unwrap();
         println!("\n✓ Connected — list_active returns {} rows", rows.len());
     }
 
     println!("\n🔥 Starting chaos attack...\n");
 
-    // ===== Test 1: Raw SQL (simple query, Parse every time) =====
-    let s1 = run_test(&db_url, worker_fetch_raw).await;
+    // ===== Test 1: Qail AST (precompiled handle) =====
+    let s1 = run_test(&db_url, worker_qail_prepared_ast).await;
 
     // ===== Test 2: Qail AST (fetch_all_cached, prepared) =====
     let s2 = run_test(&db_url, worker_qail_cached).await;

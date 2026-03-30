@@ -291,34 +291,60 @@ async fn bench_cte_depth() {
             }
         };
 
-        // Ensure the routes table exists for the benchmark
-        pg.execute_raw(
-            "CREATE TABLE IF NOT EXISTS routes (
-                id SERIAL PRIMARY KEY,
-                title TEXT NOT NULL DEFAULT 'test',
-                origin TEXT NOT NULL DEFAULT 'A',
-                destination TEXT NOT NULL DEFAULT 'B',
-                price INTEGER NOT NULL DEFAULT 50000,
-                operator_id TEXT NOT NULL DEFAULT 'op_bench',
-                active BOOLEAN NOT NULL DEFAULT true
-            )",
-        )
-        .await
-        .ok();
+        // Ensure the routes table exists for the benchmark.
+        // `IF NOT EXISTS` is not encoded in this AST path, so we ignore "already exists".
+        let create_routes = Qail::make("routes").columns_expr(vec![
+            qail_core::ast::Expr::Def {
+                name: "id".into(),
+                data_type: "SERIAL".into(),
+                constraints: vec![qail_core::ast::Constraint::PrimaryKey],
+            },
+            qail_core::ast::Expr::Def {
+                name: "title".into(),
+                data_type: "TEXT".into(),
+                constraints: vec![qail_core::ast::Constraint::Default("'test'".into())],
+            },
+            qail_core::ast::Expr::Def {
+                name: "origin".into(),
+                data_type: "TEXT".into(),
+                constraints: vec![qail_core::ast::Constraint::Default("'A'".into())],
+            },
+            qail_core::ast::Expr::Def {
+                name: "destination".into(),
+                data_type: "TEXT".into(),
+                constraints: vec![qail_core::ast::Constraint::Default("'B'".into())],
+            },
+            qail_core::ast::Expr::Def {
+                name: "price".into(),
+                data_type: "INTEGER".into(),
+                constraints: vec![qail_core::ast::Constraint::Default("50000".into())],
+            },
+            qail_core::ast::Expr::Def {
+                name: "operator_id".into(),
+                data_type: "TEXT".into(),
+                constraints: vec![qail_core::ast::Constraint::Default("'op_bench'".into())],
+            },
+            qail_core::ast::Expr::Def {
+                name: "active".into(),
+                data_type: "BOOLEAN".into(),
+                constraints: vec![qail_core::ast::Constraint::Default("true".into())],
+            },
+        ]);
+        pg.execute(&create_routes).await.ok();
 
         // Seed some rows if empty
         let count_q = Qail::get("routes").columns(["id"]).limit(1);
         let rows = pg.fetch_all_uncached(&count_q).await.unwrap_or_default();
         if rows.is_empty() {
             for i in 0..500 {
-                pg.execute_raw(&format!(
-                    "INSERT INTO routes (title, origin, destination, price, active)
-                     VALUES ('Route {}', 'Port A', 'Port B', {}, true)",
-                    i,
-                    10_000 + i * 100
-                ))
-                .await
-                .ok();
+                let insert = Qail::add("routes")
+                    .set_value("title", format!("Route {}", i))
+                    .set_value("origin", "Port A")
+                    .set_value("destination", "Port B")
+                    .set_value("price", (10_000 + i * 100) as i64)
+                    .set_value("operator_id", "op_bench")
+                    .set_value("active", true);
+                pg.execute(&insert).await.ok();
             }
             println!("  (seeded 500 rows into routes table)\n");
         }

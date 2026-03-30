@@ -13,7 +13,8 @@
 //!   DATABASE_URL=postgresql://qail_user@localhost:5432/qail_test \
 //!     cargo run -p qail-pg --example rls_isolation_test --features chrono,uuid --release
 
-use qail_core::prelude::*;
+use qail_core::ast::{Action, Constraint, Expr, Qail};
+use qail_core::migrate::policy::{RlsPolicy, tenant_check};
 use qail_pg::PgDriver;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +25,73 @@ use uuid::Uuid;
 const NUM_TENANTS: usize = 10;
 const ROWS_PER_TENANT: usize = 50;
 const QUERIES_PER_WORKER: usize = 100;
+const TABLE: &str = "_rls_chaos_test";
+
+fn drop_table_cmd(table: &str) -> Qail {
+    Qail {
+        action: Action::Drop,
+        table: table.to_string(),
+        ..Default::default()
+    }
+}
+
+fn make_rls_table_cmd() -> Qail {
+    Qail::make(TABLE).columns_expr(vec![
+        Expr::Def {
+            name: "id".into(),
+            data_type: "UUID".into(),
+            constraints: vec![
+                Constraint::PrimaryKey,
+                Constraint::Default("gen_random_uuid()".into()),
+            ],
+        },
+        Expr::Def {
+            name: "tenant_id".into(),
+            data_type: "UUID".into(),
+            constraints: vec![],
+        },
+        Expr::Def {
+            name: "data".into(),
+            data_type: "TEXT".into(),
+            constraints: vec![],
+        },
+        Expr::Def {
+            name: "created_at".into(),
+            data_type: "TIMESTAMPTZ".into(),
+            constraints: vec![Constraint::Default("NOW()".into())],
+        },
+    ])
+}
+
+fn alter_enable_rls_cmd(table: &str) -> Qail {
+    Qail {
+        action: Action::AlterEnableRls,
+        table: table.to_string(),
+        ..Default::default()
+    }
+}
+
+fn alter_force_rls_cmd(table: &str) -> Qail {
+    Qail {
+        action: Action::AlterForceRls,
+        table: table.to_string(),
+        ..Default::default()
+    }
+}
+
+fn create_tenant_policy_cmd() -> Qail {
+    let policy = RlsPolicy::create("tenant_isolation", TABLE)
+        .for_all()
+        .using(tenant_check("tenant_id", "app.current_tenant_id", "uuid"))
+        .with_check(tenant_check("tenant_id", "app.current_tenant_id", "uuid"));
+
+    Qail {
+        action: Action::CreatePolicy,
+        table: TABLE.to_string(),
+        policy_def: Some(policy),
+        ..Default::default()
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -54,60 +122,47 @@ async fn main() {
             .expect("Failed to connect");
 
         // Drop if exists from previous run
-        driver
-            .execute_raw("DROP TABLE IF EXISTS _rls_chaos_test CASCADE")
-            .await
-            .ok();
+        driver.execute(&drop_table_cmd(TABLE)).await.ok();
 
         // Create table
         driver
-            .execute_raw(
-                "CREATE TABLE _rls_chaos_test (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                tenant_id UUID NOT NULL,
-                data TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )",
-            )
+            .execute(&make_rls_table_cmd())
             .await
             .expect("Failed to create table");
 
         // Enable RLS
         driver
-            .execute_raw("ALTER TABLE _rls_chaos_test ENABLE ROW LEVEL SECURITY")
+            .execute(&alter_enable_rls_cmd(TABLE))
             .await
             .expect("Failed to enable RLS");
         driver
-            .execute_raw("ALTER TABLE _rls_chaos_test FORCE ROW LEVEL SECURITY")
+            .execute(&alter_force_rls_cmd(TABLE))
             .await
             .expect("Failed to force RLS");
 
         // Create policy: users can only see their own tenant_id rows
         driver
-            .execute_raw(
-                "CREATE POLICY tenant_isolation ON _rls_chaos_test
-             FOR ALL
-             USING (tenant_id = current_setting('app.current_tenant_id')::uuid)",
-            )
+            .execute(&create_tenant_policy_cmd())
             .await
             .expect("Failed to create policy");
 
         // Insert test data for each tenant
         for (i, tenant_id) in tenant_ids.iter().enumerate() {
-            // Set the session variable so RLS USING clause passes during INSERT
-            let set_sql = format!("SET app.current_tenant_id = '{}'", tenant_id);
             driver
-                .execute_raw(&set_sql)
+                .execute(&Qail::session_set(
+                    "app.current_tenant_id",
+                    tenant_id.to_string(),
+                ))
                 .await
                 .expect("Failed to set tenant_id for insert");
 
             for j in 0..ROWS_PER_TENANT {
-                let sql = format!(
-                    "INSERT INTO _rls_chaos_test (tenant_id, data) VALUES ('{}', 'tenant_{}_row_{}')",
-                    tenant_id, i, j
-                );
                 driver
-                    .execute_raw(&sql)
+                    .execute(
+                        &Qail::add(TABLE)
+                            .columns(["tenant_id", "data"])
+                            .values([tenant_id.to_string(), format!("tenant_{}_row_{}", i, j)]),
+                    )
                     .await
                     .expect("Failed to insert test data");
             }
@@ -146,10 +201,11 @@ async fn main() {
                 .await
                 .expect("Worker failed to connect");
 
-            // Set this worker's tenant context
-            let set_sql = format!("SET app.current_tenant_id = '{}'", tenant_id);
             driver
-                .execute_raw(&set_sql)
+                .execute(&Qail::session_set(
+                    "app.current_tenant_id",
+                    tenant_id.to_string(),
+                ))
                 .await
                 .expect("Failed to set tenant_id");
 
@@ -162,7 +218,7 @@ async fn main() {
 
             for _ in 0..QUERIES_PER_WORKER {
                 // Build query using Qail AST
-                let cmd = Qail::get("_rls_chaos_test").columns(vec!["id", "tenant_id", "data"]);
+                let cmd = Qail::get(TABLE).columns(["id", "tenant_id", "data"]);
 
                 match driver.fetch_all_cached(&cmd).await {
                     Ok(rows) => {
@@ -221,10 +277,7 @@ async fn main() {
         let mut driver = PgDriver::connect_url(&db_url)
             .await
             .expect("Failed to connect for cleanup");
-        driver
-            .execute_raw("DROP TABLE IF EXISTS _rls_chaos_test CASCADE")
-            .await
-            .ok();
+        driver.execute(&drop_table_cmd(TABLE)).await.ok();
     }
 
     // =========================================================================

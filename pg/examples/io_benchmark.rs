@@ -7,6 +7,7 @@
 //!
 //! Requires: PostgreSQL on 127.0.0.1:5432, trust auth, database qail_e2e_test
 
+use qail_core::ast::{Action, Constraint, Expr, IndexDef, Qail, Value};
 use qail_core::prelude::*;
 use qail_pg::driver::PgDriver;
 use std::time::Instant;
@@ -42,69 +43,152 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Setup: seed tables ───────────────────────────────────
     println!("  Setting up benchmark tables...");
 
-    let _ = driver
-        .execute_raw("DROP TABLE IF EXISTS bench_orders")
-        .await;
-    let _ = driver.execute_raw("DROP TABLE IF EXISTS bench_users").await;
-    driver
-        .execute_raw(
-            "CREATE TABLE bench_users (
-              id SERIAL PRIMARY KEY,
-              name TEXT NOT NULL,
-              email TEXT NOT NULL,
-              active BOOLEAN DEFAULT true
-            )",
-        )
-        .await?;
-    driver
-        .execute_raw(
-            "CREATE TABLE bench_orders (
-              id SERIAL PRIMARY KEY,
-              user_id INTEGER REFERENCES bench_users(id),
-              product TEXT NOT NULL,
-              amount NUMERIC(10,2) NOT NULL,
-              status TEXT DEFAULT 'pending'
-            )",
-        )
-        .await?;
+    let drop_orders = Qail {
+        action: Action::Drop,
+        table: "bench_orders".to_string(),
+        ..Default::default()
+    };
+    let drop_users = Qail {
+        action: Action::Drop,
+        table: "bench_users".to_string(),
+        ..Default::default()
+    };
+    let create_users = Qail {
+        action: Action::Make,
+        table: "bench_users".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "email".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "active".to_string(),
+                data_type: "boolean".to_string(),
+                constraints: vec![Constraint::Default("true".to_string())],
+            },
+        ],
+        ..Default::default()
+    };
+    let create_orders = Qail {
+        action: Action::Make,
+        table: "bench_orders".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "user_id".to_string(),
+                data_type: "integer".to_string(),
+                constraints: vec![
+                    Constraint::Nullable,
+                    Constraint::References("bench_users(id)".to_string()),
+                ],
+            },
+            Expr::Def {
+                name: "product".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "amount".to_string(),
+                data_type: "numeric(10,2)".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "status".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![Constraint::Default("'pending'".to_string())],
+            },
+        ],
+        ..Default::default()
+    };
+
+    let _ = driver.execute(&drop_orders).await;
+    let _ = driver.execute(&drop_users).await;
+    driver.execute(&create_users).await?;
+    driver.execute(&create_orders).await?;
 
     // Seed 100 users
     for i in 1..=100 {
-        let sql = format!(
-            "INSERT INTO bench_users (name, email, active) VALUES ('User {}', 'user{}@test.com', {})",
-            i,
-            i,
-            if i % 3 != 0 { "true" } else { "false" }
-        );
-        let _ = driver.execute_raw(&sql).await;
+        let insert_user = Qail::add("bench_users")
+            .columns(["name", "email", "active"])
+            .values([
+                Value::String(format!("User {}", i)),
+                Value::String(format!("user{}@test.com", i)),
+                Value::Bool(i % 3 != 0),
+            ]);
+        let _ = driver.execute(&insert_user).await;
     }
 
     // Seed 500 orders
     let statuses = ["pending", "completed", "shipped", "cancelled", "refunded"];
     for uid in 1..=100u32 {
         for j in 0..5u32 {
-            let sql = format!(
-                "INSERT INTO bench_orders (user_id, product, amount, status) VALUES ({}, 'Product {}-{}', {}.99, '{}')",
-                uid,
-                uid,
-                j,
-                (j + 1) * 10,
-                statuses[j as usize % 5]
-            );
-            let _ = driver.execute_raw(&sql).await;
+            let insert_order = Qail::add("bench_orders")
+                .columns(["user_id", "product", "amount", "status"])
+                .values([
+                    Value::Int(uid as i64),
+                    Value::String(format!("Product {}-{}", uid, j)),
+                    Value::Float(((j + 1) * 10) as f64 + 0.99),
+                    Value::String(statuses[j as usize % 5].to_string()),
+                ]);
+            let _ = driver.execute(&insert_order).await;
         }
     }
 
     // Indexes
-    let _ = driver
-        .execute_raw("CREATE INDEX IF NOT EXISTS idx_users_active ON bench_users (active)")
-        .await;
-    let _ = driver
-        .execute_raw("CREATE INDEX IF NOT EXISTS idx_orders_status ON bench_orders (status)")
-        .await;
-    let _ = driver
-        .execute_raw("CREATE INDEX IF NOT EXISTS idx_orders_user ON bench_orders (user_id)")
-        .await;
+    let idx_users_active = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_users_active".to_string(),
+            table: "bench_users".to_string(),
+            columns: vec!["active".to_string()],
+            unique: false,
+            index_type: None,
+            where_clause: None,
+        }),
+        ..Default::default()
+    };
+    let idx_orders_status = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_orders_status".to_string(),
+            table: "bench_orders".to_string(),
+            columns: vec!["status".to_string()],
+            unique: false,
+            index_type: None,
+            where_clause: None,
+        }),
+        ..Default::default()
+    };
+    let idx_orders_user = Qail {
+        action: Action::Index,
+        index_def: Some(IndexDef {
+            name: "idx_orders_user".to_string(),
+            table: "bench_orders".to_string(),
+            columns: vec!["user_id".to_string()],
+            unique: false,
+            index_type: None,
+            where_clause: None,
+        }),
+        ..Default::default()
+    };
+    let _ = driver.execute(&idx_users_active).await;
+    let _ = driver.execute(&idx_orders_status).await;
+    let _ = driver.execute(&idx_orders_user).await;
 
     println!("  Seeded: 100 users, 500 orders (indexed)\n");
 
@@ -189,24 +273,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── T4: INSERT + DELETE write cycle ──────────────────────
     {
+        let insert_tmp = Qail::add("bench_users")
+            .columns(["name", "email"])
+            .values(["_tmp", "_tmp@t.com"]);
+        let delete_tmp = Qail::del("bench_users").filter("name", Operator::Eq, "_tmp");
+
         // Warmup
         for _ in 0..100 {
-            let _ = driver
-                .execute_raw("INSERT INTO bench_users (name, email) VALUES ('_tmp', '_tmp@t.com')")
-                .await;
-            let _ = driver
-                .execute_raw("DELETE FROM bench_users WHERE name = '_tmp'")
-                .await;
+            let _ = driver.execute(&insert_tmp).await;
+            let _ = driver.execute(&delete_tmp).await;
         }
 
         let start = Instant::now();
         for _ in 0..WRITE_ITERS {
-            let _ = driver
-                .execute_raw("INSERT INTO bench_users (name, email) VALUES ('_tmp', '_tmp@t.com')")
-                .await;
-            let _ = driver
-                .execute_raw("DELETE FROM bench_users WHERE name = '_tmp'")
-                .await;
+            let _ = driver.execute(&insert_tmp).await;
+            let _ = driver.execute(&delete_tmp).await;
         }
         let elapsed = start.elapsed();
         let write_ops = WRITE_ITERS * 2;
@@ -221,23 +302,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── T5: UPDATE WHERE ─────────────────────────────────────
     {
+        let set_true =
+            Qail::set("bench_users")
+                .set_value("active", true)
+                .filter("id", Operator::Eq, 1);
+        let set_false =
+            Qail::set("bench_users")
+                .set_value("active", false)
+                .filter("id", Operator::Eq, 1);
+
         // Warmup
         for _ in 0..100 {
-            let _ = driver
-                .execute_raw("UPDATE bench_users SET active = true WHERE id = 1")
-                .await;
+            let _ = driver.execute(&set_true).await;
         }
 
         let start = Instant::now();
         for i in 0..WRITE_ITERS {
             if i % 2 == 0 {
-                let _ = driver
-                    .execute_raw("UPDATE bench_users SET active = true WHERE id = 1")
-                    .await;
+                let _ = driver.execute(&set_true).await;
             } else {
-                let _ = driver
-                    .execute_raw("UPDATE bench_users SET active = false WHERE id = 1")
-                    .await;
+                let _ = driver.execute(&set_false).await;
             }
         }
         let elapsed = start.elapsed();
@@ -293,8 +377,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Cleanup ──────────────────────────────────────────────
     print!("\n  Cleaning up...");
-    let _ = driver.execute_raw("DROP TABLE bench_orders").await;
-    let _ = driver.execute_raw("DROP TABLE bench_users").await;
+    let _ = driver.execute(&drop_orders).await;
+    let _ = driver.execute(&drop_users).await;
     println!(" done");
 
     println!("\n────────────────────────────────────────────────────────");

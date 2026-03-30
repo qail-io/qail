@@ -6,7 +6,7 @@
 //! **The Test:**
 //! 1. Connect to PostgreSQL.
 //! 2. Set `statement_timeout` to 2000ms (2s).
-//! 3. Run `SELECT pg_sleep(5)` (simulating a 5s delay/stall).
+//! 3. Run a `DO` block with `pg_sleep(5)` (simulating a 5s delay/stall).
 //! 4. The driver MUST return an error after ~2s.
 //!
 //! **Pass:** Error received within < 3s. Error is "timeout".
@@ -14,6 +14,7 @@
 //!
 //! Run: cargo run --release -p qail-pg --example battle_network
 
+use qail_core::ast::Qail;
 use qail_pg::PgDriver;
 use std::time::Instant;
 
@@ -35,10 +36,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     driver.set_statement_timeout(2000).await?;
     println!("   ✓ Timeout set");
 
-    // Run a query that takes 5 seconds
-    println!("\n3️⃣  Running 'SELECT pg_sleep(5)' (Should timeout in 2s)...");
+    // Run a command that takes 5 seconds
+    println!("\n3️⃣  Running DO block with pg_sleep(5) (Should timeout in 2s)...");
     let start = Instant::now();
-    let result = driver.fetch_raw("SELECT pg_sleep(5)").await;
+    let sleep_cmd = Qail::do_block("BEGIN PERFORM pg_sleep(5); END;", "plpgsql");
+    let result = driver.execute(&sleep_cmd).await;
     let duration = start.elapsed();
 
     println!("\n   ⏱️  Duration: {:.2?}", duration);
@@ -79,7 +81,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Verify connection is still usable (optional, but good practice)
     println!("\n4️⃣  Verifying connection health after timeout...");
     driver.reset_statement_timeout().await?;
-    let _ = driver.fetch_raw("SELECT 1").await?;
+    let _ = driver
+        .fetch_all(&Qail::session_show("server_version"))
+        .await?;
     println!("   ✓ Connection still alive");
 
     Ok(())

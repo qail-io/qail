@@ -5,6 +5,7 @@
 //!
 //! Run: cargo run --release -p qail-pg --example battle_chatty
 
+use qail_core::ast::Qail;
 use qail_pg::PgDriver;
 
 #[tokio::main]
@@ -17,34 +18,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PgDriver::connect_with_password("localhost", 5432, "postgres", "postgres", "postgres")
             .await?;
 
-    println!("1️⃣  Creating noisy function...");
-    driver
-        .fetch_raw(
-            "
-        CREATE OR REPLACE FUNCTION make_noise() RETURNS int AS $$
-        BEGIN
-            RAISE NOTICE 'Hear me roar!';
-            RAISE WARNING 'I am warning you!';
-            RETURN 1;
-        END;
-        $$ LANGUAGE plpgsql;
-    ",
-        )
-        .await?;
-
-    println!("2️⃣  Executing function...");
-    // This will send: DataRow -> NoticeResponse -> DataRow -> WarningResponse...
-    let result = driver.fetch_raw("SELECT make_noise()").await;
+    println!("1️⃣  Executing noisy DO block...");
+    let noisy = Qail::do_block(
+        "BEGIN RAISE NOTICE 'Hear me roar!'; RAISE WARNING 'I am warning you!'; END;",
+        "plpgsql",
+    );
+    let result = driver.execute(&noisy).await;
 
     match result {
-        Ok(rows) => {
-            println!(
-                "   ✅ PASS: Driver filtered out the noise and got {} rows.",
-                rows.len()
-            );
-            if rows.len() == 1 {
-                // Verify value if possible, but basic success is enough
-            }
+        Ok(_) => {
+            println!("   ✅ PASS: Driver handled NOTICE/WARNING packets cleanly.");
         }
         Err(e) => {
             println!("   ❌ FAIL: Driver choked on the Notice message.");
@@ -52,6 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("   (You probably tried to parse 'N' packet as a DataRow)");
         }
     }
+
+    let _ = driver
+        .fetch_all(&Qail::session_show("server_version"))
+        .await?;
 
     Ok(())
 }

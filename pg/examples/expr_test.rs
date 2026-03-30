@@ -3,8 +3,7 @@
 //!
 //! Run with: cargo run --example expr_test
 
-use qail_core::ast::Expr;
-use qail_core::prelude::Qail;
+use qail_core::ast::{Action, Constraint, Expr, Qail, Value};
 use qail_pg::driver::PgDriver;
 
 #[tokio::main]
@@ -18,29 +17,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🛠  Setup Test Data");
     println!("-------------------");
 
-    driver
-        .execute_raw("DROP TABLE IF EXISTS expr_test CASCADE")
-        .await
-        .ok();
-    driver
-        .execute_raw(
-            "CREATE TABLE expr_test (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            tags TEXT[] DEFAULT '{}',
-            data JSONB DEFAULT '{}'
-        )",
-        )
-        .await?;
+    let drop_cmd = Qail {
+        action: Action::Drop,
+        table: "expr_test".to_string(),
+        ..Default::default()
+    };
+    let make_cmd = Qail {
+        action: Action::Make,
+        table: "expr_test".to_string(),
+        columns: vec![
+            Expr::Def {
+                name: "id".to_string(),
+                data_type: "serial".to_string(),
+                constraints: vec![Constraint::PrimaryKey],
+            },
+            Expr::Def {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![],
+            },
+            Expr::Def {
+                name: "tags".to_string(),
+                data_type: "text[]".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+            Expr::Def {
+                name: "data".to_string(),
+                data_type: "jsonb".to_string(),
+                constraints: vec![Constraint::Nullable],
+            },
+        ],
+        ..Default::default()
+    };
 
-    driver
-        .execute_raw(
-            "INSERT INTO expr_test (name, tags, data) VALUES 
-        ('Alice', ARRAY['rust', 'postgres'], '{\"city\": \"NYC\"}'),
-        ('Bob', ARRAY['go', 'mysql'], '{\"city\": \"LA\"}'),
-        ('Carol', ARRAY['python', 'postgres', 'redis'], '{\"city\": \"SF\"}')",
-        )
-        .await?;
+    let _ = driver.execute(&drop_cmd).await;
+    driver.execute(&make_cmd).await?;
+
+    let seed = [
+        (
+            "Alice",
+            vec!["rust", "postgres"],
+            r#"{"city": "NYC"}"#.to_string(),
+        ),
+        ("Bob", vec!["go", "mysql"], r#"{"city": "LA"}"#.to_string()),
+        (
+            "Carol",
+            vec!["python", "postgres", "redis"],
+            r#"{"city": "SF"}"#.to_string(),
+        ),
+    ];
+    for (name, tags, json) in seed {
+        let tag_vals = Value::Array(
+            tags.into_iter()
+                .map(|s| Value::String(s.to_string()))
+                .collect(),
+        );
+        let insert = Qail::add("expr_test")
+            .columns(["name", "tags", "data"])
+            .values([Value::String(name.to_string()), tag_vals, Value::Json(json)]);
+        driver.execute(&insert).await?;
+    }
     println!("  ✓ Created expr_test table with 3 rows");
 
     // =====================================================
@@ -136,9 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =====================================================
     println!("\n🧹 Cleanup");
     println!("-----------");
-    driver
-        .execute_raw("DROP TABLE IF EXISTS expr_test CASCADE")
-        .await?;
+    driver.execute(&drop_cmd).await?;
     println!("  ✓ Cleanup complete");
 
     println!("\n✅ Expression test complete! All v0.14.4 features verified.");
