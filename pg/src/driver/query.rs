@@ -1354,4 +1354,87 @@ impl PgConnection {
             }
         }
     }
+
+    /// Sequential prepared query using reusable buffers and fixed 4-column visitor.
+    #[inline]
+    pub async fn query_prepared_single_reuse_visit_first_four_columns_bytes_with_result_format<F>(
+        &mut self,
+        stmt: &super::PreparedStatement,
+        params: &[Option<Vec<u8>>],
+        result_format: i16,
+        mut on_row: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut([Option<&[u8]>; 4]) -> PgResult<()>,
+    {
+        reserve_prepared_single_write_buf(self, stmt, params, result_format)?;
+
+        PgEncoder::encode_bind_to_with_result_format(
+            &mut self.write_buf,
+            &stmt.name,
+            params,
+            result_format,
+        )
+        .map_err(|e| PgError::Encode(e.to_string()))?;
+        PgEncoder::encode_execute_to(&mut self.write_buf);
+        PgEncoder::encode_sync_to(&mut self.write_buf);
+
+        self.flush_write_buf().await?;
+
+        let mut row_count = 0usize;
+        let mut columns = [None, None, None, None];
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
+
+        loop {
+            match self
+                .recv_fill_first_four_columns_zerocopy_fast(&mut columns)
+                .await
+            {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(
+                        msg_type,
+                        "prepared single reuse visit first-four execute",
+                        error.is_some(),
+                    )?;
+                    match msg_type {
+                        b'2' | b'T' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_row([
+                                    columns[0].as_deref(),
+                                    columns[1].as_deref(),
+                                    columns[2].as_deref(),
+                                    columns[3].as_deref(),
+                                ])?;
+                                columns.fill(None);
+                                row_count += 1;
+                            }
+                        }
+                        b'C' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok(row_count);
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "prepared single reuse visit first-four execute",
+                                other,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
 }

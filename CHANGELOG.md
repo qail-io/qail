@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.4] - 2026-03-30
+
+### Changed
+
+- **Native benchmark surface:** refreshed the canonical PostgreSQL benchmark harness around native `Qail` AST execution versus `pgx` SQL strings and updated the aggregate workload reporting to the corrected native-DSL path.
+- **PostgreSQL hot path:** tightened query/pipeline I/O buffer reuse and added a dedicated four-column zero-copy aggregate fast path for the scalar grouped-result path.
+- **Versioning/docs:** bumped Rust workspace crates and docs references to `0.27.4`.
+
+### Fixed
+
+- **Benchmark fairness:** aligned aggregate benchmark query shape and pooled prepare timing so the public Rust-vs-pgx report compares equivalent native workloads.
+- **Aggregate receive path:** removed remaining unnecessary row-materialization work on the native aggregate hot path and reduced write-buffer churn on repeated query execution.
+
 ## [0.27.3] - 2026-03-28
 
 ### Changed

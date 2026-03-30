@@ -728,11 +728,11 @@ fn consume_scalar_value(value: Option<&[u8]>, stats: &mut BatchStats) {
     }
 }
 
-fn consume_aggregate_row(row: &PgBytesRow, stats: &mut BatchStats) {
+fn consume_aggregate_columns(columns: [Option<&[u8]>; 4], stats: &mut BatchStats) {
     stats.rows += 1;
     let mut row_hash = FNV_OFFSET;
-    for idx in 0..4 {
-        if let Some(value) = row.get_bytes(idx) {
+    for value in columns {
+        if let Some(value) = value {
             stats.bytes += value.len();
             let parsed = std::str::from_utf8(value)
                 .ok()
@@ -792,7 +792,7 @@ fn consume_bytes_row(row: &PgBytesRow, result_mode: ResultMode, stats: &mut Batc
         ResultMode::PointRows => consume_point_row(row, stats),
         ResultMode::WideRows => consume_wide_row(row, stats),
         ResultMode::ScalarInt => unreachable!("scalar mode uses first-column visitor"),
-        ResultMode::AggregateScalars => consume_aggregate_row(row, stats),
+        ResultMode::AggregateScalars => unreachable!("aggregate mode uses four-column visitor"),
     }
 }
 
@@ -812,6 +812,18 @@ async fn run_single_iteration(
                     0,
                     |value| {
                         consume_scalar_value(value, &mut stats);
+                        Ok(())
+                    },
+                )
+                .await?;
+            }
+            ResultMode::AggregateScalars => {
+                conn.query_prepared_single_reuse_visit_first_four_columns_bytes_with_result_format(
+                    stmt,
+                    params,
+                    0,
+                    |columns| {
+                        consume_aggregate_columns(columns, &mut stats);
                         Ok(())
                     },
                 )
@@ -852,6 +864,17 @@ async fn run_pipeline_iteration(
                 consume_scalar_value(value, &mut stats);
                 Ok(())
             })
+            .await?
+        }
+        ResultMode::AggregateScalars => {
+            conn.pipeline_execute_prepared_visit_first_four_columns_bytes(
+                stmt,
+                params_batch,
+                |columns| {
+                    consume_aggregate_columns(columns, &mut stats);
+                    Ok(())
+                },
+            )
             .await?
         }
         _ => {
