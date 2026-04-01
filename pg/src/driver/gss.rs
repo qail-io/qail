@@ -1052,19 +1052,7 @@ impl Drop for GssHandshakeGuard {
     }
 }
 
-/// Perform the GSSAPI session encryption handshake on a TCP stream that
-/// already received a `G` response to GSSENCRequest.
-///
-/// This runs `gss_init_sec_context` in a loop, exchanging length-prefixed
-/// tokens with the server, until the context is established.
-///
-/// Returns a `GssEncStream` ready for encrypted I/O.
-/// GSS resources are cleaned up on all error paths via `GssHandshakeGuard`.
-pub(crate) async fn gssenc_handshake(
-    mut tcp: TcpStream,
-    host: &str,
-) -> Result<GssEncStream, String> {
-    // Import the server’s target name (host-based service principal).
+fn import_gss_target_name(host: &str) -> Result<GssHandshakeGuard, String> {
     let target_str = format!("postgres@{}", host);
     let mut minor: OmUint32 = 0;
     let mut target_name: GssName = std::ptr::null_mut();
@@ -1086,9 +1074,24 @@ pub(crate) async fn gssenc_handshake(
             format_gss_error(major, minor)
         ));
     }
+    Ok(GssHandshakeGuard::new(target_name))
+}
 
+/// Perform the GSSAPI session encryption handshake on a TCP stream that
+/// already received a `G` response to GSSENCRequest.
+///
+/// This runs `gss_init_sec_context` in a loop, exchanging length-prefixed
+/// tokens with the server, until the context is established.
+///
+/// Returns a `GssEncStream` ready for encrypted I/O.
+/// GSS resources are cleaned up on all error paths via `GssHandshakeGuard`.
+pub(crate) async fn gssenc_handshake(
+    mut tcp: TcpStream,
+    host: &str,
+) -> Result<GssEncStream, String> {
+    let mut minor: OmUint32 = 0;
     // Guard cleans up target_name + context on any error path.
-    let mut guard = GssHandshakeGuard::new(target_name);
+    let mut guard = import_gss_target_name(host)?;
 
     let mut input_token: Option<Vec<u8>> = None;
     let mut roundtrips = 0u32;
