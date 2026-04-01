@@ -33,7 +33,7 @@ tokio-test = "0.4"
 anyhow = "1"
 
 [build-dependencies]
-tonic-build = "0.13"
+tonic-build = "0.14"
 
 [lints.rust]
 warnings = "deny"
