@@ -719,18 +719,17 @@ impl GssEncStream {
         };
 
         if is_gss_error(major) {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("gss_wrap failed: {}", format_gss_error(major, minor)),
-            ));
+            return Err(io::Error::other(format!(
+                "gss_wrap failed: {}",
+                format_gss_error(major, minor)
+            )));
         }
 
         if conf_state == 0 {
             // Server did not apply confidentiality — integrity-only.
             // For GSSENC this is a protocol violation.
             let _ = take_gss_buffer(&mut output);
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "gss_wrap did not provide confidentiality (conf_state=0)",
             ));
         }
@@ -770,18 +769,17 @@ impl GssEncStream {
         };
 
         if is_gss_error(major) {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("gss_unwrap failed: {}", format_gss_error(major, minor)),
-            ));
+            return Err(io::Error::other(format!(
+                "gss_unwrap failed: {}",
+                format_gss_error(major, minor)
+            )));
         }
 
         if conf_state == 0 {
             // Inbound message was integrity-only, not encrypted.
             // This is a protocol violation for GSSENC.
             let _ = take_gss_buffer(&mut output);
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "gss_unwrap: inbound message lacks confidentiality (conf_state=0)",
             ));
         }
@@ -948,7 +946,7 @@ impl AsyncRead for GssEncStream {
 
 impl AsyncWrite for GssEncStream {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
@@ -1011,6 +1009,11 @@ struct GssHandshakeGuard {
     target_name: GssName,
 }
 
+// SAFETY: The guard owns opaque GSS handles and is moved by value only.
+// It is never aliased; cleanup runs once in Drop. Moving between threads
+// does not violate handle ownership or aliasing guarantees.
+unsafe impl Send for GssHandshakeGuard {}
+
 impl GssHandshakeGuard {
     fn new(target_name: GssName) -> Self {
         Self {
@@ -1047,19 +1050,7 @@ impl Drop for GssHandshakeGuard {
     }
 }
 
-/// Perform the GSSAPI session encryption handshake on a TCP stream that
-/// already received a `G` response to GSSENCRequest.
-///
-/// This runs `gss_init_sec_context` in a loop, exchanging length-prefixed
-/// tokens with the server, until the context is established.
-///
-/// Returns a `GssEncStream` ready for encrypted I/O.
-/// GSS resources are cleaned up on all error paths via `GssHandshakeGuard`.
-pub(crate) async fn gssenc_handshake(
-    mut tcp: TcpStream,
-    host: &str,
-) -> Result<GssEncStream, String> {
-    // Import the server’s target name (host-based service principal).
+fn import_gss_target_name(host: &str) -> Result<GssHandshakeGuard, String> {
     let target_str = format!("postgres@{}", host);
     let mut minor: OmUint32 = 0;
     let mut target_name: GssName = std::ptr::null_mut();
@@ -1081,9 +1072,24 @@ pub(crate) async fn gssenc_handshake(
             format_gss_error(major, minor)
         ));
     }
+    Ok(GssHandshakeGuard::new(target_name))
+}
 
+/// Perform the GSSAPI session encryption handshake on a TCP stream that
+/// already received a `G` response to GSSENCRequest.
+///
+/// This runs `gss_init_sec_context` in a loop, exchanging length-prefixed
+/// tokens with the server, until the context is established.
+///
+/// Returns a `GssEncStream` ready for encrypted I/O.
+/// GSS resources are cleaned up on all error paths via `GssHandshakeGuard`.
+pub(crate) async fn gssenc_handshake(
+    mut tcp: TcpStream,
+    host: &str,
+) -> Result<GssEncStream, String> {
+    let mut minor: OmUint32 = 0;
     // Guard cleans up target_name + context on any error path.
-    let mut guard = GssHandshakeGuard::new(target_name);
+    let mut guard = import_gss_target_name(host)?;
 
     let mut input_token: Option<Vec<u8>> = None;
     let mut roundtrips = 0u32;
@@ -1098,42 +1104,45 @@ pub(crate) async fn gssenc_handshake(
             ));
         }
 
-        let mut output = GssBufferDesc {
-            length: 0,
-            value: std::ptr::null_mut(),
-        };
-        let mut input = GssBufferDesc {
-            length: 0,
-            value: std::ptr::null_mut(),
-        };
-        let input_ptr = if let Some(ref bytes) = input_token {
-            input.length = bytes.len();
-            input.value = bytes.as_ptr() as *mut c_void;
-            &input as *const GssBufferDesc
-        } else {
-            std::ptr::null()
-        };
+        let (major, ret_flags, token) = {
+            let mut output = GssBufferDesc {
+                length: 0,
+                value: std::ptr::null_mut(),
+            };
+            let mut input = GssBufferDesc {
+                length: 0,
+                value: std::ptr::null_mut(),
+            };
+            let input_ptr = if let Some(ref bytes) = input_token {
+                input.length = bytes.len();
+                input.value = bytes.as_ptr() as *mut c_void;
+                &input as *const GssBufferDesc
+            } else {
+                std::ptr::null()
+            };
 
-        let mut ret_flags: OmUint32 = 0;
-        let major = unsafe {
-            gss_init_sec_context(
-                &mut minor,
-                std::ptr::null_mut(), // use default credentials
-                &mut guard.context,
-                guard.target_name,
-                std::ptr::null_mut(), // default mechanism
-                GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG | GSS_C_CONF_FLAG,
-                0,
-                std::ptr::null_mut(), // no channel bindings
-                input_ptr,
-                std::ptr::null_mut(), // actual_mech
-                &mut output,
-                &mut ret_flags,
-                std::ptr::null_mut(), // time_rec
-            )
-        };
+            let mut ret_flags: OmUint32 = 0;
+            let major = unsafe {
+                gss_init_sec_context(
+                    &mut minor,
+                    std::ptr::null_mut(), // use default credentials
+                    &mut guard.context,
+                    guard.target_name,
+                    std::ptr::null_mut(), // default mechanism
+                    GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG | GSS_C_CONF_FLAG,
+                    0,
+                    std::ptr::null_mut(), // no channel bindings
+                    input_ptr,
+                    std::ptr::null_mut(), // actual_mech
+                    &mut output,
+                    &mut ret_flags,
+                    std::ptr::null_mut(), // time_rec
+                )
+            };
 
-        let token = take_gss_buffer(&mut output);
+            let token = take_gss_buffer(&mut output);
+            (major, ret_flags, token)
+        };
 
         if is_gss_error(major) {
             return Err(format!(

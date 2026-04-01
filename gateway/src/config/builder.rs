@@ -7,6 +7,12 @@ pub struct GatewayConfigBuilder {
 }
 
 impl GatewayConfigBuilder {
+    /// Apply hardened security defaults.
+    pub fn secure_defaults(mut self) -> Self {
+        self.config.apply_secure_profile();
+        self
+    }
+
     /// Set the database URL.
     pub fn database(mut self, url: impl Into<String>) -> Self {
         self.config.database_url = url.into();

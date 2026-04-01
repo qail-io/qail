@@ -33,11 +33,11 @@ impl Gateway {
 
         let jwt_set = std::env::var("JWT_SECRET").is_ok();
         if !jwt_set {
-            tracing::warn!(
-                "QAIL_DEV_MODE=true and JWT_SECRET is not set. \
-                 Header-based auth is active on {}. Do NOT expose this port publicly.",
+            return Err(GatewayError::Config(format!(
+                "SECURITY: QAIL_DEV_MODE=true but JWT_SECRET is not set for bind_address='{}'. \
+                 Set JWT_SECRET or unset QAIL_DEV_MODE.",
                 bind
-            );
+            )));
         }
 
         Ok(())
@@ -118,5 +118,90 @@ impl Gateway {
                 violations.join("\n  - ")
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                unsafe {
+                    std::env::set_var(self.key, value);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env mutex poisoned")
+    }
+
+    #[test]
+    fn dev_mode_requires_jwt_secret() {
+        let _lock = env_lock();
+        let _dev = EnvGuard::set("QAIL_DEV_MODE", "1");
+        let _jwt = EnvGuard::unset("JWT_SECRET");
+
+        let cfg = crate::config::GatewayConfig {
+            bind_address: "127.0.0.1:8080".to_string(),
+            ..crate::config::GatewayConfig::default()
+        };
+        let gw = Gateway::new(cfg);
+        let err = gw.check_dev_mode_safety().unwrap_err();
+
+        match err {
+            GatewayError::Config(msg) => {
+                assert!(msg.contains("JWT_SECRET"));
+            }
+            other => panic!("expected GatewayError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dev_mode_with_local_bind_and_jwt_secret_is_allowed() {
+        let _lock = env_lock();
+        let _dev = EnvGuard::set("QAIL_DEV_MODE", "1");
+        let _jwt = EnvGuard::set("JWT_SECRET", "dev-test-secret");
+
+        let cfg = crate::config::GatewayConfig {
+            bind_address: "127.0.0.1:8080".to_string(),
+            ..crate::config::GatewayConfig::default()
+        };
+        let gw = Gateway::new(cfg);
+        assert!(gw.check_dev_mode_safety().is_ok());
     }
 }

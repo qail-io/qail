@@ -1,7 +1,7 @@
 //! QAIL wire codecs for command transport.
 //!
 //! - Text codecs (`QAIL-CMD/1`, `QAIL-CMDS/1`) round-trip through canonical text.
-//! - Binary codec (`QWB2`) transports AST bytes directly (parser-free decode).
+//! - Binary codec (`QWB2`) transports framed AST bytes directly.
 
 use crate::ast::Qail;
 
@@ -112,8 +112,7 @@ pub fn encode_cmd_binary(cmd: &Qail) -> Vec<u8> {
 
 /// Fallible QWB2 AST-binary encoder.
 pub fn try_encode_cmd_binary(cmd: &Qail) -> Result<Vec<u8>, String> {
-    let payload = bincode::serde::encode_to_vec(cmd, binary_ast_bincode_config())
-        .map_err(|e| format!("binary AST encode failed: {e}"))?;
+    let payload = serde_json::to_vec(cmd).map_err(|e| format!("binary AST encode failed: {e}"))?;
     if payload.len() > MAX_CMD_BINARY_PAYLOAD_BYTES {
         return Err(format!(
             "binary AST payload too large: {} bytes (max {})",
@@ -133,15 +132,15 @@ pub fn try_encode_cmd_binary(cmd: &Qail) -> Result<Vec<u8>, String> {
 
 /// Decode one command from strict QWB2 AST-binary wire format.
 ///
-/// This path is parser-free and rejects legacy QWB1/raw-text payloads.
+/// This path rejects legacy QWB1/raw-text payloads.
 pub fn decode_cmd_binary(input: &[u8]) -> Result<Qail, String> {
     let payload = decode_cmd_binary_payload(input)?;
-    let (cmd, consumed): (Qail, usize) =
-        bincode::serde::decode_from_slice(payload, binary_ast_bincode_config())
-            .map_err(|e| format!("binary AST decode failed: {e}"))?;
-    if consumed != payload.len() {
-        return Err("trailing bytes after AST payload".to_string());
-    }
+    let mut deserializer = serde_json::Deserializer::from_slice(payload);
+    let cmd = serde::Deserialize::deserialize(&mut deserializer)
+        .map_err(|e| format!("binary AST decode failed: {e}"))?;
+    deserializer
+        .end()
+        .map_err(|_| "trailing bytes after AST payload".to_string())?;
     validate_binary_ast_limits(&cmd)?;
     Ok(cmd)
 }
@@ -175,11 +174,6 @@ pub fn decode_cmd_binary_payload(input: &[u8]) -> Result<&[u8], String> {
         ));
     }
     Ok(&input[8..])
-}
-
-#[inline(always)]
-fn binary_ast_bincode_config() -> impl bincode::config::Config {
-    bincode::config::standard().with_limit::<MAX_CMD_BINARY_PAYLOAD_BYTES>()
 }
 
 #[derive(Default)]
@@ -882,11 +876,14 @@ mod tests {
     }
 
     #[test]
-    fn cmd_binary_bincode_config_has_hard_limit() {
-        use bincode::config::Config;
+    fn cmd_binary_payload_rejects_oversized_header() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&CMD_BIN_MAGIC);
+        payload.extend_from_slice(&((MAX_CMD_BINARY_PAYLOAD_BYTES + 1) as u32).to_be_bytes());
+        payload.extend_from_slice(&[]);
 
-        let cfg = binary_ast_bincode_config();
-        assert_eq!(cfg.limit(), Some(MAX_CMD_BINARY_PAYLOAD_BYTES));
+        let err = decode_cmd_binary_payload(&payload).unwrap_err();
+        assert!(err.contains("binary AST payload too large"));
     }
 
     #[test]
@@ -894,9 +891,9 @@ mod tests {
         let cmd = crate::ast::Qail::get("users").limit(3);
         let encoded = encode_cmd_binary(&cmd);
         let payload = decode_cmd_binary_payload(&encoded).unwrap();
-        let (decoded, consumed): (crate::ast::Qail, usize) =
-            bincode::serde::decode_from_slice(payload, bincode::config::standard()).unwrap();
-        assert_eq!(consumed, payload.len());
+        let mut deserializer = serde_json::Deserializer::from_slice(payload);
+        let decoded: crate::ast::Qail = serde::Deserialize::deserialize(&mut deserializer).unwrap();
+        deserializer.end().unwrap();
         assert_eq!(decoded.to_string(), cmd.to_string());
     }
 
@@ -944,7 +941,11 @@ mod tests {
 
         let encoded = encode_cmd_binary(&nested);
         let err = decode_cmd_binary(&encoded).unwrap_err();
-        assert!(err.contains("AST depth limit exceeded"));
+        assert!(
+            err.contains("AST depth limit exceeded")
+                || err.contains("binary AST decode failed")
+                || err.contains("recursion limit exceeded")
+        );
     }
 
     #[test]

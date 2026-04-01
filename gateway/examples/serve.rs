@@ -5,7 +5,7 @@
 //! ```
 //!
 //! Config resolution (highest priority wins):
-//!   1. Environment variables (DATABASE_URL, BIND_ADDRESS, SCHEMA_PATH, POLICY_PATH)
+//!   1. Environment variables (DATABASE_URL, BIND_ADDRESS, SCHEMA_PATH, POLICY_PATH, QAIL_SECURITY_PROFILE)
 //!   2. `qail-gateway.toml` in the current working directory
 //!   3. Built-in defaults
 
@@ -78,6 +78,9 @@ fn load_config() -> anyhow::Result<GatewayConfig> {
             break;
         }
     }
+
+    // Optional hardening profile for production bootstrapping.
+    config.apply_security_profile_from_env();
 
     // Environment variables override TOML settings (highest priority)
     if let Ok(url) = std::env::var("DATABASE_URL") {

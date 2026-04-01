@@ -40,8 +40,12 @@ fn ready_idle() -> Vec<u8> {
 }
 
 fn negotiate_protocol_version(newest_minor_supported: u16, unrecognized: &[&str]) -> Vec<u8> {
+    negotiate_protocol_version_raw(i32::from(newest_minor_supported), unrecognized)
+}
+
+fn negotiate_protocol_version_raw(newest_minor_supported: i32, unrecognized: &[&str]) -> Vec<u8> {
     let mut payload = Vec::new();
-    payload.extend_from_slice(&(i32::from(newest_minor_supported)).to_be_bytes());
+    payload.extend_from_slice(&newest_minor_supported.to_be_bytes());
     payload.extend_from_slice(&(unrecognized.len() as i32).to_be_bytes());
     for name in unrecognized {
         payload.extend_from_slice(name.as_bytes());
@@ -91,6 +95,33 @@ async fn startup_accepts_negotiate_protocol_version_and_tracks_minor() {
 
     assert_eq!(conn.requested_protocol_minor(), 2);
     assert_eq!(conn.negotiated_protocol_minor(), 1);
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_accepts_negotiate_protocol_version_full_protocol_value() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let version = read_startup_version(&mut sock).await;
+        assert_eq!(version, PROTOCOL_VERSION_3_2);
+
+        sock.write_all(&negotiate_protocol_version_raw(PROTOCOL_VERSION_3_0, &[]))
+            .await
+            .unwrap();
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let conn = PgConnection::connect_with_password("127.0.0.1", port, "test_user", "test_db", None)
+        .await
+        .unwrap();
+
+    assert_eq!(conn.requested_protocol_minor(), 2);
+    assert_eq!(conn.negotiated_protocol_minor(), 0);
 
     server.await.unwrap();
 }

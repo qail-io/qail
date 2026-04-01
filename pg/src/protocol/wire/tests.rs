@@ -584,6 +584,14 @@ mod tests {
         assert!(err_term.contains("terminator"));
     }
 
+    #[test]
+    fn decode_negotiate_protocol_version_rejects_count_exceeding_payload_capacity() {
+        let mut payload = 2i32.to_be_bytes().to_vec();
+        payload.extend_from_slice(&1024i32.to_be_bytes());
+        let err = BackendMessage::decode(&wire_msg(b'v', &payload)).unwrap_err();
+        assert!(err.contains("exceeds payload capacity"));
+    }
+
     // ========== ErrorResponse tests ==========
 
     #[test]

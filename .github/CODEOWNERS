@@ -1,0 +1,12 @@
+# Default ownership for the repository.
+* @VerysignVL
+
+# Security- and release-sensitive controls.
+.github/workflows/* @VerysignVL
+.github/dependabot.yml @VerysignVL
+deny.toml @VerysignVL
+Cargo.toml @VerysignVL
+Cargo.lock @VerysignVL
+SECURITY.md @VerysignVL
+gateway/** @VerysignVL
+pg/** @VerysignVL

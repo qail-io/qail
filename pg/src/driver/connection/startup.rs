@@ -409,12 +409,25 @@ impl PgConnection {
                             "Received NegotiateProtocolVersion after AuthenticationOk".to_string(),
                         ));
                     }
-                    let negotiated = u16::try_from(newest_minor_supported).map_err(|_| {
-                        PgError::Protocol(format!(
-                            "Invalid NegotiateProtocolVersion newest_minor_supported: {}",
-                            newest_minor_supported
-                        ))
-                    })?;
+                    let negotiated = if let Ok(minor) = u16::try_from(newest_minor_supported) {
+                        minor
+                    } else {
+                        let packed = u32::try_from(newest_minor_supported).map_err(|_| {
+                            PgError::Protocol(format!(
+                                "Invalid NegotiateProtocolVersion newest_minor_supported: {}",
+                                newest_minor_supported
+                            ))
+                        })?;
+                        let major = (packed >> 16) as u16;
+                        let minor = (packed & 0xFFFF) as u16;
+                        if major != 3 {
+                            return Err(PgError::Protocol(format!(
+                                "Invalid NegotiateProtocolVersion newest_minor_supported: {}",
+                                newest_minor_supported
+                            )));
+                        }
+                        minor
+                    };
                     if negotiated > self.requested_protocol_minor {
                         return Err(PgError::Protocol(format!(
                             "Server negotiated protocol minor {} above requested {}",

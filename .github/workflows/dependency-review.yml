@@ -25,4 +25,4 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Dependency review
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48

@@ -757,6 +757,7 @@ async fn rpc_route_variadic_empty_object_executes_without_required_arg_error() {
     let _serial = integration_test_serial_guard().await;
     require_db!();
     let _dev_mode = EnvGuard::set("QAIL_DEV_MODE", "1");
+    let _jwt = EnvGuard::set("JWT_SECRET", "dev-test-secret");
     let app = build_rpc_router(&["qail_test.sum_all"]).await;
 
     let response = app
@@ -783,6 +784,7 @@ async fn rpc_route_custom_enum_and_domain_use_typed_probe_fallback() {
     let _serial = integration_test_serial_guard().await;
     require_db!();
     let _dev_mode = EnvGuard::set("QAIL_DEV_MODE", "1");
+    let _jwt = EnvGuard::set("JWT_SECRET", "dev-test-secret");
 
     let enum_app = build_rpc_router(&["qail_test.echo_priority"]).await;
     let enum_response = enum_app
@@ -826,6 +828,7 @@ async fn rpc_contracts_route_marks_variadic_tail_optional() {
     let _serial = integration_test_serial_guard().await;
     require_db!();
     let _dev_mode = EnvGuard::set("QAIL_DEV_MODE", "1");
+    let _jwt = EnvGuard::set("JWT_SECRET", "dev-test-secret");
     let app = build_rpc_router(&["qail_test.sum_all"]).await;
 
     let response = app

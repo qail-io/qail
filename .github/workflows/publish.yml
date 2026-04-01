@@ -31,17 +31,18 @@ jobs:
     environment: release
     permissions:
       id-token: write
+      attestations: write
       contents: read
     
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
 
       - name: Check Cargo Version
         run: |
@@ -72,8 +73,20 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Build crate packages
+        run: |
+          cargo package -p qail-core
+          cargo package -p qail-pg
+          cargo package -p qail-qdrant
+          cargo package -p qail
+
+      - name: Attest crate packages
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: target/package/*.crate
+
       - name: Authenticate with Crates.io
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec
         id: auth
         
       - name: Publish qail-core

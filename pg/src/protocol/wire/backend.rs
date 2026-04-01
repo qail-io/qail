@@ -278,6 +278,15 @@ impl BackendMessage {
             );
         }
         let unrecognized_count = unrecognized_count as usize;
+        let remaining = payload.len() - 8;
+        // Each option is NUL-terminated, so even an empty option consumes one byte.
+        // This bound keeps malformed counts from forcing huge pre-allocations.
+        if unrecognized_count > remaining {
+            return Err(format!(
+                "NegotiateProtocolVersion unrecognized option count {} exceeds payload capacity {}",
+                unrecognized_count, remaining
+            ));
+        }
 
         let mut options = Vec::with_capacity(unrecognized_count);
         let mut pos = 8usize;

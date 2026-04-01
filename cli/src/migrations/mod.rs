@@ -266,7 +266,14 @@ pub async fn ensure_migration_table(driver: &mut PgDriver) -> anyhow::Result<()>
             ],
             ..Default::default()
         };
-        driver.execute(&cmd).await?;
+        if let Err(create_err) = driver.execute(&cmd).await {
+            // A concurrent bootstrap can race this CREATE TABLE. Re-check table
+            // existence and only fail if it is still absent.
+            let exists_after = driver.fetch_all(&exists_cmd).await?;
+            if exists_after.is_empty() {
+                return Err(create_err.into());
+            }
+        }
     }
 
     ensure_migration_receipt_columns(driver).await?;

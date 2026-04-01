@@ -38,6 +38,7 @@ use qail_gateway::Gateway;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let gateway = Gateway::builder()
+        .secure_defaults() // optional: hardened profile
         .database("postgres://postgres:postgres@localhost:5432/app")
         .schema("schema.qail")
         .policy("policies.yaml")
@@ -65,3 +66,5 @@ async fn main() -> anyhow::Result<()> {
 ## Notes
 
 `production_strict=true` enables fail-closed startup checks for required security configuration.
+
+Set `QAIL_SECURITY_PROFILE=secure` to apply the hardened profile automatically in the example server loader.
