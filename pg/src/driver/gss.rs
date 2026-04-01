@@ -719,18 +719,17 @@ impl GssEncStream {
         };
 
         if is_gss_error(major) {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("gss_wrap failed: {}", format_gss_error(major, minor)),
-            ));
+            return Err(io::Error::other(format!(
+                "gss_wrap failed: {}",
+                format_gss_error(major, minor)
+            )));
         }
 
         if conf_state == 0 {
             // Server did not apply confidentiality — integrity-only.
             // For GSSENC this is a protocol violation.
             let _ = take_gss_buffer(&mut output);
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "gss_wrap did not provide confidentiality (conf_state=0)",
             ));
         }
@@ -770,18 +769,17 @@ impl GssEncStream {
         };
 
         if is_gss_error(major) {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("gss_unwrap failed: {}", format_gss_error(major, minor)),
-            ));
+            return Err(io::Error::other(format!(
+                "gss_unwrap failed: {}",
+                format_gss_error(major, minor)
+            )));
         }
 
         if conf_state == 0 {
             // Inbound message was integrity-only, not encrypted.
             // This is a protocol violation for GSSENC.
             let _ = take_gss_buffer(&mut output);
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "gss_unwrap: inbound message lacks confidentiality (conf_state=0)",
             ));
         }

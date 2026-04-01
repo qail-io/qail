@@ -155,55 +155,51 @@ impl PgConnection {
                     #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
                     {
                         let default_minor = Self::default_protocol_minor();
-                        let mut result = Self::connect_gssenc_accepted_with_timeout(
-                            tcp_stream,
+                        let gss_params = ConnectParams {
                             host,
+                            port,
                             user,
                             database,
                             password,
-                            auth,
+                            auth_settings: auth,
                             gss_token_provider,
-                            gss_token_provider_ex.clone(),
-                            startup_params.clone(),
-                            default_minor,
-                        )
-                        .await;
-                        if let Err(err) = &result {
-                            if default_minor > 0 && is_explicit_protocol_version_rejection(err) {
-                                let downgrade_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
-                                let retry_stream = match Self::try_gssenc_request(host, port).await
-                                {
-                                    Ok(GssEncNegotiationResult::Accepted(stream)) => stream,
-                                    Ok(GssEncNegotiationResult::Rejected) => {
-                                        return Err(PgError::Connection(
-                                            "Protocol downgrade retry failed: server rejected GSSENCRequest"
-                                                .to_string(),
-                                        ));
-                                    }
-                                    Ok(GssEncNegotiationResult::ServerError) => {
-                                        return Err(PgError::Connection(
-                                            "Protocol downgrade retry failed: server returned error to GSSENCRequest"
-                                                .to_string(),
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        return Err(e);
-                                    }
-                                };
-                                result = Self::connect_gssenc_accepted_with_timeout(
-                                    retry_stream,
-                                    host,
-                                    user,
-                                    database,
-                                    password,
-                                    auth,
-                                    gss_token_provider,
-                                    gss_token_provider_ex,
-                                    startup_params.clone(),
-                                    downgrade_minor,
-                                )
+                            gss_token_provider_ex: gss_token_provider_ex.clone(),
+                            protocol_minor: default_minor,
+                            startup_params: startup_params.clone(),
+                        };
+                        let mut result =
+                            Self::connect_gssenc_accepted_with_timeout(tcp_stream, gss_params.clone())
                                 .await;
-                            }
+                        if let Err(err) = &result
+                            && default_minor > 0
+                            && is_explicit_protocol_version_rejection(err)
+                        {
+                            let downgrade_minor = (PROTOCOL_VERSION_3_0 & 0xFFFF) as u16;
+                            let retry_stream = match Self::try_gssenc_request(host, port).await {
+                                Ok(GssEncNegotiationResult::Accepted(stream)) => stream,
+                                Ok(GssEncNegotiationResult::Rejected) => {
+                                    return Err(PgError::Connection(
+                                        "Protocol downgrade retry failed: server rejected GSSENCRequest"
+                                            .to_string(),
+                                    ));
+                                }
+                                Ok(GssEncNegotiationResult::ServerError) => {
+                                    return Err(PgError::Connection(
+                                        "Protocol downgrade retry failed: server returned error to GSSENCRequest"
+                                            .to_string(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    return Err(e);
+                                }
+                            };
+                            let mut retry_params = gss_params;
+                            retry_params.protocol_minor = downgrade_minor;
+                            result = Self::connect_gssenc_accepted_with_timeout(
+                                retry_stream,
+                                retry_params,
+                            )
+                            .await;
                         }
                         record_connect_result(
                             CONNECT_TRANSPORT_GSSENC,
@@ -424,18 +420,10 @@ impl PgConnection {
     #[cfg(all(feature = "enterprise-gssapi", target_os = "linux"))]
     async fn connect_gssenc_accepted_with_timeout(
         tcp_stream: TcpStream,
-        host: &str,
-        user: &str,
-        database: &str,
-        password: Option<&str>,
-        auth_settings: AuthSettings,
-        gss_token_provider: Option<super::super::GssTokenProvider>,
-        gss_token_provider_ex: Option<super::super::GssTokenProviderEx>,
-        startup_params: Vec<(String, String)>,
-        protocol_minor: u16,
+        params: ConnectParams<'_>,
     ) -> PgResult<Self> {
         let gssenc_fut = async {
-            let gss_stream = super::super::gss::gssenc_handshake(tcp_stream, host)
+            let gss_stream = super::super::gss::gssenc_handshake(tcp_stream, params.host)
                 .await
                 .map_err(PgError::Auth)?;
             let mut conn = Self {
@@ -450,29 +438,29 @@ impl PgConnection {
                 process_id: 0,
                 secret_key: 0,
                 cancel_key_bytes: Vec::new(),
-                requested_protocol_minor: protocol_minor,
-                negotiated_protocol_minor: protocol_minor,
+                requested_protocol_minor: params.protocol_minor,
+                negotiated_protocol_minor: params.protocol_minor,
                 notifications: VecDeque::new(),
                 replication_stream_active: false,
-                replication_mode_enabled: has_logical_replication_startup_mode(&startup_params),
+                replication_mode_enabled: has_logical_replication_startup_mode(&params.startup_params),
                 last_replication_wal_end: None,
                 io_desynced: false,
                 pending_statement_closes: Vec::new(),
                 draining_statement_closes: false,
             };
             conn.send(FrontendMessage::Startup {
-                user: user.to_string(),
-                database: database.to_string(),
-                protocol_version: protocol_version_from_minor(protocol_minor),
-                startup_params: startup_params.clone(),
+                user: params.user.to_string(),
+                database: params.database.to_string(),
+                protocol_version: protocol_version_from_minor(params.protocol_minor),
+                startup_params: params.startup_params.clone(),
             })
             .await?;
             conn.handle_startup(
-                user,
-                password,
-                auth_settings,
-                gss_token_provider,
-                gss_token_provider_ex,
+                params.user,
+                params.password,
+                params.auth_settings,
+                params.gss_token_provider,
+                params.gss_token_provider_ex,
             )
             .await?;
             Ok(conn)
