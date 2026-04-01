@@ -34,7 +34,7 @@ anyhow = "1.0"
 serde_yaml = "0.9"
 
 # JWT validation
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 thiserror = "2.0"
 
 # Logging
