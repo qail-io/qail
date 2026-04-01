@@ -23,10 +23,10 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "js"] }
 strsim = "0.11"
-toml = "1.0"
+toml = "1.1"
 
 [dev-dependencies]
-proptest = "1.10.0"
+proptest = "1.11.0"
 
 [[example]]
 name = "test_multiline_sql"
