@@ -4,8 +4,28 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
     commit-message:
       prefix: "deps"
     labels:
       - "dependencies"
-    open-pull-requests-limit: 5
+      - "security"
+    open-pull-requests-limit: 3
+    rebase-strategy: "disabled"
+    groups:
+      cargo-minor-patch-prod:
+        patterns:
+          - "*"
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+      cargo-minor-patch-dev:
+        patterns:
+          - "*"
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"

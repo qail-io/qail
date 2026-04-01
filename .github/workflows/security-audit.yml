@@ -34,5 +34,5 @@ jobs:
       - name: Install cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check advisories
+          command: check
           arguments: --all-features
