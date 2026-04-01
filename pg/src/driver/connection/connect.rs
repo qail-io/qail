@@ -3,8 +3,8 @@
 #[cfg(all(target_os = "linux", feature = "io_uring"))]
 use super::helpers::should_try_uring_plain;
 use super::helpers::{
-    connect_backend_for_stream, connect_error_kind, plain_connect_attempt_backend,
-    record_connect_attempt, record_connect_result,
+    connect_backend_for_stream, plain_connect_attempt_backend, record_connect_attempt,
+    record_connect_result,
 };
 use super::types::{
     BUFFER_CAPACITY, CONNECT_BACKEND_TOKIO, CONNECT_TRANSPORT_GSSENC, CONNECT_TRANSPORT_MTLS,
@@ -232,7 +232,7 @@ impl PgConnection {
                             "qail_pg_connect_failure_total",
                             "transport" => CONNECT_TRANSPORT_GSSENC,
                             "backend" => CONNECT_BACKEND_TOKIO,
-                            "error_kind" => connect_error_kind(&err)
+                            "error_kind" => super::helpers::connect_error_kind(&err)
                         )
                         .increment(1);
                         return Err(err);

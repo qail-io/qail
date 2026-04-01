@@ -948,7 +948,7 @@ impl AsyncRead for GssEncStream {
 
 impl AsyncWrite for GssEncStream {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
@@ -1010,6 +1010,11 @@ struct GssHandshakeGuard {
     context: GssContext,
     target_name: GssName,
 }
+
+// SAFETY: The guard owns opaque GSS handles and is moved by value only.
+// It is never aliased; cleanup runs once in Drop. Moving between threads
+// does not violate handle ownership or aliasing guarantees.
+unsafe impl Send for GssHandshakeGuard {}
 
 impl GssHandshakeGuard {
     fn new(target_name: GssName) -> Self {
