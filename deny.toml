@@ -2,14 +2,8 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-# Ignore unmaintained transitive dependencies we can't directly control
-ignore = [
-    # rustls-pemfile — unmaintained, pulled in by tonic → qdrant-client
-    # Will be resolved when tonic upgrades to rustls-pki-types
-    "RUSTSEC-2025-0134",
-    # instant — unmaintained, pulled in by notify-types → notify-debouncer-full (LSP file watcher)
-    "RUSTSEC-2024-0384",
-]
+# Keep advisories strict; do not suppress by default.
+ignore = []
 
 [licenses]
 # Workspace policy: allow common permissive OSS licenses used by transitive deps.
@@ -24,11 +18,7 @@ allow = [
     "ISC",
     "MIT",
     "MIT-0",
-    "MPL-2.0",
-    "NCSA",
-    "OpenSSL",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Unlicense",
     "Zlib",
 ]
