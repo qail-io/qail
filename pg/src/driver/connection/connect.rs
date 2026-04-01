@@ -167,9 +167,11 @@ impl PgConnection {
                             protocol_minor: default_minor,
                             startup_params: startup_params.clone(),
                         };
-                        let mut result =
-                            Self::connect_gssenc_accepted_with_timeout(tcp_stream, gss_params.clone())
-                                .await;
+                        let mut result = Self::connect_gssenc_accepted_with_timeout(
+                            tcp_stream,
+                            gss_params.clone(),
+                        )
+                        .await;
                         if let Err(err) = &result
                             && default_minor > 0
                             && is_explicit_protocol_version_rejection(err)
@@ -442,7 +444,9 @@ impl PgConnection {
                 negotiated_protocol_minor: params.protocol_minor,
                 notifications: VecDeque::new(),
                 replication_stream_active: false,
-                replication_mode_enabled: has_logical_replication_startup_mode(&params.startup_params),
+                replication_mode_enabled: has_logical_replication_startup_mode(
+                    &params.startup_params,
+                ),
                 last_replication_wal_end: None,
                 io_desynced: false,
                 pending_statement_closes: Vec::new(),
