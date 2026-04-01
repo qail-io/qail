@@ -1106,42 +1106,45 @@ pub(crate) async fn gssenc_handshake(
             ));
         }
 
-        let mut output = GssBufferDesc {
-            length: 0,
-            value: std::ptr::null_mut(),
-        };
-        let mut input = GssBufferDesc {
-            length: 0,
-            value: std::ptr::null_mut(),
-        };
-        let input_ptr = if let Some(ref bytes) = input_token {
-            input.length = bytes.len();
-            input.value = bytes.as_ptr() as *mut c_void;
-            &input as *const GssBufferDesc
-        } else {
-            std::ptr::null()
-        };
+        let (major, ret_flags, token) = {
+            let mut output = GssBufferDesc {
+                length: 0,
+                value: std::ptr::null_mut(),
+            };
+            let mut input = GssBufferDesc {
+                length: 0,
+                value: std::ptr::null_mut(),
+            };
+            let input_ptr = if let Some(ref bytes) = input_token {
+                input.length = bytes.len();
+                input.value = bytes.as_ptr() as *mut c_void;
+                &input as *const GssBufferDesc
+            } else {
+                std::ptr::null()
+            };
 
-        let mut ret_flags: OmUint32 = 0;
-        let major = unsafe {
-            gss_init_sec_context(
-                &mut minor,
-                std::ptr::null_mut(), // use default credentials
-                &mut guard.context,
-                guard.target_name,
-                std::ptr::null_mut(), // default mechanism
-                GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG | GSS_C_CONF_FLAG,
-                0,
-                std::ptr::null_mut(), // no channel bindings
-                input_ptr,
-                std::ptr::null_mut(), // actual_mech
-                &mut output,
-                &mut ret_flags,
-                std::ptr::null_mut(), // time_rec
-            )
-        };
+            let mut ret_flags: OmUint32 = 0;
+            let major = unsafe {
+                gss_init_sec_context(
+                    &mut minor,
+                    std::ptr::null_mut(), // use default credentials
+                    &mut guard.context,
+                    guard.target_name,
+                    std::ptr::null_mut(), // default mechanism
+                    GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG | GSS_C_CONF_FLAG,
+                    0,
+                    std::ptr::null_mut(), // no channel bindings
+                    input_ptr,
+                    std::ptr::null_mut(), // actual_mech
+                    &mut output,
+                    &mut ret_flags,
+                    std::ptr::null_mut(), // time_rec
+                )
+            };
 
-        let token = take_gss_buffer(&mut output);
+            let token = take_gss_buffer(&mut output);
+            (major, ret_flags, token)
+        };
 
         if is_gss_error(major) {
             return Err(format!(
