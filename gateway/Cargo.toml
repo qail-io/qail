@@ -84,6 +84,6 @@ legacy-raw-tests = []
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-toml = "1.0"
+toml = "1.1"
 hdrhistogram = "7"
-proptest = "1.10.0"
+proptest = "1.11.0"
