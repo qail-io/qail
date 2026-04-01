@@ -2,7 +2,55 @@ use super::{EffectiveLimits, GatewayConfig, GatewayConfigBuilder};
 use std::collections::HashMap;
 use std::time::Duration;
 
+const SECURITY_PROFILE_ENV: &str = "QAIL_SECURITY_PROFILE";
+
+fn secure_profile_requested_from_env() -> bool {
+    std::env::var(SECURITY_PROFILE_ENV)
+        .map(|v| {
+            let normalized = v.trim().to_ascii_lowercase();
+            matches!(
+                normalized.as_str(),
+                "secure" | "strict" | "hardened" | "1" | "true"
+            )
+        })
+        .unwrap_or(false)
+}
+
 impl GatewayConfig {
+    /// Construct hardened gateway defaults suitable for production bootstrapping.
+    ///
+    /// This profile is intentionally fail-closed:
+    /// - local bind by default
+    /// - strict CORS mode enabled
+    /// - production strict checks enabled
+    /// - TLS + SCRAM channel binding required
+    pub fn secure_defaults() -> Self {
+        let mut config = Self::default();
+        config.apply_secure_profile();
+        config
+    }
+
+    /// Apply the hardened security profile in-place.
+    pub fn apply_secure_profile(&mut self) {
+        self.bind_address = "127.0.0.1:8080".to_string();
+        self.cors_strict = true;
+        self.production_strict = true;
+        if self.jwt_allowed_algorithms.is_empty() {
+            self.jwt_allowed_algorithms = vec!["RS256".to_string()];
+        }
+        self.pg_sslmode = "require".to_string();
+        self.pg_channel_binding = "require".to_string();
+    }
+
+    /// Opt into hardened profile via `QAIL_SECURITY_PROFILE`.
+    ///
+    /// Enabled values: `secure`, `strict`, `hardened`, `1`, `true`.
+    pub fn apply_security_profile_from_env(&mut self) {
+        if secure_profile_requested_from_env() {
+            self.apply_secure_profile();
+        }
+    }
+
     /// Get cache configuration
     pub fn cache_config(&self) -> crate::cache::CacheConfig {
         crate::cache::CacheConfig {
@@ -82,7 +130,7 @@ impl GatewayConfig {
             ("0.0.0.0:8080".to_string(), true, None, true, 1000, 60)
         };
 
-        Self {
+        let mut config = Self {
             database_url: qail.postgres.url.clone(),
             schema_path: qail.project.schema.clone(),
             policy_path,
@@ -156,7 +204,9 @@ impl GatewayConfig {
             txn_max_sessions: 0,
             txn_max_lifetime_secs: 900,
             txn_max_statements_per_session: 1000,
-        }
+        };
+        config.apply_security_profile_from_env();
+        config
     }
 }
 
@@ -164,5 +214,33 @@ impl GatewayConfig {
     /// Create a new configuration builder
     pub fn builder() -> GatewayConfigBuilder {
         GatewayConfigBuilder::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GatewayConfig;
+
+    #[test]
+    fn secure_defaults_enable_strict_security_controls() {
+        let cfg = GatewayConfig::secure_defaults();
+        assert_eq!(cfg.bind_address, "127.0.0.1:8080");
+        assert!(cfg.cors_strict);
+        assert!(cfg.production_strict);
+        assert_eq!(cfg.jwt_allowed_algorithms, vec!["RS256".to_string()]);
+        assert_eq!(cfg.pg_sslmode, "require");
+        assert_eq!(cfg.pg_channel_binding, "require");
+    }
+
+    #[test]
+    fn apply_secure_profile_hardens_existing_config() {
+        let mut cfg = GatewayConfig::default();
+        cfg.apply_secure_profile();
+        assert_eq!(cfg.bind_address, "127.0.0.1:8080");
+        assert!(cfg.cors_strict);
+        assert!(cfg.production_strict);
+        assert_eq!(cfg.jwt_allowed_algorithms, vec!["RS256".to_string()]);
+        assert_eq!(cfg.pg_sslmode, "require");
+        assert_eq!(cfg.pg_channel_binding, "require");
     }
 }
