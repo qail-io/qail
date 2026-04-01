@@ -5,7 +5,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, Mac};
-use rand::RngExt;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
