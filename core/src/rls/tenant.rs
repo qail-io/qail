@@ -156,6 +156,20 @@ pub fn register_tenant_tables(tables: &[(&str, &str)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn registry_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("tenant registry test mutex poisoned")
+    }
+
+    fn clear_global_registry() {
+        if let Ok(mut reg) = TENANT_TABLES.write() {
+            *reg = TenantRegistry::new();
+        }
+    }
 
     #[test]
     fn test_registry_register_and_lookup() {
@@ -189,6 +203,9 @@ mod tests {
 
     #[test]
     fn test_global_register_and_lookup() {
+        let _lock = registry_test_lock();
+        clear_global_registry();
+
         // Use unique table names to avoid test interference
         register_tenant_table("_test_t1", "tenant_id");
         assert_eq!(
@@ -198,13 +215,14 @@ mod tests {
         assert_eq!(lookup_tenant_column("_test_nonexistent"), None);
 
         // Clean up
-        if let Ok(mut reg) = TENANT_TABLES.write() {
-            *reg = TenantRegistry::new();
-        }
+        clear_global_registry();
     }
 
     #[test]
     fn test_bulk_register() {
+        let _lock = registry_test_lock();
+        clear_global_registry();
+
         register_tenant_tables(&[("_test_bulk_a", "tenant_id"), ("_test_bulk_b", "tenant_id")]);
 
         assert_eq!(
@@ -217,9 +235,7 @@ mod tests {
         );
 
         // Clean up
-        if let Ok(mut reg) = TENANT_TABLES.write() {
-            *reg = TenantRegistry::new();
-        }
+        clear_global_registry();
     }
 
     #[test]

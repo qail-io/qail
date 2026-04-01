@@ -42,7 +42,7 @@ curl \
 > **Warning:** Header-based auth is only active when `QAIL_DEV_MODE=true` is set.
 > This works independently of `JWT_SECRET` — you can have both JWT and dev-mode headers active simultaneously.
 > If a `Bearer` token is provided but fails validation, the request is **denied** (not degraded to dev-mode or anonymous).
-> The gateway logs a startup warning when dev mode is enabled and does not enforce bind-address restrictions.
+> Startup is fail-closed in dev mode: gateway boot is rejected unless bind address is localhost and `JWT_SECRET` is set.
 
 ---
 

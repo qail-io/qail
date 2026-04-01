@@ -4,7 +4,7 @@ use super::*;
 /// Execute a QAIL query (BINARY format)
 ///
 /// Accepts strict QWB2 AST-binary payloads and returns JSON results.
-/// This path is parser-free for ingress decoding and rejects legacy QWB1 text payloads.
+/// This path rejects legacy QWB1 text payloads.
 /// PostgreSQL still parses emitted SQL text as part of the wire protocol.
 pub async fn execute_query_binary(
     State(state): State<Arc<GatewayState>>,

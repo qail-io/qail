@@ -30,14 +30,14 @@ libpq = []
 qail-core = { version = "0.27.6", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
-tokio = { version = "1.48.0", features = ["net", "io-util", "sync", "rt", "time"] }
+tokio = { version = "1.50.0", features = ["net", "io-util", "sync", "rt", "time"] }
 
 # SCRAM-SHA-256 authentication
 sha2 = "0.10"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 base64 = "0.22"
-rand = "0.10"
+rand = "0.9"
 md-5 = "0.10"
 
 # Zero-allocation formatting for COPY encoder
@@ -52,7 +52,7 @@ metrics = "0.24"
 
 # Optional: Ergonomic row extraction
 chrono = { version = "0.4", optional = true }
-uuid = { version = "1.9", optional = true }
+uuid = { version = "1.22", optional = true }
 
 # io_uring support (Linux only, opt-in via feature flag)
 # Use `--features io_uring` for native Linux builds
@@ -63,8 +63,8 @@ io-uring = { version = "0.7", optional = true }
 workspace = true
 
 [dev-dependencies]
-tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros"] }
-uuid = { version = "1.9", features = ["v4"] }
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros"] }
+uuid = { version = "1.22", features = ["v4"] }
 chrono = { version = "0.4" }
 proptest = "1.10.0"
 tokio-postgres = "0.7.13"

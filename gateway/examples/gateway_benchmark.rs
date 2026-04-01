@@ -1,7 +1,7 @@
 //! Benchmark: Text vs Binary QAIL queries
 //!
 //! Run server first: DATABASE_URL="..." cargo run -p qail-gateway --example serve
-//! Then run: cargo run -p qail-gateway --example benchmark --release
+//! Then run: cargo run -p qail-gateway --example gateway_benchmark --release
 
 use qail_core::ast::Qail;
 use qail_core::wire::encode_cmd_binary;
