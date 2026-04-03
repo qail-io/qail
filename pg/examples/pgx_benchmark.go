@@ -21,59 +21,12 @@ const (
 
 	sqlByID = "SELECT id, name FROM harbors WHERE id = $1"
 
-	wideRowsSQL = "SELECT gs AS id, " +
-		"('harbor-' || gs)::text AS name, " +
-		"repeat(md5(gs::text), 4) AS bio, " +
-		"repeat(md5((gs * 17)::text), 3) AS region, " +
-		"(gs * 11) AS visits, " +
-		"(gs % 2 = 0) AS active, " +
-		"round((gs::numeric / 7.0), 3) AS ratio, " +
-		"CASE WHEN gs % 5 = 0 THEN NULL ELSE repeat(md5((gs * 3)::text), 2) END AS optional_note " +
-		"FROM generate_series(1, $1::int) AS gs"
-
-	largeRowsSQL = "SELECT id, name, bio, region, visits, active, ratio, optional_note " +
+	payloadRowsSQL = "SELECT id, name, bio, region, visits, active, ratio, optional_note " +
 		"FROM qail_bench_payload " +
 		"WHERE id <= $1::int " +
 		"ORDER BY id"
 
-	monsterCTESQL = "WITH base AS (" +
-		"  SELECT id, visits, active, COALESCE(octet_length(optional_note), 0) AS note_len " +
-		"  FROM qail_bench_payload " +
-		"  WHERE id <= $1::int" +
-		"), ranked AS (" +
-		"  SELECT id, visits, note_len, " +
-		"         row_number() OVER (ORDER BY visits DESC) AS rn, " +
-		"         lag(visits, 1, 0) OVER (ORDER BY visits DESC) AS prev_visits " +
-		"  FROM base" +
-		"), bucketed AS (" +
-		"  SELECT (id % 32) AS bucket, " +
-		"         sum(visits) AS total_visits, " +
-		"         max(note_len) AS max_note_len, " +
-		"         sum(CASE WHEN active THEN 1 ELSE 0 END) AS active_count " +
-		"  FROM base " +
-		"  GROUP BY 1" +
-		"), joined AS (" +
-		"  SELECT r.id, r.visits, r.prev_visits, r.note_len, " +
-		"         b.total_visits, b.max_note_len, b.active_count " +
-		"  FROM ranked r " +
-		"  JOIN bucketed b ON (r.id % 32) = b.bucket " +
-		"  WHERE r.rn <= 256" +
-		") " +
-		"SELECT (" +
-		"  COALESCE(sum(visits + prev_visits + note_len), 0)::bigint + " +
-		"  COALESCE(max(total_visits), 0)::bigint + " +
-		"  COALESCE(max(max_note_len), 0)::bigint + " +
-		"  COALESCE(sum(active_count), 0)::bigint" +
-		") AS total " +
-		"FROM joined"
-
 	manyParamsParamCount = 32
-	manyParamsSQL        = "SELECT " +
-		"$1::int + $2::int + $3::int + $4::int + $5::int + $6::int + $7::int + $8::int + " +
-		"$9::int + $10::int + $11::int + $12::int + $13::int + $14::int + $15::int + $16::int + " +
-		"$17::int + $18::int + $19::int + $20::int + $21::int + $22::int + $23::int + $24::int + " +
-		"$25::int + $26::int + $27::int + $28::int + $29::int + $30::int + $31::int + $32::int " +
-		"AS total"
 
 	pointBatchSize       = 10_000
 	pointIterations      = 5
@@ -83,16 +36,17 @@ const (
 	largeRowsIterations  = 2
 	manyParamsBatchSize  = 5_000
 	manyParamsIterations = 5
-	monsterCTEBatchSize  = 20
-	monsterCTEIterations = 2
+	aggregateBatchSize   = 2_000
+	aggregateIterations  = 3
 
 	fnvOffset = uint64(0xcbf29ce484222325)
 	fnvPrime  = uint64(1099511628211)
 
-	benchPayloadTargetRows = 20_000
-	benchSetupLockSQL      = "SELECT pg_advisory_lock(60119029)"
-	benchSetupUnlockSQL    = "SELECT pg_advisory_unlock(60119029)"
-	createBenchPayloadSQL  = "CREATE TABLE IF NOT EXISTS qail_bench_payload (" +
+	benchPayloadTargetRows    = 20_000
+	benchManyParamsTargetRows = 512
+	benchSetupLockSQL         = "SELECT pg_advisory_lock(60119029)"
+	benchSetupUnlockSQL       = "SELECT pg_advisory_unlock(60119029)"
+	createBenchPayloadSQL     = "CREATE TABLE IF NOT EXISTS qail_bench_payload (" +
 		"id INTEGER PRIMARY KEY, " +
 		"name TEXT NOT NULL, " +
 		"bio TEXT NOT NULL, " +
@@ -102,6 +56,13 @@ const (
 		"ratio NUMERIC(12, 3) NOT NULL, " +
 		"optional_note TEXT NULL" +
 		")"
+	aggregateSQL = "SELECT " +
+		"COALESCE(SUM(visits), 0)::bigint AS sum_visits, " +
+		"COALESCE(MAX(visits), 0)::bigint AS max_visits, " +
+		"COUNT(*)::bigint AS row_count, " +
+		"COALESCE(SUM(CASE WHEN active THEN 1 ELSE 0 END), 0)::bigint AS active_count " +
+		"FROM qail_bench_payload " +
+		"WHERE id <= $1::int"
 )
 
 type preparedCall struct {
@@ -112,19 +73,21 @@ type preparedCall struct {
 type resultMode int
 
 const (
-	resultModeCompleteOnly resultMode = iota
+	resultModePointRows resultMode = iota
 	resultModeScalarInt
 	resultModeWideRows
+	resultModeAggregateScalars
 )
 
 type modeWorkload struct {
-	name                 string
-	sql                  string
-	batchSize            int
-	iterations           int
-	latencySamples       int
-	mode                 resultMode
-	requiresBenchPayload bool
+	name                    string
+	sql                     string
+	batchSize               int
+	iterations              int
+	latencySamples          int
+	mode                    resultMode
+	requiresBenchPayload    bool
+	requiresBenchManyParams bool
 }
 
 type statementMode int
@@ -187,7 +150,7 @@ type latencyResult struct {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: pgx_benchmark [--mode strict|once|single|pipeline|pool10|latency] [--workload literal|param|point|wide_rows|large_rows|many_params|monster_cte] [--stmt-mode prepared|unprepared] [--plain]\n")
+	fmt.Fprintf(os.Stderr, "Usage: pgx_benchmark [--mode strict|once|single|pipeline|pool10|latency] [--workload literal|param|point|wide_rows|large_rows|many_params|aggregate] [--stmt-mode prepared|unprepared] [--plain]\n")
 	flag.PrintDefaults()
 }
 
@@ -258,60 +221,129 @@ func percentile(values []float64, p float64) float64 {
 	return sorted[rank-1]
 }
 
+func manyParamColumnName(idx int) string {
+	return fmt.Sprintf("p%02d", idx+1)
+}
+
+func buildManyParamsCreateSQL() string {
+	var b strings.Builder
+	b.WriteString("CREATE TABLE IF NOT EXISTS qail_bench_many_params (slot INTEGER PRIMARY KEY, total BIGINT NOT NULL")
+	for idx := 0; idx < manyParamsParamCount; idx++ {
+		b.WriteString(", ")
+		b.WriteString(manyParamColumnName(idx))
+		b.WriteString(" INTEGER NOT NULL")
+	}
+	b.WriteByte(')')
+	return b.String()
+}
+
+func buildManyParamsIndexSQL() string {
+	var b strings.Builder
+	b.WriteString("CREATE UNIQUE INDEX IF NOT EXISTS qail_bench_many_params_lookup_idx ON qail_bench_many_params (")
+	for idx := 0; idx < manyParamsParamCount; idx++ {
+		if idx > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(manyParamColumnName(idx))
+	}
+	b.WriteByte(')')
+	return b.String()
+}
+
+func buildManyParamsInsertSQL(startSlot, endSlot int) string {
+	sumCoeff := 0
+	for idx := 0; idx < manyParamsParamCount; idx++ {
+		sumCoeff += idx + 1
+	}
+
+	var b strings.Builder
+	b.WriteString("INSERT INTO qail_bench_many_params (slot, total")
+	for idx := 0; idx < manyParamsParamCount; idx++ {
+		b.WriteString(", ")
+		b.WriteString(manyParamColumnName(idx))
+	}
+	b.WriteString(") SELECT gs, ")
+	b.WriteString(fmt.Sprintf("(gs * %d)::bigint", sumCoeff))
+	for idx := 0; idx < manyParamsParamCount; idx++ {
+		b.WriteString(fmt.Sprintf(", gs * %d", idx+1))
+	}
+	b.WriteString(fmt.Sprintf(" FROM generate_series(%d, %d) AS gs ON CONFLICT (slot) DO NOTHING", startSlot, endSlot))
+	return b.String()
+}
+
+func buildManyParamsSelectSQL() string {
+	var b strings.Builder
+	b.WriteString("SELECT total FROM qail_bench_many_params WHERE ")
+	for idx := 0; idx < manyParamsParamCount; idx++ {
+		if idx > 0 {
+			b.WriteString(" AND ")
+		}
+		b.WriteString(manyParamColumnName(idx))
+		b.WriteString(fmt.Sprintf(" = $%d::int", idx+1))
+	}
+	b.WriteString(" LIMIT 1")
+	return b.String()
+}
+
 func modeWorkloadFromName(name string) (modeWorkload, error) {
 	switch name {
 	case "point", "lookup":
 		return modeWorkload{
-			name:                 "point",
-			sql:                  sqlByID,
-			batchSize:            pointBatchSize,
-			iterations:           pointIterations,
-			latencySamples:       2000,
-			mode:                 resultModeCompleteOnly,
-			requiresBenchPayload: false,
+			name:                    "point",
+			sql:                     sqlByID,
+			batchSize:               pointBatchSize,
+			iterations:              pointIterations,
+			latencySamples:          2000,
+			mode:                    resultModePointRows,
+			requiresBenchPayload:    false,
+			requiresBenchManyParams: false,
 		}, nil
 	case "wide_rows", "wide":
 		return modeWorkload{
-			name:                 "wide_rows",
-			sql:                  wideRowsSQL,
-			batchSize:            wideRowsBatchSize,
-			iterations:           wideRowsIterations,
-			latencySamples:       120,
-			mode:                 resultModeWideRows,
-			requiresBenchPayload: false,
+			name:                    "wide_rows",
+			sql:                     payloadRowsSQL,
+			batchSize:               wideRowsBatchSize,
+			iterations:              wideRowsIterations,
+			latencySamples:          120,
+			mode:                    resultModeWideRows,
+			requiresBenchPayload:    true,
+			requiresBenchManyParams: false,
 		}, nil
 	case "large_rows", "large":
 		return modeWorkload{
-			name:                 "large_rows",
-			sql:                  largeRowsSQL,
-			batchSize:            largeRowsBatchSize,
-			iterations:           largeRowsIterations,
-			latencySamples:       40,
-			mode:                 resultModeWideRows,
-			requiresBenchPayload: true,
+			name:                    "large_rows",
+			sql:                     payloadRowsSQL,
+			batchSize:               largeRowsBatchSize,
+			iterations:              largeRowsIterations,
+			latencySamples:          40,
+			mode:                    resultModeWideRows,
+			requiresBenchPayload:    true,
+			requiresBenchManyParams: false,
 		}, nil
 	case "many_params", "params":
 		return modeWorkload{
-			name:                 "many_params",
-			sql:                  manyParamsSQL,
-			batchSize:            manyParamsBatchSize,
-			iterations:           manyParamsIterations,
-			latencySamples:       2000,
-			mode:                 resultModeScalarInt,
-			requiresBenchPayload: false,
+			name:                    "many_params",
+			sql:                     buildManyParamsSelectSQL(),
+			batchSize:               manyParamsBatchSize,
+			iterations:              manyParamsIterations,
+			latencySamples:          2000,
+			mode:                    resultModeScalarInt,
+			requiresBenchPayload:    false,
+			requiresBenchManyParams: true,
 		}, nil
-	case "monster_cte", "cte", "server_heavy":
+	case "aggregate", "agg", "server_heavy":
 		return modeWorkload{
-			name:                 "monster_cte",
-			sql:                  monsterCTESQL,
-			batchSize:            monsterCTEBatchSize,
-			iterations:           monsterCTEIterations,
-			latencySamples:       40,
-			mode:                 resultModeScalarInt,
-			requiresBenchPayload: true,
+			name:                    "aggregate",
+			sql:                     aggregateSQL,
+			batchSize:               aggregateBatchSize,
+			iterations:              aggregateIterations,
+			latencySamples:          40,
+			mode:                    resultModeAggregateScalars,
+			requiresBenchPayload:    true,
+			requiresBenchManyParams: false,
 		}, nil
 	default:
-		return modeWorkload{}, fmt.Errorf("unknown workload %q (expected point, wide_rows, large_rows, many_params, or monster_cte)", name)
+		return modeWorkload{}, fmt.Errorf("unknown workload %q (expected point, wide_rows, large_rows, many_params, or aggregate)", name)
 	}
 }
 
@@ -332,17 +364,12 @@ func buildModeParamBatch(spec modeWorkload) [][][]byte {
 		}
 		return params
 	case "many_params":
-		cache := make([][]byte, 256)
-		for i := range cache {
-			cache[i] = []byte(strconv.Itoa(i + 1))
-		}
-
 		params := make([][][]byte, 0, spec.batchSize)
 		for queryIdx := 0; queryIdx < spec.batchSize; queryIdx++ {
+			rowSlot := (queryIdx % benchManyParamsTargetRows) + 1
 			row := make([][]byte, manyParamsParamCount)
 			for paramIdx := 0; paramIdx < manyParamsParamCount; paramIdx++ {
-				valueIdx := (queryIdx + paramIdx*7) % len(cache)
-				row[paramIdx] = cache[valueIdx]
+				row[paramIdx] = []byte(strconv.Itoa(rowSlot * (paramIdx + 1)))
 			}
 			params = append(params, row)
 		}
@@ -354,7 +381,7 @@ func buildModeParamBatch(spec modeWorkload) [][][]byte {
 			params = append(params, [][]byte{[]byte(rowCounts[i%len(rowCounts)])})
 		}
 		return params
-	case "monster_cte":
+	case "aggregate":
 		rowCounts := []string{"8000", "12000", "16000", "20000"}
 		params := make([][][]byte, 0, spec.batchSize)
 		for i := 0; i < spec.batchSize; i++ {
@@ -407,6 +434,34 @@ func ensureBenchPayload(ctx context.Context, conn *pgx.Conn) error {
 	return nil
 }
 
+func ensureBenchManyParams(ctx context.Context, conn *pgx.Conn) error {
+	if _, err := conn.Exec(ctx, benchSetupLockSQL); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = conn.Exec(ctx, benchSetupUnlockSQL)
+	}()
+
+	if _, err := conn.Exec(ctx, buildManyParamsCreateSQL()); err != nil {
+		return err
+	}
+	if _, err := conn.Exec(ctx, buildManyParamsIndexSQL()); err != nil {
+		return err
+	}
+
+	var currentRows int
+	if err := conn.QueryRow(ctx, "SELECT COALESCE(MAX(slot), 0) FROM qail_bench_many_params").Scan(&currentRows); err != nil {
+		return err
+	}
+	if currentRows < benchManyParamsTargetRows {
+		if _, err := conn.Exec(ctx, buildManyParamsInsertSQL(currentRows+1, benchManyParamsTargetRows)); err != nil {
+			return err
+		}
+		_, _ = conn.Exec(ctx, "ANALYZE qail_bench_many_params")
+	}
+	return nil
+}
+
 func buildModeCalls(spec modeWorkload) ([]preparedCall, map[string]string, []string, [][][]byte) {
 	params := buildModeParamBatch(spec)
 	calls := make([]preparedCall, 0, len(params))
@@ -453,8 +508,29 @@ func prepareTemplates(p *pgconn.Pipeline, templates map[string]string, orderedNa
 
 func consumeValues(mode resultMode, values [][]byte, stats *batchStats) {
 	switch mode {
-	case resultModeCompleteOnly:
-		return
+	case resultModePointRows:
+		stats.rows++
+		rowHash := fnvOffset
+		for idx, value := range values {
+			if value == nil {
+				rowHash = mixHash(rowHash, []byte("NULL"))
+				rowHash += uint64(idx)
+				continue
+			}
+
+			stats.bytes += len(value)
+			switch idx {
+			case 0:
+				parsed, err := strconv.ParseInt(string(value), 10, 64)
+				if err != nil {
+					parsed = int64(len(value))
+				}
+				rowHash += uint64(parsed)
+			default:
+				rowHash = mixHash(rowHash, value)
+			}
+		}
+		stats.checksum += rowHash
 	case resultModeScalarInt:
 		stats.rows++
 		if len(values) == 0 || values[0] == nil {
@@ -501,20 +577,27 @@ func consumeValues(mode resultMode, values [][]byte, stats *batchStats) {
 		}
 		stats.rows++
 		stats.checksum += rowHash
+	case resultModeAggregateScalars:
+		stats.rows++
+		rowHash := fnvOffset
+		for _, value := range values {
+			if value == nil {
+				continue
+			}
+
+			stats.bytes += len(value)
+			parsed, err := strconv.ParseInt(string(value), 10, 64)
+			if err != nil {
+				parsed = int64(len(value))
+			}
+			rowHash += uint64(parsed)
+		}
+		stats.checksum += rowHash
 	}
 }
 
 func consumeResultReader(rr *pgconn.ResultReader, mode resultMode) (batchStats, error) {
 	stats := batchStats{}
-
-	if mode == resultModeCompleteOnly {
-		_, err := rr.Close()
-		if err != nil {
-			return batchStats{}, err
-		}
-		stats.completed = 1
-		return stats, nil
-	}
 
 	for rr.NextRow() {
 		consumeValues(mode, rr.Values(), &stats)
@@ -720,7 +803,7 @@ func runUnpreparedPipelineModeBenchmark(
 }
 
 func runPreparedPipelineBenchmark(calls []preparedCall, templates map[string]string, orderedNames []string) (float64, error) {
-	result, err := runPreparedPipelineModeBenchmark(calls, templates, orderedNames, resultModeCompleteOnly, 5, nil)
+	result, err := runPreparedPipelineModeBenchmark(calls, templates, orderedNames, resultModePointRows, 5, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -768,6 +851,11 @@ func runSingleMode(spec modeWorkload, stmtMode statementMode) (benchmarkResult, 
 	defer conn.Close(ctx)
 	if spec.requiresBenchPayload {
 		if err := ensureBenchPayload(ctx, conn); err != nil {
+			return benchmarkResult{}, err
+		}
+	}
+	if spec.requiresBenchManyParams {
+		if err := ensureBenchManyParams(ctx, conn); err != nil {
 			return benchmarkResult{}, err
 		}
 	}
@@ -820,8 +908,20 @@ func runSingleMode(spec modeWorkload, stmtMode statementMode) (benchmarkResult, 
 
 func runPipelineMode(spec modeWorkload, stmtMode statementMode) (benchmarkResult, error) {
 	var setup func(context.Context, *pgx.Conn) error
-	if spec.requiresBenchPayload {
-		setup = ensureBenchPayload
+	if spec.requiresBenchPayload || spec.requiresBenchManyParams {
+		setup = func(ctx context.Context, conn *pgx.Conn) error {
+			if spec.requiresBenchPayload {
+				if err := ensureBenchPayload(ctx, conn); err != nil {
+					return err
+				}
+			}
+			if spec.requiresBenchManyParams {
+				if err := ensureBenchManyParams(ctx, conn); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 	}
 	switch stmtMode {
 	case statementModePrepared:
@@ -854,6 +954,17 @@ func runPool10Mode(spec modeWorkload, stmtMode statementMode) (benchmarkResult, 
 			return benchmarkResult{}, err
 		}
 		if err := ensureBenchPayload(ctx, conn); err != nil {
+			conn.Close(ctx)
+			return benchmarkResult{}, err
+		}
+		conn.Close(ctx)
+	}
+	if spec.requiresBenchManyParams {
+		conn, err := pgx.Connect(ctx, benchmarkConnString())
+		if err != nil {
+			return benchmarkResult{}, err
+		}
+		if err := ensureBenchManyParams(ctx, conn); err != nil {
 			conn.Close(ctx)
 			return benchmarkResult{}, err
 		}
@@ -980,6 +1091,11 @@ func runLatencyMode(spec modeWorkload, stmtMode statementMode) (latencyResult, e
 	defer conn.Close(ctx)
 	if spec.requiresBenchPayload {
 		if err := ensureBenchPayload(ctx, conn); err != nil {
+			return latencyResult{}, err
+		}
+	}
+	if spec.requiresBenchManyParams {
+		if err := ensureBenchManyParams(ctx, conn); err != nil {
 			return latencyResult{}, err
 		}
 	}
@@ -1138,9 +1254,7 @@ func printModeResult(label string, result benchmarkResult, plain bool, mode resu
 	if result.hasMiB {
 		fmt.Printf(" | %.2f MiB/s", result.mibPerSec)
 	}
-	if mode != resultModeCompleteOnly {
-		fmt.Printf(" | checksum=0x%x", result.checksum)
-	}
+	fmt.Printf(" | checksum=0x%x", result.checksum)
 	fmt.Println()
 }
 
@@ -1155,7 +1269,7 @@ func mixHash(seed uint64, bytes []byte) uint64 {
 
 func main() {
 	mode := flag.String("mode", "strict", "benchmark mode: strict, once, single, pipeline, pool10, or latency")
-	workload := flag.String("workload", "", "workload name: strict/once use literal|param; single/pipeline/pool10/latency use point|wide_rows|large_rows|many_params|monster_cte")
+	workload := flag.String("workload", "", "workload name: strict/once use literal|param; single/pipeline/pool10/latency use point|wide_rows|large_rows|many_params|aggregate")
 	stmtModeName := flag.String("stmt-mode", "prepared", "statement mode for single/pipeline/pool10/latency: prepared or unprepared")
 	plain := flag.Bool("plain", false, "print only numeric q/s in single-run modes")
 	flag.Usage = usage

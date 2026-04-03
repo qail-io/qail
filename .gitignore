@@ -97,7 +97,6 @@ soak/traefik/certs/*.pem
 log
 
 
-CLAUDE.md
 
 # Local migration/retest sandboxes
 tmp/matrix_*/

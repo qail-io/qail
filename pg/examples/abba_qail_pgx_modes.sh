@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RUST_TARGET_DIR="${RUST_TARGET_DIR:-${CARGO_TARGET_DIR:-${REPO_ROOT}/target}}"
 
 ROUNDS="${ROUNDS:-6}"
 if ! [[ "${ROUNDS}" =~ ^[0-9]+$ ]] || [[ "${ROUNDS}" -lt 1 ]]; then
@@ -10,7 +11,7 @@ if ! [[ "${ROUNDS}" =~ ^[0-9]+$ ]] || [[ "${ROUNDS}" -lt 1 ]]; then
   exit 1
 fi
 
-WORKLOADS="${WORKLOADS:-point wide_rows large_rows many_params monster_cte}"
+WORKLOADS="${WORKLOADS:-point wide_rows large_rows many_params aggregate}"
 MODES="${MODES:-single pipeline pool10 latency}"
 STMT_MODES="${STMT_MODES:-prepared unprepared}"
 RUNNERS="${RUNNERS:-pgx qail_rs qail_zig}"
@@ -18,6 +19,8 @@ RUNNERS="${RUNNERS:-pgx qail_rs qail_zig}"
 ZIG_REPO_ROOT="${ZIG_REPO_ROOT:-$(cd "${REPO_ROOT}/.." && pwd)/qail-zig}"
 ZIG_BIN="${ZIG_BIN:-/tmp/qail_zig_modes_once}"
 ZIG_CACHE_DIR="${ZIG_CACHE_DIR:-/tmp/qail-zig-bench-cache}"
+ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-/tmp/qail-zig-global-cache}"
+ZIG_LOCAL_CACHE_DIR="${ZIG_LOCAL_CACHE_DIR:-${ZIG_CACHE_DIR}}"
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64) DEFAULT_ZIG_TARGET="aarch64-macos.15.0" ;;
   Darwin:x86_64) DEFAULT_ZIG_TARGET="x86_64-macos.15.0" ;;
@@ -82,11 +85,10 @@ calc_delta() {
 run_qail_rust_once() {
   local mode="$1"
   local workload="$2"
-  local stmt_mode="$3"
-  "${REPO_ROOT}/target/release/examples/qail_pgx_modes_once" \
+  local _stmt_mode="$3"
+  "${RUST_TARGET_DIR}/release/examples/qail_native_pgx_once" \
     "${mode}" \
     --workload "${workload}" \
-    --statement-mode "${stmt_mode}" \
     --plain
 }
 
@@ -109,12 +111,6 @@ run_qail_zig_once() {
     echo "qail-zig latency mode is not implemented in this repo layout" >&2
     return 1
   fi
-  case "${workload}" in
-    large_rows|monster_cte)
-      echo "qail-zig workload '${workload}' is not implemented in this repo layout" >&2
-      return 1
-      ;;
-  esac
   "${ZIG_BIN}" "${mode}" --workload "${workload}" --plain
 }
 
@@ -213,7 +209,7 @@ echo
 echo "Building QAIL Rust runner..."
 (
   cd "${REPO_ROOT}"
-  cargo build --release -p qail-pg --example qail_pgx_modes_once >/dev/null
+  CARGO_TARGET_DIR="${RUST_TARGET_DIR}" cargo build --release -p qail-pg --example qail_native_pgx_once >/dev/null
 )
 
 echo "Building PGX runner..."
@@ -228,6 +224,8 @@ if runner_enabled qail_zig; then
     echo "Building QAIL Zig runner..."
     (
       cd "${ZIG_REPO_ROOT}"
+      export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR}"
+      export ZIG_LOCAL_CACHE_DIR="${ZIG_LOCAL_CACHE_DIR}"
       zig_cmd=(
         zig build-exe
         src/qail_pgx_modes_once.zig
@@ -253,8 +251,8 @@ for workload in ${WORKLOADS}; do
     point) workload_label="Workload: point lookup (1 row)" ;;
     wide_rows) workload_label="Workload: wide rows (128-512 rows/query, mixed types)" ;;
     large_rows) workload_label="Workload: large rows (10k-16k rows/query, table-backed)" ;;
-    many_params) workload_label="Workload: many params (32 binds/query, scalar result)" ;;
-    monster_cte) workload_label="Workload: monster CTE (server-heavy, scalar result)" ;;
+    many_params) workload_label="Workload: many params (32 binds/query, indexed lookup)" ;;
+    aggregate) workload_label="Workload: aggregate (server-heavy, 4-scalar result)" ;;
     *) workload_label="Workload: ${workload}" ;;
   esac
   echo "${workload_label}"
@@ -274,6 +272,11 @@ for workload in ${WORKLOADS}; do
       active_runners=()
       for runner in ${RUNNERS}; do
         case "${runner}" in
+          qail_rs)
+            if [[ "${stmt_mode}" != "prepared" ]]; then
+              continue
+            fi
+            ;;
           qail_zig)
             if [[ "${stmt_mode}" != "prepared" ]]; then
               continue
@@ -284,9 +287,6 @@ for workload in ${WORKLOADS}; do
             if [[ "${mode}" == "latency" ]]; then
               continue
             fi
-            case "${workload}" in
-              large_rows|monster_cte) continue ;;
-            esac
             ;;
         esac
         active_runners+=("${runner}")
@@ -298,19 +298,14 @@ for workload in ${WORKLOADS}; do
         continue
       fi
 
-      if [[ "${stmt_mode}" == "unprepared" ]] && runner_enabled qail_zig; then
-        echo "    note: qail-zig skipped for unprepared mode"
+      if [[ "${stmt_mode}" == "unprepared" ]]; then
+        if runner_enabled qail_rs || runner_enabled qail_zig; then
+          echo "    note: qail-rs and qail-zig use native DSL prepared paths; unprepared mode is pgx-only"
+        fi
       fi
       if [[ "${mode}" == "latency" ]] && runner_enabled qail_zig; then
         echo "    note: qail-zig skipped for latency mode"
       fi
-      case "${workload}" in
-        large_rows|monster_cte)
-          if runner_enabled qail_zig; then
-            echo "    note: qail-zig skipped for workload '${workload}'"
-          fi
-          ;;
-      esac
 
       qail_rs_runs=()
       qail_zig_runs=()

@@ -82,6 +82,34 @@ $$
 }
 
 #[test]
+fn test_parse_qail_migration_supports_explicit_alter_add_column_lines() {
+    let mut schema = Schema::parse(
+        r#"
+table whatsapp_phone_configs {
+  id UUID
+}
+"#,
+    )
+    .unwrap();
+
+    let changes = schema
+        .parse_qail_migration(
+            r#"
+alter whatsapp_phone_configs add automation_reply_enabled:boolean:default=true
+alter whatsapp_phone_configs add ai_reply_enabled:boolean:default=true
+"#,
+        )
+        .expect("explicit alter add-column migration should merge");
+
+    assert_eq!(changes, 2);
+    let table = schema
+        .table("whatsapp_phone_configs")
+        .expect("whatsapp_phone_configs should still exist");
+    assert!(table.has_column("automation_reply_enabled"));
+    assert!(table.has_column("ai_reply_enabled"));
+}
+
+#[test]
 fn test_extract_string_arg() {
     assert_eq!(extract_string_arg(r#""users")"#), Some("users".to_string()));
     assert_eq!(
@@ -173,6 +201,129 @@ let cmd = Qail::get("orders")
     );
     // Column from .order_desc()
     assert!(usages[0].columns.contains(&"created_at".to_string()));
+}
+
+#[test]
+fn test_scan_file_resolves_helper_param_tables_and_columns_from_call_sites() {
+    let content = r#"
+const USERS_TABLE: &str = "users";
+const USERS_COLUMNS: &[&str] = &["id", "email"];
+const ORDERS_COLUMNS: &[&str] = &["id", "status"];
+
+async fn fetch_one_by_id(table: &str, columns: &[&str], id: &str) {
+    let _cmd = Qail::get(table).columns(columns).eq("id", id).limit(1);
+}
+
+async fn demo() {
+    fetch_one_by_id(USERS_TABLE, USERS_COLUMNS, "u1").await;
+    fetch_one_by_id("orders", ORDERS_COLUMNS, "o1").await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0].table, "users");
+    assert!(usages[0].columns.contains(&"id".to_string()));
+    assert!(usages[0].columns.contains(&"email".to_string()));
+    assert_eq!(usages[1].table, "orders");
+    assert!(usages[1].columns.contains(&"id".to_string()));
+    assert!(usages[1].columns.contains(&"status".to_string()));
+}
+
+#[test]
+fn test_scan_file_resolves_multiline_helper_calls_like_charters_admin() {
+    let content = r#"
+const ALIEUS_COLUMNS: &[&str] = &["id", "name"];
+const DIATHESI_TEMPLATE_TABLE: &str = "charters_diathesi_templates";
+const DIATHESI_TEMPLATE_COLUMNS: &[&str] = &["id", "tenant_id", "drasimos_id"];
+
+async fn fetch_rows(_state: &AppState, _claims: &AdminClaims, _cmd: Qail, _table: &str) {}
+async fn execute_write(_state: &AppState, _claims: &AdminClaims, _cmd: Qail, _ctx: &str) {}
+
+async fn fetch_one_by_id(
+    state: &AppState,
+    claims: &AdminClaims,
+    table: &str,
+    columns: &[&str],
+    id: &str,
+) {
+    let _ = fetch_rows(
+        state,
+        claims,
+        Qail::get(table).columns(columns).eq("id", id).limit(1),
+        table,
+    )
+    .await;
+}
+
+async fn delete_by_id(
+    state: &AppState,
+    claims: &AdminClaims,
+    table: &str,
+    id: &str,
+) {
+    let _ = execute_write(
+        state,
+        claims,
+        Qail::del(table).eq("id", id),
+        "delete",
+    )
+    .await;
+}
+
+async fn get_alieus(state: &AppState, claims: &AdminClaims, id: &str) {
+    let _ = fetch_one_by_id(state, claims, "charters_alieus", ALIEUS_COLUMNS, id).await;
+}
+
+async fn get_template(state: &AppState, claims: &AdminClaims, id: &str) {
+    let _ = fetch_one_by_id(
+        state,
+        claims,
+        DIATHESI_TEMPLATE_TABLE,
+        DIATHESI_TEMPLATE_COLUMNS,
+        id,
+    )
+    .await;
+    let _ = delete_by_id(state, claims, DIATHESI_TEMPLATE_TABLE, id).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert!(
+        usages
+            .iter()
+            .any(|usage| usage.table == "charters_alieus"
+                && usage.columns.contains(&"name".to_string())),
+        "expected helper call-site substitution to resolve charters_alieus columns, got: {:?}",
+        usages
+            .iter()
+            .map(|usage| (&usage.table, &usage.columns))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        usages
+            .iter()
+            .any(|usage| usage.table == "charters_diathesi_templates"
+                && usage.columns.contains(&"tenant_id".to_string())
+                && usage.action == "GET"),
+        "expected helper call-site substitution to resolve template GET columns, got: {:?}",
+        usages
+            .iter()
+            .map(|usage| (&usage.table, &usage.columns, &usage.action))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        usages
+            .iter()
+            .any(|usage| usage.table == "charters_diathesi_templates" && usage.action == "DEL"),
+        "expected helper call-site substitution to resolve template delete helper, got: {:?}",
+        usages
+            .iter()
+            .map(|usage| (&usage.table, &usage.action))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -479,6 +630,131 @@ let q = Qail::get("orders")
 
     assert_eq!(usages.len(), 1);
     assert!(usages[0].has_rls);
+}
+
+#[test]
+fn test_explicit_tenant_scope_detects_payload_setters() {
+    let content = r#"
+let q = Qail::add("usage_ledger")
+    .set_value("tenant_id", tenant_id)
+    .set_value("metric", "waba_messages");
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        usages[0].has_explicit_tenant_scope,
+        "tenant_id payload setters should count as explicit tenant scope"
+    );
+}
+
+#[test]
+fn test_rls_detection_late_with_rls_on_bound_query_var() {
+    let content = r#"
+async fn demo(conn: &mut qail_pg::PooledConnection, ctx: &qail_core::rls::RlsContext) {
+    let cmd = Qail::get("orders")
+        .columns(["id"])
+        .limit(1);
+
+    let _ = conn.fetch_all_uncached(&cmd.with_rls(ctx)).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        usages[0].has_rls,
+        "execution-site cmd.with_rls(...) should mark the bound query as RLS-scoped"
+    );
+}
+
+#[test]
+fn test_rls_detection_late_with_rls_does_not_bleed_across_same_var_name() {
+    let content = r#"
+async fn scoped(conn: &mut qail_pg::PooledConnection, ctx: &qail_core::rls::RlsContext) {
+    let cmd = Qail::get("orders").columns(["id"]);
+    let _ = conn.fetch_all_uncached(&cmd.with_rls(ctx)).await;
+}
+
+async fn unscoped(conn: &mut qail_pg::PooledConnection) {
+    let cmd = Qail::get("orders").columns(["id"]);
+    let _ = conn.fetch_all_uncached(&cmd).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert!(usages[0].has_rls);
+    assert!(
+        !usages[1].has_rls,
+        "late with_rls on a previous binding must not suppress warnings for a later same-name binding"
+    );
+}
+
+#[test]
+fn test_rls_detection_helper_param_with_rls_on_inline_qail_arg() {
+    let content = r#"
+async fn exec_with_rls(
+    cmd: Qail,
+    conn: &mut qail_pg::PooledConnection,
+    ctx: &qail_core::rls::RlsContext,
+) {
+    let _ = conn.fetch_all_uncached(&cmd.with_rls(ctx)).await;
+}
+
+async fn demo(
+    conn: &mut qail_pg::PooledConnection,
+    ctx: &qail_core::rls::RlsContext,
+) {
+    let _ = exec_with_rls(Qail::get("orders").columns(["id"]).limit(1), conn, ctx).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert!(
+        usages[0].has_rls,
+        "passing a Qail chain into a helper that applies cmd.with_rls(...) should count as RLS-scoped"
+    );
+}
+
+#[test]
+fn test_rls_detection_helper_param_with_rls_on_bound_query_var() {
+    let content = r#"
+async fn exec_with_rls(
+    cmd: Qail,
+    conn: &mut qail_pg::PooledConnection,
+    ctx: &qail_core::rls::RlsContext,
+) {
+    let _ = conn.fetch_all_uncached(&cmd.with_rls(ctx)).await;
+}
+
+async fn scoped(
+    conn: &mut qail_pg::PooledConnection,
+    ctx: &qail_core::rls::RlsContext,
+) {
+    let cmd = Qail::get("orders").columns(["id"]).limit(1);
+    let _ = exec_with_rls(cmd, conn, ctx).await;
+}
+
+async fn unscoped(conn: &mut qail_pg::PooledConnection) {
+    let cmd = Qail::get("orders").columns(["id"]).limit(1);
+    let _ = consume(cmd).await;
+}
+"#;
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 2);
+    assert!(usages[0].has_rls);
+    assert!(
+        !usages[1].has_rls,
+        "helper-param RLS detection must stay scoped to the call that passes the query into the RLS helper"
+    );
 }
 
 #[test]

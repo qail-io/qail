@@ -14,6 +14,7 @@ use qail_core::migrate::schema::{
     Comment, CommentTarget, EnumType, Extension, Grant, MigrationHint, ResourceDef,
     SchemaFunctionDef, SchemaTriggerDef, Sequence, ViewDef,
 };
+use qail_core::parser::grammar::ddl::parse_column_definition;
 use qail_core::parser::schema::Schema;
 use qail_core::transpiler::ToSql;
 
@@ -89,6 +90,10 @@ pub(crate) fn parse_qail_to_commands_strict(content: &str) -> Result<Vec<Qail>> 
 
     if let Ok(schema) = parse_qail(content) {
         return compile_migrate_schema_strict(&schema);
+    }
+
+    if let Some(cmds) = parse_explicit_apply_commands(content)? {
+        return Ok(cmds);
     }
 
     bail!("Could not parse migration into strict AST commands")
@@ -1152,6 +1157,84 @@ fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
         bail!("No executable AST commands found in migration");
     }
     Ok(cmds)
+}
+
+fn parse_explicit_apply_commands(content: &str) -> Result<Option<Vec<Qail>>> {
+    let mut cmds = Vec::new();
+    let mut saw_explicit_command = false;
+
+    for (line_no, raw_line) in content.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("--") {
+            continue;
+        }
+
+        if line.starts_with("alter ") {
+            saw_explicit_command = true;
+            cmds.push(
+                parse_explicit_alter_add_column_line(line)
+                    .map_err(|err| anyhow!("Line {}: {}", line_no + 1, err))?,
+            );
+            continue;
+        }
+
+        if saw_explicit_command {
+            bail!(
+                "Line {}: unsupported explicit apply command '{}'",
+                line_no + 1,
+                line
+            );
+        }
+    }
+
+    if !saw_explicit_command {
+        return Ok(None);
+    }
+
+    Ok(Some(cmds))
+}
+
+fn parse_explicit_alter_add_column_line(line: &str) -> Result<Qail> {
+    let rest = line
+        .strip_prefix("alter ")
+        .ok_or_else(|| anyhow!("expected 'alter <table> add <column:type[:constraints]>'"))?
+        .trim();
+
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let table = parts
+        .next()
+        .map(str::trim)
+        .filter(|table| !table.is_empty())
+        .ok_or_else(|| anyhow!("expected table name after 'alter'"))?;
+    let remainder = parts
+        .next()
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("expected 'add <column:type[:constraints]>' after table name"))?;
+    let column_def = remainder
+        .strip_prefix("add ")
+        .ok_or_else(|| anyhow!("expected 'add <column:type[:constraints]>' after table name"))?
+        .trim();
+
+    if column_def.is_empty() {
+        bail!("expected column definition after 'add'");
+    }
+
+    let (remaining, column_expr) = parse_column_definition(column_def)
+        .map_err(|_| anyhow!("invalid column definition '{}'", column_def))?;
+
+    if !remaining.trim().is_empty() {
+        bail!(
+            "unexpected trailing content after column definition: '{}'",
+            remaining.trim()
+        );
+    }
+
+    Ok(Qail {
+        action: Action::Alter,
+        table: table.to_string(),
+        columns: vec![column_expr],
+        ..Default::default()
+    })
 }
 
 /// Generate SQL DDL from a fully-parsed migrate Schema.

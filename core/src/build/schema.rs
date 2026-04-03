@@ -1,6 +1,8 @@
 //! Schema types and parsing for build-time validation.
 
+use crate::ast::Expr;
 use crate::migrate::types::ColumnType;
+use crate::parser::grammar::ddl::parse_column_definition;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -382,6 +384,44 @@ impl Schema {
             }
         }
 
+        changes += self.parse_explicit_qail_apply_commands(qail)?;
+
+        Ok(changes)
+    }
+
+    fn parse_explicit_qail_apply_commands(&mut self, qail: &str) -> Result<usize, String> {
+        let mut changes = 0usize;
+
+        for (line_no, raw_line) in qail.lines().enumerate() {
+            let line = strip_schema_comments(raw_line);
+            if line.is_empty() || !line.starts_with("alter ") {
+                continue;
+            }
+
+            let (table, column_name, column_type) = parse_explicit_alter_add_column_line(line)
+                .map_err(|err| format!("Line {}: {}", line_no + 1, err))?;
+
+            if let Some(existing) = self.tables.get_mut(&table) {
+                if existing.columns.insert(column_name, column_type).is_none() {
+                    changes += 1;
+                }
+            } else {
+                let mut columns = HashMap::new();
+                columns.insert(column_name, column_type);
+                self.tables.insert(
+                    table.clone(),
+                    TableSchema {
+                        name: table,
+                        columns,
+                        policies: HashMap::new(),
+                        foreign_keys: vec![],
+                        rls_enabled: false,
+                    },
+                );
+                changes += 2;
+            }
+        }
+
         Ok(changes)
     }
 
@@ -547,6 +587,54 @@ impl Schema {
         }
 
         changes
+    }
+}
+
+fn parse_explicit_alter_add_column_line(
+    line: &str,
+) -> Result<(String, String, ColumnType), String> {
+    let rest = line
+        .strip_prefix("alter ")
+        .ok_or_else(|| "expected 'alter <table> add <column:type[:constraints]>'".to_string())?
+        .trim();
+
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let table = parts
+        .next()
+        .map(str::trim)
+        .filter(|table| !table.is_empty())
+        .ok_or_else(|| "expected table name after 'alter'".to_string())?;
+    let remainder = parts
+        .next()
+        .map(str::trim)
+        .ok_or_else(|| "expected 'add <column:type[:constraints]>' after table name".to_string())?;
+    let column_def = remainder
+        .strip_prefix("add ")
+        .ok_or_else(|| "expected 'add <column:type[:constraints]>' after table name".to_string())?
+        .trim();
+
+    if column_def.is_empty() {
+        return Err("expected column definition after 'add'".to_string());
+    }
+
+    let (remaining, column_expr) = parse_column_definition(column_def)
+        .map_err(|_| format!("invalid column definition '{}'", column_def))?;
+    if !remaining.trim().is_empty() {
+        return Err(format!(
+            "unexpected trailing content after column definition: '{}'",
+            remaining.trim()
+        ));
+    }
+
+    match column_expr {
+        Expr::Def {
+            name, data_type, ..
+        } => Ok((
+            table.to_string(),
+            name,
+            data_type.parse::<ColumnType>().unwrap_or(ColumnType::Text),
+        )),
+        _ => Err("expected column definition after 'add'".to_string()),
     }
 }
 
