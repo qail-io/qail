@@ -1,7 +1,8 @@
-# Qail — Application-to-Database Pipeline with Compile-Time Safety
+# Qail — Rust PostgreSQL Driver + AST Toolkit
 
-> **From your app to PostgreSQL wire bytes — one typed AST, zero application SQL strings, built-in tenant isolation.**
+> **Qail is a Rust PostgreSQL toolkit that makes typed AST queries the default for safe, tenant-isolated execution, with optional auto-REST/WebSocket exposure.**
 
+[![Crates.io](https://img.shields.io/badge/crates.io-qail--pg-orange)](https://crates.io/crates/qail-pg)
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-dev.qail.io-blue)](https://dev.qail.io/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
@@ -9,36 +10,79 @@
 
 ---
 
-## The Problem
+## Start Here (Driver First)
 
-Every SaaS backend has the same three bugs waiting to happen:
+If you are searching for a **Rust PostgreSQL driver**, start with `qail-pg` + `qail-core`.
 
-1. **N+1 queries** — Your ORM fires 100+ queries where 1 would do. You find out in production.
-2. **SQL injection** — One string interpolation mistake. That's all it takes.
-3. **Broken tenant isolation** — A missing `WHERE tenant_id = ?` leaks another customer's data.
-
-These aren't edge cases. They're the *default* outcome of string-based SQL.
-
-## The Fix
-
-Qail is a **native AST PostgreSQL pipeline**. Instead of writing ad-hoc SQL strings in application code, you build a typed Abstract Syntax Tree that compiles to PostgreSQL wire protocol bytes.
+```toml
+[dependencies]
+qail-core = "0.27.6"
+qail-pg = "0.27.6"
+```
 
 ```rust
-// String-based (every other driver): parse → plan → execute
-"SELECT id, email FROM users WHERE active = $1"
+use qail_core::prelude::*;
+use qail_pg::PgDriver;
 
-// Qail: AST → protocol bytes → server parse/plan/execute
-// (no app-side SQL interpolation surface)
-Qail::get("users").columns(["id", "email"]).eq("active", true)
+let mut driver = PgDriver::connect("localhost", 5432, "user", "mydb").await?;
+let ctx = RlsContext::tenant(tenant_id);
+
+let query = Qail::get("users")
+    .columns(["id", "email"])
+    .eq("active", true)
+    .with_rls(&ctx);
+
+let rows = driver.fetch_all(&query).await?;
 ```
+
+## Product Map
+
+| Component | Use it for | Primary audience |
+|---|---|---|
+| `qail-pg` | PostgreSQL driver (wire protocol, pooling, pipeline, COPY) | Backend app code |
+| `qail-core` | Typed AST, parser, validator, RLS model, transpiler | Query/model layer |
+| `qail-gateway` | Optional auto-REST + WebSocket server | API platform teams |
+| `qail` (CLI) | Schema pull/diff, migrations, codegen, lint | DevEx and CI |
+
+## Choose Your Mode
+
+1. Driver mode: add `qail-pg` and execute AST queries in your app.
+2. Gateway mode: run `qail-gateway` when you want auto-generated REST/WebSocket.
+3. Tooling mode: use `qail` CLI for schema and migration workflows.
+
+## qail-pg vs tokio-postgres vs sqlx
+
+| Need | `qail-pg` | `tokio-postgres` | `sqlx` |
+|---|---|---|---|
+| Query API | Typed Qail AST | SQL strings | SQL strings (+ compile-time checked macros) |
+| App-side SQL interpolation path | No on AST path | Yes | Yes |
+| Tenant scoping model | Built-in RLS context APIs | App-managed | App-managed |
+| Auto-REST/WebSocket companion | Yes (`qail-gateway`) | No | No |
+
+Use `qail-pg` when your priority is typed query construction, tenant isolation discipline, and direct wire-level execution from Rust.
+
+## Problem It Solves
+
+Every SaaS backend has the same three recurring failure modes:
+
+1. N+1 query explosions
+2. SQL injection from ad-hoc string assembly
+3. Tenant data leaks from missing scope filters
+
+Qail addresses these by making AST-first query execution and explicit tenant context the default.
+
+### SQL String vs SQL Bytes (Exact Meaning)
+
+- **SQL string**: query text assembled in app code (manual concatenation/interpolation, dynamic formatting, etc.).
+- **SQL bytes**: frontend/backend protocol frames and typed bind-value bytes emitted by the driver.
+- **Qail claim**: "no SQL strings" means no **application-level string interpolation path** on the AST flow.
+- **PostgreSQL behavior**: PostgreSQL still performs normal parse/plan/execute on received statements (or reuses prepared plans).
 
 ### Legacy Syntax Notice
 
 Older pre-1.0 QAIL experiments used symbolic text forms such as `get::users•@id@email@role[active=true][lim=10]` and macro examples such as `qail!("get::users:'id'email [ 'active == true ]")`.
 
-Those forms are **legacy and obsolete**. They are not the canonical `0.27.x` API surface, and some search engines still surface them from immutable old `docs.rs` pages.
-
-Current QAIL application code should use the native AST/DSL path:
+Those forms are historical and are not the canonical `0.27.x` API surface. Current application code should use the AST/DSL path:
 
 ```rust
 let query = Qail::get("users")
@@ -48,22 +92,6 @@ let query = Qail::get("users")
 
 let rows = driver.fetch_all(&query).await?;
 ```
-
-If you find docs claiming "the driver never sees a string" for those old symbolic macro examples, treat that as historical pre-1.0 documentation, not current guidance.
-
-### SQL String vs SQL Bytes (Exact Meaning)
-
-- **SQL string**: query text assembled in app code (manual concatenation/interpolation, dynamic formatting, etc.).
-- **SQL bytes**: frontend/backend protocol frames and typed bind-value bytes emitted by the driver.
-- **Qail claim**: "no SQL strings" means no **application-level string interpolation path** on the AST flow.
-- **PostgreSQL behavior**: PostgreSQL still performs normal parse/plan/execute on received statements (or reuses prepared plans).
-
-**N+1 is structurally discouraged by design and enforced by build-time detection.** The AST guides you to `.join()` (no implicit lazy-loading path), and validator/lint rules catch looped query patterns before production.
-
-### Best Fit / Not Fit
-
-- **Best fit:** PostgreSQL-first SaaS backends that want strong tenant isolation, AST safety, and high-throughput query execution.
-- **Not fit:** teams that need GraphQL-first ecosystems, cross-database federation, or SQL-string-centric workflows.
 
 ---
 
