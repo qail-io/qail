@@ -200,6 +200,26 @@ fn test_platform_admin_helper_rejects_legacy_is_platform_admin_claim() {
 }
 
 #[test]
+fn test_platform_admin_helper_rejects_legacy_qail_platform_admin_claim() {
+    let auth = AuthContext {
+        user_id: "platform-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: None,
+        claims: {
+            let mut claims = HashMap::new();
+            claims.insert(
+                "qail_platform_admin".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            claims
+        },
+    };
+    assert!(!auth.has_platform_admin_claim());
+    assert!(!auth.is_platform_admin());
+    assert!(!auth.can_use_branching());
+}
+
+#[test]
 fn test_explain_admin_helper_rejects_legacy_roles() {
     let admin = AuthContext {
         user_id: "legacy-admin".to_string(),

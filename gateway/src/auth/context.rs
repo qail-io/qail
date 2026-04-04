@@ -51,8 +51,8 @@ impl AuthContext {
     /// This is intentionally fail-closed:
     /// - role must be `administrator` (case-insensitive)
     /// - tenant scope must be empty
-    /// - JWT must explicitly assert platform admin via claim
-    ///   (`platform_admin=true` or `qail_platform_admin=true`)
+    /// - JWT must explicitly assert platform admin via
+    ///   `platform_admin=true`
     pub fn is_platform_admin(&self) -> bool {
         self.role.eq_ignore_ascii_case("administrator")
             && self.tenant_id.as_deref().is_none_or(str::is_empty)
@@ -62,7 +62,6 @@ impl AuthContext {
     /// Returns `true` when JWT claims explicitly grant platform-admin authority.
     pub fn has_platform_admin_claim(&self) -> bool {
         has_truthy_claim(&self.claims, "platform_admin")
-            || has_truthy_claim(&self.claims, "qail_platform_admin")
     }
 
     /// Returns `true` when the caller can execute branch virtualization APIs.
