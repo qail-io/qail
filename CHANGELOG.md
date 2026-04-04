@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.7] - 2026-04-04
+
+### Changed
+
+- **Gateway auth contract:** platform scope now requires the explicit `platform_admin=true` claim; legacy aliases (`qail_platform_admin`, `is_platform_admin`) are rejected.
+- **Migration delta scanner:** build scanner now understands migration deltas and keeps helper-scoped tenant filters in an explicit AND cage.
+- **Driver docs positioning:** `qail-pg` docs and examples are now framed around the driver-first/native AST path.
+- **Versioning/docs:** bumped Rust workspace crates and current docs/install/readme references to `0.27.7`.
+
 ## [0.27.6] - 2026-03-31
 
 ### Changed
