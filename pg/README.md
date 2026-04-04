@@ -1,11 +1,28 @@
 # qail-pg
 
-**PostgreSQL driver for QAIL - native wire protocol**
+**Rust PostgreSQL driver for typed AST queries and native wire-protocol execution**
 
 [![Crates.io](https://img.shields.io/crates/v/qail-pg.svg)](https://crates.io/crates/qail-pg)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-A high-performance PostgreSQL driver that speaks the wire protocol directly. AST-first execution with no application-level SQL string interpolation on the safe path.
+A high-performance async PostgreSQL driver that speaks the wire protocol directly. `qail-pg` is the driver layer of Qail and is intended for backend code that wants AST-first query construction.
+
+## Positioning
+
+qail-pg is a **Rust PostgreSQL driver** for teams that want:
+
+- a typed AST query surface instead of SQL-string-centric app code
+- explicit tenant-scoping APIs on query objects
+- direct wire-protocol execution with pipelining and COPY support
+
+## Quick Comparison
+
+| Need | `qail-pg` | `tokio-postgres` | `sqlx` |
+|---|---|---|---|
+| Primary query API | Typed Qail AST | SQL strings | SQL strings (+ checked macros) |
+| App-side SQL interpolation path | No on AST path | Yes | Yes |
+| Built-in tenant context model | Yes (`RlsContext`) | App-managed | App-managed |
+| Auto-REST companion | Yes (`qail-gateway`) | No | No |
 
 ## SQL String vs SQL Bytes
 
@@ -72,8 +89,8 @@ This shows the exact protocol-byte path used by the driver.
 
 ```toml
 [dependencies]
-qail-pg = "0.27.6"
-qail-core = "0.27.6"
+qail-pg = "0.27.7"
+qail-core = "0.27.7"
 ```
 
 `qail-pg` is AST-only. Raw SQL helper APIs were removed.

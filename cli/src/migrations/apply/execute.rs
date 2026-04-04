@@ -774,6 +774,16 @@ async fn verify_applied_commands_effects(
                     failures.push(format!("expected table '{}' to exist", cmd.table));
                 }
             }
+            Action::Alter => {
+                for column in extract_column_names(&cmd.columns) {
+                    if !column_exists(pg, &cmd.table, &column).await? {
+                        failures.push(format!(
+                            "expected column '{}.{}' to exist",
+                            cmd.table, column
+                        ));
+                    }
+                }
+            }
             Action::Drop => {
                 if table_exists(pg, &cmd.table).await? {
                     failures.push(format!("expected table '{}' to be dropped", cmd.table));

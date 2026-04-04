@@ -145,6 +145,43 @@ index idx_users_name on users (name)
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_supports_explicit_alter_add_column_lines() {
+        let input = r#"
+alter whatsapp_phone_configs add automation_reply_enabled:boolean:default=true
+alter whatsapp_phone_configs add ai_reply_enabled:boolean:default=true
+"#;
+
+        let cmds =
+            parse_qail_to_commands_strict(input).expect("explicit alter lines should compile");
+        assert_eq!(cmds.len(), 2);
+        assert!(
+            cmds.iter()
+                .all(|cmd| matches!(cmd.action, qail_core::ast::Action::Alter)),
+            "all commands should compile to ALTER ADD COLUMN"
+        );
+        assert!(
+            cmds.iter().all(|cmd| cmd.table == "whatsapp_phone_configs"),
+            "all alter commands should target whatsapp_phone_configs"
+        );
+
+        let first_constraints = match &cmds[0].columns[0] {
+            qail_core::ast::Expr::Def {
+                name, constraints, ..
+            } => {
+                assert_eq!(name, "automation_reply_enabled");
+                constraints
+            }
+            other => panic!("expected column definition, got {:?}", other),
+        };
+        assert!(
+            first_constraints
+                .iter()
+                .any(|constraint| matches!(constraint, qail_core::ast::Constraint::Default(val) if val == "true")),
+            "first alter command should preserve DEFAULT true"
+        );
+    }
+
+    #[test]
     fn test_parse_qail_to_commands_strict_supports_advanced_column_constraints() {
         let input = r#"
 table users {

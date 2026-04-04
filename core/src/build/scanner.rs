@@ -35,6 +35,33 @@ pub struct QailUsage {
     pub file_uses_super_admin: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct LiteralBindings {
+    scalars: HashMap<String, Vec<String>>,
+    arrays: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalFunction {
+    name: String,
+    params: Vec<String>,
+    body_start: usize,
+    body_end: usize,
+}
+
+#[derive(Debug, Clone)]
+struct LocalFunctionCall {
+    name: String,
+    args: Vec<String>,
+    arg_spans: Vec<(usize, usize)>,
+    open_paren: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ParamSubstitutions {
+    values: HashMap<String, String>,
+}
+
 /// Scan Rust source files for QAIL usage patterns
 pub fn scan_source_files(src_dir: &str) -> Vec<QailUsage> {
     let mut usages = Vec::new();
@@ -143,6 +170,149 @@ fn collect_let_bindings(content: &str) -> HashMap<String, Vec<String>> {
     }
 
     bindings
+}
+
+fn collect_literal_bindings(content: &str) -> LiteralBindings {
+    let mut bindings = LiteralBindings {
+        scalars: collect_let_bindings(content),
+        arrays: collect_let_array_bindings(content),
+    };
+    collect_const_literal_bindings(content, &mut bindings);
+    dedupe_binding_values(&mut bindings.scalars);
+    dedupe_binding_values(&mut bindings.arrays);
+    bindings
+}
+
+fn collect_let_array_bindings(content: &str) -> HashMap<String, Vec<String>> {
+    let mut bindings: HashMap<String, Vec<String>> = HashMap::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0usize;
+
+    while i < lines.len() {
+        let line = lines[i].trim();
+        if let Some(rest) = line.strip_prefix("let ")
+            && let Some((var, rhs)) = parse_simple_let(rest.trim())
+        {
+            let mut full_expr = rhs.trim().to_string();
+            let mut j = i + 1;
+            while j < lines.len() && !full_expr.contains(';') {
+                full_expr.push(' ');
+                full_expr.push_str(lines[j].trim());
+                j += 1;
+            }
+            let values = extract_array_string_literals_from_expr(&full_expr);
+            if !values.is_empty() {
+                bindings.insert(var, values);
+            }
+            i = j.max(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+
+    bindings
+}
+
+fn collect_const_literal_bindings(content: &str, bindings: &mut LiteralBindings) {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0usize;
+
+    while i < lines.len() {
+        let line = lines[i].trim();
+        if !looks_like_const_binding(line) {
+            i += 1;
+            continue;
+        }
+
+        let mut full_stmt = line.to_string();
+        let mut j = i + 1;
+        while j < lines.len() && !full_stmt.contains(';') {
+            full_stmt.push(' ');
+            full_stmt.push_str(lines[j].trim());
+            j += 1;
+        }
+
+        if let Some((name, rhs)) = parse_const_binding(&full_stmt) {
+            if let Some(value) = extract_string_arg(rhs) {
+                bindings
+                    .scalars
+                    .entry(name.clone())
+                    .or_default()
+                    .push(value);
+            }
+
+            let values = extract_array_string_literals_from_expr(rhs);
+            if !values.is_empty() {
+                bindings.arrays.insert(name, values);
+            }
+        }
+
+        i = j.max(i + 1);
+    }
+}
+
+fn looks_like_const_binding(line: &str) -> bool {
+    for prefix in [
+        "const ",
+        "static ",
+        "pub const ",
+        "pub static ",
+        "pub(crate) const ",
+        "pub(crate) static ",
+        "pub(super) const ",
+        "pub(super) static ",
+    ] {
+        if line.starts_with(prefix) {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_const_binding(stmt: &str) -> Option<(String, &str)> {
+    let mut rest = stmt.trim();
+
+    for _ in 0..4 {
+        let mut advanced = false;
+        for prefix in ["pub(crate) ", "pub(super) ", "pub ", "const ", "static "] {
+            if let Some(next) = rest.strip_prefix(prefix) {
+                rest = next.trim_start();
+                advanced = true;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+
+    if let Some(next) = rest.strip_prefix("mut ") {
+        rest = next.trim_start();
+    }
+
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty() {
+        return None;
+    }
+
+    let rest = rest[name.len()..].trim_start();
+    let rest = if rest.starts_with(':') {
+        rest.find('=').map(|pos| &rest[pos..])?
+    } else {
+        rest
+    };
+
+    let rhs = rest.strip_prefix('=')?.trim();
+    Some((name, rhs.trim_end_matches(';').trim()))
+}
+
+fn dedupe_binding_values(bindings: &mut HashMap<String, Vec<String>>) {
+    for values in bindings.values_mut() {
+        let mut seen = HashSet::new();
+        values.retain(|value| seen.insert(value.clone()));
+    }
 }
 
 /// Parse `ident = rest` from a let statement (after stripping `let `).
@@ -345,11 +515,14 @@ pub(crate) fn count_net_delimiters(line: &str) -> i32 {
 
 #[derive(Debug, Clone)]
 struct ScannedQailChain {
+    start: usize,
+    end: usize,
     line: usize,
     column: usize,
     action: &'static str,
     first_arg: String,
     full_chain: String,
+    bound_var: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -365,6 +538,290 @@ struct QailConstructorHit {
 struct MethodCall<'a> {
     name: &'a str,
     args: &'a str,
+}
+
+fn collect_local_functions(source: &str) -> Vec<LocalFunction> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if !starts_with_bytes(bytes, i, b"fn")
+            || i > 0 && is_ident_byte(bytes[i - 1])
+            || bytes.get(i + 2).copied().is_some_and(is_ident_byte)
+        {
+            i += 1;
+            continue;
+        }
+
+        let name_start = skip_ws(bytes, i + 2);
+        let Some((name, name_end)) = parse_ident_at_bytes(source, name_start) else {
+            i += 2;
+            continue;
+        };
+        let open_paren = skip_ws(bytes, name_end);
+        if bytes.get(open_paren).copied() != Some(b'(') {
+            i += 2;
+            continue;
+        }
+        let Some(close_paren) = find_matching_delim(source, open_paren, b'(', b')') else {
+            i += 2;
+            continue;
+        };
+        let Some(body_start) = find_function_body_open(source, close_paren + 1) else {
+            i = close_paren + 1;
+            continue;
+        };
+        let Some(body_end) = find_matching_delim(source, body_start, b'{', b'}') else {
+            i = body_start + 1;
+            continue;
+        };
+
+        out.push(LocalFunction {
+            name: name.to_string(),
+            params: parse_param_names(source.get(open_paren + 1..close_paren).unwrap_or_default()),
+            body_start,
+            body_end,
+        });
+
+        i = close_paren + 1;
+    }
+
+    out
+}
+
+fn collect_local_function_calls(
+    source: &str,
+    functions: &[LocalFunction],
+) -> Vec<LocalFunctionCall> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for function in functions {
+        let needle = format!("{}(", function.name);
+        for (idx, _) in source.match_indices(&needle) {
+            let open_paren = idx + function.name.len();
+            let Some((name, name_start)) = bare_call_name_before_open_paren(source, open_paren)
+            else {
+                continue;
+            };
+            if name != function.name {
+                continue;
+            }
+            if previous_identifier_before(source, name_start).as_deref() == Some("fn") {
+                continue;
+            }
+            let Some(close_paren) = find_matching_delim(source, open_paren, b'(', b')') else {
+                continue;
+            };
+            let parsed_args = source
+                .get(open_paren + 1..close_paren)
+                .map(|args| split_top_level_args_with_spans(args, open_paren + 1))
+                .unwrap_or_default();
+            let args = parsed_args
+                .iter()
+                .map(|(arg, _, _)| arg.clone())
+                .collect::<Vec<_>>();
+            let arg_spans = parsed_args
+                .iter()
+                .map(|(_, start, end)| (*start, *end))
+                .collect::<Vec<_>>();
+            let key = format!("{}@{}@{}", name, open_paren, close_paren);
+            if seen.insert(key) {
+                out.push(LocalFunctionCall {
+                    name,
+                    args,
+                    arg_spans,
+                    open_paren,
+                });
+            }
+        }
+    }
+
+    out
+}
+
+fn find_function_body_open(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+        match bytes[i] {
+            b'{' => return Some(i),
+            b';' => return None,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn parse_param_names(params: &str) -> Vec<String> {
+    split_top_level_args(params)
+        .into_iter()
+        .filter_map(extract_param_name)
+        .collect()
+}
+
+fn extract_param_name(param: &str) -> Option<String> {
+    let lhs = param.split(':').next()?.trim();
+    if lhs.is_empty() {
+        return None;
+    }
+    let lhs = lhs.strip_prefix("mut ").unwrap_or(lhs).trim();
+    if matches!(lhs, "self" | "&self" | "&mut self" | "mut self") {
+        return None;
+    }
+    extract_last_ident(lhs)
+}
+
+fn extract_last_ident(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && !is_ident_byte(bytes[end - 1]) {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let mut start = end;
+    while start > 0 && is_ident_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    let ident = text.get(start..end)?.trim();
+    if ident.is_empty() {
+        None
+    } else {
+        Some(ident.to_string())
+    }
+}
+
+fn bare_call_name_before_open_paren(
+    source: &str,
+    open_paren_idx: usize,
+) -> Option<(String, usize)> {
+    let bytes = source.as_bytes();
+    if open_paren_idx == 0 || open_paren_idx > bytes.len() {
+        return None;
+    }
+
+    let mut end = open_paren_idx;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+
+    let mut start = end;
+    while start > 0 && is_ident_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+
+    let prev = source
+        .get(..start)
+        .and_then(|prefix| prefix.as_bytes().last().copied());
+    if matches!(prev, Some(b'.' | b':' | b'!')) {
+        return None;
+    }
+
+    let name = source.get(start..end)?.trim();
+    if name.is_empty() || is_rust_keyword(name) {
+        return None;
+    }
+
+    Some((name.to_string(), start))
+}
+
+fn previous_identifier_before(source: &str, start: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut end = start;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+
+    let mut ident_end = end;
+    while ident_end > 0 && !is_ident_byte(bytes[ident_end - 1]) {
+        ident_end -= 1;
+    }
+    if ident_end == 0 {
+        return None;
+    }
+
+    let mut ident_start = ident_end;
+    while ident_start > 0 && is_ident_byte(bytes[ident_start - 1]) {
+        ident_start -= 1;
+    }
+    let ident = source.get(ident_start..ident_end)?.trim();
+    if ident.is_empty() {
+        None
+    } else {
+        Some(ident.to_string())
+    }
+}
+
+fn is_rust_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "if" | "for"
+            | "while"
+            | "loop"
+            | "match"
+            | "return"
+            | "let"
+            | "fn"
+            | "impl"
+            | "async"
+            | "await"
+            | "move"
+            | "in"
+            | "where"
+            | "else"
+            | "mod"
+            | "struct"
+            | "enum"
+            | "trait"
+            | "use"
+            | "pub"
+            | "super"
+            | "self"
+            | "crate"
+    )
 }
 
 fn compute_line_starts(source: &str) -> Vec<usize> {
@@ -607,6 +1064,19 @@ fn find_statement_end(source: &str, start: usize) -> Option<usize> {
     None
 }
 
+fn find_statement_start(source: &str, end: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut i = end.min(bytes.len());
+    while i > 0 {
+        let prev = i - 1;
+        match bytes[prev] {
+            b';' | b'{' | b'}' => return i,
+            _ => i -= 1,
+        }
+    }
+    0
+}
+
 fn find_next_qail_constructor(source: &str, start: usize) -> Option<QailConstructorHit> {
     let bytes = source.as_bytes();
     let mut i = start;
@@ -773,6 +1243,92 @@ fn split_top_level_args(args: &str) -> Vec<&str> {
     }
 
     out
+}
+
+fn split_top_level_args_with_spans(args: &str, base_offset: usize) -> Vec<(String, usize, usize)> {
+    let bytes = args.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        match bytes[i] {
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            b'{' => brace += 1,
+            b'}' => brace = brace.saturating_sub(1),
+            b',' if paren == 0 && bracket == 0 && brace == 0 => {
+                push_arg_span(args, base_offset, start, i, &mut out);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    push_arg_span(args, base_offset, start, args.len(), &mut out);
+    out
+}
+
+fn push_arg_span(
+    args: &str,
+    base_offset: usize,
+    start: usize,
+    end: usize,
+    out: &mut Vec<(String, usize, usize)>,
+) {
+    let Some((trimmed_start, trimmed_end)) = trim_span(args, start, end) else {
+        return;
+    };
+    let Some(arg) = args.get(trimmed_start..trimmed_end) else {
+        return;
+    };
+    out.push((
+        arg.to_string(),
+        base_offset + trimmed_start,
+        base_offset + trimmed_end,
+    ));
+}
+
+fn trim_span(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    if start >= end || end > text.len() {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut trimmed_start = start;
+    let mut trimmed_end = end;
+    while trimmed_start < trimmed_end && bytes[trimmed_start].is_ascii_whitespace() {
+        trimmed_start += 1;
+    }
+    while trimmed_end > trimmed_start && bytes[trimmed_end - 1].is_ascii_whitespace() {
+        trimmed_end -= 1;
+    }
+    if trimmed_start >= trimmed_end {
+        None
+    } else {
+        Some((trimmed_start, trimmed_end))
+    }
 }
 
 fn parse_string_literal_at(input: &str, start: usize) -> Option<(String, usize)> {
@@ -1001,6 +1557,100 @@ fn scan_chain_method_calls(chain: &str) -> Vec<MethodCall<'_>> {
     out
 }
 
+fn extract_bound_var_from_prefix(prefix: &str) -> Option<String> {
+    let mut s = prefix.trim_start();
+    s = s.strip_prefix("let ")?;
+    s = s.strip_prefix("mut ").unwrap_or(s).trim_start();
+    if s.starts_with('(') {
+        return None;
+    }
+
+    let ident: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if ident.is_empty() {
+        return None;
+    }
+
+    let rest = s[ident.len()..].trim_start();
+    let rest = if rest.starts_with(':') {
+        rest.find('=').map(|pos| &rest[pos..])?
+    } else {
+        rest
+    };
+    if !rest.trim_start().starts_with('=') {
+        return None;
+    }
+
+    Some(ident)
+}
+
+fn extract_receiver_ident_before_dot(source: &str, dot_idx: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    if dot_idx == 0 || dot_idx > bytes.len() || bytes.get(dot_idx).copied() != Some(b'.') {
+        return None;
+    }
+
+    let mut end = dot_idx;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && is_ident_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+
+    let mut before = start;
+    while before > 0 && bytes[before - 1].is_ascii_whitespace() {
+        before -= 1;
+    }
+    if before > 0 && matches!(bytes[before - 1], b'.' | b':') {
+        return None;
+    }
+
+    source.get(start..end).map(str::to_string)
+}
+
+fn collect_execution_site_rls_offsets(source: &str) -> HashMap<String, Vec<usize>> {
+    let bytes = source.as_bytes();
+    let mut out: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_with_bytes(bytes, i, b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if starts_with_bytes(bytes, i, b"/*") {
+            i = consume_block_comment(bytes, i);
+            continue;
+        }
+        if let Some(next) = consume_rust_literal(bytes, i) {
+            i = next;
+            continue;
+        }
+
+        if starts_with_bytes(bytes, i, b".with_rls") {
+            if let Some(var) = extract_receiver_ident_before_dot(source, i) {
+                out.entry(var).or_default().push(i);
+            }
+            i += ".with_rls".len();
+            continue;
+        }
+
+        i += 1;
+    }
+
+    out
+}
+
 fn source_has_allow_comment(source: &str, marker: &str) -> bool {
     let bytes = source.as_bytes();
     let mut i = 0usize;
@@ -1089,18 +1739,25 @@ fn collect_qail_chains(source: &str) -> Vec<ScannedQailChain> {
     let mut cursor = 0usize;
 
     while let Some(hit) = find_next_qail_constructor(source, cursor) {
+        let statement_start = find_statement_start(source, hit.start);
         let args = source
             .get(hit.open_paren + 1..hit.close_paren)
             .unwrap_or_default();
         let first_arg = extract_first_argument(args).to_string();
         let full_chain = source.get(hit.start..hit.statement_end).unwrap_or_default();
+        let bound_var = source
+            .get(statement_start..hit.start)
+            .and_then(extract_bound_var_from_prefix);
         let (line, column0) = offset_to_line_col(&line_starts, hit.start);
         out.push(ScannedQailChain {
+            start: hit.start,
+            end: hit.statement_end,
             line,
             column: column0 + 1,
             action: hit.action,
             first_arg,
             full_chain: full_chain.to_string(),
+            bound_var,
         });
 
         let next = if hit.statement_end > hit.start {
@@ -1147,6 +1804,233 @@ fn collect_cte_aliases(chains: &[ScannedQailChain]) -> HashSet<String> {
     cte_names
 }
 
+fn find_enclosing_local_function(
+    offset: usize,
+    functions: &[LocalFunction],
+) -> Option<&LocalFunction> {
+    functions
+        .iter()
+        .filter(|func| offset > func.body_start && offset < func.body_end)
+        .min_by_key(|func| func.body_end.saturating_sub(func.body_start))
+}
+
+fn build_param_substitutions(
+    function: &LocalFunction,
+    calls: &[LocalFunctionCall],
+    function_name_counts: &HashMap<String, usize>,
+) -> Vec<ParamSubstitutions> {
+    if function_name_counts
+        .get(&function.name)
+        .copied()
+        .unwrap_or(0)
+        != 1
+    {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for call in calls {
+        if call.name != function.name || call.args.len() < function.params.len() {
+            continue;
+        }
+        let values = function
+            .params
+            .iter()
+            .cloned()
+            .zip(call.args.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        if !values.is_empty() {
+            out.push(ParamSubstitutions { values });
+        }
+    }
+    out
+}
+
+fn binding_lookup_key(expr: &str) -> Option<String> {
+    let mut trimmed = expr.trim();
+    while let Some(rest) = trimmed.strip_prefix('&') {
+        trimmed = rest.trim_start();
+    }
+    trimmed = trimmed.trim_matches(|ch: char| matches!(ch, '(' | ')' | '[' | ']'));
+    let segment = trimmed.rsplit("::").next().unwrap_or(trimmed);
+    let segment = segment.rsplit('.').next().unwrap_or(segment).trim();
+    if segment.is_empty() || !segment.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        None
+    } else {
+        Some(segment.to_string())
+    }
+}
+
+fn resolve_string_values(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut visited = HashSet::new();
+    resolve_string_values_inner(expr, substitutions, bindings, &mut visited, &mut out);
+    dedupe_values(&mut out);
+    out
+}
+
+fn resolve_string_values_inner(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+    visited: &mut HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    if let Some(value) = extract_string_arg(expr) {
+        out.push(value);
+        return;
+    }
+
+    let Some(key) = binding_lookup_key(expr) else {
+        return;
+    };
+    if !visited.insert(format!("s:{key}")) {
+        return;
+    }
+
+    if let Some(substitutions) = substitutions
+        && let Some(arg_expr) = substitutions.values.get(&key)
+    {
+        resolve_string_values_inner(arg_expr, Some(substitutions), bindings, visited, out);
+    }
+    if let Some(values) = bindings.scalars.get(&key) {
+        out.extend(values.iter().cloned());
+    }
+}
+
+fn resolve_array_string_values(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut visited = HashSet::new();
+    resolve_array_string_values_inner(expr, substitutions, bindings, &mut visited, &mut out);
+    dedupe_values(&mut out);
+    out
+}
+
+fn resolve_array_string_values_inner(
+    expr: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+    visited: &mut HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    let direct = extract_array_string_literals_from_expr(expr);
+    if !direct.is_empty() {
+        out.extend(direct);
+        return;
+    }
+
+    let Some(key) = binding_lookup_key(expr) else {
+        return;
+    };
+    if !visited.insert(format!("a:{key}")) {
+        return;
+    }
+
+    if let Some(substitutions) = substitutions
+        && let Some(arg_expr) = substitutions.values.get(&key)
+    {
+        resolve_array_string_values_inner(arg_expr, Some(substitutions), bindings, visited, out);
+    }
+    if let Some(values) = bindings.arrays.get(&key) {
+        out.extend(values.iter().cloned());
+    }
+}
+
+fn dedupe_values(values: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
+}
+
+fn collect_helper_rls_param_indices(
+    source: &str,
+    functions: &[LocalFunction],
+) -> HashMap<String, HashSet<usize>> {
+    let mut out = HashMap::new();
+
+    for function in functions {
+        let body = source
+            .get(function.body_start + 1..function.body_end)
+            .unwrap_or_default();
+        let mut indices = HashSet::new();
+        for (idx, param) in function.params.iter().enumerate() {
+            if source_contains_ident_method_call(body, param, "with_rls")
+                || source_contains_ident_method_call(body, param, "rls")
+            {
+                indices.insert(idx);
+            }
+        }
+        if !indices.is_empty() {
+            out.insert(function.name.clone(), indices);
+        }
+    }
+
+    out
+}
+
+fn source_contains_ident_method_call(source: &str, ident: &str, method: &str) -> bool {
+    let needle = format!("{ident}.{method}");
+    for (idx, _) in source.match_indices(&needle) {
+        let before_ok = idx == 0 || !is_ident_byte(source.as_bytes()[idx - 1]);
+        if !before_ok {
+            continue;
+        }
+        let mut after = idx + needle.len();
+        after = skip_ws(source.as_bytes(), after);
+        if source.as_bytes().get(after).copied() == Some(b'(') {
+            return true;
+        }
+    }
+    false
+}
+
+fn chain_has_helper_param_rls(
+    chain: &ScannedQailChain,
+    calls: &[LocalFunctionCall],
+    helper_rls_params: &HashMap<String, HashSet<usize>>,
+    enclosing_function: Option<&LocalFunction>,
+    next_same_var_start: usize,
+) -> bool {
+    for call in calls {
+        let Some(rls_param_indices) = helper_rls_params.get(&call.name) else {
+            continue;
+        };
+        if let Some(function) = enclosing_function
+            && !(call.open_paren > function.body_start && call.open_paren < function.body_end)
+        {
+            continue;
+        }
+
+        for (idx, (arg_start, arg_end)) in call.arg_spans.iter().enumerate() {
+            if !rls_param_indices.contains(&idx) {
+                continue;
+            }
+
+            if chain.start >= *arg_start && chain.start < *arg_end {
+                return true;
+            }
+
+            if let Some(var) = chain.bound_var.as_ref()
+                && call.open_paren >= chain.end
+                && call.open_paren < next_same_var_start
+                && let Some(arg_expr) = call.args.get(idx)
+                && binding_lookup_key(arg_expr).as_deref() == Some(var.as_str())
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 pub(crate) fn scan_file(file: &str, content: &str, usages: &mut Vec<QailUsage>) {
     scan_file_inner(file, content, usages, true);
 }
@@ -1157,8 +2041,7 @@ pub(crate) fn scan_file_silent(file: &str, content: &str, usages: &mut Vec<QailU
 }
 
 fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_warnings: bool) {
-    // Phase 1+2: Collect let-bindings that resolve variable → string literal(s)
-    let let_bindings = collect_let_bindings(content);
+    let literal_bindings = collect_literal_bindings(content);
 
     // ── File-level flags ─────────────────────────────────────────────
     // Detect SuperAdminToken::for_system_process() usage anywhere in file.
@@ -1168,15 +2051,20 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
         !file_has_allow_super_admin && source_has_function_call(content, "for_system_process");
 
     let chains = collect_qail_chains(content);
+    let execution_site_rls = collect_execution_site_rls_offsets(content);
     let file_cte_names = collect_cte_aliases(&chains);
+    let local_functions = collect_local_functions(content);
+    let local_function_calls = collect_local_function_calls(content, &local_functions);
+    let helper_rls_params = collect_helper_rls_param_indices(content, &local_functions);
+    let mut function_name_counts = HashMap::new();
+    for function in &local_functions {
+        *function_name_counts
+            .entry(function.name.clone())
+            .or_insert(0usize) += 1;
+    }
 
-    for chain in chains {
+    for (idx, chain) in chains.iter().enumerate() {
         let action = chain.action;
-        let table = if action == "TYPED" {
-            extract_typed_table_arg(&chain.first_arg)
-        } else {
-            extract_string_arg(&chain.first_arg)
-        };
 
         if action == "RAW" {
             if emit_warnings {
@@ -1188,56 +2076,103 @@ fn scan_file_inner(file: &str, content: &str, usages: &mut Vec<QailUsage>, emit_
             continue;
         }
 
-        let has_rls = chain_has_rls(&chain.full_chain);
+        let enclosing_function = find_enclosing_local_function(chain.start, &local_functions);
+        let next_same_var_start = chain.bound_var.as_ref().map(|var| {
+            chains
+                .iter()
+                .skip(idx + 1)
+                .find(|other| other.bound_var.as_ref() == Some(var))
+                .map(|other| other.start)
+                .unwrap_or(usize::MAX)
+        });
+        let has_late_rls = chain.bound_var.as_ref().is_some_and(|var| {
+            execution_site_rls
+                .get(var)
+                .into_iter()
+                .flatten()
+                .any(|offset| {
+                    *offset >= chain.end
+                        && *offset < next_same_var_start.unwrap_or(usize::MAX)
+                        && match enclosing_function {
+                            Some(function) => {
+                                *offset > function.body_start && *offset < function.body_end
+                            }
+                            None => true,
+                        }
+                })
+        });
+        let has_helper_param_rls = chain_has_helper_param_rls(
+            chain,
+            &local_function_calls,
+            &helper_rls_params,
+            enclosing_function,
+            next_same_var_start.unwrap_or(usize::MAX),
+        );
+        let has_rls = chain_has_rls(&chain.full_chain) || has_late_rls || has_helper_param_rls;
         let has_explicit_tenant_scope = chain_has_explicit_tenant_scope(&chain.full_chain);
-        let columns = extract_columns(&chain.full_chain);
+        let substitution_contexts = enclosing_function
+            .map(|function| {
+                build_param_substitutions(function, &local_function_calls, &function_name_counts)
+            })
+            .unwrap_or_default();
 
-        if let Some(table) = table {
-            let is_cte_ref = file_cte_names.contains(&table);
-            usages.push(QailUsage {
-                file: file.to_string(),
-                line: chain.line,
-                column: chain.column,
-                table,
-                is_dynamic_table: false,
-                columns,
-                action: action.to_string(),
-                is_cte_ref,
-                has_rls,
-                has_explicit_tenant_scope,
-                file_uses_super_admin,
-            });
-        } else if action != "TYPED" {
+        let context_iter = if substitution_contexts.is_empty() {
+            vec![None]
+        } else {
+            substitution_contexts.iter().map(Some).collect::<Vec<_>>()
+        };
+        let mut pushed = false;
+        let mut seen_variants = HashSet::new();
+
+        for substitutions in context_iter {
+            let resolved_tables = if action == "TYPED" {
+                extract_typed_table_arg(&chain.first_arg)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            } else {
+                resolve_string_values(&chain.first_arg, substitutions, &literal_bindings)
+            };
+            if resolved_tables.is_empty() {
+                continue;
+            }
+
+            let columns =
+                extract_columns_with_bindings(&chain.full_chain, substitutions, &literal_bindings);
+            let columns_key = columns.join("\x1f");
+
+            for table in resolved_tables {
+                let variant_key = format!("{table}\x1e{columns_key}");
+                if !seen_variants.insert(variant_key) {
+                    continue;
+                }
+                let is_cte_ref = file_cte_names.contains(&table);
+                usages.push(QailUsage {
+                    file: file.to_string(),
+                    line: chain.line,
+                    column: chain.column,
+                    table,
+                    is_dynamic_table: false,
+                    columns: columns.clone(),
+                    action: action.to_string(),
+                    is_cte_ref,
+                    has_rls,
+                    has_explicit_tenant_scope,
+                    file_uses_super_admin,
+                });
+                pushed = true;
+            }
+        }
+
+        if !pushed && action != "TYPED" && emit_warnings {
             let var_hint = if chain.first_arg.trim().is_empty() {
                 "?"
             } else {
                 chain.first_arg.trim()
             };
-            let lookup_key = var_hint.rsplit('.').next().unwrap_or(var_hint).trim();
-
-            if let Some(resolved_tables) = let_bindings.get(lookup_key) {
-                for resolved_table in resolved_tables {
-                    let is_cte_ref = file_cte_names.contains(resolved_table);
-                    usages.push(QailUsage {
-                        file: file.to_string(),
-                        line: chain.line,
-                        column: chain.column,
-                        table: resolved_table.clone(),
-                        is_dynamic_table: false,
-                        columns: columns.clone(),
-                        action: action.to_string(),
-                        is_cte_ref,
-                        has_rls,
-                        has_explicit_tenant_scope,
-                        file_uses_super_admin,
-                    });
-                }
-            } else if emit_warnings {
-                println!(
-                    "cargo:warning=Qail: dynamic table name `{}` in {}:{} — cannot validate columns at build time. Consider using string literals.",
-                    var_hint, file, chain.line
-                );
-            }
+            println!(
+                "cargo:warning=Qail: dynamic table name `{}` in {}:{} — cannot validate columns at build time. Consider using string literals.",
+                var_hint, file, chain.line
+            );
         }
     }
 }
@@ -1294,44 +2229,67 @@ pub(crate) fn extract_typed_table_arg(s: &str) -> Option<String> {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn extract_columns(line: &str) -> Vec<String> {
+    extract_columns_with_bindings(line, None, &LiteralBindings::default())
+}
+
+fn extract_columns_with_bindings(
+    line: &str,
+    substitutions: Option<&ParamSubstitutions>,
+    bindings: &LiteralBindings,
+) -> Vec<String> {
     let calls = scan_chain_method_calls(line);
     let mut columns = Vec::new();
     let mut aliases = HashSet::new();
 
     for call in &calls {
-        if call.name == "alias"
-            && let Some(name) = extract_string_arg(extract_first_argument(call.args))
-        {
-            aliases.insert(name);
+        if call.name == "alias" {
+            for name in
+                resolve_string_values(extract_first_argument(call.args), substitutions, bindings)
+            {
+                aliases.insert(name);
+            }
         }
     }
 
     for call in calls {
         match call.name {
             "column" => {
-                if let Some(col) = extract_string_arg(extract_first_argument(call.args)) {
+                for col in resolve_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ) {
                     columns.push(col);
                 }
             }
             "columns" => {
-                columns.extend(extract_array_string_literals_from_expr(
+                columns.extend(resolve_array_string_values(
                     extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
                 ));
             }
             "filter" | "eq" | "ne" | "gt" | "lt" | "gte" | "lte" | "like" | "ilike"
             | "where_eq" | "order_by" | "order_desc" | "order_asc" | "in_vals" | "is_null"
             | "is_not_null" | "set_value" | "set_coalesce" | "set_coalesce_opt" => {
-                if let Some(col) = extract_string_arg(extract_first_argument(call.args))
-                    && !col.contains('.')
-                {
-                    columns.push(col);
+                for col in resolve_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ) {
+                    if !col.contains('.') {
+                        columns.push(col);
+                    }
                 }
             }
             "returning" | "on_conflict_update" | "on_conflict_nothing" => {
-                for col in
-                    extract_array_string_literals_from_expr(extract_first_argument(call.args))
-                {
+                for col in resolve_array_string_values(
+                    extract_first_argument(call.args),
+                    substitutions,
+                    bindings,
+                ) {
                     if !col.contains('.') {
                         columns.push(col);
                     }
@@ -1381,7 +2339,10 @@ fn chain_has_rls(chain: &str) -> bool {
 
 fn chain_has_explicit_tenant_scope(chain: &str) -> bool {
     for call in scan_chain_method_calls(chain) {
-        if !matches!(call.name, "eq" | "where_eq" | "is_null") {
+        if !matches!(
+            call.name,
+            "eq" | "where_eq" | "is_null" | "set_value" | "set_coalesce" | "set_coalesce_opt"
+        ) {
             continue;
         }
         if let Some(col) = extract_string_arg(extract_first_argument(call.args))

@@ -9,7 +9,7 @@ Lightweight QAIL protocol encoder crate.
 
 ```toml
 [dependencies]
-qail-encoder = "0.27.6"
+qail-encoder = "0.27.7"
 ```
 
 ## Scope
