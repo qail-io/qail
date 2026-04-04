@@ -1804,10 +1804,10 @@ fn collect_cte_aliases(chains: &[ScannedQailChain]) -> HashSet<String> {
     cte_names
 }
 
-fn find_enclosing_local_function<'a>(
+fn find_enclosing_local_function(
     offset: usize,
-    functions: &'a [LocalFunction],
-) -> Option<&'a LocalFunction> {
+    functions: &[LocalFunction],
+) -> Option<&LocalFunction> {
     functions
         .iter()
         .filter(|func| offset > func.body_start && offset < func.body_end)
@@ -2002,10 +2002,10 @@ fn chain_has_helper_param_rls(
         let Some(rls_param_indices) = helper_rls_params.get(&call.name) else {
             continue;
         };
-        if let Some(function) = enclosing_function {
-            if !(call.open_paren > function.body_start && call.open_paren < function.body_end) {
-                continue;
-            }
+        if let Some(function) = enclosing_function
+            && !(call.open_paren > function.body_start && call.open_paren < function.body_end)
+        {
+            continue;
         }
 
         for (idx, (arg_start, arg_end)) in call.arg_spans.iter().enumerate() {
