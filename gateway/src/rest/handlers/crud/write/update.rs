@@ -55,6 +55,10 @@ pub(crate) async fn update_handler(
         .schema
         .table(&table_name)
         .ok_or_else(|| ApiError::not_found(&table_name))?;
+    let table_has_tenant_column = table
+        .columns
+        .iter()
+        .any(|c| c.name == state.config.tenant_column);
 
     let pk = table
         .primary_key
@@ -86,7 +90,15 @@ pub(crate) async fn update_handler(
             )));
         }
     }
-    reject_tenant_column_update(obj, &state.config.tenant_column, auth.tenant_id.as_deref())?;
+    reject_tenant_column_update(
+        obj,
+        &state.config.tenant_column,
+        if table_has_tenant_column {
+            auth.tenant_id.as_deref()
+        } else {
+            None
+        },
+    )?;
 
     // Build: set table { col1 = val1 } [pk = $id]
     let mut cmd = qail_core::ast::Qail::set(&table_name).filter(
@@ -94,7 +106,7 @@ pub(crate) async fn update_handler(
         Operator::Eq,
         QailValue::String(id.clone()),
     );
-    if let Some(ref tid) = auth.tenant_id {
+    if table_has_tenant_column && let Some(ref tid) = auth.tenant_id {
         cmd = cmd.filter(
             &state.config.tenant_column,
             Operator::Eq,
@@ -137,7 +149,11 @@ pub(crate) async fn update_handler(
             &pk,
             &id,
             &state.config.tenant_column,
-            auth.tenant_id.as_deref(),
+            if table_has_tenant_column {
+                auth.tenant_id.as_deref()
+            } else {
+                None
+            },
         );
         let overlay_result = redirect_to_overlay(
             &mut conn,

@@ -87,6 +87,18 @@ fn test_cross_table_isolation() {
 }
 
 #[test]
+fn test_invalidate_all_clears_all_tables() {
+    let cache = QueryCache::new(CacheConfig::default());
+
+    cache.set("SELECT * FROM users", "users", "users_data".to_string());
+    cache.set("SELECT * FROM orders", "orders", "orders_data".to_string());
+
+    let _invalidated = cache.invalidate_all();
+    assert!(cache.get("SELECT * FROM users").is_none());
+    assert!(cache.get("SELECT * FROM orders").is_none());
+}
+
+#[test]
 fn test_ttl_expiry() {
     let cache = QueryCache::new(CacheConfig {
         ttl: Duration::from_millis(50),

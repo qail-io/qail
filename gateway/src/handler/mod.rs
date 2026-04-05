@@ -15,7 +15,7 @@ pub(crate) mod txn;
 
 // ── Public re-exports (preserves existing `crate::handler::*` paths) ──
 
-pub use admin::{health_check, health_check_internal, swagger_ui};
+pub use admin::{cache_invalidate_internal, health_check, health_check_internal, swagger_ui};
 pub use convert::row_to_json;
 pub(crate) use query::{clamp_query_limit, is_query_allowed};
 pub use query::{

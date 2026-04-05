@@ -1,5 +1,17 @@
 use super::*;
 
+fn should_auto_project_tenant_column(
+    has_tenant_context: bool,
+    table_has_tenant_column: bool,
+    cols: &[&str],
+    tenant_column: &str,
+) -> bool {
+    has_tenant_context
+        && table_has_tenant_column
+        && !cols.contains(&"*")
+        && !cols.iter().any(|c| *c == tenant_column)
+}
+
 pub(crate) async fn list_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -10,10 +22,14 @@ pub(crate) async fn list_handler(
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
     check_table_not_blocked(&state, &table_name)?;
 
-    let _table = state
+    let table = state
         .schema
         .table(&table_name)
         .ok_or_else(|| ApiError::not_found(&table_name))?;
+    let table_has_tenant_column = table
+        .columns
+        .iter()
+        .any(|c| c.name == state.config.tenant_column);
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
     let branch_ctx = extract_branch_from_headers(&headers);
@@ -41,12 +57,12 @@ pub(crate) async fn list_handler(
         // SECURITY: Ensure tenant column is always projected so verify_tenant_boundary()
         // can check row ownership. Without this, a malicious client could bypass the
         // tenant guard by omitting the tenant column from `select`.
-        if !cols.contains(&"*")
-            && auth.tenant_id.is_some()
-            && !cols
-                .iter()
-                .any(|c| *c == state.config.tenant_column.as_str())
-        {
+        if should_auto_project_tenant_column(
+            auth.tenant_id.is_some(),
+            table_has_tenant_column,
+            &cols,
+            state.config.tenant_column.as_str(),
+        ) {
             cols.push(&state.config.tenant_column);
         }
 
@@ -380,7 +396,7 @@ pub(crate) async fn list_handler(
 
     // Branch overlay merge (CoW Read)
     if let Some(branch_name) = branch_ctx.branch_name() {
-        let pk_col = _table.primary_key.as_deref().unwrap_or("id");
+        let pk_col = table.primary_key.as_deref().unwrap_or("id");
         apply_branch_overlay(&mut conn, branch_name, &table_name, &mut data, pk_col).await;
     }
 
@@ -475,4 +491,31 @@ pub(crate) async fn list_handler(
     }
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_auto_project_tenant_column;
+
+    #[test]
+    fn does_not_inject_tenant_column_for_non_tenant_tables() {
+        let cols = vec!["id", "name"];
+        assert!(!should_auto_project_tenant_column(
+            true,
+            false,
+            &cols,
+            "tenant_id"
+        ));
+    }
+
+    #[test]
+    fn injects_tenant_column_for_tenant_scoped_tables() {
+        let cols = vec!["id", "name"];
+        assert!(should_auto_project_tenant_column(
+            true,
+            true,
+            &cols,
+            "tenant_id"
+        ));
+    }
 }

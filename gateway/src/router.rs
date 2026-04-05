@@ -20,9 +20,9 @@ use tower_http::{
 
 use crate::GatewayState;
 use crate::handler::{
-    execute_batch, execute_query, execute_query_binary, execute_query_export, execute_query_fast,
-    health_check, health_check_internal, swagger_ui, txn_begin, txn_commit, txn_query,
-    txn_rollback, txn_savepoint,
+    cache_invalidate_internal, execute_batch, execute_query, execute_query_binary,
+    execute_query_export, execute_query_fast, health_check, health_check_internal, swagger_ui,
+    txn_begin, txn_commit, txn_query, txn_rollback, txn_savepoint,
 };
 use crate::middleware::rate_limit_middleware;
 use crate::rest::auto_rest_routes;
@@ -53,6 +53,11 @@ pub fn create_router(
         .route("/health", get(health_check))
         // Health check (internal — full metrics, restrict in production)
         .route("/health/internal", get(health_check_internal))
+        // Internal cache invalidation (admin token protected)
+        .route(
+            "/_internal/cache/invalidate",
+            post(cache_invalidate_internal),
+        )
         // Prometheus metrics (outside rate limiting — Prometheus scraper must always succeed)
         .route("/metrics", get(crate::metrics::metrics_handler))
         // Swagger UI (interactive API docs)

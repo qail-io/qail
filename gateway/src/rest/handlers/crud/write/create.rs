@@ -47,6 +47,10 @@ pub(crate) async fn create_handler(
         .schema
         .table(&table_name)
         .ok_or_else(|| ApiError::not_found(&table_name))?;
+    let table_has_tenant_column = table
+        .columns
+        .iter()
+        .any(|c| c.name == state.config.tenant_column);
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
     let prefer = parse_prefer_header(&headers);
@@ -62,7 +66,10 @@ pub(crate) async fn create_handler(
             // Skip tenant_column from required validation — it will be auto-injected
             // from the auth context if not provided by the client.
             .filter(|name| {
-                if auth.tenant_id.is_some() && name == &state.config.tenant_column {
+                if auth.tenant_id.is_some()
+                    && table_has_tenant_column
+                    && name == &state.config.tenant_column
+                {
                     return false;
                 }
                 true
@@ -130,7 +137,11 @@ pub(crate) async fn create_handler(
             normalize_create_object_for_tenant(
                 obj,
                 &state.config.tenant_column,
-                auth.tenant_id.as_deref(),
+                if table_has_tenant_column {
+                    auth.tenant_id.as_deref()
+                } else {
+                    None
+                },
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -208,7 +219,7 @@ pub(crate) async fn create_handler(
         };
 
     let mut all_results: Vec<Value> = Vec::with_capacity(normalized_objects.len());
-    let enforce_tenant_column = auth.tenant_id.is_some();
+    let enforce_tenant_column = auth.tenant_id.is_some() && table_has_tenant_column;
     let tenant_column = state.config.tenant_column.as_str();
 
     for obj in &normalized_objects {

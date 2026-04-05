@@ -121,8 +121,14 @@ impl QueryCache {
         }
     }
 
-    /// Invalidate all cache entries for a table
-    pub fn invalidate_table(&self, table: &str) {
+    /// Invalidate all cache entries for a table.
+    ///
+    /// Returns the number of keys invalidated.
+    pub fn invalidate_table(&self, table: &str) -> usize {
+        if !self.enabled {
+            return 0;
+        }
+
         if let Ok(mut map) = self.table_keys.write()
             && let Some(keys) = map.remove(table)
         {
@@ -131,7 +137,27 @@ impl QueryCache {
                 self.entries.invalidate(key);
             }
             tracing::debug!("Invalidated {} cache entries for table '{}'", count, table);
+            return count;
         }
+
+        0
+    }
+
+    /// Invalidate all cache entries across all tables.
+    ///
+    /// Returns an approximate number of entries invalidated.
+    pub fn invalidate_all(&self) -> usize {
+        if !self.enabled {
+            return 0;
+        }
+
+        let count = self.entries.entry_count() as usize;
+        self.entries.invalidate_all();
+        if let Ok(mut map) = self.table_keys.write() {
+            map.clear();
+        }
+        tracing::info!("Invalidated all cache entries (count={})", count);
+        count
     }
 
     /// Return a snapshot of cache statistics.
