@@ -81,7 +81,6 @@ jobs:
     permissions:
       contents: write
       id-token: write
-      attestations: write
     
     steps:
       - name: Download all artifacts
@@ -107,11 +106,6 @@ jobs:
             fi
           done
           ls -R release_assets
-
-      - name: Attest release assets
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
-        with:
-          subject-path: release_assets/*
 
       - name: Create Release
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844
