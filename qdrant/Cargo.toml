@@ -26,7 +26,7 @@ futures-util = "0.3"
 # TLS (rustls - no system openssl needed)
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 
 [dev-dependencies]
 tokio-test = "0.4"
