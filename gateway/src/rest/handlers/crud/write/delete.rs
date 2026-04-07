@@ -29,6 +29,8 @@ pub(crate) async fn delete_handler(
         .clone();
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let tenant_scope =
+        crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
 
     // Build: del table[pk = $id]
     let mut cmd = qail_core::ast::Qail::del(&table_name).filter(
@@ -36,6 +38,13 @@ pub(crate) async fn delete_handler(
         Operator::Eq,
         QailValue::String(id.clone()),
     );
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+        cmd = cmd.filter(
+            scope_column,
+            Operator::Eq,
+            QailValue::String(tenant_id.clone()),
+        );
+    }
 
     // Apply RLS
     state

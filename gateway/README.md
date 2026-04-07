@@ -25,9 +25,9 @@ Auto-REST + WebSocket gateway for QAIL with direct PostgreSQL execution via `qai
 
 ```toml
 [dependencies]
-qail-gateway = "0.27.7"
-qail-core = "0.27.7"
-qail-pg = "0.27.7"
+qail-gateway = "0.27.8"
+qail-core = "0.27.8"
+qail-pg = "0.27.8"
 ```
 
 ## Quick Start

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.8] - 2026-04-07
+
+### Fixed
+
+- **Shadow migration database quoting:** `qail migrate shadow` now correctly quotes hyphenated database names when creating/dropping shadow databases (for example `qail-engine-db_shadow`).
+
+### Changed
+
+- **Versioning/docs:** bumped Rust workspace crates and current docs/install/readme references to `0.27.8`.
+
 ## [0.27.7] - 2026-04-04
 
 ### Changed

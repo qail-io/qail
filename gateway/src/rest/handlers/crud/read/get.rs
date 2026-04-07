@@ -29,6 +29,8 @@ pub(crate) async fn get_by_id_handler(
         .ok_or_else(|| ApiError::internal("Table has no primary key"))?;
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let tenant_scope =
+        crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
     let branch_ctx = extract_branch_from_headers(&headers);
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
         return Err(ApiError::forbidden(
@@ -40,6 +42,13 @@ pub(crate) async fn get_by_id_handler(
     let mut cmd = qail_core::ast::Qail::get(&table_name)
         .filter(pk, Operator::Eq, QailValue::String(id.clone()))
         .limit(1);
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+        cmd = cmd.filter(
+            scope_column,
+            Operator::Eq,
+            QailValue::String(tenant_id.clone()),
+        );
+    }
 
     // Apply RLS
     state
@@ -112,17 +121,12 @@ pub(crate) async fn get_by_id_handler(
     let data = data.ok_or_else(|| ApiError::not_found(format!("{}/{}", table_name, id)))?;
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
-    let is_exempt = state
-        .config
-        .tenant_guard_exempt_tables
-        .iter()
-        .any(|t| t == &table_name);
-    if !is_exempt && let Some(ref tenant_id) = auth.tenant_id {
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         let single = vec![data.clone()];
         let _proof = crate::tenant_guard::verify_tenant_boundary(
             &single,
             tenant_id,
-            &state.config.tenant_column,
+            scope_column,
             &table_name,
             "rest_get_by_id",
         )
