@@ -561,7 +561,11 @@ pub fn encode_session_reset(cmd: &Qail, buf: &mut BytesMut) {
 #[inline]
 fn encode_identifier_maybe_quoted(buf: &mut BytesMut, ident: &str) {
     let needs_quotes = ident.is_empty()
-        || ident.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        || ident
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
         || ident
             .chars()
             .any(|c| !c.is_ascii_alphanumeric() && c != '_');

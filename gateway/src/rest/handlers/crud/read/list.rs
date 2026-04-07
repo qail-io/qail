@@ -46,7 +46,7 @@ pub(crate) async fn list_handler(
         // tenant guard by omitting the tenant column from `select`.
         if let Some(scope_column) = tenant_scope_column
             && !cols.contains(&"*")
-            && !cols.iter().any(|c| *c == scope_column)
+            && !cols.contains(&scope_column)
         {
             cols.push(scope_column);
         }

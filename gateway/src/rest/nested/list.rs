@@ -99,7 +99,7 @@ pub(crate) async fn nested_list_handler(
             .collect();
         if let Some(scope_column) = tenant_scope_column
             && !cols.contains(&"*")
-            && !cols.iter().any(|c| *c == scope_column)
+            && !cols.contains(&scope_column)
         {
             cols.push(scope_column);
         }
