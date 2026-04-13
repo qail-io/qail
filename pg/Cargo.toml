@@ -33,7 +33,7 @@ libpq = []
 qail-core = { version = "0.27.7", path = "../core" }
 postgres-protocol = "0.6"
 bytes = "1.5"
-tokio = { version = "1.50.0", features = ["net", "io-util", "sync", "rt", "time"] }
+tokio = { version = "1.51.1", features = ["net", "io-util", "sync", "rt", "time"] }
 
 # SCRAM-SHA-256 authentication
 sha2 = "0.10"
@@ -66,7 +66,7 @@ io-uring = { version = "0.7", optional = true }
 workspace = true
 
 [dev-dependencies]
-tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.51.1", features = ["rt-multi-thread", "macros"] }
 uuid = { version = "1.23", features = ["v4"] }
 chrono = { version = "0.4" }
 proptest = "1.11.0"
