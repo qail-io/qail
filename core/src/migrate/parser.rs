@@ -218,18 +218,17 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     .try_unique()
                     .map_err(|e| format!("{} (column '{}')", e, name))?;
             }
-            "default" => {
-                if i + 1 < parts.len() {
-                    let mut default_parts = Vec::new();
+            "default" if i + 1 < parts.len() => {
+                let mut default_parts = Vec::new();
+                i += 1;
+                default_parts.push(parts[i]);
+                while i + 1 < parts.len() && !is_column_constraint_keyword(parts[i + 1]) {
                     i += 1;
                     default_parts.push(parts[i]);
-                    while i + 1 < parts.len() && !is_column_constraint_keyword(parts[i + 1]) {
-                        i += 1;
-                        default_parts.push(parts[i]);
-                    }
-                    col.default = Some(default_parts.join(" "));
                 }
+                col.default = Some(default_parts.join(" "));
             }
+            "default" => {}
             s if s.starts_with("references") => {
                 let fk_str = if s.contains('(') {
                     // references is attached: "references users(id)"
@@ -299,14 +298,13 @@ fn parse_column(line: &str, enum_types: &[EnumType]) -> Result<Column, String> {
                     col.check = Some(CheckConstraint { expr, name: None });
                 }
             }
-            "check_name" => {
-                if i + 1 < parts.len() {
-                    i += 1;
-                    if let Some(ref mut check) = col.check {
-                        check.name = Some(parts[i].to_string());
-                    }
+            "check_name" if i + 1 < parts.len() => {
+                i += 1;
+                if let Some(ref mut check) = col.check {
+                    check.name = Some(parts[i].to_string());
                 }
             }
+            "check_name" => {}
             _ => {
                 // Unknown constraint, might be part of default value
             }

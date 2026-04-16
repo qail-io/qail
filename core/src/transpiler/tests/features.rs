@@ -78,6 +78,20 @@ fn test_grant_sql() {
 }
 
 #[test]
+fn test_create_database_quotes_hyphenated_name() {
+    let cmd = Qail::create_database("qail-engine-db_shadow");
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(sql, "CREATE DATABASE \"qail-engine-db_shadow\"");
+}
+
+#[test]
+fn test_drop_database_quotes_hyphenated_name() {
+    let cmd = Qail::drop_database("qail-engine-db_shadow");
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(sql, "DROP DATABASE IF EXISTS \"qail-engine-db_shadow\"");
+}
+
+#[test]
 fn test_revoke_sql() {
     let cmd = Qail {
         action: Action::Revoke,

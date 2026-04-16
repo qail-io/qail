@@ -12,7 +12,9 @@ mod parse;
 
 pub(crate) use apply::{apply_filters, apply_returning, apply_sorting};
 pub(crate) use convert::json_to_qail_value;
-pub(crate) use parse::{is_safe_identifier, parse_filters, parse_scalar_value};
+pub(crate) use parse::{
+    is_safe_identifier, parse_filters, parse_identifier_csv, parse_scalar_value,
+};
 
 #[cfg(test)]
 mod tests;

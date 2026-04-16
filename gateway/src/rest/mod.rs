@@ -42,6 +42,7 @@ use qail_core::branch::BranchContext;
 use qail_core::transpiler::ToSql;
 
 use crate::GatewayState;
+use crate::middleware::ApiError;
 
 // Re-export public request/response types
 pub use types::{
@@ -51,9 +52,20 @@ pub use types::{
 
 /// Extract branch context from X-Branch-ID header.
 #[allow(dead_code)]
-fn extract_branch_from_headers(headers: &HeaderMap) -> BranchContext {
-    let branch_id = headers.get("x-branch-id").and_then(|v| v.to_str().ok());
-    BranchContext::from_header(branch_id)
+fn extract_branch_from_headers(headers: &HeaderMap) -> Result<BranchContext, ApiError> {
+    let Some(raw_branch) = headers.get("x-branch-id") else {
+        return Ok(BranchContext::main());
+    };
+
+    let branch_id = raw_branch.to_str().map_err(|_| {
+        ApiError::bad_request(
+            "INVALID_BRANCH_NAME",
+            "Invalid X-Branch-ID header encoding (must be UTF-8)",
+        )
+    })?;
+
+    BranchContext::parse_header(Some(branch_id))
+        .map_err(|e| ApiError::bad_request("INVALID_BRANCH_NAME", e))
 }
 
 /// Extract table name from the request path (e.g., `/api/users` → `users`)
@@ -83,6 +95,64 @@ fn debug_sql(cmd: &qail_core::ast::Qail) -> String {
     cmd.to_sql()
 }
 
+/// Resolve the tenant scope column for a table from loaded schema metadata.
+///
+/// Prefers the configured canonical tenant column (`tenant_id` by default).
+/// Falls back to legacy `operator_id` to keep tenant isolation fail-closed
+/// during ongoing schema migrations.
+pub(crate) fn tenant_scope_column_for_table(
+    state: &GatewayState,
+    table_name: &str,
+) -> Option<String> {
+    let table = state.schema.table(table_name)?;
+    if table
+        .columns
+        .iter()
+        .any(|col| col.name == state.config.tenant_column)
+    {
+        return Some(state.config.tenant_column.clone());
+    }
+
+    if table.columns.iter().any(|col| col.name == "operator_id") {
+        tracing::debug!(
+            table = %table_name,
+            "Using legacy operator_id as tenant scope column"
+        );
+        return Some("operator_id".to_string());
+    }
+
+    None
+}
+
+/// Resolve tenant scope for a table in the current request context.
+///
+/// Returns `(scope_column, tenant_id)` when:
+/// - auth has a non-empty tenant scope
+/// - table is not configured as tenant-guard exempt
+/// - a tenant scope column can be derived from schema
+pub(crate) fn tenant_scope_filter_for_table(
+    state: &GatewayState,
+    auth: &crate::auth::AuthContext,
+    table_name: &str,
+) -> Option<(String, String)> {
+    let tenant_id = auth.tenant_id.as_deref()?.trim();
+    if tenant_id.is_empty() {
+        return None;
+    }
+
+    if state
+        .config
+        .tenant_guard_exempt_tables
+        .iter()
+        .any(|t| t == table_name)
+    {
+        return None;
+    }
+
+    let scope_column = tenant_scope_column_for_table(state, table_name)?;
+    Some((scope_column, tenant_id.to_string()))
+}
+
 /// Generate REST routes for all tables in the schema registry.
 ///
 /// Returns an Axum Router with routes like `/api/users`, `/api/orders`, etc.
@@ -91,4 +161,26 @@ fn debug_sql(cmd: &qail_core::ast::Qail) -> String {
 /// directory, listing every endpoint (allowed + blocked) for security auditing.
 pub fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewayState>> {
     routes::auto_rest_routes(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_branch_from_headers;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn extract_branch_from_headers_accepts_main_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-branch-id", HeaderValue::from_static("MAIN"));
+        let ctx = extract_branch_from_headers(&headers).expect("MAIN should map to main branch");
+        assert!(ctx.is_main());
+    }
+
+    #[test]
+    fn extract_branch_from_headers_rejects_invalid_branch_name() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-branch-id", HeaderValue::from_static("feature bad"));
+        let err = extract_branch_from_headers(&headers).expect_err("invalid branch must fail");
+        assert_eq!(err.code, "INVALID_BRANCH_NAME");
+    }
 }

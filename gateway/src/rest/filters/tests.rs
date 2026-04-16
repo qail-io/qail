@@ -11,6 +11,19 @@ fn test_parse_filters_basic() {
 }
 
 #[test]
+fn test_parse_identifier_csv_accepts_documented_format() {
+    let cols = parse_identifier_csv("name, description ,name").expect("valid CSV identifiers");
+    assert_eq!(cols, vec!["name", "description"]);
+}
+
+#[test]
+fn test_parse_identifier_csv_rejects_invalid_entries() {
+    assert!(parse_identifier_csv("").is_err());
+    assert!(parse_identifier_csv("name,").is_err());
+    assert!(parse_identifier_csv("name,bad-col").is_err());
+}
+
+#[test]
 fn test_parse_filters_in() {
     let filters = parse_filters("status.in=active,pending,closed");
     assert_eq!(filters.len(), 1);

@@ -8,6 +8,22 @@
 
 pub use qail_core::rls::RlsContext;
 
+fn quote_guc_literal(value: &str) -> String {
+    let sanitized = sanitize_guc_value(value);
+    for idx in 0usize.. {
+        let tag = if idx == 0 {
+            "qail_guc".to_string()
+        } else {
+            format!("qail_guc_{}", idx)
+        };
+        let delim = format!("${}$", tag);
+        if !sanitized.contains(&delim) {
+            return format!("{}{}{}", delim, sanitized, delim);
+        }
+    }
+    unreachable!("finite strings always admit an unused dollar-quote tag")
+}
+
 /// PostgreSQL-specific SQL generation for RLS context.
 ///
 /// These functions generate the `set_config()` calls that configure
@@ -27,26 +43,23 @@ pub(crate) fn context_to_sql(ctx: &RlsContext) -> String {
     } else {
         &ctx.agent_id
     };
-    let t_id = sanitize_guc_value(t_id_raw);
-    let ag_id = sanitize_guc_value(ag_id_raw);
+    let t_id = quote_guc_literal(t_id_raw);
+    let ag_id = quote_guc_literal(ag_id_raw);
     let u_id_raw = if ctx.user_id().is_empty() {
         nil_uuid
     } else {
         ctx.user_id()
     };
-    let u_id = sanitize_guc_value(u_id_raw);
-    let is_global = if ctx.is_global() { "true" } else { "false" };
+    let u_id = quote_guc_literal(u_id_raw);
+    let is_global = quote_guc_literal(if ctx.is_global() { "true" } else { "false" });
+    let is_super_admin = quote_guc_literal(if ctx.bypasses_rls() { "true" } else { "false" });
     format!(
-        "BEGIN; SET LOCAL app.is_global = '{}'; \
-         SELECT set_config('app.current_user_id', '{}', true), \
-                set_config('app.current_tenant_id', '{}', true), \
-                set_config('app.current_agent_id', '{}', true), \
-                set_config('app.is_super_admin', '{}', true)",
-        is_global,
-        u_id,
-        t_id,
-        ag_id,
-        ctx.bypasses_rls(),
+        "BEGIN; SET LOCAL app.is_global = {}; \
+         SELECT set_config('app.current_user_id', {}, true), \
+                set_config('app.current_tenant_id', {}, true), \
+                set_config('app.current_agent_id', {}, true), \
+                set_config('app.is_super_admin', {}, true)",
+        is_global, u_id, t_id, ag_id, is_super_admin,
     )
 }
 
@@ -78,15 +91,16 @@ pub(crate) fn context_to_sql_with_timeouts(
     } else {
         &ctx.agent_id
     };
-    let t_id = sanitize_guc_value(t_id_raw);
-    let ag_id = sanitize_guc_value(ag_id_raw);
+    let t_id = quote_guc_literal(t_id_raw);
+    let ag_id = quote_guc_literal(ag_id_raw);
     let u_id_raw = if ctx.user_id().is_empty() {
         nil_uuid
     } else {
         ctx.user_id()
     };
-    let u_id = sanitize_guc_value(u_id_raw);
-    let is_global = if ctx.is_global() { "true" } else { "false" };
+    let u_id = quote_guc_literal(u_id_raw);
+    let is_global = quote_guc_literal(if ctx.is_global() { "true" } else { "false" });
+    let is_super_admin = quote_guc_literal(if ctx.bypasses_rls() { "true" } else { "false" });
 
     let lock_clause = if lock_timeout_ms > 0 {
         format!(" SET LOCAL lock_timeout = {};", lock_timeout_ms)
@@ -96,41 +110,23 @@ pub(crate) fn context_to_sql_with_timeouts(
 
     format!(
         "BEGIN; SET LOCAL statement_timeout = {};{} \
-         SET LOCAL app.is_global = '{}'; \
-         SELECT set_config('app.current_user_id', '{}', true), \
-                set_config('app.current_tenant_id', '{}', true), \
-                set_config('app.current_agent_id', '{}', true), \
-                set_config('app.is_super_admin', '{}', true)",
-        statement_timeout_ms,
-        lock_clause,
-        is_global,
-        u_id,
-        t_id,
-        ag_id,
-        ctx.bypasses_rls(),
+         SET LOCAL app.is_global = {}; \
+         SELECT set_config('app.current_user_id', {}, true), \
+                set_config('app.current_tenant_id', {}, true), \
+                set_config('app.current_agent_id', {}, true), \
+                set_config('app.is_super_admin', {}, true)",
+        statement_timeout_ms, lock_clause, is_global, u_id, t_id, ag_id, is_super_admin,
     )
 }
 
-/// Strip characters that could break out of a SQL string literal or
-/// cause C-level string truncation inside PostgreSQL.
+/// Sanitize raw GUC values before embedding them into SQL.
 ///
-/// Uses an **allowlist** approach: only printable ASCII (0x20–0x7E) is
-/// allowed, with additional exclusions for `'`, `\`, `;`, and `$`.
-///
-/// This blocks:
-/// - NUL bytes (`\x00`) — C string truncation inside `set_config()`
-/// - Newlines/CR — log injection, multi-line confusion
-/// - All control characters — unpredictable behavior
-/// - Dollar signs — prevents `$$`-style quoting attempts
+/// PostgreSQL rejects interior NUL bytes in text payloads and in simple-query
+/// frames. We preserve all other characters (including unicode/emoji) so
+/// identity values are not silently collapsed.
 pub fn sanitize_guc_value(val: &str) -> String {
     val.chars()
-        .filter(|c| {
-            // Allowlist: printable ASCII only (space through tilde)
-            let is_printable_ascii = *c >= ' ' && *c <= '~';
-            // Denylist within printable range
-            let is_dangerous = *c == '\'' || *c == '\\' || *c == ';' || *c == '$';
-            is_printable_ascii && !is_dangerous
-        })
+        .map(|c| if c == '\0' { '\u{FFFD}' } else { c })
         .collect()
 }
 
@@ -152,10 +148,10 @@ mod tests {
     fn test_context_to_sql_tenant() {
         let ctx = RlsContext::tenant("abc-123");
         let sql = context_to_sql(&ctx);
-        assert!(sql.contains("'abc-123'"));
+        assert!(sql.contains("$qail_guc$abc-123$qail_guc$"));
         assert!(sql.contains("app.current_tenant_id"));
-        assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
-        assert!(sql.contains("'false'")); // is_super_admin
+        assert!(sql.contains("SET LOCAL app.is_global = $qail_guc$false$qail_guc$"));
+        assert!(sql.contains("set_config('app.is_super_admin', $qail_guc$false$qail_guc$, true)"));
     }
 
     #[test]
@@ -163,31 +159,27 @@ mod tests {
         let token = SuperAdminToken::for_system_process("test_super_admin_sql");
         let ctx = RlsContext::super_admin(token);
         let sql = context_to_sql(&ctx);
-        assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
-        assert!(sql.contains("'true'")); // is_super_admin
+        assert!(sql.contains("SET LOCAL app.is_global = $qail_guc$false$qail_guc$"));
+        assert!(sql.contains("set_config('app.is_super_admin', $qail_guc$true$qail_guc$, true)"));
     }
 
     #[test]
     fn test_context_to_sql_global_context() {
         let ctx = RlsContext::global();
         let sql = context_to_sql(&ctx);
-        assert!(sql.contains("SET LOCAL app.is_global = 'true'"));
+        assert!(sql.contains("SET LOCAL app.is_global = $qail_guc$true$qail_guc$"));
         assert!(sql.contains("00000000-0000-0000-0000-000000000000"));
-        assert!(sql.contains("'false'")); // is_super_admin remains false
+        assert!(sql.contains("set_config('app.is_super_admin', $qail_guc$false$qail_guc$, true)"));
     }
 
     #[test]
     fn test_context_to_sql_user_context() {
         let ctx = RlsContext::user("550e8400-e29b-41d4-a716-446655440000");
         let sql = context_to_sql(&ctx);
-        assert!(
-            sql.contains(
-                "set_config('app.current_user_id', '550e8400-e29b-41d4-a716-446655440000'"
-            ),
-            "user_id must be set in session SQL"
-        );
-        assert!(sql.contains("'false'")); // is_super_admin remains false
-        assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
+        assert!(sql.contains("set_config('app.current_user_id'"));
+        assert!(sql.contains("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(sql.contains("set_config('app.is_super_admin', $qail_guc$false$qail_guc$, true)"));
+        assert!(sql.contains("SET LOCAL app.is_global = $qail_guc$false$qail_guc$"));
     }
 
     #[test]
@@ -197,7 +189,7 @@ mod tests {
         let sql = context_to_sql(&ctx);
         assert!(
             sql.contains(
-                "set_config('app.current_user_id', '00000000-0000-0000-0000-000000000000'"
+                "set_config('app.current_user_id', $qail_guc$00000000-0000-0000-0000-000000000000$qail_guc$"
             ),
             "empty user_id emits nil UUID to avoid ::uuid cast failures"
         );
@@ -208,8 +200,8 @@ mod tests {
         let ctx = RlsContext::user("'; DROP TABLE users; --");
         let sql = context_to_sql(&ctx);
         assert!(
-            !sql.contains("'; DROP"),
-            "user_id injection must be sanitized"
+            sql.contains("$qail_guc$'; DROP TABLE users; --$qail_guc$"),
+            "dangerous characters must remain isolated inside a quoted literal"
         );
         assert!(sql.contains("app.current_user_id"));
     }
@@ -225,48 +217,37 @@ mod tests {
     // ══════════════════════════════════════════════════════════════════
 
     #[test]
-    fn redteam_guc_injection_single_quote_stripped() {
+    fn redteam_guc_injection_single_quote_is_dollar_quoted() {
         let ctx = RlsContext::tenant("'; DROP TABLE users; --");
         let sql = context_to_sql(&ctx);
-        // Quotes and semicolons stripped → value is harmless inside set_config()
-        // The value becomes " DROP TABLE users --" (inert string, not executable SQL)
         let sanitized = sanitize_guc_value("'; DROP TABLE users; --");
-        assert!(!sanitized.contains('\''), "Single quotes must be stripped");
-        assert!(!sanitized.contains(';'), "Semicolons must be stripped");
+        assert_eq!(sanitized, "'; DROP TABLE users; --");
+        assert!(sql.contains("$qail_guc$'; DROP TABLE users; --$qail_guc$"));
         assert!(sql.contains("app.current_tenant_id"));
     }
 
     #[test]
-    fn redteam_guc_injection_backslash_stripped() {
+    fn redteam_guc_injection_backslash_is_dollar_quoted() {
         let ctx = RlsContext::tenant("abc\\'; SELECT 1; --");
         let sql = context_to_sql(&ctx);
         let sanitized = sanitize_guc_value("abc\\'; SELECT 1; --");
-        assert!(!sanitized.contains('\\'), "Backslashes must be stripped");
-        assert!(!sanitized.contains('\''), "Quotes must be stripped");
-        assert!(!sanitized.contains(';'), "Semicolons must be stripped");
-        // The resulting SQL has the value safely inside set_config quotes
+        assert_eq!(sanitized, "abc\\'; SELECT 1; --");
+        assert!(sql.contains("$qail_guc$abc\\'; SELECT 1; --$qail_guc$"));
         assert!(sql.contains("app.current_tenant_id"));
     }
 
     #[test]
-    fn redteam_guc_injection_semicolon_stripped() {
+    fn redteam_guc_injection_semicolon_preserved() {
         let input = "abc; SET app.is_super_admin = 'true'";
         let sanitized = sanitize_guc_value(input);
-        // Semicolons and quotes stripped — cannot break out of set_config
-        assert!(!sanitized.contains(';'), "Semicolons must be stripped");
-        assert!(!sanitized.contains('\''), "Quotes must be stripped");
-        assert_eq!(sanitized, "abc SET app.is_super_admin = true");
+        assert_eq!(sanitized, input);
     }
 
     #[test]
     fn redteam_guc_injection_with_timeout() {
         let ctx = RlsContext::tenant("'; DROP TABLE users; --");
         let sql = context_to_sql_with_timeout(&ctx, 5000);
-        // The injected value is sanitized — no quote/semicolon escape
-        assert!(
-            !sql.contains("''; DROP"),
-            "Injection must not escape set_config quotes"
-        );
+        assert!(sql.contains("$qail_guc$'; DROP TABLE users; --$qail_guc$"));
         assert!(sql.contains("statement_timeout = 5000"));
     }
 
@@ -282,16 +263,20 @@ mod tests {
     }
 
     #[test]
-    fn redteam_sanitize_strips_dangerous_chars() {
+    fn redteam_sanitize_preserves_unicode_and_symbols_except_nul() {
         assert_eq!(sanitize_guc_value("normal-uuid"), "normal-uuid");
-        assert_eq!(sanitize_guc_value("ab'cd"), "abcd");
-        assert_eq!(sanitize_guc_value("ab\\cd"), "abcd");
-        assert_eq!(sanitize_guc_value("ab;cd"), "abcd");
-        assert_eq!(
-            sanitize_guc_value("'; DROP TABLE x; --"),
-            " DROP TABLE x --"
-        );
+        assert_eq!(sanitize_guc_value("ab'cd"), "ab'cd");
+        assert_eq!(sanitize_guc_value("ab\\cd"), "ab\\cd");
+        assert_eq!(sanitize_guc_value("ab;cd"), "ab;cd");
+        assert_eq!(sanitize_guc_value("ten\0ant"), "ten\u{FFFD}ant");
+        assert_eq!(sanitize_guc_value("tenant🚀"), "tenant🚀");
         assert_eq!(sanitize_guc_value(""), "");
+    }
+
+    #[test]
+    fn quote_guc_literal_uses_non_colliding_tag() {
+        let quoted = quote_guc_literal("$qail_guc$inside$qail_guc$");
+        assert_eq!(quoted, "$qail_guc_1$$qail_guc$inside$qail_guc$$qail_guc_1$");
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -310,7 +295,7 @@ mod tests {
             sql.contains("lock_timeout = 5000"),
             "lock_timeout must be set when > 0"
         );
-        assert!(sql.contains("SET LOCAL app.is_global = 'false'"));
+        assert!(sql.contains("SET LOCAL app.is_global = $qail_guc$false$qail_guc$"));
     }
 
     #[test]

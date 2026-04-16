@@ -1020,6 +1020,22 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_create_database_quotes_hyphenated_name() {
+        let cmd = Qail::create_database("qail-engine-db_shadow");
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(sql, "CREATE DATABASE \"qail-engine-db_shadow\"");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_drop_database_quotes_hyphenated_name() {
+        let cmd = Qail::drop_database("qail-engine-db_shadow");
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(sql, "DROP DATABASE IF EXISTS \"qail-engine-db_shadow\"");
+        assert!(params.is_empty());
+    }
+
+    #[test]
     fn test_encode_create_extension() {
         use qail_core::ast::Expr;
 

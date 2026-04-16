@@ -75,6 +75,9 @@ pub(crate) async fn nested_list_handler(
         })?;
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let tenant_scope =
+        crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &child_table);
+    let tenant_scope_column = tenant_scope.as_ref().map(|(col, _)| col.as_str());
 
     let max_rows = state.config.max_result_rows.min(1000) as i64;
     let limit = params.limit.unwrap_or(50).clamp(1, max_rows);
@@ -89,11 +92,17 @@ pub(crate) async fn nested_list_handler(
 
     // Column selection
     if let Some(ref select) = params.select {
-        let cols: Vec<&str> = select
+        let mut cols: Vec<&str> = select
             .split(',')
             .map(|s| s.trim())
             .filter(|s| *s == "*" || crate::rest::filters::is_safe_identifier(s))
             .collect();
+        if let Some(scope_column) = tenant_scope_column
+            && !cols.contains(&"*")
+            && !cols.contains(&scope_column)
+        {
+            cols.push(scope_column);
+        }
         if !cols.is_empty() {
             cmd = cmd.columns(cols);
         }
@@ -120,6 +129,13 @@ pub(crate) async fn nested_list_handler(
     let query_string = request.uri().query().unwrap_or("");
     let filters = parse_filters(query_string);
     cmd = apply_filters(cmd, &filters);
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+        cmd = cmd.filter(
+            scope_column,
+            Operator::Eq,
+            QailValue::String(tenant_id.clone()),
+        );
+    }
 
     // Full-text search
     if let Some(ref term) = params.search {
@@ -159,16 +175,11 @@ pub(crate) async fn nested_list_handler(
     let data: Vec<Value> = rows.iter().map(row_to_json).collect();
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
-    let is_exempt = state
-        .config
-        .tenant_guard_exempt_tables
-        .iter()
-        .any(|t| t == &child_table);
-    if !is_exempt && let Some(ref tenant_id) = auth.tenant_id {
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         let _proof = crate::tenant_guard::verify_tenant_boundary(
             &data,
             tenant_id,
-            &state.config.tenant_column,
+            scope_column,
             &child_table,
             "rest_nested_list",
         )

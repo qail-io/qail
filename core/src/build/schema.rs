@@ -641,10 +641,8 @@ fn parse_explicit_alter_add_column_line(
 fn extract_view_name(line: &str) -> Option<&str> {
     let rest = if let Some(r) = line.strip_prefix("view ") {
         r
-    } else if let Some(r) = line.strip_prefix("materialized view ") {
-        r
     } else {
-        return None;
+        line.strip_prefix("materialized view ")?
     };
 
     let name = rest.split_whitespace().next().unwrap_or_default().trim();

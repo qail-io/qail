@@ -558,16 +558,37 @@ pub fn encode_session_reset(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(cmd.table.as_bytes());
 }
 
+#[inline]
+fn encode_identifier_maybe_quoted(buf: &mut BytesMut, ident: &str) {
+    let needs_quotes = ident.is_empty()
+        || ident
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        || ident
+            .chars()
+            .any(|c| !c.is_ascii_alphanumeric() && c != '_');
+
+    if needs_quotes {
+        buf.extend_from_slice(b"\"");
+        buf.extend_from_slice(ident.replace('"', "\"\"").as_bytes());
+        buf.extend_from_slice(b"\"");
+    } else {
+        buf.extend_from_slice(ident.as_bytes());
+    }
+}
+
 /// Encode CREATE DATABASE name.
 pub fn encode_create_database(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"CREATE DATABASE ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    encode_identifier_maybe_quoted(buf, &cmd.table);
 }
 
 /// Encode DROP DATABASE IF EXISTS name.
 pub fn encode_drop_database(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP DATABASE IF EXISTS ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    encode_identifier_maybe_quoted(buf, &cmd.table);
 }
 
 /// Encode GRANT privileges ON object TO role.

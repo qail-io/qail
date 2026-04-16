@@ -769,11 +769,10 @@ async fn verify_applied_commands_effects(
 
     for cmd in cmds {
         match cmd.action {
-            Action::Make => {
-                if !table_exists(pg, &cmd.table).await? {
-                    failures.push(format!("expected table '{}' to exist", cmd.table));
-                }
+            Action::Make if !table_exists(pg, &cmd.table).await? => {
+                failures.push(format!("expected table '{}' to exist", cmd.table));
             }
+            Action::Make => {}
             Action::Alter => {
                 for column in extract_column_names(&cmd.columns) {
                     if !column_exists(pg, &cmd.table, &column).await? {
@@ -784,11 +783,10 @@ async fn verify_applied_commands_effects(
                     }
                 }
             }
-            Action::Drop => {
-                if table_exists(pg, &cmd.table).await? {
-                    failures.push(format!("expected table '{}' to be dropped", cmd.table));
-                }
+            Action::Drop if table_exists(pg, &cmd.table).await? => {
+                failures.push(format!("expected table '{}' to be dropped", cmd.table));
             }
+            Action::Drop => {}
             Action::Index => {
                 let index_name = cmd
                     .index_def

@@ -21,6 +21,8 @@ pub(crate) async fn aggregate_handler(
         .ok_or_else(|| ApiError::not_found(&table_name))?;
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let tenant_scope =
+        crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
 
     let func_name = params.func.as_deref().unwrap_or("count");
     let agg_func = match func_name.to_lowercase().as_str() {
@@ -87,6 +89,13 @@ pub(crate) async fn aggregate_handler(
     let query_string = request.uri().query().unwrap_or("");
     let filters = parse_filters(query_string);
     cmd = apply_filters(cmd, &filters);
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+        cmd = cmd.filter(
+            scope_column,
+            Operator::Eq,
+            QailValue::String(tenant_id.clone()),
+        );
+    }
 
     // Apply RLS
     state
@@ -111,16 +120,11 @@ pub(crate) async fn aggregate_handler(
     let data: Vec<Value> = rows.iter().map(row_to_json).collect();
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
-    let is_exempt = state
-        .config
-        .tenant_guard_exempt_tables
-        .iter()
-        .any(|t| t == &table_name);
-    if !is_exempt && let Some(ref tenant_id) = auth.tenant_id {
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         let _proof = crate::tenant_guard::verify_tenant_boundary(
             &data,
             tenant_id,
-            &state.config.tenant_column,
+            scope_column,
             &table_name,
             "rest_aggregate",
         )

@@ -395,10 +395,10 @@ impl ToSql for Qail {
                 format!("RESET {}", self.table)
             }
             Action::CreateDatabase => {
-                format!("CREATE DATABASE {}", self.table)
+                format!("CREATE DATABASE {}", escape_identifier(&self.table))
             }
             Action::DropDatabase => {
-                format!("DROP DATABASE IF EXISTS {}", self.table)
+                format!("DROP DATABASE IF EXISTS {}", escape_identifier(&self.table))
             }
             Action::Grant => {
                 let role = self.payload.as_deref().unwrap_or("");

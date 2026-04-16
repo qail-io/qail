@@ -83,6 +83,14 @@ pub async fn expand_nested(
         };
 
         let mut cmd = plan.to_qail();
+        let tenant_scope = crate::rest::tenant_scope_filter_for_table(state.as_ref(), auth, rel);
+        if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+            cmd = cmd.filter(
+                scope_column,
+                qail_core::ast::Operator::Eq,
+                QailValue::String(tenant_id.clone()),
+            );
+        }
         state.optimize_qail_for_execution(&mut cmd);
         if let Err(e) = state.policy_engine.apply_policies(auth, &mut cmd) {
             conn.release().await;

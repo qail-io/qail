@@ -63,6 +63,10 @@ pub(crate) async fn update_handler(
         .clone();
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let tenant_scope_column =
+        crate::rest::tenant_scope_column_for_table(state.as_ref(), &table_name);
+    let tenant_scope =
+        crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
 
     // Parse JSON body
     let body = axum::body::to_bytes(request.into_body(), state.config.max_request_body_bytes)
@@ -86,7 +90,9 @@ pub(crate) async fn update_handler(
             )));
         }
     }
-    reject_tenant_column_update(obj, &state.config.tenant_column, auth.tenant_id.as_deref())?;
+    if let Some(scope_column) = tenant_scope_column.as_deref() {
+        reject_tenant_column_update(obj, scope_column, auth.tenant_id.as_deref())?;
+    }
 
     // Build: set table { col1 = val1 } [pk = $id]
     let mut cmd = qail_core::ast::Qail::set(&table_name).filter(
@@ -94,11 +100,11 @@ pub(crate) async fn update_handler(
         Operator::Eq,
         QailValue::String(id.clone()),
     );
-    if let Some(ref tid) = auth.tenant_id {
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         cmd = cmd.filter(
-            &state.config.tenant_column,
+            scope_column,
             Operator::Eq,
-            QailValue::String(tid.clone()),
+            QailValue::String(tenant_id.clone()),
         );
     }
 
@@ -118,7 +124,7 @@ pub(crate) async fn update_handler(
     state.optimize_qail_for_execution(&mut cmd);
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
-    let branch_ctx = extract_branch_from_headers(&headers);
+    let branch_ctx = extract_branch_from_headers(&headers)?;
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
         return Err(ApiError::forbidden(
             "Platform administrator role required for branch overlay writes",
@@ -136,7 +142,9 @@ pub(crate) async fn update_handler(
             obj,
             &pk,
             &id,
-            &state.config.tenant_column,
+            tenant_scope_column
+                .as_deref()
+                .unwrap_or(&state.config.tenant_column),
             auth.tenant_id.as_deref(),
         );
         let overlay_result = redirect_to_overlay(

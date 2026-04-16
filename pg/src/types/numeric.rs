@@ -126,7 +126,7 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<Numeric, TypeError> {
     // Decimal part
     if dscale > 0 {
         result.push('.');
-        let start = int_digits.max(0);
+        let start = int_digits;
         let mut decimal_digits = 0;
         for digit in digits.iter().skip(start) {
             let s = format!("{:04}", digit);

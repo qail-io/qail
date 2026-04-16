@@ -49,6 +49,8 @@ pub(crate) async fn create_handler(
         .ok_or_else(|| ApiError::not_found(&table_name))?;
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
+    let tenant_scope_column =
+        crate::rest::tenant_scope_column_for_table(state.as_ref(), &table_name);
     let prefer = parse_prefer_header(&headers);
 
     // Validate required columns upfront (skip for upserts — conflict rows may exist)
@@ -62,7 +64,11 @@ pub(crate) async fn create_handler(
             // Skip tenant_column from required validation — it will be auto-injected
             // from the auth context if not provided by the client.
             .filter(|name| {
-                if auth.tenant_id.is_some() && name == &state.config.tenant_column {
+                if auth.tenant_id.is_some()
+                    && tenant_scope_column
+                        .as_ref()
+                        .is_some_and(|scope_column| name == scope_column)
+                {
                     return false;
                 }
                 true
@@ -126,17 +132,16 @@ pub(crate) async fn create_handler(
 
     let normalized_objects: Vec<serde_json::Map<String, Value>> = objects
         .iter()
-        .map(|obj| {
-            normalize_create_object_for_tenant(
-                obj,
-                &state.config.tenant_column,
-                auth.tenant_id.as_deref(),
-            )
+        .map(|obj| match tenant_scope_column.as_deref() {
+            Some(scope_column) => {
+                normalize_create_object_for_tenant(obj, scope_column, auth.tenant_id.as_deref())
+            }
+            None => Ok((*obj).clone()),
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
-    let branch_ctx = extract_branch_from_headers(&headers);
+    let branch_ctx = extract_branch_from_headers(&headers)?;
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
         return Err(ApiError::forbidden(
             "Platform administrator role required for branch overlay writes",
@@ -208,8 +213,8 @@ pub(crate) async fn create_handler(
         };
 
     let mut all_results: Vec<Value> = Vec::with_capacity(normalized_objects.len());
-    let enforce_tenant_column = auth.tenant_id.is_some();
-    let tenant_column = state.config.tenant_column.as_str();
+    let enforce_tenant_column = auth.tenant_id.is_some() && tenant_scope_column.is_some();
+    let tenant_column = tenant_scope_column.as_deref().unwrap_or("");
 
     for obj in &normalized_objects {
         let mut cmd = qail_core::ast::Qail::add(&table_name);

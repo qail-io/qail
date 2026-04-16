@@ -10,13 +10,16 @@ pub(crate) async fn list_handler(
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
     check_table_not_blocked(&state, &table_name)?;
 
-    let _table = state
+    let table = state
         .schema
         .table(&table_name)
         .ok_or_else(|| ApiError::not_found(&table_name))?;
 
     let auth = authenticate_request(state.as_ref(), &headers).await?;
-    let branch_ctx = extract_branch_from_headers(&headers);
+    let tenant_scope =
+        crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
+    let tenant_scope_column = tenant_scope.as_ref().map(|(col, _)| col.as_str());
+    let branch_ctx = extract_branch_from_headers(&headers)?;
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
         return Err(ApiError::forbidden(
             "Platform administrator role required for branch overlay reads",
@@ -41,13 +44,11 @@ pub(crate) async fn list_handler(
         // SECURITY: Ensure tenant column is always projected so verify_tenant_boundary()
         // can check row ownership. Without this, a malicious client could bypass the
         // tenant guard by omitting the tenant column from `select`.
-        if !cols.contains(&"*")
-            && auth.tenant_id.is_some()
-            && !cols
-                .iter()
-                .any(|c| *c == state.config.tenant_column.as_str())
+        if let Some(scope_column) = tenant_scope_column
+            && !cols.contains(&"*")
+            && !cols.contains(&scope_column)
         {
-            cols.push(&state.config.tenant_column);
+            cols.push(scope_column);
         }
 
         if !cols.is_empty() {
@@ -144,6 +145,13 @@ pub(crate) async fn list_handler(
     let query_string = request.uri().query().unwrap_or("");
     let filters = parse_filters(query_string);
     cmd = apply_filters(cmd, &filters);
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+        cmd = cmd.filter(
+            scope_column,
+            Operator::Eq,
+            QailValue::String(tenant_id.clone()),
+        );
+    }
 
     // Cursor-based pagination: filter rows after the cursor value
     if let Some(ref cursor) = params.cursor {
@@ -158,13 +166,15 @@ pub(crate) async fn list_handler(
 
     // Full-text search
     if let Some(ref term) = params.search {
-        let cols = params.search_columns.as_deref().unwrap_or("name");
-        // SECURITY: Validate search column identifier.
-        if crate::rest::filters::is_safe_identifier(cols) {
-            cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
-        } else {
-            tracing::warn!(cols = %cols, "search_columns rejected by identifier guard");
-        }
+        let cols_input = params.search_columns.as_deref().unwrap_or("name");
+        let cols = crate::rest::filters::parse_identifier_csv(cols_input)
+            .map_err(ApiError::parse_error)?;
+        let search_cols = cols.join(",");
+        cmd = cmd.filter(
+            &search_cols,
+            Operator::TextSearch,
+            QailValue::String(term.clone()),
+        );
     }
 
     // Pagination
@@ -380,7 +390,7 @@ pub(crate) async fn list_handler(
 
     // Branch overlay merge (CoW Read)
     if let Some(branch_name) = branch_ctx.branch_name() {
-        let pk_col = _table.primary_key.as_deref().unwrap_or("id");
+        let pk_col = table.primary_key.as_deref().unwrap_or("id");
         apply_branch_overlay(&mut conn, branch_name, &table_name, &mut data, pk_col).await;
     }
 
@@ -393,16 +403,11 @@ pub(crate) async fn list_handler(
     // ── Tenant Boundary Invariant ────────────────────────────────────
     // Skip guard for tables that are cross-tenant by design (e.g.,
     // resellers need to see other tenants' pricing via active contracts).
-    let is_exempt = state
-        .config
-        .tenant_guard_exempt_tables
-        .iter()
-        .any(|t| t == &table_name);
-    if !is_exempt && let Some(ref tenant_id) = auth.tenant_id {
+    if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         let _proof = crate::tenant_guard::verify_tenant_boundary(
             &data,
             tenant_id,
-            &state.config.tenant_column,
+            scope_column,
             &table_name,
             "rest_list",
         )
