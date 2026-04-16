@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/cli/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/cli/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/core/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/core/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/encoder/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/gateway/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/gateway/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/gateway/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/lsp/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/pg/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/pg/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/pg/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/qdrant/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/qdrant/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/qdrant/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/workflow/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/pg/examples/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/target" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

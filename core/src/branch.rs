@@ -69,15 +69,30 @@ impl BranchContext {
         }
     }
 
-    /// Create from an optional branch name (None = main).
-    /// Invalid branch names are silently treated as main.
-    pub fn from_header(value: Option<&str>) -> Self {
+    /// Parse an optional branch header value into a [`BranchContext`].
+    ///
+    /// Rules:
+    /// - `None`, empty string, and `main` (case-insensitive) map to main.
+    /// - Any other value must pass [`Self::is_valid_name`].
+    pub fn parse_header(value: Option<&str>) -> Result<Self, String> {
         match value {
-            Some(name) if !name.is_empty() && name != "main" && Self::is_valid_name(name) => Self {
+            None => Ok(Self::main()),
+            Some(name) if name.is_empty() || name.eq_ignore_ascii_case("main") => Ok(Self::main()),
+            Some(name) if Self::is_valid_name(name) => Ok(Self {
                 branch_id: Some(name.to_string()),
-            },
-            _ => Self::main(),
+            }),
+            Some(name) => Err(format!(
+                "Invalid branch name '{}'. Use 1-{} ASCII alphanumeric/._- characters",
+                name,
+                Self::MAX_NAME_LEN
+            )),
         }
+    }
+
+    /// Create from an optional branch name (None = main).
+    /// Invalid branch names are treated as main for backward compatibility.
+    pub fn from_header(value: Option<&str>) -> Self {
+        Self::parse_header(value).unwrap_or_else(|_| Self::main())
     }
 
     /// Validate a branch name.
@@ -146,10 +161,21 @@ mod tests {
         assert!(BranchContext::from_header(None).is_main());
         assert!(BranchContext::from_header(Some("")).is_main());
         assert!(BranchContext::from_header(Some("main")).is_main());
+        assert!(BranchContext::from_header(Some("MAIN")).is_main());
         assert_eq!(
             BranchContext::from_header(Some("feat-1")).branch_name(),
             Some("feat-1")
         );
+    }
+
+    #[test]
+    fn test_parse_header_strict_rejects_invalid() {
+        assert!(BranchContext::parse_header(Some("feat-1")).is_ok());
+        assert!(BranchContext::parse_header(Some("main")).is_ok());
+        assert!(BranchContext::parse_header(Some("MAIN")).is_ok());
+        assert!(BranchContext::parse_header(None).is_ok());
+        assert!(BranchContext::parse_header(Some("bad name")).is_err());
+        assert!(BranchContext::parse_header(Some("🚀")).is_err());
     }
 
     #[test]

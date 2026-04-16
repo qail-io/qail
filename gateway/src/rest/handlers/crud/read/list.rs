@@ -19,7 +19,7 @@ pub(crate) async fn list_handler(
     let tenant_scope =
         crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
     let tenant_scope_column = tenant_scope.as_ref().map(|(col, _)| col.as_str());
-    let branch_ctx = extract_branch_from_headers(&headers);
+    let branch_ctx = extract_branch_from_headers(&headers)?;
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
         return Err(ApiError::forbidden(
             "Platform administrator role required for branch overlay reads",
@@ -166,13 +166,15 @@ pub(crate) async fn list_handler(
 
     // Full-text search
     if let Some(ref term) = params.search {
-        let cols = params.search_columns.as_deref().unwrap_or("name");
-        // SECURITY: Validate search column identifier.
-        if crate::rest::filters::is_safe_identifier(cols) {
-            cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
-        } else {
-            tracing::warn!(cols = %cols, "search_columns rejected by identifier guard");
-        }
+        let cols_input = params.search_columns.as_deref().unwrap_or("name");
+        let cols = crate::rest::filters::parse_identifier_csv(cols_input)
+            .map_err(ApiError::parse_error)?;
+        let search_cols = cols.join(",");
+        cmd = cmd.filter(
+            &search_cols,
+            Operator::TextSearch,
+            QailValue::String(term.clone()),
+        );
     }
 
     // Pagination

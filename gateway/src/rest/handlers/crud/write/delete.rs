@@ -54,7 +54,7 @@ pub(crate) async fn delete_handler(
     state.optimize_qail_for_execution(&mut cmd);
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
-    let branch_ctx = extract_branch_from_headers(&headers);
+    let branch_ctx = extract_branch_from_headers(&headers)?;
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
         return Err(ApiError::forbidden(
             "Platform administrator role required for branch overlay writes",

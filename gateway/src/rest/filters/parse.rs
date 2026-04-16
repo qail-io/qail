@@ -25,6 +25,33 @@ pub(crate) fn is_safe_identifier(s: &str) -> bool {
     })
 }
 
+/// Parse a comma-separated identifier list.
+///
+/// Returns an error when any entry is empty or unsafe.
+pub(crate) fn parse_identifier_csv(input: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for raw in input.split(',') {
+        let ident = raw.trim();
+        if ident.is_empty() {
+            return Err("Identifier list contains an empty entry".to_string());
+        }
+        if !is_safe_identifier(ident) {
+            return Err(format!("Invalid identifier '{}'", ident));
+        }
+        if seen.insert(ident.to_string()) {
+            out.push(ident.to_string());
+        }
+    }
+
+    if out.is_empty() {
+        return Err("Identifier list cannot be empty".to_string());
+    }
+
+    Ok(out)
+}
+
 /// Parse filter operators from query string.
 ///
 /// Supports both forms:

@@ -31,7 +31,7 @@ pub(crate) async fn get_by_id_handler(
     let auth = authenticate_request(state.as_ref(), &headers).await?;
     let tenant_scope =
         crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
-    let branch_ctx = extract_branch_from_headers(&headers);
+    let branch_ctx = extract_branch_from_headers(&headers)?;
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
         return Err(ApiError::forbidden(
             "Platform administrator role required for branch overlay reads",

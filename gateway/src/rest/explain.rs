@@ -142,13 +142,15 @@ pub(crate) async fn explain_handler(
 
     // Full-text search
     if let Some(ref term) = params.search {
-        let cols = params.search_columns.as_deref().unwrap_or("name");
-        // SECURITY: Validate search column identifier.
-        if crate::rest::filters::is_safe_identifier(cols) {
-            cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
-        } else {
-            tracing::warn!(cols = %cols, "explain: search_columns rejected by identifier guard");
-        }
+        let cols_input = params.search_columns.as_deref().unwrap_or("name");
+        let cols = crate::rest::filters::parse_identifier_csv(cols_input)
+            .map_err(ApiError::parse_error)?;
+        let search_cols = cols.join(",");
+        cmd = cmd.filter(
+            &search_cols,
+            Operator::TextSearch,
+            QailValue::String(term.clone()),
+        );
     }
 
     cmd = cmd.limit(limit);

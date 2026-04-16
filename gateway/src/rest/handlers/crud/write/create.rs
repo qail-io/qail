@@ -141,7 +141,7 @@ pub(crate) async fn create_handler(
         .collect::<Result<Vec<_>, _>>()?;
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
-    let branch_ctx = extract_branch_from_headers(&headers);
+    let branch_ctx = extract_branch_from_headers(&headers)?;
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
         return Err(ApiError::forbidden(
             "Platform administrator role required for branch overlay writes",
