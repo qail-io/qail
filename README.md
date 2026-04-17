@@ -6,7 +6,7 @@
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-dev.qail.io-blue)](https://dev.qail.io/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.27.8-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.27.9-green)](CHANGELOG.md)
 
 ---
 
@@ -16,8 +16,8 @@ If you are searching for a **Rust PostgreSQL driver**, start with `qail-pg` + `q
 
 ```toml
 [dependencies]
-qail-core = "0.27.8"
-qail-pg = "0.27.8"
+qail-core = "0.27.9"
+qail-pg = "0.27.9"
 ```
 
 ```rust

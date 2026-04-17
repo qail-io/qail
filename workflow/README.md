@@ -9,8 +9,8 @@ Declarative workflow engine for QAIL-driven systems.
 
 ```toml
 [dependencies]
-qail-workflow = "0.27.8"
-qail-core = "0.27.8"
+qail-workflow = "0.27.9"
+qail-core = "0.27.9"
 ```
 
 ## Features

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.9] - 2026-04-17
+
+### Fixed
+
+- **Scanner inline comment handling:** migration scanner now correctly parses `const` column arrays that include inline comments, preventing scanner failures and preserving column extraction behavior.
+- **Explicit apply mixed command parsing:** `parse_qail_to_commands_strict` now accepts mixed command blocks (for example enum + `alter ... add` + partial index) in explicit apply mode instead of rejecting non-`alter` lines.
+
+### Changed
+
+- **Versioning/docs:** bumped Rust workspace crates and current docs/install/readme references to `0.27.9`.
+
 ## [0.27.8] - 2026-04-07
 
 ### Fixed
