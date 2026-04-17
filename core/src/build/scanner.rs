@@ -135,7 +135,8 @@ fn collect_let_bindings(content: &str) -> HashMap<String, Vec<String>> {
                     let mut j = i + 1;
                     // Keep joining lines until we see the closing `;`
                     while j < lines.len() && !full_expr.contains(';') {
-                        full_expr.push(' ');
+                        // Preserve line boundaries so `//` comments stay line-scoped.
+                        full_expr.push('\n');
                         full_expr.push_str(lines[j].trim());
                         j += 1;
                     }
@@ -153,7 +154,8 @@ fn collect_let_bindings(content: &str) -> HashMap<String, Vec<String>> {
                 let mut full_line = line.to_string();
                 let mut j = i + 1;
                 while j < lines.len() && !full_line.contains(';') {
-                    full_line.push(' ');
+                    // Preserve line boundaries so `//` comments stay line-scoped.
+                    full_line.push('\n');
                     full_line.push_str(lines[j].trim());
                     j += 1;
                 }
@@ -196,7 +198,8 @@ fn collect_let_array_bindings(content: &str) -> HashMap<String, Vec<String>> {
             let mut full_expr = rhs.trim().to_string();
             let mut j = i + 1;
             while j < lines.len() && !full_expr.contains(';') {
-                full_expr.push(' ');
+                // Preserve line boundaries so `//` comments stay line-scoped.
+                full_expr.push('\n');
                 full_expr.push_str(lines[j].trim());
                 j += 1;
             }
@@ -227,7 +230,8 @@ fn collect_const_literal_bindings(content: &str, bindings: &mut LiteralBindings)
         let mut full_stmt = line.to_string();
         let mut j = i + 1;
         while j < lines.len() && !full_stmt.contains(';') {
-            full_stmt.push(' ');
+            // Preserve line boundaries so `//` comments stay line-scoped.
+            full_stmt.push('\n');
             full_stmt.push_str(lines[j].trim());
             j += 1;
         }

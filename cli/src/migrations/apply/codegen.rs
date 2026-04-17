@@ -1162,36 +1162,70 @@ fn compile_parser_schema_strict(schema: &Schema) -> Result<Vec<Qail>> {
 fn parse_explicit_apply_commands(content: &str) -> Result<Option<Vec<Qail>>> {
     let mut cmds = Vec::new();
     let mut saw_explicit_command = false;
+    let mut passthrough_segment = String::new();
+    let mut segment_start_line = 1usize;
+    let mut last_line_no = 0usize;
 
     for (line_no, raw_line) in content.lines().enumerate() {
+        let line_no = line_no + 1;
+        last_line_no = line_no;
         let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with("--") {
-            continue;
-        }
 
         if line.starts_with("alter ") {
+            let compiled_segment = compile_non_explicit_apply_segment(&passthrough_segment)
+                .map_err(|err| anyhow!("Lines {}-{}: {}", segment_start_line, line_no - 1, err))?;
+            cmds.extend(compiled_segment);
+            passthrough_segment.clear();
+
             saw_explicit_command = true;
             cmds.push(
                 parse_explicit_alter_add_column_line(line)
-                    .map_err(|err| anyhow!("Line {}: {}", line_no + 1, err))?,
+                    .map_err(|err| anyhow!("Line {}: {}", line_no, err))?,
             );
+            segment_start_line = line_no + 1;
             continue;
         }
 
-        if saw_explicit_command {
-            bail!(
-                "Line {}: unsupported explicit apply command '{}'",
-                line_no + 1,
-                line
-            );
-        }
+        passthrough_segment.push_str(raw_line);
+        passthrough_segment.push('\n');
     }
 
     if !saw_explicit_command {
         return Ok(None);
     }
 
+    let trailing_segment = compile_non_explicit_apply_segment(&passthrough_segment)
+        .map_err(|err| anyhow!("Lines {}-{}: {}", segment_start_line, last_line_no, err))?;
+    cmds.extend(trailing_segment);
+
     Ok(Some(cmds))
+}
+
+fn compile_non_explicit_apply_segment(segment: &str) -> Result<Vec<Qail>> {
+    let trimmed = segment.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if segment.lines().all(|line| {
+        let line = line.trim();
+        line.is_empty() || line.starts_with('#') || line.starts_with("--")
+    }) {
+        return Ok(Vec::new());
+    }
+
+    if let Ok(schema) = parse_qail(trimmed) {
+        return compile_migrate_schema_strict(&schema);
+    }
+
+    if let Ok(schema) = Schema::parse(trimmed) {
+        return compile_parser_schema_strict(&schema);
+    }
+
+    let first_line = trimmed.lines().next().unwrap_or("<empty>");
+    bail!(
+        "unsupported command block in explicit apply mode starting with '{}'",
+        first_line
+    )
 }
 
 fn parse_explicit_alter_add_column_line(line: &str) -> Result<Qail> {

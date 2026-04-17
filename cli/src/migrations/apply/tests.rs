@@ -182,6 +182,64 @@ alter whatsapp_phone_configs add ai_reply_enabled:boolean:default=true
     }
 
     #[test]
+    fn test_parse_qail_to_commands_strict_supports_mixed_enum_alter_and_partial_index() {
+        let input = r#"
+enum charter_service_type { fishing_charter, boat_charter, yacht_charter }
+alter charters_drasimos add service_type:charter_service_type:nullable
+index idx_charters_drasimos_service_type on charters_drasimos (service_type) where (service_type IS NOT NULL)
+"#;
+
+        let cmds = parse_qail_to_commands_strict(input)
+            .expect("mixed enum/alter/index migration should compile");
+
+        assert_eq!(
+            cmds.len(),
+            3,
+            "expected enum create + alter add column + partial index create"
+        );
+        assert!(
+            matches!(cmds[0].action, qail_core::ast::Action::CreateEnum),
+            "first command should create enum type"
+        );
+        assert!(
+            matches!(cmds[1].action, qail_core::ast::Action::Alter),
+            "second command should alter table add column"
+        );
+        assert!(
+            matches!(cmds[2].action, qail_core::ast::Action::Index),
+            "third command should create index"
+        );
+
+        match &cmds[1].columns[0] {
+            qail_core::ast::Expr::Def {
+                name,
+                data_type,
+                constraints,
+            } => {
+                assert_eq!(name, "service_type");
+                assert_eq!(data_type, "charter_service_type");
+                assert!(
+                    constraints
+                        .iter()
+                        .any(|c| matches!(c, qail_core::ast::Constraint::Nullable)),
+                    "alter column should preserve nullable constraint"
+                );
+            }
+            other => panic!("expected alter column definition, got {:?}", other),
+        }
+
+        let index_def = cmds[2]
+            .index_def
+            .as_ref()
+            .expect("index command should contain index_def");
+        assert_eq!(index_def.name, "idx_charters_drasimos_service_type");
+        assert_eq!(
+            index_def.where_clause.as_deref(),
+            Some("(service_type IS NOT NULL)")
+        );
+    }
+
+    #[test]
     fn test_parse_qail_to_commands_strict_supports_advanced_column_constraints() {
         let input = r#"
 table users {

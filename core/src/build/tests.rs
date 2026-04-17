@@ -204,6 +204,40 @@ let cmd = Qail::get("orders")
 }
 
 #[test]
+fn test_scan_file_const_array_with_inline_comments_preserves_columns() {
+    // Regression: inline `//` comments inside const column arrays must not
+    // swallow the rest of the statement during scanner pre-processing.
+    let content = r#"
+const ORDER_COLUMNS: &[&str] = &[
+    "id",                 // 0
+    "invoice_number",     // 1
+    "status",             // 2
+    "total_amount",       // 3
+    "created_at",         // 4
+];
+
+fn list(uid: &str) {
+    let _cmd = qail_core::ast::Qail::get("orders")
+        .columns(ORDER_COLUMNS)
+        .eq("user_id", uid)
+        .order_by("created_at", qail_core::ast::SortOrder::Desc);
+}
+"#;
+
+    let mut usages = Vec::new();
+    scan_file("test.rs", content, &mut usages);
+
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].table, "orders");
+    assert!(usages[0].columns.contains(&"id".to_string()));
+    assert!(usages[0].columns.contains(&"invoice_number".to_string()));
+    assert!(usages[0].columns.contains(&"status".to_string()));
+    assert!(usages[0].columns.contains(&"total_amount".to_string()));
+    assert!(usages[0].columns.contains(&"created_at".to_string()));
+    assert!(usages[0].columns.contains(&"user_id".to_string()));
+}
+
+#[test]
 fn test_scan_file_resolves_helper_param_tables_and_columns_from_call_sites() {
     let content = r#"
 const USERS_TABLE: &str = "users";
