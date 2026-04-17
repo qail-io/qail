@@ -7,14 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.27.8] - 2026-04-07
+## [0.27.8] - 2026-04-16
 
 ### Fixed
 
+- **Branch header fail-closed parsing:** REST handlers now reject malformed `X-Branch-ID` values (for example whitespace/emoji/invalid format) with `INVALID_BRANCH_NAME` instead of silently falling back to `main`; `main` is treated case-insensitively.
+- **RLS/GUC identity safety under weird input:** PostgreSQL RLS session values now use safe dollar-quoted literals, preserve unicode/symbols (including emoji), and only normalize interior NUL bytes to avoid lossy tenant/user/agent identity collapse.
+- **`search_columns` CSV contract:** REST/explain handlers now accept documented comma-separated identifier input (for example `name,description`) with strict per-column validation and deduplication.
 - **Shadow migration database quoting:** `qail migrate shadow` now correctly quotes hyphenated database names when creating/dropping shadow databases (for example `qail-engine-db_shadow`).
 
 ### Changed
 
+- **REST tenant scope enforcement:** tenant filtering/guarding now resolves scope columns per table from schema metadata (`tenant_id` with legacy `operator_id` fallback) and applies consistently across CRUD/nested/aggregate paths.
+- **Dependency security:** updated `rustls-webpki` to `0.103.12` to address `RUSTSEC-2026-0098` and `RUSTSEC-2026-0099`.
 - **Versioning/docs:** bumped Rust workspace crates and current docs/install/readme references to `0.27.8`.
 
 ## [0.27.7] - 2026-04-04
