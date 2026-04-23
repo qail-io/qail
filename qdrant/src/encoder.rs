@@ -16,6 +16,7 @@
 //! - Update payload
 //! - Create field index
 
+use crate::error::{QdrantError, QdrantResult};
 use bytes::{BufMut, BytesMut};
 
 // ============================================================================
@@ -94,6 +95,8 @@ const FILTER_SHOULD: u8 = 0x12;
 /// Filter.must_not (field 3, repeated Condition) -> 0x1A
 #[allow(dead_code)]
 const FILTER_MUST_NOT: u8 = 0x1A;
+/// Condition.filter (field 4, nested Filter message) -> 0x22
+const CONDITION_FILTER: u8 = 0x22;
 
 // ============================================================================
 // Varint Encoding
@@ -133,6 +136,16 @@ pub fn encode_varint_u64(buf: &mut BytesMut, mut value: u64) {
 // ============================================================================
 // SearchPoints Encoder
 // ============================================================================
+
+/// Common search request fields shared by all search encoders.
+#[derive(Clone, Copy)]
+pub struct SearchRequest<'a> {
+    pub collection: &'a str,
+    pub vector: &'a [f32],
+    pub limit: u64,
+    pub score_threshold: Option<f32>,
+    pub vector_name: Option<&'a str>,
+}
 
 /// Encode a SearchPoints request directly to protobuf wire format.
 ///
@@ -196,34 +209,50 @@ pub fn encode_search_proto(
 ///
 /// This is the filtered search path — translates QAIL conditions into
 /// Qdrant's protobuf Filter message (must/should arrays of Condition).
-#[allow(clippy::too_many_arguments)]
 pub fn encode_search_with_filter_proto(
     buf: &mut BytesMut,
-    collection: &str,
-    vector: &[f32],
-    limit: u64,
-    score_threshold: Option<f32>,
-    vector_name: Option<&str>,
+    request: SearchRequest<'_>,
     conditions: &[qail_core::ast::Condition],
     is_or: bool,
-) {
+) -> QdrantResult<()> {
+    let (must_conditions, should_conditions): (
+        &[qail_core::ast::Condition],
+        &[qail_core::ast::Condition],
+    ) = if is_or {
+        (&[], conditions)
+    } else {
+        (conditions, &[])
+    };
+
+    encode_search_with_filter_groups_proto(buf, request, must_conditions, should_conditions)
+}
+
+/// Encode a SearchPoints request with grouped filter conditions.
+///
+/// `must_conditions` are combined as AND, `should_conditions` as OR.
+pub fn encode_search_with_filter_groups_proto(
+    buf: &mut BytesMut,
+    request: SearchRequest<'_>,
+    must_conditions: &[qail_core::ast::Condition],
+    should_conditions: &[qail_core::ast::Condition],
+) -> QdrantResult<()> {
     buf.clear();
 
     // Field 1: collection_name
     buf.put_u8(SEARCH_COLLECTION);
-    encode_varint(buf, collection.len());
-    buf.extend_from_slice(collection.as_bytes());
+    encode_varint(buf, request.collection.len());
+    buf.extend_from_slice(request.collection.as_bytes());
 
     // Field 2: vector (packed floats, zero-copy)
     buf.put_u8(SEARCH_VECTOR);
-    let vector_bytes_len = vector.len() * 4;
+    let vector_bytes_len = request.vector.len() * 4;
     encode_varint(buf, vector_bytes_len);
-    let float_bytes: &[u8] = bytemuck::cast_slice(vector);
+    let float_bytes: &[u8] = bytemuck::cast_slice(request.vector);
     buf.extend_from_slice(float_bytes);
 
     // Field 3: filter (Filter message)
-    if !conditions.is_empty() {
-        let filter_buf = encode_filter_message(conditions, is_or);
+    if !must_conditions.is_empty() || !should_conditions.is_empty() {
+        let filter_buf = encode_filter_message_grouped(must_conditions, should_conditions)?;
         buf.put_u8(SEARCH_FILTER);
         encode_varint(buf, filter_buf.len());
         buf.extend_from_slice(&filter_buf);
@@ -231,23 +260,81 @@ pub fn encode_search_with_filter_proto(
 
     // Field 4: limit
     buf.put_u8(SEARCH_LIMIT);
-    encode_varint_u64(buf, limit);
+    encode_varint_u64(buf, request.limit);
 
     // Field 6: with_payload = true
     encode_with_payload_true(buf);
 
     // Field 8: score_threshold
-    if let Some(threshold) = score_threshold {
+    if let Some(threshold) = request.score_threshold {
         buf.put_u8(SEARCH_SCORE_THRESHOLD);
         buf.put_f32_le(threshold);
     }
 
     // Field 10: vector_name
-    if let Some(name) = vector_name {
+    if let Some(name) = request.vector_name {
         buf.put_u8(SEARCH_VECTOR_NAME);
         encode_varint(buf, name.len());
         buf.extend_from_slice(name.as_bytes());
     }
+
+    Ok(())
+}
+
+/// Encode a SearchPoints request where OR conditions are preserved per-cage.
+///
+/// Every OR cage is encoded as a nested `Filter { should: [...] }` wrapped
+/// in the outer filter's `must`, preserving:
+/// `(A OR B) AND (C OR D)` instead of flattening to `A OR B OR C OR D`.
+pub fn encode_search_with_filter_grouped_cages_proto(
+    buf: &mut BytesMut,
+    request: SearchRequest<'_>,
+    must_conditions: &[qail_core::ast::Condition],
+    should_groups: &[Vec<qail_core::ast::Condition>],
+) -> QdrantResult<()> {
+    buf.clear();
+
+    // Field 1: collection_name
+    buf.put_u8(SEARCH_COLLECTION);
+    encode_varint(buf, request.collection.len());
+    buf.extend_from_slice(request.collection.as_bytes());
+
+    // Field 2: vector (packed floats, zero-copy)
+    buf.put_u8(SEARCH_VECTOR);
+    let vector_bytes_len = request.vector.len() * 4;
+    encode_varint(buf, vector_bytes_len);
+    let float_bytes: &[u8] = bytemuck::cast_slice(request.vector);
+    buf.extend_from_slice(float_bytes);
+
+    // Field 3: filter (Filter message)
+    if !must_conditions.is_empty() || !should_groups.is_empty() {
+        let filter_buf = encode_filter_message_grouped_cages(must_conditions, should_groups)?;
+        buf.put_u8(SEARCH_FILTER);
+        encode_varint(buf, filter_buf.len());
+        buf.extend_from_slice(&filter_buf);
+    }
+
+    // Field 4: limit
+    buf.put_u8(SEARCH_LIMIT);
+    encode_varint_u64(buf, request.limit);
+
+    // Field 6: with_payload = true
+    encode_with_payload_true(buf);
+
+    // Field 8: score_threshold
+    if let Some(threshold) = request.score_threshold {
+        buf.put_u8(SEARCH_SCORE_THRESHOLD);
+        buf.put_f32_le(threshold);
+    }
+
+    // Field 10: vector_name
+    if let Some(name) = request.vector_name {
+        buf.put_u8(SEARCH_VECTOR_NAME);
+        encode_varint(buf, name.len());
+        buf.extend_from_slice(name.as_bytes());
+    }
+
+    Ok(())
 }
 
 /// Encode with_payload = true as a sub-message.
@@ -287,68 +374,165 @@ pub fn encode_with_payload_true(buf: &mut BytesMut) {
 ///   }
 /// }
 /// ```
-fn encode_filter_message(conditions: &[qail_core::ast::Condition], is_or: bool) -> BytesMut {
-    use qail_core::ast::{Expr, Operator, Value};
+fn encode_filter_message_grouped(
+    must_conditions: &[qail_core::ast::Condition],
+    should_conditions: &[qail_core::ast::Condition],
+) -> QdrantResult<BytesMut> {
+    let mut filter_buf =
+        BytesMut::with_capacity((must_conditions.len() + should_conditions.len()) * 32);
 
-    let mut filter_buf = BytesMut::with_capacity(conditions.len() * 32);
-    let clause_tag = if is_or { FILTER_SHOULD } else { FILTER_MUST };
+    let mut encode_clause =
+        |conditions: &[qail_core::ast::Condition], clause_tag: u8| -> QdrantResult<()> {
+            for cond in conditions {
+                let cond_buf = encode_condition_message(cond)?;
 
-    for cond in conditions {
-        // Extract field name
-        let key = match &cond.left {
-            Expr::Named(name) => name.as_str(),
-            Expr::Aliased { name, .. } => name.as_str(),
-            _ => continue,
+                // Write as repeated Condition in the filter's must/should field
+                filter_buf.put_u8(clause_tag);
+                encode_varint(&mut filter_buf, cond_buf.len());
+                filter_buf.extend_from_slice(&cond_buf);
+            }
+            Ok(())
         };
 
-        // Build the Condition message
-        let cond_buf = match (&cond.op, &cond.value) {
-            // Match (equality) conditions
-            (Operator::Eq, Value::String(s)) => encode_field_condition_match_keyword(key, s),
-            (Operator::Eq, Value::Int(n)) => encode_field_condition_match_integer(key, *n),
-            (Operator::Eq, Value::Bool(b)) => encode_field_condition_match_bool(key, *b),
+    encode_clause(must_conditions, FILTER_MUST)?;
+    encode_clause(should_conditions, FILTER_SHOULD)?;
 
-            // Range conditions
-            (Operator::Gt, Value::Int(n)) => {
-                encode_field_condition_range(key, None, None, Some(*n as f64), None)
-            }
-            (Operator::Gt, Value::Float(f)) => {
-                encode_field_condition_range(key, None, None, Some(*f), None)
-            }
-            (Operator::Gte, Value::Int(n)) => {
-                encode_field_condition_range(key, None, None, None, Some(*n as f64))
-            }
-            (Operator::Gte, Value::Float(f)) => {
-                encode_field_condition_range(key, None, None, None, Some(*f))
-            }
-            (Operator::Lt, Value::Int(n)) => {
-                encode_field_condition_range(key, Some(*n as f64), None, None, None)
-            }
-            (Operator::Lt, Value::Float(f)) => {
-                encode_field_condition_range(key, Some(*f), None, None, None)
-            }
-            (Operator::Lte, Value::Int(n)) => {
-                encode_field_condition_range(key, None, Some(*n as f64), None, None)
-            }
-            (Operator::Lte, Value::Float(f)) => {
-                encode_field_condition_range(key, None, Some(*f), None, None)
-            }
+    Ok(filter_buf)
+}
 
-            // Text match (contains / like)
-            (Operator::Contains | Operator::Like, Value::String(s)) => {
-                encode_field_condition_match_text(key, s)
-            }
+/// Encode a grouped filter preserving each OR cage as its own nested should-group.
+fn encode_filter_message_grouped_cages(
+    must_conditions: &[qail_core::ast::Condition],
+    should_groups: &[Vec<qail_core::ast::Condition>],
+) -> QdrantResult<BytesMut> {
+    let grouped_condition_count: usize = should_groups.iter().map(Vec::len).sum();
+    let mut filter_buf =
+        BytesMut::with_capacity((must_conditions.len() + grouped_condition_count) * 32);
 
-            _ => continue,
-        };
-
-        // Write as repeated Condition in the filter's must/should field
-        filter_buf.put_u8(clause_tag);
+    for cond in must_conditions {
+        let cond_buf = encode_condition_message(cond)?;
+        filter_buf.put_u8(FILTER_MUST);
         encode_varint(&mut filter_buf, cond_buf.len());
         filter_buf.extend_from_slice(&cond_buf);
     }
 
-    filter_buf
+    for group in should_groups {
+        if group.is_empty() {
+            continue;
+        }
+
+        if group.len() == 1 {
+            let cond_buf = encode_condition_message(&group[0])?;
+            filter_buf.put_u8(FILTER_MUST);
+            encode_varint(&mut filter_buf, cond_buf.len());
+            filter_buf.extend_from_slice(&cond_buf);
+            continue;
+        }
+
+        let nested_filter = encode_filter_message_grouped(&[], group)?;
+        let mut nested_condition = BytesMut::with_capacity(nested_filter.len() + 4);
+        nested_condition.put_u8(CONDITION_FILTER);
+        encode_varint(&mut nested_condition, nested_filter.len());
+        nested_condition.extend_from_slice(&nested_filter);
+
+        filter_buf.put_u8(FILTER_MUST);
+        encode_varint(&mut filter_buf, nested_condition.len());
+        filter_buf.extend_from_slice(&nested_condition);
+    }
+
+    Ok(filter_buf)
+}
+
+/// Encode a single `Condition` message for Qdrant filters.
+fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<BytesMut> {
+    use qail_core::ast::{Expr, Operator, Value};
+
+    let key = match &cond.left {
+        Expr::Named(name) => name.as_str(),
+        Expr::Aliased { name, .. } => name.as_str(),
+        other => {
+            return Err(QdrantError::Encode(format!(
+                "Unsupported filter left expression for Qdrant: {:?}",
+                other
+            )));
+        }
+    };
+
+    match (&cond.op, &cond.value) {
+        // Match (equality) conditions
+        (Operator::Eq, Value::String(s)) => Ok(encode_field_condition_match_keyword(key, s)),
+        (Operator::Eq, Value::Int(n)) => Ok(encode_field_condition_match_integer(key, *n)),
+        (Operator::Eq, Value::Float(f)) => Ok(encode_field_condition_match_float(key, *f)),
+        (Operator::Eq, Value::Bool(b)) => Ok(encode_field_condition_match_bool(key, *b)),
+
+        // Range conditions
+        (Operator::Gt, Value::Int(n)) => Ok(encode_field_condition_range(
+            key,
+            None,
+            None,
+            Some(*n as f64),
+            None,
+        )),
+        (Operator::Gt, Value::Float(f)) => Ok(encode_field_condition_range(
+            key,
+            None,
+            None,
+            Some(*f),
+            None,
+        )),
+        (Operator::Gte, Value::Int(n)) => Ok(encode_field_condition_range(
+            key,
+            None,
+            None,
+            None,
+            Some(*n as f64),
+        )),
+        (Operator::Gte, Value::Float(f)) => Ok(encode_field_condition_range(
+            key,
+            None,
+            None,
+            None,
+            Some(*f),
+        )),
+        (Operator::Lt, Value::Int(n)) => Ok(encode_field_condition_range(
+            key,
+            Some(*n as f64),
+            None,
+            None,
+            None,
+        )),
+        (Operator::Lt, Value::Float(f)) => Ok(encode_field_condition_range(
+            key,
+            Some(*f),
+            None,
+            None,
+            None,
+        )),
+        (Operator::Lte, Value::Int(n)) => Ok(encode_field_condition_range(
+            key,
+            None,
+            Some(*n as f64),
+            None,
+            None,
+        )),
+        (Operator::Lte, Value::Float(f)) => Ok(encode_field_condition_range(
+            key,
+            None,
+            Some(*f),
+            None,
+            None,
+        )),
+
+        // Text match (contains / like)
+        (Operator::Contains | Operator::Like, Value::String(s)) => {
+            Ok(encode_field_condition_match_text(key, s))
+        }
+
+        _ => Err(QdrantError::Encode(format!(
+            "Unsupported Qdrant filter condition: op={:?}, value={:?}",
+            cond.op, cond.value
+        ))),
+    }
 }
 
 /// Encode a FieldCondition with Match { keyword } for string equality.
@@ -394,6 +578,29 @@ fn encode_field_condition_match_integer(key: &str, value: i64) -> BytesMut {
     let mut match_buf = BytesMut::with_capacity(16);
     match_buf.put_u8(0x10); // field 2 (integer), wire VARINT
     encode_varint_u64(&mut match_buf, value as u64);
+
+    let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
+    fc_buf.put_u8(0x0A);
+    encode_varint(&mut fc_buf, key.len());
+    fc_buf.extend_from_slice(key.as_bytes());
+    fc_buf.put_u8(0x12);
+    encode_varint(&mut fc_buf, match_buf.len());
+    fc_buf.extend_from_slice(&match_buf);
+
+    let mut cond_buf = BytesMut::with_capacity(fc_buf.len() + 4);
+    cond_buf.put_u8(0x0A);
+    encode_varint(&mut cond_buf, fc_buf.len());
+    cond_buf.extend_from_slice(&fc_buf);
+
+    cond_buf
+}
+
+/// Encode a FieldCondition with Match { integer } using float payload.
+fn encode_field_condition_match_float(key: &str, value: f64) -> BytesMut {
+    // Match message: field 5 = double (double)
+    let mut match_buf = BytesMut::with_capacity(10);
+    match_buf.put_u8(0x29); // field 5 (double), wire FIXED64
+    match_buf.put_f64_le(value);
 
     let mut fc_buf = BytesMut::with_capacity(key.len() + match_buf.len() + 16);
     fc_buf.put_u8(0x0A);
@@ -984,7 +1191,7 @@ pub fn encode_create_collection_proto(
     buf: &mut BytesMut,
     collection_name: &str,
     vector_size: u64,
-    distance: qail_core::ast::Distance,
+    distance: crate::Distance,
     on_disk: bool,
 ) {
     buf.clear();
@@ -1004,9 +1211,9 @@ pub fn encode_create_collection_proto(
     // VectorParams.distance (field 2, enum)
     params_buf.put_u8(0x10);
     let distance_val = match distance {
-        qail_core::ast::Distance::Cosine => 1,
-        qail_core::ast::Distance::Euclid => 2,
-        qail_core::ast::Distance::Dot => 3,
+        crate::Distance::Cosine => 1,
+        crate::Distance::Euclidean => 2,
+        crate::Distance::Dot => 3,
     };
     encode_varint(&mut params_buf, distance_val);
 
@@ -1253,14 +1460,17 @@ mod tests {
 
         encode_search_with_filter_proto(
             &mut buf,
-            "products",
-            &vector,
-            10,
-            None,
-            None,
+            SearchRequest {
+                collection: "products",
+                vector: &vector,
+                limit: 10,
+                score_threshold: None,
+                vector_name: None,
+            },
             &conditions,
             false,
-        );
+        )
+        .expect("filter encoding should succeed");
 
         // Should contain collection, vector, filter, limit, with_payload
         assert!(buf.len() > 50);
@@ -1322,6 +1532,105 @@ mod tests {
 
         assert_eq!(buf[0], 0x0A);
         assert!(buf.len() > 15);
+    }
+
+    #[test]
+    fn test_encode_search_with_filter_rejects_unsupported_operator() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let mut buf = BytesMut::with_capacity(512);
+        let vector = vec![0.1f32, 0.2];
+        let conditions = vec![Condition {
+            left: Expr::Named("status".to_string()),
+            op: Operator::NotLike,
+            value: Value::String("%inactive%".to_string()),
+            is_array_unnest: false,
+        }];
+
+        let err = encode_search_with_filter_proto(
+            &mut buf,
+            SearchRequest {
+                collection: "products",
+                vector: &vector,
+                limit: 5,
+                score_threshold: None,
+                vector_name: None,
+            },
+            &conditions,
+            false,
+        )
+        .expect_err("unsupported operator must return an explicit error");
+
+        match err {
+            QdrantError::Encode(message) => {
+                assert!(message.contains("Unsupported Qdrant filter condition"));
+            }
+            other => panic!("expected encode error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_encode_search_with_filter_grouped_cages_includes_nested_filter_conditions() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let mut buf = BytesMut::with_capacity(1024);
+        let vector = vec![0.1f32, 0.2, 0.3];
+        let must_conditions = vec![Condition {
+            left: Expr::Named("tenant_id".to_string()),
+            op: Operator::Eq,
+            value: Value::String("t1".to_string()),
+            is_array_unnest: false,
+        }];
+        let should_groups = vec![
+            vec![
+                Condition {
+                    left: Expr::Named("city".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("London".to_string()),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("city".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("Paris".to_string()),
+                    is_array_unnest: false,
+                },
+            ],
+            vec![
+                Condition {
+                    left: Expr::Named("country".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("UK".to_string()),
+                    is_array_unnest: false,
+                },
+                Condition {
+                    left: Expr::Named("country".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("FR".to_string()),
+                    is_array_unnest: false,
+                },
+            ],
+        ];
+
+        encode_search_with_filter_grouped_cages_proto(
+            &mut buf,
+            SearchRequest {
+                collection: "products",
+                vector: &vector,
+                limit: 10,
+                score_threshold: None,
+                vector_name: None,
+            },
+            &must_conditions,
+            &should_groups,
+        )
+        .expect("grouped-cage filter encoding should succeed");
+
+        assert!(buf.contains(&SEARCH_FILTER));
+        assert!(
+            buf.contains(&CONDITION_FILTER),
+            "expected nested filter condition tag for OR groups"
+        );
     }
 
     #[test]

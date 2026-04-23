@@ -1,34 +1,30 @@
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-
-use crate::GatewayState;
-use crate::auth::AuthContext;
-
 use super::super::super::listener::listener_rpc;
 use super::super::super::{
     ListenControl, WS_ERR_LIVE_QUERY_SUB_FAILED, WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
-    WS_MIN_LIVE_QUERY_INTERVAL_MS, WsConnectionState, WsServerMessage,
-    build_live_query_notify_channel, decrement_channel_refcount, increment_channel_refcount,
-    tracked_channel_count,
+    WS_MIN_LIVE_QUERY_INTERVAL_MS, WsServerMessage, build_live_query_notify_channel,
+    decrement_channel_refcount, increment_channel_refcount, tracked_channel_count,
 };
+use super::LiveQueryRuntime;
 use super::poller::{LiveQueryPollerConfig, spawn_live_query_poller};
 
 fn exceeds_live_query_task_limit(task_count: usize, replacing_existing: bool) -> bool {
     !replacing_existing && task_count >= WS_MAX_SUBSCRIPTIONS_PER_CONNECTION
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn subscribe_and_spawn_live_query(
     table: &str,
     interval_ms: u64,
     cmd: qail_core::ast::Qail,
-    state: &Arc<GatewayState>,
-    tx: &mpsc::Sender<WsServerMessage>,
-    listener_tx: &mpsc::UnboundedSender<ListenControl>,
-    auth: &AuthContext,
-    conn_state: &mut WsConnectionState,
+    runtime: &mut LiveQueryRuntime<'_>,
 ) {
+    let state = runtime.state;
+    let tx = runtime.tx;
+    let listener_tx = runtime.listener_tx;
+    let auth = runtime.auth;
+    let conn_state = &mut *runtime.conn_state;
+
     let notify_channel = match build_live_query_notify_channel(auth.tenant_id.as_deref(), table) {
         Ok(channel) => channel,
         Err(message) => {

@@ -13,28 +13,25 @@ use crate::auth::AuthContext;
 
 use super::super::{ListenControl, WsConnectionState, WsServerMessage};
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct LiveQueryRequest {
+    pub qail: String,
+    pub table: String,
+    pub interval_ms: u64,
+}
+
+pub(super) struct LiveQueryRuntime<'a> {
+    pub state: &'a Arc<GatewayState>,
+    pub tx: &'a mpsc::Sender<WsServerMessage>,
+    pub listener_tx: &'a mpsc::UnboundedSender<ListenControl>,
+    pub auth: &'a AuthContext,
+    pub conn_state: &'a mut WsConnectionState,
+}
+
 pub(super) async fn handle_live_query(
-    qail: String,
-    table: String,
-    interval_ms: u64,
-    state: &Arc<GatewayState>,
-    tx: &mpsc::Sender<WsServerMessage>,
-    listener_tx: &mpsc::UnboundedSender<ListenControl>,
-    auth: &AuthContext,
-    conn_state: &mut WsConnectionState,
+    request: LiveQueryRequest,
+    runtime: &mut LiveQueryRuntime<'_>,
 ) {
-    start::handle_live_query(
-        qail,
-        table,
-        interval_ms,
-        state,
-        tx,
-        listener_tx,
-        auth,
-        conn_state,
-    )
-    .await;
+    start::handle_live_query(request, runtime).await;
 }
 
 pub(super) async fn handle_stop_live_query(

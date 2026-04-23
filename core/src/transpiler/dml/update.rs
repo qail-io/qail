@@ -26,7 +26,11 @@ pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
                         Expr::Named(name) => generator.quote_identifier(name),
                         expr => expr.to_string(),
                     };
-                    set_clauses.push(format!("{} = {}", col_sql, cond.to_value_sql(&generator)));
+                    set_clauses.push(format!(
+                        "{} = {}",
+                        col_sql,
+                        cond.to_value_sql(generator.as_ref())
+                    ));
                 }
             }
             CageKind::Filter if !cage.conditions.is_empty() => {
@@ -37,7 +41,7 @@ pub fn build_update(cmd: &Qail, dialect: Dialect) -> String {
                 let conditions: Vec<String> = cage
                     .conditions
                     .iter()
-                    .map(|c| c.to_sql(&generator, Some(cmd)))
+                    .map(|c| c.to_sql(generator.as_ref(), Some(cmd)))
                     .collect();
                 let group = conditions.join(joiner);
                 if cage.logical_op == LogicalOp::Or && cage.conditions.len() > 1 {

@@ -82,18 +82,17 @@ fn resolve_col_syntax(col: &str, cmd: &Qail, generator: &dyn SqlGenerator) -> St
     generator.json_access(col_name, path)
 }
 
-#[allow(clippy::borrowed_box)]
 /// Trait for converting AST conditions to SQL strings.
 pub trait ConditionToSql {
     /// Render this condition as a SQL string.
-    fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&Qail>) -> String;
+    fn to_sql(&self, generator: &dyn SqlGenerator, context: Option<&Qail>) -> String;
     /// Render the right-hand value of this condition as a SQL string.
-    fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String;
+    fn to_value_sql(&self, generator: &dyn SqlGenerator) -> String;
 
     /// Convert condition to SQL with parameterized values.
     fn to_sql_parameterized(
         &self,
-        generator: &Box<dyn SqlGenerator>,
+        generator: &dyn SqlGenerator,
         context: Option<&Qail>,
         params: &mut ParamContext,
     ) -> String;
@@ -101,13 +100,13 @@ pub trait ConditionToSql {
 
 impl ConditionToSql for Condition {
     /// Convert condition to SQL string.
-    fn to_sql(&self, generator: &Box<dyn SqlGenerator>, context: Option<&Qail>) -> String {
+    fn to_sql(&self, generator: &dyn SqlGenerator, context: Option<&Qail>) -> String {
         let col = match &self.left {
             Expr::Named(name) => {
                 if name.starts_with('{') && name.ends_with('}') {
                     name[1..name.len() - 1].to_string()
                 } else if let Some(cmd) = context {
-                    resolve_col_syntax(name, cmd, generator.as_ref())
+                    resolve_col_syntax(name, cmd, generator)
                 } else {
                     generator.quote_identifier(name)
                 }
@@ -253,7 +252,7 @@ impl ConditionToSql for Condition {
         }
     }
 
-    fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String {
+    fn to_value_sql(&self, generator: &dyn SqlGenerator) -> String {
         match &self.value {
             Value::Param(n) => generator.placeholder(*n),
             Value::String(s) => format!("'{}'", s.replace('\'', "''")),
@@ -267,8 +266,7 @@ impl ConditionToSql for Condition {
                 // Determine if it's "table"."col" or just "col"
                 // Use resolve_col_syntax logic? Or simply quote?
                 // Usually Join ON RHS is just an identifier, but transpiler logic in resolve_col_syntax
-                // requires a Qail context which we don't have here efficiently (we have context: Option<&Qail> in other methods but strictly to_value_sql signature is fixed?).
-                // Wait, to_value_sql signature is: fn to_value_sql(&self, generator: &Box<dyn SqlGenerator>) -> String
+                // requires a Qail context which we don't have here efficiently (we have context: Option<&Qail> in other methods but strictly to_value_sql signature is fixed).
                 // We don't have context here.
                 // However, we can use a basic split check or just quote full string.
                 // If col is "users.id", generator.quote_identifier("users.id") might quote the whole thing which is wrong for Postgres ("users.id" vs "users"."id").
@@ -290,7 +288,7 @@ impl ConditionToSql for Condition {
 
     fn to_sql_parameterized(
         &self,
-        generator: &Box<dyn SqlGenerator>,
+        generator: &dyn SqlGenerator,
         context: Option<&Qail>,
         params: &mut ParamContext,
     ) -> String {
@@ -299,7 +297,7 @@ impl ConditionToSql for Condition {
                 if name.starts_with('{') && name.ends_with('}') {
                     name[1..name.len() - 1].to_string()
                 } else if let Some(cmd) = context {
-                    resolve_col_syntax(name, cmd, generator.as_ref())
+                    resolve_col_syntax(name, cmd, generator)
                 } else {
                     generator.quote_identifier(name)
                 }
@@ -327,9 +325,9 @@ impl ConditionToSql for Condition {
         let value_placeholder = |v: &Value, p: &mut ParamContext| -> String {
             match v {
                 Value::Param(n) => generator.placeholder(*n), // Already a placeholder
-                Value::NamedParam(name) => p.add_named_param(name.clone(), generator.as_ref()),
+                Value::NamedParam(name) => p.add_named_param(name.clone(), generator),
                 Value::Null => "NULL".to_string(),
-                other => p.add_param(other.clone(), generator.as_ref()),
+                other => p.add_param(other.clone(), generator),
             }
         };
 

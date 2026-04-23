@@ -53,16 +53,22 @@ impl QdrantDriver {
 
     /// Connect with address string.
     pub async fn connect_addr(addr: &str) -> QdrantResult<Self> {
-        let parts: Vec<&str> = addr.split(':').collect();
-        if parts.len() != 2 {
+        let (host_part, port_part) = addr.rsplit_once(':').ok_or_else(|| {
+            QdrantError::Connection("Invalid address format, expected host:port".to_string())
+        })?;
+        let host = host_part
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host_part);
+        if host.is_empty() {
             return Err(QdrantError::Connection(
-                "Invalid address format, expected host:port".to_string(),
+                "Invalid address format, empty host".to_string(),
             ));
         }
-        let port: u16 = parts[1]
+        let port: u16 = port_part
             .parse()
             .map_err(|_| QdrantError::Connection("Invalid port".to_string()))?;
-        Self::connect(parts[0], port).await
+        Self::connect(host, port).await
     }
 
     /// Connect to Qdrant gRPC endpoint with TLS (rustls).
@@ -153,14 +159,58 @@ impl QdrantDriver {
         self.buffer.clear();
         encoder::encode_search_with_filter_proto(
             &mut self.buffer,
-            collection,
-            vector,
-            limit,
-            score_threshold,
-            None,
+            encoder::SearchRequest {
+                collection,
+                vector,
+                limit,
+                score_threshold,
+                vector_name: None,
+            },
             conditions,
             is_or,
-        );
+        )?;
+        let request_bytes = self.buffer.split().freeze();
+        let response = self.client.search(request_bytes).await?;
+        decoder::decode_search_response(&response)
+    }
+
+    /// Filtered vector search with grouped conditions.
+    ///
+    /// `must_conditions` are joined with AND, `should_conditions` with OR.
+    pub async fn search_filtered_grouped(
+        &mut self,
+        request: encoder::SearchRequest<'_>,
+        must_conditions: &[qail_core::ast::Condition],
+        should_conditions: &[qail_core::ast::Condition],
+    ) -> QdrantResult<Vec<ScoredPoint>> {
+        self.buffer.clear();
+        encoder::encode_search_with_filter_groups_proto(
+            &mut self.buffer,
+            request,
+            must_conditions,
+            should_conditions,
+        )?;
+        let request_bytes = self.buffer.split().freeze();
+        let response = self.client.search(request_bytes).await?;
+        decoder::decode_search_response(&response)
+    }
+
+    /// Filtered vector search preserving OR-cage groups.
+    ///
+    /// Each OR group is treated as its own disjunction that must be satisfied.
+    pub async fn search_filtered_grouped_cages(
+        &mut self,
+        request: encoder::SearchRequest<'_>,
+        must_conditions: &[qail_core::ast::Condition],
+        should_groups: &[Vec<qail_core::ast::Condition>],
+    ) -> QdrantResult<Vec<ScoredPoint>> {
+        self.buffer.clear();
+        encoder::encode_search_with_filter_grouped_cages_proto(
+            &mut self.buffer,
+            request,
+            must_conditions,
+            should_groups,
+        )?;
         let request_bytes = self.buffer.split().freeze();
         let response = self.client.search(request_bytes).await?;
         decoder::decode_search_response(&response)
@@ -219,6 +269,8 @@ impl QdrantDriver {
     /// Extracts vector, collection, limit from the Qail command.
     /// If conditions are present in the AST, they are included as filters.
     pub async fn search_ast(&mut self, cmd: &Qail) -> QdrantResult<Vec<ScoredPoint>> {
+        use qail_core::ast::LogicalOp;
+
         let collection = if cmd.table.is_empty() {
             return Err(QdrantError::Encode("Collection name required".to_string()));
         } else {
@@ -239,24 +291,35 @@ impl QdrantDriver {
 
         let score_threshold = cmd.score_threshold;
 
-        // Extract filter conditions from cages
-        let conditions: Vec<qail_core::ast::Condition> = cmd
+        let mut must_conditions = Vec::new();
+        let mut should_groups = Vec::new();
+        for cage in cmd
             .cages
             .iter()
             .filter(|c| matches!(c.kind, qail_core::ast::CageKind::Filter))
-            .flat_map(|c| c.conditions.iter().cloned())
-            .collect();
+        {
+            match cage.logical_op {
+                LogicalOp::And => must_conditions.extend(cage.conditions.iter().cloned()),
+                LogicalOp::Or => {
+                    if !cage.conditions.is_empty() {
+                        should_groups.push(cage.conditions.to_vec());
+                    }
+                }
+            }
+        }
 
-        // If AST has conditions, use filtered search
-        if !conditions.is_empty() {
+        if !must_conditions.is_empty() || !should_groups.is_empty() {
             return self
-                .search_filtered(
-                    collection,
-                    vector,
-                    limit,
-                    score_threshold,
-                    &conditions,
-                    false,
+                .search_filtered_grouped_cages(
+                    encoder::SearchRequest {
+                        collection,
+                        vector,
+                        limit,
+                        score_threshold,
+                        vector_name: cmd.vector_name.as_deref(),
+                    },
+                    &must_conditions,
+                    &should_groups,
                 )
                 .await;
         }
@@ -368,7 +431,7 @@ impl QdrantDriver {
         &mut self,
         collection_name: &str,
         vector_size: u64,
-        distance: qail_core::ast::Distance,
+        distance: crate::Distance,
         on_disk: bool,
     ) -> QdrantResult<()> {
         self.buffer.clear();

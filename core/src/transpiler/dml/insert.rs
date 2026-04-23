@@ -41,7 +41,7 @@ pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
         let values: Vec<String> = cage
             .conditions
             .iter()
-            .map(|c| c.to_value_sql(&generator))
+            .map(|c| c.to_value_sql(generator.as_ref()))
             .collect();
 
         if !values.is_empty() {

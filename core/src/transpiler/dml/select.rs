@@ -29,7 +29,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
         let exprs: Vec<String> = cmd
             .distinct_on
             .iter()
-            .map(|e| render_expr_for_orderby(e, &generator, cmd))
+            .map(|e| render_expr_for_orderby(e, generator.as_ref(), cmd))
             .collect();
         format!("{}SELECT DISTINCT ON ({}) ", cte_prefix, exprs.join(", "))
     } else if cmd.distinct {
@@ -56,14 +56,14 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                         for (cond, val) in when_clauses {
                             case_sql.push_str(&format!(
                                 " WHEN {} THEN {}",
-                                cond.to_sql(&generator, Some(cmd)),
-                                render_expr_for_orderby(val, &generator, cmd)
+                                cond.to_sql(generator.as_ref(), Some(cmd)),
+                                render_expr_for_orderby(val, generator.as_ref(), cmd)
                             ));
                         }
                         if let Some(e) = else_value {
                             case_sql.push_str(&format!(
                                 " ELSE {}",
-                                render_expr_for_orderby(e, &generator, cmd)
+                                render_expr_for_orderby(e, generator.as_ref(), cmd)
                             ));
                         }
                         case_sql.push_str(" END");
@@ -350,7 +350,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
     }
     sql.push_str(&generator.quote_identifier(&cmd.table));
 
-    // TABLESAMPLE - check new sample field first, then legacy CageKind::Sample
+    // TABLESAMPLE
     if let Some((method, percent, seed)) = &cmd.sample {
         let method_str = match method {
             SampleMethod::Bernoulli => "BERNOULLI",
@@ -359,18 +359,6 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
         sql.push_str(&format!(" TABLESAMPLE {}({})", method_str, percent));
         if let Some(s) = seed {
             sql.push_str(&format!(" REPEATABLE({})", s));
-        }
-    } else {
-        // Legacy CageKind::Sample support
-        let sample_percent = cmd.cages.iter().find_map(|c| {
-            if let CageKind::Sample(pct) = c.kind {
-                Some(pct)
-            } else {
-                None
-            }
-        });
-        if let Some(pct) = sample_percent {
-            sql.push_str(&format!(" TABLESAMPLE BERNOULLI({})", pct));
         }
     }
 
@@ -394,7 +382,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
         if let Some(on_conds) = &join.on {
             let on_sql: Vec<String> = on_conds
                 .iter()
-                .map(|c| c.to_sql(&generator, Some(cmd)))
+                .map(|c| c.to_sql(generator.as_ref(), Some(cmd)))
                 .collect();
             sql.push_str(&format!(
                 " {} JOIN {} ON {}",
@@ -474,7 +462,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                     let conditions: Vec<String> = cage
                         .conditions
                         .iter()
-                        .map(|c| c.to_sql(&generator, Some(cmd)))
+                        .map(|c| c.to_sql(generator.as_ref(), Some(cmd)))
                         .collect();
                     let group = conditions.join(joiner);
                     // Wrap OR groups in parentheses for correct precedence
@@ -495,7 +483,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                         SortOrder::DescNullsFirst => "DESC NULLS FIRST",
                         SortOrder::DescNullsLast => "DESC NULLS LAST",
                     };
-                    let col_sql = render_expr_for_orderby(&cond.left, &generator, cmd);
+                    let col_sql = render_expr_for_orderby(&cond.left, generator.as_ref(), cmd);
                     order_by_clauses.push(format!("{} {}", col_sql, dir));
                 }
             }
@@ -548,7 +536,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
         let having_conds: Vec<String> = cmd
             .having
             .iter()
-            .map(|c| c.to_sql(&generator, Some(cmd)))
+            .map(|c| c.to_sql(generator.as_ref(), Some(cmd)))
             .collect();
         sql.push_str(" HAVING ");
         sql.push_str(&having_conds.join(" AND "));
@@ -568,7 +556,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
             let qualify_conds: Vec<String> = cage
                 .conditions
                 .iter()
-                .map(|c| c.to_sql(&generator, Some(cmd)))
+                .map(|c| c.to_sql(generator.as_ref(), Some(cmd)))
                 .collect();
             sql.push_str(" QUALIFY ");
             sql.push_str(&qualify_conds.join(" AND "));
@@ -615,10 +603,9 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
 
 /// Render an expression for ORDER BY (and potentially other contexts).
 /// Handles CASE, Binary, FunctionCall, SpecialFunction, and Named expressions.
-#[allow(clippy::borrowed_box)]
 fn render_expr_for_orderby(
     expr: &Expr,
-    generator: &Box<dyn crate::transpiler::SqlGenerator>,
+    generator: &dyn crate::transpiler::SqlGenerator,
     cmd: &Qail,
 ) -> String {
     match expr {

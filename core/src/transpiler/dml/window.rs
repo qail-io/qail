@@ -130,7 +130,7 @@ pub fn build_window(cmd: &Qail, dialect: Dialect) -> String {
             let conditions: Vec<String> = cage
                 .conditions
                 .iter()
-                .map(|c| c.to_sql(&generator, Some(cmd)))
+                .map(|c| c.to_sql(generator.as_ref(), Some(cmd)))
                 .collect();
             let group = conditions.join(joiner);
             if cage.logical_op == LogicalOp::Or && cage.conditions.len() > 1 {

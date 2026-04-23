@@ -46,15 +46,20 @@ pub(super) async fn handle_client_message(
             table,
             interval_ms,
         } => {
-            live_query::handle_live_query(
-                qail,
-                table,
-                interval_ms,
+            let mut runtime = live_query::LiveQueryRuntime {
                 state,
                 tx,
                 listener_tx,
                 auth,
                 conn_state,
+            };
+            live_query::handle_live_query(
+                live_query::LiveQueryRequest {
+                    qail,
+                    table,
+                    interval_ms,
+                },
+                &mut runtime,
             )
             .await;
         }

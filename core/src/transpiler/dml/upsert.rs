@@ -33,7 +33,7 @@ pub fn build_upsert(cmd: &Qail, dialect: Dialect) -> String {
                         Expr::Named(name) => name.clone(),
                         expr => expr.to_string(),
                     },
-                    c.to_value_sql(&generator),
+                    c.to_value_sql(generator.as_ref()),
                 )
             })
             .unzip()

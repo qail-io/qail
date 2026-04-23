@@ -1,8 +1,7 @@
 //! Apply module tests.
 
 #[cfg(test)]
-#[allow(clippy::module_inception)]
-mod tests {
+mod suite {
     use super::super::backfill::{parse_backfill_spec, split_schema_table};
     use super::super::codegen::{
         commands_to_sql, parse_qail_to_commands_strict, parse_qail_to_sql,
