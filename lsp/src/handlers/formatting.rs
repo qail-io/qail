@@ -18,9 +18,10 @@ impl QailLanguageServer {
             .documents
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(content) = docs.get(&uri) else {
+        let Some(doc) = docs.get(&uri) else {
             return Ok(None);
         };
+        let content = &doc.text;
 
         let Some((kind, query_text, _, _, _, _)) = full_document_query_span(content) else {
             return Ok(None);

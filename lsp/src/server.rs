@@ -1,8 +1,8 @@
 //! QAIL Language Server Core
 
 use qail_core::analyzer::{
-    QueryCall, TextLiteral, detect_query_calls, extract_text_literals, literal_offset_to_line_col,
-    looks_like_qail_query, looks_like_sql_query, trim_query_bounds,
+    QueryCall, TextLiteral, detect_query_calls, extract_text_literals, looks_like_qail_query,
+    looks_like_sql_query, trim_query_bounds,
 };
 use qail_core::ast::{Condition, Expr, Qail, Value};
 use qail_core::build::{
@@ -13,8 +13,10 @@ use qail_core::parse;
 use qail_core::schema::Schema;
 use qail_core::validator::Validator;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::time::SystemTime;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -25,9 +27,22 @@ use crate::utf16::Utf16Index;
 #[derive(Debug)]
 pub struct QailLanguageServer {
     pub client: Client,
-    pub documents: RwLock<HashMap<String, String>>,
-    pub schema: RwLock<Option<Validator>>,
-    pub build_schema: RwLock<Option<BuildSchema>>,
+    pub documents: RwLock<HashMap<String, OpenDocument>>,
+    pub schemas: RwLock<HashMap<PathBuf, WorkspaceSchemaCache>>,
+}
+
+#[derive(Debug)]
+pub struct OpenDocument {
+    pub text: String,
+    pub version: i32,
+}
+
+#[derive(Debug)]
+pub struct WorkspaceSchemaCache {
+    pub schema_path: PathBuf,
+    pub schema_mtime: Option<SystemTime>,
+    pub validator: Option<Validator>,
+    pub build_schema: Option<BuildSchema>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,68 +66,107 @@ impl QailLanguageServer {
         Self {
             client,
             documents: RwLock::new(HashMap::new()),
-            schema: RwLock::new(None),
-            build_schema: RwLock::new(None),
+            schemas: RwLock::new(HashMap::new()),
         }
     }
 
-    pub fn try_load_schema_from_uri(&self, uri: &str) {
-        if let Ok(schema) = self.schema.read()
-            && schema.is_some()
-        {
-            return;
-        }
-
-        let Some(file_path) = uri_to_file_path(uri) else {
-            return;
-        };
+    pub fn try_load_schema_from_uri(&self, uri: &str) -> Option<PathBuf> {
+        let file_path = uri_to_file_path(uri)?;
 
         for candidate_dir in schema_probe_dirs(&file_path) {
-            if self.load_schema_from_dir(&candidate_dir) {
-                break;
+            let schema_path = candidate_dir.join("schema.qail");
+            let Ok(metadata) = fs::metadata(&schema_path) else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
             }
+
+            let schema_mtime = metadata.modified().ok();
+            let needs_reload = self
+                .schemas
+                .read()
+                .ok()
+                .and_then(|schemas| {
+                    schemas.get(&candidate_dir).map(|cached| {
+                        cached.schema_path != schema_path || cached.schema_mtime != schema_mtime
+                    })
+                })
+                .unwrap_or(true);
+
+            if needs_reload {
+                self.load_schema_from_dir(&candidate_dir, schema_path.clone(), schema_mtime);
+            }
+
+            return Some(candidate_dir);
         }
+
+        None
     }
 
-    fn load_schema_from_dir(&self, workspace_root: &Path) -> bool {
-        let qail_path = workspace_root.join("schema.qail");
-        let Ok(content) = qail_core::schema_source::read_qail_schema_source(&qail_path) else {
-            return false;
+    fn load_schema_from_dir(
+        &self,
+        workspace_root: &Path,
+        schema_path: PathBuf,
+        schema_mtime: Option<SystemTime>,
+    ) {
+        let Ok(content) = qail_core::schema_source::read_qail_schema_source(&schema_path) else {
+            if let Ok(mut schemas) = self.schemas.write() {
+                schemas.remove(workspace_root);
+            }
+            return;
         };
 
-        let mut loaded_any = false;
+        let validator = Schema::from_qail_schema(&content)
+            .ok()
+            .map(|schema| schema.to_validator());
+        let build_schema = BuildSchema::parse(&content).ok();
 
-        if let Ok(schema) = Schema::from_qail_schema(&content)
-            && let Ok(mut s) = self.schema.write()
-        {
-            *s = Some(schema.to_validator());
-            loaded_any = true;
+        if let Ok(mut schemas) = self.schemas.write() {
+            schemas.insert(
+                workspace_root.to_path_buf(),
+                WorkspaceSchemaCache {
+                    schema_path,
+                    schema_mtime,
+                    validator,
+                    build_schema,
+                },
+            );
         }
-
-        if let Ok(schema) = BuildSchema::parse(&content)
-            && let Ok(mut s) = self.build_schema.write()
-        {
-            *s = Some(schema);
-            loaded_any = true;
-        }
-
-        loaded_any
     }
 
-    pub(crate) fn extract_query_at_line(&self, uri: &str, line: usize) -> Option<EmbeddedQuery> {
+    pub(crate) fn schema_validator_for_uri(&self, uri: &str) -> Option<Validator> {
+        let root = self.try_load_schema_from_uri(uri)?;
+        self.schemas.read().ok()?.get(&root)?.validator.clone()
+    }
+
+    pub(crate) fn extract_query_at_position(
+        &self,
+        uri: &str,
+        position: Position,
+    ) -> Option<EmbeddedQuery> {
         let docs = self.documents.read().ok()?;
-        let content = docs.get(uri)?;
+        let content = &docs.get(uri)?.text;
 
         if uri.ends_with(".rs") {
-            return extract_rust_query_at_line(content, line);
+            return extract_rust_query_at_position(content, position);
         }
 
-        extract_text_query_at_line(content, line)
+        extract_text_query_at_position(content, position)
+    }
+
+    pub(crate) fn get_document(&self, uri: &str) -> Option<String> {
+        self.documents
+            .read()
+            .ok()?
+            .get(uri)
+            .map(|doc| doc.text.clone())
     }
 
     /// Get diagnostics for a document. Pass the file URI to enable N+1 detection for `.rs` files.
     pub fn get_diagnostics(&self, text: &str, uri: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
+        let schema_root = self.try_load_schema_from_uri(uri);
 
         // ── QAIL query syntax diagnostics ──
         if uri.ends_with(".rs") {
@@ -165,8 +219,10 @@ impl QailLanguageServer {
         }
 
         // ── Schema + RLS semantic diagnostics (matches build/CLI pipeline) ──
-        if let Ok(schema) = self.build_schema.read()
-            && let Some(build_schema) = schema.as_ref()
+        if let Some(root) = schema_root
+            && let Ok(schemas) = self.schemas.read()
+            && let Some(cache) = schemas.get(&root)
+            && let Some(build_schema) = cache.build_schema.as_ref()
         {
             diagnostics.extend(collect_semantic_qail_diagnostics(text, uri, build_schema));
         }
@@ -652,21 +708,33 @@ fn rust_query_chain_has_rls(text: &str, query: &QueryCall) -> bool {
     snippet.contains(".with_rls(") || snippet.contains(".rls(")
 }
 
+fn split_validation_message(message: &str) -> Option<(usize, &str)> {
+    let mut search_start = 0usize;
+
+    while let Some(rel_sep_idx) = message.get(search_start..)?.find(": ") {
+        let sep_idx = search_start + rel_sep_idx;
+        let prefix = message.get(..sep_idx)?;
+        if let Some((_, line_part)) = prefix.rsplit_once(':')
+            && let Ok(line) = line_part.trim().parse::<usize>()
+        {
+            let body = message.get(sep_idx + 2..)?;
+            return Some((line, body));
+        }
+
+        search_start = sep_idx + 2;
+    }
+
+    None
+}
+
 fn extract_line_from_validation_message(message: &str) -> Option<usize> {
-    let (_, rest) = message.split_once(':')?;
-    let (line, _) = rest.split_once(':')?;
-    line.trim().parse::<usize>().ok()
+    split_validation_message(message).map(|(line, _)| line)
 }
 
 fn strip_file_line_prefix(message: &str) -> String {
-    if let Some((_, rest)) = message.split_once(':')
-        && let Some((line, tail)) = rest.split_once(':')
-        && line.trim().parse::<usize>().is_ok()
-    {
-        return tail.trim_start().to_string();
-    }
-
-    message.to_string()
+    split_validation_message(message)
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_else(|| message.to_string())
 }
 
 fn diagnostic_from_parse_error(
@@ -694,11 +762,19 @@ fn diagnostic_from_parse_error(
     }
 }
 
+#[cfg(test)]
 fn extract_rust_query_at_line(content: &str, line: usize) -> Option<EmbeddedQuery> {
     detect_query_calls(content)
         .into_iter()
         .find(|query| is_line_in_query_call(query, line))
         .map(|query| query_call_to_embedded(content, query))
+}
+
+fn extract_rust_query_at_position(content: &str, position: Position) -> Option<EmbeddedQuery> {
+    detect_query_calls(content)
+        .into_iter()
+        .map(|query| query_call_to_embedded(content, query))
+        .find(|query| embedded_query_contains_position(query, position))
 }
 
 fn query_call_to_embedded(content: &str, query: QueryCall) -> EmbeddedQuery {
@@ -725,12 +801,14 @@ fn query_call_to_embedded(content: &str, query: QueryCall) -> EmbeddedQuery {
     }
 }
 
+#[cfg(test)]
 fn is_line_in_query_call(query: &QueryCall, line: usize) -> bool {
     let start = query.start_line.saturating_sub(1);
     let end = query.end_line.saturating_sub(1);
     (start..=end).contains(&line)
 }
 
+#[cfg(test)]
 fn extract_text_query_at_line(content: &str, line: usize) -> Option<EmbeddedQuery> {
     for literal in extract_text_literals(content) {
         if !is_line_in_literal(&literal, line) {
@@ -773,9 +851,98 @@ fn extract_text_query_at_line(content: &str, line: usize) -> Option<EmbeddedQuer
     None
 }
 
+fn extract_text_query_at_position(content: &str, position: Position) -> Option<EmbeddedQuery> {
+    for literal in extract_text_literals(content) {
+        let Some((kind, query_text, start_line, start_col, end_line, end_col)) =
+            literal_query_span(content, &literal)
+        else {
+            continue;
+        };
+
+        let query = EmbeddedQuery {
+            kind,
+            text: query_text.to_string(),
+            start_line: start_line.saturating_sub(1),
+            start_column: start_col.saturating_sub(1),
+            end_line: end_line.saturating_sub(1),
+            end_column: end_col.saturating_sub(1),
+        };
+
+        if embedded_query_contains_position(&query, position) {
+            return Some(query);
+        }
+    }
+
+    if let Some((kind, query_text, start_line, start_col, end_line, end_col)) =
+        full_document_query_span(content)
+    {
+        let query = EmbeddedQuery {
+            kind,
+            text: query_text.to_string(),
+            start_line: start_line.saturating_sub(1),
+            start_column: start_col.saturating_sub(1),
+            end_line: end_line.saturating_sub(1),
+            end_column: end_col.saturating_sub(1),
+        };
+
+        if embedded_query_contains_position(&query, position) {
+            return Some(query);
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
 fn is_line_in_literal(literal: &TextLiteral, zero_based_line: usize) -> bool {
     let line = zero_based_line + 1;
     (literal.start_line..=literal.end_line).contains(&line)
+}
+
+pub(crate) fn embedded_query_contains_position(query: &EmbeddedQuery, position: Position) -> bool {
+    let line = position.line as usize;
+    let character = position.character as usize;
+
+    if line < query.start_line || line > query.end_line {
+        return false;
+    }
+
+    if query.start_line == query.end_line {
+        return character >= query.start_column && character <= query.end_column;
+    }
+
+    if line == query.start_line {
+        return character >= query.start_column;
+    }
+    if line == query.end_line {
+        return character <= query.end_column;
+    }
+
+    true
+}
+
+fn literal_byte_offset_to_line_col(literal: &TextLiteral, offset: usize) -> (usize, usize) {
+    let capped = offset.min(literal.text.len());
+    let mut rel_line = 0usize;
+    let mut rel_col_bytes = 0usize;
+
+    for b in literal.text.as_bytes().iter().take(capped) {
+        if *b == b'\n' {
+            rel_line += 1;
+            rel_col_bytes = 0;
+        } else {
+            rel_col_bytes += 1;
+        }
+    }
+
+    let line = literal.start_line + rel_line;
+    let column = if rel_line == 0 {
+        literal.start_column + rel_col_bytes
+    } else {
+        rel_col_bytes + 1
+    };
+
+    (line, column)
 }
 
 fn literal_query_span<'a>(
@@ -792,14 +959,16 @@ fn literal_query_span<'a>(
         return None;
     };
 
-    let (start_line, start_col_byte) = literal_offset_to_line_col(literal, start);
-    let (end_line, end_col_byte) = literal_offset_to_line_col(literal, end);
+    let (start_line, start_col_byte) = literal_byte_offset_to_line_col(literal, start);
+    let (end_line, end_col_byte) = literal_byte_offset_to_line_col(literal, end);
     let utf16 = Utf16Index::new(content);
     let start_col = utf16
         .one_based_byte_col_to_utf16(start_line, start_col_byte)
+        .map(|col| col.saturating_add(1))
         .unwrap_or(start_col_byte);
     let end_col = utf16
         .one_based_byte_col_to_utf16(end_line, end_col_byte)
+        .map(|col| col.saturating_add(1))
         .unwrap_or(end_col_byte);
     Some((kind, query_text, start_line, start_col, end_line, end_col))
 }
@@ -835,8 +1004,13 @@ impl LanguageServer for QailLanguageServer {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::FULL),
+                        save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                        ..Default::default()
+                    },
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 completion_provider: Some(CompletionOptions {
@@ -871,6 +1045,14 @@ impl LanguageServer for QailLanguageServer {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         self.handle_did_change(params).await;
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        self.handle_did_close(params).await;
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        self.handle_did_change_watched_files(params).await;
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

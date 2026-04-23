@@ -5,8 +5,9 @@
 
 use qail_core::ast::Qail;
 use qail_core::ast::builders::{count, count_filter, eq as cond_eq, max, sum};
+use bytes::{Bytes, BytesMut};
 use qail_pg::protocol::AstEncoder;
-use qail_pg::{ConnectOptions, PgBytesRow, PgConnection, PgPool, PgRow, PoolConfig, TlsMode};
+use qail_pg::{ConnectOptions, PgBytesRow, PgConnection, PgEncoder, PgPool, PgRow, PoolConfig, TlsMode};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Barrier;
@@ -224,6 +225,26 @@ struct PreparedBatch {
 }
 
 #[derive(Clone, Debug)]
+struct PreparedSinglesWireBatch {
+    wires: Vec<Bytes>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SingleProfile {
+    send: Duration,
+    consume: Duration,
+    calls: usize,
+}
+
+impl SingleProfile {
+    fn record(&mut self, send: Duration, consume: Duration) {
+        self.send += send;
+        self.consume += consume;
+        self.calls += 1;
+    }
+}
+
+#[derive(Clone, Debug)]
 struct BenchDbConfig {
     host: String,
     port: u16,
@@ -337,6 +358,20 @@ fn env_override(primary: &str, fallback: &str) -> Option<String> {
     std::env::var(primary)
         .ok()
         .or_else(|| std::env::var(fallback).ok())
+}
+
+fn want_single_profile() -> bool {
+    std::env::var("QAIL_PROFILE_SINGLE")
+        .ok()
+        .map(|v| {
+            let normalized = v.trim().to_ascii_lowercase();
+            !(normalized.is_empty()
+                || normalized == "0"
+                || normalized == "false"
+                || normalized == "no"
+                || normalized == "off")
+        })
+        .unwrap_or(false)
 }
 
 fn env_usize(name: &str) -> Option<usize> {
@@ -673,6 +708,34 @@ fn encode_prepared_batch(cmds: &[Qail]) -> Result<PreparedBatch, Box<dyn std::er
     })
 }
 
+fn encode_prepared_singles_wire_batch(
+    stmt: &qail_pg::driver::PreparedStatement,
+    params_batch: &[Vec<Option<Vec<u8>>>],
+    result_format: i16,
+) -> Result<PreparedSinglesWireBatch, Box<dyn std::error::Error>> {
+    let mut wires = Vec::with_capacity(params_batch.len());
+
+    for params in params_batch {
+        let needed = PgEncoder::bind_execute_sync_wire_len_with_formats(
+            stmt.name(),
+            params,
+            PgEncoder::FORMAT_TEXT,
+            result_format,
+        )
+        .map_err(|e| format!("failed to size prepared single wire: {}", e))?;
+
+        let mut wire = BytesMut::with_capacity(needed);
+        PgEncoder::encode_bind_to_with_result_format(&mut wire, stmt.name(), params, result_format)
+            .map_err(|e| format!("failed to encode prepared single wire: {}", e))?;
+        PgEncoder::encode_execute_to(&mut wire);
+        PgEncoder::encode_sync_to(&mut wire);
+        debug_assert_eq!(wire.len(), needed);
+        wires.push(wire.freeze());
+    }
+
+    Ok(PreparedSinglesWireBatch { wires })
+}
+
 fn split_commands_for_pool(cmds: &[Qail]) -> Result<Vec<Vec<Qail>>, Box<dyn std::error::Error>> {
     if cmds.len() % POOL_SIZE != 0 {
         return Err(format!(
@@ -843,6 +906,87 @@ async fn run_single_iteration(
     Ok(stats)
 }
 
+async fn run_single_iteration_encoded(
+    conn: &mut PgConnection,
+    wire_batch: &PreparedSinglesWireBatch,
+    result_mode: ResultMode,
+    mut profile: Option<&mut SingleProfile>,
+) -> Result<BatchStats, Box<dyn std::error::Error>> {
+    let mut stats = BatchStats::default();
+    for wire in &wire_batch.wires {
+        match result_mode {
+            ResultMode::ScalarInt => {
+                if let Some(single_profile) = profile.as_deref_mut() {
+                    let (_, send, consume) = conn
+                        .query_prepared_single_encoded_visit_first_column_bytes_profiled(
+                            wire.as_ref(),
+                            |value| {
+                                consume_scalar_value(value, &mut stats);
+                                Ok(())
+                            },
+                        )
+                        .await?;
+                    single_profile.record(send, consume);
+                } else {
+                    conn.query_prepared_single_encoded_visit_first_column_bytes(
+                        wire.as_ref(),
+                        |value| {
+                            consume_scalar_value(value, &mut stats);
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                }
+            }
+            ResultMode::AggregateScalars => {
+                if let Some(single_profile) = profile.as_deref_mut() {
+                    let (_, send, consume) = conn
+                        .query_prepared_single_encoded_visit_first_four_columns_bytes_profiled(
+                            wire.as_ref(),
+                            |columns| {
+                                consume_aggregate_columns(columns, &mut stats);
+                                Ok(())
+                            },
+                        )
+                        .await?;
+                    single_profile.record(send, consume);
+                } else {
+                    conn.query_prepared_single_encoded_visit_first_four_columns_bytes(
+                        wire.as_ref(),
+                        |columns| {
+                            consume_aggregate_columns(columns, &mut stats);
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                }
+            }
+            _ => {
+                if let Some(single_profile) = profile.as_deref_mut() {
+                    let (_, send, consume) = conn
+                        .query_prepared_single_encoded_visit_bytes_rows_profiled(
+                            wire.as_ref(),
+                            |row| {
+                                consume_bytes_row(row, result_mode, &mut stats);
+                                Ok(())
+                            },
+                        )
+                        .await?;
+                    single_profile.record(send, consume);
+                } else {
+                    conn.query_prepared_single_encoded_visit_bytes_rows(wire.as_ref(), |row| {
+                        consume_bytes_row(row, result_mode, &mut stats);
+                        Ok(())
+                    })
+                    .await?;
+                }
+            }
+        }
+        stats.completed += 1;
+    }
+    Ok(stats)
+}
+
 async fn run_pipeline_iteration(
     conn: &mut PgConnection,
     stmt: &qail_pg::driver::PreparedStatement,
@@ -902,35 +1046,55 @@ async fn run_single_mode(
     let mut conn = connect_bench_connection(cfg).await?;
     let prepared = encode_prepared_batch(cmds)?;
     let stmt = conn.prepare(&prepared.sql).await?;
+    let wire_batch = encode_prepared_singles_wire_batch(&stmt, &prepared.params_batch, 0)?;
+    let profile_single = want_single_profile();
 
-    let warmup =
-        run_single_iteration(&mut conn, &stmt, &prepared.params_batch, spec.result_mode).await?;
-    if warmup.completed != prepared.params_batch.len() {
+    let warmup = run_single_iteration_encoded(&mut conn, &wire_batch, spec.result_mode, None).await?;
+    if warmup.completed != wire_batch.wires.len() {
         return Err(format!(
             "warmup completed {} queries, expected {}",
             warmup.completed,
-            prepared.params_batch.len()
+            wire_batch.wires.len()
         )
         .into());
     }
 
     let mut total = Duration::ZERO;
     let mut aggregate = BatchStats::default();
+    let mut single_profile = SingleProfile::default();
     for _ in 0..spec.iterations {
         let start = Instant::now();
-        let stats =
-            run_single_iteration(&mut conn, &stmt, &prepared.params_batch, spec.result_mode)
-                .await?;
+        let stats = if profile_single {
+            run_single_iteration_encoded(
+                &mut conn,
+                &wire_batch,
+                spec.result_mode,
+                Some(&mut single_profile),
+            )
+            .await?
+        } else {
+            run_single_iteration_encoded(&mut conn, &wire_batch, spec.result_mode, None).await?
+        };
         total += start.elapsed();
-        if stats.completed != prepared.params_batch.len() {
+        if stats.completed != wire_batch.wires.len() {
             return Err(format!(
                 "run completed {} queries, expected {}",
                 stats.completed,
-                prepared.params_batch.len()
+                wire_batch.wires.len()
             )
             .into());
         }
         aggregate.add(stats);
+    }
+
+    if profile_single && single_profile.calls > 0 {
+        let calls = single_profile.calls as f64;
+        eprintln!(
+            "single split avg/call: send={:.3}ms consume={:.3}ms calls={}",
+            single_profile.send.as_secs_f64() * 1000.0 / calls,
+            single_profile.consume.as_secs_f64() * 1000.0 / calls,
+            single_profile.calls
+        );
     }
 
     Ok(make_benchmark_result(aggregate, total))

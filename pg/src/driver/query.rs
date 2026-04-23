@@ -10,6 +10,7 @@ use super::{
 };
 use crate::protocol::{BackendMessage, PgEncoder};
 use bytes::{Bytes, BytesMut};
+use std::time::{Duration, Instant};
 
 #[inline]
 fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError>, err: PgError) {
@@ -1444,6 +1445,265 @@ impl PgConnection {
                         other => {
                             return Err(unexpected_backend_msg_type(
                                 "prepared single reuse visit first-four execute",
+                                other,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Sequential prepared query from pre-encoded Bind/Execute/Sync wire bytes.
+    ///
+    /// `wire` must contain exactly one prepared-statement execution.
+    #[inline]
+    pub async fn query_prepared_single_encoded_visit_bytes_rows<F>(
+        &mut self,
+        wire: &[u8],
+        on_row: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(&super::PgBytesRow) -> PgResult<()>,
+    {
+        let (row_count, _, _) = self
+            .query_prepared_single_encoded_visit_bytes_rows_profiled(wire, on_row)
+            .await?;
+        Ok(row_count)
+    }
+
+    /// Sequential prepared query from pre-encoded Bind/Execute/Sync wire bytes.
+    ///
+    /// Returns `(rows, send_elapsed, consume_elapsed)`.
+    #[inline]
+    pub async fn query_prepared_single_encoded_visit_bytes_rows_profiled<F>(
+        &mut self,
+        wire: &[u8],
+        mut on_row: F,
+    ) -> PgResult<(usize, Duration, Duration)>
+    where
+        F: FnMut(&super::PgBytesRow) -> PgResult<()>,
+    {
+        let send_start = Instant::now();
+        self.send_bytes(wire).await?;
+        let send_elapsed = send_start.elapsed();
+        let consume_start = Instant::now();
+
+        let mut row_count = 0usize;
+        let mut row = super::PgBytesRow::default();
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
+
+        loop {
+            match self.recv_fill_zerocopy_row_fast(&mut row).await {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(
+                        msg_type,
+                        "prepared single encoded visit bytes execute",
+                        error.is_some(),
+                    )?;
+                    match msg_type {
+                        b'2' | b'T' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_row(&row)?;
+                                row_count += 1;
+                                row.release_payload();
+                            }
+                        }
+                        b'C' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok((row_count, send_elapsed, consume_start.elapsed()));
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "prepared single encoded visit bytes execute",
+                                other,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Sequential prepared query from pre-encoded Bind/Execute/Sync wire bytes.
+    #[inline]
+    pub async fn query_prepared_single_encoded_visit_first_column_bytes<F>(
+        &mut self,
+        wire: &[u8],
+        on_value: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut(Option<&[u8]>) -> PgResult<()>,
+    {
+        let (row_count, _, _) = self
+            .query_prepared_single_encoded_visit_first_column_bytes_profiled(wire, on_value)
+            .await?;
+        Ok(row_count)
+    }
+
+    /// Sequential prepared query from pre-encoded Bind/Execute/Sync wire bytes.
+    ///
+    /// Returns `(rows, send_elapsed, consume_elapsed)`.
+    #[inline]
+    pub async fn query_prepared_single_encoded_visit_first_column_bytes_profiled<F>(
+        &mut self,
+        wire: &[u8],
+        mut on_value: F,
+    ) -> PgResult<(usize, Duration, Duration)>
+    where
+        F: FnMut(Option<&[u8]>) -> PgResult<()>,
+    {
+        let send_start = Instant::now();
+        self.send_bytes(wire).await?;
+        let send_elapsed = send_start.elapsed();
+        let consume_start = Instant::now();
+
+        let mut row_count = 0usize;
+        let mut first_column: Option<Bytes> = None;
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
+
+        loop {
+            match self
+                .recv_fill_first_column_zerocopy_fast(&mut first_column)
+                .await
+            {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(
+                        msg_type,
+                        "prepared single encoded visit first-column execute",
+                        error.is_some(),
+                    )?;
+                    match msg_type {
+                        b'2' | b'T' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_value(first_column.as_deref())?;
+                                row_count += 1;
+                                first_column = None;
+                            }
+                        }
+                        b'C' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok((row_count, send_elapsed, consume_start.elapsed()));
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "prepared single encoded visit first-column execute",
+                                other,
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(&e, PgError::QueryServer(_)) {
+                        capture_query_server_error(self, &mut error, e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Sequential prepared query from pre-encoded Bind/Execute/Sync wire bytes.
+    #[inline]
+    pub async fn query_prepared_single_encoded_visit_first_four_columns_bytes<F>(
+        &mut self,
+        wire: &[u8],
+        on_row: F,
+    ) -> PgResult<usize>
+    where
+        F: FnMut([Option<&[u8]>; 4]) -> PgResult<()>,
+    {
+        let (row_count, _, _) = self
+            .query_prepared_single_encoded_visit_first_four_columns_bytes_profiled(wire, on_row)
+            .await?;
+        Ok(row_count)
+    }
+
+    /// Sequential prepared query from pre-encoded Bind/Execute/Sync wire bytes.
+    ///
+    /// Returns `(rows, send_elapsed, consume_elapsed)`.
+    #[inline]
+    pub async fn query_prepared_single_encoded_visit_first_four_columns_bytes_profiled<F>(
+        &mut self,
+        wire: &[u8],
+        mut on_row: F,
+    ) -> PgResult<(usize, Duration, Duration)>
+    where
+        F: FnMut([Option<&[u8]>; 4]) -> PgResult<()>,
+    {
+        let send_start = Instant::now();
+        self.send_bytes(wire).await?;
+        let send_elapsed = send_start.elapsed();
+        let consume_start = Instant::now();
+
+        let mut row_count = 0usize;
+        let mut columns = [None, None, None, None];
+        let mut error: Option<PgError> = None;
+        let mut flow = ExtendedFlowTracker::new(ExtendedFlowConfig::parse_bind_execute(false));
+
+        loop {
+            match self
+                .recv_fill_first_four_columns_zerocopy_fast(&mut columns)
+                .await
+            {
+                Ok(msg_type) => {
+                    flow.validate_msg_type(
+                        msg_type,
+                        "prepared single encoded visit first-four execute",
+                        error.is_some(),
+                    )?;
+                    match msg_type {
+                        b'2' | b'T' | b'n' => {}
+                        b'D' => {
+                            if error.is_none() {
+                                on_row([
+                                    columns[0].as_deref(),
+                                    columns[1].as_deref(),
+                                    columns[2].as_deref(),
+                                    columns[3].as_deref(),
+                                ])?;
+                                columns.fill(None);
+                                row_count += 1;
+                            }
+                        }
+                        b'C' => {}
+                        b'Z' => {
+                            if let Some(err) = error {
+                                return Err(err);
+                            }
+                            return Ok((row_count, send_elapsed, consume_start.elapsed()));
+                        }
+                        msg_type if is_ignorable_session_msg_type(msg_type) => {}
+                        other => {
+                            return Err(unexpected_backend_msg_type(
+                                "prepared single encoded visit first-four execute",
                                 other,
                             ));
                         }

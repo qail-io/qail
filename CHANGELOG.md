@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.10] - 2026-04-23
+
+### Fixed
+
+- **LSP schema cache reload behavior:** schema resolution is now workspace-scoped and reload-aware, preventing stale schema diagnostics/completions when switching roots or editing `schema.qail`.
+- **LSP completion context gating:** completion suggestions are now constrained to active Rust builder/QAIL query contexts instead of returning broad static+schema results in unrelated cursor locations.
+- **LSP validation line parsing on Windows paths:** diagnostic line extraction now handles drive-letter and colon-rich message prefixes safely.
+- **LSP diagnostic ordering:** document lifecycle handling now tracks text document versions, ignores out-of-order `didChange` updates, and publishes diagnostics with explicit versions during schema-triggered refresh.
+- **LSP close lifecycle cleanup:** `didClose` removes in-memory document state and clears diagnostics for closed documents.
+- **LSP hover/range positioning:** embedded query hit-testing and literal query span mapping now consistently use UTF-16-safe ranges for non-ASCII text.
+
+### Changed
+
+- **LSP regression coverage:** added end-to-end coverage for out-of-order `didChange` handling, watched schema refresh behavior, and multi-workspace schema cache isolation/reload.
+- **Versioning/docs:** bumped Rust workspace crates and current docs/install/readme references to `0.27.10`.
+
 ## [0.27.9] - 2026-04-17
 
 ### Fixed

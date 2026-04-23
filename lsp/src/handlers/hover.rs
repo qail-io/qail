@@ -15,9 +15,9 @@ impl QailLanguageServer {
             .text_document
             .uri
             .to_string();
-        let line = params.text_document_position_params.position.line as usize;
+        let position = params.text_document_position_params.position;
 
-        if let Some(query) = self.extract_query_at_line(&uri, line) {
+        if let Some(query) = self.extract_query_at_position(&uri, position) {
             let range = Some(Range {
                 start: Position {
                     line: query.start_line as u32,

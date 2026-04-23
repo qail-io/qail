@@ -537,9 +537,10 @@ impl QailLanguageServer {
             .documents
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(content) = docs.get(uri.as_str()) else {
+        let Some(doc) = docs.get(uri.as_str()) else {
             return Ok(Some(actions));
         };
+        let content = &doc.text;
 
         actions.extend(semantic_quickfix_actions(
             &uri,

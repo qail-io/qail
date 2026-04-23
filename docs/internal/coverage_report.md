@@ -1,4 +1,4 @@
-# QAIL PostgreSQL Deep Coverage Report (v0.27.9)
+# QAIL PostgreSQL Deep Coverage Report (v0.27.10)
 
 ## Executive Summary
 
