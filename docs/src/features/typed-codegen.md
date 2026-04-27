@@ -74,7 +74,7 @@ use schema::{users, posts};
 // Tables and columns are type-safe
 Qail::get(users::table)
     .columns([users::id, users::email])
-    .join_on(posts::table)
+    .join_on(posts::table)?
 ```
 
 ## Type Mapping
@@ -213,4 +213,3 @@ Qail::get(users::table)
     .with_cap(&NoCap)
     .column_protected(users::password_hash)
 ```
-

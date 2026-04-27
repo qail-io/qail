@@ -148,13 +148,11 @@ pub(super) fn gss_circuit_record_failure(config: &PoolConfig) {
     let Ok(mut registry) = gss_circuit_registry().lock() else {
         return;
     };
-    let state = registry
-        .entry(key.clone())
-        .or_insert_with(|| GssCircuitState {
-            window_started_at: now,
-            failure_count: 0,
-            open_until: None,
-        });
+    let state = registry.entry(key).or_insert_with(|| GssCircuitState {
+        window_started_at: now,
+        failure_count: 0,
+        open_until: None,
+    });
 
     if now.duration_since(state.window_started_at) > config.gss_circuit_breaker_window {
         state.window_started_at = now;

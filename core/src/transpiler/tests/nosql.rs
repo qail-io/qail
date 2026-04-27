@@ -172,3 +172,68 @@ fn test_qdrant_and_plus_or_filter_output() {
         "Expected should group: {qdrant}"
     );
 }
+
+#[test]
+fn test_qdrant_multiple_or_cages_remain_separate_groups() {
+    use crate::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+
+    let qdrant = Qail {
+        table: "points".to_string(),
+        cages: vec![
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![Condition {
+                    left: Expr::Named("tenant_id".to_string()),
+                    op: Operator::Eq,
+                    value: Value::String("t1".to_string()),
+                    is_array_unnest: false,
+                }],
+                logical_op: LogicalOp::And,
+            },
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![
+                    Condition {
+                        left: Expr::Named("city".to_string()),
+                        op: Operator::Eq,
+                        value: Value::String("London".to_string()),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("city".to_string()),
+                        op: Operator::Eq,
+                        value: Value::String("Paris".to_string()),
+                        is_array_unnest: false,
+                    },
+                ],
+                logical_op: LogicalOp::Or,
+            },
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![
+                    Condition {
+                        left: Expr::Named("country".to_string()),
+                        op: Operator::Eq,
+                        value: Value::String("UK".to_string()),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("country".to_string()),
+                        op: Operator::Eq,
+                        value: Value::String("FR".to_string()),
+                        is_array_unnest: false,
+                    },
+                ],
+                logical_op: LogicalOp::Or,
+            },
+        ],
+        ..Default::default()
+    }
+    .to_qdrant_search();
+
+    let should_count = qdrant.matches("\"should\": [").count();
+    assert!(
+        should_count >= 2,
+        "Expected multiple nested OR groups, got {should_count}: {qdrant}"
+    );
+}

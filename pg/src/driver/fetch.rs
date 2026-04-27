@@ -590,7 +590,7 @@ impl PgDriver {
                     if is_cache_miss {
                         self.connection
                             .column_info_cache
-                            .insert(sql_hash, info.clone());
+                            .insert(sql_hash, Arc::clone(&info));
                     }
                     column_info = Some(info);
                 }

@@ -1,4 +1,3 @@
-use qail_core::ast::Distance;
 use qail_qdrant::QdrantDriver;
 use tokio::time::{Duration, sleep};
 
@@ -9,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating collection: {}", collection);
     driver
-        .create_collection(collection, 128, Distance::Cosine, false)
+        .create_collection(collection, 128, qail_qdrant::Distance::Cosine, false)
         .await?;
     println!("Collection created successfully!");
 

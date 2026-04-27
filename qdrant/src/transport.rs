@@ -26,10 +26,6 @@ const GRPC_CONTENT_TYPE: &str = "application/grpc";
 /// Default per-request timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Qdrant gRPC service paths
-#[allow(dead_code)]
-const POINTS_SERVICE: &str = "qdrant.Points";
-
 // gRPC method paths
 const METHOD_SEARCH: &str = "/qdrant.Points/Search";
 const METHOD_UPSERT: &str = "/qdrant.Points/Upsert";
@@ -73,9 +69,6 @@ pub struct GrpcClient {
     tls: bool,
     /// Cached TLS config (None when plain TCP)
     tls_config: Option<Arc<rustls::ClientConfig>>,
-    /// Server URI
-    #[allow(dead_code)]
-    uri: Uri,
     /// Per-request timeout
     timeout: Duration,
 }
@@ -85,17 +78,12 @@ impl GrpcClient {
     pub async fn connect(host: &str, port: u16) -> QdrantResult<Self> {
         let sender = Self::establish_plain(host, port).await?;
 
-        let uri: Uri = format!("http://{}:{}", host, port)
-            .parse()
-            .map_err(|e| QdrantError::Connection(format!("Invalid URI: {}", e)))?;
-
         Ok(Self {
             sender: Arc::new(Mutex::new(Some(sender))),
             host: host.to_string(),
             port,
             tls: false,
             tls_config: None,
-            uri,
             timeout: DEFAULT_TIMEOUT,
         })
     }
@@ -107,17 +95,12 @@ impl GrpcClient {
         let tls_config = build_tls_config()?;
         let sender = Self::establish_tls(host, port, &tls_config).await?;
 
-        let uri: Uri = format!("https://{}:{}", host, port)
-            .parse()
-            .map_err(|e| QdrantError::Connection(format!("Invalid URI: {}", e)))?;
-
         Ok(Self {
             sender: Arc::new(Mutex::new(Some(sender))),
             host: host.to_string(),
             port,
             tls: true,
             tls_config: Some(tls_config),
-            uri,
             timeout: DEFAULT_TIMEOUT,
         })
     }

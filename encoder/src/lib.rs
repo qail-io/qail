@@ -18,9 +18,6 @@
 //! - Caller-owned memory with explicit `qail_free` / `qail_free_bytes` deallocation
 //! - Thread-local error reporting via `qail_last_error()`
 
-// FFI functions check pointers before dereferencing, clippy doesn't understand this pattern
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
-
 use qail_core::transpiler::ToSql;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
@@ -75,8 +72,12 @@ pub extern "C" fn qail_version() -> *const c_char {
 /// Transpile QAIL text to SQL.
 /// Returns NULL on error.
 /// Caller must free with qail_free().
+///
+/// # Safety
+///
+/// `qail` must be a valid, NUL-terminated C string pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_transpile(qail: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn qail_transpile(qail: *const c_char) -> *mut c_char {
     ffi_catch!(std::ptr::null_mut(), {
         clear_error();
 
@@ -85,6 +86,8 @@ pub extern "C" fn qail_transpile(qail: *const c_char) -> *mut c_char {
             return std::ptr::null_mut();
         }
 
+        // SAFETY: `qail` is checked non-null above and the caller contract
+        // requires it to point to a valid NUL-terminated C string.
         let c_str = unsafe { CStr::from_ptr(qail) };
         let qail_str = match c_str.to_str() {
             Ok(s) => s,
@@ -115,13 +118,19 @@ pub extern "C" fn qail_transpile(qail: *const c_char) -> *mut c_char {
 
 /// Validate QAIL syntax.
 /// Returns 1 if valid, 0 if invalid.
+///
+/// # Safety
+///
+/// If non-null, `qail` must be a valid, NUL-terminated C string pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_validate(qail: *const c_char) -> i32 {
+pub unsafe extern "C" fn qail_validate(qail: *const c_char) -> i32 {
     ffi_catch!(0, {
         if qail.is_null() {
             return 0;
         }
 
+        // SAFETY: `qail` is checked non-null above and the caller contract
+        // requires it to point to a valid NUL-terminated C string.
         let c_str = unsafe { CStr::from_ptr(qail) };
         match c_str.to_str() {
             Ok(s) => {
@@ -143,8 +152,13 @@ pub extern "C" fn qail_validate(qail: *const c_char) -> i32 {
 /// Encode a SELECT query to PostgreSQL wire protocol bytes.
 /// Returns 0 on success, non-zero on error.
 /// Caller must free with qail_free_bytes().
+///
+/// # Safety
+///
+/// `table` and optional `columns` must be valid, NUL-terminated C strings.
+/// `out_ptr` and `out_len` must be valid writable pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_encode_get(
+pub unsafe extern "C" fn qail_encode_get(
     table: *const c_char,
     columns: *const c_char, // comma-separated, or "*" for all
     limit: i64,             // -1 for no limit
@@ -159,6 +173,8 @@ pub extern "C" fn qail_encode_get(
             return -1;
         }
 
+        // SAFETY: `table` is checked non-null above and the caller contract
+        // requires it to point to a valid NUL-terminated C string.
         let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
             Ok(s) => s,
             Err(e) => {
@@ -172,6 +188,8 @@ pub extern "C" fn qail_encode_get(
 
         // Parse columns
         if !columns.is_null() {
+            // SAFETY: `columns` is non-null in this branch and the caller
+            // contract requires it to be a valid NUL-terminated C string.
             let cols_str = match unsafe { CStr::from_ptr(columns) }.to_str() {
                 Ok(s) => s,
                 Err(e) => {
@@ -209,6 +227,8 @@ pub extern "C" fn qail_encode_get(
         let ptr = boxed.as_mut_ptr();
         std::mem::forget(boxed);
 
+        // SAFETY: `out_ptr` and `out_len` are checked non-null above and
+        // the caller contract requires them to be writable.
         unsafe {
             *out_ptr = ptr;
             *out_len = len;
@@ -220,8 +240,13 @@ pub extern "C" fn qail_encode_get(
 
 /// Encode a batch of uniform SELECT queries.
 /// All queries have same table/columns, just repeated `count` times.
+///
+/// # Safety
+///
+/// `table` and optional `columns` must be valid, NUL-terminated C strings.
+/// `out_ptr` and `out_len` must be valid writable pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_encode_uniform_batch(
+pub unsafe extern "C" fn qail_encode_uniform_batch(
     table: *const c_char,
     columns: *const c_char,
     limit: i64,
@@ -237,6 +262,8 @@ pub extern "C" fn qail_encode_uniform_batch(
             return -1;
         }
 
+        // SAFETY: `table` is checked non-null above and the caller contract
+        // requires it to point to a valid NUL-terminated C string.
         let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
             Ok(s) => s,
             Err(e) => {
@@ -249,6 +276,8 @@ pub extern "C" fn qail_encode_uniform_batch(
         let mut base_cmd = qail_core::ast::Qail::get(table_str);
 
         if !columns.is_null() {
+            // SAFETY: `columns` is non-null in this branch and the caller
+            // contract requires it to be a valid NUL-terminated C string.
             if let Ok(cols_str) = unsafe { CStr::from_ptr(columns) }.to_str() {
                 if cols_str == "*" {
                     base_cmd = base_cmd.select_all();
@@ -284,6 +313,8 @@ pub extern "C" fn qail_encode_uniform_batch(
         let ptr = boxed.as_mut_ptr();
         std::mem::forget(boxed);
 
+        // SAFETY: `out_ptr` and `out_len` are checked non-null above and
+        // the caller contract requires them to be writable.
         unsafe {
             *out_ptr = ptr;
             *out_len = len;
@@ -298,9 +329,16 @@ pub extern "C" fn qail_encode_uniform_batch(
 // ============================================================================
 
 /// Free a string returned by qail_transpile.
+///
+/// # Safety
+///
+/// `ptr` must be null or a pointer returned by `qail_transpile` that has not
+/// already been freed.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_free(ptr: *mut c_char) {
+pub unsafe extern "C" fn qail_free(ptr: *mut c_char) {
     if !ptr.is_null() {
+        // SAFETY: The caller contract requires `ptr` to come from
+        // `CString::into_raw` in `qail_transpile` and not be freed already.
         unsafe {
             drop(CString::from_raw(ptr));
         }
@@ -308,9 +346,16 @@ pub extern "C" fn qail_free(ptr: *mut c_char) {
 }
 
 /// Free bytes returned by qail_encode_* functions.
+///
+/// # Safety
+///
+/// `ptr` and `len` must match a byte buffer returned by a `qail_encode_*`
+/// function and must not have been freed already.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_free_bytes(ptr: *mut u8, len: usize) {
+pub unsafe extern "C" fn qail_free_bytes(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
+        // SAFETY: The caller contract requires `ptr` and `len` to match a
+        // buffer allocated by this library and not be freed already.
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
         }
@@ -328,7 +373,7 @@ pub extern "C" fn qail_last_error() -> *const c_char {
         let error = e.borrow();
         match &*error {
             Some(msg) => ERROR_CSTRING.with(|ec| {
-                let c_str = CString::new(msg.clone()).unwrap_or_default();
+                let c_str = CString::new(msg.as_str()).unwrap_or_default();
                 let ptr = c_str.as_ptr();
                 *ec.borrow_mut() = Some(c_str);
                 ptr
@@ -369,8 +414,13 @@ fn encode_simple_query(sql: &str) -> Vec<u8> {
 /// * `out_len` - Output length
 ///
 /// Returns 0 on success.
+///
+/// # Safety
+///
+/// `sql` and optional `name` must be valid, NUL-terminated C strings.
+/// `out_ptr` and `out_len` must be valid writable pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_encode_parse(
+pub unsafe extern "C" fn qail_encode_parse(
     name: *const c_char,
     sql: *const c_char,
     out_ptr: *mut *mut u8,
@@ -387,9 +437,13 @@ pub extern "C" fn qail_encode_parse(
         let name_str = if name.is_null() {
             ""
         } else {
+            // SAFETY: `name` is non-null in this branch and the caller
+            // contract requires it to be a valid NUL-terminated C string.
             unsafe { CStr::from_ptr(name) }.to_str().unwrap_or_default()
         };
 
+        // SAFETY: `sql` is checked non-null above and the caller contract
+        // requires it to point to a valid NUL-terminated C string.
         let sql_str = match unsafe { CStr::from_ptr(sql) }.to_str() {
             Ok(s) => s,
             Err(e) => {
@@ -405,6 +459,8 @@ pub extern "C" fn qail_encode_parse(
         let ptr = boxed.as_mut_ptr();
         std::mem::forget(boxed);
 
+        // SAFETY: `out_ptr` and `out_len` are checked non-null above and
+        // the caller contract requires them to be writable.
         unsafe {
             *out_ptr = ptr;
             *out_len = len;
@@ -416,8 +472,12 @@ pub extern "C" fn qail_encode_parse(
 
 /// Encode a Sync message.
 /// Used after Parse to wait for ParseComplete.
+///
+/// # Safety
+///
+/// `out_ptr` and `out_len` must be valid writable pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut usize) -> i32 {
+pub unsafe extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut usize) -> i32 {
     if out_ptr.is_null() || out_len.is_null() {
         return -1;
     }
@@ -429,6 +489,8 @@ pub extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut usize) -
     let ptr = boxed.as_mut_ptr();
     std::mem::forget(boxed);
 
+    // SAFETY: `out_ptr` and `out_len` are checked non-null above and the
+    // caller contract requires them to be writable.
     unsafe {
         *out_ptr = ptr;
         *out_len = len;
@@ -449,14 +511,14 @@ pub extern "C" fn qail_encode_sync(out_ptr: *mut *mut u8, out_len: *mut usize) -
 ///
 /// Each query in batch uses params[i % params_count] as its parameter.
 ///
-/// # Safety — `params` Array Bounds
+/// # Safety
 ///
 /// The caller **MUST** ensure that `params` points to a valid array of at least
 /// `params_count` elements. Providing a smaller array is **undefined behavior**
 /// (the function iterates `0..params_count` via `params.add(i)`).
 /// Individual null elements within the array are safely skipped via `filter_map`.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_encode_bind_execute_batch(
+pub unsafe extern "C" fn qail_encode_bind_execute_batch(
     statement: *const c_char,
     params: *const *const c_char, // Array of param strings
     params_count: usize,
@@ -472,6 +534,8 @@ pub extern "C" fn qail_encode_bind_execute_batch(
             return -1;
         }
 
+        // SAFETY: `statement` is checked non-null above and the caller
+        // contract requires it to be a valid NUL-terminated C string.
         let stmt_str = unsafe { CStr::from_ptr(statement) }
             .to_str()
             .unwrap_or_default();
@@ -482,10 +546,14 @@ pub extern "C" fn qail_encode_bind_execute_batch(
         } else {
             (0..params_count)
                 .filter_map(|i| {
+                    // SAFETY: The caller contract requires `params` to point
+                    // to an array containing at least `params_count` entries.
                     let p = unsafe { *params.add(i) };
                     if p.is_null() {
                         None
                     } else {
+                        // SAFETY: Non-null parameter entries are expected to
+                        // point to valid NUL-terminated C strings.
                         unsafe { CStr::from_ptr(p) }.to_str().ok()
                     }
                 })
@@ -524,6 +592,8 @@ pub extern "C" fn qail_encode_bind_execute_batch(
         let ptr = boxed.as_mut_ptr();
         std::mem::forget(boxed);
 
+        // SAFETY: `out_ptr` and `out_len` are checked non-null above and
+        // the caller contract requires them to be writable.
         unsafe {
             *out_ptr = ptr;
             *out_len = len;
@@ -603,8 +673,13 @@ pub struct QailResponse {
 #[cfg(feature = "response")]
 /// Decode PostgreSQL response bytes.
 /// Returns a handle that must be freed with qail_response_free.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes. `out_handle` must be a valid
+/// writable pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_decode_response(
+pub unsafe extern "C" fn qail_decode_response(
     data: *const u8,
     len: usize,
     out_handle: *mut *mut QailResponse,
@@ -617,6 +692,8 @@ pub extern "C" fn qail_decode_response(
             return -1;
         }
 
+        // SAFETY: `data` is checked non-null above and the caller contract
+        // requires it to point to `len` readable bytes.
         let bytes = unsafe { std::slice::from_raw_parts(data, len) };
         let mut response = QailResponse {
             rows: Vec::new(),
@@ -665,6 +742,8 @@ pub extern "C" fn qail_decode_response(
         }
 
         let boxed = Box::new(response);
+        // SAFETY: `out_handle` is checked non-null above and the caller
+        // contract requires it to be writable.
         unsafe { *out_handle = Box::into_raw(boxed) };
         0
     })
@@ -672,38 +751,67 @@ pub extern "C" fn qail_decode_response(
 
 #[cfg(feature = "response")]
 /// Get number of rows in response.
+///
+/// # Safety
+///
+/// If non-null, `handle` must point to a live `QailResponse` returned by
+/// `qail_decode_response`.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_row_count(handle: *const QailResponse) -> usize {
+pub unsafe extern "C" fn qail_response_row_count(handle: *const QailResponse) -> usize {
     if handle.is_null() {
         return 0;
     }
+    // SAFETY: `handle` is checked non-null above and the caller contract
+    // requires it to point to a live `QailResponse`.
     unsafe { (&*handle).rows.len() }
 }
 
 #[cfg(feature = "response")]
 /// Get number of columns in a row.
+///
+/// # Safety
+///
+/// If non-null, `handle` must point to a live `QailResponse` returned by
+/// `qail_decode_response`.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_column_count(handle: *const QailResponse, row: usize) -> usize {
+pub unsafe extern "C" fn qail_response_column_count(
+    handle: *const QailResponse,
+    row: usize,
+) -> usize {
     if handle.is_null() {
         return 0;
     }
+    // SAFETY: `handle` is checked non-null above and the caller contract
+    // requires it to point to a live `QailResponse`.
     unsafe { (&*handle).rows.get(row).map(|r| r.len()).unwrap_or(0) }
 }
 
 #[cfg(feature = "response")]
 /// Get affected row count.
+///
+/// # Safety
+///
+/// If non-null, `handle` must point to a live `QailResponse` returned by
+/// `qail_decode_response`.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_affected_rows(handle: *const QailResponse) -> u64 {
+pub unsafe extern "C" fn qail_response_affected_rows(handle: *const QailResponse) -> u64 {
     if handle.is_null() {
         return 0;
     }
+    // SAFETY: `handle` is checked non-null above and the caller contract
+    // requires it to point to a live `QailResponse`.
     unsafe { (&*handle).affected_rows }
 }
 
 #[cfg(feature = "response")]
 /// Check if a column is NULL.
+///
+/// # Safety
+///
+/// If non-null, `handle` must point to a live `QailResponse` returned by
+/// `qail_decode_response`.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_is_null(
+pub unsafe extern "C" fn qail_response_is_null(
     handle: *const QailResponse,
     row: usize,
     col: usize,
@@ -711,6 +819,8 @@ pub extern "C" fn qail_response_is_null(
     if handle.is_null() {
         return 1;
     }
+    // SAFETY: `handle` is checked non-null above and the caller contract
+    // requires it to point to a live `QailResponse`.
     unsafe {
         let resp = &*handle;
         resp.rows
@@ -725,14 +835,15 @@ pub extern "C" fn qail_response_is_null(
 /// Get column value as string.
 /// Returns pointer to null-terminated string, or NULL if value is NULL.
 ///
-/// # Safety — Pointer Lifetime (L2)
+/// # Safety
 ///
 /// The returned `*out_ptr` borrows memory from the `QailResponse` handle.
 /// It is **only valid** until `qail_response_free(handle)` is called.
 /// Callers **MUST** copy the data (e.g., `memcpy`) before freeing the response
 /// if the value is needed beyond the response's lifetime.
+/// `out_ptr` and `out_len` must be valid writable pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_get_string(
+pub unsafe extern "C" fn qail_response_get_string(
     handle: *const QailResponse,
     row: usize,
     col: usize,
@@ -743,6 +854,8 @@ pub extern "C" fn qail_response_get_string(
         return -1;
     }
 
+    // SAFETY: Pointers are checked non-null above. `handle` must point to a
+    // live response and `out_ptr`/`out_len` must be writable per caller contract.
     unsafe {
         let resp = &*handle;
         if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col)) {
@@ -759,8 +872,13 @@ pub extern "C" fn qail_response_get_string(
 
 #[cfg(feature = "response")]
 /// Get column value as i32.
+///
+/// # Safety
+///
+/// If non-null, `handle` must point to a live `QailResponse` returned by
+/// `qail_decode_response`. `out_value` must be a valid writable pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_get_i32(
+pub unsafe extern "C" fn qail_response_get_i32(
     handle: *const QailResponse,
     row: usize,
     col: usize,
@@ -770,6 +888,8 @@ pub extern "C" fn qail_response_get_i32(
         return -1;
     }
 
+    // SAFETY: Pointers are checked non-null above. `handle` must point to a
+    // live response and `out_value` must be writable per caller contract.
     unsafe {
         let resp = &*handle;
         if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
@@ -785,8 +905,13 @@ pub extern "C" fn qail_response_get_i32(
 
 #[cfg(feature = "response")]
 /// Get column value as i64.
+///
+/// # Safety
+///
+/// If non-null, `handle` must point to a live `QailResponse` returned by
+/// `qail_decode_response`. `out_value` must be a valid writable pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_get_i64(
+pub unsafe extern "C" fn qail_response_get_i64(
     handle: *const QailResponse,
     row: usize,
     col: usize,
@@ -796,6 +921,8 @@ pub extern "C" fn qail_response_get_i64(
         return -1;
     }
 
+    // SAFETY: Pointers are checked non-null above. `handle` must point to a
+    // live response and `out_value` must be writable per caller contract.
     unsafe {
         let resp = &*handle;
         if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
@@ -811,8 +938,13 @@ pub extern "C" fn qail_response_get_i64(
 
 #[cfg(feature = "response")]
 /// Get column value as f64.
+///
+/// # Safety
+///
+/// If non-null, `handle` must point to a live `QailResponse` returned by
+/// `qail_decode_response`. `out_value` must be a valid writable pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_get_f64(
+pub unsafe extern "C" fn qail_response_get_f64(
     handle: *const QailResponse,
     row: usize,
     col: usize,
@@ -822,6 +954,8 @@ pub extern "C" fn qail_response_get_f64(
         return -1;
     }
 
+    // SAFETY: Pointers are checked non-null above. `handle` must point to a
+    // live response and `out_value` must be writable per caller contract.
     unsafe {
         let resp = &*handle;
         if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
@@ -837,8 +971,13 @@ pub extern "C" fn qail_response_get_f64(
 
 #[cfg(feature = "response")]
 /// Get column value as bool.
+///
+/// # Safety
+///
+/// If non-null, `handle` must point to a live `QailResponse` returned by
+/// `qail_decode_response`. `out_value` must be a valid writable pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_get_bool(
+pub unsafe extern "C" fn qail_response_get_bool(
     handle: *const QailResponse,
     row: usize,
     col: usize,
@@ -848,6 +987,8 @@ pub extern "C" fn qail_response_get_bool(
         return -1;
     }
 
+    // SAFETY: Pointers are checked non-null above. `handle` must point to a
+    // live response and `out_value` must be writable per caller contract.
     unsafe {
         let resp = &*handle;
         if let Some(Some(bytes)) = resp.rows.get(row).and_then(|r| r.get(col))
@@ -866,9 +1007,16 @@ pub extern "C" fn qail_response_get_bool(
 
 #[cfg(feature = "response")]
 /// Free a response handle.
+///
+/// # Safety
+///
+/// `handle` must be null or a pointer returned by `qail_decode_response` that
+/// has not already been freed.
 #[unsafe(no_mangle)]
-pub extern "C" fn qail_response_free(handle: *mut QailResponse) {
+pub unsafe extern "C" fn qail_response_free(handle: *mut QailResponse) {
     if !handle.is_null() {
+        // SAFETY: The caller contract requires `handle` to be null or a value
+        // returned by `qail_decode_response` that has not been freed already.
         unsafe {
             let _ = Box::from_raw(handle);
         }

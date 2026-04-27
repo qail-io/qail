@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_collection(
             "upsert_debug_test",
             4, // Small vector for testing
-            qail_core::ast::Distance::Cosine,
+            qail_qdrant::Distance::Cosine,
             false,
         )
         .await?;

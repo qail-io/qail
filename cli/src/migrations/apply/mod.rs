@@ -1,4 +1,4 @@
-//! Apply migrations from migrations/ folder
+//! Apply migrations from deltas/ folder
 //!
 //! Reads `.qail` migration files in order and executes them against the database.
 //! Tracks applied migrations in `_qail_migrations` table.

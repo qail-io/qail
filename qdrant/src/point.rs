@@ -177,7 +177,7 @@ impl MultiVectorPoint {
 pub struct ScoredPoint {
     /// Point identifier.
     pub id: PointId,
-    /// Similarity score (higher = more similar for cosine/dot, lower for euclid).
+    /// Similarity score (higher = more similar for cosine/dot, lower for euclidean).
     pub score: f32,
     /// Key-value metadata payload.
     #[serde(default)]

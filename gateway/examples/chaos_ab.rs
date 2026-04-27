@@ -183,7 +183,7 @@ async fn attack(
 
     for _ in 0..concurrency {
         let client = client.clone();
-        let metrics = metrics.clone();
+        let metrics = Arc::clone(&metrics);
         let url = url.clone();
         let deadline = duration;
 

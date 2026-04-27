@@ -25,7 +25,33 @@ pub fn encode_select(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
-    if try_encode_simple_select_fast(cmd, buf, params) {
+    encode_select_with_columns(cmd, &cmd.columns, buf, params)
+}
+
+/// Encode a COUNT statement using the original query shape with a COUNT(*)
+/// projection, without cloning the full AST.
+pub fn encode_count(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    let count_columns = [Expr::Aggregate {
+        col: "*".to_string(),
+        func: qail_core::ast::AggregateFunc::Count,
+        distinct: false,
+        filter: None,
+        alias: None,
+    }];
+    encode_select_with_columns(cmd, &count_columns, buf, params)
+}
+
+fn encode_select_with_columns(
+    cmd: &Qail,
+    columns: &[Expr],
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    if try_encode_simple_select_fast(cmd, columns, buf, params) {
         return Ok(());
     }
 
@@ -49,7 +75,7 @@ pub fn encode_select(
         buf.extend_from_slice(b"DISTINCT ");
     }
 
-    encode_columns_with_params(&cmd.columns, buf, Some(params));
+    encode_columns_with_params(columns, buf, Some(params));
 
     // FROM
     buf.extend_from_slice(b" FROM ");
@@ -105,8 +131,7 @@ pub fn encode_select(
         }
     } else {
         // Auto-generate GROUP BY from columns when aggregates are present
-        let group_cols: Vec<&str> = cmd
-            .columns
+        let group_cols: Vec<&str> = columns
             .iter()
             .filter_map(|e| match e {
                 Expr::Named(name) => Some(name.as_str()),
@@ -115,10 +140,7 @@ pub fn encode_select(
             })
             .collect();
 
-        let has_aggregates = cmd
-            .columns
-            .iter()
-            .any(|e| matches!(e, Expr::Aggregate { .. }));
+        let has_aggregates = columns.iter().any(|e| matches!(e, Expr::Aggregate { .. }));
         if has_aggregates && !group_cols.is_empty() {
             buf.extend_from_slice(b" GROUP BY ");
             match &cmd.group_by_mode {
@@ -244,6 +266,7 @@ pub fn encode_select(
 #[inline]
 fn try_encode_simple_select_fast(
     cmd: &Qail,
+    columns: &[Expr],
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> bool {
@@ -258,8 +281,7 @@ fn try_encode_simple_select_fast(
         return false;
     }
 
-    if cmd
-        .columns
+    if columns
         .iter()
         .any(|expr| matches!(expr, Expr::Aggregate { .. }))
     {
@@ -290,7 +312,7 @@ fn try_encode_simple_select_fast(
     }
 
     buf.extend_from_slice(b"SELECT ");
-    encode_columns_with_params(&cmd.columns, buf, Some(params));
+    encode_columns_with_params(columns, buf, Some(params));
     buf.extend_from_slice(b" FROM ");
     buf.extend_from_slice(cmd.table.as_bytes());
 

@@ -22,8 +22,6 @@ use std::hash::{Hash, Hasher};
 pub struct PreparedStatement {
     /// Pre-computed statement name (e.g., "s1234567890abcdef")
     pub(crate) name: String,
-    #[allow(dead_code)]
-    pub(crate) param_count: usize,
 }
 
 /// A fully prepared AST query handle.
@@ -63,12 +61,7 @@ impl PreparedStatement {
     #[inline]
     pub fn from_sql_bytes(sql_bytes: &[u8]) -> Self {
         let name = sql_bytes_to_stmt_name(sql_bytes);
-        // Count $N placeholders (simple heuristic)
-        let param_count = sql_bytes
-            .windows(2)
-            .filter(|w| w[0] == b'$' && w[1].is_ascii_digit())
-            .count();
-        Self { name, param_count }
+        Self { name }
     }
 
     /// Create from SQL string (convenience method).
@@ -128,7 +121,6 @@ mod tests {
     #[test]
     fn test_prepared_statement() {
         let stmt = PreparedStatement::from_sql("SELECT * FROM users WHERE id = $1 AND name = $2");
-        assert_eq!(stmt.param_count, 2);
         assert!(stmt.name.starts_with("s"));
     }
 }

@@ -31,7 +31,7 @@ let ctx = RlsContext::tenant(tenant_id);
 // Every query is automatically scoped
 let query = Qail::get("bookings")
     .columns(["id", "customer", "status"])
-    .with_rls(&ctx);  // ← RLS injected at AST level
+    .with_rls(&ctx)?;  // ← RLS injected at AST level
 
 // Generated SQL: SELECT ... FROM bookings
 // But the connection sets app.current_tenant_id/app.current_agent_id
@@ -45,7 +45,6 @@ let query = Qail::get("bookings")
 | `RlsContext::tenant(id)` | Single tenant | Tenant dashboard |
 | `RlsContext::agent(id)` | Single agent | Agent portal |
 | `RlsContext::tenant_and_agent(t, ag)` | Both | Agent within tenant |
-| `RlsContext::operator(id)` | Legacy alias | Backward compatibility |
 | `RlsContext::global()` | Shared/global rows (`tenant_id IS NULL`) | Public/reference data |
 | `RlsContext::super_admin(token)` | Bypasses RLS | Internal platform-only ops |
 
@@ -73,14 +72,15 @@ admin.bypasses_rls(); // true
 ┌─────────────────────────────────────────────────┐
 │  Application Code                                │
 │                                                   │
-│  Qail::get("bookings").with_rls(&ctx)            │
+│  Qail::get("bookings").with_rls(&ctx)?           │
 │       ↓                                           │
 │  AST Builder adds RLS context to query            │
 │       ↓                                           │
 │  PgDriver::execute()                              │
 │  ├─ set_config('app.current_tenant_id', '<uuid>', true)    │
-│  ├─ set_config('app.current_operator_id', '<uuid>', true)  │
+│  ├─ set_config('app.current_user_id', '<uuid>', true)      │
 │  ├─ set_config('app.current_agent_id', '<uuid>', true)     │
+│  ├─ set_config('app.is_super_admin', 'false', true)        │
 │  └─ Execute query on SAME connection                       │
 │       ↓                                           │
 │  PostgreSQL RLS Policy                            │
@@ -92,7 +92,7 @@ admin.bypasses_rls(); // true
 └─────────────────────────────────────────────────┘
 ```
 
-> Compatibility note: gateway/driver still writes legacy operator GUCs and accepts `operator_id` in JWTs while tenant-first naming is rolled out.
+> Migration note: gateway/driver tenant scope is `tenant_id`-first. Legacy `operator_id` JWT claims are not mapped into tenant scope.
 
 ## Why AST-Level?
 
@@ -115,7 +115,7 @@ let query = Qail::typed(bookings::table)
     .join_related(users::table)       // Compile-time safe join
     .typed_column(bookings::id())
     .typed_column(bookings::status())
-    .with_rls(&ctx)                   // Multi-tenant isolation
+    .with_rls(&ctx)?                  // Multi-tenant isolation
     .build();
 ```
 

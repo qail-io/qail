@@ -1,6 +1,6 @@
 use crate::ast::{
-    Action, Cage, CageKind, Condition, Distance, Expr, GroupByMode, IndexDef, Join, LockMode,
-    LogicalOp, Operator, OverridingKind, SampleMethod, SetOp, TableConstraint, Value,
+    Action, Cage, Condition, Distance, Expr, GroupByMode, IndexDef, Join, LockMode, OverridingKind,
+    SampleMethod, SetOp, TableConstraint,
 };
 
 /// The core Qail AST node representing a single database operation.
@@ -196,35 +196,6 @@ mod cte;
 mod query;
 mod rls;
 mod vector;
-
-// Deprecated methods kept in main module for backward compatibility
-impl Qail {
-    /// Set columns for the query (deprecated alias for `.columns()`).
-    #[deprecated(since = "0.11.0", note = "Use .columns([...]) instead")]
-    pub fn hook(mut self, cols: &[&str]) -> Self {
-        self.columns = cols.iter().map(|c| Expr::Named(c.to_string())).collect();
-        self
-    }
-
-    /// Add an equality filter (deprecated alias for `.where_eq()`).
-    #[deprecated(
-        since = "0.11.0",
-        note = "Use .filter(column, Operator::Eq, value) or .where_eq(column, value) instead"
-    )]
-    pub fn cage(mut self, column: &str, value: impl Into<Value>) -> Self {
-        self.cages.push(Cage {
-            kind: CageKind::Filter,
-            conditions: vec![Condition {
-                left: Expr::Named(column.to_string()),
-                op: Operator::Eq,
-                value: value.into(),
-                is_array_unnest: false,
-            }],
-            logical_op: LogicalOp::And,
-        });
-        self
-    }
-}
 
 impl std::fmt::Display for Qail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

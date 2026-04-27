@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = Qail::get("harbors").columns(["id", "name"]).limit(3);
 
     // Serialize to QAIL binary wire payload (QWB2 AST binary)
-    let bytes = encode_cmd_binary(&cmd);
+    let bytes = encode_cmd_binary(&cmd).map_err(std::io::Error::other)?;
     println!("Binary query size: {} bytes", bytes.len());
 
     // Send to gateway

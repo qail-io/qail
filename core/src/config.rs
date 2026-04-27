@@ -252,7 +252,7 @@ impl Default for QdrantConfig {
 }
 
 fn default_qdrant_url() -> String {
-    "http://localhost:6333".to_string()
+    "http://localhost:6334".to_string()
 }
 
 /// `[gateway]` — Gateway server settings.
@@ -264,7 +264,7 @@ pub struct GatewayConfig {
     /// Enable CORS.
     pub cors: bool,
 
-    /// Allowed CORS origins. Empty = allow all.
+    /// Allowed CORS origins. Empty = fail-closed (no origins allowed).
     pub cors_allowed_origins: Option<Vec<String>>,
 
     /// Path to policy file.

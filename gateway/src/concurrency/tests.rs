@@ -48,9 +48,9 @@ async fn redteam_100_concurrent_acquires_same_tenant() {
 
     let mut handles = Vec::new();
     for _ in 0..100 {
-        let sem = sem.clone();
-        let acquired = acquired.clone();
-        let rejected = rejected.clone();
+        let sem = Arc::clone(&sem);
+        let acquired = Arc::clone(&acquired);
+        let rejected = Arc::clone(&rejected);
         handles.push(tokio::spawn(async move {
             match sem.try_acquire("hot-tenant").await {
                 Some(permit) => {
@@ -83,7 +83,7 @@ async fn redteam_50_tenants_concurrent() {
     let mut handles = Vec::new();
 
     for i in 0..50 {
-        let sem = sem.clone();
+        let sem = Arc::clone(&sem);
         handles.push(tokio::spawn(async move {
             let tenant = format!("tenant-{}", i);
             let p1 = sem.try_acquire(&tenant).await;
@@ -113,8 +113,8 @@ async fn redteam_same_tenant_5_ips_burst() {
     let mut handles = Vec::new();
     for _ip in 0..5 {
         for _ in 0..10 {
-            let sem = sem.clone();
-            let acquired = acquired.clone();
+            let sem = Arc::clone(&sem);
+            let acquired = Arc::clone(&acquired);
             handles.push(tokio::spawn(async move {
                 if let Some(_permit) = sem.try_acquire("burst-tenant").await {
                     acquired.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

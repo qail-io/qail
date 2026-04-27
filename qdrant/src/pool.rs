@@ -6,6 +6,7 @@
 
 use crate::driver::QdrantDriver;
 use crate::error::{QdrantError, QdrantResult};
+use http::Uri;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
@@ -62,26 +63,16 @@ impl PoolConfig {
             .tls
             .unwrap_or_else(|| qdrant.url.starts_with("https://"));
 
-        let (host, port) = if let Some(ref grpc) = qdrant.grpc {
-            if grpc.contains(':') {
-                let mut parts = grpc.rsplitn(2, ':');
-                let port = parts.next().and_then(|s| s.parse().ok()).unwrap_or(6334u16);
-                let host = parts.next().unwrap_or("localhost").to_string();
-                (host, port)
-            } else {
-                (grpc.clone(), 6334)
-            }
+        let (host, mut port) = if let Some(ref grpc) = qdrant.grpc {
+            parse_endpoint_host_port(grpc, 6334)
         } else {
-            let host = qdrant
-                .url
-                .trim_start_matches("http://")
-                .trim_start_matches("https://")
-                .split(':')
-                .next()
-                .unwrap_or("localhost")
-                .to_string();
-            (host, 6334)
+            parse_endpoint_host_port(&qdrant.url, 6334)
         };
+        if qdrant.grpc.is_none() && port == 6333 {
+            // `qdrant.url` is commonly an HTTP endpoint; when grpc is omitted,
+            // avoid accidentally dialing REST port 6333 with the gRPC client.
+            port = 6334;
+        }
 
         Self {
             max_connections: qdrant.max_connections,
@@ -234,22 +225,50 @@ impl std::ops::DerefMut for PooledConnection {
 impl Drop for PooledConnection {
     fn drop(&mut self) {
         if let Some(driver) = self.driver.take() {
-            let pool = Arc::clone(&self.pool);
-            // Return connection to the idle queue and release the permit.
-            // Spawn a task because we can't async in Drop.
-            tokio::spawn(async move {
-                {
-                    let mut idle = pool.idle.lock().await;
-                    // Only keep connections up to the pool size
-                    if idle.len() < pool.config.max_connections {
-                        idle.push(driver);
-                    }
-                    // else: drop the connection (over capacity)
-                }
-                pool.semaphore.add_permits(1);
-            });
+            if let Ok(mut idle) = self.pool.idle.try_lock()
+                && idle.len() < self.pool.config.max_connections
+            {
+                idle.push(driver);
+            }
+            // Always release a permit, even if we couldn't return to idle.
+            self.pool.semaphore.add_permits(1);
         }
     }
+}
+
+fn parse_endpoint_host_port(input: &str, default_port: u16) -> (String, u16) {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return ("localhost".to_string(), default_port);
+    }
+
+    if raw.contains("://")
+        && let Ok(uri) = raw.parse::<Uri>()
+    {
+        let host = uri.host().unwrap_or("localhost").to_string();
+        let port = uri.port_u16().unwrap_or(default_port);
+        return (host, port);
+    }
+
+    if raw.starts_with('[')
+        && let Some(end) = raw.find(']')
+    {
+        let host = &raw[1..end];
+        let port = raw[end + 1..]
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_port);
+        return (host.to_string(), port);
+    }
+
+    if let Some((host, port_str)) = raw.rsplit_once(':')
+        && !host.is_empty()
+        && let Ok(port) = port_str.parse::<u16>()
+    {
+        return (host.to_string(), port);
+    }
+
+    (raw.to_string(), default_port)
 }
 
 #[cfg(test)]
@@ -276,5 +295,40 @@ mod tests {
         assert_eq!(config.max_connections, 10);
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 6334);
+    }
+
+    #[test]
+    fn test_parse_endpoint_host_port() {
+        assert_eq!(
+            parse_endpoint_host_port("localhost:6334", 6334),
+            ("localhost".to_string(), 6334)
+        );
+        assert_eq!(
+            parse_endpoint_host_port("https://cloud.qdrant.io:443", 6334),
+            ("cloud.qdrant.io".to_string(), 443)
+        );
+        assert_eq!(
+            parse_endpoint_host_port("[::1]:6334", 6334),
+            ("::1".to_string(), 6334)
+        );
+        assert_eq!(
+            parse_endpoint_host_port("qdrant.internal", 6334),
+            ("qdrant.internal".to_string(), 6334)
+        );
+    }
+
+    #[test]
+    fn test_from_qail_config_ref_defaults_grpc_port_when_url_uses_rest_port() {
+        let cfg = qail_core::config::QdrantConfig {
+            url: "http://localhost:6333".to_string(),
+            grpc: None,
+            max_connections: 7,
+            tls: None,
+        };
+        let pool = PoolConfig::from_qail_config_ref(&cfg);
+        assert_eq!(pool.host, "localhost");
+        assert_eq!(pool.port, 6334);
+        assert_eq!(pool.max_connections, 7);
+        assert!(!pool.tls);
     }
 }

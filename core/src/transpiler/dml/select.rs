@@ -655,26 +655,7 @@ fn render_expr_for_orderby(
             match op {
                 BinaryOp::IsNull => format!("({} IS NULL)", left_sql),
                 BinaryOp::IsNotNull => format!("({} IS NOT NULL)", left_sql),
-                _ => {
-                    let op_str = match op {
-                        BinaryOp::Add => "+",
-                        BinaryOp::Sub => "-",
-                        BinaryOp::Mul => "*",
-                        BinaryOp::Div => "/",
-                        BinaryOp::Rem => "%",
-                        BinaryOp::Concat => "||",
-                        BinaryOp::And => "AND",
-                        BinaryOp::Or => "OR",
-                        BinaryOp::Eq => "=",
-                        BinaryOp::Ne => "<>",
-                        BinaryOp::Gt => ">",
-                        BinaryOp::Gte => ">=",
-                        BinaryOp::Lt => "<",
-                        BinaryOp::Lte => "<=",
-                        BinaryOp::IsNull | BinaryOp::IsNotNull => unreachable!(),
-                    };
-                    format!("({} {} {})", left_sql, op_str, right_sql)
-                }
+                _ => format!("({} {} {})", left_sql, op, right_sql),
             }
         }
         Expr::FunctionCall { name, args, .. } => {

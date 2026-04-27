@@ -148,17 +148,7 @@ impl AstEncoder {
                 dml::encode_select(cmd, sql_buf, params)?;
             }
             Action::Cnt => {
-                // COUNT: clone AST, replace columns with COUNT(*), delegate to SELECT
-                let mut count_cmd = cmd.clone();
-                count_cmd.action = Action::Get;
-                count_cmd.columns = vec![qail_core::ast::Expr::Aggregate {
-                    col: "*".to_string(),
-                    func: qail_core::ast::AggregateFunc::Count,
-                    distinct: false,
-                    filter: None,
-                    alias: None,
-                }];
-                dml::encode_select(&count_cmd, sql_buf, params)?;
+                dml::encode_count(cmd, sql_buf, params)?;
             }
             Action::Add => {
                 dml::encode_insert(cmd, sql_buf, params)?;
@@ -239,16 +229,7 @@ impl AstEncoder {
                 dml::encode_select(cmd, &mut sql_buf, &mut params)?;
             }
             Action::Cnt => {
-                let mut count_cmd = cmd.clone();
-                count_cmd.action = Action::Get;
-                count_cmd.columns = vec![qail_core::ast::Expr::Aggregate {
-                    col: "*".to_string(),
-                    func: qail_core::ast::AggregateFunc::Count,
-                    distinct: false,
-                    filter: None,
-                    alias: None,
-                }];
-                dml::encode_select(&count_cmd, &mut sql_buf, &mut params)?;
+                dml::encode_count(cmd, &mut sql_buf, &mut params)?;
             }
             Action::Add => {
                 dml::encode_insert(cmd, &mut sql_buf, &mut params)?;

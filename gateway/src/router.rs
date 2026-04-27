@@ -128,7 +128,7 @@ pub fn create_router(
 /// Build CORS layer from gateway config.
 ///
 /// - If `cors_allowed_origins` is non-empty → strict origin allowlist
-/// - Otherwise → `allow_origin(Any)` (backward compatible unless `cors_strict=true`)
+/// - Otherwise → fail-closed (no allowed origins)
 fn build_cors_layer(config: &crate::config::GatewayConfig) -> CorsLayer {
     if !config.cors_enabled {
         // CORS disabled — return restrictive layer (no Access-Control headers)
@@ -138,20 +138,12 @@ fn build_cors_layer(config: &crate::config::GatewayConfig) -> CorsLayer {
     let base = CorsLayer::new().allow_methods(Any).allow_headers(Any);
 
     if config.cors_allowed_origins.is_empty() {
-        if config.cors_strict {
-            tracing::error!(
-                "SECURITY: cors_strict=true but cors_allowed_origins is empty. \
-                 Applying fail-closed CORS (no allowed origins). \
-                 Configure explicit CORS origins or set cors_strict=false."
-            );
-            return base;
-        }
-        // Backward compatible: warn and allow all
-        tracing::warn!(
-            "CORS allows ANY origin (cors_allowed_origins is empty). \
-             Set `cors_allowed_origins` for production deployments."
+        tracing::error!(
+            "SECURITY: cors_allowed_origins is empty. \
+             Applying fail-closed CORS (no allowed origins). \
+             Configure explicit CORS origins."
         );
-        base.allow_origin(Any)
+        base
     } else {
         let origins: Vec<HeaderValue> = config
             .cors_allowed_origins
@@ -160,18 +152,11 @@ fn build_cors_layer(config: &crate::config::GatewayConfig) -> CorsLayer {
             .collect();
 
         if origins.is_empty() {
-            if config.cors_strict {
-                tracing::error!(
-                    "SECURITY: cors_strict=true and none of cors_allowed_origins parsed. \
-                     Applying fail-closed CORS (no allowed origins)."
-                );
-                base
-            } else {
-                tracing::warn!(
-                    "cors_allowed_origins configured but none parsed — falling back to Any"
-                );
-                base.allow_origin(Any)
-            }
+            tracing::error!(
+                "SECURITY: none of cors_allowed_origins parsed. \
+                 Applying fail-closed CORS (no allowed origins)."
+            );
+            base
         } else {
             tracing::info!(
                 "CORS restricted to {} origin(s): {:?}",

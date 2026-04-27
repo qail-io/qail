@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut handles = vec![];
 
     for i in 0..task_count {
-        let sem = semaphore.clone();
+        let sem = Arc::clone(&semaphore);
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
 

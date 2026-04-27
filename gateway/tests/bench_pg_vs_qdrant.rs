@@ -8,8 +8,8 @@
 //!   DATABASE_URL="postgresql://qail_user@localhost:5432/postgres" \
 //!     cargo test -p qail-gateway --test bench_pg_vs_qdrant -- --nocapture
 
-use qail_core::prelude::*;
 use qail_pg::PgConnection;
+use qail_qdrant::Distance as QdrantDistance;
 use qail_qdrant::prelude::*;
 use std::time::{Duration, Instant};
 use url::Url;
@@ -121,7 +121,7 @@ async fn bench_pg_vs_qdrant() {
     .ok();
 
     // Create Qdrant collection
-    qd.create_collection(COLLECTION, DIM, Distance::Cosine, false)
+    qd.create_collection(COLLECTION, DIM, QdrantDistance::Cosine, false)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;

@@ -439,8 +439,10 @@ fn percent_decode(s: &str) -> String {
 async fn connect_bench_connection(
     cfg: &BenchDbConfig,
 ) -> Result<PgConnection, Box<dyn std::error::Error>> {
-    let mut options = ConnectOptions::default();
-    options.tls_mode = cfg.tls_mode;
+    let options = ConnectOptions {
+        tls_mode: cfg.tls_mode,
+        ..Default::default()
+    };
     Ok(PgConnection::connect_with_options(
         &cfg.host,
         cfg.port,
@@ -576,9 +578,7 @@ async fn ensure_bench_payload(conn: &mut PgConnection) -> Result<(), Box<dyn std
     .await;
     let unlock_result = conn.execute_simple(BENCH_SETUP_UNLOCK_SQL).await;
 
-    if let Err(err) = setup_result {
-        return Err(err);
-    }
+    setup_result?;
     unlock_result?;
     Ok(())
 }
@@ -1338,7 +1338,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Mode::Pool10 => {
-            if params.len() % POOL_SIZE != 0 {
+            if !params.len().is_multiple_of(POOL_SIZE) {
                 return Err(format!(
                     "workload '{}' produced {} params, not divisible by pool size {}",
                     spec.name,

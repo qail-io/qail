@@ -454,16 +454,6 @@ impl PgConnection {
                     }
                     self.process_id = process_id;
                     self.cancel_key_bytes = secret_key;
-                    self.secret_key = if self.cancel_key_bytes.len() == 4 {
-                        i32::from_be_bytes([
-                            self.cancel_key_bytes[0],
-                            self.cancel_key_bytes[1],
-                            self.cancel_key_bytes[2],
-                            self.cancel_key_bytes[3],
-                        ])
-                    } else {
-                        0
-                    };
                 }
                 BackendMessage::ReadyForQuery(TransactionStatus::Idle)
                 | BackendMessage::ReadyForQuery(TransactionStatus::InBlock)

@@ -7,7 +7,7 @@
 //!
 //! ```text
 //!  Qail::get("orders")
-//!    .with_rls(&ctx)          ← Phase 4: AST injection (primary)
+//!    .with_rls(&ctx)              ← Phase 4: AST injection (primary)
 //!    → WHERE tenant_id = 'uuid'
 //!
 //!  acquire_with_rls(ctx)      ← Phase 2: DB session vars (backup)
@@ -26,11 +26,12 @@
 //! register_tenant_table("orders", "tenant_id");
 //!
 //! let ctx = RlsContext::tenant("550e8400-e29b-41d4-a716-446655440000");
-//! let query = Qail::get("orders").with_rls(&ctx);
+//! let query = Qail::get("orders").with_rls(&ctx).expect("rls should apply");
 //! // Transpiles to: SELECT * FROM orders WHERE tenant_id = '550e8400-...'
 //! ```
 
 use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+use crate::error::{QailBuildError, QailBuildResult};
 use crate::rls::RlsContext;
 use crate::rls::tenant::lookup_tenant_column;
 
@@ -107,42 +108,42 @@ impl Qail {
     /// # Example
     /// ```ignore
     /// let ctx = RlsContext::tenant("tenant-uuid");
-    /// let query = Qail::get("orders").with_rls(&ctx);
+    /// let query = Qail::get("orders").with_rls(&ctx)?;
     /// ```
-    pub fn with_rls(self, ctx: &RlsContext) -> Self {
+    pub fn with_rls(self, ctx: &RlsContext) -> QailBuildResult<Self> {
         if ctx.bypasses_rls() {
-            return self;
+            return Ok(self);
         }
 
         let Some(tenant_col) = lookup_tenant_column(&self.table) else {
-            return self;
+            return Ok(self);
         };
 
         if ctx.is_global() {
             return match self.action {
                 Action::Get | Action::Set | Action::Del | Action::Over | Action::Gen => {
-                    self.scope_to_global(&tenant_col)
+                    Ok(self.scope_to_global(&tenant_col))
                 }
                 Action::Add | Action::Upsert | Action::Put => self.scope_insert_global(&tenant_col),
-                _ => self,
+                _ => Ok(self),
             };
         }
 
         if !ctx.has_tenant() {
-            return self;
+            return Ok(self);
         }
 
         match self.action {
             // Read / Update / Delete → inject WHERE filter
             Action::Get | Action::Set | Action::Del | Action::Over | Action::Gen => {
-                self.scope_to_tenant(&tenant_col, ctx)
+                Ok(self.scope_to_tenant(&tenant_col, ctx))
             }
             // Insert / Upsert → auto-set tenant column in payload
             Action::Add | Action::Upsert | Action::Put => {
                 self.scope_insert_tenant(&tenant_col, ctx)
             }
             // DDL, transactions, etc. → no injection
-            _ => self,
+            _ => Ok(self),
         }
     }
 
@@ -207,16 +208,20 @@ impl Qail {
     ///
     /// Adds the tenant column to the Payload cage so the scope id
     /// is always included in INSERT statements.
-    fn scope_insert_tenant(self, tenant_col: &str, ctx: &RlsContext) -> Self {
+    fn scope_insert_tenant(self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
         self.scope_insert_value(tenant_col, Value::String(ctx.tenant_id.clone()))
     }
 
     /// Auto-set `tenant_col = NULL` in INSERT/UPSERT payload for global rows.
-    fn scope_insert_global(self, tenant_col: &str) -> Self {
+    fn scope_insert_global(self, tenant_col: &str) -> QailBuildResult<Self> {
         self.scope_insert_value(tenant_col, Value::Null)
     }
 
-    fn scope_insert_value(mut self, tenant_col: &str, tenant_value: Value) -> Self {
+    fn scope_insert_value(
+        mut self,
+        tenant_col: &str,
+        tenant_value: Value,
+    ) -> QailBuildResult<Self> {
         let payload_idx = self
             .cages
             .iter()
@@ -228,16 +233,16 @@ impl Qail {
                 conditions: vec![make_named_condition(tenant_col, tenant_value)],
                 logical_op: LogicalOp::And,
             });
-            return self;
+            return Ok(self);
         };
 
         let positional = payload_is_positional(&self.cages[idx]);
         if positional {
             if self.columns.is_empty() {
-                panic!(
-                    "QAIL: with_rls requires explicit columns for positional INSERT payloads on table '{}'",
-                    self.table
-                );
+                return Err(QailBuildError::RlsInsertRequiresExplicitColumns {
+                    table: self.table,
+                    tenant_column: tenant_col.to_string(),
+                });
             }
 
             if let Some(col_idx) = self
@@ -259,7 +264,7 @@ impl Qail {
                     cage.conditions
                         .push(make_positional_condition(col_idx, tenant_value));
                 }
-                return self;
+                return Ok(self);
             }
 
             if !self.columns.is_empty() {
@@ -268,7 +273,7 @@ impl Qail {
                 let cage = &mut self.cages[idx];
                 cage.conditions
                     .push(make_positional_condition(idx_col, tenant_value));
-                return self;
+                return Ok(self);
             }
         }
 
@@ -277,7 +282,7 @@ impl Qail {
             .retain(|cond| !is_tenant_column_condition(cond, tenant_col));
         cage.conditions
             .push(make_named_condition(tenant_col, tenant_value));
-        self
+        Ok(self)
     }
 }
 
@@ -295,7 +300,9 @@ mod tests {
         register_tenant_table("_rls_get_orders", "tenant_id");
 
         let ctx = RlsContext::tenant("t-123");
-        let query = Qail::get("_rls_get_orders").with_rls(&ctx);
+        let query = Qail::get("_rls_get_orders")
+            .with_rls(&ctx)
+            .expect("rls should apply");
 
         let filter = query
             .cages
@@ -320,7 +327,8 @@ mod tests {
         let ctx = RlsContext::tenant("t-456");
         let query = Qail::add("_rls_add_orders")
             .set_value("total", 100)
-            .with_rls(&ctx);
+            .with_rls(&ctx)
+            .expect("rls should apply");
 
         let payload = query
             .cages
@@ -344,7 +352,9 @@ mod tests {
 
         let token = crate::rls::SuperAdminToken::for_system_process("test_super_admin_noop");
         let ctx = RlsContext::super_admin(token);
-        let query = Qail::get("_rls_admin_orders").with_rls(&ctx);
+        let query = Qail::get("_rls_admin_orders")
+            .with_rls(&ctx)
+            .expect("super admin rls should no-op");
 
         let filter = query
             .cages
@@ -356,7 +366,9 @@ mod tests {
     #[test]
     fn test_with_rls_noop_for_unregistered_table() {
         let ctx = RlsContext::tenant("t-789");
-        let query = Qail::get("_rls_unreg_migrations").with_rls(&ctx);
+        let query = Qail::get("_rls_unreg_migrations")
+            .with_rls(&ctx)
+            .expect("unregistered table rls should no-op");
 
         let filter = query
             .cages
@@ -378,7 +390,7 @@ mod tests {
             table: "_rls_ddl_orders".to_string(),
             ..Default::default()
         };
-        let query = query.with_rls(&ctx);
+        let query = query.with_rls(&ctx).expect("ddl rls should no-op");
 
         assert!(query.cages.is_empty(), "DDL should not inject cages");
     }
@@ -390,7 +402,8 @@ mod tests {
         let ctx = RlsContext::tenant("t-merge");
         let query = Qail::get("_rls_merge_orders")
             .filter("status", Operator::Eq, "active")
-            .with_rls(&ctx);
+            .with_rls(&ctx)
+            .expect("rls should apply");
 
         let filters: Vec<_> = query
             .cages
@@ -413,7 +426,8 @@ mod tests {
         let query = Qail::get("_rls_or_orders")
             .or_filter("status", Operator::Eq, "active")
             .or_filter("status", Operator::Eq, "pending")
-            .with_rls(&ctx);
+            .with_rls(&ctx)
+            .expect("rls should apply");
 
         let or_filter = query
             .cages
@@ -464,7 +478,8 @@ mod tests {
         let ctx = RlsContext::tenant("t-set");
         let query = Qail::set("_rls_set_orders")
             .set_value("status", "shipped")
-            .with_rls(&ctx);
+            .with_rls(&ctx)
+            .expect("rls should apply");
 
         let filter = query
             .cages
@@ -487,7 +502,9 @@ mod tests {
 
         // Agent-only context without tenant_id
         let ctx = RlsContext::agent("ag-only");
-        let query = Qail::get("_rls_noops_orders").with_rls(&ctx);
+        let query = Qail::get("_rls_noops_orders")
+            .with_rls(&ctx)
+            .expect("missing tenant rls should no-op");
 
         let filter = query
             .cages
@@ -504,7 +521,9 @@ mod tests {
         register_tenant_table("_rls_global_get_orders", "tenant_id");
 
         let ctx = RlsContext::global();
-        let query = Qail::get("_rls_global_get_orders").with_rls(&ctx);
+        let query = Qail::get("_rls_global_get_orders")
+            .with_rls(&ctx)
+            .expect("global rls should apply");
 
         let filter = query
             .cages
@@ -530,7 +549,8 @@ mod tests {
         let ctx = RlsContext::global();
         let query = Qail::add("_rls_global_add_catalog")
             .set_value("name", "item")
-            .with_rls(&ctx);
+            .with_rls(&ctx)
+            .expect("global rls should apply");
 
         let payload = query
             .cages
@@ -555,7 +575,9 @@ mod tests {
         let ctx = RlsContext::tenant("t-idempotent");
         let query = Qail::get("_rls_idempotent_get_orders")
             .with_rls(&ctx)
+            .expect("rls should apply")
             .with_rls(&ctx);
+        let query = query.expect("rls should remain idempotent");
 
         let filter = query
             .cages
@@ -579,7 +601,8 @@ mod tests {
         let query = Qail::add("_rls_positional_add_orders")
             .columns(["id", "total"])
             .values([Value::Int(1), Value::Int(100)])
-            .with_rls(&ctx);
+            .with_rls(&ctx)
+            .expect("rls should apply");
 
         let sql = query.to_sql();
         assert!(
@@ -604,7 +627,8 @@ mod tests {
                 Value::String("tenant-wrong".to_string()),
                 Value::Int(50),
             ])
-            .with_rls(&ctx);
+            .with_rls(&ctx)
+            .expect("rls should apply");
 
         let sql = query.to_sql();
         assert!(sql.contains("'tenant-final'"));
@@ -612,14 +636,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "with_rls requires explicit columns")]
-    fn test_with_rls_add_positional_payload_without_columns_panics() {
-        register_tenant_table("_rls_positional_add_no_columns_orders", "tenant_id");
+    fn test_with_rls_add_positional_payload_without_columns_errors() {
+        register_tenant_table("_rls_positional_add_without_columns_orders", "tenant_id");
 
-        let ctx = RlsContext::tenant("tenant-no-columns");
-        let _ = Qail::add("_rls_positional_add_no_columns_orders")
+        let ctx = RlsContext::tenant("tenant-without-columns");
+        let err = Qail::add("_rls_positional_add_without_columns_orders")
             .values([Value::Int(1), Value::Int(100)])
-            .with_rls(&ctx);
+            .with_rls(&ctx)
+            .expect_err("positional payload without columns should fail");
+
+        assert!(err.to_string().contains("requires explicit columns"));
     }
 
     #[test]
@@ -629,7 +655,8 @@ mod tests {
         let ctx = RlsContext::tenant("tenant-final");
         let query = Qail::get("_rls_qualified_tenant_filter_orders")
             .filter("orders.tenant_id", Operator::Eq, "tenant-wrong")
-            .with_rls(&ctx);
+            .with_rls(&ctx)
+            .expect("rls should apply");
 
         let sql = query.to_sql();
         assert!(sql.contains("'tenant-final'"));

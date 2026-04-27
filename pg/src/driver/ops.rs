@@ -202,7 +202,9 @@ impl PgDriver {
                     .await?
             }
             AutoCountPath::PoolParallel => {
-                unreachable!("driver auto planner cannot resolve pool-parallel")
+                return Err(PgError::Protocol(
+                    "driver auto planner returned pool-parallel path".to_string(),
+                ));
             }
         };
 

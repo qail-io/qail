@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for i in 0..task_count {
         let pool = pool.clone();
-        let counter = success_count.clone();
+        let counter = Arc::clone(&success_count);
 
         let task = tokio::spawn(async move {
             // Each task fights for a connection

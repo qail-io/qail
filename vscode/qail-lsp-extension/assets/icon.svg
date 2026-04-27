@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00f0ff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#a855f7;stop-opacity:1" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="15" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+  
+  <!-- Outer Ring (Q shape base) -->
+  <circle cx="256" cy="256" r="200" fill="none" stroke="url(#grad)" stroke-width="40" stroke-linecap="round" filter="url(#glow)" opacity="0.9" />
+  
+  <!-- Hook Tail (The Q tail/Hook) -->
+  <path d="M 330 380 L 420 470" stroke="url(#grad)" stroke-width="50" stroke-linecap="round" />
+  
+  <!-- Hook Barb inside -->
+  <path d="M 256 120 L 256 220" stroke="url(#grad)" stroke-width="30" stroke-linecap="round" />
+  <path d="M 256 220 L 320 280" stroke="url(#grad)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

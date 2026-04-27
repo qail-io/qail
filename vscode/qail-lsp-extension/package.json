@@ -2,9 +2,10 @@
   "name": "qail-lsp",
   "displayName": "QAIL LSP",
   "description": "VS Code extension for QAIL Language Server (qail-lsp)",
-  "version": "0.1.1",
-  "publisher": "qail-io",
+  "version": "0.27.11",
+  "publisher": "qail",
   "license": "Apache-2.0",
+  "icon": "assets/icon.png",
   "engines": {
     "vscode": "^1.90.0"
   },

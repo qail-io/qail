@@ -129,8 +129,8 @@ let unlisten = Qail::unlisten("orders");
 | `.left_join_as(table, alias, left, right)` | LEFT JOIN with alias |
 | `.inner_join_as(table, alias, left, right)` | INNER JOIN with alias |
 | `.join(kind, table, left, right)` | Generic join |
-| `.join_on(related)` | Auto-inferred FK join |
-| `.join_on_optional(related)` | FK join (no-op if no relation) |
+| `.join_on(related)` | Auto-inferred FK join, returns `QailBuildResult<Self>` |
+| `.join_on_optional(related)` | FK join (no-op if no relation or ambiguity) |
 
 ### Grouping & Aggregation
 
@@ -168,7 +168,7 @@ let unlisten = Qail::unlisten("orders");
 | `.update_from([...])` | UPDATE ... FROM tables |
 | `.delete_using([...])` | DELETE ... USING tables |
 | `.with_ctes(ctes)` | WITH (Common Table Expressions) |
-| `.with_rls(&ctx)` | Inject RLS context |
+| `.with_rls(&ctx)` | Inject RLS context, returns `QailBuildResult<Self>` |
 
 ### Materialized Views
 

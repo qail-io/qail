@@ -147,8 +147,8 @@ pub(super) fn parse_drop_targets(sql: &str) -> (Vec<String>, Vec<(String, String
 /// Discover migration files in both flat and subdirectory layouts.
 ///
 /// Supported layouts:
-///   Flat:   `migrations/001_name.up.qail`
-///   Subdir: `migrations/20251207000000_name/up.qail`
+///   Flat:   `deltas/001_name.up.qail`
+///   Subdir: `deltas/20251207000000_name/{expand,backfill,contract}.qail`
 ///
 /// Raw `.sql` files are rejected to enforce the type-safe barrier.
 pub(crate) fn discover_migrations(
@@ -169,7 +169,6 @@ pub(crate) fn discover_migrations(
 
         if path.is_dir() {
             // Subdirectory layout:
-            //   legacy:   <dir>/up.qail
             //   phased:   <dir>/expand.qail, backfill.qail, contract.qail
             if matches!(direction, MigrateDirection::Up) {
                 let phased = [
@@ -177,7 +176,6 @@ pub(crate) fn discover_migrations(
                     ("backfill.qail", MigrationPhase::Backfill),
                     ("contract.qail", MigrationPhase::Contract),
                 ];
-                let mut has_phased_files = false;
 
                 for (filename, phase) in phased {
                     let qail_file = path.join(filename);
@@ -191,36 +189,12 @@ pub(crate) fn discover_migrations(
                         );
                     }
                     if qail_file.exists() {
-                        has_phased_files = true;
                         migrations.push(MigrationFile {
                             group_key: name_str.clone(),
                             sort_key: format!("{}/{}", name_str, filename),
                             display_name: format!("{}/{}", name_str, filename),
                             path: qail_file,
                             phase,
-                        });
-                    }
-                }
-
-                // Legacy fallback when phased files do not exist
-                if !has_phased_files {
-                    let qail_file = path.join("up.qail");
-                    let sql_file = path.join("up.sql");
-                    if sql_file.exists() && !qail_file.exists() {
-                        eprintln!(
-                            "  {} {}/up.sql found but .sql is not supported — convert to .qail",
-                            "⚠".yellow(),
-                            name_str
-                        );
-                        continue;
-                    }
-                    if qail_file.exists() {
-                        migrations.push(MigrationFile {
-                            group_key: name_str.clone(),
-                            sort_key: name_str.clone(),
-                            display_name: format!("{}/up.qail", name_str),
-                            path: qail_file,
-                            phase: MigrationPhase::Expand,
                         });
                     }
                 }

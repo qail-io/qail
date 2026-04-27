@@ -348,7 +348,9 @@ table comments {
 
         // Test forward join: from users, join posts
         // This should find reverse: posts.user_id -> users.id
-        let query = Qail::get("users").join_on("posts");
+        let query = Qail::get("users")
+            .join_on("posts")
+            .expect("relation should join");
 
         assert_eq!(query.joins.len(), 1);
         let join = &query.joins[0];
@@ -382,7 +384,7 @@ table comments {
     }
 
     #[test]
-    fn test_join_on_panics_on_ambiguous_relation() {
+    fn test_join_on_returns_error_on_ambiguous_relation() {
         use crate::Qail;
         let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
 
@@ -393,10 +395,10 @@ table comments {
             reg.register("invoices", "seller_id", "users", "id");
         }
 
-        let result = std::panic::catch_unwind(|| {
-            let _ = Qail::get("invoices").join_on("users");
-        });
-        assert!(result.is_err(), "ambiguous relation should panic");
+        let err = Qail::get("invoices")
+            .join_on("users")
+            .expect_err("ambiguous relation should error");
+        assert!(err.to_string().contains("Ambiguous relation"));
 
         {
             let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
@@ -426,21 +428,7 @@ table comments {
     }
 
     #[test]
-    fn test_join_on_returns_self_when_no_relation() {
-        use crate::Qail;
-        let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
-
-        {
-            let mut reg = super::RUNTIME_RELATIONS.write().unwrap();
-            *reg = RelationRegistry::new();
-        }
-
-        let query = Qail::get("users").join_on("nonexistent");
-        assert!(query.joins.is_empty());
-    }
-
-    #[test]
-    fn test_try_join_on_returns_error_when_no_relation() {
+    fn test_join_on_returns_error_when_no_relation() {
         use crate::Qail;
         let _guard = RELATION_TEST_LOCK.lock().expect("relation test lock");
 
@@ -450,9 +438,9 @@ table comments {
         }
 
         let err = Qail::get("users")
-            .try_join_on("nonexistent")
-            .expect_err("expected missing relation error");
-        assert!(err.contains("No relation found"));
+            .join_on("nonexistent")
+            .expect_err("missing relation should error");
+        assert!(err.to_string().contains("No relation found"));
     }
 
     #[test]
@@ -711,7 +699,7 @@ table invoices {
         }
 
         let err = lookup_relation_state("invoices", "users").expect_err("ambiguous relation");
-        assert!(err.contains("Ambiguous relation"));
+        assert!(err.to_string().contains("Ambiguous relation"));
 
         {
             let mut reg = super::RUNTIME_RELATIONS.write().expect("registry lock");
@@ -874,21 +862,20 @@ pub fn lookup_relation(from_table: &str, to_table: &str) -> Option<(String, Stri
 pub fn lookup_relation_state(
     from_table: &str,
     to_table: &str,
-) -> Result<Option<(String, String)>, String> {
+) -> crate::error::QailBuildResult<Option<(String, String)>> {
     let registry = RUNTIME_RELATIONS
         .read()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .map_err(|e| crate::error::QailBuildError::RelationRegistryLock(e.to_string()))?;
     let Some(options) = registry.get_all(from_table, to_table) else {
         return Ok(None);
     };
 
     if options.len() > 1 {
-        return Err(format!(
-            "Ambiguous relation between '{}' and '{}': {} foreign keys registered. Use an explicit join condition.",
-            from_table,
-            to_table,
-            options.len()
-        ));
+        return Err(crate::error::QailBuildError::AmbiguousRelation {
+            from_table: from_table.to_string(),
+            to_table: to_table.to_string(),
+            foreign_key_count: options.len(),
+        });
     }
 
     let (fc, tc) = options[0].clone();

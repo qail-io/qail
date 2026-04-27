@@ -4,7 +4,6 @@
 //! 1. Run Qdrant: `docker run -p 6333:6333 qdrant/qdrant`
 //! 2. Run this example: `cargo run -p qail-qdrant --example integration_test`
 
-use qail_qdrant::prelude::Distance;
 use qail_qdrant::{Point, QdrantDriver};
 
 #[tokio::main]
@@ -33,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Create collection ---
     println!("📁 Creating collection '{}'...", collection);
     driver
-        .create_collection(collection, 4, Distance::Cosine, false)
+        .create_collection(collection, 4, qail_qdrant::Distance::Cosine, false)
         .await?;
     println!("✅ Collection created");
 

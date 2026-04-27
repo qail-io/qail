@@ -36,7 +36,7 @@ pub struct MigrateApplyOptions<'a> {
     pub lock_timeout_secs: Option<u64>,
 }
 
-/// Apply all pending migrations from the migrations/ folder.
+/// Apply all pending migrations from the deltas/ folder.
 ///
 /// Tracks applied migrations in `_qail_migrations` table so re-running
 /// is safe (idempotent). Skips migrations that have already been applied.

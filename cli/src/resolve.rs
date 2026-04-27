@@ -29,7 +29,7 @@ pub fn resolve_db_url(cli_url: Option<&str>) -> Result<String> {
     // 3. Try qail.toml
     match QailConfig::load() {
         Ok(config) => {
-            let url = config.postgres.url.clone();
+            let url = config.postgres.url;
             // Don't return the default placeholder URL
             if url == "postgres://postgres@localhost:5432/postgres" {
                 anyhow::bail!(

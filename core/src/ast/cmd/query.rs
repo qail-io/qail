@@ -17,22 +17,6 @@ impl Qail {
         self
     }
 
-    /// Sort by column ascending (deprecated, use `.order_asc()`).
-    #[deprecated(since = "0.11.0", note = "Use .order_asc(column) instead")]
-    pub fn sort_asc(mut self, column: &str) -> Self {
-        self.cages.push(Cage {
-            kind: CageKind::Sort(SortOrder::Asc),
-            conditions: vec![Condition {
-                left: Expr::Named(column.to_string()),
-                op: Operator::Eq,
-                value: Value::Null,
-                is_array_unnest: false,
-            }],
-            logical_op: LogicalOp::And,
-        });
-        self
-    }
-
     /// SELECT * (all columns).
     pub fn select_all(mut self) -> Self {
         self.columns.push(Expr::Star);
@@ -371,46 +355,12 @@ impl Qail {
     /// Qail::get("users").left_join("posts", "users.id", "posts.user_id")
     ///
     /// // Simply:
-    /// Qail::get("users").join_on("posts")
+    /// Qail::get("users").join_on("posts")?
     /// ```
     ///
-    /// If no relation is found, this returns `self` unchanged.
-    /// If relation metadata is ambiguous, this method panics with guidance
-    /// to use explicit join conditions.
-    ///
-    /// Use [`Qail::try_join_on`] when you need a strict error on missing
-    /// relation metadata.
-    pub fn join_on(self, related_table: impl AsRef<str>) -> Self {
-        let related = related_table.as_ref();
-
-        // Try: current table -> related (forward relation)
-        match crate::schema::lookup_relation_state(&self.table, related) {
-            Ok(Some((from_col, to_col))) => return self.left_join(related, &from_col, &to_col),
-            Ok(None) => {}
-            Err(msg) => panic!("QAIL: join_on failed — {}", msg),
-        }
-
-        // Try: related -> current table (reverse relation)
-        match crate::schema::lookup_relation_state(related, &self.table) {
-            Ok(Some((from_col, to_col))) => {
-                // Reverse: related.from_col references self.to_col
-                return self.left_join(related, &to_col, &from_col);
-            }
-            Ok(None) => {}
-            Err(msg) => panic!("QAIL: join_on failed — {}", msg),
-        }
-
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "QAIL: join_on skipped — no relation found between '{}' and '{}'. \
-             Define a ref: in schema.qail or use load_schema_relations() first.",
-            self.table, related
-        );
-        self
-    }
-
-    /// Strict relation join that returns an error when no relation is found.
-    pub fn try_join_on(self, related_table: impl AsRef<str>) -> Result<Self, String> {
+    /// Returns an error when no relation is found or relation metadata is
+    /// ambiguous. Use [`Qail::join_on_optional`] for a no-op fallback.
+    pub fn join_on(self, related_table: impl AsRef<str>) -> crate::error::QailBuildResult<Self> {
         let related = related_table.as_ref();
 
         // Try: current table -> related (forward relation)
@@ -427,10 +377,10 @@ impl Qail {
             return Ok(self.left_join(related, &to_col, &from_col));
         }
 
-        Err(format!(
-            "No relation found between '{}' and '{}'. Define a ref: in schema.qail or use load_schema_relations() first.",
-            self.table, related
-        ))
+        Err(crate::error::QailBuildError::RelationNotFound {
+            from_table: self.table,
+            to_table: related.to_string(),
+        })
     }
 
     /// Join a related table if relation exists, otherwise no-op.

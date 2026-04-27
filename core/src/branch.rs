@@ -90,9 +90,8 @@ impl BranchContext {
     }
 
     /// Create from an optional branch name (None = main).
-    /// Invalid branch names are treated as main for backward compatibility.
-    pub fn from_header(value: Option<&str>) -> Self {
-        Self::parse_header(value).unwrap_or_else(|_| Self::main())
+    pub fn from_header(value: Option<&str>) -> Result<Self, String> {
+        Self::parse_header(value)
     }
 
     /// Validate a branch name.
@@ -158,12 +157,14 @@ mod tests {
 
     #[test]
     fn test_from_header() {
-        assert!(BranchContext::from_header(None).is_main());
-        assert!(BranchContext::from_header(Some("")).is_main());
-        assert!(BranchContext::from_header(Some("main")).is_main());
-        assert!(BranchContext::from_header(Some("MAIN")).is_main());
+        assert!(BranchContext::from_header(None).unwrap().is_main());
+        assert!(BranchContext::from_header(Some("")).unwrap().is_main());
+        assert!(BranchContext::from_header(Some("main")).unwrap().is_main());
+        assert!(BranchContext::from_header(Some("MAIN")).unwrap().is_main());
         assert_eq!(
-            BranchContext::from_header(Some("feat-1")).branch_name(),
+            BranchContext::from_header(Some("feat-1"))
+                .unwrap()
+                .branch_name(),
             Some("feat-1")
         );
     }
@@ -227,16 +228,10 @@ mod tests {
     }
 
     #[test]
-    fn test_from_header_rejects_invalid() {
-        // Invalid branch names silently fall back to main
-        assert!(BranchContext::from_header(Some("has;semicolon")).is_main());
-        assert!(BranchContext::from_header(Some(".hidden")).is_main());
-        assert!(BranchContext::from_header(Some("' OR 1=1 --")).is_main());
-        // Valid names still work
-        assert_eq!(
-            BranchContext::from_header(Some("feat-1")).branch_name(),
-            Some("feat-1")
-        );
+    fn test_from_header_errors_on_invalid() {
+        let err = BranchContext::from_header(Some("has;semicolon"))
+            .expect_err("invalid header should fail");
+        assert!(err.contains("Invalid branch name"));
     }
 
     #[test]

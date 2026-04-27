@@ -759,7 +759,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         }
         return Ok(Qail {
             action: Action::DropMaterializedView,
-            table: view_name.to_string(),
+            table: view_name,
             ..Default::default()
         });
     }
@@ -774,7 +774,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         }
         return Ok(Qail {
             action: Action::DropView,
-            table: view_name.to_string(),
+            table: view_name,
             ..Default::default()
         });
     }
@@ -789,7 +789,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         }
         return Ok(Qail {
             action: Action::DropExtension,
-            table: ext_name.to_string(),
+            table: ext_name,
             ..Default::default()
         });
     }
@@ -804,7 +804,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         }
         return Ok(Qail {
             action: Action::DropSequence,
-            table: seq_name.to_string(),
+            table: seq_name,
             ..Default::default()
         });
     }
@@ -823,7 +823,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         }
         return Ok(Qail {
             action: Action::DropEnum,
-            table: enum_name.to_string(),
+            table: enum_name,
             ..Default::default()
         });
     }
@@ -854,7 +854,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         }
         return Ok(Qail {
             action: Action::DropFunction,
-            table: function_target.to_string(),
+            table: function_target,
             ..Default::default()
         });
     }
@@ -874,7 +874,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         }
         return Ok(Qail {
             action: Action::DropTrigger,
-            table: trigger_target.to_string(),
+            table: trigger_target,
             ..Default::default()
         });
     }
@@ -891,7 +891,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
             action: Action::DropIndex,
             // qail-pg AST encoder emits "DROP INDEX IF EXISTS ..." already.
             // Keep only the raw index identifier here to avoid "IF EXISTS IF EXISTS ...".
-            table: index_name.to_string(),
+            table: index_name,
             ..Default::default()
         });
     }
@@ -906,7 +906,7 @@ fn compile_drop_hint_strict(target: &str) -> Result<Qail> {
         }
         return Ok(Qail {
             action: Action::Drop,
-            table: table_name.to_string(),
+            table: table_name,
             ..Default::default()
         });
     }

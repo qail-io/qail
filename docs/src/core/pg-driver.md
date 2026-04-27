@@ -13,7 +13,7 @@ The `qail-pg` crate provides a **native PostgreSQL driver** with AST-native wire
 - **Kerberos/GSS/SSPI Hooks** — Protocol-level support with pluggable token providers (legacy + stateful)
 - **Built-in Linux Kerberos Provider** — Optional `enterprise-gssapi` feature for native krb5/GSS flow
 - **Protocol Negotiation** — Requests startup protocol 3.2 by default with one-shot fallback to 3.0 on explicit server version rejection
-- **Cancel-Key Compatibility** — Native bytes cancel-key APIs with legacy i32 wrappers retained for 4-byte keys
+- **Cancel-Key API** — Native bytes cancel-key APIs for protocol 3.0 and 3.2 keys
 - **Connection Pooling** — Efficient resource management with RLS-safe checkout
 - **COPY Protocol** — Bulk insert for high throughput (1.63M rows/sec)
 - **Pipeline Execution** — Multiple queries per round-trip
@@ -357,15 +357,11 @@ let idle = pool.idle_count().await;
 ```rust
 use qail_core::RlsContext;
 
-let ctx = RlsContext {
-    operator_id: "tenant-123".into(),
-    agent_id: Some("agent-456".into()),
-    is_super_admin: false,
-};
+let ctx = RlsContext::tenant_and_agent("tenant-123", "agent-456");
 
 // Acquire + set RLS context in one call
 // Call release() after query work to reset context and return to pool
-let mut conn = pool.acquire_with_rls(&ctx).await?;
+let mut conn = pool.acquire_with_rls(ctx).await?;
 conn.release().await;
 ```
 

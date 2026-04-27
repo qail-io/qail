@@ -13,7 +13,6 @@
 //! GET    /api/{table}?sort=-col          → Sort prefix direction
 //! GET    /api/{table}?distinct=col       → Distinct on columns
 //! GET    /api/{table}/aggregate          → Aggregation (count, sum, avg, min, max)
-//! GET    /api/{table}/_aggregate         → Aggregation alias (compat)
 //! GET    /api/{table}/_explain           → EXPLAIN ANALYZE for query
 //! GET    /api/{table}/{id}               → Get single row by PK
 //! POST   /api/{table}                    → Create row(s) from JSON body (single or batch)
@@ -51,7 +50,6 @@ pub use types::{
 };
 
 /// Extract branch context from X-Branch-ID header.
-#[allow(dead_code)]
 fn extract_branch_from_headers(headers: &HeaderMap) -> Result<BranchContext, ApiError> {
     let Some(raw_branch) = headers.get("x-branch-id") else {
         return Ok(BranchContext::main());
@@ -97,9 +95,7 @@ fn debug_sql(cmd: &qail_core::ast::Qail) -> String {
 
 /// Resolve the tenant scope column for a table from loaded schema metadata.
 ///
-/// Prefers the configured canonical tenant column (`tenant_id` by default).
-/// Falls back to legacy `operator_id` to keep tenant isolation fail-closed
-/// during ongoing schema migrations.
+/// Uses the configured canonical tenant column (`tenant_id` by default) only.
 pub(crate) fn tenant_scope_column_for_table(
     state: &GatewayState,
     table_name: &str,
@@ -111,14 +107,6 @@ pub(crate) fn tenant_scope_column_for_table(
         .any(|col| col.name == state.config.tenant_column)
     {
         return Some(state.config.tenant_column.clone());
-    }
-
-    if table.columns.iter().any(|col| col.name == "operator_id") {
-        tracing::debug!(
-            table = %table_name,
-            "Using legacy operator_id as tenant scope column"
-        );
-        return Some("operator_id".to_string());
     }
 
     None

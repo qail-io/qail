@@ -428,7 +428,7 @@ fn test_extract_columns_on_conflict() {
 }
 
 #[test]
-fn test_validate_against_schema_casted_column_no_false_positive() {
+fn test_validate_against_schema_diagnostics_casted_column_no_false_positive() {
     let schema = Schema::parse(
         r#"
 table users {
@@ -444,16 +444,16 @@ let q = Qail::get("users").eq("id::text", "abc");
 
     let mut usages = Vec::new();
     scan_file("test.rs", content, &mut usages);
-    let errors = validate_against_schema(&schema, &usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
     assert!(
-        errors.is_empty(),
+        diagnostics.is_empty(),
         "casted column should not produce schema error: {:?}",
-        errors
+        diagnostics
     );
 }
 
 #[test]
-fn test_validate_against_schema_view_table_name_is_allowed() {
+fn test_validate_against_schema_diagnostics_view_table_name_is_allowed() {
     let schema = Schema::parse(
         r#"
 table users {
@@ -474,12 +474,12 @@ let q = Qail::get("v_users").column("v_users.id").eq("v_users.some_projection", 
 
     let mut usages = Vec::new();
     scan_file("test.rs", content, &mut usages);
-    let errors = validate_against_schema(&schema, &usages);
+    let diagnostics = validate_against_schema_diagnostics(&schema, &usages);
 
     assert!(
-        errors.is_empty(),
+        diagnostics.is_empty(),
         "view-backed query should not fail table validation: {:?}",
-        errors
+        diagnostics
     );
 }
 

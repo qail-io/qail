@@ -255,7 +255,7 @@ SUBCOMMANDS:
     up       - Apply migrations forward
     down     - Rollback migrations
     rollback - Roll back to a specific applied version
-    apply    - Run all pending migrations from migrations/ folder
+    apply    - Run all pending migrations from deltas/ folder
     create   - Generate a new named migration file
     shadow   - Apply to shadow database (blue-green deployment)
     promote  - Swap shadow to primary
@@ -786,9 +786,9 @@ EXAMPLES:
         #[arg(long)]
         lock_timeout_secs: Option<u64>,
     },
-    /// Apply migrations from migrations/ folder (reads .qail files)
+    /// Apply migrations from deltas/ folder (reads .qail files)
     #[command(after_help = r#"WHAT IT DOES:
-    Scans migrations/ directory for .qail files, determines which have not
+    Scans deltas/ directory for .qail files, determines which have not
     been applied to the database, and runs them in order.
 
 EXAMPLES:
@@ -821,7 +821,7 @@ EXAMPLES:
         /// Database URL (reads from qail.toml if not provided)
         #[arg(short, long)]
         url: Option<String>,
-        /// Direction to apply from migrations folder
+        /// Direction to apply from deltas folder
         #[arg(long, value_enum, default_value = "up")]
         direction: CliMigrateDirection,
         /// Migration phase to apply (all, expand, backfill, contract)
@@ -860,7 +860,7 @@ EXAMPLES:
     qail migrate create add_user_avatars
     qail migrate create add_user_avatars --author "orion" --depends add_users
     
-    Creates: migrations/<timestamp>_add_user_avatars.qail"#)]
+    Creates: deltas/<timestamp>_add_user_avatars.qail"#)]
     Create {
         /// Name for the migration (e.g., add_user_avatars)
         name: String,
@@ -1425,7 +1425,7 @@ fn transpile_query(query: &str, cli: &Cli) -> Result<()> {
                 "wire": qail_core::wire::encode_cmd_text(&cmd),
                 "sql": cmd.to_sql_with_dialect(dialect),
                 "action": format!("{}", cmd.action),
-                "table": cmd.table.clone(),
+                "table": cmd.table,
             });
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }

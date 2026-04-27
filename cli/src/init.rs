@@ -534,10 +534,7 @@ drop table _qail_queue
         down_content,
     )?;
 
-    println!("{} Created migrations/001_qail_queue.up.qail", "✓".green());
-    println!(
-        "{} Created migrations/001_qail_queue.down.qail",
-        "✓".green()
-    );
+    println!("{} Created deltas/001_qail_queue.up.qail", "✓".green());
+    println!("{} Created deltas/001_qail_queue.down.qail", "✓".green());
     Ok(())
 }

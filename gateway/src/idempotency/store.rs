@@ -76,17 +76,6 @@ impl IdempotencyStore {
             response,
         );
     }
-
-    /// Number of entries currently cached (for metrics).
-    pub(crate) fn len(&self) -> u64 {
-        self.cache.entry_count()
-    }
-
-    /// Returns `true` if the cache is empty.
-    #[allow(dead_code)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 pub(crate) fn lock_in_flight_set(

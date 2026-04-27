@@ -96,7 +96,8 @@ fn main() {
         .column("id")
         .column("status")
         .column("total_fare")
-        .with_rls(&ctx) // Returns RlsQuery<Orders> — proof provided
+        .with_rls(&ctx) // Returns Result<RlsQuery<Orders>> — proof provided
+        .expect("RLS proof should apply")
         .build(); // ✅ Compiles — RlsQuery has .build()
 
     println!("✅ RLS table with proof (Orders):");
@@ -108,6 +109,7 @@ fn main() {
     let query = Qail::typed(Bookings)
         .column("id")
         .with_rls(&ctx)
+        .expect("RLS proof should apply")
         .column("passenger_name")
         .column("booking_number")
         .filter("status", qail_core::ast::Operator::Eq, "confirmed")
@@ -127,6 +129,7 @@ fn main() {
         .column("id")
         .column("operator_id")
         .with_rls(&admin_ctx) // Proof satisfied, but no filter injected
+        .expect("RLS proof should apply")
         .build();
 
     println!("✅ Super admin (no tenant filter, but proof still required):");

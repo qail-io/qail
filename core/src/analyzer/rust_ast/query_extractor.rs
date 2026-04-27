@@ -8,8 +8,6 @@
 //! - Fetch method (fetch_all/fetch_one/fetch_optional/execute/unknown)
 //! - Return type (from turbofish)
 
-#![allow(dead_code)] // Module under development, will be used by LSP
-
 use super::sql_semantics::{SqlStmtKind, classify_sql_kind};
 
 /// SQL statement category for a detected query call.

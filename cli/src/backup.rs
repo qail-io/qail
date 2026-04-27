@@ -421,12 +421,16 @@ table _qail_data_snapshots (
 /// Generate data snapshots table DDL
 pub fn data_snapshots_ddl() -> String {
     use qail_core::parser::schema::Schema;
-    Schema::parse(DATA_SNAPSHOTS_SCHEMA)
-        .expect("Invalid data snapshots schema")
+
+    let Ok(schema) = Schema::parse(DATA_SNAPSHOTS_SCHEMA) else {
+        return String::new();
+    };
+
+    schema
         .tables
         .first()
-        .expect("No table in snapshots schema")
-        .to_ddl()
+        .map(|table| table.to_ddl())
+        .unwrap_or_default()
 }
 
 /// Ensure data snapshots table exists

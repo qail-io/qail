@@ -142,7 +142,7 @@ impl Default for GatewayConfig {
             bind_address: "0.0.0.0:8080".to_string(),
             cors_enabled: true,
             cors_allowed_origins: Vec::new(),
-            cors_strict: false,
+            cors_strict: true,
             config_root: None,
             require_auth: true,
             admin_token: None,

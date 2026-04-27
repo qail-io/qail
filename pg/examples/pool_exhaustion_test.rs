@@ -18,7 +18,7 @@ use tokio::sync::Barrier;
 
 fn slow_query(seconds: f64) -> Qail {
     Qail::get("pg_catalog.pg_class")
-        .column(&format!("pg_sleep({seconds}) AS slept"))
+        .column(format!("pg_sleep({seconds}) AS slept"))
         .column("'alive' AS status")
         .limit(1)
 }
@@ -90,10 +90,10 @@ async fn main() {
 
         for _ in 0..num_workers {
             let db_url = db_url.clone();
-            let barrier = barrier.clone();
-            let successes = successes.clone();
-            let errors = errors.clone();
-            let max_lat = max_latency_us.clone();
+            let barrier = Arc::clone(&barrier);
+            let successes = Arc::clone(&successes);
+            let errors = Arc::clone(&errors);
+            let max_lat = Arc::clone(&max_latency_us);
             let slow = slow_query(0.1);
 
             handles.push(tokio::spawn(async move {

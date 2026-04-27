@@ -6,7 +6,7 @@ QAIL compiles typed query ASTs directly to database wire protocols. No applicati
 
 ## Latest Updates (March 2026)
 
-- Tenant-first naming is now canonical across docs and gateway flows (`tenant_id`), with legacy `operator_id` compatibility retained.
+- Tenant-first naming is canonical across docs and gateway flows (`tenant_id`); legacy `operator_id` runtime aliases have been removed.
 - Gateway policy evaluation and execution-path fixes were applied to reduce false denies and keep optimized command execution consistent.
 - Direct SDK tracks are now first-class: TypeScript, Swift, and Kotlin.
 - Node.js native binding and WASM packaging remain deferred.

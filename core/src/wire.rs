@@ -106,12 +106,7 @@ pub fn decode_cmds_text(input: &str) -> Result<Vec<Qail>, String> {
 }
 
 /// Encode one command into compact binary wire format (QWB2 AST binary).
-pub fn encode_cmd_binary(cmd: &Qail) -> Vec<u8> {
-    try_encode_cmd_binary(cmd).expect("QWB2 AST binary encoding must succeed for valid Qail")
-}
-
-/// Fallible QWB2 AST-binary encoder.
-pub fn try_encode_cmd_binary(cmd: &Qail) -> Result<Vec<u8>, String> {
+pub fn encode_cmd_binary(cmd: &Qail) -> Result<Vec<u8>, String> {
     let payload = serde_json::to_vec(cmd).map_err(|e| format!("binary AST encode failed: {e}"))?;
     if payload.len() > MAX_CMD_BINARY_PAYLOAD_BYTES {
         return Err(format!(
@@ -870,7 +865,7 @@ mod tests {
             .set_value("active", true)
             .where_eq("id", 7);
 
-        let encoded = encode_cmd_binary(&cmd);
+        let encoded = encode_cmd_binary(&cmd).expect("binary encode");
         let decoded = decode_cmd_binary(&encoded).unwrap();
         assert_eq!(decoded.to_string(), cmd.to_string());
     }
@@ -889,7 +884,7 @@ mod tests {
     #[test]
     fn cmd_binary_payload_roundtrip() {
         let cmd = crate::ast::Qail::get("users").limit(3);
-        let encoded = encode_cmd_binary(&cmd);
+        let encoded = encode_cmd_binary(&cmd).expect("binary encode");
         let payload = decode_cmd_binary_payload(&encoded).unwrap();
         let mut deserializer = serde_json::Deserializer::from_slice(payload);
         let decoded: crate::ast::Qail = serde::Deserialize::deserialize(&mut deserializer).unwrap();
@@ -918,7 +913,7 @@ mod tests {
     #[test]
     fn cmd_binary_decode_rejects_trailing_bytes() {
         let cmd = crate::ast::Qail::get("users").limit(1);
-        let mut encoded = encode_cmd_binary(&cmd);
+        let mut encoded = encode_cmd_binary(&cmd).expect("binary encode");
         encoded.extend_from_slice(&[0xAA, 0xBB]);
         let err = decode_cmd_binary(&encoded).unwrap_err();
         assert!(err.contains("invalid payload length"));
@@ -939,7 +934,7 @@ mod tests {
             };
         }
 
-        let encoded = encode_cmd_binary(&nested);
+        let encoded = encode_cmd_binary(&nested).expect("binary encode");
         let err = decode_cmd_binary(&encoded).unwrap_err();
         assert!(
             err.contains("AST depth limit exceeded")
@@ -951,8 +946,9 @@ mod tests {
     #[test]
     fn cmd_binary_decode_bitflip_corpus_no_panic() {
         let seeds = vec![
-            encode_cmd_binary(&crate::ast::Qail::get("users").limit(1)),
-            encode_cmd_binary(&crate::ast::Qail::set("users").set_value("active", true)),
+            encode_cmd_binary(&crate::ast::Qail::get("users").limit(1)).expect("binary encode"),
+            encode_cmd_binary(&crate::ast::Qail::set("users").set_value("active", true))
+                .expect("binary encode"),
             vec![],
             b"QWB2garbage".to_vec(),
             vec![0u8; 32],

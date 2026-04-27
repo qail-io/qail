@@ -299,7 +299,8 @@ async fn binary_handler_accepts_qwb2_then_enforces_binary_allow_list_gate() {
         .route("/qail/binary", post(execute_query_binary))
         .with_state(Arc::clone(&state));
 
-    let payload = qail_core::wire::encode_cmd_binary(&qail_core::ast::Qail::get("users").limit(1));
+    let payload = qail_core::wire::encode_cmd_binary(&qail_core::ast::Qail::get("users").limit(1))
+        .expect("binary encode");
     let response = app
         .oneshot(
             Request::builder()

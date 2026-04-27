@@ -223,8 +223,8 @@ pub(crate) async fn explain_handler(
         .filter_map(|cols| {
             cols.first()
                 .and_then(|c| c.as_ref())
-                .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
-                .and_then(|s| serde_json::from_str(&s).ok())
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(|s| serde_json::from_str(s).ok())
         })
         .collect();
 

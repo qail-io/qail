@@ -60,7 +60,7 @@ fn transform_cte_select(sql: &str) -> String {
 
     format!(
         "use qail_core::ast::{{Qail, Operator, Order}};\n\n
-         // CTE '{}': define as separate query and use .as_cte(\"{}\")\n
+         // CTE '{}': define as separate query and pass it to .with(\"{}\", query)\n
          let {}_cte = Qail::get(\"{}\")
              .columns([\"*\"]);\n\n
          // Then reference CTE in main query using the alias\n\n

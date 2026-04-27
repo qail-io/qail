@@ -6,7 +6,7 @@ use anyhow::Result;
 /// Create a new named migration file pair (up + down) with timestamp prefix.
 /// ## Generated Files
 /// ```text
-/// migrations/
+/// deltas/
 /// ├── 20251231093400123_add_users.up.qail
 /// └── 20251231093400123_add_users.down.qail
 /// ```
@@ -73,7 +73,7 @@ pub fn migrate_create(name: &str, depends: Option<&str>, author: Option<&str>) -
     );
     println!("    2. Edit {} with rollback logic", down_filename.yellow());
     println!(
-        "    3. Run: {} schema.qail:migrations/ postgres://...",
+        "    3. Run: {} schema.qail:deltas/ postgres://...",
         "qail migrate up".cyan()
     );
 

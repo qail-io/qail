@@ -14,8 +14,8 @@
 //!   - Qdrant on localhost:6334 (gRPC)
 //!   - Postgres accessible via DATABASE_URL env var
 
-use qail_core::prelude::*;
 use qail_pg::PgConnection;
+use qail_qdrant::Distance as QdrantDistance;
 use qail_qdrant::prelude::*;
 use url::Url;
 
@@ -127,7 +127,7 @@ async fn hybrid_rag_search_flow() {
     println!("  ✓ PG table '{}' created", TABLE);
 
     // Create Qdrant collection
-    qd.create_collection(COLLECTION, VECTOR_DIM, Distance::Cosine, false)
+    qd.create_collection(COLLECTION, VECTOR_DIM, QdrantDistance::Cosine, false)
         .await
         .expect("Failed to create Qdrant collection");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;

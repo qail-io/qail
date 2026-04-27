@@ -73,13 +73,11 @@ pub(super) fn pool_churn_record_destroy(config: &PoolConfig, reason: &'static st
     let Ok(mut registry) = pool_churn_registry().lock() else {
         return;
     };
-    let state = registry
-        .entry(key.clone())
-        .or_insert_with(|| PoolChurnState {
-            window_started_at: now,
-            failure_count: 0,
-            open_until: None,
-        });
+    let state = registry.entry(key).or_insert_with(|| PoolChurnState {
+        window_started_at: now,
+        failure_count: 0,
+        open_until: None,
+    });
 
     if let Some(until) = state.open_until {
         if until > now {

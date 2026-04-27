@@ -5,7 +5,6 @@
 //! - Concurrent point upserts
 //! - Batch search operations
 
-use qail_core::ast::Distance;
 use qail_qdrant::point::PayloadValue;
 use qail_qdrant::{Point, PointId, QdrantDriver};
 use std::collections::HashMap;
@@ -70,7 +69,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..NUM_COLLECTIONS {
         let name = format!("heavy_stress_{}", i);
         if driver
-            .create_collection(&name, VECTOR_DIM as u64, Distance::Cosine, false)
+            .create_collection(
+                &name,
+                VECTOR_DIM as u64,
+                qail_qdrant::Distance::Cosine,
+                false,
+            )
             .await
             .is_ok()
         {

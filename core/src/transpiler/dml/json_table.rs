@@ -91,7 +91,7 @@ pub fn build_json_table(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     let source_ref = if source_table == "_" {
-        source_col.clone()
+        source_col
     } else {
         format!(
             "{}.{}",

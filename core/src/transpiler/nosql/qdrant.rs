@@ -174,10 +174,11 @@ fn build_qdrant_search(cmd: &Qail) -> String {
 fn build_filter(cmd: &Qail) -> String {
     // Qdrant Filter structure: { "must": [ { "key": "city", "match": { "value": "London" } } ] }
     let mut musts = Vec::new();
-    let mut shoulds = Vec::new();
+    let mut should_groups: Vec<Vec<String>> = Vec::new();
 
     for cage in &cmd.cages {
         if let CageKind::Filter = cage.kind {
+            let mut cage_clauses = Vec::new();
             for cond in &cage.conditions {
                 // Skip the vector query itself
                 if cond.op == Operator::Fuzzy {
@@ -221,24 +222,35 @@ fn build_filter(cmd: &Qail) -> String {
                         col_str, val
                     ),
                 };
-                match cage.logical_op {
-                    LogicalOp::And => musts.push(clause),
-                    LogicalOp::Or => shoulds.push(clause),
-                }
+                cage_clauses.push(clause);
+            }
+
+            if cage_clauses.is_empty() {
+                continue;
+            }
+
+            match cage.logical_op {
+                LogicalOp::And => musts.extend(cage_clauses),
+                LogicalOp::Or => should_groups.push(cage_clauses),
             }
         }
     }
 
-    if musts.is_empty() && shoulds.is_empty() {
+    for group in should_groups {
+        if group.len() == 1 {
+            musts.push(group[0].clone());
+        } else {
+            musts.push(format!("{{ \"should\": [{}] }}", group.join(", ")));
+        }
+    }
+
+    if musts.is_empty() {
         return String::new();
     }
 
     let mut parts = Vec::new();
     if !musts.is_empty() {
         parts.push(format!("\"must\": [{}]", musts.join(", ")));
-    }
-    if !shoulds.is_empty() {
-        parts.push(format!("\"should\": [{}]", shoulds.join(", ")));
     }
     format!("{{ {} }}", parts.join(", "))
 }

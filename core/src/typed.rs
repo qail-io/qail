@@ -586,19 +586,10 @@ impl<T: Table> TypedQail<T> {
     }
 
     /// Apply RLS context (tenant scoping) — available on all typed queries.
-    /// For tables that `impl RequiresRls`, prefer the dedicated `.with_rls()` → `RlsQuery<T>` path.
-    pub fn rls(mut self, ctx: &crate::rls::RlsContext) -> Self {
-        self.inner = self.inner.with_rls(ctx);
-        self
-    }
-
-    /// Deprecated alias for [`Self::rls`].
-    #[deprecated(
-        since = "0.26.5",
-        note = "use `rls(ctx)` on TypedQail<T>; `with_rls(ctx)` remains the proof-returning API for RequiresRls tables"
-    )]
-    pub fn with_rls_scoped(self, ctx: &crate::rls::RlsContext) -> Self {
-        self.rls(ctx)
+    /// For tables that `impl RequiresRls`, prefer the dedicated `.with_rls()?` → `RlsQuery<T>` path.
+    pub fn rls(mut self, ctx: &crate::rls::RlsContext) -> crate::error::QailBuildResult<Self> {
+        self.inner = self.inner.with_rls(ctx)?;
+        Ok(self)
     }
 
     /// Get a reference to the inner Qail.
@@ -621,7 +612,7 @@ impl<T: Table + DirectBuild> TypedQail<T> {
     /// Finish building and return the inner Qail.
     ///
     /// Only available for tables that do NOT require RLS.
-    /// RLS-protected tables must go through `.with_rls(ctx).build()` instead.
+    /// RLS-protected tables must go through `.with_rls(ctx)?.build()` instead.
     pub fn build(self) -> Qail {
         self.inner
     }
@@ -635,7 +626,7 @@ impl<T: Table + DirectBuild> TypedQail<T> {
 ///
 /// Tables with `tenant_id` column get this from codegen.
 /// When a table implements `RequiresRls`, its `TypedQail<T>` can only
-/// produce a `Qail` via `.with_rls(ctx)` → `RlsQuery<T>` → `.build()`.
+/// produce a `Qail` via `.with_rls(ctx)?` → `RlsQuery<T>` → `.build()`.
 ///
 /// This makes data leakage a **compile error**, not a runtime bug.
 ///
@@ -651,7 +642,7 @@ impl<T: Table + DirectBuild> TypedQail<T> {
 ///
 /// // ✓ Compiles — RLS proof provided
 /// let ctx = RlsContext::tenant("tenant-uuid");
-/// Qail::typed(Orders).with_rls(&ctx).build()
+/// Qail::typed(Orders).with_rls(&ctx)?.build()
 /// ```
 pub trait RequiresRls: Table {}
 
@@ -710,16 +701,19 @@ impl<T: Table + RequiresRls> TypedQail<T> {
     /// let ctx = RlsContext::tenant("tenant-uuid");
     /// let query = Qail::typed(Orders)
     ///     .column("id")
-    ///     .with_rls(&ctx)   // returns RlsQuery<Orders>
+    ///     .with_rls(&ctx)?  // returns RlsQuery<Orders>
     ///     .build();         // now .build() is available
     /// ```
-    pub fn with_rls(mut self, ctx: &crate::rls::RlsContext) -> RlsQuery<T> {
-        self.inner = self.inner.with_rls(ctx);
-        RlsQuery {
+    pub fn with_rls(
+        mut self,
+        ctx: &crate::rls::RlsContext,
+    ) -> crate::error::QailBuildResult<RlsQuery<T>> {
+        self.inner = self.inner.with_rls(ctx)?;
+        Ok(RlsQuery {
             inner: self.inner,
             _proof: RlsProof(()),
             _table: PhantomData,
-        }
+        })
     }
 }
 
@@ -781,16 +775,6 @@ impl<T: Table> RlsQuery<T> {
         V: Into<crate::ast::Value> + ColumnValue<C>,
     {
         self.inner = self.inner.typed_filter(col, op, value);
-        self
-    }
-
-    /// Deprecated alias for re-applying RLS context on a proven query chain.
-    #[deprecated(
-        since = "0.26.5",
-        note = "use `with_rls(ctx)` on TypedQail<T> before proof, or continue chaining on RlsQuery<T>"
-    )]
-    pub fn with_rls_scoped(mut self, ctx: &crate::rls::RlsContext) -> Self {
-        self.inner = self.inner.with_rls(ctx);
         self
     }
 
@@ -1110,6 +1094,7 @@ mod tests {
             .column("id")
             .column("total")
             .with_rls(&ctx)
+            .expect("rls should apply")
             .build();
 
         let sql = query.to_sql();
@@ -1128,6 +1113,7 @@ mod tests {
         let query = Qail::typed(Orders)
             .column("id")
             .with_rls(&ctx)
+            .expect("rls should apply")
             .column("status")
             .filter("status", crate::ast::Operator::Eq, "active")
             .order_by("created_at", SortOrder::Desc)
@@ -1152,6 +1138,7 @@ mod tests {
         let ctx = RlsContext::tenant("tenant-typed");
         let query = Qail::typed(Orders)
             .with_rls(&ctx)
+            .expect("rls should apply")
             .typed_columns(vec![status])
             .typed_filter(total, Operator::Gt, 100_i64)
             .build();
@@ -1173,41 +1160,6 @@ mod tests {
         assert!(sql.contains("users"), "Should build directly");
     }
 
-    #[allow(deprecated)]
-    #[test]
-    fn test_non_rls_with_rls_scoped_alias_builds() {
-        use crate::rls::RlsContext;
-        use crate::transpiler::ToSql;
-
-        let ctx = RlsContext::tenant("tenant-non-rls");
-        let query = Qail::typed(Users)
-            .with_rls_scoped(&ctx)
-            .column("email")
-            .build();
-
-        let sql = query.to_sql();
-        assert!(sql.contains("users"), "table");
-        assert!(sql.contains("email"), "column");
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn test_rls_query_with_rls_scoped_alias_builds() {
-        use crate::rls::RlsContext;
-        use crate::transpiler::ToSql;
-
-        let ctx = RlsContext::tenant("tenant-alias");
-        let query = Qail::typed(Orders)
-            .with_rls(&ctx)
-            .with_rls_scoped(&ctx)
-            .column("id")
-            .build();
-
-        let sql = query.to_sql();
-        assert!(sql.contains("orders"), "table");
-        assert!(sql.contains("id"), "column");
-    }
-
     #[test]
     fn test_super_admin_bypasses_rls() {
         use crate::rls::RlsContext;
@@ -1216,7 +1168,11 @@ mod tests {
         // Super admin — RLS injection is a no-op but proof still required
         let token = crate::rls::SuperAdminToken::for_system_process("test_super_admin_bypass");
         let ctx = RlsContext::super_admin(token);
-        let query = Qail::typed(Orders).column("id").with_rls(&ctx).build();
+        let query = Qail::typed(Orders)
+            .column("id")
+            .with_rls(&ctx)
+            .expect("super admin rls should no-op")
+            .build();
 
         let sql = query.to_sql();
         assert!(sql.contains("orders"), "Should query orders");

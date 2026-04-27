@@ -127,7 +127,7 @@ fn test_concurrent_read_write_no_stale_data() {
     let mut handles = Vec::new();
 
     for i in 0..5 {
-        let cache = cache.clone();
+        let cache = Arc::clone(&cache);
         handles.push(std::thread::spawn(move || {
             for j in 0..100 {
                 let query = format!("SELECT * FROM table_{}", i);
@@ -139,7 +139,7 @@ fn test_concurrent_read_write_no_stale_data() {
     }
 
     for i in 0..5 {
-        let cache = cache.clone();
+        let cache = Arc::clone(&cache);
         handles.push(std::thread::spawn(move || {
             for _ in 0..100 {
                 let query = format!("SELECT * FROM table_{}", i);

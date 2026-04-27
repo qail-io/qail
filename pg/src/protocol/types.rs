@@ -6,7 +6,6 @@
 ///
 /// Constants matching [`pg_type.dat`](https://github.com/postgres/postgres/blob/master/src/include/catalog/pg_type.dat).
 /// Use these with [`oid_to_name`] and [`is_array_oid`] for type introspection.
-#[allow(dead_code)]
 pub mod oid {
     /// Boolean (`bool`) — OID 16.
     pub const BOOL: u32 = 16;
@@ -245,7 +244,9 @@ pub fn decode_jsonb(bytes: &[u8]) -> Result<String, String> {
     if bytes[0] != 1 {
         return Err(format!("Unsupported JSONB version: {}", bytes[0]));
     }
-    String::from_utf8(bytes[1..].to_vec()).map_err(|e| format!("Invalid UTF-8 in JSONB: {}", e))
+    std::str::from_utf8(&bytes[1..])
+        .map(str::to_owned)
+        .map_err(|e| format!("Invalid UTF-8 in JSONB: {}", e))
 }
 
 /// Encode plain JSON (not JSONB) - just the text.
@@ -255,7 +256,9 @@ pub fn encode_json(json_str: &str) -> Vec<u8> {
 
 /// Decode plain JSON from PostgreSQL.
 pub fn decode_json(bytes: &[u8]) -> Result<String, String> {
-    String::from_utf8(bytes.to_vec()).map_err(|e| format!("Invalid UTF-8 in JSON: {}", e))
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|e| format!("Invalid UTF-8 in JSON: {}", e))
 }
 
 // ==================== Array Encoding/Decoding ====================

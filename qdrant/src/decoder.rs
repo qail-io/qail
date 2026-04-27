@@ -29,8 +29,6 @@ const MAX_DECODE_DEPTH: usize = 32;
 // ============================================================================
 
 const SEARCH_RESULT: u32 = 1;
-#[allow(dead_code)]
-const SEARCH_TIME: u32 = 2;
 
 // ============================================================================
 // ScoredPoint Field Numbers
@@ -40,8 +38,6 @@ const SCORED_POINT_ID: u32 = 1;
 const SCORED_POINT_PAYLOAD: u32 = 2;
 const SCORED_POINT_SCORE: u32 = 3;
 const SCORED_POINT_VECTORS: u32 = 4;
-#[allow(dead_code)]
-const SCORED_POINT_VERSION: u32 = 5;
 
 // ============================================================================
 // PointId Field Numbers

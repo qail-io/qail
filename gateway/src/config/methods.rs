@@ -141,7 +141,7 @@ impl GatewayConfig {
                 .as_ref()
                 .and_then(|gw| gw.cors_allowed_origins.clone())
                 .unwrap_or_default(),
-            cors_strict: false,
+            cors_strict: true,
             config_root: None,
             require_auth: true,
             admin_token: None,

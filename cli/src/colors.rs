@@ -68,7 +68,6 @@ impl Painted {
     pub fn white(self) -> Self {
         self.wrap("37")
     }
-    #[allow(dead_code)]
     pub fn bright_black(self) -> Self {
         self.wrap("90")
     }
@@ -110,7 +109,6 @@ pub trait Colorize {
     fn white(&self) -> Painted {
         self.paint("37")
     }
-    #[allow(dead_code)]
     fn bright_black(&self) -> Painted {
         self.paint("90")
     }

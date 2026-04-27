@@ -62,7 +62,6 @@ use std::path::{Path, PathBuf};
 /// Resolution order:
 /// 1. `migrations_dir` from `qail.toml` `[project]` section (if set)
 /// 2. `deltas/` (Qail default)
-/// 3. `migrations/` (SQLx compatibility fallback)
 ///
 /// Returns the resolved path, or an error if none exist and `create` is false.
 pub fn resolve_deltas_dir(create_if_missing: bool) -> anyhow::Result<PathBuf> {
@@ -89,12 +88,6 @@ pub fn resolve_deltas_dir(create_if_missing: bool) -> anyhow::Result<PathBuf> {
         return Ok(deltas.to_path_buf());
     }
 
-    // 3. SQLx compatibility fallback: migrations/
-    let migrations = Path::new("migrations");
-    if migrations.exists() {
-        return Ok(migrations.to_path_buf());
-    }
-
     // None exist — create the default if requested
     if create_if_missing {
         std::fs::create_dir_all(deltas)?;
@@ -102,7 +95,7 @@ pub fn resolve_deltas_dir(create_if_missing: bool) -> anyhow::Result<PathBuf> {
     }
 
     anyhow::bail!(
-        "No deltas/ or migrations/ directory found. Run 'qail init' first.\n\
+        "No deltas/ directory found. Run 'qail init' first.\n\
          Tip: Set a custom path in qail.toml:\n\
          [project]\n\
          migrations_dir = \"my_deltas\""
@@ -134,12 +127,15 @@ table _qail_migrations (
 
 /// Generate migration table DDL from AST (AST-native bootstrap).
 pub fn migration_table_ddl() -> String {
-    Schema::parse(MIGRATION_TABLE_SCHEMA)
-        .expect("Invalid migration table schema")
+    let Ok(schema) = Schema::parse(MIGRATION_TABLE_SCHEMA) else {
+        return String::new();
+    };
+
+    schema
         .tables
         .first()
-        .expect("No table in migration schema")
-        .to_ddl()
+        .map(|table| table.to_ddl())
+        .unwrap_or_default()
 }
 
 /// Stable checksum for a sequence of migration commands.

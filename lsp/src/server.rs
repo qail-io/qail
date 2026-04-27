@@ -95,7 +95,7 @@ impl QailLanguageServer {
                 .unwrap_or(true);
 
             if needs_reload {
-                self.load_schema_from_dir(&candidate_dir, schema_path.clone(), schema_mtime);
+                self.load_schema_from_dir(&candidate_dir, schema_path, schema_mtime);
             }
 
             return Some(candidate_dir);

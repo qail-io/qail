@@ -19,7 +19,7 @@ async fn driver() -> QdrantDriver {
 async fn ensure_collection(d: &mut QdrantDriver, name: &str, dim: u64) {
     let _ = d.delete_collection(name).await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    d.create_collection(name, dim, Distance::Cosine, false)
+    d.create_collection(name, dim, qail_qdrant::Distance::Cosine, false)
         .await
         .expect("create_collection failed");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;

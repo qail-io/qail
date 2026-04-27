@@ -60,20 +60,6 @@ pub fn write_usize(buf: &mut BytesMut, n: usize) {
     }
 }
 
-/// Write i64 to buffer.
-/// Zero allocation for 0-99.
-#[inline(always)]
-#[allow(dead_code)]
-pub fn write_i64(buf: &mut BytesMut, n: i64) {
-    if (0..100).contains(&n) {
-        buf.extend_from_slice(NUMERIC_VALUES[n as usize]);
-    } else if (0..1000).contains(&n) {
-        write_usize(buf, n as usize);
-    } else {
-        buf.extend_from_slice(n.to_string().as_bytes());
-    }
-}
-
 /// Convert i64 to bytes for parameter.
 /// Zero allocation for 0-99.
 #[inline(always)]

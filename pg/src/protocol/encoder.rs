@@ -736,8 +736,6 @@ impl PgEncoder {
         buf.extend_from_slice(&[b'S', 0, 0, 0, 4]);
     }
 
-    // Keep the original methods for compatibility
-
     /// Encode Bind message directly into existing buffer (ZERO ALLOCATION).
     /// This is the hot path optimization - no intermediate Vec allocation.
     #[inline]

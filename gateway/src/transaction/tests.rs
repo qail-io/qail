@@ -189,7 +189,7 @@ async fn test_with_session_allow_aborted_enables_recovery_flow() {
 
     {
         let sessions = mgr.sessions.lock().await;
-        let session = sessions.get("s_aborted").expect("session exists").clone();
+        let session = std::sync::Arc::clone(sessions.get("s_aborted").expect("session exists"));
         drop(sessions);
         let mut guard = session.lock().await;
         guard.pg_aborted = true;

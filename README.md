@@ -6,7 +6,7 @@
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-dev.qail.io-blue)](https://dev.qail.io/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.27.10-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.28.0-green)](CHANGELOG.md)
 
 ---
 
@@ -16,8 +16,8 @@ If you are searching for a **Rust PostgreSQL driver**, start with `qail-pg` + `q
 
 ```toml
 [dependencies]
-qail-core = "0.27.10"
-qail-pg = "0.27.10"
+qail-core = "0.28.0"
+qail-pg = "0.28.0"
 ```
 
 ```rust
@@ -30,7 +30,7 @@ let ctx = RlsContext::tenant(tenant_id);
 let query = Qail::get("users")
     .columns(["id", "email"])
     .eq("active", true)
-    .with_rls(&ctx);
+    .with_rls(&ctx)?;
 
 let rows = driver.fetch_all(&query).await?;
 ```
@@ -145,7 +145,7 @@ let orders = Qail::get("orders")
     .eq("orders.status", "paid")
     .order_by("orders.created_at", Desc)
     .limit(25)
-    .with_rls(&ctx);  // ← tenant-scoped automatically
+    .with_rls(&ctx)?;  // ← tenant-scoped automatically
 
 let rows = driver.fetch_all(&orders).await?;
 ```
@@ -184,8 +184,8 @@ let ctx = RlsContext::global();                     // Shared data (tenant_id IS
 let token = SuperAdminToken::for_system_process("admin");
 let ctx = RlsContext::super_admin(token);           // Full bypass (internal only)
 
-// Every query is automatically scoped
-Qail::get("bookings").with_rls(&ctx)  // ← no manual WHERE needed
+// Every query can be automatically scoped
+let bookings = Qail::get("bookings").with_rls(&ctx)?;  // ← no manual WHERE needed
 ```
 
 ### 🔗 Compile-Time Relation Safety

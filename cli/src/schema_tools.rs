@@ -283,9 +283,9 @@ pub fn format_schema_source(path: &str) -> Result<()> {
         .map_err(|e| anyhow!("Failed to resolve schema source '{}': {}", path, e))?;
 
     let files = if resolved.is_directory() {
-        resolved.files.clone()
+        resolved.files
     } else {
-        vec![resolved.root.clone()]
+        vec![resolved.root]
     };
 
     let mut changed = 0usize;

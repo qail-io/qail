@@ -66,9 +66,7 @@ pub fn txn_test_metrics_snapshot() -> TxnTestMetricsSnapshot {
 
 #[cfg(test)]
 pub async fn txn_test_serial_guard() -> tokio::sync::OwnedSemaphorePermit {
-    TEST_TXN_SERIAL
-        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
-        .clone()
+    Arc::clone(TEST_TXN_SERIAL.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
         .acquire_owned()
         .await
         .expect("txn test serial semaphore should remain open")

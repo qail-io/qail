@@ -51,14 +51,13 @@ struct QdrantConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct SyncRule {
     source_table: String,
     target_collection: String,
     #[serde(default)]
     trigger_column: Option<String>,
-    #[serde(default)]
-    embedding_model: Option<String>,
+    #[serde(default, rename = "embedding_model")]
+    _embedding_model: Option<String>,
 }
 
 /// Embedding model trait - user implements this
@@ -211,7 +210,9 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
             }
         }
     }
-    let mut pg = pg.unwrap();
+    let Some(mut pg) = pg else {
+        anyhow::bail!("Failed to connect to PostgreSQL");
+    };
     println!("{} Connected to PostgreSQL", "✓".green());
 
     // Connect to Qdrant with retry
@@ -246,7 +247,9 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
             }
         }
     }
-    let mut qdrant = qdrant.unwrap();
+    let Some(mut qdrant) = qdrant else {
+        anyhow::bail!("Failed to connect to Qdrant");
+    };
     println!("{} Connected to Qdrant", "✓".green());
 
     // Use dummy embedding for now (user would inject their own)
@@ -284,7 +287,7 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
 
     // Graceful shutdown: spawn signal handler
     let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
+    let running_clone = Arc::clone(&running);
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             println!("\n🛑 Shutdown signal received. Finishing current batch...");
@@ -457,13 +460,39 @@ fn load_config() -> Result<WorkerConfig> {
 }
 
 fn parse_grpc_url(url: &str) -> Result<(String, u16)> {
-    let url = url
+    let raw = url.trim();
+    if raw.is_empty() {
+        anyhow::bail!("Qdrant gRPC endpoint is empty");
+    }
+
+    let without_scheme = raw
         .trim_start_matches("http://")
         .trim_start_matches("https://");
-    let parts: Vec<&str> = url.split(':').collect();
-    let host = parts.first().unwrap_or(&"localhost").to_string();
-    let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(6334);
-    Ok((host, port))
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    if authority.is_empty() {
+        anyhow::bail!("Invalid Qdrant gRPC endpoint: '{url}'");
+    }
+
+    if authority.starts_with('[')
+        && let Some(end) = authority.find(']')
+    {
+        let host = &authority[1..end];
+        let port = authority[end + 1..]
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(6334);
+        return Ok((host.to_string(), port));
+    }
+
+    if let Some((host, port_str)) = authority.rsplit_once(':')
+        && !host.is_empty()
+        && !host.contains(':')
+        && let Ok(port) = port_str.parse::<u16>()
+    {
+        return Ok((host.to_string(), port));
+    }
+
+    Ok((authority.to_string(), 6334))
 }
 
 /// Parse PostgreSQL URL: postgres://user:password@host:port/database
@@ -674,4 +703,43 @@ async fn recover_stale_jobs(pg: &mut qail_pg::PgDriver) -> Result<u64> {
         .unwrap_or(0) as u64;
 
     Ok(recovered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_grpc_url;
+
+    #[test]
+    fn parse_grpc_url_supports_host_port_and_scheme() {
+        assert_eq!(
+            parse_grpc_url("localhost:6334").expect("parse localhost"),
+            ("localhost".to_string(), 6334)
+        );
+        assert_eq!(
+            parse_grpc_url("https://cloud.qdrant.io:443").expect("parse https endpoint"),
+            ("cloud.qdrant.io".to_string(), 443)
+        );
+        assert_eq!(
+            parse_grpc_url("http://qdrant.internal:6334/grpc").expect("parse path endpoint"),
+            ("qdrant.internal".to_string(), 6334)
+        );
+    }
+
+    #[test]
+    fn parse_grpc_url_supports_bracketed_ipv6_and_default_port() {
+        assert_eq!(
+            parse_grpc_url("[::1]:6334").expect("parse ipv6"),
+            ("::1".to_string(), 6334)
+        );
+        assert_eq!(
+            parse_grpc_url("qdrant.internal").expect("parse host"),
+            ("qdrant.internal".to_string(), 6334)
+        );
+    }
+
+    #[test]
+    fn parse_grpc_url_rejects_empty() {
+        let err = parse_grpc_url("").expect_err("empty endpoint must fail");
+        assert!(err.to_string().contains("empty"));
+    }
 }

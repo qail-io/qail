@@ -83,14 +83,11 @@ pub(super) fn auto_rest_routes(state: Arc<GatewayState>) -> Router<Arc<GatewaySt
 
         // GET /api/{table}/aggregate — aggregation
         let agg_path = format!("/api/{}/aggregate", table_name);
-        // GET /api/{table}/_aggregate — compatibility alias
-        let agg_alias_path = format!("/api/{}/_aggregate", table_name);
 
         // GET /api/{table}/_explain — explain query plan
         let explain_path = format!("/api/{}/_explain", table_name);
         router = router.route(&explain_path, get(explain::explain_handler));
         router = router.route(&agg_path, get(handlers::aggregate_handler));
-        router = router.route(&agg_alias_path, get(handlers::aggregate_handler));
 
         if has_pk {
             let id_path = format!("/api/{}/{{id}}", table_name);

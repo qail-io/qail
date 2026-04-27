@@ -27,11 +27,12 @@ Always use RLS-aware methods for tenant queries:
 use qail_core::rls::RlsContext;
 
 // Tenant-scoped connection — RLS is set before any query runs
-let ctx = RlsContext::operator(operator_id);
+let ctx = RlsContext::tenant(tenant_id);
 let mut conn = pool.acquire_with_rls(ctx).await?;
 
 // With custom statement timeout (milliseconds)
-let mut conn = pool.acquire_with_rls_timeout(ctx, 30_000).await?;
+let timeout_ctx = RlsContext::tenant(tenant_id);
+let mut conn = pool.acquire_with_rls_timeout(timeout_ctx, 30_000).await?;
 
 // System connection — no tenant context (for schema introspection, migrations)
 let mut conn = pool.acquire_system().await?;
@@ -45,7 +46,9 @@ Every connection follows a strict lifecycle:
 
 ```
 acquire_with_rls(ctx)
-  → set_config('app.current_operator_id', '...', false)
+  → set_config('app.current_tenant_id', '...', false)
+  → set_config('app.current_user_id', '...', false)
+  → set_config('app.current_agent_id', '...', false)
   → set_config('app.is_super_admin', '...', false)
   → execute queries (RLS policies filter rows automatically)
   → release()
@@ -79,7 +82,7 @@ let pool = Arc::new(PgPool::connect(config).await?);
 // Clone Arc for each task
 let pool_clone = pool.clone();
 tokio::spawn(async move {
-    let ctx = RlsContext::operator(op_id);
+    let ctx = RlsContext::tenant(tenant_id);
     let conn = pool_clone.acquire_with_rls(ctx).await?;
     // ...
 });

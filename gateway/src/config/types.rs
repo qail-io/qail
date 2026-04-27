@@ -37,7 +37,7 @@ impl From<qail_core::config::QdrantConfig> for GatewayQdrantConfig {
 }
 
 fn default_qdrant_url() -> String {
-    "http://localhost:6333".to_string()
+    "http://localhost:6334".to_string()
 }
 
 fn default_qdrant_max_connections() -> usize {
@@ -63,7 +63,7 @@ pub struct GatewayConfig {
     #[serde(default = "default_true")]
     pub cors_enabled: bool,
 
-    /// Allowed CORS origins. Empty = allow all (backward compatible).
+    /// Allowed CORS origins. Empty = fail-closed (no origins allowed).
     /// Example: `["https://app.qail.io", "https://staging.qail.io"]`
     #[serde(default)]
     pub cors_allowed_origins: Vec<String>,

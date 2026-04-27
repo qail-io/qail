@@ -369,7 +369,8 @@ fn main() {
         .typed_column(orders::id)
         .typed_column(orders::status)
         .typed_column(orders::total_fare)
-        .with_rls(&tenant_ctx) // → RlsQuery<Orders> (proof sealed)
+        .with_rls(&tenant_ctx) // → Result<RlsQuery<Orders>> (proof sealed)
+        .expect("RLS proof should apply")
         .build(); // ✅ .build() now available
 
     println!("✅ Orders query proven isolated to tenant 550e8400...");
@@ -381,6 +382,7 @@ fn main() {
         .typed_column(bookings::id)
         .typed_column(bookings::passenger_name)
         .with_rls(&tenant_ctx)
+        .expect("RLS proof should apply")
         .column("seat_number") // Can still add columns after proof
         .filter("seat_number", Operator::IsNotNull, Value::Null)
         .order_by("passenger_name", SortOrder::Asc)
@@ -399,6 +401,7 @@ fn main() {
         .typed_column(orders::operator_id)
         .typed_column(orders::total_fare)
         .with_rls(&admin_ctx) // Proof satisfied, no filter added
+        .expect("RLS proof should apply")
         .build();
 
     println!("✅ Super admin — proof required (type-level), no filter injected");
@@ -423,6 +426,7 @@ fn main() {
         .typed_column(orders::status) // Proof 1: column type checked
         .typed_eq(orders::status, "paid") // Proof 2: String == &str ✓
         .with_rls(&tenant_ctx) // Proof 5: tenant isolation proven
+        .expect("RLS proof should apply")
         .filter("total_fare", Operator::Gt, 100000i64) // Additional filter
         .order_by("total_fare", SortOrder::Desc)
         .limit(20)

@@ -3,9 +3,11 @@
 //! Extended Query protocol construction and batch operations.
 
 use bytes::BytesMut;
-use qail_core::ast::{Action, AggregateFunc, Expr, Qail};
+use qail_core::ast::{Action, Qail};
 
-use super::dml::{encode_delete, encode_export, encode_insert, encode_select, encode_update};
+use super::dml::{
+    encode_count, encode_delete, encode_export, encode_insert, encode_select, encode_update,
+};
 
 use crate::protocol::EncodeError;
 
@@ -238,18 +240,7 @@ pub fn encode_batch_with_result_format(
             Action::Add => encode_insert(cmd, &mut sql_buf, &mut params),
             Action::Set => encode_update(cmd, &mut sql_buf, &mut params),
             Action::Del => encode_delete(cmd, &mut sql_buf, &mut params),
-            Action::Cnt => {
-                let mut count_cmd = cmd.clone();
-                count_cmd.action = Action::Get;
-                count_cmd.columns = vec![Expr::Aggregate {
-                    col: "*".to_string(),
-                    func: AggregateFunc::Count,
-                    distinct: false,
-                    filter: None,
-                    alias: None,
-                }];
-                encode_select(&count_cmd, &mut sql_buf, &mut params)
-            }
+            Action::Cnt => encode_count(cmd, &mut sql_buf, &mut params),
             Action::Export => encode_export(cmd, &mut sql_buf, &mut params),
             // DDL/utility actions — delegate to encode_cmd_sql_to which
             // handles 24 DDL actions (Make, Drop, Index, Alter*, etc.)
@@ -337,18 +328,7 @@ pub fn encode_batch_simple(cmds: &[Qail]) -> Result<BytesMut, EncodeError> {
             Action::Add => encode_insert(cmd, &mut total_buf, &mut params),
             Action::Set => encode_update(cmd, &mut total_buf, &mut params),
             Action::Del => encode_delete(cmd, &mut total_buf, &mut params),
-            Action::Cnt => {
-                let mut count_cmd = cmd.clone();
-                count_cmd.action = Action::Get;
-                count_cmd.columns = vec![Expr::Aggregate {
-                    col: "*".to_string(),
-                    func: AggregateFunc::Count,
-                    distinct: false,
-                    filter: None,
-                    alias: None,
-                }];
-                encode_select(&count_cmd, &mut total_buf, &mut params)
-            }
+            Action::Cnt => encode_count(cmd, &mut total_buf, &mut params),
             Action::Export => encode_export(cmd, &mut total_buf, &mut params),
             // DDL/utility — delegate to encode_cmd_sql_to
             _ => {

@@ -1,6 +1,5 @@
 //! Debug test for upsert - checks actual gRPC response
 
-use qail_core::ast::Distance;
 use qail_qdrant::{Point, PointId, QdrantDriver};
 use std::collections::HashMap;
 
@@ -19,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create fresh
     driver
-        .create_collection(collection, 4, Distance::Cosine, false)
+        .create_collection(collection, 4, qail_qdrant::Distance::Cosine, false)
         .await?;
     println!("✓ Collection created");
 

@@ -32,7 +32,12 @@ async fn e2e_qdrant_lifecycle() {
         COLLECTION, VECTOR_DIM
     );
     driver
-        .create_collection(COLLECTION, VECTOR_DIM as u64, Distance::Cosine, false)
+        .create_collection(
+            COLLECTION,
+            VECTOR_DIM as u64,
+            qail_qdrant::Distance::Cosine,
+            false,
+        )
         .await
         .expect("Failed to create collection");
     println!("  ✓ Collection created");

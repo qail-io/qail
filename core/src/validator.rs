@@ -113,7 +113,6 @@ pub struct Validator {
     /// Columns indexed by table name.
     columns: HashMap<String, Vec<String>>,
     /// Column types indexed by table.column.
-    #[allow(dead_code)]
     column_types: HashMap<String, HashMap<String, String>>,
 }
 
@@ -584,23 +583,6 @@ impl Validator {
         }
 
         best_match
-    }
-
-    // =========================================================================
-    // Legacy API (for backward compatibility)
-    // =========================================================================
-
-    /// Legacy: validate_table that returns String error
-    #[deprecated(note = "Use validate_table() which returns ValidationError")]
-    pub fn validate_table_legacy(&self, table: &str) -> Result<(), String> {
-        self.validate_table(table).map_err(|e| e.to_string())
-    }
-
-    /// Legacy: validate_column that returns String error
-    #[deprecated(note = "Use validate_column() which returns ValidationError")]
-    pub fn validate_column_legacy(&self, table: &str, column: &str) -> Result<(), String> {
-        self.validate_column(table, column)
-            .map_err(|e| e.to_string())
     }
 }
 

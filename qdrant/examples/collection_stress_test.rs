@@ -2,7 +2,6 @@
 //!
 //! Tests create/drop collection operations against a real Qdrant instance.
 
-use qail_core::ast::Distance;
 use qail_qdrant::QdrantDriver;
 use std::time::Instant;
 
@@ -43,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
 
         match driver
-            .create_collection(&name, 1536, Distance::Cosine, false)
+            .create_collection(&name, 1536, qail_qdrant::Distance::Cosine, false)
             .await
         {
             Ok(_) => {

@@ -127,7 +127,7 @@ impl PgRow {
         self.columns
             .get(idx)?
             .as_ref()
-            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok().map(str::to_owned))
     }
 
     /// Get a column value as i32.
@@ -210,7 +210,7 @@ impl PgRow {
             decode_uuid(bytes).ok()
         } else {
             // Text format - return as-is
-            String::from_utf8(bytes.clone()).ok()
+            std::str::from_utf8(bytes).ok().map(str::to_owned)
         }
     }
 
@@ -225,16 +225,16 @@ impl PgRow {
 
         // JSONB has version byte (1) as first byte
         if bytes[0] == 1 && bytes.len() > 1 {
-            String::from_utf8(bytes[1..].to_vec()).ok()
+            std::str::from_utf8(&bytes[1..]).ok().map(str::to_owned)
         } else {
-            String::from_utf8(bytes.clone()).ok()
+            std::str::from_utf8(bytes).ok().map(str::to_owned)
         }
     }
 
     /// Get a column value as timestamp string (ISO 8601 format).
     pub fn get_timestamp(&self, idx: usize) -> Option<String> {
         let bytes = self.columns.get(idx)?.as_ref()?;
-        String::from_utf8(bytes.clone()).ok()
+        std::str::from_utf8(bytes).ok().map(str::to_owned)
     }
 
     /// Get a column value as text array.

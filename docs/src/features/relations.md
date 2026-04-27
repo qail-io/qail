@@ -11,7 +11,7 @@ Qail::get("users")
 
 // ✅ After: Implicit joins via schema
 Qail::get("users")
-    .join_on("posts")
+    .join_on("posts")?
 ```
 
 ## 1. Define Relations in Schema
@@ -52,26 +52,26 @@ use qail_core::Qail;
 // Auto-infers: LEFT JOIN posts ON users.id = posts.user_id
 let query = Qail::get("users")
     .columns(["users.id", "users.email", "posts.title"])
-    .join_on("posts");
+    .join_on("posts")?;
 
 // Forward and reverse relations work automatically
 let posts_with_users = Qail::get("posts")
-    .join_on("users");  // Infers: LEFT JOIN users ON posts.user_id = users.id
+    .join_on("users")?;  // Infers: LEFT JOIN users ON posts.user_id = users.id
 ```
 
 ## API Reference
 
 ### `join_on(table)`
 
-Joins a related table using the schema-defined foreign key. Panics if no relation exists.
+Joins a related table using the schema-defined foreign key. Returns an error if no relation exists or relation metadata is ambiguous.
 
 ```rust
-Qail::get("users").join_on("posts")
+Qail::get("users").join_on("posts")?
 ```
 
 ### `join_on_optional(table)`
 
-Same as `join_on()`, but returns `self` unchanged if no relation exists (no panic).
+Same as `join_on()`, but returns `self` unchanged if no relation exists or metadata is ambiguous.
 
 ```rust
 Qail::get("users").join_on_optional("comments")  // No-op if no relation
@@ -81,5 +81,5 @@ Qail::get("users").join_on_optional("comments")  // No-op if no relation
 
 1. **Schema Parsing**: `build.rs` parses `ref:` annotations and stores them as `ForeignKey` entries
 2. **Runtime Registry**: `schema::load_schema_relations()` populates a global `RelationRegistry`
-3. **Lookup**: `join_on()` calls `lookup_relation()` to find the join condition
+3. **Lookup**: `join_on()` calls `lookup_relation_state()` to find the join condition or return a structured error path
 4. **Bidirectional**: Both forward (`posts.user_id → users.id`) and reverse directions are checked

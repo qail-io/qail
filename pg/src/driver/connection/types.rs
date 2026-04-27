@@ -246,11 +246,6 @@ pub struct PgConnection {
     /// This cache ensures by-name column access works even for cached prepared statements.
     pub(crate) column_info_cache: HashMap<u64, Arc<super::super::ColumnInfo>>,
     pub(crate) process_id: i32,
-    /// Legacy 4-byte cancel secret key (protocol 3.0-compatible wrappers).
-    ///
-    /// For protocol 3.2 extended key lengths, this remains `0` and callers
-    /// must use `cancel_key_bytes`.
-    pub(crate) secret_key: i32,
     /// Full cancel key bytes (`4..=256`) from BackendKeyData.
     pub(crate) cancel_key_bytes: Vec<u8>,
     /// Startup protocol minor requested by this connection (for example `2` for 3.2).

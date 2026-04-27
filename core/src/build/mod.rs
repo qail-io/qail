@@ -41,8 +41,7 @@ pub use codegen::{generate_schema_code, generate_typed_schema};
 pub use scanner::{QailUsage, scan_source_files, scan_source_text};
 pub use schema::{ForeignKey, ResourceSchema, Schema, TableSchema};
 pub use validate::{
-    ValidationDiagnostic, ValidationDiagnosticKind, validate, validate_against_schema,
-    validate_against_schema_diagnostics,
+    ValidationDiagnostic, ValidationDiagnosticKind, validate, validate_against_schema_diagnostics,
 };
 
 #[cfg(test)]

@@ -193,14 +193,6 @@ Use claims-based scoping, `RlsContext::global()` for shared data, or add explici
     diagnostics
 }
 
-/// Backward-compatible string diagnostics output.
-pub fn validate_against_schema(schema: &Schema, usages: &[QailUsage]) -> Vec<String> {
-    validate_against_schema_diagnostics(schema, usages)
-        .into_iter()
-        .map(|d| d.message)
-        .collect()
-}
-
 /// Run N+1 compile-time check.
 ///
 /// Controlled by environment variables:

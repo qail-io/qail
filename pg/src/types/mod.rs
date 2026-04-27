@@ -61,7 +61,8 @@ pub trait ToPg {
 
 impl FromPg for String {
     fn from_pg(bytes: &[u8], _oid: u32, _format: i16) -> Result<Self, TypeError> {
-        String::from_utf8(bytes.to_vec())
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
             .map_err(|e| TypeError::InvalidData(format!("Invalid UTF-8: {}", e)))
     }
 }
@@ -208,7 +209,8 @@ impl FromPg for Uuid {
             decode_uuid(bytes).map(Uuid).map_err(TypeError::InvalidData)
         } else {
             // Text format
-            String::from_utf8(bytes.to_vec())
+            std::str::from_utf8(bytes)
+                .map(str::to_owned)
                 .map(Uuid)
                 .map_err(|e| TypeError::InvalidData(e.to_string()))
         }

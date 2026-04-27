@@ -292,7 +292,7 @@ where
     let wall_start = Instant::now();
     for _ in 0..WORKERS {
         let url = db_url.to_string();
-        let b = barrier.clone();
+        let b = Arc::clone(&barrier);
         let f = worker_fn.clone();
         handles.push(tokio::spawn(f(url, b)));
     }

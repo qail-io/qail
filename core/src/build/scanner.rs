@@ -2233,7 +2233,7 @@ pub(crate) fn extract_typed_table_arg(s: &str) -> Option<String> {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn extract_columns(line: &str) -> Vec<String> {
     extract_columns_with_bindings(line, None, &LiteralBindings::default())
 }

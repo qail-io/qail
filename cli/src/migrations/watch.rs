@@ -39,7 +39,11 @@ pub async fn watch_schema(schema_path: &str, db_url: Option<&str>, auto_apply: b
         .map_err(|e| anyhow::anyhow!("Failed to parse initial schema: {}", e))?;
 
     let mut driver = if auto_apply {
-        let url = db_url.expect("checked above");
+        let Some(url) = db_url else {
+            anyhow::bail!(
+                "Auto-apply requires a database URL. Pass --url or configure DATABASE_URL/qail.toml."
+            );
+        };
         let (host, port, user, password, database) = parse_pg_url(url)?;
         let connected = if let Some(pwd) = password {
             PgDriver::connect_with_password(&host, port, &user, &database, &pwd)

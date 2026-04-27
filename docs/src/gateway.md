@@ -182,7 +182,7 @@ curl \
 
 ### Row-Level Security (RLS)
 
-Every query is automatically scoped to the authenticated tenant via PostgreSQL's native RLS. The gateway sets session variables (`app.current_tenant_id`, `app.current_user_id`) before each query, and also writes legacy `app.current_operator_id` for compatibility — **no manual WHERE clauses needed**.
+Every query is automatically scoped to the authenticated tenant via PostgreSQL's native RLS. The gateway sets session variables (`app.current_tenant_id`, `app.current_user_id`, `app.current_agent_id`, `app.is_super_admin`) before each query — **no manual WHERE clauses needed**.
 
 ### YAML Policy Engine
 

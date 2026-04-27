@@ -189,7 +189,7 @@ impl TryFrom<&Qail> for NormalizedMutation {
                     ));
                 }
             }
-            _ => unreachable!("unsupported action already rejected"),
+            _ => return Err(NormalizeMutationError::UnsupportedAction(qail.action)),
         }
 
         Ok(Self {

@@ -96,7 +96,7 @@ impl TenantSemaphore {
         {
             let map = self.semaphores.read().await;
             if let Some(entry) = map.get(tenant_id) {
-                return entry.semaphore.clone().try_acquire_owned().ok();
+                return Arc::clone(&entry.semaphore).try_acquire_owned().ok();
             }
         }
 
@@ -106,7 +106,7 @@ impl TenantSemaphore {
         // Check if another task created it while we waited for write lock
         if let Some(entry) = map.get_mut(tenant_id) {
             entry.last_used = Instant::now();
-            return entry.semaphore.clone().try_acquire_owned().ok();
+            return Arc::clone(&entry.semaphore).try_acquire_owned().ok();
         }
 
         // Reject if at tenant capacity — prevents memory exhaustion
@@ -123,7 +123,7 @@ impl TenantSemaphore {
             semaphore: Arc::new(Semaphore::new(self.max_permits)),
             last_used: Instant::now(),
         });
-        entry.semaphore.clone().try_acquire_owned().ok()
+        Arc::clone(&entry.semaphore).try_acquire_owned().ok()
     }
 
     /// Number of tracked tenants (for metrics / debugging).

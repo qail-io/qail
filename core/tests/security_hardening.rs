@@ -350,7 +350,7 @@ fn like_very_long_pattern() {
         "users",
         "name",
         Operator::Fuzzy,
-        Value::String(long_pattern.clone()),
+        Value::String(long_pattern),
     );
     let sql = cmd.to_sql();
     assert!(

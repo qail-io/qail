@@ -10,7 +10,7 @@ pub use qail_core::rls::RlsContext;
 
 fn quote_guc_literal(value: &str) -> String {
     let sanitized = sanitize_guc_value(value);
-    for idx in 0usize.. {
+    for idx in 0..=sanitized.len() {
         let tag = if idx == 0 {
             "qail_guc".to_string()
         } else {
@@ -21,7 +21,8 @@ fn quote_guc_literal(value: &str) -> String {
             return format!("{}{}{}", delim, sanitized, delim);
         }
     }
-    unreachable!("finite strings always admit an unused dollar-quote tag")
+
+    format!("'{}'", sanitized.replace('\'', "''"))
 }
 
 /// PostgreSQL-specific SQL generation for RLS context.

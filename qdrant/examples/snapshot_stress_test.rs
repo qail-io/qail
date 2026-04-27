@@ -28,7 +28,6 @@ struct SnapshotListResponse {
     result: Vec<SnapshotInfo>,
 }
 
-use qail_core::ast::Distance;
 use qail_qdrant::{Point, PointId, QdrantDriver};
 use std::collections::HashMap;
 
@@ -69,7 +68,12 @@ async fn main() -> Result<()> {
 
         // Create collection
         driver
-            .create_collection(&name, VECTOR_DIM as u64, Distance::Cosine, false)
+            .create_collection(
+                &name,
+                VECTOR_DIM as u64,
+                qail_qdrant::Distance::Cosine,
+                false,
+            )
             .await?;
 
         // Insert points

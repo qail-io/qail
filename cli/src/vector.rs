@@ -9,17 +9,16 @@ use anyhow::Result;
 
 /// Create a vector collection in Qdrant.
 pub async fn vector_create(collection: &str, size: u64, distance: &str, url: &str) -> Result<()> {
-    use qail_core::ast::Distance;
-    use qail_qdrant::QdrantDriver;
+    use qail_qdrant::{Distance, QdrantDriver};
 
     // Parse distance metric
     let dist = match distance.to_lowercase().as_str() {
         "cosine" => Distance::Cosine,
-        "euclid" | "euclidean" => Distance::Euclid,
-        "dot" | "dotproduct" => Distance::Dot,
+        "euclidean" => Distance::Euclidean,
+        "dot" => Distance::Dot,
         _ => {
             anyhow::bail!(
-                "Invalid distance metric: {}. Use cosine, euclid, or dot",
+                "Invalid distance metric: {}. Use cosine, euclidean, or dot",
                 distance
             );
         }

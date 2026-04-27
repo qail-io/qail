@@ -113,6 +113,74 @@ impl From<std::io::Error> for QailError {
 /// Result type alias for QAIL operations.
 pub type QailResult<T> = Result<T, QailError>;
 
+/// Error type for query-builder operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QailBuildError {
+    /// RLS insertion cannot safely align positional values without columns.
+    RlsInsertRequiresExplicitColumns {
+        /// Target table being scoped.
+        table: String,
+        /// Tenant column that would be injected.
+        tenant_column: String,
+    },
+
+    /// Runtime relation registry lock failed.
+    RelationRegistryLock(String),
+
+    /// Relation metadata has more than one possible join edge.
+    AmbiguousRelation {
+        /// Source table.
+        from_table: String,
+        /// Related table.
+        to_table: String,
+        /// Number of registered foreign-key candidates.
+        foreign_key_count: usize,
+    },
+
+    /// No schema relation could be found for an implicit join.
+    RelationNotFound {
+        /// Current table.
+        from_table: String,
+        /// Requested related table.
+        to_table: String,
+    },
+}
+
+impl std::fmt::Display for QailBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RlsInsertRequiresExplicitColumns {
+                table,
+                tenant_column,
+            } => write!(
+                f,
+                "with_rls requires explicit columns for positional INSERT payloads on table '{table}' (tenant column '{tenant_column}')"
+            ),
+            Self::RelationRegistryLock(msg) => write!(f, "Relation registry lock error: {msg}"),
+            Self::AmbiguousRelation {
+                from_table,
+                to_table,
+                foreign_key_count,
+            } => write!(
+                f,
+                "Ambiguous relation between '{from_table}' and '{to_table}': {foreign_key_count} foreign keys registered. Use an explicit join condition."
+            ),
+            Self::RelationNotFound {
+                from_table,
+                to_table,
+            } => write!(
+                f,
+                "No relation found between '{from_table}' and '{to_table}'. Define a ref: in schema.qail or use load_schema_relations() first."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for QailBuildError {}
+
+/// Result type alias for query-builder operations.
+pub type QailBuildResult<T> = Result<T, QailBuildError>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

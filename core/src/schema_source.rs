@@ -30,7 +30,7 @@ const STRICT_CONFIG_ERROR_ENV_VAR: &str = "QAIL_SCHEMA_STRICT_MANIFEST_CONFIG_ST
 pub struct ResolvedSchemaSource {
     /// Original path requested by caller.
     pub requested: PathBuf,
-    /// Effective path used after fallback resolution.
+    /// Effective source path (file or directory).
     pub root: PathBuf,
     /// Ordered list of `.qail` files to merge.
     pub files: Vec<PathBuf>,
@@ -95,10 +95,6 @@ impl ResolvedSchemaSource {
 }
 
 /// Resolve a schema source path into concrete module files.
-///
-/// Fallback behavior:
-/// - if requested path is missing and equals `schema.qail`,
-///   automatically use sibling `schema/` directory when present.
 pub fn resolve_schema_source(path: impl AsRef<Path>) -> Result<ResolvedSchemaSource, String> {
     let requested = path.as_ref();
     let root = resolve_root_path(requested)?;
@@ -160,16 +156,6 @@ pub fn read_qail_schema_source(path: impl AsRef<Path>) -> Result<String, String>
 fn resolve_root_path(requested: &Path) -> Result<PathBuf, String> {
     if requested.exists() {
         return Ok(requested.to_path_buf());
-    }
-
-    // Backward-compatible default:
-    // if "schema.qail" is missing, try sibling "schema/" directory.
-    if requested.file_name() == Some(OsStr::new("schema.qail")) {
-        let parent = requested.parent().unwrap_or_else(|| Path::new("."));
-        let modular_dir = parent.join("schema");
-        if modular_dir.is_dir() {
-            return Ok(modular_dir);
-        }
     }
 
     Err(format!(
@@ -570,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_schema_qail_falls_back_to_schema_dir() {
+    fn resolve_schema_qail_no_implicit_schema_dir_fallback() {
         let root = tmp_dir("fallback");
         fs::create_dir_all(root.join("schema")).expect("mkdir schema");
         fs::write(
@@ -585,13 +571,8 @@ mod tests {
         .expect("write user");
 
         let requested = root.join("schema.qail");
-        let resolved = resolve_schema_source(&requested).expect("resolved");
-        assert!(resolved.is_directory());
-        assert_eq!(resolved.files.len(), 2);
-
-        let merged = resolved.read_merged().expect("merged");
-        assert!(merged.contains("table auth_users"));
-        assert!(merged.contains("table users"));
+        let err = resolve_schema_source(&requested).expect_err("missing schema.qail must fail");
+        assert!(err.contains("not found"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -605,7 +586,7 @@ mod tests {
 
         let resolved = resolve_schema_source(&schema_file).expect("resolved");
         assert!(!resolved.is_directory());
-        assert_eq!(resolved.files, vec![schema_file.clone()]);
+        assert_eq!(resolved.files, vec![schema_file]);
         assert!(
             resolved
                 .read_merged()
@@ -639,7 +620,7 @@ mod tests {
         fs::write(schema_dir.join(MODULE_ORDER_FILE), "user.qail\nauth.qail\n")
             .expect("write order");
 
-        let resolved = resolve_schema_source(root.join("schema.qail")).expect("resolved");
+        let resolved = resolve_schema_source(root.join("schema")).expect("resolved");
         assert_eq!(resolved.files.len(), 3);
         assert_eq!(
             resolved.files[0].file_name().and_then(|n| n.to_str()),
@@ -683,7 +664,7 @@ mod tests {
         )
         .expect("write order");
 
-        let err = resolve_schema_source(root.join("schema.qail")).expect_err("should error");
+        let err = resolve_schema_source(root.join("schema")).expect_err("should error");
         assert!(err.contains("strict manifest enabled"));
         assert!(err.contains("billing.qail"));
 
@@ -716,7 +697,7 @@ mod tests {
         )
         .expect("write order");
 
-        let resolved = resolve_schema_source(root.join("schema.qail")).expect("resolved");
+        let resolved = resolve_schema_source(root.join("schema")).expect("resolved");
         assert_eq!(resolved.files.len(), 3);
         assert_eq!(
             resolved.files[0].file_name().and_then(|n| n.to_str()),
@@ -746,7 +727,7 @@ mod tests {
         .expect("write user");
         fs::write(schema_dir.join(MODULE_ORDER_FILE), "missing.qail\n").expect("write order");
 
-        let err = resolve_schema_source(root.join("schema.qail")).expect_err("should error");
+        let err = resolve_schema_source(root.join("schema")).expect_err("should error");
         assert!(err.contains("cannot be resolved") || err.contains("not a loadable"));
 
         let _ = fs::remove_dir_all(root);
@@ -767,7 +748,7 @@ mod tests {
         fs::write(&outside, "table outside { id uuid primary_key }\n").expect("write outside");
         fs::write(schema_dir.join(MODULE_ORDER_FILE), "../outside.qail\n").expect("write order");
 
-        let err = resolve_schema_source(root.join("schema.qail")).expect_err("should error");
+        let err = resolve_schema_source(root.join("schema")).expect_err("should error");
         assert!(err.contains("escapes schema root"));
 
         let _ = fs::remove_dir_all(root);
@@ -785,7 +766,7 @@ mod tests {
         .expect("write user");
         fs::write(schema_dir.join(MODULE_ORDER_FILE), "user.qail\n").expect("write order");
 
-        let resolved = resolve_schema_source(root.join("schema.qail")).expect("resolved");
+        let resolved = resolve_schema_source(root.join("schema")).expect("resolved");
         let watch_paths = resolved.watch_paths();
         assert!(watch_paths.iter().any(|p| p.ends_with(MODULE_ORDER_FILE)));
 
@@ -826,7 +807,7 @@ mod tests {
         .expect("write billing");
         fs::write(schema_dir.join(MODULE_ORDER_FILE), "users.qail\n").expect("write order");
 
-        let err = resolve_schema_source(root.join("schema.qail")).expect_err("should error");
+        let err = resolve_schema_source(root.join("schema")).expect_err("should error");
         assert!(err.contains("strict manifest enabled"));
         assert!(err.contains("billing.qail"));
 
@@ -856,7 +837,7 @@ mod tests {
         .expect("write billing");
         fs::write(schema_dir.join(MODULE_ORDER_FILE), "users.qail\n").expect("write order");
 
-        let resolved = resolve_schema_source(root.join("schema.qail")).expect("should resolve");
+        let resolved = resolve_schema_source(root.join("schema")).expect("should resolve");
         assert_eq!(resolved.files.len(), 2);
         assert_eq!(
             resolved.files[0].file_name().and_then(|n| n.to_str()),
@@ -890,7 +871,7 @@ mod tests {
 
         // SAFETY: test mutates process env, keep scoped and restore after test.
         unsafe { std::env::set_var(STRICT_CONFIG_ERROR_ENV_VAR, "true") };
-        let err = resolve_schema_source(root.join("schema.qail")).expect_err("should fail fast");
+        let err = resolve_schema_source(root.join("schema")).expect_err("should fail fast");
         assert!(err.contains("Failed to load strict-manifest defaults"));
         assert!(err.contains("qail.toml"));
 
@@ -919,7 +900,7 @@ mod tests {
         .expect("write leak");
         symlink(&outside_dir, schema_dir.join("ext")).expect("symlink outside");
 
-        let resolved = resolve_schema_source(root.join("schema.qail")).expect("resolved");
+        let resolved = resolve_schema_source(root.join("schema")).expect("resolved");
         assert_eq!(resolved.files.len(), 1);
         assert!(resolved.files[0].ends_with("users.qail"));
 
@@ -941,7 +922,7 @@ mod tests {
         .expect("write users");
         symlink(&schema_dir, schema_dir.join("loop")).expect("symlink loop");
 
-        let resolved = resolve_schema_source(root.join("schema.qail")).expect("resolved");
+        let resolved = resolve_schema_source(root.join("schema")).expect("resolved");
         assert_eq!(resolved.files.len(), 1);
         assert!(resolved.files[0].ends_with("users.qail"));
 

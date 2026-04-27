@@ -226,7 +226,7 @@ fn with_rls_edit_for_diagnostic(content: &str, diagnostic: &Diagnostic) -> Optio
             start: pos,
             end: pos,
         },
-        new_text: ".with_rls(&ctx)".to_string(),
+        new_text: ".with_rls(&ctx)?".to_string(),
     })
 }
 
@@ -348,7 +348,7 @@ fn semantic_quickfix_actions(
                 changes.insert(uri.clone(), vec![edit]);
 
                 actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: "Add .with_rls(&ctx)".to_string(),
+                    title: "Add .with_rls(&ctx)?".to_string(),
                     kind: Some(CodeActionKind::QUICKFIX),
                     diagnostics: Some(vec![diagnostic.clone()]),
                     edit: Some(WorkspaceEdit {
@@ -724,7 +724,7 @@ mod tests {
         let rewritten = apply_edit(src, &edit);
         assert_eq!(
             rewritten,
-            r#"let cmd = Qail::get("orders").with_rls(&ctx);"#
+            r#"let cmd = Qail::get("orders").with_rls(&ctx)?;"#
         );
     }
 
@@ -751,7 +751,7 @@ mod tests {
         let rewritten = apply_edit(src, &edit);
         assert_eq!(
             rewritten,
-            r#"let cmd = Qail::typed(Orders).with_rls(&ctx).build();"#
+            r#"let cmd = Qail::typed(Orders).with_rls(&ctx)?.build();"#
         );
     }
 

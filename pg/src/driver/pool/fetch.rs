@@ -577,7 +577,7 @@ impl PooledConnection {
                 crate::protocol::BackendMessage::RowDescription(fields) => {
                     let info = Arc::new(ColumnInfo::from_fields(&fields));
                     if is_cache_miss {
-                        conn.column_info_cache.insert(sql_hash, info.clone());
+                        conn.column_info_cache.insert(sql_hash, Arc::clone(&info));
                     }
                     column_info = Some(info);
                 }
@@ -919,7 +919,8 @@ impl PooledConnection {
                 crate::protocol::BackendMessage::RowDescription(fields) => {
                     let info = std::sync::Arc::new(ColumnInfo::from_fields(&fields));
                     if is_cache_miss {
-                        conn.column_info_cache.insert(sql_hash, info.clone());
+                        conn.column_info_cache
+                            .insert(sql_hash, std::sync::Arc::clone(&info));
                     }
                     column_info = Some(info);
                 }

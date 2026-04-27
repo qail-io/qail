@@ -191,10 +191,10 @@ async fn main() {
     for (tenant_idx, tenant_id) in tenant_ids.iter().enumerate() {
         let db_url = db_url.clone();
         let tenant_id = *tenant_id;
-        let barrier = barrier.clone();
-        let violations = violations.clone();
-        let total_rows = total_rows_checked.clone();
-        let errors = errors.clone();
+        let barrier = Arc::clone(&barrier);
+        let violations = Arc::clone(&violations);
+        let total_rows = Arc::clone(&total_rows_checked);
+        let errors = Arc::clone(&errors);
 
         handles.push(tokio::spawn(async move {
             let mut driver = PgDriver::connect_url(&db_url)

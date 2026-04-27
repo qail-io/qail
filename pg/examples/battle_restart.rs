@@ -133,10 +133,10 @@ fn is_expected_restart_error(err: &PgError) -> bool {
         return true;
     }
 
-    if let Some(code) = err.sqlstate() {
-        if matches!(code, "57P01" | "57P02" | "57P03") || code.starts_with("08") {
-            return true;
-        }
+    if let Some(code) = err.sqlstate()
+        && (matches!(code, "57P01" | "57P02" | "57P03") || code.starts_with("08"))
+    {
+        return true;
     }
 
     let lower = err.to_string().to_ascii_lowercase();

@@ -20,20 +20,6 @@ use crate::error::{QdrantError, QdrantResult};
 use bytes::{BufMut, BytesMut};
 
 // ============================================================================
-// Protobuf Wire Type Constants
-// ============================================================================
-
-/// Wire type for varints (int32, int64, uint32, uint64, bool, enum)
-#[allow(dead_code)]
-const WIRE_VARINT: u8 = 0;
-/// Wire type for length-delimited (string, bytes, embedded messages, packed repeated)
-#[allow(dead_code)]
-const WIRE_LEN: u8 = 2;
-/// Wire type for 32-bit fixed (float, fixed32)
-#[allow(dead_code)]
-const WIRE_FIXED32: u8 = 5;
-
-// ============================================================================
 // SearchPoints Field Tags (pre-computed)
 // ============================================================================
 // Tag = (field_number << 3) | wire_type
@@ -92,9 +78,6 @@ const POINT_ID_UUID: u8 = 0x12;
 const FILTER_MUST: u8 = 0x0A;
 /// Filter.should (field 2, repeated Condition) -> 0x12
 const FILTER_SHOULD: u8 = 0x12;
-/// Filter.must_not (field 3, repeated Condition) -> 0x1A
-#[allow(dead_code)]
-const FILTER_MUST_NOT: u8 = 0x1A;
 /// Condition.filter (field 4, nested Filter message) -> 0x22
 const CONDITION_FILTER: u8 = 0x22;
 

@@ -10,7 +10,6 @@ use super::types::*;
 
 /// Combines the pure encoder (Layer 2) with async I/O (Layer 3).
 pub struct PgDriver {
-    #[allow(dead_code)]
     pub(super) connection: PgConnection,
     /// Current RLS context, if set. Used for multi-tenant data isolation.
     pub(super) rls_context: Option<RlsContext>,

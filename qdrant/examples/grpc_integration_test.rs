@@ -7,7 +7,6 @@
 
 use bytes::BytesMut;
 use qail_qdrant::encoder;
-use qail_qdrant::prelude::Distance;
 use qail_qdrant::{QdrantDriver, QdrantResult};
 
 const COLLECTION_NAME: &str = "grpc_test_collection";
@@ -42,7 +41,7 @@ async fn main() -> QdrantResult<()> {
     let _ = rest_driver.delete_collection(COLLECTION_NAME).await;
 
     rest_driver
-        .create_collection(COLLECTION_NAME, 4, Distance::Cosine, false)
+        .create_collection(COLLECTION_NAME, 4, qail_qdrant::Distance::Cosine, false)
         .await?;
     println!("   ✓ Collection created with 4D vectors, Cosine distance");
 

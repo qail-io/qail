@@ -326,7 +326,7 @@ impl Drop for PooledConnection {
                 }
             }
 
-            let pool = self.pool.clone();
+            let pool = std::sync::Arc::clone(&self.pool);
             let created_at = self.created_at;
             let reset_timeout = pool.config.connect_timeout;
             match tokio::runtime::Handle::try_current() {

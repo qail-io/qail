@@ -10,42 +10,74 @@ static LAST_MIGRATION_TICK_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Format the current local time as `YYYYMMDDHHMMSSmmm` (for migration versions).
 pub fn timestamp_version() -> String {
-    // Use the `date` command for local time — avoids pulling in chrono
-    let output = Command::new("date")
-        .arg("+%Y%m%d%H%M%S")
-        .output()
-        .expect("failed to run `date`");
-    let base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let base = date_output(&["+%Y%m%d%H%M%S"]).unwrap_or_else(|| {
+        let (year, month, day, hour, minute, second) = utc_now_parts();
+        format!("{year:04}{month:02}{day:02}{hour:02}{minute:02}{second:02}")
+    });
     let ms_suffix = monotonic_epoch_ms() % 1000;
     format!("{base}{ms_suffix:03}")
 }
 
 /// Format the current local time as `YYYYMMDD_HHMMSS` (for backup filenames).
 pub fn timestamp_filename() -> String {
-    let output = Command::new("date")
-        .arg("+%Y%m%d_%H%M%S")
-        .output()
-        .expect("failed to run `date`");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    date_output(&["+%Y%m%d_%H%M%S"]).unwrap_or_else(|| {
+        let (year, month, day, hour, minute, second) = utc_now_parts();
+        format!("{year:04}{month:02}{day:02}_{hour:02}{minute:02}{second:02}")
+    })
 }
 
 /// Format the current local time as `HH:MM:SS` (for watch mode logging).
 pub fn timestamp_short() -> String {
-    let output = Command::new("date")
-        .arg("+%H:%M:%S")
-        .output()
-        .expect("failed to run `date`");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    date_output(&["+%H:%M:%S"]).unwrap_or_else(|| {
+        let (_, _, _, hour, minute, second) = utc_now_parts();
+        format!("{hour:02}:{minute:02}:{second:02}")
+    })
 }
 
 /// Format the current local time as RFC 3339 (for metadata).
 pub fn timestamp_rfc3339() -> String {
-    let output = Command::new("date")
-        .arg("-u")
-        .arg("+%Y-%m-%dT%H:%M:%SZ")
-        .output()
-        .expect("failed to run `date`");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    date_output(&["-u", "+%Y-%m-%dT%H:%M:%SZ"]).unwrap_or_else(|| {
+        let (year, month, day, hour, minute, second) = utc_now_parts();
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    })
+}
+
+fn date_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("date").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn utc_now_parts() -> (i64, u32, u32, u32, u32, u32) {
+    utc_parts(monotonic_epoch_ms() / 1000)
+}
+
+fn utc_parts(epoch_secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = (epoch_secs / 86_400) as i64;
+    let secs_of_day = epoch_secs % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = (secs_of_day / 3_600) as u32;
+    let minute = ((secs_of_day % 3_600) / 60) as u32;
+    let second = (secs_of_day % 60) as u32;
+    (year, month, day, hour, minute, second)
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year, month as u32, day as u32)
 }
 
 fn monotonic_epoch_ms() -> u64 {

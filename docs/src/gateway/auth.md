@@ -20,9 +20,9 @@ The extracted claims (`tenant_id`, `user_id`, `role`) are set as PostgreSQL sess
 
 ```sql
 set_config('app.current_tenant_id', '<from JWT>', false);
-set_config('app.current_operator_id', '<from JWT>', false); -- legacy compat alias
 set_config('app.current_user_id', '<from JWT>', false);
-set_config('app.role', '<from JWT>', false);
+set_config('app.current_agent_id', '<from JWT agent_id claim>', false);
+set_config('app.is_super_admin', 'false', false);
 ```
 
 ---
@@ -52,10 +52,10 @@ Every query is automatically scoped to the authenticated tenant via PostgreSQL's
 
 ```sql
 -- Automatically executed before every query:
-set_config('app.current_operator_id', '<from JWT>', false);
 set_config('app.current_tenant_id', '<from JWT>', false);
 set_config('app.current_user_id', '<from JWT>', false);
-set_config('app.role', '<from JWT>', false);
+set_config('app.current_agent_id', '<from JWT agent_id claim>', false);
+set_config('app.is_super_admin', 'false', false);
 ```
 
 Your PostgreSQL RLS policies reference these variables:
@@ -94,7 +94,7 @@ policies:
     allowed_columns: ["id", "status"]
 ```
 
-> Compatibility: gateway JWT parsing still accepts legacy `operator_id` claims and maps them into `tenant_id` when `tenant_id` is absent.
+> Migration note: `operator_id` JWT claims are preserved in extra claims but are not mapped into `tenant_id`. Use a `tenant_id` claim for tenant scope.
 
 ### Column Permissions
 

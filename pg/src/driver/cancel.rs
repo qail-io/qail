@@ -63,26 +63,6 @@ impl PgConnection {
         (self.process_id, &self.cancel_key_bytes)
     }
 
-    /// Legacy cancel key accessor (`process_id`, `secret_key_i32`).
-    ///
-    /// Compatibility-only: valid for protocol 3.0 4-byte cancel keys.
-    /// For protocol 3.2 extended keys, this returns `(process_id, 0)`.
-    pub fn get_cancel_key(&self) -> (i32, i32) {
-        if self.cancel_key_bytes.len() == 4 {
-            (
-                self.process_id,
-                i32::from_be_bytes([
-                    self.cancel_key_bytes[0],
-                    self.cancel_key_bytes[1],
-                    self.cancel_key_bytes[2],
-                    self.cancel_key_bytes[3],
-                ]),
-            )
-        } else {
-            (self.process_id, 0)
-        }
-    }
-
     /// Cancel a running query using bytes-native cancel key.
     pub async fn cancel_query_bytes(
         host: &str,
@@ -102,16 +82,6 @@ impl PgConnection {
 
         // Server will close connection after receiving cancel request
         Ok(())
-    }
-
-    /// Legacy i32 cancel API wrapper (protocol 3.0-style 4-byte key).
-    pub async fn cancel_query(
-        host: &str,
-        port: u16,
-        process_id: i32,
-        secret_key: i32,
-    ) -> PgResult<()> {
-        Self::cancel_query_bytes(host, port, process_id, &secret_key.to_be_bytes()).await
     }
 }
 

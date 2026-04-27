@@ -151,7 +151,11 @@ proptest! {
         query in arb_pg_string(),
         param_types in proptest::collection::vec(any::<u32>(), 0..4),
     ) {
-        let msg = FrontendMessage::Parse { name: name.clone(), query: query.clone(), param_types: param_types.clone() };
+        let msg = FrontendMessage::Parse {
+            name,
+            query,
+            param_types: param_types.clone(),
+        };
         let bytes = msg.encode_checked().expect("parse must encode");
 
         // Payload starts at byte 5 (after type + length)

@@ -3,11 +3,13 @@
 //! QAIL uses native AST/DSL APIs here. This is intentionally separate from
 //! `qail_pgx_modes_once.rs`, which benchmarks raw-SQL driver paths.
 
+use bytes::{Bytes, BytesMut};
 use qail_core::ast::Qail;
 use qail_core::ast::builders::{count, count_filter, eq as cond_eq, max, sum};
-use bytes::{Bytes, BytesMut};
 use qail_pg::protocol::AstEncoder;
-use qail_pg::{ConnectOptions, PgBytesRow, PgConnection, PgEncoder, PgPool, PgRow, PoolConfig, TlsMode};
+use qail_pg::{
+    ConnectOptions, PgBytesRow, PgConnection, PgEncoder, PgPool, PgRow, PoolConfig, TlsMode,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Barrier;
@@ -406,8 +408,10 @@ fn percent_decode(s: &str) -> String {
 async fn connect_bench_connection(
     cfg: &BenchDbConfig,
 ) -> Result<PgConnection, Box<dyn std::error::Error>> {
-    let mut options = ConnectOptions::default();
-    options.tls_mode = cfg.tls_mode;
+    let options = ConnectOptions {
+        tls_mode: cfg.tls_mode,
+        ..Default::default()
+    };
     Ok(PgConnection::connect_with_options(
         &cfg.host,
         cfg.port,
@@ -533,9 +537,7 @@ async fn ensure_bench_payload(conn: &mut PgConnection) -> Result<(), Box<dyn std
     .await;
     let unlock_result = conn.execute_simple(BENCH_SETUP_UNLOCK_SQL).await;
 
-    if let Err(err) = setup_result {
-        return Err(err);
-    }
+    setup_result?;
     unlock_result?;
     Ok(())
 }
@@ -572,9 +574,7 @@ async fn ensure_bench_many_params(
     .await;
     let unlock_result = conn.execute_simple(BENCH_SETUP_UNLOCK_SQL).await;
 
-    if let Err(err) = setup_result {
-        return Err(err);
-    }
+    setup_result?;
     unlock_result?;
     Ok(())
 }
@@ -737,7 +737,7 @@ fn encode_prepared_singles_wire_batch(
 }
 
 fn split_commands_for_pool(cmds: &[Qail]) -> Result<Vec<Vec<Qail>>, Box<dyn std::error::Error>> {
-    if cmds.len() % POOL_SIZE != 0 {
+    if !cmds.len().is_multiple_of(POOL_SIZE) {
         return Err(format!(
             "workload produced {} commands, not divisible by pool size {}",
             cmds.len(),
@@ -790,15 +790,13 @@ fn consume_scalar_value(value: Option<&[u8]>, stats: &mut BatchStats) {
 fn consume_aggregate_columns(columns: [Option<&[u8]>; 4], stats: &mut BatchStats) {
     stats.rows += 1;
     let mut row_hash = FNV_OFFSET;
-    for value in columns {
-        if let Some(value) = value {
-            stats.bytes += value.len();
-            let parsed = std::str::from_utf8(value)
-                .ok()
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(value.len() as i64);
-            row_hash = row_hash.wrapping_add(parsed as u64);
-        }
+    for value in columns.into_iter().flatten() {
+        stats.bytes += value.len();
+        let parsed = std::str::from_utf8(value)
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(value.len() as i64);
+        row_hash = row_hash.wrapping_add(parsed as u64);
     }
     stats.checksum = stats.checksum.wrapping_add(row_hash);
 }
@@ -1049,7 +1047,8 @@ async fn run_single_mode(
     let wire_batch = encode_prepared_singles_wire_batch(&stmt, &prepared.params_batch, 0)?;
     let profile_single = want_single_profile();
 
-    let warmup = run_single_iteration_encoded(&mut conn, &wire_batch, spec.result_mode, None).await?;
+    let warmup =
+        run_single_iteration_encoded(&mut conn, &wire_batch, spec.result_mode, None).await?;
     if warmup.completed != wire_batch.wires.len() {
         return Err(format!(
             "warmup completed {} queries, expected {}",

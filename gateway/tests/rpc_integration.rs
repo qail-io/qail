@@ -160,8 +160,7 @@ async fn response_json(response: axum::response::Response) -> Value {
 
 async fn integration_test_serial_guard() -> tokio::sync::OwnedSemaphorePermit {
     static SEM: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    SEM.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
-        .clone()
+    Arc::clone(SEM.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
         .acquire_owned()
         .await
         .expect("serial permit")
@@ -479,8 +478,7 @@ async fn binary_float8() {
     let rows = query_binary(&mut pg, "SELECT * FROM qail_test.ret_float8()").await;
     assert_eq!(rows.len(), 1);
     let val = rows[0]["ret_float8"].as_f64().unwrap();
-    #[allow(clippy::approx_constant)]
-    let expected = 3.14;
+    let expected = f64::from(314) / 100.0;
     assert!(
         (val - expected).abs() < 0.001,
         "expected ~3.14, got {}",
@@ -720,8 +718,7 @@ async fn binary_decode_inline_types() {
     assert_eq!(r["bool_col"], true);
     assert_eq!(r["int4_col"], 42);
     assert_eq!(r["int8_col"], 9223372036854775807_i64);
-    #[allow(clippy::approx_constant)]
-    let expected_float = 3.14;
+    let expected_float = f64::from(314) / 100.0;
     assert!((r["float8_col"].as_f64().unwrap() - expected_float).abs() < 0.001);
     // Numeric binary decode may truncate 99.95 to i64(99).
     if let Some(f) = r["numeric_col"].as_f64() {

@@ -133,82 +133,6 @@ async fn ensure_shadow_state_table(driver: &mut PgDriver) -> Result<()> {
             .execute(&create_cmd)
             .await
             .map_err(|e| anyhow!("Failed to create shadow state table: {}", e))?;
-    } else {
-        // Backward compatibility for older installs missing diff_checksum.
-        let diff_col_exists = Qail::get("information_schema.columns")
-            .column("1")
-            .where_eq("table_schema", "public")
-            .where_eq("table_name", "_qail_shadow_state")
-            .where_eq("column_name", "diff_checksum")
-            .limit(1);
-        let rows = driver
-            .fetch_all(&diff_col_exists)
-            .await
-            .map_err(|e| anyhow!("Failed to inspect shadow state columns: {}", e))?;
-        if rows.is_empty() {
-            let alter_cmd = Qail {
-                action: Action::Mod,
-                table: "_qail_shadow_state".to_string(),
-                columns: vec![Expr::Def {
-                    name: "diff_checksum".to_string(),
-                    data_type: "text".to_string(),
-                    constraints: vec![Constraint::Nullable],
-                }],
-                ..Default::default()
-            };
-            driver
-                .execute(&alter_cmd)
-                .await
-                .map_err(|e| anyhow!("Failed to migrate shadow state table: {}", e))?;
-        }
-    }
-    purge_legacy_shadow_state_rows(driver).await?;
-    Ok(())
-}
-
-fn is_current_shadow_diff_cmds_wire(diff_cmds: &str) -> bool {
-    diff_cmds.starts_with("QAIL-CMDS/1\n")
-}
-
-async fn purge_legacy_shadow_state_rows(driver: &mut PgDriver) -> Result<()> {
-    let cmd = Qail::get("_qail_shadow_state")
-        .columns(["id", "status", "diff_cmds"])
-        .in_vals("status", ["pending", "verified"]);
-    let rows = driver
-        .fetch_all(&cmd)
-        .await
-        .map_err(|e| anyhow!("Failed to inspect shadow state rows: {}", e))?;
-
-    let mut purged = 0u64;
-    for row in rows {
-        let id = row.get_i64(0).or_else(|| row.get_i32(0).map(i64::from));
-        let status = row.get_string(1).unwrap_or_else(|| "unknown".to_string());
-        let diff_cmds = row.get_string(2).unwrap_or_default();
-
-        if !is_current_shadow_diff_cmds_wire(&diff_cmds)
-            && let Some(id) = id
-        {
-            let del = Qail::del("_qail_shadow_state").where_eq("id", id);
-            driver
-                .execute(&del)
-                .await
-                .map_err(|e| anyhow!("Failed to purge legacy shadow row id={}: {}", id, e))?;
-            purged += 1;
-            eprintln!(
-                "{} Purged legacy _qail_shadow_state row id={} status={} (non-wire diff_cmds)",
-                "⚠".yellow(),
-                id,
-                status
-            );
-        }
-    }
-
-    if purged > 0 {
-        eprintln!(
-            "{} Purged {} legacy shadow state row(s) during wire cutover",
-            "⚠".yellow(),
-            purged
-        );
     }
     Ok(())
 }
@@ -297,7 +221,7 @@ async fn load_shadow_state(driver: &mut PgDriver) -> Result<Option<(ShadowState,
         .map_err(|e| anyhow!("Failed to decode diff commands: {}", e))?;
 
     let state = ShadowState {
-        primary_url: primary_url.clone(),
+        primary_url,
         shadow_name,
         shadow_url: String::new(), // Will be reconstructed
         is_ready: true,
@@ -1337,6 +1261,3 @@ async fn apply_base_schema_to_shadow(state: &mut ShadowState, cmds: &[Qail]) -> 
 
     Ok(())
 }
-
-#[cfg(test)]
-mod shadow_state_cutover_tests;

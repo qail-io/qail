@@ -1,6 +1,6 @@
 //! CTE (Common Table Expression) builder methods.
 
-use crate::ast::{Action, CTEDef, Expr, GroupByMode, Qail};
+use crate::ast::{CTEDef, Expr, Qail};
 
 impl Qail {
     /// Convert this query into a reusable CTE definition.
@@ -29,73 +29,6 @@ impl Qail {
     /// Add an inline CTE from another query.
     pub fn with(self, name: impl Into<String>, query: Qail) -> Self {
         self.with_cte(query.to_cte(name))
-    }
-
-    /// Convert this query into a CTE (deprecated, use `.to_cte()` or `.with()`).
-    #[deprecated(
-        since = "0.13.0",
-        note = "Use .to_cte() for reusable CTEDef or .with() for inline CTE"
-    )]
-    pub fn as_cte(self, name: impl Into<String>) -> Self {
-        let cte_name = name.into();
-        let columns: Vec<String> = self
-            .columns
-            .iter()
-            .filter_map(|c| match c {
-                Expr::Named(n) => Some(n.clone()),
-                Expr::Aliased { alias, .. } => Some(alias.clone()),
-                _ => None,
-            })
-            .collect();
-
-        Self {
-            action: Action::With,
-            table: cte_name.clone(),
-            columns: vec![],
-            joins: vec![],
-            cages: vec![],
-            distinct: false,
-            index_def: None,
-            table_constraints: vec![],
-            set_ops: vec![],
-            having: vec![],
-            group_by_mode: GroupByMode::Simple,
-            distinct_on: vec![],
-            returning: None,
-            on_conflict: None,
-            source_query: None,
-            channel: None,
-            payload: None,
-            savepoint_name: None,
-            from_tables: vec![],
-            using_tables: vec![],
-            lock_mode: None,
-            skip_locked: false,
-            fetch: None,
-            default_values: false,
-            overriding: None,
-            sample: None,
-            only_table: false,
-            vector: None,
-            score_threshold: None,
-            vector_name: None,
-            with_vector: false,
-            vector_size: None,
-            distance: None,
-            on_disk: None,
-            function_def: None,
-            trigger_def: None,
-            policy_def: None,
-
-            ctes: vec![CTEDef {
-                name: cte_name,
-                recursive: false,
-                columns,
-                base_query: Box::new(self),
-                recursive_query: None,
-                source_table: None,
-            }],
-        }
     }
 
     /// Mark the last CTE as recursive and attach the recursive query.

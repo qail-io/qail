@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 
 use qail_core::ast::Qail;
@@ -7,10 +6,9 @@ use qail_core::migrate;
 
 use crate::error::GatewayError;
 
+use super::GatewayTable;
 use super::convert::convert_table;
 use super::validate::validate_cmd;
-use super::yaml::YamlSchemaConfig;
-use super::{GatewayColumn, GatewayTable};
 
 /// Schema registry — the gateway's knowledge of the database schema
 #[derive(Debug, Default)]
@@ -55,57 +53,13 @@ impl SchemaRegistry {
         Ok(())
     }
 
-    /// Load schema from YAML file (backward compatibility)
-    pub fn load_from_yaml_file(&mut self, path: &str) -> Result<(), GatewayError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| GatewayError::Schema(format!("Failed to read schema: {}", e)))?;
-
-        let config: YamlSchemaConfig = serde_yaml::from_str(&content)
-            .map_err(|e| GatewayError::Schema(format!("Failed to parse schema: {}", e)))?;
-
-        for table in config.tables {
-            let pk = table
-                .columns
-                .iter()
-                .find(|c| c.primary_key)
-                .map(|c| c.name.clone());
-
-            let gateway_table = GatewayTable {
-                name: table.name.clone(),
-                columns: table
-                    .columns
-                    .into_iter()
-                    .map(|c| GatewayColumn {
-                        pg_type: c.col_type.to_uppercase(),
-                        col_type: c.col_type.clone(),
-                        name: c.name,
-                        nullable: c.nullable,
-                        primary_key: c.primary_key,
-                        unique: false,
-                        has_default: false,
-                        foreign_key: None,
-                    })
-                    .collect(),
-                primary_key: pk,
-            };
-
-            tracing::debug!("Loaded table: {}", table.name);
-            self.tables.insert(table.name, gateway_table);
-        }
-
-        tracing::info!("Loaded {} table schemas from YAML", self.tables.len());
-        Ok(())
-    }
-
     /// Load from a file, auto-detecting format by extension
     pub fn load_from_file(&mut self, path: &str) -> Result<(), GatewayError> {
         if Path::new(path).is_dir() || path.ends_with(".qail") {
             self.load_from_qail_file(path)
-        } else if path.ends_with(".yaml") || path.ends_with(".yml") {
-            self.load_from_yaml_file(path)
         } else {
             Err(GatewayError::Schema(format!(
-                "Unknown schema format: {}. Use .qail, schema directory, or .yaml",
+                "Unknown schema format: {}. Use .qail or schema directory",
                 path
             )))
         }

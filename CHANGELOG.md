@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-04-27
+
+### Removed
+
+- **RLS builder compatibility alias:** removed `try_with_rls()`; `with_rls(&ctx)` is the fallible RLS builder API.
+- **Implicit relation join compatibility alias:** removed `try_join_on()`; `join_on(...)` now carries the fallible relation lookup contract directly.
+- **Binary command encoder alias:** removed `try_encode_cmd_binary()`; `encode_cmd_binary()` is the fallible binary AST encoder.
+- **Analyzer legacy mode:** removed unused `AnalysisMode::Regex`; non-Rust source scanning reports `TextSemantic`.
+- **String-only build validation wrapper:** removed `validate_against_schema()`; use `validate_against_schema_diagnostics()` for structured diagnostics.
+- **PostgreSQL cancel-key compatibility wrappers:** removed legacy `i32` cancel-key accessors and wrappers; use bytes-native cancel-key APIs.
+- **Build-error string conversion:** removed the broad `From<QailBuildError> for String` compatibility conversion.
+
+### Fixed
+
+- **Panic-safety surfaces:** builder and encoder runtime paths now keep malformed payloads, ambiguous relation metadata, and size-limit failures on structured fallible paths instead of compatibility wrappers.
+- **RLS positional insert handling:** positional insert payloads without explicit columns now return a build error when RLS cannot safely inject tenant scope.
+- **CLI timestamp fallback:** timestamp helpers no longer rely solely on the system `date` command in restricted environments.
+
+### Changed
+
+- **Tenant-first runtime docs:** gateway and driver documentation now consistently describe `tenant_id`, `current_user_id`, `current_agent_id`, and `is_super_admin`; legacy `operator_id` JWT claims are not mapped into tenant scope.
+- **PostgreSQL AST encoder naming:** count-query encoder helpers were renamed to match their actual behavior.
+- **Versioning/docs:** bumped Rust workspace crates and current docs/install/readme references to `0.28.0`.
+
 ## [0.27.10] - 2026-04-23
 
 ### Fixed

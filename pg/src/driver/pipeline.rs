@@ -894,7 +894,9 @@ impl PgConnection {
         match mode.resolve_for_batch_len(cmds.len()) {
             AstPipelineMode::OneShot => self.pipeline_execute_count_ast_oneshot(cmds).await,
             AstPipelineMode::Cached => self.pipeline_execute_count_ast_cached(cmds).await,
-            AstPipelineMode::Auto => unreachable!("Auto mode must resolve to concrete strategy"),
+            AstPipelineMode::Auto => Err(PgError::Protocol(
+                "auto pipeline mode did not resolve to a concrete strategy".to_string(),
+            )),
         }
     }
 
@@ -1317,10 +1319,7 @@ impl PgConnection {
             }
         }
 
-        Ok(super::PreparedStatement {
-            name: stmt_name,
-            param_count: sql.matches('$').count(),
-        })
+        Ok(super::PreparedStatement { name: stmt_name })
     }
 
     /// Execute a prepared statement pipeline and return all row data.
@@ -2065,7 +2064,6 @@ mod tests {
             stmt_cache: StatementCache::new(NonZeroUsize::new(16).expect("non-zero")),
             column_info_cache: HashMap::new(),
             process_id: 0,
-            secret_key: 0,
             cancel_key_bytes: Vec::new(),
             requested_protocol_minor: PgConnection::default_protocol_minor(),
             negotiated_protocol_minor: PgConnection::default_protocol_minor(),

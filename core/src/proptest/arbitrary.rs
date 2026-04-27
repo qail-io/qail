@@ -8,7 +8,7 @@ use proptest::prelude::*;
 
 /// Generate valid SQL identifiers (alphanumeric + underscore, starting with letter)
 pub fn arb_identifier() -> impl Strategy<Value = String> {
-    "[a-z][a-z0-9_]{0,15}".prop_map(|s| s.to_string())
+    "[a-z][a-z0-9_]{0,15}"
 }
 
 /// Strategy for IntervalUnit

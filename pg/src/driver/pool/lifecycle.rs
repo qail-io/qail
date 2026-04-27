@@ -370,7 +370,7 @@ impl PgPool {
 
         Ok(PooledConnection {
             conn: Some(conn),
-            pool: self.inner.clone(),
+            pool: std::sync::Arc::clone(&self.inner),
             rls_dirty: false,
             created_at,
         })

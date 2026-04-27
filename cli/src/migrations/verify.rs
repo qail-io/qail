@@ -89,7 +89,9 @@ fn schema_fingerprint_lines(schema: &Schema) -> Vec<String> {
     let mut table_names: Vec<String> = schema.tables.keys().cloned().collect();
     table_names.sort();
     for table_name in table_names {
-        let table = schema.tables.get(&table_name).expect("table exists");
+        let Some(table) = schema.tables.get(&table_name) else {
+            continue;
+        };
         lines.push(format!(
             "T|{}|rls={}|force={}",
             table.name, table.enable_rls, table.force_rls

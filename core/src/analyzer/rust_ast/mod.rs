@@ -15,5 +15,4 @@ pub use nplus1::{
     NPlusOneCode, NPlusOneDiagnostic, NPlusOneSeverity, detect_n_plus_one_in_dir,
     detect_n_plus_one_in_file,
 };
-#[allow(unused_imports)]
 pub use query_extractor::{FetchMethod, QueryCall, SqlType, detect_query_calls};
