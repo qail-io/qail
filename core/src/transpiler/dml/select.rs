@@ -351,7 +351,14 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
     sql.push_str(&generator.quote_identifier(&cmd.table));
 
     // TABLESAMPLE
-    if let Some((method, percent, seed)) = &cmd.sample {
+    let sample = cmd.sample.or_else(|| {
+        cmd.cages.iter().find_map(|cage| match &cage.kind {
+            CageKind::Sample(percent) => Some((SampleMethod::Bernoulli, *percent as f64, None)),
+            _ => None,
+        })
+    });
+
+    if let Some((method, percent, seed)) = sample {
         let method_str = match method {
             SampleMethod::Bernoulli => "BERNOULLI",
             SampleMethod::System => "SYSTEM",
