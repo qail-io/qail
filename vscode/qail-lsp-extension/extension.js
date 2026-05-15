@@ -117,7 +117,10 @@ function buildClientOptions() {
     ],
     synchronize: {
       configurationSection: "qailLsp",
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{qail,rs}")
+      fileEvents: [
+        vscode.workspace.createFileSystemWatcher("**/*.{qail,rs}"),
+        vscode.workspace.createFileSystemWatcher("**/qail.toml")
+      ]
     }
   };
 }

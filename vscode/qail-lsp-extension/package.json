@@ -2,9 +2,14 @@
   "name": "qail-lsp",
   "displayName": "QAIL LSP",
   "description": "VS Code extension for QAIL Language Server (qail-lsp)",
-  "version": "0.27.11",
+  "version": "0.28.0",
   "publisher": "qail",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qail-io/qail.git",
+    "directory": "vscode/qail-lsp-extension"
+  },
   "icon": "assets/icon.png",
   "engines": {
     "vscode": "^1.90.0"
@@ -14,7 +19,7 @@
     "Linters",
     "Other"
   ],
-  "main": "./extension.js",
+  "main": "./dist/extension.js",
   "activationEvents": [
     "onLanguage:qail",
     "onLanguage:rust",
@@ -62,12 +67,15 @@
     }
   },
   "scripts": {
+    "bundle": "esbuild extension.js --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js",
+    "vscode:prepublish": "npm run bundle",
     "package": "vsce package"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
-    "@vscode/vsce": "^2.27.0"
+    "@vscode/vsce": "^2.32.0",
+    "esbuild": "^0.27.7"
   }
 }

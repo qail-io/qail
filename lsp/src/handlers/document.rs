@@ -143,7 +143,23 @@ fn is_schema_uri(uri: &str) -> bool {
     Url::parse(uri)
         .ok()
         .and_then(|url| url.to_file_path().ok())
-        .and_then(|path| path.file_name().map(|name| name == "schema.qail"))
+        .map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name == "schema.qail" || name == "_order.qail" || name == "qail.toml"
+                })
+                || (path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("qail"))
+                    && path.ancestors().any(|ancestor| {
+                        ancestor
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name == "schema")
+                    }))
+        })
         .unwrap_or(false)
 }
 
@@ -153,7 +169,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use super::should_apply_version;
+    use super::{is_schema_uri, should_apply_version};
     use crate::server::QailLanguageServer;
     use tower_lsp::LspService;
     use tower_lsp::lsp_types::{
@@ -177,12 +193,33 @@ mod tests {
         dir
     }
 
+    fn latest_schema_mtime(signature: &[(PathBuf, Option<SystemTime>)]) -> Option<SystemTime> {
+        let mut latest = None;
+        for (_, mtime) in signature {
+            if let Some(mtime) = *mtime
+                && latest.is_none_or(|current| mtime > current)
+            {
+                latest = Some(mtime);
+            }
+        }
+        latest
+    }
+
     #[test]
     fn version_updates_require_newer_sequence() {
         assert!(should_apply_version(None, 1));
         assert!(should_apply_version(Some(3), 4));
         assert!(!should_apply_version(Some(3), 3));
         assert!(!should_apply_version(Some(3), 2));
+    }
+
+    #[test]
+    fn schema_uri_detection_covers_modular_schema_sources() {
+        assert!(is_schema_uri("file:///workspace/schema.qail"));
+        assert!(is_schema_uri("file:///workspace/schema/users.qail"));
+        assert!(is_schema_uri("file:///workspace/schema/_order.qail"));
+        assert!(is_schema_uri("file:///workspace/qail.toml"));
+        assert!(!is_schema_uri("file:///workspace/queries/users.qail"));
     }
 
     #[tokio::test]
@@ -274,7 +311,7 @@ table users {
         let initial_schema_mtime = {
             let schemas = server.schemas.read().expect("schema cache");
             let root_cache = schemas.get(&root).expect("root schema cache");
-            root_cache.schema_mtime
+            latest_schema_mtime(&root_cache.schema_watch_mtimes)
         };
 
         std::thread::sleep(Duration::from_secs(1));
@@ -303,7 +340,11 @@ table users {
             let root_cache = schemas.get(&root).expect("root schema cache");
             let docs = server.documents.read().expect("documents lock");
             let doc = docs.get(file_uri.as_str()).expect("open document");
-            (root_cache.schema_mtime, doc.text.clone(), doc.version)
+            (
+                latest_schema_mtime(&root_cache.schema_watch_mtimes),
+                doc.text.clone(),
+                doc.version,
+            )
         };
 
         assert_ne!(

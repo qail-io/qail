@@ -11,6 +11,7 @@ use qail_core::build::{
 };
 use qail_core::parse;
 use qail_core::schema::Schema;
+use qail_core::schema_source::{ResolvedSchemaSource, resolve_schema_source};
 use qail_core::validator::Validator;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -40,7 +41,7 @@ pub struct OpenDocument {
 #[derive(Debug)]
 pub struct WorkspaceSchemaCache {
     pub schema_path: PathBuf,
-    pub schema_mtime: Option<SystemTime>,
+    pub schema_watch_mtimes: Vec<(PathBuf, Option<SystemTime>)>,
     pub validator: Option<Validator>,
     pub build_schema: Option<BuildSchema>,
 }
@@ -74,28 +75,30 @@ impl QailLanguageServer {
         let file_path = uri_to_file_path(uri)?;
 
         for candidate_dir in schema_probe_dirs(&file_path) {
-            let schema_path = candidate_dir.join("schema.qail");
-            let Ok(metadata) = fs::metadata(&schema_path) else {
+            let Some(source) = resolve_schema_for_candidate_dir(&candidate_dir) else {
                 continue;
             };
-            if !metadata.is_file() {
-                continue;
-            }
-
-            let schema_mtime = metadata.modified().ok();
+            let Ok(source) = source else {
+                if let Ok(mut schemas) = self.schemas.write() {
+                    schemas.remove(&candidate_dir);
+                }
+                return Some(candidate_dir);
+            };
+            let schema_watch_mtimes = schema_watch_signature(&source);
             let needs_reload = self
                 .schemas
                 .read()
                 .ok()
                 .and_then(|schemas| {
                     schemas.get(&candidate_dir).map(|cached| {
-                        cached.schema_path != schema_path || cached.schema_mtime != schema_mtime
+                        cached.schema_path != source.root
+                            || cached.schema_watch_mtimes != schema_watch_mtimes
                     })
                 })
                 .unwrap_or(true);
 
             if needs_reload {
-                self.load_schema_from_dir(&candidate_dir, schema_path, schema_mtime);
+                self.load_schema_from_dir(&candidate_dir, source, schema_watch_mtimes);
             }
 
             return Some(candidate_dir);
@@ -107,10 +110,10 @@ impl QailLanguageServer {
     fn load_schema_from_dir(
         &self,
         workspace_root: &Path,
-        schema_path: PathBuf,
-        schema_mtime: Option<SystemTime>,
+        source: ResolvedSchemaSource,
+        schema_watch_mtimes: Vec<(PathBuf, Option<SystemTime>)>,
     ) {
-        let Ok(content) = qail_core::schema_source::read_qail_schema_source(&schema_path) else {
+        let Ok(content) = source.read_merged() else {
             if let Ok(mut schemas) = self.schemas.write() {
                 schemas.remove(workspace_root);
             }
@@ -126,8 +129,8 @@ impl QailLanguageServer {
             schemas.insert(
                 workspace_root.to_path_buf(),
                 WorkspaceSchemaCache {
-                    schema_path,
-                    schema_mtime,
+                    schema_path: source.root,
+                    schema_watch_mtimes,
                     validator,
                     build_schema,
                 },
@@ -245,6 +248,69 @@ fn schema_probe_dirs(file_path: &Path) -> Vec<PathBuf> {
     }
 
     out
+}
+
+fn resolve_schema_for_candidate_dir(
+    candidate_dir: &Path,
+) -> Option<std::result::Result<ResolvedSchemaSource, String>> {
+    let schema_file = candidate_dir.join("schema.qail");
+    if schema_file.is_file() {
+        return Some(resolve_schema_source(schema_file));
+    }
+
+    let schema_dir = candidate_dir.join("schema");
+    if schema_dir.is_dir() {
+        return Some(resolve_schema_source(schema_dir));
+    }
+
+    None
+}
+
+fn schema_watch_signature(source: &ResolvedSchemaSource) -> Vec<(PathBuf, Option<SystemTime>)> {
+    let mut paths = source.watch_paths();
+    if let Some(config_path) = nearest_qail_toml(&source.root)
+        && !paths.contains(&config_path)
+    {
+        paths.push(config_path);
+    }
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let mtime = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+            (path, mtime)
+        })
+        .collect()
+}
+
+fn nearest_qail_toml(schema_root: &Path) -> Option<PathBuf> {
+    let start = if schema_root.is_file() {
+        schema_root.parent()?
+    } else {
+        schema_root
+    };
+
+    for dir in start.ancestors() {
+        let candidate = dir.join("qail.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+fn latest_schema_mtime(signature: &[(PathBuf, Option<SystemTime>)]) -> Option<SystemTime> {
+    let mut latest = None;
+    for (_, mtime) in signature {
+        if let Some(mtime) = *mtime
+            && latest.is_none_or(|current| mtime > current)
+        {
+            latest = Some(mtime);
+        }
+    }
+    latest
 }
 
 fn collect_text_qail_diagnostics(text: &str) -> Vec<Diagnostic> {

@@ -4,10 +4,10 @@ VS Code extension for the `qail-lsp` language server.
 
 ## Features
 
-- LSP diagnostics for `.qail`, `schema.qail`, and Rust files
+- LSP diagnostics for `.qail`, `schema.qail`, modular `schema/`, and Rust files
 - Hover previews for embedded QAIL/SQL queries
 - Context-aware completion
-- Code actions
+- Code actions for schema/RLS diagnostics and SQL-to-QAIL migration
 - Document formatting (raw `.qail` documents)
 - Restart command for the language server
 
@@ -15,7 +15,7 @@ VS Code extension for the `qail-lsp` language server.
 
 1. Build or install `qail-lsp` so the binary is available on your machine.
 2. Install this extension (`.vsix`).
-3. Open a workspace containing `.qail`, `schema.qail`, or Rust files.
+3. Open a workspace containing `.qail`, `schema.qail`, `schema/`, or Rust files.
 
 Default server discovery order:
 1. `qail-lsp` found in `PATH`
@@ -36,6 +36,11 @@ Default server discovery order:
 Create a `.qail` file and start typing, for example:
 
 `get users fields id, email where active = true`
+
+For semantic diagnostics and table/column completions, keep either
+`schema.qail` or a modular `schema/` directory in the workspace root. The
+extension watches `.qail`, Rust, and `qail.toml` changes and asks the language
+server to refresh open diagnostics.
 
 ## Contributing
 

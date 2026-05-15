@@ -2,6 +2,11 @@
 .github/**
 **/.DS_Store
 **/*.log
+*.vsix
+extension.js
+package-lock.json
+node_modules/**
+dist/**/*.map
 node_modules/**/test/**
 node_modules/**/tests/**
 node_modules/**/example/**

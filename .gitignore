@@ -104,3 +104,6 @@ tmp/retest_*/
 tmp/pg18_*/
 tmp/*/deltas/
 tmp/*/migrations/
+
+# VS Code extension build output
+vscode/qail-lsp-extension/dist/

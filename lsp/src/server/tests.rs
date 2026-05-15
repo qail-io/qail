@@ -178,6 +178,113 @@ fn schema_probe_dirs_walks_upward() {
 }
 
 #[test]
+fn schema_directory_source_loads_modules_and_reloads_on_module_change() {
+    let root = create_temp_dir("schema_dir");
+    let schema_dir = root.join("schema");
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::create_dir_all(&schema_dir).expect("mkdir schema");
+    fs::write(
+        root.join("qail.toml"),
+        "[project]\nschema_strict_manifest = false\n",
+    )
+    .expect("write qail.toml");
+    fs::write(schema_dir.join("_order.qail"), "users.qail\norders.qail\n").expect("write order");
+    fs::write(
+        schema_dir.join("users.qail"),
+        r#"
+table users {
+  id UUID
+}
+"#,
+    )
+    .expect("write users");
+    fs::write(
+        schema_dir.join("orders.qail"),
+        r#"
+table orders {
+  id UUID
+}
+"#,
+    )
+    .expect("write orders");
+
+    let uri = Url::from_file_path(root.join("src/main.rs"))
+        .expect("uri")
+        .to_string();
+    let (service, _socket) = LspService::new(QailLanguageServer::new);
+    let server = service.inner();
+
+    assert_eq!(server.try_load_schema_from_uri(&uri), Some(root.clone()));
+
+    let mtime_before = {
+        let schemas = server.schemas.read().expect("schema cache");
+        let cache = schemas.get(&root).expect("root cache");
+        assert_eq!(cache.schema_path, schema_dir);
+        assert!(
+            cache
+                .build_schema
+                .as_ref()
+                .is_some_and(|schema| schema.tables.contains_key("users")
+                    && schema.tables.contains_key("orders"))
+        );
+        assert!(cache.schema_watch_mtimes.iter().any(|(path, _)| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "_order.qail")
+        }));
+        assert!(cache.schema_watch_mtimes.iter().any(|(path, _)| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "qail.toml")
+        }));
+        latest_schema_mtime(&cache.schema_watch_mtimes)
+    };
+
+    std::thread::sleep(Duration::from_secs(1));
+    fs::write(
+        schema_dir.join("orders.qail"),
+        r#"
+table orders {
+  id UUID
+  tenant_id UUID
+}
+"#,
+    )
+    .expect("rewrite orders");
+
+    assert_eq!(server.try_load_schema_from_uri(&uri), Some(root.clone()));
+
+    let mtime_after = {
+        let schemas = server.schemas.read().expect("schema cache");
+        let cache = schemas.get(&root).expect("root cache");
+        assert!(
+            cache
+                .build_schema
+                .as_ref()
+                .and_then(|schema| schema.tables.get("orders"))
+                .is_some_and(|table| table.columns.contains_key("tenant_id"))
+        );
+        latest_schema_mtime(&cache.schema_watch_mtimes)
+    };
+
+    assert_ne!(
+        mtime_before, mtime_after,
+        "module mtime changes should invalidate schema cache"
+    );
+
+    fs::write(schema_dir.join("_order.qail"), "missing.qail\n").expect("break order");
+    assert_eq!(server.try_load_schema_from_uri(&uri), Some(root.clone()));
+    let schemas = server.schemas.read().expect("schema cache");
+    assert!(
+        schemas.get(&root).is_none(),
+        "broken schema source should clear stale workspace cache"
+    );
+    drop(schemas);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn validation_message_parsing_handles_windows_paths() {
     let msg = r"C:\work\qail\src\main.rs:42: Table 'usrs' not found. Did you mean 'users'?";
     assert_eq!(extract_line_from_validation_message(msg), Some(42));
@@ -314,7 +421,10 @@ table orders {
         let schemas = server.schemas.read().expect("schema cache");
         let cache_a = schemas.get(&workspace_a).expect("cache A");
         let cache_b = schemas.get(&workspace_b).expect("cache B");
-        (cache_a.schema_mtime, cache_b.schema_mtime)
+        (
+            latest_schema_mtime(&cache_a.schema_watch_mtimes),
+            latest_schema_mtime(&cache_b.schema_watch_mtimes),
+        )
     };
 
     std::thread::sleep(Duration::from_secs(1));
@@ -338,7 +448,10 @@ table users {
         let schemas = server.schemas.read().expect("schema cache");
         let cache_a = schemas.get(&workspace_a).expect("cache A");
         let cache_b = schemas.get(&workspace_b).expect("cache B");
-        (cache_a.schema_mtime, cache_b.schema_mtime)
+        (
+            latest_schema_mtime(&cache_a.schema_watch_mtimes),
+            latest_schema_mtime(&cache_b.schema_watch_mtimes),
+        )
     };
 
     assert_ne!(

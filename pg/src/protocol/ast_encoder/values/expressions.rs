@@ -963,6 +963,7 @@ pub fn write_value_to_array(buf: &mut Vec<u8>, value: &Value) {
         Value::Bool(b) => buf.extend_from_slice(if *b { b"t" } else { b"f" }),
         Value::Null => buf.extend_from_slice(b"NULL"),
         Value::Float(f) => buf.extend_from_slice(f.to_string().as_bytes()),
+        Value::Uuid(uuid) => buf.extend_from_slice(uuid.to_string().as_bytes()),
         _ => buf.extend_from_slice(value.to_string().as_bytes()),
     }
 }
@@ -999,5 +1000,30 @@ fn encode_frame_bound(bound: &FrameBound, buf: &mut BytesMut) {
             buf.extend_from_slice(b" FOLLOWING");
         }
         FrameBound::UnboundedFollowing => buf.extend_from_slice(b"UNBOUNDED FOLLOWING"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_value;
+    use bytes::BytesMut;
+    use qail_core::ast::Value;
+    use uuid::Uuid;
+
+    #[test]
+    fn encode_uuid_array_parameter_uses_raw_uuid_tokens() {
+        let uuid = Uuid::parse_str("b0e72b4f-c883-42ce-a5a9-96de097d6c54").unwrap();
+        let value = Value::Array(vec![Value::Uuid(uuid)]);
+        let mut sql = BytesMut::new();
+        let mut params = Vec::new();
+
+        encode_value(&value, &mut sql, &mut params).unwrap();
+
+        assert_eq!(sql.as_ref(), b"$1");
+        assert_eq!(params.len(), 1);
+        assert_eq!(
+            params[0].as_deref(),
+            Some(b"{b0e72b4f-c883-42ce-a5a9-96de097d6c54}".as_slice())
+        );
     }
 }

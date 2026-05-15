@@ -21,14 +21,41 @@ const QAIL_KEYWORDS: &[(&str, &str)] = &[
         "add",
         "INSERT query - add users fields name, email values :name, :email",
     ),
+    (
+        "insert",
+        "INSERT query - insert users fields name, email values :name, :email",
+    ),
     ("count", "COUNT query - count users fields id"),
+    ("cnt", "COUNT query - cnt users fields id"),
     ("export", "COPY TO query - export users fields id"),
     ("make", "DDL query - make users fields id:int"),
+    ("create", "DDL query - create users fields id:int"),
     ("del", "DELETE query - del users where id = :id"),
+    ("delete", "DELETE query - delete users where id = :id"),
     (
         "with",
         "CTE query - with recent as (get users fields id) get recent fields id",
     ),
+    ("call", "CALL command - call refresh_materialized_views()"),
+    (
+        "do",
+        "DO block - do $$ BEGIN RAISE NOTICE 'ok'; END; $$ language plpgsql",
+    ),
+    (
+        "session set",
+        "Session command - session set statement_timeout = '5000'",
+    ),
+    (
+        "session show",
+        "Session command - session show statement_timeout",
+    ),
+    (
+        "session reset",
+        "Session command - session reset statement_timeout",
+    ),
+    ("begin", "Transaction command - begin"),
+    ("commit", "Transaction command - commit"),
+    ("rollback", "Transaction command - rollback"),
 ];
 
 /// QAIL operator completions
@@ -37,7 +64,13 @@ const QAIL_OPERATORS: &[(&str, &str)] = &[
     ("where", "Filter rows"),
     ("order by", "Sort rows"),
     ("limit", "Limit row count"),
+    ("offset", "Skip row count"),
     ("group by", "Group rows"),
+    ("having", "Filter grouped rows"),
+    ("on conflict", "UPSERT conflict handling"),
+    ("join", "Join another table"),
+    ("left join", "LEFT JOIN another table"),
+    ("inner join", "INNER JOIN another table"),
 ];
 
 impl QailLanguageServer {
@@ -146,14 +179,134 @@ fn push_builder_method_items(items: &mut Vec<CompletionItem>) {
         ("Qail::del", "Start a DELETE query"),
         ("Qail::put", "Start an UPSERT query"),
         ("Qail::export", "Start a COPY TO query"),
+        ("Qail::search", "Start a vector search query"),
+        ("Qail::upsert", "Start a vector upsert query"),
+        ("Qail::scroll", "Start a vector scroll query"),
+        ("Qail::make", "Start a CREATE TABLE command"),
+        ("Qail::truncate", "Start a TRUNCATE command"),
+        ("Qail::explain", "Start an EXPLAIN command"),
+        ("Qail::explain_analyze", "Start an EXPLAIN ANALYZE command"),
+        ("Qail::lock", "Start a LOCK TABLE command"),
+        (
+            "Qail::create_materialized_view",
+            "Start a CREATE MATERIALIZED VIEW command",
+        ),
+        (
+            "Qail::refresh_materialized_view",
+            "Start a REFRESH MATERIALIZED VIEW command",
+        ),
+        (
+            "Qail::drop_materialized_view",
+            "Start a DROP MATERIALIZED VIEW command",
+        ),
+        ("Qail::listen", "Start a LISTEN command"),
+        ("Qail::unlisten", "Start an UNLISTEN command"),
+        ("Qail::notify", "Start a NOTIFY command"),
+        ("Qail::call", "Start a CALL command"),
+        ("Qail::do_block", "Start a DO block command"),
+        ("Qail::session_set", "Start a SET session command"),
+        ("Qail::session_show", "Start a SHOW session command"),
+        ("Qail::session_reset", "Start a RESET session command"),
+        ("Qail::create_database", "Start a CREATE DATABASE command"),
+        ("Qail::drop_database", "Start a DROP DATABASE command"),
+        ("Qail::typed", "Start a typed query builder"),
         (".columns", "Specify columns to select"),
+        (".column", "Append one selected column"),
+        (".select_all", "Select all columns"),
+        (".select_expr", "Append one selected expression"),
+        (".select_exprs", "Append selected expressions"),
+        (".column_expr", "Append one selected expression"),
+        (".columns_expr", "Append selected expressions"),
+        (".distinct_on", "Add DISTINCT ON columns"),
+        (".distinct_on_expr", "Add DISTINCT ON expressions"),
+        (".distinct_on_all", "Add DISTINCT ON all selected columns"),
         (".filter", "Add WHERE condition"),
+        (".filter_cond", "Add raw WHERE condition"),
+        (".or_filter", "Add OR WHERE condition group"),
+        (".where_eq", "Add equality filter"),
+        (".eq", "Add equality filter"),
+        (".ne", "Add not-equal filter"),
+        (".gt", "Add greater-than filter"),
+        (".gte", "Add greater-than-or-equal filter"),
+        (".lt", "Add less-than filter"),
+        (".lte", "Add less-than-or-equal filter"),
+        (".is_null", "Add IS NULL filter"),
+        (".is_not_null", "Add IS NOT NULL filter"),
+        (".like", "Add LIKE filter"),
+        (".ilike", "Add ILIKE filter"),
+        (".in_vals", "Add IN-list filter"),
+        (
+            ".array_elem_contained_in_text",
+            "Filter by matching array elements in text",
+        ),
+        (".join_on", "Join through registered schema relation"),
+        (
+            ".join_on_optional",
+            "Join through registered relation when available",
+        ),
+        (".join", "Add explicit join"),
+        (".left_join", "Add LEFT JOIN"),
+        (".inner_join", "Add INNER JOIN"),
+        (".left_join_as", "Add aliased LEFT JOIN"),
+        (".inner_join_as", "Add aliased INNER JOIN"),
+        (".join_conds", "Add join with multiple ON conditions"),
+        (".left_join_conds", "Add LEFT JOIN with multiple conditions"),
+        (
+            ".inner_join_conds",
+            "Add INNER JOIN with multiple conditions",
+        ),
         (".order_by", "Add ORDER BY clause"),
+        (".order_by_expr", "Add ORDER BY expression"),
+        (".order_desc", "Add descending ORDER BY clause"),
+        (".order_asc", "Add ascending ORDER BY clause"),
         (".limit", "Add LIMIT clause"),
         (".offset", "Add OFFSET clause"),
+        (".group_by", "Add GROUP BY clause"),
+        (".group_by_expr", "Add GROUP BY expressions"),
+        (".having_cond", "Add HAVING condition"),
+        (".having_conds", "Add multiple HAVING conditions"),
+        (".to_cte", "Convert query to a CTE definition"),
+        (".with", "Add WITH CTE query"),
+        (".with_cte", "Add CTE definition"),
+        (".with_ctes", "Replace CTE definitions"),
+        (".recursive", "Add recursive CTE part"),
+        (".from_cte", "Read from a CTE"),
+        (".select_from_cte", "Select columns from a CTE"),
         (".set_value", "Set column value for UPDATE/INSERT"),
+        (".set_opt", "Set optional column value"),
+        (".set_coalesce", "Set column with COALESCE"),
+        (".set_coalesce_opt", "Set COALESCE only when value is Some"),
+        (".values", "Set positional INSERT values"),
+        (".update_from", "Add UPDATE FROM tables"),
+        (".delete_using", "Add DELETE USING tables"),
         (".returning", "Add RETURNING clause"),
-        (".with_rls", "Inject RLS context"),
+        (".returning_all", "Add RETURNING *"),
+        (".on_conflict_update", "Add ON CONFLICT DO UPDATE"),
+        (".on_conflict_nothing", "Add ON CONFLICT DO NOTHING"),
+        (".with_rls", "Inject RLS context; returns QailBuildResult"),
+        (".rls", "Apply RLS on a typed builder"),
+        (".for_update", "Add FOR UPDATE row lock"),
+        (
+            ".for_update_skip_locked",
+            "Add FOR UPDATE SKIP LOCKED row lock",
+        ),
+        (".for_no_key_update", "Add FOR NO KEY UPDATE row lock"),
+        (".for_share", "Add FOR SHARE row lock"),
+        (".for_key_share", "Add FOR KEY SHARE row lock"),
+        (".fetch_first", "Add FETCH FIRST rows only"),
+        (".fetch_with_ties", "Add FETCH FIRST rows with ties"),
+        (".default_values", "Use INSERT DEFAULT VALUES"),
+        (".overriding_system_value", "Add OVERRIDING SYSTEM VALUE"),
+        (".overriding_user_value", "Add OVERRIDING USER VALUE"),
+        (".tablesample_bernoulli", "Add TABLESAMPLE BERNOULLI"),
+        (".tablesample_system", "Add TABLESAMPLE SYSTEM"),
+        (".repeatable", "Add TABLESAMPLE REPEATABLE seed"),
+        (".only", "Select from ONLY this table"),
+        (".table_alias", "Set an alias for the source table"),
+        (".vector", "Set vector search embedding"),
+        (".vector_name", "Set named vector"),
+        (".score_threshold", "Set vector score threshold"),
+        (".with_vectors", "Include vectors in results"),
     ];
 
     for (method, doc) in builder_methods {
@@ -222,5 +375,42 @@ foo."#;
                 character: 4,
             }
         ));
+    }
+
+    #[test]
+    fn builder_completions_include_current_028_methods() {
+        let mut items = Vec::new();
+        push_builder_method_items(&mut items);
+        let labels = items
+            .into_iter()
+            .map(|item| item.label)
+            .collect::<HashSet<_>>();
+
+        for label in [
+            "Qail::search",
+            "Qail::explain_analyze",
+            "Qail::session_set",
+            ".join_on",
+            ".for_update_skip_locked",
+            ".on_conflict_update",
+            ".tablesample_bernoulli",
+            ".with_rls",
+        ] {
+            assert!(labels.contains(label), "missing completion: {label}");
+        }
+    }
+
+    #[test]
+    fn qail_text_completions_include_current_actions() {
+        let mut items = Vec::new();
+        push_qail_keyword_items(&mut items);
+        let labels = items
+            .into_iter()
+            .map(|item| item.label)
+            .collect::<HashSet<_>>();
+
+        for label in ["insert", "call", "session set", "begin"] {
+            assert!(labels.contains(label), "missing keyword: {label}");
+        }
     }
 }
