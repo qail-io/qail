@@ -122,6 +122,8 @@ struct TrackedSession {
 // which is only accessed under a Mutex lock in `linux_krb5_token_provider`.
 // The GSS context is never shared across threads without synchronisation.
 unsafe impl Send for TrackedSession {}
+// SAFETY: Access to the wrapped session is synchronized by the provider Mutex,
+// so sharing the tracked session wrapper does not permit unsynchronized GSS use.
 unsafe impl Sync for TrackedSession {}
 
 /// Sessions older than this are pruned on every callback entry.
@@ -423,11 +425,14 @@ impl LinuxKrb5Session {
             value: target.as_ptr() as *mut c_void,
         };
 
+        // SAFETY: This reads the platform-provided immutable GSS OID symbol.
         let name_type = unsafe { GSS_C_NT_HOSTBASED_SERVICE };
         if name_type.is_null() {
             return Err("GSS_C_NT_HOSTBASED_SERVICE resolved to null pointer".to_string());
         }
 
+        // SAFETY: `input` points to `target` bytes alive for the call, `name_type`
+        // was checked for null, and `output_name` is an out-parameter we own.
         let major = unsafe {
             gss_import_name(
                 &mut minor,
@@ -472,6 +477,8 @@ impl LinuxKrb5Session {
         };
 
         let mut context = self.context;
+        // SAFETY: Input/output buffers and context pointers remain valid for the
+        // duration of the GSS call; output is released through `take_gss_buffer`.
         let major = unsafe {
             gss_init_sec_context(
                 &mut minor,
@@ -519,6 +526,8 @@ impl Drop for LinuxKrb5Session {
         let mut minor: OmUint32 = 0;
 
         if !self.context.is_null() {
+            // SAFETY: `self.context` is owned by this session and is nulled
+            // immediately after release to prevent double-free.
             let _ = unsafe {
                 gss_delete_sec_context(
                     &mut minor,
@@ -530,6 +539,8 @@ impl Drop for LinuxKrb5Session {
         }
 
         if !self.target_name.is_null() {
+            // SAFETY: `self.target_name` was returned by GSSAPI and is owned by
+            // this session until drop.
             let _ = unsafe { gss_release_name(&mut minor, &mut self.target_name) };
             self.target_name = std::ptr::null_mut();
         }
@@ -561,6 +572,8 @@ fn status_messages(status: OmUint32, status_type: i32) -> String {
             value: std::ptr::null_mut(),
         };
 
+        // SAFETY: `msg_buf` is a valid out-buffer and `message_context` is kept
+        // across calls as required by `gss_display_status`.
         let major = unsafe {
             gss_display_status(
                 &mut minor,
@@ -593,10 +606,13 @@ fn take_gss_buffer(buffer: &mut GssBufferDesc) -> Vec<u8> {
     let bytes = if buffer.length == 0 || buffer.value.is_null() {
         Vec::new()
     } else {
+        // SAFETY: Non-null GSS buffers point to `length` bytes owned by GSSAPI
+        // until `gss_release_buffer` below.
         unsafe { std::slice::from_raw_parts(buffer.value as *const u8, buffer.length).to_vec() }
     };
 
     let mut minor: OmUint32 = 0;
+    // SAFETY: The buffer was allocated by GSSAPI and may be safely released once.
     let _ = unsafe { gss_release_buffer(&mut minor, buffer) };
 
     bytes
@@ -677,6 +693,8 @@ pub struct GssEncStream {
 // synchronously within poll_read/poll_write. The stream is exclusively
 // owned and never shared across threads without Mutex.
 unsafe impl Send for GssEncStream {}
+// SAFETY: Async I/O polls require pinned mutable access; the opaque GSS handle
+// is not accessed concurrently through shared references.
 unsafe impl Sync for GssEncStream {}
 
 impl GssEncStream {
@@ -706,6 +724,8 @@ impl GssEncStream {
             value: std::ptr::null_mut(),
         };
 
+        // SAFETY: `input` borrows `plaintext` for the duration of the call and
+        // `output` is released through `take_gss_buffer`.
         let major = unsafe {
             gss_wrap(
                 &mut minor,
@@ -757,6 +777,8 @@ impl GssEncStream {
             value: std::ptr::null_mut(),
         };
 
+        // SAFETY: `input` borrows `wrapped` for the duration of the call and
+        // `output` is released through `take_gss_buffer`.
         let major = unsafe {
             gss_unwrap(
                 &mut minor,
@@ -983,6 +1005,8 @@ impl Drop for GssEncStream {
     fn drop(&mut self) {
         if !self.context.is_null() {
             let mut minor: OmUint32 = 0;
+            // SAFETY: `self.context` is owned by this stream and nulled after
+            // GSSAPI releases it.
             let _ = unsafe {
                 gss_delete_sec_context(
                     &mut minor,
@@ -994,6 +1018,8 @@ impl Drop for GssEncStream {
         }
         if !self._target_name.is_null() {
             let mut minor: OmUint32 = 0;
+            // SAFETY: `_target_name` is owned by this stream after handshake
+            // ownership transfer and is released exactly once.
             let _ = unsafe { gss_release_name(&mut minor, &mut self._target_name) };
             self._target_name = std::ptr::null_mut();
         }
@@ -1036,6 +1062,7 @@ impl Drop for GssHandshakeGuard {
     fn drop(&mut self) {
         let mut minor: OmUint32 = 0;
         if !self.context.is_null() {
+            // SAFETY: The guard owns this context unless `into_stream` nulled it.
             let _ = unsafe {
                 gss_delete_sec_context(
                     &mut minor,
@@ -1045,6 +1072,7 @@ impl Drop for GssHandshakeGuard {
             };
         }
         if !self.target_name.is_null() {
+            // SAFETY: The guard owns this target name unless `into_stream` nulled it.
             let _ = unsafe { gss_release_name(&mut minor, &mut self.target_name) };
         }
     }
@@ -1058,6 +1086,8 @@ fn import_gss_target_name(host: &str) -> Result<GssHandshakeGuard, String> {
         length: target_str.len(),
         value: target_str.as_ptr() as *mut c_void,
     };
+    // SAFETY: `name_buf` points to `target_str` bytes alive for the call and
+    // `target_name` is an out-parameter owned by the returned guard.
     let major = unsafe {
         gss_import_name(
             &mut minor,
@@ -1122,6 +1152,8 @@ pub(crate) async fn gssenc_handshake(
             };
 
             let mut ret_flags: OmUint32 = 0;
+            // SAFETY: Input/output token buffers live for the call; the output
+            // buffer is copied and released through `take_gss_buffer`.
             let major = unsafe {
                 gss_init_sec_context(
                     &mut minor,

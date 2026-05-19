@@ -514,8 +514,8 @@ pub(crate) fn apply_url_query_params(
                 let provider = crate::driver::gss::linux_krb5_token_provider(
                     crate::driver::gss::LinuxKrb5ProviderConfig {
                         host: host.to_string(),
-                        service: gss_service.clone(),
-                        target_name: gss_target.clone(),
+                        service: gss_service,
+                        target_name: gss_target,
                     },
                 )
                 .map_err(PgError::Auth)?;
