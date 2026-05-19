@@ -20,9 +20,9 @@ pub(super) fn apply_gss_provider(
         {
             let mut config = config;
             let gss_config = LinuxKrb5ProviderConfig {
-                service: gss_service.clone(),
+                service: gss_service,
                 host: host.to_string(),
-                target_name: gss_target.clone(),
+                target_name: gss_target,
             };
             let report = linux_krb5_preflight(&gss_config).map_err(GatewayError::Config)?;
             for warning in &report.warnings {

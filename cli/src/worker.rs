@@ -428,11 +428,9 @@ pub async fn run_worker(poll_interval_ms: u64, batch_size: u32) -> Result<()> {
         }
 
         let elapsed = start_time.elapsed().as_secs();
-        let rate = if elapsed > 0 {
-            total_processed / elapsed
-        } else {
-            total_processed
-        };
+        let rate = total_processed
+            .checked_div(elapsed)
+            .unwrap_or(total_processed);
         println!(
             "{} Processed {} total ({}/sec)",
             "✓".green(),
