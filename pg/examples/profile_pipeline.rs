@@ -67,10 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 | qail_pg::protocol::BackendMessage::NoData => {
                     queries_completed += 1;
                 }
-                qail_pg::protocol::BackendMessage::ReadyForQuery(_) => {
-                    if queries_completed == QUERIES_PER_BATCH {
-                        break;
-                    }
+                qail_pg::protocol::BackendMessage::ReadyForQuery(_)
+                    if queries_completed == QUERIES_PER_BATCH =>
+                {
+                    break;
                 }
                 qail_pg::protocol::BackendMessage::ErrorResponse(e) => {
                     return Err(format!("Error: {}", e.message).into());
