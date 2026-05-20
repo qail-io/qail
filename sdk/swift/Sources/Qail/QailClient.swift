@@ -141,17 +141,18 @@ public final class QailClient: Sendable {
     // MARK: - Raw QAIL text protocol
 
     /// Execute raw Qail DSL text.
-    ///
-    /// ```swift
-    /// let res = try await qail.query("get users fields id, name limit 10")
-    /// ```
     public func query<T: Decodable>(_ dsl: String) async throws -> QueryResponse<T> {
         try await request(method: "POST", path: "/qail", body: dsl.data(using: .utf8), contentType: "text/plain")
     }
 
+    /// Execute raw Qail DSL via fast protocol (array-of-arrays).
+    public func queryFast(_ dsl: String) async throws -> FastQueryResponse {
+        try await request(method: "POST", path: "/qail/fast", body: dsl.data(using: .utf8), contentType: "text/plain")
+    }
+
     /// Execute a batch of Qail DSL queries.
-    public func batch<T: Decodable>(_ queries: [String]) async throws -> [BatchResult<T>] {
-        let body = try JSONSerialization.data(withJSONObject: queries)
+    public func batch<T: Decodable>(_ queries: [String]) async throws -> BatchResponse<T> {
+        let body = try JSONSerialization.data(withJSONObject: ["queries": queries])
         return try await request(method: "POST", path: "/qail/batch", body: body)
     }
 
@@ -173,11 +174,16 @@ public final class QailClient: Sendable {
     }
 
     /// Generate TypeScript interfaces from the gateway schema.
-    ///
-    /// Returns a string containing valid TypeScript interface declarations
-    /// that can be written to a `.d.ts` file for type-safe queries.
     public func generateTypes() async throws -> String {
         try await requestText(method: "GET", path: "/api/_schema/typescript")
+    }
+
+    // MARK: - Transactions
+
+    /// Start a new transaction session.
+    public func beginTxn() async throws -> QailTxnSession {
+        let res: TxnBeginResponse = try await request(method: "POST", path: "/txn/begin")
+        return QailTxnSession(client: self, txnId: res.txnId)
     }
 
     // MARK: - Realtime (WebSocket)
@@ -396,5 +402,88 @@ public final class QailClient: Sendable {
     private func resolveWebSocketToken() async throws -> String? {
         guard let tokenSource else { return nil }
         return try await tokenSource.resolve()
+    }
+}
+
+/// Handle for an active transaction session.
+public final class QailTxnSession: Sendable {
+    public let txnId: String
+    private let client: QailClient
+
+    init(client: QailClient, txnId: String) {
+        self.client = client
+        self.txnId = txnId
+    }
+
+    /// Execute a query within this transaction.
+    public func query<T: Decodable>(_ dsl: String) async throws -> QueryResponse<T> {
+        try await client.request(
+            method: "POST",
+            path: "/txn/query",
+            body: dsl.data(using: .utf8),
+            contentType: "text/plain"
+        ) { request in
+            request.setValue(txnId, forHTTPHeaderField: "X-Transaction-Id")
+        }
+    }
+
+    /// Commit the transaction.
+    public func commit() async throws -> TxnEndResponse {
+        try await client.request(method: "POST", path: "/txn/commit") { request in
+            request.setValue(txnId, forHTTPHeaderField: "X-Transaction-Id")
+        }
+    }
+
+    /// Rollback the transaction.
+    public func rollback() async throws -> TxnEndResponse {
+        try await client.request(method: "POST", path: "/txn/rollback") { request in
+            request.setValue(txnId, forHTTPHeaderField: "X-Transaction-Id")
+        }
+    }
+
+    /// Create or release a savepoint within this transaction.
+    public func savepoint(action: String, name: String) async throws -> SavepointResponse {
+        let body = try JSONEncoder().encode(SavepointRequest(action: action, name: name))
+        return try await client.request(method: "POST", path: "/txn/savepoint", body: body) { request in
+            request.setValue(txnId, forHTTPHeaderField: "X-Transaction-Id")
+        }
+    }
+}
+
+extension QailClient {
+    /// Internal helper for transaction requests with header modification.
+    internal func request<T: Decodable>(
+        method: String,
+        path: String,
+        body: Data? = nil,
+        contentType: String = "application/json",
+        configure: (inout URLRequest) -> Void
+    ) async throws -> T {
+        guard let url = URL(string: "\(baseUrl)\(path)") else {
+            throw QailError(code: "INVALID_URL", message: "Bad URL", details: nil, requestId: nil, hint: nil, table: nil, column: nil)
+        }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = method
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        for (key, value) in defaultHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        if let tokenSource {
+            let token = try await tokenSource.resolve()
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        if method != "GET", let body {
+            request.httpBody = body
+        }
+        configure(&request)
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw QailError(code: "NETWORK_ERROR", message: "Invalid response", details: nil, requestId: nil, hint: nil, table: nil, column: nil)
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw QailError.from(data: data, status: httpResponse.statusCode)
+        }
+        return try decoder.decode(T.self, from: data)
     }
 }

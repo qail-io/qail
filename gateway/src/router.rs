@@ -113,6 +113,10 @@ pub fn create_router(
             axum::http::header::HeaderName::from_static("permissions-policy"),
             HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
         ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static("default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data:; connect-src 'self';"),
+        ))
         // ── Stable API Version Header (Phase 4) ─────────────────────
         .layer(SetResponseHeaderLayer::if_not_present(
             axum::http::header::HeaderName::from_static("x-api-version"),

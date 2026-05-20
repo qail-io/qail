@@ -119,10 +119,17 @@ class QailClient(@PublishedApi internal val config: QailConfig) {
             contentType(ContentType.Text.Plain)
         }
 
+    /** Execute raw Qail DSL via fast protocol (array-of-arrays). */
+    suspend fun queryFast(dsl: String): FastQueryResponse =
+        request(HttpMethod.Post, "/qail/fast") {
+            setBody(dsl)
+            contentType(ContentType.Text.Plain)
+        }
+
     /** Execute a batch of Qail DSL queries. */
-    suspend inline fun <reified T> batch(queries: List<String>): List<BatchResult<T>> =
+    suspend inline fun <reified T> batch(queries: List<String>): BatchResponse<T> =
         request(HttpMethod.Post, "/qail/batch") {
-            setBody(queries)
+            setBody(mapOf("queries" to queries))
             contentType(ContentType.Application.Json)
         }
 
@@ -137,12 +144,16 @@ class QailClient(@PublishedApi internal val config: QailConfig) {
     /** Get schema introspection. */
     suspend fun schema(): JsonObject = request(HttpMethod.Get, "/api/_schema")
 
-    /**
-     * Generate TypeScript interfaces from the gateway schema.
-     *
-     * Returns a string containing valid TypeScript interface declarations.
-     */
+    /** Generate TypeScript interfaces from the gateway schema. */
     suspend fun generateTypes(): String = requestText(HttpMethod.Get, "/api/_schema/typescript")
+
+    // ── Transactions ────────────────────────────────────────────────
+
+    /** Start a new transaction session. */
+    suspend fun beginTxn(): QailTxnSession {
+        val res: TxnBeginResponse = request(HttpMethod.Post, "/txn/begin")
+        return QailTxnSession(this, res.txnId)
+    }
 
     // ── Realtime (WebSocket) ────────────────────────────────────────
 
@@ -177,7 +188,11 @@ class QailClient(@PublishedApi internal val config: QailConfig) {
                     }
                 }) {
                     // Send listen command
-                    send(Frame.Text("""{ "action": "listen", "channel": "$channel"}"""))
+                    val cmd = kotlinx.serialization.json.buildJsonObject {
+                        put("action", kotlinx.serialization.json.JsonPrimitive("listen"))
+                        put("channel", kotlinx.serialization.json.JsonPrimitive(channel))
+                    }
+                    send(Frame.Text(json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), cmd)))
 
                     for (frame in incoming) {
                         if (!sub.active) break
@@ -282,4 +297,38 @@ class QailClient(@PublishedApi internal val config: QailConfig) {
 
     private fun encodeQueryComponent(value: String): String =
         URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20")
+}
+
+/**
+ * Handle for an active transaction session.
+ */
+class QailTxnSession(@PublishedApi internal val client: QailClient, val txnId: String) {
+
+    /** Execute a query within this transaction. */
+    suspend inline fun <reified T> query(dsl: String): QueryResponse<T> =
+        client.request(HttpMethod.Post, "/txn/query") {
+            header("X-Transaction-Id", txnId)
+            setBody(dsl)
+            contentType(ContentType.Text.Plain)
+        }
+
+    /** Commit the transaction. */
+    suspend fun commit(): TxnEndResponse =
+        client.request(HttpMethod.Post, "/txn/commit") {
+            header("X-Transaction-Id", txnId)
+        }
+
+    /** Rollback the transaction. */
+    suspend fun rollback(): TxnEndResponse =
+        client.request(HttpMethod.Post, "/txn/rollback") {
+            header("X-Transaction-Id", txnId)
+        }
+
+    /** Create or release a savepoint within this transaction. */
+    suspend fun savepoint(action: String, name: String): SavepointResponse =
+        client.request(HttpMethod.Post, "/txn/savepoint") {
+            header("X-Transaction-Id", txnId)
+            setBody(SavepointRequest(action = action, name = name))
+            contentType(ContentType.Application.Json)
+        }
 }

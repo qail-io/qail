@@ -228,9 +228,14 @@ impl QueryTimer {
         }
     }
 
+    /// Get the current elapsed time in milliseconds without finishing the timer.
+    pub fn elapsed_ms(&self) -> f64 {
+        self.start.elapsed().as_secs_f64() * 1000.0
+    }
+
     /// Stop the timer and record the query duration metric.
     pub fn finish(self, success: bool) {
-        let duration_ms = self.start.elapsed().as_secs_f64() * 1000.0;
+        let duration_ms = self.elapsed_ms();
         record_query(&self.table, &self.action, duration_ms, success);
     }
 }

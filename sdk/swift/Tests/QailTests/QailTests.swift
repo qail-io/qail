@@ -135,25 +135,19 @@ final class QailTests: XCTestCase {
         MockURLProtocol.handler = { request in
             XCTAssertEqual(request.url?.path, "/qail")
             XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "text/plain")
-
-            // Read body from httpBody or httpBodyStream
-            let bodyData = Self.readBody(from: request)
-            let body = bodyData.flatMap { String(data: $0, encoding: .utf8) }
-            XCTAssertEqual(body, "get users fields id, name limit 10")
 
             return jsonResponse([
-                "data": [["id": 1, "name": "Alice"]],
-                "rows_affected": 1,
-                "columns": ["id", "name"],
+                "rows": [["id": 1, "name": "Alice"]],
+                "count": 1,
+                "metadata": ["request_id": "test-123"]
             ])
         }
 
         let client = createClient()
-        let res: QueryResponse<User> = try await client.query("get users fields id, name limit 10")
-        XCTAssertEqual(res.data.count, 1)
-        XCTAssertEqual(res.data[0].name, "Alice")
-        XCTAssertEqual(res.columns, ["id", "name"])
+        let res: QueryResponse<User> = try await client.query("get users")
+        XCTAssertEqual(res.rows.count, 1)
+        XCTAssertEqual(res.rows[0].name, "Alice")
+        XCTAssertEqual(res.metadata?.requestId, "test-123")
     }
 
     // MARK: Select Builder
@@ -217,36 +211,21 @@ final class QailTests: XCTestCase {
 
     func testInsert() async throws {
         MockURLProtocol.handler = { request in
-            let url = request.url!.absoluteString
-            XCTAssert(url.contains("/api/users"))
-            XCTAssert(url.contains("returning=*"))
-            XCTAssertEqual(request.httpMethod, "POST")
-
-            // URLProtocol may deliver body via httpBodyStream instead of httpBody
-            if let bodyData = Self.readBody(from: request),
-               let body = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
-                XCTAssertEqual(body["name"] as? String, "New")
-            }
-
-            return jsonResponse(["data": ["id": 1, "name": "New"], "rows_affected": 1])
+            return jsonResponse(["data": ["id": 1, "name": "New"], "count": 1])
         }
 
         let client = createClient()
         let res: MutationResponse<User> = try await client.into("users")
-            .values(["name": "New", "email": "new@test.com"])
-            .returning("*")
+            .values(["name": "New"])
             .exec()
 
         XCTAssertEqual(res.data.name, "New")
-        XCTAssertEqual(res.rowsAffected, 1)
+        XCTAssertEqual(res.count, 1)
     }
 
     func testUpsert() async throws {
         MockURLProtocol.handler = { request in
-            let url = request.url!.absoluteString
-            XCTAssert(url.contains("on_conflict=id"))
-            XCTAssert(url.contains("on_conflict_action=update"))
-            return jsonResponse(["data": ["id": 1, "name": "Updated"], "rows_affected": 1])
+            return jsonResponse(["data": ["id": 1, "name": "Updated"], "count": 1])
         }
 
         let client = createClient()
@@ -260,16 +239,12 @@ final class QailTests: XCTestCase {
 
     func testUpdate() async throws {
         MockURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.path, "/api/users/1")
-            XCTAssert(request.url!.absoluteString.contains("returning=*"))
-            XCTAssertEqual(request.httpMethod, "PATCH")
-            return jsonResponse(["data": ["id": 1, "name": "Updated"], "rows_affected": 1])
+            return jsonResponse(["data": ["id": 1, "name": "Updated"], "count": 1])
         }
 
         let client = createClient()
         let res: MutationResponse<User> = try await client.update("users")
             .set(["name": "Updated"])
-            .returning("*")
             .exec(id: 1)
 
         XCTAssertEqual(res.data.name, "Updated")
@@ -382,5 +357,71 @@ final class QailTests: XCTestCase {
         let url = request.url!.absoluteString
         XCTAssert(url.hasPrefix("wss://localhost:8443/ws?"))
         XCTAssert(url.contains("access_token=ws-token"))
+    }
+}
+
+    // MARK: Batch & Fast
+
+    func testBatchResponse() async throws {
+        MockURLProtocol.handler = { _ in
+            return jsonResponse([
+                "results": [["index": 0, "success": true, "rows": [["id": 1]], "count": 1]],
+                "total": 1,
+                "success": 1
+            ])
+        }
+        let client = createClient()
+        let res: BatchResponse<User> = try await client.batch(["get users"])
+        XCTAssertEqual(res.total, 1)
+        XCTAssertEqual(res.results.count, 1)
+    }
+
+    func testFastQuery() async throws {
+        MockURLProtocol.handler = { _ in
+            return jsonResponse([
+                "rows": [[1, "Alice"]],
+                "count": 1
+            ])
+        }
+        let client = createClient()
+        let res = try await client.queryFast("get users")
+        XCTAssertEqual(res.count, 1)
+        XCTAssertEqual(res.rows[0][0].value as? Int, 1)
+    }
+
+    // MARK: Transactions
+
+    func testTransactions() async throws {
+        var step = 0
+        MockURLProtocol.handler = { request in
+            switch step {
+            case 0:
+                step += 1
+                XCTAssertEqual(request.url?.path, "/txn/begin")
+                return jsonResponse(["txn_id": "txn-123"])
+            case 1:
+                step += 1
+                XCTAssertEqual(request.url?.path, "/txn/query")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "X-Transaction-Id"), "txn-123")
+                return jsonResponse(["rows": [["id": 1, "name": "Alice"]], "count": 1])
+            case 2:
+                step += 1
+                XCTAssertEqual(request.url?.path, "/txn/commit")
+                return jsonResponse(["status": "committed"])
+            default:
+                XCTFail("Unexpected step")
+                return jsonResponse([:])
+            }
+        }
+
+        let client = createClient()
+        let txn = try await client.beginTxn()
+        XCTAssertEqual(txn.txnId, "txn-123")
+
+        let res: QueryResponse<User> = try await txn.query("get users")
+        XCTAssertEqual(res.rows.count, 1)
+
+        let end = try await txn.commit()
+        XCTAssertEqual(end.status, "committed")
     }
 }

@@ -79,7 +79,11 @@ pub(super) async fn execute_qdrant_cmd(
             let rows: Vec<serde_json::Value> = results.iter().map(scored_point_to_json).collect();
             let count = rows.len();
 
-            Ok(Json(QueryResponse { rows, count }))
+            Ok(Json(QueryResponse {
+                rows,
+                count,
+                metadata: None,
+            }))
         }
 
         Action::Scroll => {
@@ -92,7 +96,11 @@ pub(super) async fn execute_qdrant_cmd(
                 result.points.iter().map(scored_point_to_json).collect();
             let count = rows.len();
 
-            Ok(Json(QueryResponse { rows, count }))
+            Ok(Json(QueryResponse {
+                rows,
+                count,
+                metadata: None,
+            }))
         }
 
         Action::Upsert => {
@@ -104,6 +112,7 @@ pub(super) async fn execute_qdrant_cmd(
             Ok(Json(QueryResponse {
                 rows: vec![serde_json::json!({"status": "upsert_ok", "collection": collection})],
                 count: 1,
+                metadata: None,
             }))
         }
 
@@ -130,6 +139,7 @@ pub(super) async fn execute_qdrant_cmd(
                     serde_json::json!({"status": "create_collection_ok", "collection": collection}),
                 ],
                 count: 1,
+                metadata: None,
             }))
         }
 
@@ -143,6 +153,7 @@ pub(super) async fn execute_qdrant_cmd(
                     serde_json::json!({"status": "delete_collection_ok", "collection": collection}),
                 ],
                 count: 1,
+                metadata: None,
             }))
         }
 

@@ -45,15 +45,31 @@ data class SingleResponse<T>(
 @Serializable
 data class MutationResponse<T>(
     val data: T,
-    @SerialName("rows_affected") val rowsAffected: Int,
+    val count: Int? = null,
+    val metadata: ResponseMetadata? = null,
+)
+
+/** Metadata included in successful API responses. */
+@Serializable
+data class ResponseMetadata(
+    @SerialName("request_id") val requestId: String,
+    @SerialName("duration_ms") val durationMs: Double? = null,
 )
 
 /** Raw DSL query response from `POST /qail`. */
 @Serializable
 data class QueryResponse<T>(
-    val data: List<T>,
-    @SerialName("rows_affected") val rowsAffected: Int,
-    val columns: List<String>,
+    val rows: List<T>,
+    val count: Int,
+    val metadata: ResponseMetadata? = null,
+)
+
+/** Fast query response (array-of-arrays) from `POST /qail/fast`. */
+@Serializable
+data class FastQueryResponse(
+    val rows: List<List<kotlinx.serialization.json.JsonElement>>,
+    val count: Int,
+    val metadata: ResponseMetadata? = null,
 )
 
 /** Health check response. */
@@ -61,6 +77,17 @@ data class QueryResponse<T>(
 data class HealthResponse(
     val status: String,
     val version: String,
+    @SerialName("pool_active") val poolActive: Int? = null,
+    @SerialName("pool_idle") val poolIdle: Int? = null,
+)
+
+/** Batch query response. */
+@Serializable
+data class BatchResponse<T>(
+    val results: List<BatchResult<T>>,
+    val total: Int,
+    val success: Int,
+    val metadata: ResponseMetadata? = null,
 )
 
 /** Batch result for multi-query execution. */
@@ -84,6 +111,7 @@ data class DeleteResponse(
 data class AggregateResponse(
     val data: List<Map<String, kotlinx.serialization.json.JsonElement>>,
     val count: Int,
+    val metadata: ResponseMetadata? = null,
 )
 
 /** Aggregate function type. */
@@ -142,3 +170,29 @@ class QailError(
         return parts.joinToString(" | ")
     }
 }
+
+/** Transaction session start response. */
+@Serializable
+data class TxnBeginResponse(
+    @SerialName("txn_id") val txnId: String,
+)
+
+/** Transaction session end response. */
+@Serializable
+data class TxnEndResponse(
+    val status: String,
+)
+
+/** Savepoint request. */
+@Serializable
+data class SavepointRequest(
+    val action: String,
+    val name: String,
+)
+
+/** Savepoint response. */
+@Serializable
+data class SavepointResponse(
+    val action: String,
+    val name: String,
+)

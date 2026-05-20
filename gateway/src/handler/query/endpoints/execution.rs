@@ -6,6 +6,7 @@ pub(super) async fn execute_qail_cmd_fast(
     state: &Arc<GatewayState>,
     auth: &crate::auth::AuthContext,
     cmd: &qail_core::ast::Qail,
+    extensions: &axum::http::Extensions,
 ) -> Result<Json<FastQueryResponse>, ApiError> {
     use qail_core::ast::Action;
     let mut cmd = cmd.clone();
@@ -40,6 +41,7 @@ pub(super) async fn execute_qail_cmd_fast(
         .fetch_all_fast(&cmd)
         .await
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
+    let duration_ms = timer.elapsed_ms();
     timer.finish(rows.is_ok());
     conn.release().await;
     let rows = rows?;
@@ -47,9 +49,18 @@ pub(super) async fn execute_qail_cmd_fast(
     let json_rows: Vec<Vec<serde_json::Value>> = rows.iter().map(row_to_array).collect();
 
     let count = json_rows.len();
+    let request_id = match extensions.get::<crate::middleware::RequestId>() {
+        Some(id) => id.0.clone(),
+        None => String::new(),
+    };
+
     Ok(Json(FastQueryResponse {
         rows: json_rows,
         count,
+        metadata: Some(crate::handler::ResponseMetadata {
+            request_id,
+            duration_ms: Some(duration_ms),
+        }),
     }))
 }
 
@@ -63,6 +74,7 @@ pub(super) async fn execute_qail_cmd(
     state: &Arc<GatewayState>,
     auth: &crate::auth::AuthContext,
     cmd: &qail_core::ast::Qail,
+    extensions: &axum::http::Extensions,
 ) -> Result<Json<QueryResponse>, ApiError> {
     use qail_core::ast::Action;
     let mut cmd = cmd.clone();
@@ -103,12 +115,23 @@ pub(super) async fn execute_qail_cmd(
     let table = &cmd.table;
     let is_read_query = matches!(cmd.action, Action::Get);
 
-    let tenant = auth.tenant_id.as_deref().unwrap_or("_anon");
+    let tenant = match auth.tenant_id.as_deref() {
+        Some(t) => t,
+        None => "_anon",
+    };
     let cache_key = format!("{}:{}:{}", tenant, auth.user_id, exact_cache_key(&cmd));
 
     if is_read_query && let Some(cached) = state.cache.get(&cache_key) {
         tracing::debug!("Cache HIT for table '{}'", table);
-        if let Ok(response) = serde_json::from_str::<QueryResponse>(&cached) {
+        if let Ok(mut response) = serde_json::from_str::<QueryResponse>(&cached) {
+            let request_id = match extensions.get::<crate::middleware::RequestId>() {
+                Some(id) => id.0.clone(),
+                None => String::new(),
+            };
+            response.metadata = Some(crate::handler::ResponseMetadata {
+                request_id,
+                duration_ms: None, // Cached
+            });
             return Ok(Json(response));
         }
     }
@@ -128,6 +151,7 @@ pub(super) async fn execute_qail_cmd(
         .fetch_all_with_rls(&cmd, &rls_sql)
         .await
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
+    let duration_ms = timer.elapsed_ms();
     timer.finish(rows.is_ok());
     conn.release().await;
 
@@ -152,10 +176,18 @@ pub(super) async fn execute_qail_cmd(
     };
 
     let count = json_rows.len();
+    let request_id = match extensions.get::<crate::middleware::RequestId>() {
+        Some(id) => id.0.clone(),
+        None => String::new(),
+    };
 
     let response = QueryResponse {
         rows: json_rows,
         count,
+        metadata: Some(crate::handler::ResponseMetadata {
+            request_id,
+            duration_ms: Some(duration_ms),
+        }),
     };
 
     if is_read_query {

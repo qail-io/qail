@@ -3,6 +3,7 @@ use super::*;
 /// Execute a batch of Qail queries (POST /qail/batch).
 pub async fn execute_batch(
     State(state): State<Arc<GatewayState>>,
+    extensions: axum::http::Extensions,
     headers: HeaderMap,
     Json(request): Json<BatchRequest>,
 ) -> Result<Json<BatchResponse>, ApiError> {
@@ -258,10 +259,18 @@ pub async fn execute_batch(
     }
 
     let total = results.len();
+    let request_id = match extensions.get::<crate::middleware::RequestId>() {
+        Some(id) => id.0.clone(),
+        None => String::new(),
+    };
 
     Ok(Json(BatchResponse {
         results,
         total,
         success: success_count,
+        metadata: Some(crate::handler::ResponseMetadata {
+            request_id,
+            duration_ms: None, // Complex to calculate per-batch accurately here
+        }),
     }))
 }

@@ -37,57 +37,58 @@ public struct SingleResponse<T: Decodable>: Decodable, @unchecked Sendable {
     public let data: T
 }
 
+/// Metadata included in successful API responses.
+public struct ResponseMetadata: Decodable, Sendable {
+    public let requestId: String
+    public let durationMs: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case durationMs = "duration_ms"
+    }
+}
+
 /// Mutation response from POST/PATCH operations.
 public struct MutationResponse<T: Decodable>: Decodable, @unchecked Sendable {
     public let data: T
-    public let rowsAffected: Int
-
-    enum CodingKeys: String, CodingKey {
-        case data
-        case rowsAffected
-        case rowsUnderscored = "rows_affected"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        data = try container.decode(T.self, forKey: .data)
-        if let value = try container.decodeIfPresent(Int.self, forKey: .rowsAffected) {
-            rowsAffected = value
-        } else {
-            rowsAffected = try container.decode(Int.self, forKey: .rowsUnderscored)
-        }
-    }
+    public let count: Int?
+    public let metadata: ResponseMetadata?
 }
 
 /// Raw DSL query response from `POST /qail`.
 public struct QueryResponse<T: Decodable>: Decodable, @unchecked Sendable {
-    public let data: [T]
-    public let rowsAffected: Int
-    public let columns: [String]
+    public let rows: [T]
+    public let count: Int
+    public let metadata: ResponseMetadata?
+}
 
-    enum CodingKeys: String, CodingKey {
-        case data
-        case rowsAffected
-        case rowsUnderscored = "rows_affected"
-        case columns
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        data = try container.decode([T].self, forKey: .data)
-        columns = try container.decode([String].self, forKey: .columns)
-        if let value = try container.decodeIfPresent(Int.self, forKey: .rowsAffected) {
-            rowsAffected = value
-        } else {
-            rowsAffected = try container.decode(Int.self, forKey: .rowsUnderscored)
-        }
-    }
+/// Fast query response (array-of-arrays) from `POST /qail/fast`.
+public struct FastQueryResponse: Decodable, @unchecked Sendable {
+    public let rows: [[AnyCodable]]
+    public let count: Int
+    public let metadata: ResponseMetadata?
 }
 
 /// Health check response.
 public struct HealthResponse: Decodable, Sendable {
     public let status: String
     public let version: String
+    public let poolActive: Int?
+    public let poolIdle: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case status, version
+        case poolActive = "pool_active"
+        case poolIdle = "pool_idle"
+    }
+}
+
+/// Batch query response.
+public struct BatchResponse<T: Decodable>: Decodable, @unchecked Sendable {
+    public let results: [BatchResult<T>]
+    public let total: Int
+    public let success: Int
+    public let metadata: ResponseMetadata?
 }
 
 /// Batch result for multi-query execution.
@@ -108,6 +109,7 @@ public struct DeleteResponse: Decodable, Sendable {
 public struct AggregateResponse: Decodable, Sendable {
     public let data: [[String: AnyCodable]]
     public let count: Int
+    public let metadata: ResponseMetadata?
 }
 
 /// Type-erased Codable wrapper for aggregate values.
@@ -192,8 +194,11 @@ public final class WebSocketSubscription: QailSubscription, @unchecked Sendable 
     }
 
     private func send(action: String, on task: URLSessionWebSocketTask) {
-        let msg = #"{"action":"\#(action)","channel":"\#(channel)"}"#
-        task.send(.string(msg)) { _ in }
+        let msgObj = ["action": action, "channel": channel]
+        if let data = try? JSONSerialization.data(withJSONObject: msgObj),
+           let msg = String(data: data, encoding: .utf8) {
+            task.send(.string(msg)) { _ in }
+        }
     }
 
     private func shouldContinue(with task: URLSessionWebSocketTask) -> Bool {
@@ -289,4 +294,32 @@ extension QailError {
         err.status = status
         return err
     }
+}
+
+// MARK: - Transactions
+
+/// Transaction session start response.
+public struct TxnBeginResponse: Decodable, Sendable {
+    public let txnId: String
+
+    enum CodingKeys: String, CodingKey {
+        case txnId = "txn_id"
+    }
+}
+
+/// Transaction session end response.
+public struct TxnEndResponse: Decodable, Sendable {
+    public let status: String
+}
+
+/// Savepoint request.
+public struct SavepointRequest: Encodable, Sendable {
+    public let action: String
+    public let name: String
+}
+
+/// Savepoint response.
+public struct SavepointResponse: Decodable, Sendable {
+    public let action: String
+    public let name: String
 }

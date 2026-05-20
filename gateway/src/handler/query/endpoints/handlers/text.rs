@@ -3,6 +3,7 @@ use super::*;
 
 pub async fn execute_query(
     State(state): State<Arc<GatewayState>>,
+    extensions: axum::http::Extensions,
     headers: HeaderMap,
     body: String,
 ) -> Result<Json<QueryResponse>, ApiError> {
@@ -38,8 +39,7 @@ pub async fn execute_query(
     }
 
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
-
-    execute_qail_cmd(&state, &auth, &cmd).await
+    execute_qail_cmd(&state, &auth, &cmd, &extensions).await
 }
 
 /// Execute a streaming export query (POST /qail/export).

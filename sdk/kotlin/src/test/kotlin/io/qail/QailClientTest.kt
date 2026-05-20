@@ -99,12 +99,12 @@ class QailClientTest {
         val qail = mockClient { request ->
             assertEquals("/qail", request.url.encodedPath)
             assertEquals(HttpMethod.Post, request.method)
-            jsonResponse("""{ "data":[{"id":1,"name":"Alice"}],"rows_affected":1,"columns":["id","name"]}""")
+            jsonResponse("""{ "rows":[{"id":1,"name":"Alice"}],"count":1,"metadata":{"request_id":"test-123"}}""")
         }
         val res = qail.query<User>("get users fields id, name limit 10")
-        assertEquals(1, res.data.size)
-        assertEquals("Alice", res.data[0].name)
-        assertEquals(listOf("id", "name"), res.columns)
+        assertEquals(1, res.rows.size)
+        assertEquals("Alice", res.rows[0].name)
+        assertEquals("test-123", res.metadata?.requestId)
     }
 
     // MARK: Select Builder
@@ -178,14 +178,14 @@ class QailClientTest {
             assertTrue(url.contains("/api/users"))
             assertEquals("*", request.url.parameters["returning"])
             assertEquals(HttpMethod.Post, request.method)
-            jsonResponse("""{"data":{"id":1,"name":"New"},"rows_affected":1}""")
+            jsonResponse("""{"data":{"id":1,"name":"New"},"count":1}""")
         }
         val res = qail.into<User>("users")
             .values(mapOf("name" to "New", "email" to "new@test.com"))
             .returning("*")
             .exec<User>()
         assertEquals("New", res.data.name)
-        assertEquals(1, res.rowsAffected)
+        assertEquals(1, res.count)
     }
 
     @Test
@@ -194,7 +194,7 @@ class QailClientTest {
             val url = request.url.toString()
             assertTrue(url.contains("on_conflict=id"))
             assertTrue(url.contains("on_conflict_action=update"))
-            jsonResponse("""{"data":{"id":1,"name":"Updated"},"rows_affected":1}""")
+            jsonResponse("""{"data":{"id":1,"name":"Updated"},"count":1}""")
         }
         qail.into<User>("users")
             .values(mapOf("name" to "Updated"))
@@ -210,7 +210,7 @@ class QailClientTest {
             assertEquals("/api/users/1", request.url.encodedPath)
             assertEquals("*", request.url.parameters["returning"])
             assertEquals(HttpMethod.Patch, request.method)
-            jsonResponse("""{"data":{"id":1,"name":"Updated"},"rows_affected":1}""")
+            jsonResponse("""{"data":{"id":1,"name":"Updated"},"count":1}""")
         }
         val res = qail.update<User>("users")
             .set(mapOf("name" to "Updated"))
@@ -296,5 +296,74 @@ class QailClientTest {
 
         val url = qail.buildWebSocketUrl("ws-token")
         assertEquals("ws://localhost:8080/ws", url)
+    }
+
+
+    // MARK: Batch & Fast
+
+    @Test
+    fun testBatchResponse() = runTest {
+        val qail = mockClient { _ ->
+            jsonResponse("""{
+                "results": [{"index":0,"success":true,"rows":[{"id":1}],"count":1}],
+                "total": 1,
+                "success": 1,
+                "metadata": {"request_id": "batch-1"}
+            }""")
+        }
+        val res = qail.batch<User>(listOf("get users"))
+        assertEquals(1, res.total)
+        assertEquals(1, res.results.size)
+        assertEquals("batch-1", res.metadata?.requestId)
+    }
+
+    @Test
+    fun testFastQuery() = runTest {
+        val qail = mockClient { _ ->
+            jsonResponse("""{
+                "rows": [[1, "Alice"]],
+                "count": 1,
+                "metadata": {"request_id": "fast-1"}
+            }""")
+        }
+        val res = qail.queryFast("get users")
+        assertEquals(1, res.rows.size)
+        assertEquals(1, res.rows[0][0].toString().toInt())
+        assertEquals("fast-1", res.metadata?.requestId)
+    }
+
+    // MARK: Transactions
+
+    @Test
+    fun testTransactions() = runTest {
+        var step = 0
+        val qail = mockClient { request ->
+            when (step++) {
+                0 -> {
+                    assertEquals("/txn/begin", request.url.encodedPath)
+                    jsonResponse("""{"txn_id":"txn-123"}""")
+                }
+                1 -> {
+                    assertEquals("/txn/query", request.url.encodedPath)
+                    assertEquals("txn-123", request.headers["X-Transaction-Id"])
+                    jsonResponse("""{"rows":[{"id":1,"name":"Alice"}],"count":1}""")
+                }
+                2 -> {
+                    assertEquals("/txn/commit", request.url.encodedPath)
+                    assertEquals("txn-123", request.headers["X-Transaction-Id"])
+                    jsonResponse("""{"status":"committed"}""")
+                }
+                else -> fail("Unexpected step")
+            }
+        }
+
+        val txn = qail.beginTxn()
+        assertEquals("txn-123", txn.txnId)
+
+        val res = txn.query<User>("get users")
+        assertEquals(1, res.rows.size)
+
+        val end = txn.commit()
+        assertEquals("committed", end.status)
     }
 }

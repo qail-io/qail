@@ -59,6 +59,19 @@ pub struct QueryResponse {
     pub rows: Vec<serde_json::Value>,
     /// Number of rows returned.
     pub count: usize,
+    /// Response metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ResponseMetadata>,
+}
+
+/// Metadata included in successful API responses.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResponseMetadata {
+    /// Request ID for tracing.
+    pub request_id: String,
+    /// Execution time in milliseconds (server-side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
 }
 
 /// Fast query response (array-of-arrays, no column names)
@@ -69,6 +82,9 @@ pub struct FastQueryResponse {
     pub rows: Vec<Vec<serde_json::Value>>,
     /// Number of rows returned.
     pub count: usize,
+    /// Response metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ResponseMetadata>,
 }
 
 /// Batch query request
@@ -95,6 +111,9 @@ pub struct BatchResponse {
     pub total: usize,
     /// Number of queries that succeeded.
     pub success: usize,
+    /// Response metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ResponseMetadata>,
 }
 
 /// Result for a single query in a batch

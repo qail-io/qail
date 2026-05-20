@@ -24,12 +24,20 @@ pub fn row_to_json(row: &qail_pg::PgRow) -> serde_json::Value {
 
     for (i, col_name) in column_names.into_iter().enumerate() {
         let value = if let Some(bytes) = row.columns.get(i).and_then(|v| v.as_deref()) {
-            let oid = col_info
-                .and_then(|info| info.oids.get(i).copied())
-                .unwrap_or(0);
-            let format = col_info
-                .and_then(|info| info.formats.get(i).copied())
-                .unwrap_or(0);
+            let oid = match col_info {
+                Some(info) => match info.oids.get(i) {
+                    Some(o) => *o,
+                    None => 0,
+                },
+                None => 0,
+            };
+            let format = match col_info {
+                Some(info) => match info.formats.get(i) {
+                    Some(f) => *f,
+                    None => 0,
+                },
+                None => 0,
+            };
             bytes_to_json_typed(bytes, oid, format)
         } else {
             serde_json::Value::Null
@@ -51,13 +59,17 @@ pub(crate) fn row_to_array(row: &qail_pg::PgRow) -> Vec<serde_json::Value> {
                 if (s.starts_with('{') && s.ends_with('}'))
                     || (s.starts_with('[') && s.ends_with(']'))
                 {
-                    serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s.into_owned()))
+                    match serde_json::from_str(&s) {
+                        Ok(v) => v,
+                        Err(_) => serde_json::Value::String(s.into_owned()),
+                    }
                 } else if let Ok(n) = s.parse::<i64>() {
                     serde_json::Value::Number(n.into())
                 } else if let Ok(f) = s.parse::<f64>() {
-                    serde_json::Number::from_f64(f)
-                        .map(serde_json::Value::Number)
-                        .unwrap_or(serde_json::Value::String(s.into_owned()))
+                    match serde_json::Number::from_f64(f) {
+                        Some(num) => serde_json::Value::Number(num),
+                        None => serde_json::Value::String(s.into_owned()),
+                    }
                 } else if s == "t" || s == "true" {
                     serde_json::Value::Bool(true)
                 } else if s == "f" || s == "false" {
@@ -87,57 +99,75 @@ fn bytes_to_json_typed(bytes: &[u8], oid: u32, format: i16) -> serde_json::Value
 
     // Binary format.
     match oid {
-        pg_oid::BOOL => bool::from_pg(bytes, oid, format)
-            .map(serde_json::Value::Bool)
-            .unwrap_or(serde_json::Value::Null),
-        pg_oid::INT2 | pg_oid::INT4 => i32::from_pg(bytes, oid, format)
-            .map(|n| serde_json::Value::Number(n.into()))
-            .unwrap_or(serde_json::Value::Null),
-        pg_oid::INT8 | pg_oid::OID => i64::from_pg(bytes, oid, format)
-            .map(|n| serde_json::Value::Number(n.into()))
-            .unwrap_or(serde_json::Value::Null),
-        pg_oid::FLOAT4 | pg_oid::FLOAT8 => f64::from_pg(bytes, oid, format)
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        pg_oid::NUMERIC => Numeric::from_pg(bytes, oid, format)
-            .map(|n| {
+        pg_oid::BOOL => match bool::from_pg(bytes, oid, format) {
+            Ok(b) => serde_json::Value::Bool(b),
+            Err(_) => serde_json::Value::Null,
+        },
+        pg_oid::INT2 | pg_oid::INT4 => match i32::from_pg(bytes, oid, format) {
+            Ok(n) => serde_json::Value::Number(n.into()),
+            Err(_) => serde_json::Value::Null,
+        },
+        pg_oid::INT8 | pg_oid::OID => match i64::from_pg(bytes, oid, format) {
+            Ok(n) => serde_json::Value::Number(n.into()),
+            Err(_) => serde_json::Value::Null,
+        },
+        pg_oid::FLOAT4 | pg_oid::FLOAT8 => match f64::from_pg(bytes, oid, format) {
+            Ok(f) => match serde_json::Number::from_f64(f) {
+                Some(num) => serde_json::Value::Number(num),
+                None => serde_json::Value::Null,
+            },
+            Err(_) => serde_json::Value::Null,
+        },
+        pg_oid::NUMERIC => match Numeric::from_pg(bytes, oid, format) {
+            Ok(n) => {
                 if let Ok(i) = n.to_i64() {
                     serde_json::Value::Number(i.into())
                 } else if let Ok(f) = n.to_f64() {
-                    serde_json::Number::from_f64(f)
-                        .map(serde_json::Value::Number)
-                        .unwrap_or_else(|| serde_json::Value::String(n.0))
+                    match serde_json::Number::from_f64(f) {
+                        Some(num) => serde_json::Value::Number(num),
+                        None => serde_json::Value::String(n.0),
+                    }
                 } else {
                     serde_json::Value::String(n.0)
                 }
-            })
-            .unwrap_or_else(|_| serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))),
-        pg_oid::JSON | pg_oid::JSONB => Json::from_pg(bytes, oid, format)
-            .map(|j| serde_json::from_str(&j.0).unwrap_or(serde_json::Value::String(j.0)))
-            .unwrap_or_else(|_| serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))),
-        pg_oid::UUID => Uuid::from_pg(bytes, oid, format)
-            .map(|u| serde_json::Value::String(u.0))
-            .unwrap_or_else(|_| serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))),
-        pg_oid::INET => Inet::from_pg(bytes, oid, format)
-            .map(|v| serde_json::Value::String(v.0))
-            .unwrap_or_else(|_| serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))),
-        pg_oid::CIDR => Cidr::from_pg(bytes, oid, format)
-            .map(|v| serde_json::Value::String(v.0))
-            .unwrap_or_else(|_| serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))),
-        pg_oid::MACADDR => MacAddr::from_pg(bytes, oid, format)
-            .map(|v| serde_json::Value::String(v.0))
-            .unwrap_or_else(|_| serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))),
-        pg_oid::TIMESTAMP | pg_oid::TIMESTAMPTZ => Timestamp::from_pg(bytes, oid, format)
-            .map(|ts| serde_json::Value::Number(ts.to_unix_secs().into()))
-            .unwrap_or_else(|_| serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))),
-        pg_oid::DATE => Date::from_pg(bytes, oid, format)
-            .map(|d| serde_json::Value::Number(d.days.into()))
-            .unwrap_or_else(|_| serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))),
-        pg_oid::TIME => Time::from_pg(bytes, oid, format)
-            .map(|t| serde_json::Value::Number(t.usec.into()))
-            .unwrap_or_else(|_| serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))),
+            }
+            Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
+        },
+        pg_oid::JSON | pg_oid::JSONB => match Json::from_pg(bytes, oid, format) {
+            Ok(j) => match serde_json::from_str(&j.0) {
+                Ok(v) => v,
+                Err(_) => serde_json::Value::String(j.0),
+            },
+            Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
+        },
+        pg_oid::UUID => match Uuid::from_pg(bytes, oid, format) {
+            Ok(u) => serde_json::Value::String(u.0),
+            Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
+        },
+        pg_oid::INET => match Inet::from_pg(bytes, oid, format) {
+            Ok(v) => serde_json::Value::String(v.0),
+            Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
+        },
+        pg_oid::CIDR => match Cidr::from_pg(bytes, oid, format) {
+            Ok(v) => serde_json::Value::String(v.0),
+            Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
+        },
+        pg_oid::MACADDR => match MacAddr::from_pg(bytes, oid, format) {
+            Ok(v) => serde_json::Value::String(v.0),
+            Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
+        },
+        pg_oid::TIMESTAMP | pg_oid::TIMESTAMPTZ => match Timestamp::from_pg(bytes, oid, format) {
+            Ok(ts) => serde_json::Value::Number(ts.to_unix_secs().into()),
+            Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
+        },
+        pg_oid::DATE => match Date::from_pg(bytes, oid, format) {
+            Ok(d) => serde_json::Value::Number(d.days.into()),
+            Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
+        },
+        pg_oid::TIME => match Time::from_pg(bytes, oid, format) {
+            Ok(t) => serde_json::Value::Number(t.usec.into()),
+            Err(_) => serde_json::Value::String(format!("\\x{}", hex_encode(bytes))),
+        },
         _ => {
             crate::metrics::record_rpc_binary_decode_fallback();
             serde_json::Value::String(format!("\\x{}", hex_encode(bytes)))
@@ -171,34 +201,39 @@ pub(crate) fn text_to_json_typed(s: &str, oid: u32) -> serde_json::Value {
         16 => serde_json::Value::Bool(s == "t" || s == "true"),
 
         // ── Integer types (OID 20=int8, 21=int2, 23=int4, 26=oid) ──
-        20 | 21 | 23 | 26 => s
-            .parse::<i64>()
-            .map(|n| serde_json::Value::Number(n.into()))
-            .unwrap_or(serde_json::Value::String(s.to_string())),
+        20 | 21 | 23 | 26 => match s.parse::<i64>() {
+            Ok(n) => serde_json::Value::Number(n.into()),
+            Err(_) => serde_json::Value::String(s.to_string()),
+        },
 
         // ── Float types (OID 700=float4, 701=float8) ──────────────
-        700 | 701 => s
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::String(s.to_string())),
+        700 | 701 => match s.parse::<f64>() {
+            Ok(f) => match serde_json::Number::from_f64(f) {
+                Some(num) => serde_json::Value::Number(num),
+                None => serde_json::Value::String(s.to_string()),
+            },
+            Err(_) => serde_json::Value::String(s.to_string()),
+        },
 
         // ── Numeric/Decimal (OID 1700) — preserve precision as string or number ──
         1700 => {
             if let Ok(n) = s.parse::<i64>() {
                 serde_json::Value::Number(n.into())
             } else if let Ok(f) = s.parse::<f64>() {
-                serde_json::Number::from_f64(f)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::String(s.to_string()))
+                match serde_json::Number::from_f64(f) {
+                    Some(num) => serde_json::Value::Number(num),
+                    None => serde_json::Value::String(s.to_string()),
+                }
             } else {
                 serde_json::Value::String(s.to_string())
             }
         }
 
         // ── JSON/JSONB (OID 114, 3802) — parse directly ──────────
-        114 | 3802 => serde_json::from_str(s).unwrap_or(serde_json::Value::String(s.to_string())),
+        114 | 3802 => match serde_json::from_str(s) {
+            Ok(v) => v,
+            Err(_) => serde_json::Value::String(s.to_string()),
+        },
 
         // ── Array types (int[], text[], etc.) — parse as JSON array ──
         1005 | 1007 | 1009 | 1015 | 1016 | 1021 | 1022 | 1000 | 1231 => pg_array_to_json(s),
@@ -217,13 +252,17 @@ pub(crate) fn text_to_json_typed(s: &str, oid: u32) -> serde_json::Value {
 #[inline]
 fn text_to_json_guess(s: &str) -> serde_json::Value {
     if (s.starts_with('{') && s.ends_with('}')) || (s.starts_with('[') && s.ends_with(']')) {
-        serde_json::from_str(s).unwrap_or(serde_json::Value::String(s.to_string()))
+        match serde_json::from_str(s) {
+            Ok(v) => v,
+            Err(_) => serde_json::Value::String(s.to_string()),
+        }
     } else if let Ok(n) = s.parse::<i64>() {
         serde_json::Value::Number(n.into())
     } else if let Ok(f) = s.parse::<f64>() {
-        serde_json::Number::from_f64(f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::String(s.to_string()))
+        match serde_json::Number::from_f64(f) {
+            Some(num) => serde_json::Value::Number(num),
+            None => serde_json::Value::String(s.to_string()),
+        }
     } else if s == "t" || s == "true" {
         serde_json::Value::Bool(true)
     } else if s == "f" || s == "false" {
@@ -233,36 +272,90 @@ fn text_to_json_guess(s: &str) -> serde_json::Value {
     }
 }
 
-/// Convert PostgreSQL text-format array (e.g., `{1,2,3}`) to JSON array.
+/// Convert PostgreSQL text-format array (e.g., `{1,2,3}` or `{{1,2},{3,4}}`) to JSON array.
+///
+/// Handles:
+/// - Quoted strings with commas: `{"New York, NY", "London"}`
+/// - Escaped quotes: `{"He said \"Hello\""}`
+/// - Nested arrays: `{{1,2},{3,4}}`
+/// - NULL values: `{1,NULL,3}` vs `{"NULL"}`
 fn pg_array_to_json(s: &str) -> serde_json::Value {
+    let s = s.trim();
     if s.starts_with('{') && s.ends_with('}') {
         let inner = &s[1..s.len() - 1];
         if inner.is_empty() {
             return serde_json::Value::Array(vec![]);
         }
-        let elements: Vec<serde_json::Value> = inner
-            .split(',')
-            .map(|elem| {
-                let elem = elem.trim();
-                if elem.eq_ignore_ascii_case("null") {
-                    serde_json::Value::Null
-                } else if let Ok(n) = elem.parse::<i64>() {
-                    serde_json::Value::Number(n.into())
-                } else if let Ok(f) = elem.parse::<f64>() {
-                    serde_json::Number::from_f64(f)
-                        .map(serde_json::Value::Number)
-                        .unwrap_or(serde_json::Value::String(elem.to_string()))
-                } else {
-                    // Strip surrounding quotes if present
-                    let unquoted = elem.trim_matches('"');
-                    serde_json::Value::String(unquoted.to_string())
+
+        let mut elements = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut escaped = false;
+        let mut brace_depth = 0;
+        let mut was_quoted = false;
+
+        for c in inner.chars() {
+            if escaped {
+                current.push(c);
+                escaped = false;
+                continue;
+            }
+
+            match c {
+                '\\' => escaped = true,
+                '"' => {
+                    in_quotes = !in_quotes;
+                    was_quoted = true;
                 }
-            })
-            .collect();
+                '{' if !in_quotes => {
+                    brace_depth += 1;
+                    current.push(c);
+                }
+                '}' if !in_quotes => {
+                    brace_depth -= 1;
+                    current.push(c);
+                }
+                ',' if !in_quotes && brace_depth == 0 => {
+                    elements.push(finish_array_element(current, was_quoted));
+                    current = String::new();
+                    was_quoted = false;
+                }
+                _ => current.push(c),
+            }
+        }
+        elements.push(finish_array_element(current, was_quoted));
         serde_json::Value::Array(elements)
     } else {
         serde_json::Value::String(s.to_string())
     }
+}
+
+fn finish_array_element(s: String, was_quoted: bool) -> serde_json::Value {
+    let trimmed = s.trim();
+
+    // Recursive case for nested arrays
+    if !was_quoted && trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return pg_array_to_json(trimmed);
+    }
+
+    if !was_quoted {
+        if trimmed.eq_ignore_ascii_case("null") {
+            return serde_json::Value::Null;
+        }
+        if let Ok(n) = trimmed.parse::<i64>() {
+            return serde_json::Value::Number(n.into());
+        }
+        if let Ok(f) = trimmed.parse::<f64>() {
+            if let Some(num) = serde_json::Number::from_f64(f) {
+                return serde_json::Value::Number(num);
+            }
+        }
+    }
+
+    // For quoted strings or non-numeric types, return as string.
+    // If it was quoted, the quotes were stripped by the state machine logic
+    // (by toggling in_quotes but not pushing the '"' char).
+    serde_json::Value::String(trimmed.to_string())
 }
 
 #[cfg(test)]

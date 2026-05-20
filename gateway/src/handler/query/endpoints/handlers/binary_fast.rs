@@ -8,6 +8,7 @@ use super::*;
 /// PostgreSQL still parses emitted SQL text as part of the wire protocol.
 pub async fn execute_query_binary(
     State(state): State<Arc<GatewayState>>,
+    extensions: axum::http::Extensions,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<QueryResponse>, ApiError> {
@@ -80,7 +81,7 @@ pub async fn execute_query_binary(
 
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
-    execute_qail_cmd(&state, &auth, &cmd).await
+    execute_qail_cmd(&state, &auth, &cmd, &extensions).await
 }
 
 /// Execute a QAIL query (FAST — array-of-arrays response)
@@ -90,6 +91,7 @@ pub async fn execute_query_binary(
 /// Use for data pipelines and internal services that know the schema.
 pub async fn execute_query_fast(
     State(state): State<Arc<GatewayState>>,
+    extensions: axum::http::Extensions,
     headers: HeaderMap,
     body: String,
 ) -> Result<Json<FastQueryResponse>, ApiError> {
@@ -118,5 +120,5 @@ pub async fn execute_query_fast(
 
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
-    execute_qail_cmd_fast(&state, &auth, &cmd).await
+    execute_qail_cmd_fast(&state, &auth, &cmd, &extensions).await
 }

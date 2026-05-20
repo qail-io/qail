@@ -92,6 +92,7 @@ pub async fn txn_begin(
 /// bound to that session with full RLS context.
 pub async fn txn_query(
     State(state): State<Arc<GatewayState>>,
+    extensions: axum::http::Extensions,
     headers: HeaderMap,
     body: String,
 ) -> Result<Json<crate::handler::QueryResponse>, ApiError> {
@@ -182,7 +183,19 @@ pub async fn txn_query(
     }
 
     let count = rows.len();
-    Ok(Json(crate::handler::QueryResponse { rows, count }))
+    let request_id = match extensions.get::<crate::middleware::RequestId>() {
+        Some(id) => id.0.clone(),
+        None => String::new(),
+    };
+
+    Ok(Json(crate::handler::QueryResponse {
+        rows,
+        count,
+        metadata: Some(crate::handler::ResponseMetadata {
+            request_id,
+            duration_ms: None, // Txn queries don't use the simple QueryTimer yet
+        }),
+    }))
 }
 
 /// `POST /txn/commit` — Commit and close a transaction session.
