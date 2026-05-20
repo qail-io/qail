@@ -508,7 +508,7 @@ mod tests {
         let port = addr.port();
 
         let connection_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let conn_count = connection_count.clone();
+        let conn_count = Arc::clone(&connection_count);
 
         let _server_handle = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {

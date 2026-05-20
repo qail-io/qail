@@ -345,7 +345,11 @@ fn finish_array_element(s: String, was_quoted: bool) -> serde_json::Value {
         if let Ok(n) = trimmed.parse::<i64>() {
             return serde_json::Value::Number(n.into());
         }
-        if let Some(num) = trimmed.parse::<f64>().ok().and_then(serde_json::Number::from_f64) {
+        if let Some(num) = trimmed
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+        {
             return serde_json::Value::Number(num);
         }
     }
