@@ -8,6 +8,7 @@ sdk/kotlin/.kotlin/
 sdk/kotlin/bin/
 sdk/kotlin/build/
 sdk/swift/.build/
+sdk/swift/.swiftpm/xcode/xcuserdata/
 zig-cache/
 zig-out/
 .zig-cache/
