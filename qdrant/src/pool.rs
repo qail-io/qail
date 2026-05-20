@@ -7,8 +7,8 @@
 use crate::driver::QdrantDriver;
 use crate::error::{QdrantError, QdrantResult};
 use http::Uri;
-use std::sync::Arc;
-use tokio::sync::{Mutex, Semaphore};
+use std::sync::{Arc, Mutex, MutexGuard};
+use tokio::sync::Semaphore;
 
 /// Configuration for the connection pool.
 #[derive(Debug, Clone)]
@@ -103,6 +103,13 @@ struct PoolInner {
     semaphore: Semaphore,
 }
 
+fn lock_idle_connections(idle: &Mutex<Vec<QdrantDriver>>) -> MutexGuard<'_, Vec<QdrantDriver>> {
+    match idle.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// Connection pool for Qdrant gRPC driver.
 ///
 /// Maintains a pool of idle connections and reuses them instead of
@@ -154,7 +161,7 @@ impl QdrantPool {
 
         // Try to take an idle connection
         let driver = {
-            let mut idle = self.inner.idle.lock().await;
+            let mut idle = lock_idle_connections(&self.inner.idle);
             idle.pop()
         };
 
@@ -182,7 +189,7 @@ impl QdrantPool {
 
     /// Number of idle connections waiting for reuse.
     pub async fn idle_count(&self) -> usize {
-        self.inner.idle.lock().await.len()
+        lock_idle_connections(&self.inner.idle).len()
     }
 
     /// Number of available permits (connections not in use).
@@ -225,11 +232,11 @@ impl std::ops::DerefMut for PooledConnection {
 impl Drop for PooledConnection {
     fn drop(&mut self) {
         if let Some(driver) = self.driver.take() {
-            if let Ok(mut idle) = self.pool.idle.try_lock()
-                && idle.len() < self.pool.config.max_connections
-            {
+            let mut idle = lock_idle_connections(&self.pool.idle);
+            if idle.len() < self.pool.config.max_connections {
                 idle.push(driver);
             }
+            drop(idle);
             // Always release a permit, even if we couldn't return to idle.
             self.pool.semaphore.add_permits(1);
         }

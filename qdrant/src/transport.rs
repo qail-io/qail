@@ -55,13 +55,18 @@ fn build_tls_config() -> QdrantResult<Arc<rustls::ClientConfig>> {
     Ok(Arc::new(config))
 }
 
+struct ConnectionState {
+    sender: Option<SendRequest<Bytes>>,
+    generation: u64,
+}
+
 /// gRPC client for Qdrant with auto-reconnection and optional TLS.
 ///
 /// Uses HTTP/2 with persistent connection for efficient request pipelining.
 /// If the connection drops, the next call will transparently reconnect.
 pub struct GrpcClient {
-    /// HTTP/2 send request handle (None when disconnected)
-    sender: Arc<Mutex<Option<SendRequest<Bytes>>>>,
+    /// HTTP/2 send request handle and connection generation
+    state: Arc<Mutex<ConnectionState>>,
     /// Connection parameters for reconnection
     host: String,
     port: u16,
@@ -79,7 +84,10 @@ impl GrpcClient {
         let sender = Self::establish_plain(host, port).await?;
 
         Ok(Self {
-            sender: Arc::new(Mutex::new(Some(sender))),
+            state: Arc::new(Mutex::new(ConnectionState {
+                sender: Some(sender),
+                generation: 0,
+            })),
             host: host.to_string(),
             port,
             tls: false,
@@ -96,7 +104,10 @@ impl GrpcClient {
         let sender = Self::establish_tls(host, port, &tls_config).await?;
 
         Ok(Self {
-            sender: Arc::new(Mutex::new(Some(sender))),
+            state: Arc::new(Mutex::new(ConnectionState {
+                sender: Some(sender),
+                generation: 0,
+            })),
             host: host.to_string(),
             port,
             tls: true,
@@ -185,58 +196,78 @@ impl GrpcClient {
 
     /// Get a ready sender, reconnecting if the previous connection dropped.
     ///
-    /// The lock is held only to clone the sender (or reconnect), NOT during
-    /// the `ready()` await. This prevents head-of-line blocking under load.
+    /// The fast path holds the lock only to clone the sender, then awaits
+    /// `ready()` without the lock. Reconnects are serialized to avoid storms.
     async fn get_sender(&self) -> QdrantResult<SendRequest<Bytes>> {
         // Fast path: clone sender under short lock, then await ready() WITHOUT lock
-        let maybe_sender = {
-            let guard = self.sender.lock().await;
-            guard.as_ref().cloned()
+        let (maybe_sender, initial_gen) = {
+            let guard = self.state.lock().await;
+            (guard.sender.clone(), guard.generation)
         };
 
         if let Some(sender) = maybe_sender {
-            match sender.ready().await {
-                Ok(ready) => return Ok(ready),
-                Err(_) => {
-                    // Connection dead — fall through to reconnect
-                    let mut guard = self.sender.lock().await;
-                    *guard = None;
-                }
+            if let Ok(ready) = sender.ready().await {
+                return Ok(ready);
             }
         }
 
         // Slow path: reconnect (re-acquire lock for mutation)
-        let mut guard = self.sender.lock().await;
+        let mut guard = self.state.lock().await;
 
-        // Double-check: another task may have reconnected while we waited
-        if let Some(sender) = guard.as_ref().cloned() {
-            drop(guard);
-            match sender.ready().await {
-                Ok(ready) => return Ok(ready),
-                Err(_) => {
-                    let mut guard = self.sender.lock().await;
-                    *guard = None;
-                    // Fall through to reconnect below, re-acquire lock
-                    drop(guard);
+        let mut current_gen = initial_gen;
+        // Double-check: another thread might have reconnected while we were waiting/testing
+        while guard.generation != current_gen {
+            if let Some(sender) = guard.sender.clone() {
+                let new_gen = guard.generation;
+                drop(guard);
+                match sender.ready().await {
+                    Ok(ready) => return Ok(ready),
+                    Err(_) => {
+                        // The new one is also dead! Re-acquire lock.
+                        guard = self.state.lock().await;
+                        current_gen = new_gen;
+                    }
                 }
+            } else {
+                break;
             }
-            // Re-acquire for the reconnect
-            guard = self.sender.lock().await;
         }
 
-        let new_sender = if self.tls {
-            let config = self.tls_config.as_ref().ok_or_else(|| {
-                QdrantError::Connection("TLS config missing on reconnect".to_string())
-            })?;
-            Self::establish_tls(&self.host, self.port, config).await?
-        } else {
-            Self::establish_plain(&self.host, self.port).await?
-        };
+        // If the generation is still current_gen, it means the dead connection we checked
+        // is still the one stored in `guard.sender`. We should clear it before establishing
+        // a new one.
+        if guard.generation == current_gen {
+            guard.sender = None;
+        }
 
-        let ready = new_sender.clone().ready().await.map_err(|e| {
+        if guard.sender.is_none() {
+            let new_sender = if self.tls {
+                let config = self.tls_config.as_ref().ok_or_else(|| {
+                    QdrantError::Connection("TLS config missing on reconnect".to_string())
+                })?;
+                Self::establish_tls(&self.host, self.port, config).await?
+            } else {
+                Self::establish_plain(&self.host, self.port).await?
+            };
+
+            guard.sender = Some(new_sender);
+            guard.generation = guard.generation.wrapping_add(1);
+        }
+
+        let sender = match guard.sender.clone() {
+            Some(sender) => sender,
+            None => {
+                return Err(QdrantError::Connection(
+                    "missing gRPC sender after reconnect".to_string(),
+                ));
+            }
+        };
+        drop(guard);
+
+        let ready = sender.ready().await.map_err(|e| {
             QdrantError::Grpc(format!("Connection not ready after reconnect: {}", e))
         })?;
-        *guard = Some(new_sender);
+
         Ok(ready)
     }
 
@@ -466,5 +497,72 @@ mod tests {
         let config = build_tls_config().unwrap();
         // Should support TLS 1.2 and 1.3
         assert!(!config.alpn_protocols.is_empty() || config.alpn_protocols.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_reconnection_under_storm() {
+        // Start a mock H2 server
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+
+        let connection_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let conn_count = connection_count.clone();
+
+        let _server_handle = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                conn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    if let Ok(mut handshake) = h2::server::handshake(stream).await {
+                        while let Some(Ok((_req, mut respond))) = handshake.accept().await {
+                            let response = http::Response::builder().status(200).body(()).unwrap();
+                            let _: Result<h2::SendStream<bytes::Bytes>, _> =
+                                respond.send_response(response, true);
+                        }
+                    }
+                });
+            }
+        });
+
+        // 1. Establish initial connection
+        let client = GrpcClient::connect("127.0.0.1", port).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(
+            connection_count.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        // 2. Corrupt the sender to trigger a reconnection slow path in all tasks.
+        // We'll set the sender to None, simulating a disconnected state.
+        {
+            let mut guard = client.state.lock().await;
+            guard.sender = None;
+        }
+
+        // 3. Fire 30 concurrent tasks calling get_sender()
+        let client = Arc::new(client);
+        let mut handles = Vec::new();
+        for _ in 0..30 {
+            let client_clone = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let sender = client_clone.get_sender().await;
+                assert!(sender.is_ok());
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // 4. Verify that exactly ONE reconnection occurred!
+        // (Initial connection = 1, reconnection = 1, total = 2)
+        let total_connections = connection_count.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            total_connections, 2,
+            "Expected exactly 2 connections (1 initial + 1 reconnect), got {}",
+            total_connections
+        );
     }
 }

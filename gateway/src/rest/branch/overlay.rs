@@ -12,12 +12,6 @@ fn json_value_to_pk(value: &Value) -> Option<String> {
     }
 }
 
-fn row_matches_pk(row: &Value, pk_column: &str, row_pk: &str) -> bool {
-    row.get(pk_column)
-        .and_then(json_value_to_pk)
-        .is_some_and(|pk| pk == row_pk)
-}
-
 fn ensure_pk_on_overlay_row(row: &mut Value, pk_column: &str, row_pk: &str) {
     if let Some(obj) = row.as_object_mut() {
         obj.entry(pk_column.to_string())
@@ -47,6 +41,22 @@ pub(crate) async fn apply_branch_overlay(
         Err(_) => return,
     };
 
+    if overlay_rows.is_empty() {
+        return;
+    }
+
+    // Optimization: Index existing results by PK for O(1) lookup during merge.
+    // This turns an O(N*M) linear scan into O(N+M).
+    let mut data_map: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(data.len());
+    for (idx, row) in data.iter().enumerate() {
+        if let Some(pk) = row.get(pk_column).and_then(json_value_to_pk) {
+            data_map.insert(pk, idx);
+        }
+    }
+
+    let mut to_delete: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
     for row in &overlay_rows {
         let row_pk = row
             .try_get_by_name::<String>("row_pk")
@@ -72,23 +82,19 @@ pub(crate) async fn apply_branch_overlay(
             }
             "update" => {
                 if let Ok(new_val) = serde_json::from_str::<Value>(&row_data_str) {
-                    let mut found = false;
-                    for existing in data.iter_mut() {
-                        if row_matches_pk(existing, pk_column, &row_pk) {
-                            if let (Some(existing_obj), Some(patch_obj)) =
-                                (existing.as_object_mut(), new_val.as_object())
-                            {
-                                for (k, v) in patch_obj {
-                                    existing_obj.insert(k.clone(), v.clone());
-                                }
-                            } else {
-                                *existing = new_val.clone();
+                    if let Some(&idx) = data_map.get(&row_pk) {
+                        let existing = &mut data[idx];
+                        if let (Some(existing_obj), Some(patch_obj)) =
+                            (existing.as_object_mut(), new_val.as_object())
+                        {
+                            for (k, v) in patch_obj {
+                                existing_obj.insert(k.clone(), v.clone());
                             }
-                            found = true;
-                            break;
+                        } else {
+                            *existing = new_val;
                         }
-                    }
-                    if !found {
+                    } else {
+                        // Not in main data, treat as new row (e.g. if main data was filtered)
                         let mut row = new_val;
                         ensure_pk_on_overlay_row(&mut row, pk_column, &row_pk);
                         data.push(row);
@@ -96,10 +102,21 @@ pub(crate) async fn apply_branch_overlay(
                 }
             }
             "delete" => {
-                data.retain(|existing| !row_matches_pk(existing, pk_column, &row_pk));
+                if let Some(&idx) = data_map.get(&row_pk) {
+                    to_delete.insert(idx);
+                }
             }
             _ => {}
         }
+    }
+
+    if !to_delete.is_empty() {
+        let mut i = 0;
+        data.retain(|_| {
+            let keep = !to_delete.contains(&i);
+            i += 1;
+            keep
+        });
     }
 }
 

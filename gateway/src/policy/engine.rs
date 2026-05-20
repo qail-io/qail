@@ -97,17 +97,31 @@ impl PolicyEngine {
             )));
         }
 
-        let mut filters_to_inject: Vec<(String, String)> = Vec::new();
+        let mut filters_to_inject: Vec<Condition> = Vec::new();
+        let mut has_unrestricted_policy = false;
+
         for policy in &applicable_policies {
             if let Some(ref filter_template) = policy.filter {
-                let filter = self.expand_filter(filter_template, auth);
-                filters_to_inject.push((policy.name.clone(), filter));
+                let filter_str = self.expand_filter(filter_template, auth);
+                let condition = self.parse_filter_to_condition(&filter_str)?;
+                filters_to_inject.push(condition);
+            } else {
+                // Policy matches and has no filter -> UNRESTRICTED access for this op
+                has_unrestricted_policy = true;
+                break;
             }
         }
 
-        for (policy_name, filter) in filters_to_inject {
-            self.inject_filter(cmd, &filter)?;
-            tracing::debug!("Applied policy '{}' filter: {}", policy_name, filter);
+        if !has_unrestricted_policy && !filters_to_inject.is_empty() {
+            cmd.cages.push(Cage {
+                kind: CageKind::Filter,
+                conditions: filters_to_inject,
+                logical_op: LogicalOp::Or, // Combine multiple policies with OR (Permissive)
+            });
+            tracing::debug!(
+                "Applied {} policy filters with OR logic",
+                applicable_policies.len()
+            );
         }
 
         let projection_restricted_action =
@@ -175,12 +189,11 @@ impl PolicyEngine {
         result
     }
 
-    /// Inject a filter expression into the query
-    pub(super) fn inject_filter(
+    /// Parse a filter string into an AST Condition.
+    pub(super) fn parse_filter_to_condition(
         &self,
-        cmd: &mut Qail,
         filter_expr: &str,
-    ) -> Result<(), GatewayError> {
+    ) -> Result<Condition, GatewayError> {
         let parts: Vec<&str> = if filter_expr.contains(" = ") {
             filter_expr.splitn(2, " = ").collect()
         } else if filter_expr.contains(" != ") {
@@ -215,7 +228,7 @@ impl PolicyEngine {
             Value::String(value_str.to_string())
         };
 
-        let condition = Condition {
+        Ok(Condition {
             left: Expr::Named(column.to_string()),
             op: if is_not_equal {
                 Operator::Ne
@@ -224,7 +237,17 @@ impl PolicyEngine {
             },
             value,
             is_array_unnest: false,
-        };
+        })
+    }
+
+    /// Inject a filter expression into the query (legacy wrapper)
+    #[cfg(test)]
+    pub(super) fn inject_filter(
+        &self,
+        cmd: &mut Qail,
+        filter_expr: &str,
+    ) -> Result<(), GatewayError> {
+        let condition = self.parse_filter_to_condition(filter_expr)?;
 
         // Inject as a filter cage
         cmd.cages.push(Cage {

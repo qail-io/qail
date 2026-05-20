@@ -19,6 +19,7 @@ pub struct EventTriggerEngine {
     webhook_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
+#[cfg(test)]
 pub(super) fn try_acquire_webhook_permit(
     sem: &Arc<tokio::sync::Semaphore>,
     trigger_name: &str,
@@ -40,7 +41,7 @@ impl Default for EventTriggerEngine {
         Self {
             triggers: Vec::new(),
             client: None,
-            webhook_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
+            webhook_semaphore: Arc::new(tokio::sync::Semaphore::new(512)),
         }
     }
 }
@@ -79,7 +80,7 @@ impl EventTriggerEngine {
         Self {
             triggers: Vec::new(),
             client,
-            webhook_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
+            webhook_semaphore: Arc::new(tokio::sync::Semaphore::new(512)),
         }
     }
 
@@ -164,14 +165,26 @@ impl EventTriggerEngine {
             let retry_count = trigger.retry_count;
             let trigger_name = trigger.name.clone();
             let sem = Arc::clone(&self.webhook_semaphore);
-            let permit = match try_acquire_webhook_permit(&sem, &trigger_name) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            // SECURITY: Bounded concurrency — acquire permit before spawning so
-            // overload doesn't create unbounded short-lived tasks.
+            // SECURITY: Bounded concurrency — acquire permit before delivery.
+            // Bursts are queued for up to 10s before dropping, preventing
+            // unbounded memory growth while handling transient spikes.
             tokio::spawn(async move {
+                let permit = match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    sem.acquire_owned(),
+                )
+                .await
+                {
+                    Ok(Ok(p)) => p,
+                    _ => {
+                        tracing::error!(
+                            trigger = %trigger_name,
+                            "Webhook dropped: concurrency limit timeout (10s)"
+                        );
+                        return;
+                    }
+                };
+
                 let _permit = permit;
                 deliver_webhook(client, &url, &headers, &payload, retry_count, &trigger_name).await;
             });
