@@ -51,5 +51,3 @@ cd /Users/orion/dev.qail.io && npm run deploy
 
 We welcome issue reports on GitHub! Please provide detailed descriptions to help us reproduce and fix the problem. We aim to address critical issues within 1-5 business days.
 
-> [!CAUTION]
-> **Release Candidate**: QAIL is now in the **release-candidate** phase. The API is near-stable and battle-tested in production. Breaking changes are expected to be rare and limited to critical correctness/security fixes before 1.0.

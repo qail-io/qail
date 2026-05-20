@@ -2,7 +2,7 @@
   "name": "qail-lsp",
   "displayName": "QAIL LSP",
   "description": "VS Code extension for QAIL Language Server (qail-lsp)",
-  "version": "0.28.0",
+  "version": "1.0.0",
   "publisher": "qail",
   "license": "Apache-2.0",
   "repository": {

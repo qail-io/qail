@@ -115,8 +115,8 @@ pub(super) async fn execute_qail_cmd(
     let table = &cmd.table;
     let is_read_query = matches!(cmd.action, Action::Get);
 
-    let tenant = match auth.tenant_id.as_deref() {
-        Some(t) => t,
+    let tenant = match &auth.tenant_id {
+        Some(t) => t.as_str(),
         None => "_anon",
     };
     let cache_key = format!("{}:{}:{}", tenant, auth.user_id, exact_cache_key(&cmd));

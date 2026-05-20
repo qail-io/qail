@@ -84,13 +84,10 @@ This shows the exact protocol-byte path used by the driver.
 
 ## Installation
 
-> [!CAUTION]
-> **Release Candidate**: QAIL is now in the **release-candidate** phase. The API is near-stable and battle-tested in production. Breaking changes are expected to be rare and limited to critical correctness/security fixes before 1.0.
-
 ```toml
 [dependencies]
-qail-pg = "0.28.0"
-qail-core = "0.28.0"
+qail-pg = "1.0.0"
+qail-core = "1.0.0"
 ```
 
 `qail-pg` is AST-only. Raw SQL helper APIs were removed.

@@ -4,9 +4,10 @@ For the full project changelog, see the repository file:
 
 - [`CHANGELOG.md`](https://github.com/qail-io/qail/blob/main/CHANGELOG.md)
 
-## Current Highlights (v0.28.0)
+## Current Highlights (v1.0.0)
 
-- Redundant compatibility APIs were removed: `try_with_rls`, `try_join_on`, `try_encode_cmd_binary`, `AnalysisMode::Regex`, `validate_against_schema`, and legacy `i32` cancel-key wrappers.
-- Builder and encoder runtime paths now keep malformed payloads, ambiguous relation metadata, and size-limit failures on structured fallible APIs.
-- Gateway and driver docs now consistently describe tenant-first runtime scope through `tenant_id`, `current_user_id`, `current_agent_id`, and `is_super_admin`.
-- Workspace crates and docs references were bumped to `0.28.0`.
+- Promoted QAIL to 1.0.0 Stable, declaring the API complete and production-grade.
+- **gRPC Connection State Machine**: Implemented concurrent reconnection protection using a connection generation counter in the Qdrant engine.
+- **Webhook Scaling**: Scaled webhook concurrency limit to 512 paired with safe timeouts.
+- **Connection Pool Locking**: Replaced async-wait locks with standard library `unwrap` synchronization under heavy concurrent loads.
+- **Workspace Crates**: All workspace crates, internal path dependencies, and VSCode LSP extension bumped to `1.0.0`.

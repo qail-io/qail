@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-20
+
+### Added
+- **gRPC Connection State Machine**: Introduced concurrent reconnection protection in the Qdrant vector engine using a connection generation counter (`ConnectionState`). Added robust concurrent reconnection tests.
+- **Webhook Scaling**: Scale out webhook events with an increased semaphore limit from 64 to 512, paired with a timeout mechanism to prevent memory growth under load.
+
+### Changed
+- **Connection Pool Locking**: Replaced async-wait locking in the Qdrant connection pool with sync standard-library mutex `unwrap()` calls, improving reliability under load.
+- **Policy Filter Injection**: Shifted policy filters to a cleaner structured approach, allowing unrestricted and safe policy conditions.
+- **Gateway Overlays**: Shifted branch overlays to an index-based lookup, optimizing update and delete operation lookups.
+- **Release Stability**: Promoted QAIL to 1.0.0 Stable, declaring API complete and production-grade.
+
+### Fixed
+- **Gateway Dead Code**: Addressed and cleaned up dead code warnings in the gateway event engine.
+- **Event Engine Formatting**: Standardized and formatted code blocks inside the gateway event system.
+
 ## [0.28.0] - 2026-04-27
 
 ### Removed
