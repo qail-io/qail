@@ -488,6 +488,29 @@ async fn redteam_enrich_skips_anonymous() {
     );
 }
 
+#[tokio::test]
+async fn platform_admin_enrichment_does_not_add_tenant_scope() {
+    let mut auth = AuthContext {
+        user_id: "platform-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: None,
+        claims: platform_admin_claims(),
+    };
+    let map = tokio::sync::RwLock::new({
+        let mut m = std::collections::HashMap::new();
+        m.insert("platform-admin".to_string(), "tenant-xyz".to_string());
+        m
+    });
+
+    auth.enrich_with_tenant_map(&map).await;
+
+    assert_eq!(auth.tenant_id, None);
+    assert!(
+        auth.is_platform_admin(),
+        "Explicit platform-admin JWTs must stay tenantless even when the user exists in the tenant map"
+    );
+}
+
 #[test]
 fn redteam_finance_admin_does_not_bypass_rls() {
     let auth = AuthContext {

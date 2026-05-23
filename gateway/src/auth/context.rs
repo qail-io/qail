@@ -125,6 +125,9 @@ impl AuthContext {
         &mut self,
         map: &tokio::sync::RwLock<std::collections::HashMap<String, String>>,
     ) {
+        if self.role.eq_ignore_ascii_case("administrator") && self.has_platform_admin_claim() {
+            return;
+        }
         if self.tenant_id.is_none() && self.is_authenticated() {
             let guard = map.read().await;
             if let Some(tenant_id) = guard.get(&self.user_id) {
