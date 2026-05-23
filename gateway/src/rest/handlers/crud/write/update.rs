@@ -93,6 +93,9 @@ pub(crate) async fn update_handler(
     if let Some(scope_column) = tenant_scope_column.as_deref() {
         reject_tenant_column_update(obj, scope_column, auth.tenant_id.as_deref())?;
     }
+    if let Some(returning) = mutation_params.returning.as_deref() {
+        parse_select_columns(returning).map_err(ApiError::parse_error)?;
+    }
 
     // Build: set table { col1 = val1 } [pk = $id]
     let mut cmd = qail_core::ast::Qail::set(&table_name).filter(
@@ -124,7 +127,8 @@ pub(crate) async fn update_handler(
     if has_update_triggers && mutation_params.returning.is_none() {
         cmd = cmd.returning_all();
     } else {
-        cmd = apply_returning(cmd, mutation_params.returning.as_deref());
+        cmd = apply_returning(cmd, mutation_params.returning.as_deref())
+            .map_err(ApiError::parse_error)?;
     }
 
     let mut old_cmd = if has_update_triggers {

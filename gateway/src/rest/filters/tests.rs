@@ -313,3 +313,12 @@ fn test_apply_sorting_rejects_invalid_sort_inputs() {
     assert!(apply_sorting(cmd.clone(), "total;drop").is_err());
     assert!(apply_sorting(cmd, "-").is_err());
 }
+
+#[test]
+fn test_apply_returning_rejects_invalid_projection_inputs() {
+    let cmd = qail_core::ast::Qail::set("orders");
+    assert!(apply_returning(cmd.clone(), Some("id,")).is_err());
+    assert!(apply_returning(cmd.clone(), Some("id;drop")).is_err());
+    assert!(apply_returning(cmd.clone(), Some("*,id")).is_err());
+    assert!(apply_returning(cmd, Some("")).is_err());
+}

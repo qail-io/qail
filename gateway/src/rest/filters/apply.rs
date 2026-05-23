@@ -1,6 +1,6 @@
 use qail_core::ast::{Operator, Value as QailValue};
 
-use super::is_safe_identifier;
+use super::{is_safe_identifier, parse_select_columns};
 
 /// Apply parsed filters to a Qail command.
 pub(crate) fn apply_filters(
@@ -89,20 +89,15 @@ pub(crate) fn apply_sorting(
 pub(crate) fn apply_returning(
     mut cmd: qail_core::ast::Qail,
     returning: Option<&str>,
-) -> qail_core::ast::Qail {
+) -> Result<qail_core::ast::Qail, String> {
     if let Some(ret) = returning {
-        if ret == "*" {
+        let cols = parse_select_columns(ret)
+            .map_err(|msg| format!("Invalid returning parameter: {}", msg))?;
+        if cols.len() == 1 && cols[0] == "*" {
             cmd = cmd.returning_all();
         } else {
-            let cols: Vec<&str> = ret
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| is_safe_identifier(s))
-                .collect();
-            if !cols.is_empty() {
-                cmd = cmd.returning(cols);
-            }
+            cmd = cmd.returning(cols);
         }
     }
-    cmd
+    Ok(cmd)
 }

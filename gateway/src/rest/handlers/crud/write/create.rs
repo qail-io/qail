@@ -312,6 +312,9 @@ pub(crate) async fn create_handler(
 
     let on_conflict_action =
         parse_on_conflict_action(mutation_params.on_conflict_action.as_deref())?;
+    if let Some(returning) = mutation_params.returning.as_deref() {
+        parse_select_columns(returning).map_err(ApiError::parse_error)?;
+    }
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers)?;
@@ -480,9 +483,10 @@ pub(crate) async fn create_handler(
         if (response_requested_returning || has_create_triggers || classify_upsert_event)
             && mutation_params.returning.is_none()
         {
-            cmd = apply_returning(cmd, Some("*"));
+            cmd = apply_returning(cmd, Some("*")).map_err(ApiError::parse_error)?;
         } else {
-            cmd = apply_returning(cmd, mutation_params.returning.as_deref());
+            cmd = apply_returning(cmd, mutation_params.returning.as_deref())
+                .map_err(ApiError::parse_error)?;
         }
 
         let mut old_cmd = if classify_upsert_event {
