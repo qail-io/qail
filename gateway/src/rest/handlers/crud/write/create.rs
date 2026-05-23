@@ -102,6 +102,30 @@ fn apply_on_conflict_update_or_noop(
     Ok(cmd.on_conflict_update(conflict_cols, updates))
 }
 
+fn guard_upsert_conflict_update_tenant(
+    cmd: qail_core::ast::Qail,
+    tenant_scope: Option<(&str, &str)>,
+) -> qail_core::ast::Qail {
+    let Some((scope_column, tenant_id)) = tenant_scope else {
+        return cmd;
+    };
+    let has_conflict_update = cmd.on_conflict.as_ref().is_some_and(|on_conflict| {
+        matches!(
+            on_conflict.action,
+            qail_core::ast::ConflictAction::DoUpdate { .. }
+        )
+    });
+    if !has_conflict_update {
+        return cmd;
+    }
+
+    cmd.filter(
+        scope_column,
+        Operator::Eq,
+        QailValue::String(tenant_id.to_string()),
+    )
+}
+
 fn build_upsert_old_row_lookup(
     table_name: &str,
     conflict_cols: &[String],
@@ -402,6 +426,12 @@ pub(crate) async fn create_handler(
                 UpsertConflictMode::ImplicitMerge,
             )?;
         }
+        cmd = guard_upsert_conflict_update_tenant(
+            cmd,
+            tenant_scope
+                .as_ref()
+                .map(|(column, tenant_id)| (column.as_str(), tenant_id.as_str())),
+        );
 
         // Returning clause: Prefer return=representation and webhook triggers
         // need the created row even when the HTTP caller did not ask for it.
@@ -573,11 +603,11 @@ pub(crate) async fn create_handler(
 mod tests {
     use super::{
         OnConflictActionParam, UpsertConflictMode, apply_on_conflict_update_or_noop,
-        build_upsert_old_row_lookup, normalize_create_object_for_tenant,
-        parse_explicit_on_conflict_columns, parse_on_conflict_action, pk_to_overlay_key,
-        upsert_update_assignments,
+        build_upsert_old_row_lookup, guard_upsert_conflict_update_tenant,
+        normalize_create_object_for_tenant, parse_explicit_on_conflict_columns,
+        parse_on_conflict_action, pk_to_overlay_key, upsert_update_assignments,
     };
-    use qail_core::ast::ConflictAction;
+    use qail_core::ast::{CageKind, ConflictAction, Expr, Operator, Value as QailValue};
     use serde_json::{Map, Value, json};
 
     #[test]
@@ -673,6 +703,45 @@ mod tests {
 
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert!(err.message.contains("at least one"));
+    }
+
+    #[test]
+    fn conflict_update_gets_tenant_where_guard() {
+        let cmd = qail_core::ast::Qail::add("orders")
+            .set_value("id", "order-1")
+            .set_value("status", "paid")
+            .on_conflict_update(
+                &["id"],
+                &[("status", Expr::Named("EXCLUDED.status".to_string()))],
+            );
+
+        let guarded = guard_upsert_conflict_update_tenant(cmd, Some(("tenant_id", "tenant-a")));
+
+        assert!(guarded.cages.iter().any(|cage| {
+            matches!(cage.kind, CageKind::Filter)
+                && cage.conditions.iter().any(|condition| {
+                    condition.left == Expr::Named("tenant_id".to_string())
+                        && condition.op == Operator::Eq
+                        && condition.value == QailValue::String("tenant-a".to_string())
+                })
+        }));
+    }
+
+    #[test]
+    fn conflict_do_nothing_does_not_add_tenant_where_guard() {
+        let cmd = qail_core::ast::Qail::add("orders")
+            .set_value("id", "order-1")
+            .on_conflict_nothing(&["id"]);
+
+        let guarded = guard_upsert_conflict_update_tenant(cmd, Some(("tenant_id", "tenant-a")));
+
+        assert!(!guarded.cages.iter().any(|cage| {
+            matches!(cage.kind, CageKind::Filter)
+                && cage
+                    .conditions
+                    .iter()
+                    .any(|condition| condition.left == Expr::Named("tenant_id".to_string()))
+        }));
     }
 
     #[test]
