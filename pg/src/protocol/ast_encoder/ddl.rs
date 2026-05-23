@@ -37,6 +37,49 @@ pub fn map_type(t: &str) -> &str {
     }
 }
 
+fn push_joined_ident_list(buf: &mut BytesMut, cols: &[String]) {
+    for (i, col) in cols.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b", ");
+        }
+        buf.extend_from_slice(col.as_bytes());
+    }
+}
+
+fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
+    match constraint {
+        TableConstraint::Unique(cols) => {
+            buf.extend_from_slice(b"UNIQUE (");
+            push_joined_ident_list(buf, cols);
+            buf.extend_from_slice(b")");
+        }
+        TableConstraint::PrimaryKey(cols) => {
+            buf.extend_from_slice(b"PRIMARY KEY (");
+            push_joined_ident_list(buf, cols);
+            buf.extend_from_slice(b")");
+        }
+        TableConstraint::ForeignKey {
+            name,
+            columns,
+            ref_table,
+            ref_columns,
+        } => {
+            if let Some(name) = name {
+                buf.extend_from_slice(b"CONSTRAINT ");
+                buf.extend_from_slice(name.as_bytes());
+                buf.extend_from_slice(b" ");
+            }
+            buf.extend_from_slice(b"FOREIGN KEY (");
+            push_joined_ident_list(buf, columns);
+            buf.extend_from_slice(b") REFERENCES ");
+            buf.extend_from_slice(ref_table.as_bytes());
+            buf.extend_from_slice(b"(");
+            push_joined_ident_list(buf, ref_columns);
+            buf.extend_from_slice(b")");
+        }
+    }
+}
+
 /// Encode CREATE TABLE statement.
 pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"CREATE TABLE ");
@@ -202,28 +245,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
             buf.extend_from_slice(b", ");
         }
         first = false;
-        match tc {
-            TableConstraint::Unique(cols) => {
-                buf.extend_from_slice(b"UNIQUE (");
-                for (i, col) in cols.iter().enumerate() {
-                    if i > 0 {
-                        buf.extend_from_slice(b", ");
-                    }
-                    buf.extend_from_slice(col.as_bytes());
-                }
-                buf.extend_from_slice(b")");
-            }
-            TableConstraint::PrimaryKey(cols) => {
-                buf.extend_from_slice(b"PRIMARY KEY (");
-                for (i, col) in cols.iter().enumerate() {
-                    if i > 0 {
-                        buf.extend_from_slice(b", ");
-                    }
-                    buf.extend_from_slice(col.as_bytes());
-                }
-                buf.extend_from_slice(b")");
-            }
-        }
+        encode_table_constraint(tc, buf);
     }
 
     buf.extend_from_slice(b")");
@@ -275,6 +297,20 @@ pub fn encode_drop_index(cmd: &Qail, buf: &mut BytesMut) {
 
 /// Encode ALTER TABLE ADD COLUMN statement.
 pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
+    if cmd.columns.is_empty() && !cmd.table_constraints.is_empty() {
+        buf.extend_from_slice(b"ALTER TABLE ");
+        buf.extend_from_slice(cmd.table.as_bytes());
+        buf.extend_from_slice(b" ");
+        for (i, constraint) in cmd.table_constraints.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b", ");
+            }
+            buf.extend_from_slice(b"ADD ");
+            encode_table_constraint(constraint, buf);
+        }
+        return;
+    }
+
     for col in &cmd.columns {
         if let Expr::Def {
             name,

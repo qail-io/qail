@@ -1649,6 +1649,11 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
                 deps.insert(fk.table.clone());
             }
         }
+        for fk in &table.multi_column_fks {
+            if fk.ref_table != table.name && schema.tables.contains_key(&fk.ref_table) {
+                deps.insert(fk.ref_table.clone());
+            }
+        }
 
         indegree.insert(table.name.clone(), deps.len());
         for dep in deps {
@@ -1780,7 +1785,44 @@ pub fn schema_to_commands(schema: &Schema) -> Vec<crate::ast::Qail> {
         });
     }
 
+    let mut fk_table_names: Vec<&String> = schema
+        .tables
+        .iter()
+        .filter(|(_, table)| !table.multi_column_fks.is_empty())
+        .map(|(name, _)| name)
+        .collect();
+    fk_table_names.sort();
+    for table_name in fk_table_names {
+        let table = &schema.tables[table_name];
+        for fk in &table.multi_column_fks {
+            cmds.push(multi_column_fk_to_alter_command(&table.name, fk));
+        }
+    }
+
     cmds
+}
+
+pub(super) fn multi_column_fk_to_table_constraint(
+    fk: &MultiColumnForeignKey,
+) -> crate::ast::TableConstraint {
+    crate::ast::TableConstraint::ForeignKey {
+        name: fk.name.clone(),
+        columns: fk.columns.clone(),
+        ref_table: fk.ref_table.clone(),
+        ref_columns: fk.ref_columns.clone(),
+    }
+}
+
+pub(super) fn multi_column_fk_to_alter_command(
+    table_name: &str,
+    fk: &MultiColumnForeignKey,
+) -> crate::ast::Qail {
+    crate::ast::Qail {
+        action: crate::ast::Action::Alter,
+        table: table_name.to_string(),
+        table_constraints: vec![multi_column_fk_to_table_constraint(fk)],
+        ..Default::default()
+    }
 }
 
 fn fk_action_to_sql(action: &FkAction) -> &'static str {
@@ -2072,6 +2114,99 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, crate::ast::Constraint::Check(vals) if vals.len() == 1)),
             "check expressions should be preserved"
+        );
+    }
+
+    #[test]
+    fn schema_to_commands_preserves_multi_column_foreign_keys() {
+        use crate::transpiler::ToSql;
+
+        let mut schema = Schema::new();
+        schema.add_table(
+            Table::new("schedules")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        schema.add_index(
+            Index::new(
+                "idx_schedules_route_schedule",
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            )
+            .unique(),
+        );
+        schema.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text))
+                .foreign_key(MultiColumnForeignKey::new(
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                    "schedules",
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                )),
+        );
+
+        let cmds = schema_to_commands(&schema);
+        let schedules_idx = cmds
+            .iter()
+            .position(|c| c.action == crate::ast::Action::Make && c.table == "schedules")
+            .expect("schedules create command should exist");
+        let trips_idx = cmds
+            .iter()
+            .position(|c| c.action == crate::ast::Action::Make && c.table == "trips")
+            .expect("trips create command should exist");
+        let unique_idx = cmds
+            .iter()
+            .position(|c| {
+                c.action == crate::ast::Action::Index
+                    && c.index_def
+                        .as_ref()
+                        .is_some_and(|idx| idx.name == "idx_schedules_route_schedule")
+            })
+            .expect("unique index command should exist");
+        let add_fk_idx = cmds
+            .iter()
+            .position(|c| c.action == crate::ast::Action::Alter && c.table == "trips")
+            .expect("trips composite foreign key ALTER command should exist");
+
+        assert!(schedules_idx < unique_idx);
+        assert!(trips_idx < unique_idx);
+        assert!(unique_idx < add_fk_idx);
+
+        let trips_cmd = cmds
+            .iter()
+            .find(|c| c.action == crate::ast::Action::Make && c.table == "trips")
+            .expect("trips create command should exist");
+        assert!(
+            trips_cmd.table_constraints.is_empty(),
+            "composite foreign keys should not be emitted inline on CREATE TABLE"
+        );
+
+        let add_fk_cmd = &cmds[add_fk_idx];
+        assert!(
+            add_fk_cmd
+                .table_constraints
+                .iter()
+                .any(|constraint| matches!(
+                        constraint,
+                        crate::ast::TableConstraint::ForeignKey {
+                            columns,
+                            ref_table,
+                            ref_columns,
+                            ..
+                        } if columns == &["route_id", "schedule_id"]
+                            && ref_table == "schedules"
+                            && ref_columns == &["route_id", "schedule_id"]
+                )),
+            "multi-column foreign key should be represented in generated commands"
+        );
+
+        let sql = add_fk_cmd.to_sql();
+        assert!(
+            sql.contains(
+                "ALTER TABLE trips ADD FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id)"
+            ),
+            "generated SQL should include composite foreign key, got: {sql}"
         );
     }
 }

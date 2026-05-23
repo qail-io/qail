@@ -3,7 +3,7 @@
 //! Computes the difference between two schemas and generates Qail operations.
 //! Now with intent-awareness from MigrationHint.
 
-use super::schema::{MigrationHint, Schema};
+use super::schema::{MigrationHint, Schema, multi_column_fk_to_alter_command};
 use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
 use std::collections::BTreeSet;
 
@@ -156,6 +156,9 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                     c.foreign_key.as_ref().is_none_or(|fk| {
                         !new_set.contains(fk.table.as_str()) || emitted.contains(fk.table.as_str())
                     })
+                }) && t.multi_column_fks.iter().all(|fk| {
+                    !new_set.contains(fk.ref_table.as_str())
+                        || emitted.contains(fk.ref_table.as_str())
                 })
             });
             if deps_satisfied {
@@ -236,7 +239,10 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
         std::cmp::Reverse(
             old.tables
                 .get(*name)
-                .map(|t| t.columns.iter().filter(|c| c.foreign_key.is_some()).count())
+                .map(|t| {
+                    t.columns.iter().filter(|c| c.foreign_key.is_some()).count()
+                        + t.multi_column_fks.len()
+                })
                 .unwrap_or(0),
         )
     });
@@ -452,6 +458,28 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
         }
     }
 
+    let mut fk_table_names: Vec<&String> = new
+        .tables
+        .iter()
+        .filter(|(_, table)| !table.multi_column_fks.is_empty())
+        .map(|(name, _)| name)
+        .collect();
+    fk_table_names.sort();
+    for name in fk_table_names {
+        let new_table = &new.tables[name];
+        if let Some(old_table) = old.tables.get(name) {
+            for fk in &new_table.multi_column_fks {
+                if !old_table.multi_column_fks.contains(fk) {
+                    cmds.push(multi_column_fk_to_alter_command(name, fk));
+                }
+            }
+        } else {
+            for fk in &new_table.multi_column_fks {
+                cmds.push(multi_column_fk_to_alter_command(name, fk));
+            }
+        }
+    }
+
     // Detect dropped indexes
     for old_idx in &old.indexes {
         let exists = new.indexes.iter().any(|i| i.name == old_idx.name);
@@ -479,7 +507,7 @@ fn parse_table_col(s: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::schema::{Column, Table, ViewDef};
+    use super::super::schema::{Column, Index, MultiColumnForeignKey, Table, ViewDef};
     use super::*;
 
     #[test]
@@ -643,6 +671,164 @@ mod tests {
         assert!(
             orders_idx < items_idx,
             "orders (1 FK) before order_items (2 FK)"
+        );
+    }
+
+    #[test]
+    fn diff_new_table_preserves_multi_column_foreign_key() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let old = Schema::default();
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("schedules")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        new.add_index(
+            Index::new(
+                "idx_schedules_route_schedule",
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            )
+            .unique(),
+        );
+        new.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text))
+                .foreign_key(MultiColumnForeignKey::new(
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                    "schedules",
+                    vec!["route_id".to_string(), "schedule_id".to_string()],
+                )),
+        );
+
+        let cmds = diff_schemas(&old, &new);
+        let schedules_idx = cmds
+            .iter()
+            .position(|c| matches!(c.action, Action::Make) && c.table == "schedules")
+            .expect("schedules create command should exist");
+        let trips_idx = cmds
+            .iter()
+            .position(|c| matches!(c.action, Action::Make) && c.table == "trips")
+            .expect("trips create command should exist");
+        let unique_idx = cmds
+            .iter()
+            .position(|c| {
+                matches!(c.action, Action::Index)
+                    && c.index_def
+                        .as_ref()
+                        .is_some_and(|idx| idx.name == "idx_schedules_route_schedule")
+            })
+            .expect("unique index command should exist");
+        let add_fk_idx = cmds
+            .iter()
+            .position(|c| matches!(c.action, Action::Alter) && c.table == "trips")
+            .expect("composite FK ALTER command should exist");
+
+        assert!(schedules_idx < unique_idx);
+        assert!(trips_idx < unique_idx);
+        assert!(unique_idx < add_fk_idx);
+
+        let trips_cmd = cmds
+            .iter()
+            .find(|c| matches!(c.action, Action::Make) && c.table == "trips")
+            .expect("trips create command should exist");
+        assert!(
+            trips_cmd.table_constraints.is_empty(),
+            "composite foreign keys should not be emitted inline on CREATE TABLE"
+        );
+
+        let add_fk_cmd = &cmds[add_fk_idx];
+        assert!(
+            add_fk_cmd
+                .table_constraints
+                .iter()
+                .any(|constraint| matches!(
+                    constraint,
+                    crate::ast::TableConstraint::ForeignKey {
+                        columns,
+                        ref_table,
+                        ref_columns,
+                        ..
+                    } if columns == &["route_id", "schedule_id"]
+                        && ref_table == "schedules"
+                        && ref_columns == &["route_id", "schedule_id"]
+                )),
+            "diff should preserve composite FK table constraint"
+        );
+
+        let sql = add_fk_cmd.to_sql();
+        assert!(
+            sql.contains(
+                "ALTER TABLE trips ADD FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id)"
+            ),
+            "generated SQL should include composite foreign key, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn diff_existing_table_adds_multi_column_foreign_key() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("schedules")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+        old.add_table(
+            Table::new("trips")
+                .column(Column::new("route_id", ColumnType::Text))
+                .column(Column::new("schedule_id", ColumnType::Text)),
+        );
+
+        let mut new = old.clone();
+        new.add_index(
+            Index::new(
+                "idx_schedules_route_schedule",
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            )
+            .unique(),
+        );
+        new.tables
+            .get_mut("trips")
+            .expect("trips table should exist")
+            .multi_column_fks
+            .push(MultiColumnForeignKey::new(
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+                "schedules",
+                vec!["route_id".to_string(), "schedule_id".to_string()],
+            ));
+
+        let cmds = diff_schemas(&old, &new);
+        let unique_idx = cmds
+            .iter()
+            .position(|c| {
+                matches!(c.action, Action::Index)
+                    && c.index_def
+                        .as_ref()
+                        .is_some_and(|idx| idx.name == "idx_schedules_route_schedule")
+            })
+            .expect("unique index command should exist");
+        let add_fk_idx = cmds
+            .iter()
+            .position(|c| matches!(c.action, Action::Alter) && c.table == "trips")
+            .expect("composite FK ALTER command should exist");
+        assert!(unique_idx < add_fk_idx);
+
+        let add_fk_cmd = &cmds[add_fk_idx];
+        let sql = add_fk_cmd.to_sql();
+        assert!(
+            sql.contains(
+                "ALTER TABLE trips ADD FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id)"
+            ),
+            "generated SQL should add composite foreign key, got: {sql}"
         );
     }
 }

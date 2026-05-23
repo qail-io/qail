@@ -261,6 +261,33 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
                     ensure_str("qail.table_constraint.column", col)?;
                 }
             }
+            crate::ast::TableConstraint::ForeignKey {
+                name,
+                columns,
+                ref_table,
+                ref_columns,
+            } => {
+                if let Some(name) = name {
+                    ensure_str("qail.table_constraint.name", name)?;
+                }
+                ensure_len(
+                    "qail.table_constraint.columns",
+                    columns.len(),
+                    MAX_AST_COLLECTION_LEN,
+                )?;
+                for col in columns {
+                    ensure_str("qail.table_constraint.column", col)?;
+                }
+                ensure_str("qail.table_constraint.ref_table", ref_table)?;
+                ensure_len(
+                    "qail.table_constraint.ref_columns",
+                    ref_columns.len(),
+                    MAX_AST_COLLECTION_LEN,
+                )?;
+                for col in ref_columns {
+                    ensure_str("qail.table_constraint.ref_column", col)?;
+                }
+            }
         }
     }
 

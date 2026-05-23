@@ -7,7 +7,7 @@
 //! Call [`validate_ast`] on any `Qail` obtained from an untrusted source
 //! (binary endpoint, external API, etc.) before execution.
 
-use crate::ast::{Action, ConflictAction, Expr, Qail, Value};
+use crate::ast::{Action, ConflictAction, Expr, Qail, TableConstraint, Value};
 use std::fmt;
 
 /// Error returned when AST structural validation fails.
@@ -298,6 +298,34 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
     // ── Columns ──────────────────────────────────────────────────────
     for (i, col) in cmd.columns.iter().enumerate() {
         check_expr(&format!("columns[{i}]"), col)?;
+    }
+
+    // ── Table Constraints ────────────────────────────────────────────
+    for (i, constraint) in cmd.table_constraints.iter().enumerate() {
+        match constraint {
+            TableConstraint::Unique(cols) | TableConstraint::PrimaryKey(cols) => {
+                for col in cols {
+                    check_ident(&format!("table_constraints[{i}].column"), col)?;
+                }
+            }
+            TableConstraint::ForeignKey {
+                name,
+                columns,
+                ref_table,
+                ref_columns,
+            } => {
+                if let Some(name) = name {
+                    check_ident(&format!("table_constraints[{i}].name"), name)?;
+                }
+                for col in columns {
+                    check_ident(&format!("table_constraints[{i}].column"), col)?;
+                }
+                check_ident(&format!("table_constraints[{i}].ref_table"), ref_table)?;
+                for col in ref_columns {
+                    check_ident(&format!("table_constraints[{i}].ref_column"), col)?;
+                }
+            }
+        }
     }
 
     // ── Joins ────────────────────────────────────────────────────────

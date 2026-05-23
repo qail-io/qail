@@ -606,6 +606,17 @@ pub enum TableConstraint {
     Unique(Vec<String>),
     /// Composite PRIMARY KEY.
     PrimaryKey(Vec<String>),
+    /// Composite FOREIGN KEY constraint.
+    ForeignKey {
+        /// Optional constraint name.
+        name: Option<String>,
+        /// Source columns.
+        columns: Vec<String>,
+        /// Referenced table.
+        ref_table: String,
+        /// Referenced columns.
+        ref_columns: Vec<String>,
+    },
 }
 
 // ==================== From Implementations for Ergonomic API ====================

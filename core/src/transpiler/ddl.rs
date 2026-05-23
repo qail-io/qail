@@ -1,6 +1,45 @@
 use super::dialect::Dialect;
+use super::traits::SqlGenerator;
 use crate::ast::*;
-// use super::traits::SqlGenerator;
+
+fn quoted_column_list(cols: &[String], generator: &dyn SqlGenerator) -> String {
+    cols.iter()
+        .map(|c| generator.quote_identifier(c))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn table_constraint_to_sql(constraint: &TableConstraint, generator: &dyn SqlGenerator) -> String {
+    match constraint {
+        TableConstraint::Unique(cols) => {
+            format!("UNIQUE ({})", quoted_column_list(cols, generator))
+        }
+        TableConstraint::PrimaryKey(cols) => {
+            format!("PRIMARY KEY ({})", quoted_column_list(cols, generator))
+        }
+        TableConstraint::ForeignKey {
+            name,
+            columns,
+            ref_table,
+            ref_columns,
+        } => {
+            let mut sql = String::new();
+            if let Some(name) = name {
+                sql.push_str("CONSTRAINT ");
+                sql.push_str(&generator.quote_identifier(name));
+                sql.push(' ');
+            }
+            sql.push_str("FOREIGN KEY (");
+            sql.push_str(&quoted_column_list(columns, generator));
+            sql.push_str(") REFERENCES ");
+            sql.push_str(&generator.quote_identifier(ref_table));
+            sql.push('(');
+            sql.push_str(&quoted_column_list(ref_columns, generator));
+            sql.push(')');
+            sql
+        }
+    }
+}
 
 /// Generate CREATE TABLE SQL.
 pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
@@ -128,24 +167,10 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     for tc in &cmd.table_constraints {
-        match tc {
-            TableConstraint::Unique(cols) => {
-                let col_list = cols
-                    .iter()
-                    .map(|c| generator.quote_identifier(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                defs.push(format!("    UNIQUE ({})", col_list));
-            }
-            TableConstraint::PrimaryKey(cols) => {
-                let col_list = cols
-                    .iter()
-                    .map(|c| generator.quote_identifier(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                defs.push(format!("    PRIMARY KEY ({})", col_list));
-            }
-        }
+        defs.push(format!(
+            "    {}",
+            table_constraint_to_sql(tc, generator.as_ref())
+        ));
     }
 
     sql.push_str(&defs.join(",\n"));
@@ -403,6 +428,13 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
 
             parts.push(format!("ALTER TABLE {} ADD COLUMN {}", table, col_def));
         }
+    }
+    for constraint in &cmd.table_constraints {
+        parts.push(format!(
+            "ALTER TABLE {} ADD {}",
+            table,
+            table_constraint_to_sql(constraint, generator.as_ref())
+        ));
     }
 
     parts.join(";\n")
