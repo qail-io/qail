@@ -21,12 +21,14 @@ struct OutboxItem {
     payload: WebhookPayload,
     retry_count: u32,
     attempts: u32,
+    locked_at: String,
 }
 
 #[derive(Debug)]
 struct MalformedOutboxItem {
     id: String,
     reason: String,
+    locked_at: String,
 }
 
 pub(super) struct OutboxEventInsert<'a> {
@@ -178,7 +180,8 @@ RETURNING
     o.headers::text,
     o.payload::text,
     o.retry_count,
-    o.attempts
+    o.attempts,
+    o.locked_at::text
 "#
             ),
             &[Some(OUTBOX_LOCK_STALE_SECS.to_string().into_bytes())],
@@ -236,6 +239,7 @@ fn required_string(
         .ok_or_else(|| MalformedOutboxItem {
             id: id.to_string(),
             reason: format!("missing {}", field),
+            locked_at: row.get_string(7).unwrap_or_default(),
         })
 }
 
@@ -248,6 +252,7 @@ fn required_i32(
     row.get_i32(idx).ok_or_else(|| MalformedOutboxItem {
         id: id.to_string(),
         reason: format!("invalid {}", field),
+        locked_at: row.get_string(7).unwrap_or_default(),
     })
 }
 
@@ -260,15 +265,18 @@ fn parse_claimed_outbox_row(row: &PgRow) -> Result<OutboxItem, MalformedOutboxIt
         serde_json::from_str(&headers_raw).map_err(|e| MalformedOutboxItem {
             id: id.clone(),
             reason: format!("invalid headers JSON: {}", e),
+            locked_at: row.get_string(7).unwrap_or_default(),
         })?;
     let payload_raw = required_string(row, 4, &id, "payload")?;
     let payload =
         serde_json::from_str::<WebhookPayload>(&payload_raw).map_err(|e| MalformedOutboxItem {
             id: id.clone(),
             reason: format!("invalid payload JSON: {}", e),
+            locked_at: row.get_string(7).unwrap_or_default(),
         })?;
     let retry_count = required_i32(row, 5, &id, "retry_count")?.max(0) as u32;
     let attempts = required_i32(row, 6, &id, "attempts")?.max(0) as u32;
+    let locked_at = required_string(row, 7, &id, "locked_at")?;
 
     Ok(OutboxItem {
         id,
@@ -278,6 +286,7 @@ fn parse_claimed_outbox_row(row: &PgRow) -> Result<OutboxItem, MalformedOutboxIt
         payload,
         retry_count,
         attempts,
+        locked_at,
     })
 }
 
@@ -348,10 +357,12 @@ SET status = 'failed',
     next_attempt_at = now()
 WHERE id = $1
   AND status = 'delivering'
+  AND locked_at::text = $3
 "#,
         &[
             Some(item.id.as_bytes().to_vec()),
             Some(item.reason.as_bytes().to_vec()),
+            Some(item.locked_at.as_bytes().to_vec()),
         ],
     )
     .await
@@ -375,11 +386,14 @@ SET status = 'delivered',
     locked_at = NULL,
     delivered_at = now()
 WHERE id = $1
+  AND status = 'delivering'
+  AND locked_at::text = $4
 "#,
         &[
             Some(item.id.as_bytes().to_vec()),
             Some(attempts.into_bytes()),
             response_status.map(String::into_bytes),
+            Some(item.locked_at.as_bytes().to_vec()),
         ],
     )
     .await
@@ -422,6 +436,7 @@ mod tests {
             Some(&payload_json()),
             Some("3"),
             Some("1"),
+            Some("2026-01-01 00:00:00+00"),
         ]);
 
         let item = parse_claimed_outbox_row(&row).expect("row should parse");
@@ -429,6 +444,7 @@ mod tests {
         assert_eq!(item.trigger_name, "order_created");
         assert_eq!(item.retry_count, 3);
         assert_eq!(item.attempts, 1);
+        assert_eq!(item.locked_at, "2026-01-01 00:00:00+00");
         assert_eq!(
             item.headers.get("x-api-key").map(String::as_str),
             Some("secret")
@@ -445,11 +461,13 @@ mod tests {
             Some("{bad-json"),
             Some("3"),
             Some("0"),
+            Some("2026-01-01 00:00:00+00"),
         ]);
 
         let err = parse_claimed_outbox_row(&row).expect_err("payload must be rejected");
         assert_eq!(err.id, "evt_bad");
         assert!(err.reason.contains("invalid payload JSON"));
+        assert_eq!(err.locked_at, "2026-01-01 00:00:00+00");
     }
 
     #[test]
@@ -462,11 +480,31 @@ mod tests {
             Some(&payload_json()),
             Some("3"),
             Some("0"),
+            Some("2026-01-01 00:00:00+00"),
         ]);
 
         let err = parse_claimed_outbox_row(&row).expect_err("headers must be rejected");
         assert_eq!(err.id, "evt_bad");
         assert!(err.reason.contains("invalid headers JSON"));
+        assert_eq!(err.locked_at, "2026-01-01 00:00:00+00");
+    }
+
+    #[test]
+    fn rejects_claimed_outbox_row_without_lock_token() {
+        let row = row(&[
+            Some("evt_bad"),
+            Some("order_created"),
+            Some("https://example.com/hook"),
+            Some("{}"),
+            Some(&payload_json()),
+            Some("3"),
+            Some("0"),
+            None,
+        ]);
+
+        let err = parse_claimed_outbox_row(&row).expect_err("locked_at must be required");
+        assert_eq!(err.id, "evt_bad");
+        assert!(err.reason.contains("missing locked_at"));
     }
 }
 
@@ -507,6 +545,8 @@ SET status = $2,
         ELSE now() + ($6::int4 * interval '1 second')
     END
 WHERE id = $1
+  AND status = 'delivering'
+  AND locked_at::text = $7
 "#,
         &[
             Some(item.id.as_bytes().to_vec()),
@@ -515,6 +555,7 @@ WHERE id = $1
             response_status.map(String::into_bytes),
             Some(error.into_bytes()),
             Some(delay_secs.to_string().into_bytes()),
+            Some(item.locked_at.as_bytes().to_vec()),
         ],
     )
     .await
