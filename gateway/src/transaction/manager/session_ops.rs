@@ -190,6 +190,36 @@ impl TransactionSessionManager {
             return Err(TransactionError::UserMismatch);
         }
 
+        if commit && session.created_at.elapsed() > self.max_lifetime {
+            let age_secs = session.created_at.elapsed().as_secs();
+            let statements = session.statements_executed;
+            let tenant_id = session.tenant_id.clone();
+            session.closed = true;
+            let conn = session.conn.take();
+            drop(session);
+
+            {
+                let mut sessions = self.sessions.lock().await;
+                sessions.remove(session_id);
+                crate::metrics::record_txn_active_sessions(sessions.len());
+            }
+            tracing::warn!(
+                reason = "lifetime_limit",
+                session_id = %session_id,
+                tenant_id = %tenant_id,
+                age_secs,
+                statements,
+                max_lifetime_secs = self.max_lifetime.as_secs(),
+                "Rolling back transaction session instead of committing after max lifetime"
+            );
+            crate::metrics::record_txn_session_expired();
+            crate::metrics::record_txn_forced_rollback("lifetime_limit");
+            Self::rollback_and_release(conn).await;
+            return Err(TransactionError::SessionLifetimeExceeded(
+                self.max_lifetime.as_secs(),
+            ));
+        }
+
         let was_aborted = session.pg_aborted;
         let mutated_tables = if commit {
             session.mutated_tables.iter().cloned().collect()

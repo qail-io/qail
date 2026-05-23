@@ -147,6 +147,42 @@ async fn test_with_session_enforces_lifetime_limit_and_records_metrics() {
 }
 
 #[tokio::test]
+async fn test_close_session_rejects_commit_after_lifetime_limit_and_records_metrics() {
+    let _serial = crate::metrics::txn_test_serial_guard().await;
+    reset_txn_test_metrics();
+    let mgr = TransactionSessionManager::new(10, 30, 1, 1000);
+    insert_test_session(
+        &mgr,
+        "s_commit_lifetime",
+        "tenant_commit",
+        Duration::from_secs(5),
+        Duration::from_secs(0),
+        0,
+    )
+    .await;
+
+    let result = mgr
+        .close_session(
+            "s_commit_lifetime",
+            "tenant_commit",
+            Some("test-user"),
+            true,
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(TransactionError::SessionLifetimeExceeded(1))
+    ));
+    assert_eq!(mgr.active_count().await, 0);
+
+    let snapshot = txn_test_metrics_snapshot();
+    assert_eq!(snapshot.expired, 1);
+    assert_eq!(snapshot.forced_lifetime, 1);
+    assert_eq!(snapshot.active, 0);
+}
+
+#[tokio::test]
 async fn test_with_session_enforces_statement_limit_and_records_metrics() {
     let _serial = crate::metrics::txn_test_serial_guard().await;
     reset_txn_test_metrics();
