@@ -176,6 +176,63 @@ fn test_drop_index_sql_uses_if_exists() {
     assert_eq!(sql, "DROP INDEX IF EXISTS idx_users_email");
 }
 
+#[test]
+fn test_top_level_ddl_quotes_untrusted_identifiers() {
+    let drop = Qail {
+        action: Action::Drop,
+        table: "orders; DROP TABLE users; --".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        drop.to_sql_with_dialect(Dialect::Postgres),
+        "DROP TABLE \"orders; DROP TABLE users; --\""
+    );
+
+    let lock = Qail {
+        action: Action::Lock,
+        table: "orders; DROP TABLE users; --".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        lock.to_sql_with_dialect(Dialect::Postgres),
+        "LOCK TABLE \"orders; DROP TABLE users; --\" IN ACCESS EXCLUSIVE MODE"
+    );
+
+    let alter_rls = Qail {
+        action: Action::AlterEnableRls,
+        table: "orders; DROP TABLE users; --".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        alter_rls.to_sql_with_dialect(Dialect::Postgres),
+        "ALTER TABLE \"orders; DROP TABLE users; --\" ENABLE ROW LEVEL SECURITY"
+    );
+}
+
+#[test]
+fn test_pubsub_and_savepoint_escape_names_and_payloads() {
+    let notify = Qail {
+        action: Action::Notify,
+        channel: Some("tenant\"; DROP TABLE users; --".to_string()),
+        payload: Some("ok'; SELECT 'bad".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        notify.to_sql_with_dialect(Dialect::Postgres),
+        "NOTIFY \"tenant\"\"; DROP TABLE users; --\", 'ok''; SELECT ''bad'"
+    );
+
+    let savepoint = Qail {
+        action: Action::Savepoint,
+        savepoint_name: Some("sp\"; DROP TABLE users; --\0tail".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        savepoint.to_sql_with_dialect(Dialect::Postgres),
+        "SAVEPOINT \"sp\"\"; DROP TABLE users; --tail\""
+    );
+}
+
 // ============= Upsert Tests =============
 
 #[test]

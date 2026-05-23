@@ -109,7 +109,7 @@ impl ToSql for Qail {
             Action::Over => dml::window::build_window(self, dialect),
             Action::With => dml::cte::build_cte(self, dialect),
             Action::Index => ddl::build_create_index(self, dialect),
-            Action::DropIndex => format!("DROP INDEX IF EXISTS {}", self.table),
+            Action::DropIndex => format!("DROP INDEX IF EXISTS {}", escape_identifier(&self.table)),
             Action::Alter => ddl::build_alter_add_column(self, dialect),
             Action::AlterDrop => ddl::build_alter_drop_column(self, dialect),
             Action::AlterType => ddl::build_alter_column_type(self, dialect),
@@ -118,14 +118,14 @@ impl ToSql for Qail {
             Action::TxnCommit => "COMMIT;".to_string(),
             Action::TxnRollback => "ROLLBACK;".to_string(),
             Action::Put => dml::upsert::build_upsert(self, dialect),
-            Action::Drop => format!("DROP TABLE {}", self.table),
+            Action::Drop => format!("DROP TABLE {}", escape_identifier(&self.table)),
             Action::DropCol | Action::RenameCol => ddl::build_alter_column(self, dialect),
             // JSON features
             Action::JsonTable => dml::json_table::build_json_table(self, dialect),
             // COPY protocol (AST-native in qail-pg, generates SELECT for fallback)
             Action::Export => dml::select::build_select(self, dialect),
             // TRUNCATE TABLE
-            Action::Truncate => format!("TRUNCATE TABLE {}", self.table),
+            Action::Truncate => format!("TRUNCATE TABLE {}", escape_identifier(&self.table)),
             // EXPLAIN - wrap SELECT query
             Action::Explain => format!("EXPLAIN {}", dml::select::build_select(self, dialect)),
             // EXPLAIN ANALYZE - execute and analyze query
@@ -134,35 +134,50 @@ impl ToSql for Qail {
                 dml::select::build_select(self, dialect)
             ),
             // LOCK TABLE
-            Action::Lock => format!("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE", self.table),
+            Action::Lock => format!(
+                "LOCK TABLE {} IN ACCESS EXCLUSIVE MODE",
+                escape_identifier(&self.table)
+            ),
             // CREATE MATERIALIZED VIEW - uses source_query for the view definition
             Action::CreateMaterializedView => {
                 if let Some(source) = &self.source_query {
                     format!(
                         "CREATE MATERIALIZED VIEW {} AS {}",
-                        self.table,
+                        escape_identifier(&self.table),
                         source.to_sql_with_dialect(dialect)
                     )
                 } else if let Some(query) = &self.payload {
-                    format!("CREATE MATERIALIZED VIEW {} AS {}", self.table, query)
+                    format!(
+                        "CREATE MATERIALIZED VIEW {} AS {}",
+                        escape_identifier(&self.table),
+                        query
+                    )
                 } else {
                     format!(
                         "CREATE MATERIALIZED VIEW {} AS {}",
-                        self.table,
+                        escape_identifier(&self.table),
                         dml::select::build_select(self, dialect)
                     )
                 }
             }
             // REFRESH MATERIALIZED VIEW
-            Action::RefreshMaterializedView => format!("REFRESH MATERIALIZED VIEW {}", self.table),
+            Action::RefreshMaterializedView => {
+                format!(
+                    "REFRESH MATERIALIZED VIEW {}",
+                    escape_identifier(&self.table)
+                )
+            }
             // DROP MATERIALIZED VIEW
             Action::DropMaterializedView => {
-                format!("DROP MATERIALIZED VIEW IF EXISTS {}", self.table)
+                format!(
+                    "DROP MATERIALIZED VIEW IF EXISTS {}",
+                    escape_identifier(&self.table)
+                )
             }
             // LISTEN/NOTIFY (Pub/Sub)
             Action::Listen => {
                 if let Some(ch) = &self.channel {
-                    format!("LISTEN {}", ch)
+                    format!("LISTEN {}", quote_single_identifier(ch))
                 } else {
                     "LISTEN".to_string()
                 }
@@ -170,9 +185,13 @@ impl ToSql for Qail {
             Action::Notify => {
                 if let Some(ch) = &self.channel {
                     if let Some(msg) = &self.payload {
-                        format!("NOTIFY {}, '{}'", ch, msg)
+                        format!(
+                            "NOTIFY {}, '{}'",
+                            quote_single_identifier(ch),
+                            escape_sql_string_literal(msg)
+                        )
                     } else {
-                        format!("NOTIFY {}", ch)
+                        format!("NOTIFY {}", quote_single_identifier(ch))
                     }
                 } else {
                     "NOTIFY".to_string()
@@ -180,7 +199,7 @@ impl ToSql for Qail {
             }
             Action::Unlisten => {
                 if let Some(ch) = &self.channel {
-                    format!("UNLISTEN {}", ch)
+                    format!("UNLISTEN {}", quote_single_identifier(ch))
                 } else {
                     "UNLISTEN *".to_string()
                 }
@@ -188,21 +207,21 @@ impl ToSql for Qail {
             // Savepoints
             Action::Savepoint => {
                 if let Some(name) = &self.savepoint_name {
-                    format!("SAVEPOINT {}", name)
+                    format!("SAVEPOINT {}", quote_single_identifier(name))
                 } else {
                     "SAVEPOINT".to_string()
                 }
             }
             Action::ReleaseSavepoint => {
                 if let Some(name) = &self.savepoint_name {
-                    format!("RELEASE SAVEPOINT {}", name)
+                    format!("RELEASE SAVEPOINT {}", quote_single_identifier(name))
                 } else {
                     "RELEASE SAVEPOINT".to_string()
                 }
             }
             Action::RollbackToSavepoint => {
                 if let Some(name) = &self.savepoint_name {
-                    format!("ROLLBACK TO SAVEPOINT {}", name)
+                    format!("ROLLBACK TO SAVEPOINT {}", quote_single_identifier(name))
                 } else {
                     "ROLLBACK TO SAVEPOINT".to_string()
                 }
@@ -212,20 +231,24 @@ impl ToSql for Qail {
                 if let Some(source) = &self.source_query {
                     format!(
                         "CREATE VIEW {} AS {}",
-                        self.table,
+                        escape_identifier(&self.table),
                         source.to_sql_with_dialect(dialect)
                     )
                 } else if let Some(query) = &self.payload {
-                    format!("CREATE VIEW {} AS {}", self.table, query)
+                    format!(
+                        "CREATE VIEW {} AS {}",
+                        escape_identifier(&self.table),
+                        query
+                    )
                 } else {
                     format!(
                         "CREATE VIEW {} AS {}",
-                        self.table,
+                        escape_identifier(&self.table),
                         dml::select::build_select(self, dialect)
                     )
                 }
             }
-            Action::DropView => format!("DROP VIEW IF EXISTS {}", self.table),
+            Action::DropView => format!("DROP VIEW IF EXISTS {}", escape_identifier(&self.table)),
             // Vector database operations - use qail-qdrant driver instead
             operators::Action::Search | operators::Action::Upsert | operators::Action::Scroll => {
                 format!(
@@ -251,7 +274,12 @@ impl ToSql for Qail {
                         .unwrap_or_default();
                     format!(
                         "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} LANGUAGE {}{} AS $$ {} $$",
-                        func.name, args, func.returns, lang, volatility, func.body
+                        escape_identifier(&func.name),
+                        args,
+                        func.returns,
+                        lang,
+                        volatility,
+                        func.body
                     )
                 } else {
                     "-- CreateFunction requires function_def".to_string()
@@ -261,7 +289,10 @@ impl ToSql for Qail {
                 if let Some(signature) = &self.payload {
                     format!("DROP FUNCTION IF EXISTS {}", signature)
                 } else {
-                    format!("DROP FUNCTION IF EXISTS {}()", self.table)
+                    format!(
+                        "DROP FUNCTION IF EXISTS {}()",
+                        escape_identifier(&self.table)
+                    )
                 }
             }
             operators::Action::CreateTrigger => {
@@ -288,12 +319,12 @@ impl ToSql for Qail {
                     };
                     format!(
                         "CREATE TRIGGER {} {} {} ON {} {} EXECUTE FUNCTION {}()",
-                        trig.name,
+                        escape_identifier(&trig.name),
                         timing,
                         events.join(" OR "),
-                        trig.table,
+                        escape_identifier(&trig.table),
                         for_each,
-                        trig.execute_function
+                        escape_identifier(&trig.execute_function)
                     )
                 } else {
                     "-- CreateTrigger requires trigger_def".to_string()
@@ -301,9 +332,13 @@ impl ToSql for Qail {
             }
             operators::Action::DropTrigger => {
                 if let Some((table, trigger)) = self.table.rsplit_once('.') {
-                    format!("DROP TRIGGER IF EXISTS {} ON {}", trigger, table)
+                    format!(
+                        "DROP TRIGGER IF EXISTS {} ON {}",
+                        escape_identifier(trigger),
+                        escape_identifier(table)
+                    )
                 } else {
-                    format!("DROP TRIGGER IF EXISTS {}", self.table)
+                    format!("DROP TRIGGER IF EXISTS {}", escape_identifier(&self.table))
                 }
             }
             // Phase 7: Extensions, Comments, Sequences
@@ -320,20 +355,28 @@ impl ToSql for Qail {
                 if let Some(Expr::Named(col)) = self.columns.first() {
                     format!(
                         "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                        self.table, col
+                        escape_identifier(&self.table),
+                        escape_identifier(col)
                     )
                 } else {
-                    format!("ALTER TABLE {} ALTER COLUMN ... SET NOT NULL", self.table)
+                    format!(
+                        "ALTER TABLE {} ALTER COLUMN ... SET NOT NULL",
+                        escape_identifier(&self.table)
+                    )
                 }
             }
             Action::AlterDropNotNull => {
                 if let Some(Expr::Named(col)) = self.columns.first() {
                     format!(
                         "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                        self.table, col
+                        escape_identifier(&self.table),
+                        escape_identifier(col)
                     )
                 } else {
-                    format!("ALTER TABLE {} ALTER COLUMN ... DROP NOT NULL", self.table)
+                    format!(
+                        "ALTER TABLE {} ALTER COLUMN ... DROP NOT NULL",
+                        escape_identifier(&self.table)
+                    )
                 }
             }
             Action::AlterSetDefault => {
@@ -341,12 +384,14 @@ impl ToSql for Qail {
                     let default_expr = self.payload.as_deref().unwrap_or("NULL");
                     format!(
                         "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
-                        self.table, col, default_expr
+                        escape_identifier(&self.table),
+                        escape_identifier(col),
+                        default_expr
                     )
                 } else {
                     format!(
                         "ALTER TABLE {} ALTER COLUMN ... SET DEFAULT ...",
-                        self.table
+                        escape_identifier(&self.table)
                     )
                 }
             }
@@ -354,23 +399,39 @@ impl ToSql for Qail {
                 if let Some(Expr::Named(col)) = self.columns.first() {
                     format!(
                         "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
-                        self.table, col
+                        escape_identifier(&self.table),
+                        escape_identifier(col)
                     )
                 } else {
-                    format!("ALTER TABLE {} ALTER COLUMN ... DROP DEFAULT", self.table)
+                    format!(
+                        "ALTER TABLE {} ALTER COLUMN ... DROP DEFAULT",
+                        escape_identifier(&self.table)
+                    )
                 }
             }
             Action::AlterEnableRls => {
-                format!("ALTER TABLE {} ENABLE ROW LEVEL SECURITY", self.table)
+                format!(
+                    "ALTER TABLE {} ENABLE ROW LEVEL SECURITY",
+                    escape_identifier(&self.table)
+                )
             }
             Action::AlterDisableRls => {
-                format!("ALTER TABLE {} DISABLE ROW LEVEL SECURITY", self.table)
+                format!(
+                    "ALTER TABLE {} DISABLE ROW LEVEL SECURITY",
+                    escape_identifier(&self.table)
+                )
             }
             Action::AlterForceRls => {
-                format!("ALTER TABLE {} FORCE ROW LEVEL SECURITY", self.table)
+                format!(
+                    "ALTER TABLE {} FORCE ROW LEVEL SECURITY",
+                    escape_identifier(&self.table)
+                )
             }
             Action::AlterNoForceRls => {
-                format!("ALTER TABLE {} NO FORCE ROW LEVEL SECURITY", self.table)
+                format!(
+                    "ALTER TABLE {} NO FORCE ROW LEVEL SECURITY",
+                    escape_identifier(&self.table)
+                )
             }
             // Session & procedural commands
             Action::Call => {
@@ -415,7 +476,12 @@ impl ToSql for Qail {
                         _ => None,
                     })
                     .collect();
-                format!("GRANT {} ON {} TO {}", privs.join(", "), self.table, role)
+                format!(
+                    "GRANT {} ON {} TO {}",
+                    privs.join(", "),
+                    escape_identifier(&self.table),
+                    escape_identifier(role)
+                )
             }
             Action::Revoke => {
                 let role = self.payload.as_deref().unwrap_or("");
@@ -430,8 +496,8 @@ impl ToSql for Qail {
                 format!(
                     "REVOKE {} ON {} FROM {}",
                     privs.join(", "),
-                    self.table,
-                    role
+                    escape_identifier(&self.table),
+                    escape_identifier(role)
                 )
             }
             Action::CreatePolicy => {
@@ -460,6 +526,10 @@ fn session_setting_name_to_sql(name: &str) -> String {
     } else {
         escape_identifier(name)
     }
+}
+
+fn quote_single_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('\0', "").replace('"', "\"\""))
 }
 
 fn is_valid_session_setting_name(name: &str) -> bool {
