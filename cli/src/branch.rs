@@ -50,7 +50,10 @@ pub async fn branch_list(db_url: &str) -> Result<()> {
     let mut conn = connect(&host, port, &user, &database, password.as_deref()).await?;
 
     let sql = branch_sql::list_branches_sql();
-    let rows = conn.simple_query(sql).await.unwrap_or_default();
+    let rows = conn
+        .simple_query(sql)
+        .await
+        .context("Failed to list branches")?;
 
     if rows.is_empty() {
         println!("No branches found. Create one with: qail branch create <name>");
