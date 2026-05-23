@@ -135,7 +135,7 @@ impl GrpcClient {
 
     /// Establish a plain TCP → H2 connection.
     async fn establish_plain(host: &str, port: u16) -> QdrantResult<SendRequest<Bytes>> {
-        let addr = format!("{}:{}", host, port);
+        let addr = socket_addr(host, port);
         let stream = TcpStream::connect(&addr)
             .await
             .map_err(|e| QdrantError::Connection(format!("TCP connect failed: {}", e)))?;
@@ -159,7 +159,7 @@ impl GrpcClient {
         port: u16,
         tls_config: &Arc<rustls::ClientConfig>,
     ) -> QdrantResult<SendRequest<Bytes>> {
-        let addr = format!("{}:{}", host, port);
+        let addr = socket_addr(host, port);
         let tcp = TcpStream::connect(&addr)
             .await
             .map_err(|e| QdrantError::Connection(format!("TCP connect failed: {}", e)))?;
@@ -472,6 +472,14 @@ fn parse_connect_url(url: &str) -> QdrantResult<ConnectEndpoint> {
     Ok(ConnectEndpoint { host, port, tls })
 }
 
+fn socket_addr(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
 /// Frame a protobuf message for gRPC transport.
 ///
 /// gRPC uses a 5-byte header:
@@ -607,6 +615,13 @@ mod tests {
         assert!(parse_connect_url("ftp://localhost:6334").is_err());
         assert!(parse_connect_url("localhost:6334").is_err());
         assert!(parse_connect_url("https:///collections").is_err());
+    }
+
+    #[test]
+    fn test_socket_addr_brackets_ipv6_hosts() {
+        assert_eq!(socket_addr("127.0.0.1", 6334), "127.0.0.1:6334");
+        assert_eq!(socket_addr("::1", 6334), "[::1]:6334");
+        assert_eq!(socket_addr("[::1]", 6334), "[::1]:6334");
     }
 
     #[test]
