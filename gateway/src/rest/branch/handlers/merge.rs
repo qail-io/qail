@@ -44,6 +44,51 @@ fn apply_insert_conflict_target(
     }
 }
 
+fn parse_overlay_object(
+    operation: &str,
+    row_data_str: &str,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let val = serde_json::from_str::<Value>(row_data_str)
+        .map_err(|e| format!("Invalid {} overlay JSON: {}", operation, e))?;
+    val.as_object()
+        .cloned()
+        .ok_or_else(|| format!("Invalid {} overlay row_data: expected object", operation))
+}
+
+fn build_branch_overlay_merge_cmd(
+    table: &str,
+    row_pk: &str,
+    operation: &str,
+    row_data_str: &str,
+    pk_col: Option<&str>,
+) -> Result<qail_core::ast::Qail, String> {
+    match operation {
+        "insert" => {
+            let obj = parse_overlay_object(operation, row_data_str)?;
+            let mut q = qail_core::ast::Qail::add(table);
+            for (k, v) in &obj {
+                q = q.set_value(k, json_to_qail_value(v));
+            }
+            Ok(apply_insert_conflict_target(q, &obj, pk_col))
+        }
+        "update" => {
+            let obj = parse_overlay_object(operation, row_data_str)?;
+            let mut q = qail_core::ast::Qail::set(table);
+            for (k, v) in &obj {
+                q = q.set_value(k, json_to_qail_value(v));
+            }
+            Ok(q.eq(pk_col.unwrap_or("id"), row_pk.to_string()))
+        }
+        "delete" => {
+            Ok(qail_core::ast::Qail::del(table).eq(pk_col.unwrap_or("id"), row_pk.to_string()))
+        }
+        _ => Err(format!(
+            "Unsupported branch overlay operation '{}'",
+            operation
+        )),
+    }
+}
+
 /// POST /api/_branch/:name/merge — Merge branch overlay into main tables.
 pub(crate) async fn branch_merge_handler(
     State(state): State<Arc<GatewayState>>,
@@ -165,71 +210,29 @@ pub(crate) async fn branch_merge_handler(
                         .or_else(|| row.get_string(3))
                         .unwrap_or_default();
 
-                    let cmd = match operation.as_str() {
-                        "insert" => {
-                            if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
-                                if let Some(obj) = val.as_object() {
-                                    let mut q = qail_core::ast::Qail::add(&table);
-                                    for (k, v) in obj {
-                                        q = q.set_value(k, json_to_qail_value(v));
-                                    }
-                                    q = apply_insert_conflict_target(
-                                        q,
-                                        obj,
-                                        state
-                                            .schema
-                                            .table(&table)
-                                            .and_then(|t| t.primary_key.as_deref()),
-                                    );
-                                    Some(q)
-                                } else {
-                                    None
+                    let pk_col = state
+                        .schema
+                        .table(&table)
+                        .and_then(|t| t.primary_key.as_deref());
+                    match build_branch_overlay_merge_cmd(
+                        &table,
+                        &row_pk,
+                        &operation,
+                        &row_data_str,
+                        pk_col,
+                    ) {
+                        Ok(mut qail_cmd) => {
+                            state.optimize_qail_for_execution(&mut qail_cmd);
+                            match conn.fetch_all_uncached(&qail_cmd).await {
+                                Ok(_) => {
+                                    applied += 1;
+                                    mutated_tables.insert(table.clone());
                                 }
-                            } else {
-                                None
+                                Err(e) => errors.push(format!("{}.{}: {}", table, row_pk, e)),
                             }
                         }
-                        "update" => {
-                            if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
-                                if let Some(obj) = val.as_object() {
-                                    let mut q = qail_core::ast::Qail::set(&table);
-                                    for (k, v) in obj {
-                                        q = q.set_value(k, json_to_qail_value(v));
-                                    }
-                                    let pk_col = state
-                                        .schema
-                                        .table(&table)
-                                        .and_then(|t| t.primary_key.as_deref())
-                                        .unwrap_or("id");
-                                    q = q.eq(pk_col, row_pk.clone());
-                                    Some(q)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        }
-                        "delete" => {
-                            let pk_col = state
-                                .schema
-                                .table(&table)
-                                .and_then(|t| t.primary_key.as_deref())
-                                .unwrap_or("id");
-                            let q = qail_core::ast::Qail::del(&table).eq(pk_col, row_pk.clone());
-                            Some(q)
-                        }
-                        _ => None,
-                    };
-
-                    if let Some(mut qail_cmd) = cmd {
-                        state.optimize_qail_for_execution(&mut qail_cmd);
-                        match conn.fetch_all_uncached(&qail_cmd).await {
-                            Ok(_) => {
-                                applied += 1;
-                                mutated_tables.insert(table.clone());
-                            }
-                            Err(e) => errors.push(format!("{}.{}: {}", table, row_pk, e)),
+                        Err(e) => {
+                            errors.push(format!("{}.{}: {}", table, row_pk, e));
                         }
                     }
                 }
@@ -357,8 +360,8 @@ pub(crate) async fn branch_merge_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_insert_conflict_target;
-    use qail_core::ast::{ConflictAction, Expr};
+    use super::{apply_insert_conflict_target, build_branch_overlay_merge_cmd};
+    use qail_core::ast::{Action, ConflictAction, Expr};
     use serde_json::{Map, json};
 
     #[test]
@@ -403,5 +406,37 @@ mod tests {
         let cmd = apply_insert_conflict_target(qail_core::ast::Qail::add("orders"), &obj, None);
 
         assert!(cmd.on_conflict.is_none());
+    }
+
+    #[test]
+    fn overlay_merge_cmd_rejects_unknown_operation() {
+        let err = build_branch_overlay_merge_cmd("orders", "order-1", "patch", "{}", Some("id"))
+            .expect_err("unknown overlay operation must fail closed");
+        assert!(err.contains("Unsupported branch overlay operation"));
+    }
+
+    #[test]
+    fn overlay_merge_cmd_rejects_malformed_json() {
+        let err = build_branch_overlay_merge_cmd("orders", "order-1", "insert", "{bad", Some("id"))
+            .expect_err("malformed insert overlay JSON must fail closed");
+        assert!(err.contains("Invalid insert overlay JSON"));
+    }
+
+    #[test]
+    fn overlay_merge_cmd_rejects_non_object_update_payload() {
+        let err = build_branch_overlay_merge_cmd("orders", "order-1", "update", "[]", Some("id"))
+            .expect_err("non-object update overlay must fail closed");
+        assert!(err.contains("expected object"));
+    }
+
+    #[test]
+    fn overlay_merge_cmd_builds_delete_with_schema_pk() {
+        let cmd =
+            build_branch_overlay_merge_cmd("orders", "order-1", "delete", "null", Some("uuid"))
+                .expect("delete overlay should build without row_data object");
+
+        assert_eq!(cmd.action, Action::Del);
+        assert_eq!(cmd.table, "orders");
+        assert_eq!(cmd.cages[0].conditions[0].left, Expr::Named("uuid".into()));
     }
 }
