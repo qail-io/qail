@@ -42,6 +42,18 @@ fn test_parse_filters_checked_rejects_invalid_filter_column() {
 }
 
 #[test]
+fn test_parse_filters_checked_rejects_empty_in_lists() {
+    let err = parse_filters_checked("status.in=").unwrap_err();
+    assert!(err.contains("requires at least one value"));
+
+    let err = parse_filters_checked("status=in.()").unwrap_err();
+    assert!(err.contains("requires at least one value"));
+
+    let err = parse_filters_checked("status.not_in=()").unwrap_err();
+    assert!(err.contains("requires at least one value"));
+}
+
+#[test]
 fn test_parse_filters_in() {
     let filters = parse_filters("status.in=active,pending,closed");
     assert_eq!(filters.len(), 1);

@@ -181,6 +181,20 @@ fn parse_filters_impl(
             parse_filter_value_for_op(op, &decoded_value)
         };
 
+        if matches!(op, Operator::In | Operator::NotIn)
+            && matches!(&qail_value, QailValue::Array(vals) if vals.is_empty())
+        {
+            return Err(format!(
+                "Filter '{}.{}' requires at least one value",
+                column,
+                if matches!(op, Operator::In) {
+                    "in"
+                } else {
+                    "not_in"
+                }
+            ));
+        }
+
         filters.push((column.to_string(), op, qail_value));
     }
 
