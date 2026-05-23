@@ -14,9 +14,31 @@ use crate::auth::authenticate_request;
 use crate::middleware::ApiError;
 
 use super::extract_table_name;
-use super::filters::{apply_filters, apply_sorting, parse_expand_relations, parse_filters_checked};
-use super::handlers::check_table_not_blocked;
+use super::filters::{
+    apply_filters, apply_sorting, parse_expand_relations, parse_filters_checked, parse_scalar_value,
+};
+use super::handlers::{check_table_not_blocked, primary_sort_for_cursor};
 use super::types::ListParams;
+
+fn apply_cursor_filter(
+    mut cmd: qail_core::ast::Qail,
+    cursor: Option<&str>,
+    sort: Option<&str>,
+    default_sort_column: &str,
+) -> qail_core::ast::Qail {
+    let Some(cursor) = cursor else {
+        return cmd;
+    };
+
+    let (sort_col, sort_desc) = primary_sort_for_cursor(sort, default_sort_column);
+    let cursor_val = parse_scalar_value(cursor);
+    if sort_desc {
+        cmd = cmd.lt(&sort_col, cursor_val);
+    } else {
+        cmd = cmd.gt(&sort_col, cursor_val);
+    }
+    cmd
+}
 
 /// GET /api/{table}/_explain — return EXPLAIN ANALYZE for the query
 ///
@@ -136,6 +158,13 @@ pub(crate) async fn explain_handler(
         );
     }
 
+    cmd = apply_cursor_filter(
+        cmd,
+        params.cursor.as_deref(),
+        params.sort.as_deref(),
+        default_sort_column,
+    );
+
     cmd = cmd.limit(limit);
     cmd = cmd.offset(offset);
 
@@ -215,4 +244,34 @@ pub(crate) async fn explain_handler(
         "query": sql,
         "plan": plan,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use qail_core::ast::Qail;
+    use qail_core::transpiler::ToSql;
+
+    use super::apply_cursor_filter;
+
+    #[test]
+    fn explain_cursor_filter_uses_default_ascending_sort() {
+        let cmd = apply_cursor_filter(Qail::get("orders"), Some("42"), None, "id");
+
+        assert_eq!(cmd.to_sql(), "SELECT * FROM orders WHERE id > 42");
+    }
+
+    #[test]
+    fn explain_cursor_filter_uses_descending_primary_sort() {
+        let cmd = apply_cursor_filter(
+            Qail::get("orders"),
+            Some("2026-01-01"),
+            Some("-created_at,total:asc"),
+            "id",
+        );
+
+        assert_eq!(
+            cmd.to_sql(),
+            "SELECT * FROM orders WHERE created_at < '2026-01-01'"
+        );
+    }
 }
