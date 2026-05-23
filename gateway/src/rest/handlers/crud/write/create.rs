@@ -101,6 +101,10 @@ fn parse_explicit_on_conflict_columns(input: &str) -> Result<Vec<String>, ApiErr
     })
 }
 
+fn parse_explicit_on_conflict_param(input: Option<&str>) -> Result<Option<Vec<String>>, ApiError> {
+    input.map(parse_explicit_on_conflict_columns).transpose()
+}
+
 fn parse_on_conflict_action(input: Option<&str>) -> Result<OnConflictActionParam, ApiError> {
     let Some(input) = input else {
         return Ok(OnConflictActionParam::Update);
@@ -312,6 +316,8 @@ pub(crate) async fn create_handler(
 
     let on_conflict_action =
         parse_on_conflict_action(mutation_params.on_conflict_action.as_deref())?;
+    let explicit_conflict_cols =
+        parse_explicit_on_conflict_param(mutation_params.on_conflict.as_deref())?;
     if let Some(returning) = mutation_params.returning.as_deref() {
         parse_select_columns(returning).map_err(ApiError::parse_error)?;
     }
@@ -384,10 +390,10 @@ pub(crate) async fn create_handler(
 
     // Resolve PK column for Prefer: resolution=merge-duplicates
     let prefer_conflict_col: Option<String> =
-        if prefer.wants_upsert() && mutation_params.on_conflict.is_none() {
+        if prefer.wants_upsert() && explicit_conflict_cols.is_none() {
             // Auto-resolve PK column from schema
             table.primary_key.clone()
-        } else if prefer.wants_ignore_duplicates() && mutation_params.on_conflict.is_none() {
+        } else if prefer.wants_ignore_duplicates() && explicit_conflict_cols.is_none() {
             table.primary_key.clone()
         } else {
             None
@@ -419,8 +425,7 @@ pub(crate) async fn create_handler(
         }
 
         // Upsert support: explicit on_conflict param takes precedence
-        if let Some(ref conflict_col) = mutation_params.on_conflict {
-            let conflict_cols = parse_explicit_on_conflict_columns(conflict_col)?;
+        if let Some(conflict_cols) = explicit_conflict_cols.as_ref() {
             let conflict_col_refs: Vec<&str> = conflict_cols.iter().map(String::as_str).collect();
 
             match on_conflict_action {
@@ -650,7 +655,8 @@ mod tests {
         branch_insert_overlay_key, build_upsert_old_row_lookup,
         create_request_can_skip_required_validation, guard_upsert_conflict_update_tenant,
         normalize_create_object_for_tenant, parse_explicit_on_conflict_columns,
-        parse_on_conflict_action, pk_to_overlay_key, upsert_update_assignments,
+        parse_explicit_on_conflict_param, parse_on_conflict_action, pk_to_overlay_key,
+        upsert_update_assignments,
     };
     use qail_core::ast::{CageKind, ConflictAction, Expr, Operator, Value as QailValue};
     use serde_json::{Map, Value, json};
@@ -852,6 +858,20 @@ mod tests {
     #[test]
     fn explicit_on_conflict_columns_reject_invalid_column() {
         let err = parse_explicit_on_conflict_columns("id,tenant-id").unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("Invalid on_conflict parameter"));
+    }
+
+    #[test]
+    fn explicit_on_conflict_param_parses_before_connection_scope() {
+        assert!(parse_explicit_on_conflict_param(None).unwrap().is_none());
+
+        let cols = parse_explicit_on_conflict_param(Some("id, tenant_id"))
+            .unwrap()
+            .expect("columns");
+        assert_eq!(cols, vec!["id".to_string(), "tenant_id".to_string()]);
+
+        let err = parse_explicit_on_conflict_param(Some("id,tenant-id")).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
         assert!(err.message.contains("Invalid on_conflict parameter"));
     }
