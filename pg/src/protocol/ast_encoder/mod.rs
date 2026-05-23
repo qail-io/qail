@@ -650,6 +650,45 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_json_access_escapes_path_segment_quotes() {
+        use qail_core::ast::Expr;
+
+        let mut cmd = Qail::get("events");
+        cmd.columns.push(Expr::JsonAccess {
+            column: "payload".to_string(),
+            path_segments: vec![("x') IS NOT NULL OR TRUE --".to_string(), true)],
+            alias: None,
+        });
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(params.is_empty());
+        assert!(
+            sql.contains("(payload->>'x'') IS NOT NULL OR TRUE --')"),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("(payload->>'x') IS NOT NULL OR TRUE --')"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn test_encode_json_access_rejects_nul_path_segment() {
+        use qail_core::ast::Expr;
+
+        let mut cmd = Qail::get("events");
+        cmd.columns.push(Expr::JsonAccess {
+            column: "payload".to_string(),
+            path_segments: vec![("bad\0path".to_string(), true)],
+            alias: None,
+        });
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("NUL path segment must fail");
+        assert_eq!(err, EncodeError::NullByte);
+    }
+
+    #[test]
     fn test_encode_select_with_filter() {
         use qail_core::ast::Operator;
 

@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
+use crate::transpiler::traits::{SqlGenerator, escape_sql_string_literal};
 
 /// Generate SELECT SQL from a QAIL command, including CTEs, joins, filtering, grouping, and ordering.
 pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
@@ -78,15 +79,7 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                         path_segments,
                         alias,
                     } => {
-                        let mut expr = generator.quote_identifier(column);
-                        for (path, as_text) in path_segments {
-                            let op = if *as_text { "->>" } else { "->" };
-                            if path.parse::<i64>().is_ok() {
-                                expr.push_str(&format!("{}{}", op, path));
-                            } else {
-                                expr.push_str(&format!("{}'{}'", op, path));
-                            }
-                        }
+                        let expr = render_json_access(column, path_segments, generator.as_ref());
                         if let Some(a) = alias {
                             format!("{} AS {}", expr, generator.quote_identifier(a))
                         } else {
@@ -436,16 +429,11 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
                     ..
                 } => {
                     // Include JSON access expression in GROUP BY
-                    let mut expr = generator.quote_identifier(column);
-                    for (path, as_text) in path_segments {
-                        let op = if *as_text { "->>" } else { "->" };
-                        if path.parse::<i64>().is_ok() {
-                            expr.push_str(&format!("{}{}", op, path));
-                        } else {
-                            expr.push_str(&format!("{}'{}'", op, path));
-                        }
-                    }
-                    non_aggregated_cols.push(expr);
+                    non_aggregated_cols.push(render_json_access(
+                        column,
+                        path_segments,
+                        generator.as_ref(),
+                    ));
                 }
                 _ => {} // Aggregates and other expressions not added to GROUP BY
             }
@@ -741,20 +729,26 @@ fn render_expr_for_orderby(
             column,
             path_segments,
             ..
-        } => {
-            let mut result = generator.quote_identifier(column);
-            for (path, as_text) in path_segments {
-                let op = if *as_text { "->>" } else { "->" };
-                if path.parse::<i64>().is_ok() {
-                    result.push_str(&format!("{}{}", op, path));
-                } else {
-                    result.push_str(&format!("{}'{}'", op, path));
-                }
-            }
-            result
-        }
+        } => render_json_access(column, path_segments, generator),
         _ => expr.to_string(), // Fallback for Star, Aliased, etc.
     }
+}
+
+fn render_json_access(
+    column: &str,
+    path_segments: &[(String, bool)],
+    generator: &dyn SqlGenerator,
+) -> String {
+    let mut result = generator.quote_identifier(column);
+    for (path, as_text) in path_segments {
+        let op = if *as_text { "->>" } else { "->" };
+        if path.parse::<i64>().is_ok() {
+            result.push_str(&format!("{}{}", op, path));
+        } else {
+            result.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
+        }
+    }
+    result
 }
 
 /// Convert FrameBound to SQL string for window functions

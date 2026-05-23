@@ -543,6 +543,52 @@ fn test_json_access() {
 }
 
 #[test]
+fn test_json_access_escapes_path_segments_in_select_renderers() {
+    let hostile_path = "x') IS NOT NULL OR TRUE --".to_string();
+    let json_expr = Expr::JsonAccess {
+        column: "payload".to_string(),
+        path_segments: vec![(hostile_path.clone(), true)],
+        alias: Some("payload_value".to_string()),
+    };
+
+    let mut cmd = Qail::get("events").order_by_expr(
+        Expr::JsonAccess {
+            column: "payload".to_string(),
+            path_segments: vec![(hostile_path, true)],
+            alias: None,
+        },
+        SortOrder::Asc,
+    );
+    cmd.columns.push(json_expr);
+    cmd.columns.push(Expr::Aggregate {
+        col: "*".to_string(),
+        func: AggregateFunc::Count,
+        distinct: false,
+        filter: None,
+        alias: Some("total".to_string()),
+    });
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+
+    assert!(
+        sql.contains("payload->>'x'') IS NOT NULL OR TRUE --' AS payload_value"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("GROUP BY payload->>'x'') IS NOT NULL OR TRUE --'"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("ORDER BY payload->>'x'') IS NOT NULL OR TRUE --' ASC"),
+        "{sql}"
+    );
+    assert!(
+        !sql.contains("payload->>'x') IS NOT NULL OR TRUE --'"),
+        "{sql}"
+    );
+}
+
+#[test]
 fn test_json_contains() {
     let mut cmd = Qail::get("users");
     cmd.cages.push(Cage {

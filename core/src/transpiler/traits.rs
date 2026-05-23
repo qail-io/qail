@@ -82,6 +82,14 @@ fn escape_single_identifier(name: &str) -> String {
     }
 }
 
+/// Escape content placed inside a SQL single-quoted string literal.
+///
+/// The core transpiler is string-based, so NULL bytes are stripped to match
+/// identifier escaping behavior and avoid emitting invalid PostgreSQL text.
+pub fn escape_sql_string_literal(value: &str) -> String {
+    value.replace('\0', "").replace('\'', "''")
+}
+
 /// Trait for dialect-specific SQL generation.
 pub trait SqlGenerator {
     /// Quote an identifier (table or column name).

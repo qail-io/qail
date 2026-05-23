@@ -1,5 +1,4 @@
-use crate::transpiler::escape_identifier;
-use crate::transpiler::traits::SqlGenerator;
+use crate::transpiler::traits::{SqlGenerator, escape_identifier, escape_sql_string_literal};
 
 /// PostgreSQL-specific SQL generator.
 pub struct PostgresGenerator;
@@ -62,7 +61,7 @@ impl SqlGenerator for PostgresGenerator {
             // Note: If the column is not text, an explicit cast may be required.
             // Postgres ->> returns text, suitable for comparisons.
             let op = if is_last { "->>" } else { "->" };
-            sql.push_str(&format!("{}'{}'", op, key.replace('\'', "''")));
+            sql.push_str(&format!("{}'{}'", op, escape_sql_string_literal(key)));
         }
         sql
     }

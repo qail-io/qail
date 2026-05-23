@@ -10,6 +10,23 @@ use qail_core::ast::{
 
 use super::super::helpers::{NUMERIC_VALUES, i64_to_bytes, write_param_placeholder};
 
+fn encode_json_path_segment(
+    key: &str,
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
+    if key.as_bytes().contains(&0) {
+        return Err(crate::protocol::EncodeError::NullByte);
+    }
+
+    if key.contains('\'') {
+        buf.extend_from_slice(key.replace('\'', "''").as_bytes());
+    } else {
+        buf.extend_from_slice(key.as_bytes());
+    }
+
+    Ok(())
+}
+
 /// Encode column list to buffer.
 pub fn encode_columns(
     columns: &[Expr],
@@ -219,7 +236,7 @@ fn encode_column_expr_inner(
                         buf.extend_from_slice(key.as_bytes());
                     } else {
                         buf.extend_from_slice(b"->>'");
-                        buf.extend_from_slice(key.as_bytes());
+                        encode_json_path_segment(key, buf)?;
                         buf.extend_from_slice(b"'");
                     }
                 } else if is_integer {
@@ -227,7 +244,7 @@ fn encode_column_expr_inner(
                     buf.extend_from_slice(key.as_bytes());
                 } else {
                     buf.extend_from_slice(b"->'");
-                    buf.extend_from_slice(key.as_bytes());
+                    encode_json_path_segment(key, buf)?;
                     buf.extend_from_slice(b"'");
                 }
             }

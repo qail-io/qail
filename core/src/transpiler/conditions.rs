@@ -1,5 +1,5 @@
 use super::ToSql;
-use super::traits::SqlGenerator;
+use super::traits::{SqlGenerator, escape_sql_string_literal};
 use crate::ast::*;
 
 /// Context for parameterized query building.
@@ -122,7 +122,7 @@ impl ConditionToSql for Condition {
                     if path.parse::<i64>().is_ok() {
                         result.push_str(&format!("{}{}", op, path));
                     } else {
-                        result.push_str(&format!("{}'{}'", op, path.replace('\'', "''")));
+                        result.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
                     }
                 }
                 result
@@ -313,7 +313,7 @@ impl ConditionToSql for Condition {
                     if path.parse::<i64>().is_ok() {
                         result.push_str(&format!("{}{}", op, path));
                     } else {
-                        result.push_str(&format!("{}'{}'", op, path.replace('\'', "''")));
+                        result.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
                     }
                 }
                 result

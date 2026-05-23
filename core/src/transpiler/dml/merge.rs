@@ -5,6 +5,7 @@ use crate::ast::{
 };
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
+use crate::transpiler::traits::escape_sql_string_literal;
 use crate::transpiler::{SqlGenerator, ToSql};
 
 /// Generate PostgreSQL `MERGE` SQL.
@@ -339,7 +340,7 @@ fn expr_sql(expr: &Expr, generator: &dyn SqlGenerator) -> String {
                 if path.parse::<i64>().is_ok() {
                     sql.push_str(&format!("{}{}", op, path));
                 } else {
-                    sql.push_str(&format!("{}'{}'", op, path.replace('\'', "''")));
+                    sql.push_str(&format!("{}'{}'", op, escape_sql_string_literal(path)));
                 }
             }
             sql
