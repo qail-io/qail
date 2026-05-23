@@ -158,6 +158,28 @@ fn existing_column_primary_key_diffs(old: &Schema, new: &Schema) -> Vec<String> 
     changes
 }
 
+fn same_name_index_definition_diffs(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for new_idx in &new.indexes {
+        let Some(old_idx) = old
+            .indexes
+            .iter()
+            .find(|old_idx| old_idx.name == new_idx.name)
+        else {
+            continue;
+        };
+
+        if index_signature(old_idx) != index_signature(new_idx) {
+            changes.push(new_idx.name.clone());
+        }
+    }
+
+    changes.sort();
+    changes.dedup();
+    changes
+}
+
 fn check_signature(check: &Option<super::schema::CheckConstraint>) -> Option<String> {
     check
         .as_ref()
@@ -166,6 +188,20 @@ fn check_signature(check: &Option<super::schema::CheckConstraint>) -> Option<Str
 
 fn foreign_key_signature(fk: &Option<super::schema::ForeignKey>) -> Option<String> {
     fk.as_ref().map(|fk| format!("{:?}", fk))
+}
+
+fn index_signature(idx: &super::schema::Index) -> String {
+    format!(
+        "table={:?};columns={:?};expressions={:?};unique={};method={};where={:?};include={:?};concurrently={}",
+        idx.table,
+        idx.columns,
+        idx.expressions,
+        idx.unique,
+        index_method_str(&idx.method),
+        idx.where_clause.as_ref().map(check_expr_to_sql),
+        idx.include,
+        idx.concurrently
+    )
 }
 
 /// Validate that a schema pair is fully supported by state-based diff.
@@ -182,6 +218,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
              Unsupported schema object families present: {}. \
              Use folder-based strict migrations for these objects.",
             detail
+        ));
+    }
+
+    let index_diffs = same_name_index_definition_diffs(old, new);
+    if !index_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely replace existing indexes with changed definitions: {}. \
+             Use an explicit migration for DROP INDEX/CREATE INDEX replacement.",
+            index_diffs.join(", ")
         ));
     }
 
@@ -693,7 +738,7 @@ fn parse_table_col(s: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::super::schema::{
-        CheckExpr, Column, FkAction, Index, MultiColumnForeignKey, Table, ViewDef,
+        CheckExpr, Column, FkAction, Index, IndexMethod, MultiColumnForeignKey, Table, ViewDef,
     };
     use super::*;
 
@@ -738,6 +783,91 @@ mod tests {
             cmds.iter().any(|c| matches!(c.action, Action::Make)),
             "checked diff should still produce normal table commands"
         );
+    }
+
+    fn schema_with_users_index(index: Index) -> Schema {
+        use super::super::types::ColumnType;
+
+        let mut schema = Schema::default();
+        schema.add_table(
+            Table::new("users")
+                .column(Column::new("email", ColumnType::Text))
+                .column(Column::new("username", ColumnType::Text))
+                .column(Column::new("deleted_at", ColumnType::Text)),
+        );
+        schema.add_index(index);
+        schema
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_same_name_index_unique_change() {
+        let old = schema_with_users_index(Index::new(
+            "idx_users_email",
+            "users",
+            vec!["email".to_string()],
+        ));
+        let new = schema_with_users_index(
+            Index::new("idx_users_email", "users", vec!["email".to_string()]).unique(),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("same-name index unique change should fail closed");
+        assert!(err.contains("replace existing indexes"));
+        assert!(err.contains("idx_users_email"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_same_name_index_predicate_change() {
+        let old = schema_with_users_index(
+            Index::new("idx_users_email", "users", vec!["email".to_string()])
+                .partial(CheckExpr::Sql("deleted_at IS NULL".to_string())),
+        );
+        let new = schema_with_users_index(
+            Index::new("idx_users_email", "users", vec!["email".to_string()])
+                .partial(CheckExpr::Sql("deleted_at IS NOT NULL".to_string())),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("same-name index predicate change should fail closed");
+        assert!(err.contains("replace existing indexes"));
+        assert!(err.contains("idx_users_email"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_same_name_index_method_change() {
+        let old = schema_with_users_index(Index::new(
+            "idx_users_email",
+            "users",
+            vec!["email".to_string()],
+        ));
+        let new = schema_with_users_index(
+            Index::new("idx_users_email", "users", vec!["email".to_string()])
+                .using(IndexMethod::Hash),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("same-name index method change should fail closed");
+        assert!(err.contains("replace existing indexes"));
+        assert!(err.contains("idx_users_email"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_same_name_index_column_change() {
+        let old = schema_with_users_index(Index::new(
+            "idx_users_email",
+            "users",
+            vec!["email".to_string()],
+        ));
+        let new = schema_with_users_index(Index::new(
+            "idx_users_email",
+            "users",
+            vec!["username".to_string()],
+        ));
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("same-name index column change should fail closed");
+        assert!(err.contains("replace existing indexes"));
+        assert!(err.contains("idx_users_email"));
     }
 
     #[test]
