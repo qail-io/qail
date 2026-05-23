@@ -1857,7 +1857,7 @@ fn deferrable_to_sql(deferrable: &Deferrable) -> Option<&'static str> {
     }
 }
 
-fn foreign_key_to_sql(fk: &ForeignKey) -> String {
+pub(crate) fn foreign_key_to_sql(fk: &ForeignKey) -> String {
     let mut target = format!("{}({})", fk.table, fk.column);
     if fk.on_delete != FkAction::NoAction {
         target.push_str(" ON DELETE ");

@@ -424,6 +424,10 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
                     };
                     col_def.push_str(sql_default);
                 }
+                if let Constraint::References(target) = constraint {
+                    col_def.push_str(" REFERENCES ");
+                    col_def.push_str(target);
+                }
             }
 
             parts.push(format!("ALTER TABLE {} ADD COLUMN {}", table, col_def));

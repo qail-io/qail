@@ -3,7 +3,7 @@
 //! Computes the difference between two schemas and generates Qail operations.
 //! Now with intent-awareness from MigrationHint.
 
-use super::schema::{MigrationHint, Schema, multi_column_fk_to_alter_command};
+use super::schema::{MigrationHint, Schema, foreign_key_to_sql, multi_column_fk_to_alter_command};
 use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
 use std::collections::BTreeSet;
 
@@ -72,10 +72,43 @@ fn existing_column_check_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     changes
 }
 
+fn existing_column_foreign_key_diffs(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in &new_table.columns {
+            let Some(old_col) = old_table
+                .columns
+                .iter()
+                .find(|old_col| old_col.name == new_col.name)
+            else {
+                continue;
+            };
+
+            if foreign_key_signature(&old_col.foreign_key)
+                != foreign_key_signature(&new_col.foreign_key)
+            {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
 fn check_signature(check: &Option<super::schema::CheckConstraint>) -> Option<String> {
     check
         .as_ref()
         .map(|check| format!("{:?}:{:?}", check.name, check.expr))
+}
+
+fn foreign_key_signature(fk: &Option<super::schema::ForeignKey>) -> Option<String> {
+    fk.as_ref().map(|fk| format!("{:?}", fk))
 }
 
 /// Validate that a schema pair is fully supported by state-based diff.
@@ -101,6 +134,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
             "State-based diff cannot safely alter CHECK constraints on existing columns: {}. \
              Use an explicit migration for ADD/DROP/replace CHECK constraints.",
             check_diffs.join(", ")
+        ));
+    }
+
+    let fk_diffs = existing_column_foreign_key_diffs(old, new);
+    if !fk_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely alter single-column foreign keys on existing columns: {}. \
+             Use an explicit migration for ADD/DROP/replace FOREIGN KEY constraints.",
+            fk_diffs.join(", ")
         ));
     }
 
@@ -322,6 +364,9 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                         }
                         if let Some(def) = &col.default {
                             constraints.push(Constraint::Default(def.clone()));
+                        }
+                        if let Some(fk) = &col.foreign_key {
+                            constraints.push(Constraint::References(foreign_key_to_sql(fk)));
                         }
                         // SERIAL is a pseudo-type only valid in CREATE TABLE
                         // For ALTER TABLE ADD COLUMN, convert to INTEGER/BIGINT
@@ -549,7 +594,9 @@ fn parse_table_col(s: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::schema::{CheckExpr, Column, Index, MultiColumnForeignKey, Table, ViewDef};
+    use super::super::schema::{
+        CheckExpr, Column, FkAction, Index, MultiColumnForeignKey, Table, ViewDef,
+    };
     use super::*;
 
     #[test]
@@ -620,6 +667,75 @@ mod tests {
             .expect_err("existing-column CHECK change should fail closed");
         assert!(err.contains("CHECK constraints"));
         assert!(err.contains("inventory.quantity"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_existing_column_foreign_key_addition() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Int)));
+        old.add_table(Table::new("orders").column(Column::new("tenant_id", ColumnType::Int)));
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Int)));
+        new.add_table(
+            Table::new("orders")
+                .column(Column::new("tenant_id", ColumnType::Int).references("tenants", "id")),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("existing-column single-column FK change should fail closed");
+        assert!(err.contains("single-column foreign keys"));
+        assert!(err.contains("orders.tenant_id"));
+    }
+
+    #[test]
+    fn diff_new_column_preserves_foreign_key_reference() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("tenants").column(Column::new("id", ColumnType::Int)));
+        old.add_table(Table::new("orders").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("orders")
+            .expect("orders table should exist")
+            .columns
+            .push(
+                Column::new("tenant_id", ColumnType::Int)
+                    .references("tenants", "id")
+                    .on_delete(FkAction::Cascade)
+                    .on_update(FkAction::Restrict)
+                    .initially_deferred(),
+            );
+
+        let cmds = diff_schemas_checked(&old, &new).expect("new referenced column should diff");
+        let add_col = cmds
+            .iter()
+            .find(|cmd| matches!(cmd.action, Action::Alter) && cmd.table == "orders")
+            .expect("add-column command should be present");
+
+        let Expr::Def { constraints, .. } = &add_col.columns[0] else {
+            panic!("expected added column def");
+        };
+        assert!(constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                Constraint::References(target)
+                    if target == "tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+            )
+        }));
+
+        let sql = add_col.to_sql();
+        assert!(
+            sql.contains(
+                "REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+            ),
+            "add-column SQL should preserve FK reference, got: {sql}"
+        );
     }
 
     #[test]

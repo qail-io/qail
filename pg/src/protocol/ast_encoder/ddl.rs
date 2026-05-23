@@ -339,6 +339,10 @@ pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
                     };
                     buf.extend_from_slice(sql_default.as_bytes());
                 }
+                if let Constraint::References(target) = constraint {
+                    buf.extend_from_slice(b" REFERENCES ");
+                    buf.extend_from_slice(target.as_bytes());
+                }
             }
         }
     }
