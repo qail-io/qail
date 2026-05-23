@@ -311,6 +311,62 @@ mod tests {
             "postgres://admin@db.example.com:5432/app"
         );
     }
+
+    #[test]
+    fn resolves_all_columns_for_composite_primary_key() {
+        let pk_constraints =
+            std::collections::HashSet::from([("orders".to_string(), "orders_pkey".to_string())]);
+        let constraint_columns = std::collections::HashMap::from([(
+            ("orders".to_string(), "orders_pkey".to_string()),
+            vec![
+                IntrospectedKeyColumn::new("orders".to_string(), "tenant_id".to_string(), 1),
+                IntrospectedKeyColumn::new("orders".to_string(), "order_no".to_string(), 2),
+            ],
+        )]);
+
+        let primary_key_columns =
+            resolve_introspected_primary_key_columns(&pk_constraints, &constraint_columns);
+
+        assert_eq!(
+            primary_key_columns,
+            std::collections::HashSet::from([
+                ("orders".to_string(), "tenant_id".to_string()),
+                ("orders".to_string(), "order_no".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn primary_key_resolution_keeps_same_named_constraints_table_scoped() {
+        let pk_constraints =
+            std::collections::HashSet::from([("orders".to_string(), "pkey".to_string())]);
+        let constraint_columns = std::collections::HashMap::from([
+            (
+                ("orders".to_string(), "pkey".to_string()),
+                vec![IntrospectedKeyColumn::new(
+                    "orders".to_string(),
+                    "order_no".to_string(),
+                    1,
+                )],
+            ),
+            (
+                ("line_items".to_string(), "pkey".to_string()),
+                vec![IntrospectedKeyColumn::new(
+                    "line_items".to_string(),
+                    "line_no".to_string(),
+                    1,
+                )],
+            ),
+        ]);
+
+        let primary_key_columns =
+            resolve_introspected_primary_key_columns(&pk_constraints, &constraint_columns);
+
+        assert_eq!(
+            primary_key_columns,
+            std::collections::HashSet::from([("orders".to_string(), "order_no".to_string(),)])
+        );
+    }
 }
 
 /// Verify an active shadow receipt by SQL checksum.
@@ -363,6 +419,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     let mut schema = Schema::default();
     let (single_unique_columns, unique_constraint_indexes, unique_constraint_names) =
         introspect_unique_constraints(driver).await?;
+    let primary_key_columns = introspect_primary_key_columns(driver).await?;
 
     // 1. Query all tables
     let tables_cmd = Qail::get("information_schema.tables")
@@ -401,8 +458,6 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             .map_err(|e| anyhow!("Failed to query columns for {}: {}", table_name, e))?;
 
         let mut columns = Vec::new();
-        let mut pk_already_set = false; // Track if we've already set a PK for this table
-
         for row in &col_rows {
             let col_name = row.get_string(0).unwrap_or_default();
             let data_type_str = row.get_string(1).unwrap_or_default();
@@ -425,17 +480,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 other => other.clone(),
             };
 
-            // Check if this column is a primary key
-            // Only mark first PK column (for composite PKs, we can only represent 1)
-            let is_pk = if !pk_already_set {
-                let pk_check = is_primary_key(driver, table_name, &col_name).await?;
-                if pk_check {
-                    pk_already_set = true;
-                }
-                pk_check
-            } else {
-                false
-            };
+            let is_pk = primary_key_columns.contains(&(table_name.clone(), col_name.clone()));
 
             let is_unique = single_unique_columns.contains(&(table_name.clone(), col_name.clone()));
 
@@ -657,6 +702,89 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     Ok(schema)
 }
 
+async fn introspect_primary_key_columns(
+    driver: &mut PgDriver,
+) -> Result<std::collections::HashSet<(String, String)>> {
+    use qail_core::ast::Operator;
+
+    let pk_cmd = Qail::get("information_schema.table_constraints")
+        .columns(["table_name", "constraint_name"])
+        .filter("table_schema", Operator::Eq, "public")
+        .filter("constraint_type", Operator::Eq, "PRIMARY KEY");
+
+    let pk_rows = driver
+        .fetch_all(&pk_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query PK constraints: {}", e))?;
+
+    let mut pk_constraints = std::collections::HashSet::new();
+    for row in &pk_rows {
+        let table = row.text(0);
+        if table.starts_with("_qail") {
+            continue;
+        }
+        pk_constraints.insert((table, row.text(1)));
+    }
+
+    if pk_constraints.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+
+    let kcu_cmd = Qail::get("information_schema.key_column_usage")
+        .columns([
+            "table_name",
+            "column_name",
+            "constraint_name",
+            "ordinal_position",
+        ])
+        .filter("table_schema", Operator::Eq, "public");
+
+    let kcu_rows = driver
+        .fetch_all(&kcu_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query PK columns: {}", e))?;
+
+    let mut constraint_columns: std::collections::HashMap<
+        (String, String),
+        Vec<IntrospectedKeyColumn>,
+    > = std::collections::HashMap::new();
+    for row in &kcu_rows {
+        let table = row.text(0);
+        let column = row.text(1);
+        let constraint = row.text(2);
+        let ordinal_position = row
+            .get_string(3)
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
+        constraint_columns
+            .entry((table.clone(), constraint))
+            .or_default()
+            .push(IntrospectedKeyColumn::new(table, column, ordinal_position));
+    }
+
+    Ok(resolve_introspected_primary_key_columns(
+        &pk_constraints,
+        &constraint_columns,
+    ))
+}
+
+fn resolve_introspected_primary_key_columns(
+    pk_constraints: &std::collections::HashSet<(String, String)>,
+    constraint_columns: &std::collections::HashMap<(String, String), Vec<IntrospectedKeyColumn>>,
+) -> std::collections::HashSet<(String, String)> {
+    let mut primary_key_columns = std::collections::HashSet::new();
+
+    for (table, constraint) in pk_constraints {
+        if let Some(columns) = constraint_columns.get(&(table.clone(), constraint.clone())) {
+            for column in columns {
+                primary_key_columns.insert((table.clone(), column.column.clone()));
+            }
+        }
+    }
+
+    primary_key_columns
+}
+
 async fn introspect_unique_constraints(
     driver: &mut PgDriver,
 ) -> Result<(
@@ -755,45 +883,6 @@ fn parse_column_type(s: &str) -> ColumnType {
         "bytea" => ColumnType::Bytea,
         _ => ColumnType::Text, // Default fallback
     }
-}
-
-/// Check if a column is a primary key
-async fn is_primary_key(driver: &mut PgDriver, table: &str, column: &str) -> Result<bool> {
-    // Use a Qail query to properly check for rows
-    use qail_core::ast::Operator;
-    let cmd = Qail::get("information_schema.table_constraints")
-        .columns(["constraint_name"])
-        .filter("table_schema", Operator::Eq, "public")
-        .filter("table_name", Operator::Eq, table)
-        .filter("constraint_type", Operator::Eq, "PRIMARY KEY")
-        .limit(1);
-
-    // Get constraint name first
-    let tc_rows = driver
-        .fetch_all(&cmd)
-        .await
-        .map_err(|e| anyhow!("Failed to query PK constraints: {}", e))?;
-
-    if tc_rows.is_empty() {
-        return Ok(false);
-    }
-
-    let constraint_name = tc_rows[0].get_string(0).unwrap_or_default();
-
-    // Now check if this column is part of that constraint
-    let kcu_cmd = Qail::get("information_schema.key_column_usage")
-        .column("column_name")
-        .filter("table_schema", Operator::Eq, "public")
-        .filter("table_name", Operator::Eq, table)
-        .filter("constraint_name", Operator::Eq, constraint_name.clone())
-        .filter("column_name", Operator::Eq, column);
-
-    let kcu_rows = driver
-        .fetch_all(&kcu_cmd)
-        .await
-        .map_err(|e| anyhow!("Failed to query PK columns: {}", e))?;
-
-    Ok(!kcu_rows.is_empty())
 }
 
 /// Extract column names from CREATE INDEX definition
