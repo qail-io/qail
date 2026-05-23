@@ -15,7 +15,7 @@ use qail_pg::driver::PgDriver;
 
 use crate::introspection::{
     IntrospectedForeignKey, IntrospectedKeyColumn, IntrospectedUniqueConstraint,
-    identity_generation_to_generated, resolve_introspected_foreign_key,
+    introspected_column_generation, resolve_introspected_foreign_key,
     resolve_introspected_unique_constraint, sort_introspected_key_columns,
 };
 use crate::util::{parse_pg_url, redact_url};
@@ -448,6 +448,8 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 "column_default",
                 "is_identity",
                 "identity_generation",
+                "is_generated",
+                "generation_expression",
             ])
             .filter("table_schema", Operator::Eq, "public")
             .filter("table_name", Operator::Eq, table_name.clone());
@@ -466,17 +468,23 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             // is_identity: 'YES' for identity columns (GENERATED ALWAYS/BY DEFAULT AS IDENTITY)
             let is_identity = row.get_string(4).map(|s| s == "YES").unwrap_or(false);
             let identity_generation = row.get_string(5);
+            let is_generated = row.get_string(6);
+            let generation_expression = row.get_string(7);
 
             // Parse data type to ColumnType
             let data_type = parse_column_type(&data_type_str);
-            let generated =
-                identity_generation_to_generated(is_identity, identity_generation.as_deref());
+            let generated = introspected_column_generation(
+                is_identity,
+                identity_generation.as_deref(),
+                is_generated.as_deref(),
+                generation_expression.as_deref(),
+            );
 
             // Strip defaults for SERIAL and IDENTITY columns (auto-generated)
             // nextval() for SERIAL, identity columns handle their own generation
             let default = match &raw_default {
                 Some(d) if d.starts_with("nextval(") => None,
-                _ if is_identity => None, // Identity columns don't need explicit default
+                _ if generated.is_some() => None, // Generated columns don't need explicit default
                 other => other.clone(),
             };
 

@@ -177,6 +177,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             "column_default",
             "is_identity",
             "identity_generation",
+            "is_generated",
+            "generation_expression",
         ])
         .filter("table_schema", Operator::Eq, "public");
 
@@ -204,6 +206,8 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         let column_default_raw = row.get_string(8);
         let is_identity = row.get_string(9).is_some_and(|s| s == "YES");
         let identity_generation = row.get_string(10);
+        let is_generated = row.get_string(11);
+        let generation_expression = row.get_string(12);
 
         let is_nextval_default = column_default_raw
             .as_deref()
@@ -221,8 +225,12 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
         let mut col = Column::new(&col_name, col_type);
         col.nullable = is_nullable;
-        col.generated =
-            identity_generation_to_generated(is_identity, identity_generation.as_deref());
+        col.generated = introspected_column_generation(
+            is_identity,
+            identity_generation.as_deref(),
+            is_generated.as_deref(),
+            generation_expression.as_deref(),
+        );
 
         // Parse default value (skip nextval sequences — those are serial types)
         if let Some(ref default_str) = column_default_raw {
@@ -230,7 +238,7 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             if !d.is_empty() {
                 // For serial/bigserial we intentionally omit explicit nextval()
                 // because type already implies sequence-backed default.
-                if !is_identity
+                if col.generated.is_none()
                     && !(d.starts_with("nextval(")
                         && matches!(
                             col.data_type,
@@ -1491,6 +1499,31 @@ pub(crate) fn identity_generation_to_generated(
     }
 }
 
+pub(crate) fn introspected_column_generation(
+    is_identity: bool,
+    identity_generation: Option<&str>,
+    is_generated: Option<&str>,
+    generation_expression: Option<&str>,
+) -> Option<Generated> {
+    if let Some(generated) = identity_generation_to_generated(is_identity, identity_generation) {
+        return Some(generated);
+    }
+
+    let is_stored_generated = is_generated
+        .map(|value| value.trim().eq_ignore_ascii_case("ALWAYS"))
+        .unwrap_or(false);
+    if !is_stored_generated {
+        return None;
+    }
+
+    let expression = generation_expression?.trim();
+    if expression.is_empty() {
+        return None;
+    }
+
+    Some(Generated::AlwaysStored(expression.to_string()))
+}
+
 pub(crate) fn resolve_introspected_unique_constraint(
     constraint_name: &str,
     table_name: &str,
@@ -1758,6 +1791,33 @@ mod tests {
     #[test]
     fn ignores_identity_generation_when_column_is_not_identity() {
         assert!(identity_generation_to_generated(false, Some("BY DEFAULT")).is_none());
+    }
+
+    #[test]
+    fn maps_stored_generated_expression_to_generated_column() {
+        let generated = introspected_column_generation(
+            false,
+            None,
+            Some("ALWAYS"),
+            Some("first_name || ' ' || last_name"),
+        );
+
+        assert!(matches!(
+            generated,
+            Some(Generated::AlwaysStored(expr)) if expr == "first_name || ' ' || last_name"
+        ));
+    }
+
+    #[test]
+    fn identity_generation_takes_precedence_over_stored_generation_metadata() {
+        let generated = introspected_column_generation(
+            true,
+            Some("BY DEFAULT"),
+            Some("ALWAYS"),
+            Some("ignored_expr"),
+        );
+
+        assert!(matches!(generated, Some(Generated::ByDefaultIdentity)));
     }
 
     #[test]

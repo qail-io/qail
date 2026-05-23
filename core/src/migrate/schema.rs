@@ -1397,6 +1397,19 @@ pub fn to_qail_string(schema: &Schema) -> String {
             if let Some(def) = &col.default {
                 constraints.push(format!("default {}", def));
             }
+            if let Some(generated) = &col.generated {
+                match generated {
+                    Generated::AlwaysStored(expr) => {
+                        constraints.push(format!("generated_stored({})", expr));
+                    }
+                    Generated::AlwaysIdentity => {
+                        constraints.push("generated_identity".to_string());
+                    }
+                    Generated::ByDefaultIdentity => {
+                        constraints.push("generated_by_default_identity".to_string());
+                    }
+                }
+            }
             if let Some(ref fk) = col.foreign_key {
                 let mut fk_str = format!("references {}({})", fk.table, fk.column);
                 if fk.on_delete != FkAction::NoAction {
