@@ -1653,26 +1653,26 @@ impl PgConnection {
                         if msg_bytes.len() >= 2 {
                             let raw_count = msg_bytes.get_i16();
                             if raw_count < 0 {
-                                return Err(PgError::Protocol(format!(
+                                return self.protocol_desync(format!(
                                     "DataRow invalid column count: {}",
                                     raw_count
-                                )));
+                                ));
                             }
                             let column_count = raw_count as usize;
                             if column_count > msg_bytes.remaining() / 4 + 1 {
-                                return Err(PgError::Protocol(format!(
+                                return self.protocol_desync(format!(
                                     "DataRow claims {} columns but payload is only {} bytes",
                                     column_count,
                                     msg_bytes.remaining() + 2
-                                )));
+                                ));
                             }
                             let mut columns = Vec::with_capacity(column_count);
 
                             for _ in 0..column_count {
                                 if msg_bytes.remaining() < 4 {
-                                    return Err(PgError::Protocol(
+                                    return self.protocol_desync(
                                         "DataRow truncated: missing column length".into(),
-                                    ));
+                                    );
                                 }
 
                                 let len = msg_bytes.get_i32();
@@ -1681,16 +1681,16 @@ impl PgConnection {
                                     columns.push(None);
                                 } else {
                                     if len < -1 {
-                                        return Err(PgError::Protocol(format!(
+                                        return self.protocol_desync(format!(
                                             "DataRow invalid column length: {}",
                                             len
-                                        )));
+                                        ));
                                     }
                                     let len = len as usize;
                                     if msg_bytes.remaining() < len {
-                                        return Err(PgError::Protocol(
+                                        return self.protocol_desync(
                                             "DataRow truncated: column data exceeds payload".into(),
-                                        ));
+                                        );
                                     }
                                     let col_data = msg_bytes.split_to(len).freeze();
                                     columns.push(Some(col_data));
@@ -1698,12 +1698,12 @@ impl PgConnection {
                             }
 
                             if msg_bytes.remaining() != 0 {
-                                return Err(PgError::Protocol("DataRow has trailing bytes".into()));
+                                return self.protocol_desync("DataRow has trailing bytes".into());
                             }
 
                             return Ok((msg_type, Some(columns)));
                         }
-                        return Ok((msg_type, None));
+                        return self.protocol_desync("DataRow payload too short".into());
                     }
 
                     // Other messages - skip
@@ -1958,6 +1958,30 @@ mod tests {
             err.to_string()
                 .contains("fast-path expects exactly 4 columns")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_data_zerocopy_rejects_datarow_length_4() {
+        let mut conn = test_conn();
+        conn.buffer.extend_from_slice(&[b'D', 0, 0, 0, 4]);
+
+        let err = conn.recv_data_zerocopy().await.unwrap_err();
+
+        assert!(err.to_string().contains("DataRow payload too short"));
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_data_zerocopy_rejects_datarow_length_5() {
+        let mut conn = test_conn();
+        conn.buffer.extend_from_slice(&[b'D', 0, 0, 0, 5, 0]);
+
+        let err = conn.recv_data_zerocopy().await.unwrap_err();
+
+        assert!(err.to_string().contains("DataRow payload too short"));
+        assert!(conn.is_io_desynced());
     }
 
     #[cfg(unix)]
