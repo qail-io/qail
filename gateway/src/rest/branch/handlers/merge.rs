@@ -77,16 +77,24 @@ fn build_branch_overlay_merge_cmd(
             for (k, v) in &obj {
                 q = q.set_value(k, json_to_qail_value(v));
             }
-            Ok(q.eq(pk_col.unwrap_or("id"), row_pk.to_string()))
+            let pk_col = pk_col.unwrap_or("id");
+            Ok(q.eq(pk_col, row_pk.to_string()).returning([pk_col]))
         }
         "delete" => {
-            Ok(qail_core::ast::Qail::del(table).eq(pk_col.unwrap_or("id"), row_pk.to_string()))
+            let pk_col = pk_col.unwrap_or("id");
+            Ok(qail_core::ast::Qail::del(table)
+                .eq(pk_col, row_pk.to_string())
+                .returning([pk_col]))
         }
         _ => Err(format!(
             "Unsupported branch overlay operation '{}'",
             operation
         )),
     }
+}
+
+fn branch_merge_requires_affected_row(operation: &str) -> bool {
+    matches!(operation, "update" | "delete")
 }
 
 /// POST /api/_branch/:name/merge — Merge branch overlay into main tables.
@@ -224,6 +232,15 @@ pub(crate) async fn branch_merge_handler(
                         Ok(mut qail_cmd) => {
                             state.optimize_qail_for_execution(&mut qail_cmd);
                             match conn.fetch_all_uncached(&qail_cmd).await {
+                                Ok(rows)
+                                    if branch_merge_requires_affected_row(&operation)
+                                        && rows.is_empty() =>
+                                {
+                                    errors.push(format!(
+                                        "{}.{}: merge {} affected no rows",
+                                        table, row_pk, operation
+                                    ));
+                                }
                                 Ok(_) => {
                                     applied += 1;
                                     mutated_tables.insert(table.clone());
@@ -360,7 +377,10 @@ pub(crate) async fn branch_merge_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_insert_conflict_target, build_branch_overlay_merge_cmd};
+    use super::{
+        apply_insert_conflict_target, branch_merge_requires_affected_row,
+        build_branch_overlay_merge_cmd,
+    };
     use qail_core::ast::{Action, ConflictAction, Expr};
     use serde_json::{Map, json};
 
@@ -430,6 +450,22 @@ mod tests {
     }
 
     #[test]
+    fn overlay_merge_update_returns_pk_to_detect_missing_target() {
+        let cmd = build_branch_overlay_merge_cmd(
+            "orders",
+            "order-1",
+            "update",
+            r#"{"status":"paid"}"#,
+            Some("id"),
+        )
+        .expect("update overlay should build");
+
+        assert_eq!(cmd.action, Action::Set);
+        assert_eq!(cmd.returning, Some(vec![Expr::Named("id".into())]));
+        assert!(branch_merge_requires_affected_row("update"));
+    }
+
+    #[test]
     fn overlay_merge_cmd_builds_delete_with_schema_pk() {
         let cmd =
             build_branch_overlay_merge_cmd("orders", "order-1", "delete", "null", Some("uuid"))
@@ -438,5 +474,8 @@ mod tests {
         assert_eq!(cmd.action, Action::Del);
         assert_eq!(cmd.table, "orders");
         assert_eq!(cmd.cages[0].conditions[0].left, Expr::Named("uuid".into()));
+        assert_eq!(cmd.returning, Some(vec![Expr::Named("uuid".into())]));
+        assert!(branch_merge_requires_affected_row("delete"));
+        assert!(!branch_merge_requires_affected_row("insert"));
     }
 }
