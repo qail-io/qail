@@ -14,7 +14,8 @@ use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_pg::driver::PgDriver;
 
 use crate::introspection::{
-    IntrospectedForeignKey, IntrospectedKeyColumn, resolve_introspected_foreign_key,
+    IntrospectedForeignKey, IntrospectedKeyColumn, IntrospectedUniqueConstraint,
+    resolve_introspected_foreign_key, resolve_introspected_unique_constraint,
     sort_introspected_key_columns,
 };
 use crate::util::{parse_pg_url, redact_url};
@@ -360,6 +361,8 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     use qail_core::ast::Operator;
 
     let mut schema = Schema::default();
+    let (single_unique_columns, unique_constraint_indexes, unique_constraint_names) =
+        introspect_unique_constraints(driver).await?;
 
     // 1. Query all tables
     let tables_cmd = Qail::get("information_schema.tables")
@@ -430,8 +433,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
                 false
             };
 
-            // Check if this column has a unique constraint
-            let is_unique = is_unique_column(driver, table_name, &col_name).await?;
+            let is_unique = single_unique_columns.contains(&(table_name.clone(), col_name.clone()));
 
             columns.push(Column {
                 name: col_name,
@@ -468,6 +470,13 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query indexes: {}", e))?;
 
+    let unique_constraint_index_names: std::collections::HashSet<String> =
+        unique_constraint_indexes
+            .iter()
+            .map(|index| index.name.clone())
+            .collect();
+    schema.indexes.extend(unique_constraint_indexes);
+
     for row in &idx_rows {
         let idx_name = row.get_string(0).unwrap_or_default();
         let table_name = row.get_string(1).unwrap_or_default();
@@ -478,8 +487,12 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             continue;
         }
 
-        // Skip constraint-based unique indexes (ending with _key) - already covered by column unique flag
-        if idx_name.ends_with("_key") {
+        // Skip constraint-backed unique indexes; they are represented as
+        // column-level unique flags or explicit composite unique indexes.
+        if idx_name.ends_with("_key")
+            || unique_constraint_names.contains(&idx_name)
+            || unique_constraint_index_names.contains(&idx_name)
+        {
             continue;
         }
 
@@ -640,6 +653,84 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
     Ok(schema)
 }
 
+async fn introspect_unique_constraints(
+    driver: &mut PgDriver,
+) -> Result<(
+    std::collections::HashSet<(String, String)>,
+    Vec<Index>,
+    std::collections::HashSet<String>,
+)> {
+    use qail_core::ast::Operator;
+
+    let unique_cmd = Qail::get("information_schema.table_constraints")
+        .columns(["constraint_name", "table_name"])
+        .filter("table_schema", Operator::Eq, "public")
+        .filter("constraint_type", Operator::Eq, "UNIQUE");
+
+    let unique_rows = driver
+        .fetch_all(&unique_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query unique constraints: {}", e))?;
+
+    let kcu_cmd = Qail::get("information_schema.key_column_usage")
+        .columns([
+            "table_name",
+            "column_name",
+            "constraint_name",
+            "ordinal_position",
+        ])
+        .filter("table_schema", Operator::Eq, "public");
+
+    let kcu_rows = driver
+        .fetch_all(&kcu_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query key columns: {}", e))?;
+
+    let mut constraint_columns: std::collections::HashMap<String, Vec<IntrospectedKeyColumn>> =
+        std::collections::HashMap::new();
+    for row in &kcu_rows {
+        let table = row.text(0);
+        let column = row.text(1);
+        let constraint = row.text(2);
+        let ordinal_position = row
+            .get_string(3)
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
+        constraint_columns
+            .entry(constraint)
+            .or_default()
+            .push(IntrospectedKeyColumn::new(table, column, ordinal_position));
+    }
+    sort_introspected_key_columns(&mut constraint_columns);
+
+    let mut unique_columns = std::collections::HashSet::new();
+    let mut unique_indexes = Vec::new();
+    let mut unique_constraint_names = std::collections::HashSet::new();
+
+    for row in unique_rows {
+        let constraint_name = row.text(0);
+        let table_name = row.text(1);
+        if table_name.starts_with("_qail") {
+            continue;
+        }
+        unique_constraint_names.insert(constraint_name.clone());
+
+        if let Some(cols) = constraint_columns.get(&constraint_name)
+            && let Some(unique) =
+                resolve_introspected_unique_constraint(&constraint_name, &table_name, cols)
+        {
+            match unique {
+                IntrospectedUniqueConstraint::Single { table, column } => {
+                    unique_columns.insert((table, column));
+                }
+                IntrospectedUniqueConstraint::Multi(index) => unique_indexes.push(index),
+            }
+        }
+    }
+
+    Ok((unique_columns, unique_indexes, unique_constraint_names))
+}
+
 /// Parse PostgreSQL data type string to ColumnType
 fn parse_column_type(s: &str) -> ColumnType {
     match s.to_lowercase().as_str() {
@@ -699,49 +790,6 @@ async fn is_primary_key(driver: &mut PgDriver, table: &str, column: &str) -> Res
         .map_err(|e| anyhow!("Failed to query PK columns: {}", e))?;
 
     Ok(!kcu_rows.is_empty())
-}
-
-/// Check if a column has a unique constraint
-async fn is_unique_column(driver: &mut PgDriver, table: &str, column: &str) -> Result<bool> {
-    // Use a Qail query to properly check for rows
-    use qail_core::ast::Operator;
-    let cmd = Qail::get("information_schema.table_constraints")
-        .columns(["constraint_name"])
-        .filter("table_schema", Operator::Eq, "public")
-        .filter("table_name", Operator::Eq, table)
-        .filter("constraint_type", Operator::Eq, "UNIQUE");
-
-    let tc_rows = driver
-        .fetch_all(&cmd)
-        .await
-        .map_err(|e| anyhow!("Failed to query UNIQUE constraints: {}", e))?;
-
-    if tc_rows.is_empty() {
-        return Ok(false);
-    }
-
-    // Check if column is in any of the unique constraints
-    for row in &tc_rows {
-        let constraint_name = row.get_string(0).unwrap_or_default();
-
-        let kcu_cmd = Qail::get("information_schema.key_column_usage")
-            .column("column_name")
-            .filter("table_schema", Operator::Eq, "public")
-            .filter("table_name", Operator::Eq, table)
-            .filter("constraint_name", Operator::Eq, constraint_name)
-            .filter("column_name", Operator::Eq, column);
-
-        let kcu_rows = driver
-            .fetch_all(&kcu_cmd)
-            .await
-            .map_err(|e| anyhow!("Failed to query UNIQUE columns: {}", e))?;
-
-        if !kcu_rows.is_empty() {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
 }
 
 /// Extract column names from CREATE INDEX definition

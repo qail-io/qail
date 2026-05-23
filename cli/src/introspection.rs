@@ -10,7 +10,7 @@ use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget, RlsPolicy};
 use qail_core::migrate::schema::{Deferrable, FkAction};
 use qail_core::migrate::schema::{SchemaFunctionDef, SchemaTriggerDef, ViewDef};
 use qail_core::migrate::{
-    Column, ForeignKey, MultiColumnForeignKey, Schema, Table, to_qail_string,
+    Column, ForeignKey, Index, MultiColumnForeignKey, Schema, Table, to_qail_string,
 };
 use qail_pg::driver::PgDriver;
 
@@ -43,6 +43,11 @@ pub(crate) enum IntrospectedForeignKey {
         table: String,
         foreign_key: MultiColumnForeignKey,
     },
+}
+
+pub(crate) enum IntrospectedUniqueConstraint {
+    Single { table: String, column: String },
+    Multi(Index),
 }
 
 /// Output format for schema generation
@@ -312,14 +317,23 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
 
     let mut unique_columns: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
+    let mut unique_constraint_indexes = Vec::new();
     for row in unique_rows {
         let constraint_name = row.text(0);
         let table_name = row.text(1);
+        if !base_tables.contains(&table_name) {
+            continue;
+        }
         // Look up which columns this constraint covers
-        if let Some(cols) = constraint_columns.get(&constraint_name) {
-            // Only mark single-column uniques on the column itself
-            if cols.len() == 1 {
-                unique_columns.insert((table_name, cols[0].column.clone()));
+        if let Some(cols) = constraint_columns.get(&constraint_name)
+            && let Some(unique) =
+                resolve_introspected_unique_constraint(&constraint_name, &table_name, cols)
+        {
+            match unique {
+                IntrospectedUniqueConstraint::Single { table, column } => {
+                    unique_columns.insert((table, column));
+                }
+                IntrospectedUniqueConstraint::Multi(index) => unique_constraint_indexes.push(index),
             }
         }
     }
@@ -1218,6 +1232,9 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         index.method = method;
         schema.add_index(index);
     }
+    for index in unique_constraint_indexes {
+        schema.add_index(index);
+    }
 
     Ok(schema)
 }
@@ -1446,6 +1463,37 @@ pub(crate) fn sort_introspected_key_columns(
     for cols in constraints.values_mut() {
         cols.sort_by_key(|col| col.ordinal_position);
     }
+}
+
+pub(crate) fn resolve_introspected_unique_constraint(
+    constraint_name: &str,
+    table_name: &str,
+    columns: &[IntrospectedKeyColumn],
+) -> Option<IntrospectedUniqueConstraint> {
+    if columns.is_empty() {
+        return None;
+    }
+
+    let key_table = same_key_column_table(columns)?;
+    if key_table != table_name {
+        return None;
+    }
+
+    if columns.len() == 1 {
+        return Some(IntrospectedUniqueConstraint::Single {
+            table: table_name.to_string(),
+            column: columns[0].column.clone(),
+        });
+    }
+
+    Some(IntrospectedUniqueConstraint::Multi(
+        Index::new(
+            constraint_name,
+            table_name,
+            columns.iter().map(|col| col.column.clone()).collect(),
+        )
+        .unique(),
+    ))
 }
 
 pub(crate) fn resolve_introspected_foreign_key(
@@ -1749,6 +1797,65 @@ mod tests {
             &FkAction::NoAction,
             &FkAction::NoAction,
             Deferrable::NotDeferrable,
+        );
+
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn resolves_single_column_unique_constraint_as_column_flag() {
+        let resolved = resolve_introspected_unique_constraint(
+            "users_email_key",
+            "users",
+            &[key("users", "email", 1)],
+        )
+        .expect("single-column unique should resolve");
+
+        let IntrospectedUniqueConstraint::Single { table, column } = resolved else {
+            panic!("expected single-column unique");
+        };
+
+        assert_eq!(table, "users");
+        assert_eq!(column, "email");
+    }
+
+    #[test]
+    fn resolves_composite_unique_constraint_as_ordered_unique_index() {
+        let mut constraints = std::collections::HashMap::from([(
+            "schedules_route_schedule_key".to_string(),
+            vec![
+                key("schedules", "schedule_id", 2),
+                key("schedules", "route_id", 1),
+            ],
+        )]);
+        sort_introspected_key_columns(&mut constraints);
+
+        let resolved = resolve_introspected_unique_constraint(
+            "schedules_route_schedule_key",
+            "schedules",
+            &constraints["schedules_route_schedule_key"],
+        )
+        .expect("composite unique should resolve");
+
+        let IntrospectedUniqueConstraint::Multi(index) = resolved else {
+            panic!("expected composite unique index");
+        };
+
+        assert_eq!(index.name, "schedules_route_schedule_key");
+        assert_eq!(index.table, "schedules");
+        assert_eq!(index.columns, ["route_id", "schedule_id"]);
+        assert!(index.unique);
+    }
+
+    #[test]
+    fn skips_malformed_unique_constraint_mixed_tables() {
+        let resolved = resolve_introspected_unique_constraint(
+            "bad_unique",
+            "schedules",
+            &[
+                key("schedules", "route_id", 1),
+                key("other_table", "schedule_id", 2),
+            ],
         );
 
         assert!(resolved.is_none());
