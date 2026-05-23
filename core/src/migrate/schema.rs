@@ -363,7 +363,7 @@ pub enum IndexMethod {
     SpGist,
 }
 
-fn index_method_str(method: &IndexMethod) -> &'static str {
+pub(crate) fn index_method_str(method: &IndexMethod) -> &'static str {
     match method {
         IndexMethod::BTree => "btree",
         IndexMethod::Hash => "hash",
@@ -1874,7 +1874,7 @@ pub(crate) fn foreign_key_to_sql(fk: &ForeignKey) -> String {
     target
 }
 
-fn check_expr_to_sql(expr: &CheckExpr) -> String {
+pub(crate) fn check_expr_to_sql(expr: &CheckExpr) -> String {
     match expr {
         CheckExpr::GreaterThan { column, value } => format!("{column} > {value}"),
         CheckExpr::GreaterOrEqual { column, value } => format!("{column} >= {value}"),

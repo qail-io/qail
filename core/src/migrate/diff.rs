@@ -3,7 +3,10 @@
 //! Computes the difference between two schemas and generates Qail operations.
 //! Now with intent-awareness from MigrationHint.
 
-use super::schema::{MigrationHint, Schema, foreign_key_to_sql, multi_column_fk_to_alter_command};
+use super::schema::{
+    MigrationHint, Schema, check_expr_to_sql, foreign_key_to_sql, index_method_str,
+    multi_column_fk_to_alter_command,
+};
 use crate::ast::{Action, Constraint, Expr, IndexDef, Qail};
 use std::collections::BTreeSet;
 
@@ -607,10 +610,14 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                 index_def: Some(IndexDef {
                     name: new_idx.name.clone(),
                     table: new_idx.table.clone(),
-                    columns: new_idx.columns.clone(),
+                    columns: if !new_idx.expressions.is_empty() {
+                        new_idx.expressions.clone()
+                    } else {
+                        new_idx.columns.clone()
+                    },
                     unique: new_idx.unique,
-                    index_type: None,
-                    where_clause: None,
+                    index_type: Some(index_method_str(&new_idx.method).to_string()),
+                    where_clause: new_idx.where_clause.as_ref().map(check_expr_to_sql),
                 }),
                 ..Default::default()
             });
@@ -863,6 +870,49 @@ mod tests {
                 "REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"
             ),
             "add-column SQL should preserve FK reference, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn diff_new_partial_unique_index_preserves_predicate() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("users")
+                .column(Column::new("email", ColumnType::Text))
+                .column(Column::new("deleted_at", ColumnType::Text)),
+        );
+
+        let mut new = old.clone();
+        new.add_index(
+            Index::new("idx_users_email_active", "users", vec!["email".to_string()])
+                .unique()
+                .partial(CheckExpr::Sql("deleted_at IS NULL".to_string())),
+        );
+
+        let cmds = diff_schemas_checked(&old, &new).expect("new partial index should diff");
+        let index_cmd = cmds
+            .iter()
+            .find(|cmd| matches!(cmd.action, Action::Index))
+            .expect("index command should be present");
+        let index_def = index_cmd
+            .index_def
+            .as_ref()
+            .expect("index command should carry index definition");
+
+        assert!(index_def.unique);
+        assert_eq!(index_def.index_type.as_deref(), Some("btree"));
+        assert_eq!(
+            index_def.where_clause.as_deref(),
+            Some("deleted_at IS NULL")
+        );
+
+        let sql = index_cmd.to_sql();
+        assert!(
+            sql.contains("WHERE deleted_at IS NULL"),
+            "index SQL should preserve partial predicate, got: {sql}"
         );
     }
 
