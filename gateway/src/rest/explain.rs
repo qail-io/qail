@@ -15,6 +15,7 @@ use crate::middleware::ApiError;
 
 use super::extract_table_name;
 use super::filters::{apply_filters, apply_sorting, parse_expand_relations, parse_filters_checked};
+use super::handlers::check_table_not_blocked;
 use super::types::ListParams;
 
 /// GET /api/{table}/_explain — return EXPLAIN ANALYZE for the query
@@ -29,6 +30,7 @@ pub(crate) async fn explain_handler(
 ) -> Result<Json<Value>, ApiError> {
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
+    check_table_not_blocked(&state, &table_name)?;
 
     let table = state
         .schema
@@ -82,6 +84,7 @@ pub(crate) async fn explain_handler(
             )));
         }
         for rel in relations {
+            check_table_not_blocked(&state, rel)?;
             if let Some((fk_col, ref_col)) = state.schema.relation_for(&table_name, rel) {
                 let left = format!("{}.{}", table_name, fk_col);
                 let right = format!("{}.{}", rel, ref_col);
