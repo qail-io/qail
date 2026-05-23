@@ -369,6 +369,77 @@ fn validate_qail_limits(cmd: &Qail, depth: usize, state: &mut AstLimitState) -> 
         }
     }
 
+    if let Some(merge) = &cmd.merge {
+        if let Some(alias) = &merge.target_alias {
+            ensure_str("qail.merge.target_alias", alias)?;
+        }
+        match &merge.source {
+            crate::ast::MergeSource::Table { name, alias } => {
+                ensure_str("qail.merge.source.table", name)?;
+                if let Some(alias) = alias {
+                    ensure_str("qail.merge.source.alias", alias)?;
+                }
+            }
+            crate::ast::MergeSource::Query { query, alias } => {
+                validate_qail_limits(query, depth + 1, state)?;
+                if let Some(alias) = alias {
+                    ensure_str("qail.merge.source.alias", alias)?;
+                }
+            }
+        }
+        ensure_len("qail.merge.on", merge.on.len(), MAX_AST_COLLECTION_LEN)?;
+        for condition in &merge.on {
+            validate_condition_limits(condition, depth + 1, state)?;
+        }
+        ensure_len(
+            "qail.merge.clauses",
+            merge.clauses.len(),
+            MAX_AST_COLLECTION_LEN,
+        )?;
+        for clause in &merge.clauses {
+            ensure_len(
+                "qail.merge.clause.condition",
+                clause.condition.len(),
+                MAX_AST_COLLECTION_LEN,
+            )?;
+            for condition in &clause.condition {
+                validate_condition_limits(condition, depth + 1, state)?;
+            }
+            match &clause.action {
+                crate::ast::MergeAction::Update { assignments } => {
+                    ensure_len(
+                        "qail.merge.update.assignments",
+                        assignments.len(),
+                        MAX_AST_COLLECTION_LEN,
+                    )?;
+                    for (col, expr) in assignments {
+                        ensure_str("qail.merge.update.column", col)?;
+                        validate_expr_limits(expr, depth + 1, state)?;
+                    }
+                }
+                crate::ast::MergeAction::Insert { columns, values } => {
+                    ensure_len(
+                        "qail.merge.insert.columns",
+                        columns.len(),
+                        MAX_AST_COLLECTION_LEN,
+                    )?;
+                    for col in columns {
+                        ensure_str("qail.merge.insert.column", col)?;
+                    }
+                    ensure_len(
+                        "qail.merge.insert.values",
+                        values.len(),
+                        MAX_AST_COLLECTION_LEN,
+                    )?;
+                    for expr in values {
+                        validate_expr_limits(expr, depth + 1, state)?;
+                    }
+                }
+                crate::ast::MergeAction::Delete | crate::ast::MergeAction::DoNothing => {}
+            }
+        }
+    }
+
     if let Some(source_query) = &cmd.source_query {
         validate_qail_limits(source_query, depth + 1, state)?;
     }
@@ -895,6 +966,26 @@ mod tests {
         let encoded = encode_cmd_binary(&cmd).expect("binary encode");
         let decoded = decode_cmd_binary(&encoded).unwrap();
         assert_eq!(decoded.to_string(), cmd.to_string());
+    }
+
+    #[test]
+    fn cmd_binary_roundtrip_preserves_merge_ast() {
+        let cmd = crate::ast::Qail::merge_into("users")
+            .target_alias("u")
+            .using_table_as("staging_users", "s")
+            .merge_on_column("u.id", crate::ast::Operator::Eq, "s.id")
+            .when_matched_update(&[("name", crate::ast::Expr::Named("s.name".to_string()))])
+            .when_not_matched_insert(
+                &["id", "name"],
+                &[
+                    crate::ast::Expr::Named("s.id".to_string()),
+                    crate::ast::Expr::Named("s.name".to_string()),
+                ],
+            );
+
+        let encoded = encode_cmd_binary(&cmd).expect("binary encode");
+        let decoded = decode_cmd_binary(&encoded).unwrap();
+        assert_eq!(decoded, cmd);
     }
 
     #[test]

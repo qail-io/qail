@@ -6,5 +6,6 @@ mod export;
 mod get;
 mod index;
 mod joins;
+mod merge;
 mod tokens;
 mod txn;

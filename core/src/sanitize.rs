@@ -7,7 +7,9 @@
 //! Call [`validate_ast`] on any `Qail` obtained from an untrusted source
 //! (binary endpoint, external API, etc.) before execution.
 
-use crate::ast::{Action, ConflictAction, Expr, Qail, TableConstraint, Value};
+use crate::ast::{
+    Action, ConflictAction, Expr, MergeAction, MergeSource, Qail, TableConstraint, Value,
+};
 use std::fmt;
 
 /// Error returned when AST structural validation fails.
@@ -384,6 +386,54 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
             for (col, expr) in assignments {
                 check_ident("on_conflict.assignment.column", col)?;
                 check_expr("on_conflict.assignment.expr", expr)?;
+            }
+        }
+    }
+
+    // ── MERGE ────────────────────────────────────────────────────────
+    if let Some(ref merge) = cmd.merge {
+        if let Some(alias) = &merge.target_alias {
+            check_ident("merge.target_alias", alias)?;
+        }
+        match &merge.source {
+            MergeSource::Table { name, alias } => {
+                check_ident("merge.source.table", name)?;
+                if let Some(alias) = alias {
+                    check_ident("merge.source.alias", alias)?;
+                }
+            }
+            MergeSource::Query { query, alias } => {
+                validate_ast(query)?;
+                if let Some(alias) = alias {
+                    check_ident("merge.source.alias", alias)?;
+                }
+            }
+        }
+        for cond in &merge.on {
+            check_expr("merge.on.left", &cond.left)?;
+            check_value("merge.on.value", &cond.value)?;
+        }
+        for clause in &merge.clauses {
+            for cond in &clause.condition {
+                check_expr("merge.clause.condition.left", &cond.left)?;
+                check_value("merge.clause.condition.value", &cond.value)?;
+            }
+            match &clause.action {
+                MergeAction::Update { assignments } => {
+                    for (col, expr) in assignments {
+                        check_ident("merge.update.column", col)?;
+                        check_expr("merge.update.expr", expr)?;
+                    }
+                }
+                MergeAction::Insert { columns, values } => {
+                    for col in columns {
+                        check_ident("merge.insert.column", col)?;
+                    }
+                    for expr in values {
+                        check_expr("merge.insert.expr", expr)?;
+                    }
+                }
+                MergeAction::Delete | MergeAction::DoNothing => {}
             }
         }
     }

@@ -1121,6 +1121,7 @@ fn find_next_qail_constructor(source: &str, start: usize) -> Option<QailConstruc
             "set" => "SET",
             "del" => "DEL",
             "put" => "PUT",
+            "merge_into" => "MERGE",
             "typed" => "TYPED",
             "raw_sql" => "RAW",
             _ => {
@@ -2377,6 +2378,7 @@ pub(crate) fn usage_action_to_ast(action: &str) -> Result<crate::ast::Action, St
         "SET" => Ok(Action::Set),
         "DEL" => Ok(Action::Del),
         "PUT" => Ok(Action::Put),
+        "MERGE" => Ok(Action::Merge),
         _ => Err(format!("unknown scanner action '{}'", action)),
     }
 }

@@ -18,6 +18,8 @@ pub mod expressions;
 pub mod functions;
 /// JOIN clause parsing.
 pub mod joins;
+/// PostgreSQL MERGE parsing.
+pub mod merge;
 /// Special function parsing (COALESCE, NULLIF, GREATEST, etc.).
 pub mod special_funcs;
 
@@ -198,6 +200,10 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
         return parse_create_table(input, table);
     }
 
+    if matches!(action, Action::Merge) {
+        return merge::parse_merge_after_target(input, table, ctes);
+    }
+
     let (input, joins) = many0(parse_join_clause).parse(input)?;
     let (input, _) = multispace0(input)?;
 
@@ -290,6 +296,7 @@ pub fn parse_root(input: &str) -> IResult<&str, Qail> {
             returning: None,
             ctes,
             on_conflict,
+            merge: None,
             source_query,
             channel: None,
             payload: None,

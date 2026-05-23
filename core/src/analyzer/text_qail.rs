@@ -1,10 +1,10 @@
 //! Shared helpers for recognizing QAIL text queries in source files.
 
 /// Action keywords that can begin a QAIL text query.
-pub const QAIL_ACTION_PREFIXES: [&str; 25] = [
+pub const QAIL_ACTION_PREFIXES: [&str; 26] = [
     "get", "set", "add", "del", "with", "make", "mod", "insert", "delete", "create", "count",
-    "cnt", "export", "put", "truncate", "explain", "lock", "search", "upsert", "scroll", "begin",
-    "commit", "rollback", "call", "session",
+    "cnt", "export", "put", "merge", "truncate", "explain", "lock", "search", "upsert", "scroll",
+    "begin", "commit", "rollback", "call", "session",
 ];
 
 /// String literal extracted from a text source.
@@ -42,7 +42,7 @@ pub fn looks_like_sql_query(text: &str) -> bool {
 
     matches!(
         head.as_str(),
-        "select" | "insert" | "update" | "delete" | "with"
+        "select" | "insert" | "update" | "delete" | "merge" | "with"
     )
 }
 

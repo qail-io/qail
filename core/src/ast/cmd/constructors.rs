@@ -50,6 +50,15 @@ impl Qail {
         }
     }
 
+    /// MERGE — conditionally insert, update, delete, or do nothing.
+    pub fn merge_into(table: impl Into<String>) -> Self {
+        Self {
+            action: Action::Merge,
+            table: table.into(),
+            ..Default::default()
+        }
+    }
+
     /// COPY … TO — export data.
     pub fn export(table: impl Into<String>) -> Self {
         Self {

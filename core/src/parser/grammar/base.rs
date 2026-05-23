@@ -239,7 +239,7 @@ pub fn parse_operator(input: &str) -> IResult<&str, Operator> {
     .parse(input)
 }
 
-/// Parse action keyword: get, export, set, del, add, make, cnt
+/// Parse action keyword: get, export, set, del, add, make, merge, cnt
 pub fn parse_action(input: &str) -> IResult<&str, (Action, bool)> {
     alt((
         // get distinct
@@ -258,6 +258,8 @@ pub fn parse_action(input: &str) -> IResult<&str, (Action, bool)> {
         )),
         // set
         value((Action::Set, false), tag_no_case("set")),
+        // merge
+        value((Action::Merge, false), tag_no_case("merge")),
         // del / delete
         alt((
             value((Action::Del, false), tag_no_case("delete")),
@@ -304,6 +306,7 @@ pub fn parse_txn_command(input: &str) -> IResult<&str, Qail> {
             ctes: vec![],
             returning: None,
             on_conflict: None,
+            merge: None,
             source_query: None,
             channel: None,
             payload: None,

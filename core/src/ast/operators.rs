@@ -83,6 +83,8 @@ pub enum Action {
     Search,
     /// INSERT … ON CONFLICT DO UPDATE.
     Upsert,
+    /// PostgreSQL MERGE.
+    Merge,
     /// Cursor-based scrolling.
     Scroll,
     /// Create vector collection (Qdrant).
@@ -198,6 +200,7 @@ impl std::fmt::Display for Action {
             Action::DropView => write!(f, "DROP_VIEW"),
             Action::Search => write!(f, "SEARCH"),
             Action::Upsert => write!(f, "UPSERT"),
+            Action::Merge => write!(f, "MERGE"),
             Action::Scroll => write!(f, "SCROLL"),
             Action::CreateCollection => write!(f, "CREATE_COLLECTION"),
             Action::DeleteCollection => write!(f, "DELETE_COLLECTION"),

@@ -4,7 +4,8 @@
 
 use bytes::BytesMut;
 use qail_core::ast::{
-    CTEDef, CageKind, Expr, GroupByMode, JoinKind, LogicalOp, Qail, SetOp, SortOrder,
+    CTEDef, CageKind, Expr, GroupByMode, JoinKind, LogicalOp, Merge, MergeAction, MergeMatchKind,
+    MergeSource, Qail, SetOp, SortOrder,
 };
 
 use super::helpers::write_usize;
@@ -678,6 +679,185 @@ pub fn encode_delete(
     }
 
     Ok(())
+}
+
+/// Encode a PostgreSQL MERGE statement.
+pub fn encode_merge(
+    cmd: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    let merge = cmd
+        .merge
+        .as_ref()
+        .ok_or(crate::protocol::EncodeError::InvalidAst(
+            "MERGE requires merge specification".to_string(),
+        ))?;
+    validate_merge_shape(merge)?;
+
+    encode_cte_prefix(cmd, buf, params)?;
+    buf.extend_from_slice(b"MERGE INTO ");
+    buf.extend_from_slice(cmd.table.as_bytes());
+    if let Some(alias) = &merge.target_alias {
+        buf.extend_from_slice(b" AS ");
+        buf.extend_from_slice(alias.as_bytes());
+    }
+
+    buf.extend_from_slice(b" USING ");
+    encode_merge_source(&merge.source, buf, params)?;
+
+    buf.extend_from_slice(b" ON ");
+    encode_conditions(&merge.on, buf, params)?;
+
+    for clause in &merge.clauses {
+        buf.extend_from_slice(b" WHEN ");
+        match clause.match_kind {
+            MergeMatchKind::Matched => buf.extend_from_slice(b"MATCHED"),
+            MergeMatchKind::NotMatchedByTarget => buf.extend_from_slice(b"NOT MATCHED BY TARGET"),
+            MergeMatchKind::NotMatchedBySource => buf.extend_from_slice(b"NOT MATCHED BY SOURCE"),
+        }
+        if !clause.condition.is_empty() {
+            buf.extend_from_slice(b" AND ");
+            encode_conditions(&clause.condition, buf, params)?;
+        }
+        buf.extend_from_slice(b" THEN ");
+        encode_merge_action(&clause.action, buf);
+    }
+
+    if let Some(ref ret_cols) = cmd.returning
+        && !ret_cols.is_empty()
+    {
+        buf.extend_from_slice(b" RETURNING ");
+        encode_columns(ret_cols, buf);
+    }
+
+    Ok(())
+}
+
+fn validate_merge_shape(merge: &Merge) -> Result<(), crate::protocol::EncodeError> {
+    if let MergeSource::Table { name, .. } = &merge.source
+        && name.trim().is_empty()
+    {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "MERGE requires a USING source table or query".to_string(),
+        ));
+    }
+    if merge.on.is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "MERGE requires at least one ON condition".to_string(),
+        ));
+    }
+    if merge.clauses.is_empty() {
+        return Err(crate::protocol::EncodeError::InvalidAst(
+            "MERGE requires at least one WHEN clause".to_string(),
+        ));
+    }
+
+    for clause in &merge.clauses {
+        match (&clause.match_kind, &clause.action) {
+            (MergeMatchKind::Matched, MergeAction::Insert { .. }) => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "WHEN MATCHED cannot INSERT".to_string(),
+                ));
+            }
+            (MergeMatchKind::NotMatchedByTarget, MergeAction::Update { .. })
+            | (MergeMatchKind::NotMatchedByTarget, MergeAction::Delete) => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "WHEN NOT MATCHED BY TARGET can only INSERT or DO NOTHING".to_string(),
+                ));
+            }
+            (MergeMatchKind::NotMatchedBySource, MergeAction::Insert { .. }) => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "WHEN NOT MATCHED BY SOURCE cannot INSERT".to_string(),
+                ));
+            }
+            (_, MergeAction::Update { assignments }) if assignments.is_empty() => {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "MERGE UPDATE requires at least one assignment".to_string(),
+                ));
+            }
+            (_, MergeAction::Insert { columns, values }) => {
+                if values.is_empty() {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "MERGE INSERT requires at least one value".to_string(),
+                    ));
+                }
+                if !columns.is_empty() && columns.len() != values.len() {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "MERGE INSERT column count must match value count".to_string(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn encode_merge_source(
+    source: &MergeSource,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    match source {
+        MergeSource::Table { name, alias } => {
+            buf.extend_from_slice(name.as_bytes());
+            if let Some(alias) = alias {
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(alias.as_bytes());
+            }
+        }
+        MergeSource::Query { query, alias } => {
+            buf.extend_from_slice(b"(");
+            encode_select(query, buf, params)?;
+            buf.extend_from_slice(b")");
+            if let Some(alias) = alias {
+                buf.extend_from_slice(b" AS ");
+                buf.extend_from_slice(alias.as_bytes());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_merge_action(action: &MergeAction, buf: &mut BytesMut) {
+    match action {
+        MergeAction::Update { assignments } => {
+            buf.extend_from_slice(b"UPDATE SET ");
+            for (i, (col, expr)) in assignments.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                buf.extend_from_slice(col.as_bytes());
+                buf.extend_from_slice(b" = ");
+                encode_expr(expr, buf);
+            }
+        }
+        MergeAction::Insert { columns, values } => {
+            buf.extend_from_slice(b"INSERT");
+            if !columns.is_empty() {
+                buf.extend_from_slice(b" (");
+                for (i, col) in columns.iter().enumerate() {
+                    if i > 0 {
+                        buf.extend_from_slice(b", ");
+                    }
+                    buf.extend_from_slice(col.as_bytes());
+                }
+                buf.extend_from_slice(b")");
+            }
+            buf.extend_from_slice(b" VALUES (");
+            for (i, value) in values.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                encode_expr(value, buf);
+            }
+            buf.extend_from_slice(b")");
+        }
+        MergeAction::Delete => buf.extend_from_slice(b"DELETE"),
+        MergeAction::DoNothing => buf.extend_from_slice(b"DO NOTHING"),
+    }
 }
 
 /// Encode an EXPORT command as `COPY (SELECT ...) TO STDOUT`.

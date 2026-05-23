@@ -36,6 +36,9 @@ pub struct Qail {
     pub returning: Option<Vec<Expr>>,
     /// ON CONFLICT clause for upsert.
     pub on_conflict: Option<OnConflict>,
+    /// PostgreSQL MERGE specification.
+    #[serde(default)]
+    pub merge: Option<Merge>,
     /// INSERT … SELECT source query.
     pub source_query: Option<Box<Qail>>,
     /// LISTEN/NOTIFY channel.
@@ -124,6 +127,81 @@ pub enum ConflictAction {
     },
 }
 
+/// PostgreSQL `MERGE` specification.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Merge {
+    /// Optional target table alias.
+    pub target_alias: Option<String>,
+    /// `USING` data source.
+    pub source: MergeSource,
+    /// `ON` join conditions.
+    pub on: Vec<Condition>,
+    /// Ordered `WHEN ... THEN ...` clauses.
+    pub clauses: Vec<MergeClause>,
+}
+
+/// PostgreSQL `MERGE USING` source.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum MergeSource {
+    /// Table or view source.
+    Table {
+        /// Source relation name.
+        name: String,
+        /// Optional source alias.
+        alias: Option<String>,
+    },
+    /// Subquery source.
+    Query {
+        /// Source query.
+        query: Box<Qail>,
+        /// Optional source alias.
+        alias: Option<String>,
+    },
+}
+
+/// One ordered PostgreSQL `MERGE WHEN` clause.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MergeClause {
+    /// Match class for the candidate row.
+    pub match_kind: MergeMatchKind,
+    /// Optional `AND` conditions after the match class.
+    pub condition: Vec<Condition>,
+    /// Action to execute for this clause.
+    pub action: MergeAction,
+}
+
+/// PostgreSQL `MERGE WHEN` match class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MergeMatchKind {
+    /// `WHEN MATCHED`.
+    Matched,
+    /// `WHEN NOT MATCHED [BY TARGET]`.
+    NotMatchedByTarget,
+    /// `WHEN NOT MATCHED BY SOURCE`.
+    NotMatchedBySource,
+}
+
+/// PostgreSQL `MERGE THEN` action.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum MergeAction {
+    /// `UPDATE SET ...`.
+    Update {
+        /// Column = expression assignments.
+        assignments: Vec<(String, Expr)>,
+    },
+    /// `INSERT (...) VALUES (...)`.
+    Insert {
+        /// Optional target columns.
+        columns: Vec<String>,
+        /// Insert value expressions.
+        values: Vec<Expr>,
+    },
+    /// `DELETE`.
+    Delete,
+    /// `DO NOTHING`.
+    DoNothing,
+}
+
 impl Default for OnConflict {
     fn default() -> Self {
         Self {
@@ -160,6 +238,7 @@ impl Default for Qail {
             distinct_on: vec![],
             returning: None,
             on_conflict: None,
+            merge: None,
             source_query: None,
             channel: None,
             payload: None,
@@ -193,6 +272,7 @@ impl Default for Qail {
 mod advanced;
 mod constructors;
 mod cte;
+mod merge;
 mod query;
 mod rls;
 mod vector;

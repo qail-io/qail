@@ -30,7 +30,10 @@
 //! // Transpiles to: SELECT * FROM orders WHERE tenant_id = '550e8400-...'
 //! ```
 
-use crate::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+use crate::ast::{
+    Action, Cage, CageKind, Condition, Expr, LogicalOp, MergeAction, MergeMatchKind, MergeSource,
+    Operator, Qail, Value,
+};
 use crate::error::{QailBuildError, QailBuildResult};
 use crate::rls::RlsContext;
 use crate::rls::tenant::lookup_tenant_column;
@@ -66,6 +69,11 @@ fn expr_named_eq(expr: &Expr, name: &str) -> bool {
 
 fn is_tenant_column_condition(cond: &Condition, tenant_col: &str) -> bool {
     expr_named_eq(&cond.left, tenant_col)
+}
+
+fn condition_references_tenant_column(cond: &Condition, tenant_col: &str) -> bool {
+    is_tenant_column_condition(cond, tenant_col)
+        || matches!(&cond.value, Value::Column(col) if normalize_ident(col) == normalize_ident(tenant_col))
 }
 
 fn payload_is_positional(cage: &Cage) -> bool {
@@ -131,6 +139,7 @@ impl Qail {
                 | Action::Search
                 | Action::Scroll => Ok(self.scope_to_global(&tenant_col)),
                 Action::Add | Action::Upsert | Action::Put => self.scope_insert_global(&tenant_col),
+                Action::Merge => self.scope_merge_global(&tenant_col),
                 _ => Ok(self),
             };
         }
@@ -154,6 +163,7 @@ impl Qail {
             Action::Add | Action::Upsert | Action::Put => {
                 self.scope_insert_tenant(&tenant_col, ctx)
             }
+            Action::Merge => self.scope_merge_tenant(&tenant_col, ctx),
             // DDL, transactions, etc. → no injection
             _ => Ok(self),
         }
@@ -295,6 +305,163 @@ impl Qail {
         cage.conditions
             .push(make_named_condition(tenant_col, tenant_value));
         Ok(self)
+    }
+
+    fn scope_merge_tenant(mut self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
+        let target_col = self.merge_target_tenant_col(tenant_col);
+        let source_col = self.merge_source_tenant_col();
+        self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
+
+        let condition = Condition {
+            left: Expr::Named(target_col),
+            op: Operator::Eq,
+            value: Value::String(ctx.tenant_id.clone()),
+            is_array_unnest: false,
+        };
+        let source_condition = source_col.map(|source_col| Condition {
+            left: Expr::Named(source_col),
+            op: Operator::Eq,
+            value: Value::String(ctx.tenant_id.clone()),
+            is_array_unnest: false,
+        });
+        self.scope_merge_clause_conditions(tenant_col, condition, source_condition);
+        self.scope_merge_insert_value(
+            tenant_col,
+            Expr::Literal(Value::String(ctx.tenant_id.clone())),
+        )?;
+        Ok(self)
+    }
+
+    fn scope_merge_global(mut self, tenant_col: &str) -> QailBuildResult<Self> {
+        let target_col = self.merge_target_tenant_col(tenant_col);
+        let source_col = self.merge_source_tenant_col();
+        self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
+
+        let condition = Condition {
+            left: Expr::Named(target_col),
+            op: Operator::IsNull,
+            value: Value::Null,
+            is_array_unnest: false,
+        };
+        let source_condition = source_col.map(|source_col| Condition {
+            left: Expr::Named(source_col),
+            op: Operator::IsNull,
+            value: Value::Null,
+            is_array_unnest: false,
+        });
+        self.scope_merge_clause_conditions(tenant_col, condition, source_condition);
+        self.scope_merge_insert_value(tenant_col, Expr::Literal(Value::Null))?;
+        Ok(self)
+    }
+
+    fn merge_target_tenant_col(&self, tenant_col: &str) -> String {
+        let qualifier = self
+            .merge
+            .as_ref()
+            .and_then(|merge| merge.target_alias.as_ref())
+            .map(String::as_str)
+            .unwrap_or(&self.table);
+        format!("{qualifier}.{tenant_col}")
+    }
+
+    fn merge_source_tenant_col(&self) -> Option<String> {
+        let merge = self.merge.as_ref()?;
+        let MergeSource::Table { name, alias } = &merge.source else {
+            return None;
+        };
+        let source_tenant_col = lookup_tenant_column(name)?;
+        let qualifier = alias.as_deref().unwrap_or(name);
+        Some(format!("{qualifier}.{source_tenant_col}"))
+    }
+
+    fn scope_merge_on_tenant_equality(
+        &mut self,
+        tenant_col: &str,
+        target_col: String,
+        source_col: Option<String>,
+    ) {
+        let Some(merge) = &mut self.merge else {
+            return;
+        };
+        merge
+            .on
+            .retain(|cond| !condition_references_tenant_column(cond, tenant_col));
+
+        if let Some(source_col) = source_col {
+            merge.on.push(Condition {
+                left: Expr::Named(target_col),
+                op: Operator::Eq,
+                value: Value::Column(source_col),
+                is_array_unnest: false,
+            });
+        }
+    }
+
+    fn scope_merge_clause_conditions(
+        &mut self,
+        tenant_col: &str,
+        target_condition: Condition,
+        source_condition: Option<Condition>,
+    ) {
+        let Some(merge) = &mut self.merge else {
+            return;
+        };
+
+        for clause in &mut merge.clauses {
+            clause
+                .condition
+                .retain(|cond| !condition_references_tenant_column(cond, tenant_col));
+
+            match clause.match_kind {
+                MergeMatchKind::Matched | MergeMatchKind::NotMatchedBySource => {
+                    clause.condition.push(target_condition.clone());
+                }
+                MergeMatchKind::NotMatchedByTarget => {
+                    if let Some(condition) = &source_condition {
+                        clause.condition.push(condition.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    fn scope_merge_insert_value(
+        &mut self,
+        tenant_col: &str,
+        tenant_expr: Expr,
+    ) -> QailBuildResult<()> {
+        let Some(merge) = &mut self.merge else {
+            return Ok(());
+        };
+
+        for clause in &mut merge.clauses {
+            let MergeAction::Insert { columns, values } = &mut clause.action else {
+                continue;
+            };
+
+            if columns.is_empty() {
+                return Err(QailBuildError::RlsInsertRequiresExplicitColumns {
+                    table: self.table.clone(),
+                    tenant_column: tenant_col.to_string(),
+                });
+            }
+
+            if let Some(pos) = columns
+                .iter()
+                .position(|col| normalize_ident(col) == normalize_ident(tenant_col))
+            {
+                if let Some(value) = values.get_mut(pos) {
+                    *value = tenant_expr.clone();
+                } else {
+                    values.push(tenant_expr.clone());
+                }
+            } else {
+                columns.push(tenant_col.to_string());
+                values.push(tenant_expr.clone());
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -614,6 +781,110 @@ mod tests {
                     && matches!(&c.value, Value::Null)
             }),
             "Expected tenant_id = NULL in payload"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_scopes_merge_on_and_insert_action() {
+        register_tenant_table("_rls_merge_upsert_orders", "tenant_id");
+        register_tenant_table("_rls_merge_source_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-merge");
+        let query = Qail::merge_into("_rls_merge_upsert_orders")
+            .target_alias("t")
+            .using_table_as("_rls_merge_source_orders", "s")
+            .merge_on_column("t.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("status", Expr::Named("s.status".to_string()))])
+            .when_not_matched_insert(
+                &["id", "status"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Named("s.status".to_string()),
+                ],
+            )
+            .with_rls(&ctx)
+            .expect("merge rls should apply");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("ON t.id = s.id AND t.tenant_id = s.tenant_id"),
+            "MERGE ON must preserve target/source tenant equality: {sql}"
+        );
+        assert!(
+            sql.contains("WHEN MATCHED AND t.tenant_id = 'tenant-merge' THEN UPDATE"),
+            "MERGE matched branch must be target-tenant scoped: {sql}"
+        );
+        assert!(
+            sql.contains("WHEN NOT MATCHED BY TARGET AND s.tenant_id = 'tenant-merge' THEN INSERT"),
+            "MERGE insert branch must be source-tenant scoped: {sql}"
+        );
+        assert!(
+            sql.contains("INSERT (id, status, tenant_id) VALUES (s.id, s.status, 'tenant-merge')"),
+            "MERGE insert branch must include tenant value: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_scopes_merge_by_source_delete_without_target_only_on_predicate() {
+        register_tenant_table("_rls_merge_prune_orders", "tenant_id");
+        register_tenant_table("_rls_merge_prune_source_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-prune");
+        let query = Qail::merge_into("_rls_merge_prune_orders")
+            .target_alias("t")
+            .using_table_as("_rls_merge_prune_source_orders", "s")
+            .merge_on_column("t.id", Operator::Eq, "s.id")
+            .when_not_matched_by_source_delete()
+            .with_rls(&ctx)
+            .expect("merge rls should apply");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("ON t.id = s.id AND t.tenant_id = s.tenant_id"),
+            "MERGE ON should use target/source tenant equality, not a target-only literal: {sql}"
+        );
+        assert!(
+            sql.contains("WHEN NOT MATCHED BY SOURCE AND t.tenant_id = 'tenant-prune' THEN DELETE"),
+            "BY SOURCE delete must be target-tenant scoped in the WHEN branch: {sql}"
+        );
+        assert!(
+            !sql.contains("ON t.id = s.id AND t.tenant_id = 'tenant-prune'"),
+            "target-only tenant predicates in ON can misclassify BY SOURCE rows: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_global_scopes_merge_to_null_tenant() {
+        register_tenant_table("_rls_global_merge_catalog", "tenant_id");
+        register_tenant_table("_rls_global_merge_source", "tenant_id");
+
+        let query = Qail::merge_into("_rls_global_merge_catalog")
+            .using_table_as("_rls_global_merge_source", "s")
+            .merge_on_column("_rls_global_merge_catalog.id", Operator::Eq, "s.id")
+            .when_not_matched_insert(
+                &["id", "name"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Named("s.name".to_string()),
+                ],
+            )
+            .with_rls(&RlsContext::global())
+            .expect("global merge rls should apply");
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains(
+                "ON _rls_global_merge_catalog.id = s.id AND _rls_global_merge_catalog.tenant_id = s.tenant_id"
+            ),
+            "global MERGE ON must preserve target/source tenant equality: {sql}"
+        );
+        assert!(
+            sql.contains("WHEN NOT MATCHED BY TARGET AND s.tenant_id IS NULL THEN INSERT"),
+            "global MERGE insert branch must be source-null scoped: {sql}"
+        );
+        assert!(
+            sql.contains("INSERT (id, name, tenant_id) VALUES (s.id, s.name, NULL)"),
+            "global MERGE insert branch must include NULL tenant: {sql}"
         );
     }
 

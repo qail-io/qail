@@ -19,6 +19,8 @@ pub enum EncodeError {
     InvalidMaxRows(i32),
     /// Action not supported by the AST-native encoder (e.g. Listen, Search).
     UnsupportedAction(Action),
+    /// AST shape cannot be encoded as a valid SQL command.
+    InvalidAst(String),
     /// A Value::Function/expression contains SQL injection markers.
     UnsafeExpression(String),
 }
@@ -49,6 +51,7 @@ impl fmt::Display for EncodeError {
             EncodeError::UnsupportedAction(action) => {
                 write!(f, "Unsupported action {:?} in AST-native encoder", action)
             }
+            EncodeError::InvalidAst(message) => write!(f, "Invalid AST: {}", message),
             EncodeError::UnsafeExpression(expr) => {
                 write!(f, "Unsafe expression rejected: {}", expr)
             }

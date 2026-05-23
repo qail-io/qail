@@ -7,6 +7,7 @@ pub mod cte;
 pub mod delete;
 pub mod insert;
 pub mod json_table;
+pub mod merge;
 pub mod select;
 pub mod update;
 pub mod upsert;

@@ -214,6 +214,95 @@ fn test_upsert_postgres() {
     assert!(sql.contains("RETURNING *"));
 }
 
+#[test]
+fn test_merge_postgres_builder() {
+    let cmd = Qail::merge_into("users")
+        .target_alias("u")
+        .using_table_as("staging_users", "s")
+        .merge_on_column("u.id", Operator::Eq, "s.id")
+        .when_matched_update(&[
+            ("name", Expr::Named("s.name".to_string())),
+            ("email", Expr::Named("s.email".to_string())),
+        ])
+        .when_not_matched_insert(
+            &["id", "name", "email"],
+            &[
+                Expr::Named("s.id".to_string()),
+                Expr::Named("s.name".to_string()),
+                Expr::Named("s.email".to_string()),
+            ],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "MERGE INTO users AS u USING staging_users AS s ON u.id = s.id \
+         WHEN MATCHED THEN UPDATE SET name = s.name, email = s.email \
+         WHEN NOT MATCHED BY TARGET THEN INSERT (id, name, email) VALUES (s.id, s.name, s.email)"
+    );
+}
+
+#[test]
+fn test_merge_postgres_parser_to_sql() {
+    let cmd = crate::parser::parse(
+        "merge users using staging_users on users.id = staging_users.id \
+         when not matched by source then delete \
+         when matched then do nothing",
+    )
+    .unwrap();
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "MERGE INTO users USING staging_users ON users.id = staging_users.id \
+         WHEN NOT MATCHED BY SOURCE THEN DELETE \
+         WHEN MATCHED THEN DO NOTHING"
+    );
+}
+
+#[test]
+fn test_merge_postgres_with_cte() {
+    let source = Qail::get("staging_users").columns(["id", "name"]);
+    let cmd = Qail::merge_into("users")
+        .with("incoming", source)
+        .using_table_as("incoming", "s")
+        .merge_on_column("users.id", Operator::Eq, "s.id")
+        .when_matched_update(&[("name", Expr::Named("s.name".to_string()))])
+        .when_not_matched_insert(
+            &["id", "name"],
+            &[
+                Expr::Named("s.id".to_string()),
+                Expr::Named("s.name".to_string()),
+            ],
+        );
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "WITH incoming(id, name) AS (SELECT id, name FROM staging_users) \
+         MERGE INTO users USING incoming AS s ON users.id = s.id \
+         WHEN MATCHED THEN UPDATE SET name = s.name \
+         WHEN NOT MATCHED BY TARGET THEN INSERT (id, name) VALUES (s.id, s.name)"
+    );
+}
+
+#[test]
+fn test_merge_postgres_rejects_invalid_action_shape() {
+    let mut cmd = Qail::merge_into("users")
+        .using_table("staging_users")
+        .merge_on_column("users.id", Operator::Eq, "staging_users.id")
+        .when_matched_do_nothing();
+
+    let merge = cmd.merge.as_mut().expect("merge spec");
+    merge.clauses[0].action = MergeAction::Insert {
+        columns: vec!["id".to_string()],
+        values: vec![Expr::Named("staging_users.id".to_string())],
+    };
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(sql, "/* ERROR: WHEN MATCHED cannot INSERT */");
+}
+
 // ============= JSON Tests =============
 
 #[test]

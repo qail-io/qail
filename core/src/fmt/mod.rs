@@ -1,5 +1,6 @@
 use crate::ast::{
-    Action, Cage, CageKind, Condition, Expr, Join, LogicalOp, Operator, Qail, SortOrder, Value,
+    Action, Cage, CageKind, Condition, Expr, Join, LogicalOp, MergeAction, MergeMatchKind,
+    MergeSource, Operator, Qail, SortOrder, Value,
 };
 use std::fmt::{Result, Write};
 
@@ -73,6 +74,10 @@ impl Formatter {
             Action::Set => write!(self.buffer, "set {}", cmd.table)?,
             Action::Del => write!(self.buffer, "del {}", cmd.table)?,
             Action::Add => write!(self.buffer, "add {}", cmd.table)?,
+            Action::Merge => {
+                self.format_merge(cmd)?;
+                return Ok(());
+            }
             _ => write!(self.buffer, "{} {}", cmd.action, cmd.table)?, // Fallback for others
         }
         writeln!(self.buffer)?;
@@ -187,6 +192,86 @@ impl Formatter {
         }
 
         // self.indent_level -= 1; // Removed matching decrement
+        Ok(())
+    }
+
+    fn format_merge(&mut self, cmd: &Qail) -> Result {
+        let Some(merge) = &cmd.merge else {
+            write!(self.buffer, "merge {}", cmd.table)?;
+            writeln!(self.buffer)?;
+            return Ok(());
+        };
+
+        write!(self.buffer, "merge {}", cmd.table)?;
+        if let Some(alias) = &merge.target_alias {
+            write!(self.buffer, " as {}", alias)?;
+        }
+        write!(self.buffer, " using ")?;
+        match &merge.source {
+            MergeSource::Table { name, alias } => {
+                write!(self.buffer, "{}", name)?;
+                if let Some(alias) = alias {
+                    write!(self.buffer, " as {}", alias)?;
+                }
+            }
+            MergeSource::Query { query, alias } => {
+                write!(self.buffer, "(")?;
+                self.visit_cmd(query)?;
+                write!(self.buffer, ")")?;
+                if let Some(alias) = alias {
+                    write!(self.buffer, " as {}", alias)?;
+                }
+            }
+        }
+        write!(self.buffer, " on ")?;
+        self.format_conditions(&merge.on, LogicalOp::And)?;
+
+        for clause in &merge.clauses {
+            write!(self.buffer, " when ")?;
+            match clause.match_kind {
+                MergeMatchKind::Matched => write!(self.buffer, "matched")?,
+                MergeMatchKind::NotMatchedByTarget => write!(self.buffer, "not matched by target")?,
+                MergeMatchKind::NotMatchedBySource => write!(self.buffer, "not matched by source")?,
+            }
+            if !clause.condition.is_empty() {
+                write!(self.buffer, " and ")?;
+                self.format_conditions(&clause.condition, LogicalOp::And)?;
+            }
+            write!(self.buffer, " then ")?;
+            self.format_merge_action(&clause.action)?;
+        }
+        writeln!(self.buffer)?;
+        Ok(())
+    }
+
+    fn format_merge_action(&mut self, action: &MergeAction) -> Result {
+        match action {
+            MergeAction::Update { assignments } => {
+                write!(self.buffer, "update set ")?;
+                for (i, (col, expr)) in assignments.iter().enumerate() {
+                    if i > 0 {
+                        write!(self.buffer, ", ")?;
+                    }
+                    write!(self.buffer, "{} = {}", col, expr)?;
+                }
+            }
+            MergeAction::Insert { columns, values } => {
+                write!(self.buffer, "insert")?;
+                if !columns.is_empty() {
+                    write!(self.buffer, " ({})", columns.join(", "))?;
+                }
+                write!(self.buffer, " values (")?;
+                for (i, value) in values.iter().enumerate() {
+                    if i > 0 {
+                        write!(self.buffer, ", ")?;
+                    }
+                    write!(self.buffer, "{}", value)?;
+                }
+                write!(self.buffer, ")")?;
+            }
+            MergeAction::Delete => write!(self.buffer, "delete")?,
+            MergeAction::DoNothing => write!(self.buffer, "do nothing")?,
+        }
         Ok(())
     }
 

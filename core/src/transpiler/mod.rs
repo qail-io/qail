@@ -102,6 +102,7 @@ impl ToSql for Qail {
             Action::Set => dml::update::build_update(self, dialect),
             Action::Del => dml::delete::build_delete(self, dialect),
             Action::Add => dml::insert::build_insert(self, dialect),
+            Action::Merge => dml::merge::build_merge(self, dialect),
             Action::Gen => format!("-- gen::{}  (generates Rust struct, not SQL)", self.table),
             Action::Make => ddl::build_create_table(self, dialect),
             Action::Mod => ddl::build_alter_table(self, dialect),

@@ -159,6 +159,9 @@ impl AstEncoder {
             Action::Del => {
                 dml::encode_delete(cmd, sql_buf, params)?;
             }
+            Action::Merge => {
+                dml::encode_merge(cmd, sql_buf, params)?;
+            }
             Action::Export => {
                 dml::encode_export(cmd, sql_buf, params)?;
             }
@@ -239,6 +242,9 @@ impl AstEncoder {
             }
             Action::Del => {
                 dml::encode_delete(cmd, &mut sql_buf, &mut params)?;
+            }
+            Action::Merge => {
+                dml::encode_merge(cmd, &mut sql_buf, &mut params)?;
             }
             Action::Export => {
                 dml::encode_export(cmd, &mut sql_buf, &mut params)?;
@@ -335,6 +341,9 @@ impl AstEncoder {
             }
             Action::Del => {
                 dml::encode_delete(cmd, &mut sql_buf, &mut params)?;
+            }
+            Action::Merge => {
+                dml::encode_merge(cmd, &mut sql_buf, &mut params)?;
             }
             _ => {}
         }
@@ -1124,6 +1133,81 @@ mod tests {
             wire_str.contains("COPY"),
             "Batch Export should produce COPY: {}",
             wire_str
+        );
+    }
+
+    #[test]
+    fn test_encode_merge_sql() {
+        use qail_core::ast::{Expr, Operator};
+
+        let cmd = Qail::merge_into("users")
+            .target_alias("u")
+            .using_table_as("staging_users", "s")
+            .merge_on_column("u.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("name", Expr::Named("s.name".to_string()))])
+            .when_not_matched_insert(
+                &["id", "name"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Named("s.name".to_string()),
+                ],
+            );
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert!(params.is_empty());
+        assert_eq!(
+            sql,
+            "MERGE INTO users AS u USING staging_users AS s ON u.id = s.id \
+             WHEN MATCHED THEN UPDATE SET name = s.name \
+             WHEN NOT MATCHED BY TARGET THEN INSERT (id, name) VALUES (s.id, s.name)"
+        );
+    }
+
+    #[test]
+    fn test_encode_merge_with_cte_sql() {
+        use qail_core::ast::{Expr, Operator};
+
+        let source = Qail::get("staging_users").columns(["id", "name"]);
+        let cmd = Qail::merge_into("users")
+            .with("incoming", source)
+            .using_table_as("incoming", "s")
+            .merge_on_column("users.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("name", Expr::Named("s.name".to_string()))]);
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert!(params.is_empty());
+        assert_eq!(
+            sql,
+            "WITH incoming(id, name) AS (SELECT id, name FROM staging_users) \
+             MERGE INTO users USING incoming AS s ON users.id = s.id \
+             WHEN MATCHED THEN UPDATE SET name = s.name"
+        );
+    }
+
+    #[test]
+    fn test_encode_merge_rejects_invalid_action_shape() {
+        use qail_core::ast::{Expr, MergeAction, MergeClause, MergeMatchKind, Operator};
+
+        let mut cmd = Qail::merge_into("users")
+            .using_table("staging_users")
+            .merge_on_column("users.id", Operator::Eq, "staging_users.id");
+        cmd.merge
+            .as_mut()
+            .expect("merge spec")
+            .clauses
+            .push(MergeClause {
+                match_kind: MergeMatchKind::Matched,
+                condition: vec![],
+                action: MergeAction::Insert {
+                    columns: vec!["id".to_string()],
+                    values: vec![Expr::Named("staging_users.id".to_string())],
+                },
+            });
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("invalid merge should fail");
+        assert!(
+            err.to_string().contains("WHEN MATCHED cannot INSERT"),
+            "unexpected error: {err}"
         );
     }
 
