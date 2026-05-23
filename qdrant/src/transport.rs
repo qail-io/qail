@@ -501,7 +501,13 @@ fn grpc_unframe(mut data: Bytes) -> QdrantResult<Bytes> {
         ));
     }
 
-    let _compress = data.get_u8();
+    let compress = data.get_u8();
+    if compress != 0 {
+        return Err(QdrantError::Decode(format!(
+            "Unsupported compressed gRPC response frame: {}",
+            compress
+        )));
+    }
     let len = data.get_u32() as usize;
 
     if len > MAX_GRPC_RESPONSE_BYTES.saturating_sub(5) {
@@ -551,6 +557,17 @@ mod tests {
 
         let result = grpc_unframe(data.freeze()).unwrap();
         assert_eq!(&result[..], b"hello");
+    }
+
+    #[test]
+    fn test_grpc_unframe_rejects_compressed_frame() {
+        let mut data = BytesMut::new();
+        data.put_u8(1);
+        data.put_u32(5);
+        data.extend_from_slice(b"hello");
+
+        let err = grpc_unframe(data.freeze()).unwrap_err();
+        assert!(matches!(err, QdrantError::Decode(msg) if msg.contains("compressed")));
     }
 
     #[test]
