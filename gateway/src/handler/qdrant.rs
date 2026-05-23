@@ -29,6 +29,7 @@ pub(super) async fn execute_qdrant_cmd(
         tracing::error!("Qdrant operation requested but no [qdrant] config");
         ApiError::with_code("QDRANT_NOT_CONFIGURED", "Qdrant not configured")
     })?;
+    ensure_qdrant_collection_management_allowed(auth, &cmd.action)?;
 
     let mut conn = pool.get().await.map_err(|e| {
         tracing::error!("Qdrant pool error: {}", e);
@@ -263,6 +264,22 @@ pub(super) async fn execute_qdrant_cmd(
             format!("Unsupported Qdrant action: {:?}", cmd.action),
         )),
     }
+}
+
+fn ensure_qdrant_collection_management_allowed(
+    auth: &crate::auth::AuthContext,
+    action: &qail_core::ast::Action,
+) -> Result<(), ApiError> {
+    if matches!(
+        action,
+        qail_core::ast::Action::CreateCollection | qail_core::ast::Action::DeleteCollection
+    ) && !auth.is_platform_admin()
+    {
+        return Err(ApiError::forbidden(
+            "Platform administrator role required for Qdrant collection management",
+        ));
+    }
+    Ok(())
 }
 
 fn inject_qdrant_tenant_scope(cmd: &mut qail_core::ast::Qail, tenant_col: &str, tenant_id: &str) {
@@ -941,13 +958,16 @@ fn payload_value_to_json(v: &qail_qdrant::PayloadValue) -> serde_json::Value {
 mod tests {
     use super::{
         ORIGINAL_POINT_ID_PAYLOAD_KEY, enforce_qdrant_upsert_outgoing_filters,
-        enforce_qdrant_upsert_payload_filters, extract_upsert_point,
-        prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
+        enforce_qdrant_upsert_payload_filters, ensure_qdrant_collection_management_allowed,
+        extract_upsert_point, prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
         qdrant_payload_matches_filter_cages, qdrant_request_filter_cages,
         qdrant_upsert_filter_cages, scored_point_to_json, split_filter_conditions,
         tenant_scoped_qdrant_point_id, verify_existing_qdrant_points_tenant_boundary,
     };
-    use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+    use crate::auth::AuthContext;
+    use qail_core::ast::{
+        Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value,
+    };
 
     fn cond(name: &str, value: &str) -> Condition {
         Condition {
@@ -1074,6 +1094,38 @@ mod tests {
 
         let err = qdrant_limit_from_cmd(&cmd, 1_000).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn qdrant_collection_management_requires_platform_admin() {
+        let tenant_admin = AuthContext {
+            user_id: "admin-tenant".to_string(),
+            role: "administrator".to_string(),
+            tenant_id: Some("tenant-a".to_string()),
+            claims: std::collections::HashMap::from([(
+                "platform_admin".to_string(),
+                serde_json::json!(true),
+            )]),
+        };
+
+        let err =
+            ensure_qdrant_collection_management_allowed(&tenant_admin, &Action::DeleteCollection)
+                .unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+
+        let platform_admin = AuthContext {
+            user_id: "admin-platform".to_string(),
+            role: "administrator".to_string(),
+            tenant_id: None,
+            claims: std::collections::HashMap::from([(
+                "platform_admin".to_string(),
+                serde_json::json!(true),
+            )]),
+        };
+        assert!(
+            ensure_qdrant_collection_management_allowed(&platform_admin, &Action::CreateCollection)
+                .is_ok()
+        );
     }
 
     #[test]
