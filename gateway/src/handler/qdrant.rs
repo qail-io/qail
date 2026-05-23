@@ -654,15 +654,22 @@ fn qdrant_request_filter_cages(
     all_filter_cages: &[qail_core::ast::Cage],
     update_policy_filter_cages: &[qail_core::ast::Cage],
 ) -> Vec<qail_core::ast::Cage> {
-    all_filter_cages
-        .iter()
-        .filter(|cage| {
-            !update_policy_filter_cages
-                .iter()
-                .any(|policy_cage| policy_cage == *cage)
-        })
-        .cloned()
-        .collect()
+    let mut consumed_policy_filters = vec![false; update_policy_filter_cages.len()];
+    let mut request_filters = Vec::new();
+
+    all_filter_cages.iter().for_each(|cage| {
+        if let Some(policy_idx) = update_policy_filter_cages
+            .iter()
+            .enumerate()
+            .position(|(idx, policy_cage)| !consumed_policy_filters[idx] && policy_cage == cage)
+        {
+            consumed_policy_filters[policy_idx] = true;
+        } else {
+            request_filters.push(cage.clone());
+        }
+    });
+
+    request_filters
 }
 
 fn qdrant_upsert_filter_payload_field(
@@ -1365,6 +1372,25 @@ mod tests {
         let request_filters = qdrant_request_filter_cages(&all_filters, &[update_policy_filter]);
 
         assert_eq!(request_filters, vec![user_filter]);
+    }
+
+    #[test]
+    fn qdrant_request_filter_cages_preserve_user_duplicate_of_policy_filter() {
+        let user_filter = Cage {
+            kind: CageKind::Filter,
+            conditions: vec![cond("operator_id", "operator-1")],
+            logical_op: LogicalOp::And,
+        };
+        let update_policy_filter = user_filter.clone();
+        let all_filters = vec![user_filter.clone(), update_policy_filter.clone()];
+
+        let request_filters = qdrant_request_filter_cages(&all_filters, &[update_policy_filter]);
+
+        assert_eq!(
+            request_filters,
+            vec![user_filter],
+            "subtract only the policy-injected copy, not every equal user filter"
+        );
     }
 
     #[test]
