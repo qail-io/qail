@@ -115,6 +115,9 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
             if let Some(ref idx) = cmd.index_def {
                 return format!("DROP INDEX IF EXISTS {}", idx.name);
             }
+            if !cmd.table.trim().is_empty() {
+                return format!("DROP INDEX IF EXISTS {}", cmd.table);
+            }
             "DROP INDEX ...".to_string()
         }
         Action::Mod => {
@@ -271,6 +274,24 @@ mod tests {
         assert!(
             sql.contains("ON users (email)"),
             "index SQL should use IndexDef table, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn drop_index_sql_uses_command_table_when_index_def_is_absent() {
+        let cmd = Qail {
+            action: Action::DropIndex,
+            table: "idx_users_email".to_string(),
+            index_def: None,
+            ..Default::default()
+        };
+
+        let sql = cmd_to_sql(&cmd);
+
+        assert_eq!(sql, "DROP INDEX IF EXISTS idx_users_email");
+        assert!(
+            !sql.contains("..."),
+            "drop-index SQL should not contain placeholder, got: {sql}"
         );
     }
 }
