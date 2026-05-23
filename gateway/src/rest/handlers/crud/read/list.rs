@@ -829,6 +829,38 @@ fn compare_json_to_qail(value: &Value, expected: &QailValue) -> Option<std::cmp:
     }
 }
 
+fn sql_like_pattern_matches(actual: &str, pattern: &str, case_insensitive: bool) -> bool {
+    let actual = if case_insensitive {
+        actual.to_ascii_lowercase()
+    } else {
+        actual.to_string()
+    };
+    let pattern = if case_insensitive {
+        pattern.to_ascii_lowercase()
+    } else {
+        pattern.to_string()
+    };
+    let actual: Vec<char> = actual.chars().collect();
+    let pattern: Vec<char> = pattern.chars().collect();
+    let mut dp = vec![vec![false; actual.len() + 1]; pattern.len() + 1];
+    dp[0][0] = true;
+
+    for p_idx in 0..pattern.len() {
+        if pattern[p_idx] == '%' {
+            dp[p_idx + 1][0] = dp[p_idx][0];
+        }
+        for a_idx in 0..actual.len() {
+            dp[p_idx + 1][a_idx + 1] = match pattern[p_idx] {
+                '%' => dp[p_idx][a_idx + 1] || dp[p_idx + 1][a_idx],
+                '_' => dp[p_idx][a_idx],
+                ch => dp[p_idx][a_idx] && ch == actual[a_idx],
+            };
+        }
+    }
+
+    dp[pattern.len()][actual.len()]
+}
+
 fn string_like(value: &Value, pattern: &QailValue, case_insensitive: bool) -> bool {
     let Some(actual) = value.as_str() else {
         return false;
@@ -837,14 +869,26 @@ fn string_like(value: &Value, pattern: &QailValue, case_insensitive: bool) -> bo
         QailValue::String(s) => s.as_str(),
         _ => return false,
     };
-    let expected = expected.trim_matches('%');
-    if case_insensitive {
-        actual
-            .to_ascii_lowercase()
-            .contains(&expected.to_ascii_lowercase())
-    } else {
-        actual.contains(expected)
-    }
+    sql_like_pattern_matches(actual, expected, case_insensitive)
+}
+
+fn string_fuzzy(value: &Value, pattern: &QailValue) -> bool {
+    let expected = match pattern {
+        QailValue::String(s) => format!("%{}%", s),
+        _ => return false,
+    };
+    string_like(value, &QailValue::String(expected), true)
+}
+
+fn string_contains(value: &Value, pattern: &QailValue) -> bool {
+    let Some(actual) = value.as_str() else {
+        return false;
+    };
+    let expected = match pattern {
+        QailValue::String(s) => s.as_str(),
+        _ => return false,
+    };
+    actual.contains(expected)
 }
 
 fn row_matches_filter(row: &Value, column: &str, op: Operator, expected: &QailValue) -> bool {
@@ -879,12 +923,10 @@ fn row_matches_filter(row: &Value, column: &str, op: Operator, expected: &QailVa
                 Operator::Lte => ordering.is_lt() || ordering.is_eq(),
                 _ => false,
             }),
-        Operator::Like | Operator::Contains => {
-            value.is_some_and(|value| string_like(value, expected, false))
-        }
-        Operator::ILike | Operator::Fuzzy => {
-            value.is_some_and(|value| string_like(value, expected, true))
-        }
+        Operator::Like => value.is_some_and(|value| string_like(value, expected, false)),
+        Operator::Contains => value.is_some_and(|value| string_contains(value, expected)),
+        Operator::ILike => value.is_some_and(|value| string_like(value, expected, true)),
+        Operator::Fuzzy => value.is_some_and(|value| string_fuzzy(value, expected)),
         Operator::NotLike => value.is_none_or(|value| !string_like(value, expected, false)),
         Operator::NotILike => value.is_none_or(|value| !string_like(value, expected, true)),
         _ => false,
@@ -985,6 +1027,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(rows, vec![json!({"id": 1, "region": "west"})]);
+    }
+
+    #[test]
+    fn branch_read_constraints_not_like_honors_sql_wildcards() {
+        let mut rows = vec![json!({"id": 1, "name": "acb"})];
+        let filters = vec![(
+            "name".to_string(),
+            Operator::NotLike,
+            QailValue::String("a_b".to_string()),
+        )];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &filters,
+                policy_filter_cages: &[],
+                search: None,
+                search_columns: None,
+                cursor: None,
+                sort: None,
+                default_sort_column: "id",
+                offset: 0,
+                limit: 50,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            rows.is_empty(),
+            "branch replay must treat '_' as a SQL LIKE wildcard"
+        );
     }
 
     #[test]
