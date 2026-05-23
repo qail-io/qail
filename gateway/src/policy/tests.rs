@@ -1025,6 +1025,39 @@ fn security_expand_filter_escapes_claim_string_quotes() {
 }
 
 #[test]
+fn security_expand_filter_prefers_longest_claim_placeholder() {
+    let engine = PolicyEngine::new();
+    let mut claims = std::collections::HashMap::new();
+    claims.insert("org".to_string(), serde_json::json!("wrong"));
+    claims.insert("org_id".to_string(), serde_json::json!("org-123"));
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims,
+    };
+
+    let result = engine.expand_filter("org_id = $org_id", &auth);
+    assert_eq!(result, "org_id = 'org-123'");
+}
+
+#[test]
+fn security_expand_filter_does_not_reexpand_replacement_values() {
+    let engine = PolicyEngine::new();
+    let mut claims = std::collections::HashMap::new();
+    claims.insert("org_id".to_string(), serde_json::json!("$user_id"));
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims,
+    };
+
+    let result = engine.expand_filter("org_id = $org_id", &auth);
+    assert_eq!(result, "org_id = '$user_id'");
+}
+
+#[test]
 fn security_expand_filter_numeric_claim_no_quotes() {
     let engine = PolicyEngine::new();
     let mut claims = std::collections::HashMap::new();
@@ -1115,6 +1148,22 @@ fn test_expand_filter_tenant_id_missing() {
         claims: std::collections::HashMap::new(),
     };
     // When tenant_id is None, $tenant_id should NOT be expanded (stays literal)
+    let result = engine.expand_filter("operator_id = $tenant_id", &auth);
+    assert_eq!(result, "operator_id = $tenant_id");
+}
+
+#[test]
+fn test_expand_filter_extra_tenant_id_claim_cannot_spoof_scope() {
+    let engine = PolicyEngine::new();
+    let mut claims = std::collections::HashMap::new();
+    claims.insert("tenant_id".to_string(), serde_json::json!("evil-tenant"));
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "user".to_string(),
+        tenant_id: None,
+        claims,
+    };
+
     let result = engine.expand_filter("operator_id = $tenant_id", &auth);
     assert_eq!(result, "operator_id = $tenant_id");
 }

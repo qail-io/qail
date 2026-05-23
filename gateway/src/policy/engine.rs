@@ -879,28 +879,66 @@ impl PolicyEngine {
     /// SECURITY: All string values are SQL-escaped (single quotes doubled)
     /// before interpolation to prevent injection via crafted JWT claims.
     pub(super) fn expand_filter(&self, template: &str, auth: &AuthContext) -> String {
-        let mut result = template.to_string();
-        result = result.replace(
-            "$user_id",
-            &format!("'{}'", auth.user_id.replace('\'', "''")),
-        );
-        result = result.replace("$role", &format!("'{}'", auth.role.replace('\'', "''")));
+        let mut replacements = vec![
+            (
+                "$user_id".to_string(),
+                Self::quote_policy_string(&auth.user_id),
+            ),
+            ("$role".to_string(), Self::quote_policy_string(&auth.role)),
+        ];
 
-        // SECURITY (H1): Expand $tenant_id for tenant isolation policies.
-        // Without this, policies like `filter: "tenant_id = $tenant_id"` stay literal.
+        // SECURITY (H1): only canonical auth.tenant_id may expand $tenant_id.
+        // Extra JWT claims must not spoof tenant scope when tenant_id is missing.
         if let Some(ref tid) = auth.tenant_id {
-            result = result.replace("$tenant_id", &format!("'{}'", tid.replace('\'', "''")));
+            replacements.push(("$tenant_id".to_string(), Self::quote_policy_string(tid)));
         }
 
         for (key, value) in &auth.claims {
+            if matches!(key.as_str(), "user_id" | "role" | "tenant_id") {
+                continue;
+            }
             let placeholder = format!("${}", key);
-            let replacement = match value {
-                serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                _ => format!("'{}'", value.to_string().replace('\'', "''")),
+            replacements.push((placeholder, Self::policy_claim_replacement(value)));
+        }
+
+        Self::expand_policy_placeholders(template, &replacements)
+    }
+
+    fn quote_policy_string(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn policy_claim_replacement(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(s) => Self::quote_policy_string(s),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            _ => Self::quote_policy_string(&value.to_string()),
+        }
+    }
+
+    fn expand_policy_placeholders(template: &str, replacements: &[(String, String)]) -> String {
+        let mut ordered: Vec<_> = replacements.iter().collect();
+        ordered.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+
+        let mut result = String::with_capacity(template.len());
+        let mut idx = 0;
+        while idx < template.len() {
+            if template.as_bytes()[idx] == b'$'
+                && let Some((placeholder, replacement)) = ordered
+                    .iter()
+                    .find(|(placeholder, _)| template[idx..].starts_with(placeholder.as_str()))
+            {
+                result.push_str(replacement);
+                idx += placeholder.len();
+                continue;
+            }
+
+            let Some(ch) = template[idx..].chars().next() else {
+                break;
             };
-            result = result.replace(&placeholder, &replacement);
+            result.push(ch);
+            idx += ch.len_utf8();
         }
 
         result
