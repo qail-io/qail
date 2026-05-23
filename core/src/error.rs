@@ -132,6 +132,14 @@ pub enum QailBuildError {
         tenant_column: String,
     },
 
+    /// RLS-protected MERGE query sources need a tenant projection for safe row classification.
+    RlsMergeSourceTenantProjectionRequired {
+        /// Target table being scoped.
+        table: String,
+        /// Tenant column that must be projected by the source query.
+        tenant_column: String,
+    },
+
     /// Runtime relation registry lock failed.
     RelationRegistryLock(String),
 
@@ -170,6 +178,13 @@ impl std::fmt::Display for QailBuildError {
             } => write!(
                 f,
                 "with_rls rejects tenant column mutation on table '{table}' (tenant column '{tenant_column}')"
+            ),
+            Self::RlsMergeSourceTenantProjectionRequired {
+                table,
+                tenant_column,
+            } => write!(
+                f,
+                "with_rls requires MERGE query sources for table '{table}' to project tenant column '{tenant_column}'"
             ),
             Self::RelationRegistryLock(msg) => write!(f, "Relation registry lock error: {msg}"),
             Self::AmbiguousRelation {

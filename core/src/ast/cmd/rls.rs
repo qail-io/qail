@@ -103,6 +103,94 @@ fn make_positional_condition(index: usize, value: Value) -> Condition {
     }
 }
 
+fn expr_projects_all_columns(expr: &Expr) -> bool {
+    matches!(expr, Expr::Star)
+        || matches!(expr, Expr::Named(name) if name == "*" || name.trim().ends_with(".*"))
+}
+
+fn expr_projects_tenant_col(expr: &Expr, tenant_col: &str) -> bool {
+    match expr {
+        Expr::Named(name) => normalize_ident(name) == normalize_ident(tenant_col),
+        Expr::Aliased { alias, .. } => normalize_ident(alias) == normalize_ident(tenant_col),
+        Expr::JsonAccess {
+            alias: Some(alias), ..
+        }
+        | Expr::FunctionCall {
+            alias: Some(alias), ..
+        }
+        | Expr::Cast {
+            alias: Some(alias), ..
+        }
+        | Expr::Binary {
+            alias: Some(alias), ..
+        }
+        | Expr::Case {
+            alias: Some(alias), ..
+        }
+        | Expr::SpecialFunction {
+            alias: Some(alias), ..
+        }
+        | Expr::ArrayConstructor {
+            alias: Some(alias), ..
+        }
+        | Expr::RowConstructor {
+            alias: Some(alias), ..
+        }
+        | Expr::Subscript {
+            alias: Some(alias), ..
+        }
+        | Expr::Collate {
+            alias: Some(alias), ..
+        }
+        | Expr::FieldAccess {
+            alias: Some(alias), ..
+        }
+        | Expr::Subquery {
+            alias: Some(alias), ..
+        }
+        | Expr::Exists {
+            alias: Some(alias), ..
+        } => normalize_ident(alias) == normalize_ident(tenant_col),
+        _ => false,
+    }
+}
+
+fn query_projects_tenant_col(query: &Qail, tenant_col: &str) -> bool {
+    query.columns.is_empty()
+        || query.columns.iter().any(|expr| {
+            expr_projects_all_columns(expr) || expr_projects_tenant_col(expr, tenant_col)
+        })
+}
+
+fn query_can_append_tenant_projection(query: &Qail) -> bool {
+    query.set_ops.is_empty()
+        && query.having.is_empty()
+        && !query
+            .columns
+            .iter()
+            .any(|expr| matches!(expr, Expr::Aggregate { .. } | Expr::Window { .. }))
+}
+
+fn ensure_merge_query_source_projects_tenant(
+    mut query: Qail,
+    target_table: &str,
+    tenant_col: &str,
+) -> QailBuildResult<Qail> {
+    if query_projects_tenant_col(&query, tenant_col) {
+        return Ok(query);
+    }
+
+    if !query_can_append_tenant_projection(&query) {
+        return Err(QailBuildError::RlsMergeSourceTenantProjectionRequired {
+            table: target_table.to_string(),
+            tenant_column: tenant_col.to_string(),
+        });
+    }
+
+    query.columns.push(Expr::Named(tenant_col.to_string()));
+    Ok(query)
+}
+
 impl Qail {
     /// Apply tenant-scope isolation based on the query action.
     ///
@@ -359,10 +447,10 @@ impl Qail {
     }
 
     fn scope_merge_tenant(mut self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
-        self.scope_merge_query_source(ctx)?;
+        self.scope_merge_query_source(ctx, tenant_col)?;
         self.reject_merge_tenant_update_mutation(tenant_col)?;
         let target_col = self.merge_target_tenant_col(tenant_col);
-        let source_col = self.merge_source_tenant_col();
+        let source_col = self.merge_source_tenant_col(tenant_col);
         self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
 
         let condition = Condition {
@@ -386,10 +474,10 @@ impl Qail {
     }
 
     fn scope_merge_global(mut self, tenant_col: &str) -> QailBuildResult<Self> {
-        self.scope_merge_query_source(&RlsContext::global())?;
+        self.scope_merge_query_source(&RlsContext::global(), tenant_col)?;
         self.reject_merge_tenant_update_mutation(tenant_col)?;
         let target_col = self.merge_target_tenant_col(tenant_col);
-        let source_col = self.merge_source_tenant_col();
+        let source_col = self.merge_source_tenant_col(tenant_col);
         self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
 
         let condition = Condition {
@@ -409,7 +497,26 @@ impl Qail {
         Ok(self)
     }
 
-    fn scope_merge_query_source(&mut self, ctx: &RlsContext) -> QailBuildResult<()> {
+    fn scope_merge_query_source(
+        &mut self,
+        ctx: &RlsContext,
+        tenant_col: &str,
+    ) -> QailBuildResult<()> {
+        let has_query_source = matches!(
+            self.merge.as_ref().map(|merge| &merge.source),
+            Some(MergeSource::Query { .. })
+        );
+        let Some(source_tenant_col) = self.merge_query_source_tenant_col(tenant_col) else {
+            if has_query_source {
+                return Err(QailBuildError::RlsMergeSourceTenantProjectionRequired {
+                    table: self.table.clone(),
+                    tenant_column: tenant_col.to_string(),
+                });
+            }
+            return Ok(());
+        };
+        let target_table = self.table.clone();
+
         let Some(merge) = &mut self.merge else {
             return Ok(());
         };
@@ -418,6 +525,11 @@ impl Qail {
         };
 
         let scoped_query = query.as_ref().clone().with_rls(ctx)?;
+        let scoped_query = ensure_merge_query_source_projects_tenant(
+            scoped_query,
+            &target_table,
+            &source_tenant_col,
+        )?;
         *query = Box::new(scoped_query);
         Ok(())
     }
@@ -432,14 +544,60 @@ impl Qail {
         format!("{qualifier}.{tenant_col}")
     }
 
-    fn merge_source_tenant_col(&self) -> Option<String> {
+    fn merge_source_tenant_col(&self, tenant_col: &str) -> Option<String> {
         let merge = self.merge.as_ref()?;
-        let MergeSource::Table { name, alias } = &merge.source else {
+        match &merge.source {
+            MergeSource::Table { name, alias } => {
+                let source_tenant_col = lookup_tenant_column(name)?;
+                let qualifier = alias.as_deref().unwrap_or(name);
+                Some(format!("{qualifier}.{source_tenant_col}"))
+            }
+            MergeSource::Query { query, alias } => {
+                let source_tenant_col = self.merge_query_source_tenant_col(tenant_col)?;
+                let qualifier = alias.as_deref()?;
+                if query_projects_tenant_col(query, &source_tenant_col) {
+                    Some(format!("{qualifier}.{source_tenant_col}"))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn merge_query_source_tenant_col(&self, tenant_col: &str) -> Option<String> {
+        let merge = self.merge.as_ref()?;
+        let MergeSource::Query { query, .. } = &merge.source else {
             return None;
         };
-        let source_tenant_col = lookup_tenant_column(name)?;
-        let qualifier = alias.as_deref().unwrap_or(name);
-        Some(format!("{qualifier}.{source_tenant_col}"))
+
+        if let Some(source_tenant_col) = lookup_tenant_column(&query.table) {
+            return Some(source_tenant_col);
+        }
+
+        if query_projects_tenant_col(query, tenant_col)
+            || self.cte_exposes_tenant_col(&query.table, tenant_col)
+        {
+            return Some(tenant_col.to_string());
+        }
+
+        None
+    }
+
+    fn cte_exposes_tenant_col(&self, cte_name: &str, tenant_col: &str) -> bool {
+        self.ctes
+            .iter()
+            .find(|cte| normalize_ident(&cte.name) == normalize_ident(cte_name))
+            .is_some_and(|cte| {
+                if !cte.columns.is_empty() {
+                    cte.columns
+                        .iter()
+                        .any(|col| normalize_ident(col) == normalize_ident(tenant_col))
+                } else {
+                    query_projects_tenant_col(&cte.base_query, tenant_col)
+                        || lookup_tenant_column(&cte.base_query.table)
+                            .is_some_and(|col| normalize_ident(&col) == normalize_ident(tenant_col))
+                }
+            })
     }
 
     fn scope_merge_on_tenant_equality(
@@ -968,6 +1126,23 @@ mod tests {
             }),
             "MERGE query source must be tenant-scoped"
         );
+        assert!(
+            source_query
+                .columns
+                .iter()
+                .any(|expr| matches!(expr, Expr::Named(name) if name == "tenant_id")),
+            "MERGE query source must project tenant_id for ON classification"
+        );
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("ON t.id = s.id AND t.tenant_id = s.tenant_id"),
+            "MERGE query source ON must include target/source tenant equality: {sql}"
+        );
+        assert!(
+            sql.contains("WHEN NOT MATCHED BY TARGET AND s.tenant_id = 'tenant-query' THEN INSERT"),
+            "MERGE query source insert branch must be source-tenant scoped: {sql}"
+        );
     }
 
     #[test]
@@ -1005,6 +1180,16 @@ mod tests {
                 })
             }),
             "outer MERGE CTE source must be tenant-scoped"
+        );
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("ON t.id = s.id AND t.tenant_id = s.tenant_id"),
+            "CTE-backed MERGE query source ON must include tenant equality: {sql}"
+        );
+        assert!(
+            sql.contains("WHEN NOT MATCHED BY TARGET AND s.tenant_id = 'tenant-cte' THEN INSERT"),
+            "CTE-backed MERGE insert branch must be source-tenant scoped: {sql}"
         );
     }
 
@@ -1088,6 +1273,41 @@ mod tests {
             }),
             "global MERGE query source must be scoped to NULL tenant rows"
         );
+
+        let sql = query.to_sql();
+        assert!(
+            sql.contains("ON _rls_global_merge_query_target.id = s.id AND _rls_global_merge_query_target.tenant_id = s.tenant_id"),
+            "global MERGE query source ON must include target/source tenant equality: {sql}"
+        );
+        assert!(
+            sql.contains("WHEN NOT MATCHED BY TARGET AND s.tenant_id IS NULL THEN INSERT"),
+            "global MERGE query source insert branch must be source-tenant scoped: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_rejects_merge_query_source_without_tenant_projection() {
+        register_tenant_table("_rls_merge_aggregate_target", "tenant_id");
+        register_tenant_table("_rls_merge_aggregate_source", "tenant_id");
+
+        let mut source = Qail::get("_rls_merge_aggregate_source");
+        source.columns.push(Expr::Aggregate {
+            col: "*".to_string(),
+            func: crate::ast::AggregateFunc::Count,
+            distinct: false,
+            filter: None,
+            alias: Some("total".to_string()),
+        });
+
+        let err = Qail::merge_into("_rls_merge_aggregate_target")
+            .target_alias("t")
+            .using_query_as(source, "s")
+            .merge_on_column("t.id", Operator::Eq, "s.id")
+            .when_not_matched_insert(&["id"], &[Expr::Named("s.id".to_string())])
+            .with_rls(&RlsContext::tenant("tenant-aggregate"))
+            .expect_err("aggregate query source without tenant projection must fail closed");
+
+        assert!(err.to_string().contains("MERGE query sources"));
     }
 
     #[test]
