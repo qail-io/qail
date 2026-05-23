@@ -759,9 +759,6 @@ pub(super) fn row_matches_policy_filter_cages(
     row: &Value,
     cages: &[qail_core::ast::Cage],
 ) -> Result<bool, ApiError> {
-    let mut has_or_condition = false;
-    let mut any_or_condition_matches = false;
-
     for cage in cages
         .iter()
         .filter(|cage| matches!(cage.kind, qail_core::ast::CageKind::Filter))
@@ -775,17 +772,20 @@ pub(super) fn row_matches_policy_filter_cages(
                 }
             }
             qail_core::ast::LogicalOp::Or => {
+                let mut any_condition_matches = false;
                 for condition in &cage.conditions {
-                    has_or_condition = true;
                     if row_matches_policy_condition(row, condition)? {
-                        any_or_condition_matches = true;
+                        any_condition_matches = true;
                     }
+                }
+                if !any_condition_matches {
+                    return Ok(false);
                 }
             }
         }
     }
 
-    Ok(!has_or_condition || any_or_condition_matches)
+    Ok(true)
 }
 
 fn row_field<'a>(row: &'a Value, column: &str) -> Option<&'a Value> {
@@ -995,6 +995,54 @@ mod tests {
         let err = row_matches_policy_filter_cages(&row, &cages).unwrap_err();
 
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn branch_policy_filter_requires_each_or_cage_to_match() {
+        let row = json!({"id": 1, "region": "west", "tier": "silver"});
+        let cages = vec![
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![
+                    Condition {
+                        left: Expr::Named("region".to_string()),
+                        op: Operator::Eq,
+                        value: QailValue::String("west".to_string()),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("region".to_string()),
+                        op: Operator::Eq,
+                        value: QailValue::String("east".to_string()),
+                        is_array_unnest: false,
+                    },
+                ],
+                logical_op: LogicalOp::Or,
+            },
+            Cage {
+                kind: CageKind::Filter,
+                conditions: vec![
+                    Condition {
+                        left: Expr::Named("tier".to_string()),
+                        op: Operator::Eq,
+                        value: QailValue::String("gold".to_string()),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("tier".to_string()),
+                        op: Operator::Eq,
+                        value: QailValue::String("platinum".to_string()),
+                        is_array_unnest: false,
+                    },
+                ],
+                logical_op: LogicalOp::Or,
+            },
+        ];
+
+        assert!(
+            !row_matches_policy_filter_cages(&row, &cages).unwrap(),
+            "matching one OR cage must not bypass another OR cage"
+        );
     }
 
     #[test]
