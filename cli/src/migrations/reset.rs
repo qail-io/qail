@@ -13,7 +13,7 @@ use crate::migrations::{
     MigrationReceipt, acquire_migration_lock, ensure_migration_table, now_epoch_ms, runtime_actor,
     runtime_git_sha, write_migration_receipt,
 };
-use crate::util::parse_pg_url;
+use crate::util::{parse_pg_url, redact_url};
 
 async fn migration_history_table_exists(driver: &mut PgDriver) -> Result<bool> {
     let exists_cmd = qail_core::prelude::Qail::get("information_schema.tables")
@@ -35,7 +35,11 @@ pub async fn migrate_reset(
     wait_for_lock: bool,
     lock_timeout_secs: Option<u64>,
 ) -> Result<()> {
-    println!("{} {}", "🔄 Resetting database:".cyan().bold(), url);
+    println!(
+        "{} {}",
+        "🔄 Resetting database:".cyan().bold(),
+        redact_url(url)
+    );
     println!();
 
     // Parse target schema

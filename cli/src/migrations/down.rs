@@ -13,7 +13,7 @@ use crate::migrations::{
     MigrationReceipt, acquire_migration_lock, ensure_migration_table, now_epoch_ms, runtime_actor,
     runtime_git_sha, write_migration_receipt,
 };
-use crate::util::parse_pg_url;
+use crate::util::{parse_pg_url, redact_url};
 
 /// Rollback migrations using qail-pg native driver.
 pub async fn migrate_down(
@@ -23,7 +23,11 @@ pub async fn migrate_down(
     wait_for_lock: bool,
     lock_timeout_secs: Option<u64>,
 ) -> Result<()> {
-    println!("{} {}", "Migrating DOWN:".cyan().bold(), url.yellow());
+    println!(
+        "{} {}",
+        "Migrating DOWN:".cyan().bold(),
+        redact_url(url).yellow()
+    );
 
     // For rollback, user provides: current_schema:target_schema
     let cmds = if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {

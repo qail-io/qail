@@ -13,7 +13,7 @@ use anyhow::{Result, anyhow};
 use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_pg::driver::PgDriver;
 
-use crate::util::parse_pg_url;
+use crate::util::{parse_pg_url, redact_url};
 
 /// Shadow database state
 #[derive(Debug, Clone)]
@@ -899,7 +899,7 @@ pub fn display_shadow_status(state: &ShadowState) {
     println!("  {} Shadow ready for validation", "[4/4]".cyan());
     println!();
     println!("{}", "━".repeat(40).dimmed());
-    println!("  Shadow URL: {}", state.shadow_url.yellow());
+    println!("  Shadow URL: {}", redact_url(&state.shadow_url).yellow());
     println!(
         "  Tables: {}, Rows: {}",
         state.tables_synced.to_string().cyan(),

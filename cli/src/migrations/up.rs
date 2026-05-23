@@ -13,7 +13,7 @@ use crate::migrations::{
     load_migration_policy, now_epoch_ms, runtime_actor, runtime_git_sha, stable_cmds_checksum,
     write_migration_receipt,
 };
-use crate::util::parse_pg_url;
+use crate::util::{parse_pg_url, redact_url};
 
 #[derive(Clone, Copy)]
 pub struct MigrateUpOptions<'a> {
@@ -42,7 +42,11 @@ pub async fn migrate_up(
         lock_timeout_secs,
     } = options;
 
-    println!("{} {}", "Migrating UP:".cyan().bold(), url.yellow());
+    println!(
+        "{} {}",
+        "Migrating UP:".cyan().bold(),
+        redact_url(url).yellow()
+    );
 
     let (old_schema, new_schema, cmds) =
         if schema_diff_path.contains(':') && !schema_diff_path.starts_with("postgres") {

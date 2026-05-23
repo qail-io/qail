@@ -11,7 +11,7 @@ use qail_core::migrate::schema::{SchemaFunctionDef, SchemaTriggerDef, ViewDef};
 use qail_core::migrate::{Column, Schema, Table, to_qail_string};
 use qail_pg::driver::PgDriver;
 
-use crate::util::parse_pg_url;
+use crate::util::{parse_pg_url, redact_url};
 
 /// Output format for schema generation
 #[derive(Clone, Default)]
@@ -21,7 +21,11 @@ pub enum SchemaOutputFormat {
 }
 
 pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<()> {
-    println!("{} {}", "→ Connecting to:".dimmed(), url_str.yellow());
+    println!(
+        "{} {}",
+        "→ Connecting to:".dimmed(),
+        redact_url(url_str).yellow()
+    );
 
     let scheme = url_str.split("://").next().unwrap_or("");
 

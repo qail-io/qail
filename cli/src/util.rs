@@ -176,6 +176,15 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_url_hides_percent_encoded_password() {
+        let redacted = redact_url("postgresql://us%40er:p%40ss%2Fword@db.example.com/app");
+
+        assert_eq!(redacted, "postgresql://us%40er:***@db.example.com/app");
+        assert!(!redacted.contains("p%40ss"));
+        assert!(!redacted.contains("word"));
+    }
+
+    #[test]
     fn test_parse_pg_url_basic() {
         let (host, port, user, password, database) =
             parse_pg_url("postgres://admin:pass@localhost:5432/testdb").unwrap();
