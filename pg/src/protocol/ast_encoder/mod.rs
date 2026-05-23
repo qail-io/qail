@@ -956,6 +956,20 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_insert_rejects_mutating_source_query() {
+        let mut cmd = Qail::add("archived_orders").columns(["id", "total"]);
+        cmd.source_query = Some(Box::new(Qail::del("orders")));
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("mutating source must fail");
+
+        assert!(
+            err.to_string()
+                .contains("read-only SELECT query slot requires get/with action"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_encode_update_from_tables() {
         let cmd = Qail::set("orders")
             .set_value("status", "paid")
@@ -1066,6 +1080,19 @@ mod tests {
             sql
         );
         assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_encode_cte_rejects_mutating_base_query() {
+        let cmd = Qail::get("recent_orders").with("recent_orders", Qail::del("orders"));
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("mutating CTE must fail");
+
+        assert!(
+            err.to_string()
+                .contains("read-only SELECT query slot requires get/with action"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1768,6 +1795,24 @@ mod tests {
             "CREATE VIEW active_users AS SELECT id FROM users WHERE active = true"
         );
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_create_view_rejects_mutating_source_query() {
+        let cmd = Qail {
+            action: Action::CreateView,
+            table: "active_users".to_string(),
+            source_query: Some(Box::new(Qail::del("users"))),
+            ..Default::default()
+        };
+
+        let err = AstEncoder::encode_cmd_sql(&cmd).expect_err("mutating view source must fail");
+
+        assert!(
+            err.to_string()
+                .contains("read-only SELECT query slot requires get/with action"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

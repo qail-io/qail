@@ -26,7 +26,42 @@ pub fn encode_select(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
+    validate_read_only_select_query(cmd)?;
     encode_select_with_columns(cmd, &cmd.columns, buf, params)
+}
+
+fn validate_read_only_select_query(query: &Qail) -> Result<(), crate::protocol::EncodeError> {
+    validate_read_only_select_query_with_message(
+        query,
+        "read-only SELECT query slot requires get/with action",
+    )
+}
+
+fn validate_read_only_select_query_with_message(
+    query: &Qail,
+    message: &str,
+) -> Result<(), crate::protocol::EncodeError> {
+    if !matches!(query.action, Action::Get | Action::With) {
+        return Err(crate::protocol::EncodeError::InvalidAst(format!(
+            "{message}, got {}",
+            query.action
+        )));
+    }
+
+    for cte in &query.ctes {
+        validate_read_only_select_query_with_message(&cte.base_query, message)?;
+        if let Some(ref recursive_query) = cte.recursive_query {
+            validate_read_only_select_query_with_message(recursive_query, message)?;
+        }
+    }
+    for (_, set_query) in &query.set_ops {
+        validate_read_only_select_query_with_message(set_query, message)?;
+    }
+    if let Some(ref source_query) = query.source_query {
+        validate_read_only_select_query_with_message(source_query, message)?;
+    }
+
+    Ok(())
 }
 
 /// Encode a COUNT statement using the original query shape with a COUNT(*)
@@ -800,24 +835,10 @@ fn validate_merge_shape(merge: &Merge) -> Result<(), crate::protocol::EncodeErro
 }
 
 fn validate_merge_source_query(query: &Qail) -> Result<(), crate::protocol::EncodeError> {
-    if !matches!(query.action, Action::Get | Action::With) {
-        return Err(crate::protocol::EncodeError::InvalidAst(format!(
-            "MERGE source query must be read-only SELECT, got {}",
-            query.action
-        )));
-    }
-
-    for cte in &query.ctes {
-        validate_merge_source_query(&cte.base_query)?;
-        if let Some(ref recursive_query) = cte.recursive_query {
-            validate_merge_source_query(recursive_query)?;
-        }
-    }
-    for (_, set_query) in &query.set_ops {
-        validate_merge_source_query(set_query)?;
-    }
-
-    Ok(())
+    validate_read_only_select_query_with_message(
+        query,
+        "MERGE source query must be read-only SELECT",
+    )
 }
 
 fn encode_merge_source(
@@ -902,7 +923,7 @@ pub fn encode_export(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"COPY (");
-    encode_select(cmd, buf, params)?;
+    encode_select_with_columns(cmd, &cmd.columns, buf, params)?;
     buf.extend_from_slice(b") TO STDOUT");
     Ok(())
 }
