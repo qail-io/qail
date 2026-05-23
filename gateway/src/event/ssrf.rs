@@ -77,12 +77,18 @@ pub(super) fn validate_webhook_url(url: &str) -> Result<(), String> {
 pub(super) fn reject_private_ip(ip: std::net::IpAddr) -> Result<(), String> {
     let is_bad = match ip {
         std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
             v4.is_loopback()                                  // 127.0.0.0/8
             || v4.is_private()                                // 10/8, 172.16/12, 192.168/16
             || v4.is_link_local()                             // 169.254.0.0/16
             || v4.is_unspecified()                            // 0.0.0.0
-            || v4.octets()[0] == 169 && v4.octets()[1] == 254 // link-local (redundant but explicit)
-            || v4.octets()[0] == 0                            // current network (0.x.x.x)
+            || octets[0] == 169 && octets[1] == 254            // link-local (redundant but explicit)
+            || octets[0] == 0                                  // current network (0.x.x.x)
+            || octets[0] == 100 && (64..=127).contains(&octets[1]) // carrier-grade NAT (100.64/10)
+            || octets[0] == 198 && (18..=19).contains(&octets[1]) // benchmarking (198.18/15)
+            || v4.is_documentation()                           // TEST-NET ranges
+            || v4.is_multicast()                               // 224.0.0.0/4
+            || octets[0] >= 240                                // reserved/future use
             || v4.is_broadcast() // 255.255.255.255
         }
         std::net::IpAddr::V6(v6) => {
@@ -93,6 +99,8 @@ pub(super) fn reject_private_ip(ip: std::net::IpAddr) -> Result<(), String> {
             || v6.is_unspecified()                            // ::
             || (v6.segments()[0] & 0xfe00) == 0xfc00          // unique local (fc00::/7)
             || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
+            || v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8 // documentation (2001:db8::/32)
+            || v6.is_multicast() // ff00::/8
         }
     };
     if is_bad {

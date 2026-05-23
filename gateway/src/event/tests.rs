@@ -270,6 +270,24 @@ fn ssrf_rejects_current_network() {
 }
 
 #[test]
+fn ssrf_rejects_non_global_special_ipv4_ranges() {
+    assert!(validate_webhook_url("http://100.64.0.1/hook").is_err());
+    assert!(validate_webhook_url("http://100.127.255.255/hook").is_err());
+    assert!(validate_webhook_url("http://198.18.0.1/hook").is_err());
+    assert!(validate_webhook_url("http://192.0.2.1/hook").is_err());
+    assert!(validate_webhook_url("http://198.51.100.10/hook").is_err());
+    assert!(validate_webhook_url("http://203.0.113.10/hook").is_err());
+    assert!(validate_webhook_url("http://224.0.0.1/hook").is_err());
+    assert!(validate_webhook_url("http://240.0.0.1/hook").is_err());
+}
+
+#[test]
+fn ssrf_rejects_ipv6_documentation_and_multicast() {
+    assert!(validate_webhook_url("http://[2001:db8::1]/hook").is_err());
+    assert!(validate_webhook_url("http://[ff02::1]/hook").is_err());
+}
+
+#[test]
 fn ssrf_allows_public_ip() {
     assert!(validate_webhook_url("http://8.8.8.8/hook").is_ok());
     assert!(validate_webhook_url("https://1.1.1.1/hook").is_ok());
