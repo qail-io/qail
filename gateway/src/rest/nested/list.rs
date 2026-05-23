@@ -12,7 +12,9 @@ use crate::GatewayState;
 use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
 use crate::middleware::ApiError;
-use crate::rest::filters::{apply_filters, apply_sorting, parse_filters_checked};
+use crate::rest::filters::{
+    apply_filters, apply_sorting, parse_filters_checked, parse_identifier_csv,
+};
 use crate::rest::types::{ListParams, ListResponse};
 
 /// GET /api/{parent}/:id/{child} — list child rows filtered by parent FK
@@ -104,19 +106,13 @@ pub(crate) async fn nested_list_handler(
 
     // Sorting (multi-column)
     if let Some(ref sort) = params.sort {
-        cmd = apply_sorting(cmd, sort);
+        cmd = apply_sorting(cmd, sort).map_err(ApiError::parse_error)?;
     }
 
     // Distinct
     if let Some(ref distinct) = params.distinct {
-        let cols: Vec<&str> = distinct
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| crate::rest::filters::is_safe_identifier(s))
-            .collect();
-        if !cols.is_empty() {
-            cmd = cmd.distinct_on(cols);
-        }
+        let cols = parse_identifier_csv(distinct).map_err(ApiError::parse_error)?;
+        cmd = cmd.distinct_on(cols);
     }
 
     // Parse and apply filters from query string

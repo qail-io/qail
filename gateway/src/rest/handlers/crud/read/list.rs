@@ -235,21 +235,15 @@ pub(crate) async fn list_handler(
 
     // Sorting (multi-column) — default to the schema primary key for deterministic pagination
     if let Some(ref sort) = params.sort {
-        cmd = apply_sorting(cmd, sort);
+        cmd = apply_sorting(cmd, sort).map_err(ApiError::parse_error)?;
     } else if crate::rest::filters::is_safe_identifier(default_sort_column) {
         cmd = cmd.order_asc(default_sort_column);
     }
 
     // Distinct
     if let Some(ref distinct) = params.distinct {
-        let cols: Vec<&str> = distinct
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| crate::rest::filters::is_safe_identifier(s))
-            .collect();
-        if !cols.is_empty() {
-            cmd = cmd.distinct_on(cols);
-        }
+        let cols = parse_identifier_csv(distinct).map_err(ApiError::parse_error)?;
+        cmd = cmd.distinct_on(cols);
     }
 
     // Expand FK relations via LEFT JOIN

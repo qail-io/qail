@@ -14,7 +14,7 @@ use crate::auth::authenticate_request;
 use crate::middleware::ApiError;
 
 use super::extract_table_name;
-use super::filters::{apply_filters, parse_filters_checked};
+use super::filters::{apply_filters, apply_sorting, parse_filters_checked};
 use super::types::ListParams;
 
 /// GET /api/{table}/_explain — return EXPLAIN ANALYZE for the query
@@ -64,20 +64,7 @@ pub(crate) async fn explain_handler(
 
     // Apply sorting — default to the schema primary key for deterministic pagination
     if let Some(ref sort) = params.sort {
-        for part in sort.split(',') {
-            let mut iter = part.splitn(2, ':');
-            let col = iter.next().unwrap_or("id");
-            let dir = iter.next().unwrap_or("asc");
-            // SECURITY: Validate sort column identifier.
-            if !crate::rest::filters::is_safe_identifier(col) {
-                continue;
-            }
-            cmd = if dir == "desc" {
-                cmd.order_desc(col)
-            } else {
-                cmd.order_asc(col)
-            };
-        }
+        cmd = apply_sorting(cmd, sort).map_err(ApiError::parse_error)?;
     } else if crate::rest::filters::is_safe_identifier(default_sort_column) {
         cmd = cmd.order_asc(default_sort_column);
     }

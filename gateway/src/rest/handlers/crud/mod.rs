@@ -34,7 +34,7 @@ use super::super::branch::{
 };
 use super::super::filters::{
     apply_filters, apply_returning, apply_sorting, json_to_qail_value, parse_filters_checked,
-    parse_scalar_value,
+    parse_identifier_csv, parse_scalar_value,
 };
 use super::super::nested::expand_nested;
 use super::super::types::*;

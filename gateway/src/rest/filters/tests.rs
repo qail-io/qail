@@ -297,10 +297,19 @@ fn test_apply_sorting_supports_prefix_desc() {
     use qail_core::transpiler::ToSql;
 
     let cmd = qail_core::ast::Qail::get("orders");
-    let cmd = apply_sorting(cmd, "-total,created_at");
+    let cmd = apply_sorting(cmd, "-total,created_at").unwrap();
     let sql = cmd.to_sql();
     assert_eq!(
         sql,
         "SELECT * FROM orders ORDER BY total DESC, created_at ASC"
     );
+}
+
+#[test]
+fn test_apply_sorting_rejects_invalid_sort_inputs() {
+    let cmd = qail_core::ast::Qail::get("orders");
+    assert!(apply_sorting(cmd.clone(), "total:sideways").is_err());
+    assert!(apply_sorting(cmd.clone(), "total,").is_err());
+    assert!(apply_sorting(cmd.clone(), "total;drop").is_err());
+    assert!(apply_sorting(cmd, "-").is_err());
 }
