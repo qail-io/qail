@@ -4,6 +4,14 @@ use super::{CANCEL_REQUEST_CODE, PgConnection, PgResult};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+fn socket_addr(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
 fn encode_cancel_request(process_id: i32, secret_key: &[u8]) -> PgResult<Vec<u8>> {
     if !(4..=256).contains(&secret_key.len()) {
         return Err(crate::driver::PgError::Protocol(format!(
@@ -71,7 +79,7 @@ impl PgConnection {
         secret_key: &[u8],
     ) -> PgResult<()> {
         // Open new connection just for cancel
-        let addr = format!("{}:{}", host, port);
+        let addr = socket_addr(host, port);
         let mut stream = TcpStream::connect(&addr).await?;
 
         // Send CancelRequest message:
@@ -87,7 +95,14 @@ impl PgConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::{CANCEL_REQUEST_CODE, encode_cancel_request};
+    use super::{CANCEL_REQUEST_CODE, encode_cancel_request, socket_addr};
+
+    #[test]
+    fn cancel_socket_addr_brackets_ipv6_hosts() {
+        assert_eq!(socket_addr("127.0.0.1", 5432), "127.0.0.1:5432");
+        assert_eq!(socket_addr("::1", 5432), "[::1]:5432");
+        assert_eq!(socket_addr("[::1]", 5432), "[::1]:5432");
+    }
 
     #[test]
     fn encode_cancel_request_with_4_byte_key() {

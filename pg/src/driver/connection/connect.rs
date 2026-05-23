@@ -28,6 +28,14 @@ fn protocol_version_from_minor(minor: u16) -> i32 {
     ((3i32) << 16) | i32::from(minor)
 }
 
+fn socket_addr(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
 fn is_explicit_protocol_version_rejection(err: &PgError) -> bool {
     let msg = match err {
         PgError::Connection(msg) | PgError::Protocol(msg) | PgError::Auth(msg) => msg,
@@ -361,7 +369,7 @@ impl PgConnection {
     async fn try_gssenc_request_inner(host: &str, port: u16) -> PgResult<GssEncNegotiationResult> {
         use tokio::io::AsyncReadExt;
 
-        let addr = format!("{}:{}", host, port);
+        let addr = socket_addr(host, port);
         let mut tcp_stream = TcpStream::connect(&addr).await?;
         tcp_stream.set_nodelay(true)?;
 
@@ -560,7 +568,7 @@ impl PgConnection {
             startup_params,
         } = params;
         let replication_mode_enabled = has_logical_replication_startup_mode(&startup_params);
-        let addr = format!("{}:{}", host, port);
+        let addr = socket_addr(host, port);
         let stream = Self::connect_plain_stream(&addr).await?;
 
         let mut conn = Self {
@@ -753,7 +761,7 @@ impl PgConnection {
         use tokio_rustls::rustls::ClientConfig;
         use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 
-        let addr = format!("{}:{}", host, port);
+        let addr = socket_addr(host, port);
         let mut tcp_stream = TcpStream::connect(&addr).await?;
 
         // Send SSLRequest
@@ -975,7 +983,7 @@ impl PgConnection {
             pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject},
         };
 
-        let addr = format!("{}:{}", host, port);
+        let addr = socket_addr(host, port);
         let mut tcp_stream = TcpStream::connect(&addr).await?;
 
         // Send SSLRequest
@@ -1162,13 +1170,20 @@ impl PgConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_explicit_protocol_version_rejection, protocol_version_from_minor};
+    use super::{is_explicit_protocol_version_rejection, protocol_version_from_minor, socket_addr};
     use crate::driver::PgError;
 
     #[test]
     fn protocol_version_from_minor_encodes_major_3() {
         assert_eq!(protocol_version_from_minor(2), 196610);
         assert_eq!(protocol_version_from_minor(0), 196608);
+    }
+
+    #[test]
+    fn socket_addr_brackets_ipv6_hosts() {
+        assert_eq!(socket_addr("127.0.0.1", 5432), "127.0.0.1:5432");
+        assert_eq!(socket_addr("::1", 5432), "[::1]:5432");
+        assert_eq!(socket_addr("[::1]", 5432), "[::1]:5432");
     }
 
     #[test]
