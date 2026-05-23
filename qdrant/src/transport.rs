@@ -311,6 +311,7 @@ impl GrpcClient {
                 head.status
             )));
         }
+        reject_nonzero_grpc_status(&head.headers)?;
 
         let mut response_buf = BytesMut::new();
         while let Some(chunk) = body.data().await {
@@ -354,18 +355,9 @@ impl GrpcClient {
             .map_err(|e| QdrantError::Grpc(format!("Trailers failed: {}", e)))?;
 
         if let Some(trailers) = trailers
-            && let Some(status) = trailers.get("grpc-status")
-            && status != "0"
+            && let Err(err) = reject_nonzero_grpc_status(&trailers)
         {
-            let message = trailers
-                .get("grpc-message")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("Unknown error");
-            return Err(QdrantError::Grpc(format!(
-                "gRPC status {}: {}",
-                status.to_str().unwrap_or("?"),
-                message
-            )));
+            return Err(err);
         }
 
         let response_bytes = grpc_unframe(response_buf.freeze())?;
@@ -510,6 +502,25 @@ fn grpc_frame_len(len: usize) -> QdrantResult<u32> {
     })
 }
 
+fn reject_nonzero_grpc_status(headers: &http::HeaderMap) -> QdrantResult<()> {
+    let Some(status) = headers.get("grpc-status") else {
+        return Ok(());
+    };
+    if status == "0" {
+        return Ok(());
+    }
+
+    let message = headers
+        .get("grpc-message")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("Unknown error");
+    Err(QdrantError::Grpc(format!(
+        "gRPC status {}: {}",
+        status.to_str().unwrap_or("?"),
+        message
+    )))
+}
+
 /// Remove gRPC framing from response.
 /// Returns empty Bytes if response has no body (common for write operations).
 fn grpc_unframe(mut data: Bytes) -> QdrantResult<Bytes> {
@@ -607,6 +618,31 @@ mod tests {
 
         let err = grpc_unframe(data.freeze()).unwrap_err();
         assert!(matches!(err, QdrantError::Decode(msg) if msg.contains("too large")));
+    }
+
+    #[test]
+    fn test_grpc_status_headers_accept_zero_and_missing() {
+        let missing = http::HeaderMap::new();
+        reject_nonzero_grpc_status(&missing).unwrap();
+
+        let mut ok = http::HeaderMap::new();
+        ok.insert("grpc-status", http::HeaderValue::from_static("0"));
+        reject_nonzero_grpc_status(&ok).unwrap();
+    }
+
+    #[test]
+    fn test_grpc_status_headers_reject_nonzero() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("grpc-status", http::HeaderValue::from_static("7"));
+        headers.insert(
+            "grpc-message",
+            http::HeaderValue::from_static("permission denied"),
+        );
+
+        let err = reject_nonzero_grpc_status(&headers).unwrap_err();
+        assert!(
+            matches!(err, QdrantError::Grpc(msg) if msg.contains("gRPC status 7") && msg.contains("permission denied"))
+        );
     }
 
     #[test]
