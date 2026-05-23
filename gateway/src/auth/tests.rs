@@ -526,6 +526,54 @@ fn bearer_without_any_config_returns_denied() {
 }
 
 #[test]
+fn authenticated_user_without_tenant_scope_is_rejected() {
+    let auth = AuthContext {
+        user_id: "user-without-tenant".to_string(),
+        role: "operator".to_string(),
+        tenant_id: None,
+        claims: HashMap::new(),
+    };
+
+    let err = ensure_request_auth(&auth, true).expect_err("tenant scope must be required");
+    assert_eq!(err.code, "AUTH_TENANT_REQUIRED");
+}
+
+#[test]
+fn legacy_agent_only_claim_does_not_satisfy_tenant_scope() {
+    let auth = AuthContext {
+        user_id: "agent-only-user".to_string(),
+        role: "operator".to_string(),
+        tenant_id: None,
+        claims: {
+            let mut claims = HashMap::new();
+            claims.insert("agent_id".to_string(), serde_json::json!("legacy-agent"));
+            claims
+        },
+    };
+
+    let err = ensure_request_auth(&auth, true).expect_err("agent_id is not a tenant scope");
+    assert_eq!(err.code, "AUTH_TENANT_REQUIRED");
+}
+
+#[test]
+fn platform_admin_without_tenant_scope_is_allowed() {
+    let auth = AuthContext {
+        user_id: "platform-admin".to_string(),
+        role: "administrator".to_string(),
+        tenant_id: None,
+        claims: platform_admin_claims(),
+    };
+
+    ensure_request_auth(&auth, true).expect("platform admins are explicitly tenantless");
+}
+
+#[test]
+fn anonymous_without_tenant_scope_is_allowed_when_auth_optional() {
+    let auth = AuthContext::anonymous();
+    ensure_request_auth(&auth, false).expect("public mode still allows anonymous requests");
+}
+
+#[test]
 fn detect_jwt_algorithm_rs256() {
     // JWT header: {"alg":"RS256","typ":"JWT"}
     // base64url: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9

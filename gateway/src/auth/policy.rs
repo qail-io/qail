@@ -21,6 +21,15 @@ pub fn ensure_request_auth(
             "Authentication required",
         ));
     }
+    if auth.is_authenticated()
+        && !auth.is_platform_admin()
+        && auth.tenant_id.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(crate::middleware::ApiError::with_code(
+            "AUTH_TENANT_REQUIRED",
+            "Authenticated requests require a tenant scope",
+        ));
+    }
     Ok(())
 }
 

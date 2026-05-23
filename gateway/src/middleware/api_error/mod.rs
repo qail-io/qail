@@ -307,7 +307,9 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             "QUERY_TOO_EXPENSIVE" | "QUERY_TOO_COMPLEX" => StatusCode::UNPROCESSABLE_ENTITY,
-            "UNAUTHORIZED" | "AUTH_DENIED" | "AUTH_REQUIRED" => StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED" | "AUTH_DENIED" | "AUTH_REQUIRED" | "AUTH_TENANT_REQUIRED" => {
+                StatusCode::UNAUTHORIZED
+            }
             "FORBIDDEN" | "QUERY_NOT_ALLOWED" | "POLICY_DENIED" | "ACTION_DENIED" => {
                 StatusCode::FORBIDDEN
             }
