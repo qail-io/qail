@@ -124,18 +124,10 @@ pub(crate) async fn update_handler(
         .is_empty();
     let response_requested_returning = mutation_params.returning.is_some();
 
-    // Returning clause. Event triggers need the post-update row even when the
-    // HTTP caller did not ask for representation.
-    if mutation_needs_full_returning(
-        response_requested_returning,
-        mutation_params.returning.as_deref(),
-        has_update_triggers,
-    ) {
-        cmd = cmd.returning_all();
-    } else {
-        cmd = apply_returning(cmd, mutation_params.returning.as_deref())
-            .map_err(ApiError::parse_error)?;
-    }
+    // Always fetch the changed row internally. Without RETURNING, the current
+    // mutation fetch path cannot distinguish a successful path update from a
+    // zero-row match, and event triggers need the post-update row.
+    cmd = cmd.returning_all();
 
     let mut old_cmd = if has_update_triggers {
         let mut old_cmd = qail_core::ast::Qail::get(&table_name)
@@ -279,6 +271,11 @@ pub(crate) async fn update_handler(
             return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
         }
     };
+
+    if let Err(e) = ensure_path_mutation_affected(rows.len(), &id) {
+        conn.release().await;
+        return Err(e);
+    }
 
     let returned_rows: Vec<Value> = rows.iter().map(row_to_json).collect();
     let event_new = returned_rows.first().cloned();

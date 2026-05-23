@@ -45,39 +45,18 @@ pub(crate) async fn delete_handler(
             QailValue::String(tenant_id.clone()),
         );
     }
+    cmd = cmd.returning_all();
 
     let has_delete_triggers = !state
         .event_engine
         .triggers_for(&table_name, &OperationType::Delete)
         .is_empty();
-    let mut old_cmd = if has_delete_triggers {
-        let mut old_cmd = qail_core::ast::Qail::get(&table_name)
-            .filter(&pk, Operator::Eq, QailValue::String(id.clone()))
-            .limit(1);
-        if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
-            old_cmd = old_cmd.filter(
-                scope_column,
-                Operator::Eq,
-                QailValue::String(tenant_id.clone()),
-            );
-        }
-        Some(old_cmd)
-    } else {
-        None
-    };
 
     // Apply RLS
     state
         .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
-    if let Some(ref mut old_cmd) = old_cmd {
-        state
-            .policy_engine
-            .apply_policies(&auth, old_cmd)
-            .map_err(|e| ApiError::forbidden(e.to_string()))?;
-        state.optimize_qail_for_execution(old_cmd);
-    }
     state.optimize_qail_for_execution(&mut cmd);
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
@@ -114,28 +93,26 @@ pub(crate) async fn delete_handler(
         return Ok(axum::http::StatusCode::NO_CONTENT);
     }
 
-    let old_data = if let Some(ref old_cmd) = old_cmd {
-        let rows = match conn.fetch_all_uncached(old_cmd).await {
-            Ok(rows) => rows,
-            Err(e) => {
-                conn.release().await;
-                return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
-            }
-        };
-        rows.first().map(row_to_json)
-    } else {
-        None
-    };
-
-    match conn.fetch_all_uncached(&cmd).await {
-        Ok(_) => {}
+    let rows = match conn.fetch_all_uncached(&cmd).await {
+        Ok(rows) => rows,
         Err(e) => {
             conn.release().await;
             return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
         }
     };
 
-    if let Some(old_data) = old_data.clone()
+    if let Err(e) = ensure_path_mutation_affected(rows.len(), &id) {
+        conn.release().await;
+        return Err(e);
+    }
+
+    let deleted_data = if has_delete_triggers {
+        rows.first().map(row_to_json)
+    } else {
+        None
+    };
+
+    if let Some(old_data) = deleted_data
         && let Err(e) = state
             .event_engine
             .enqueue_durable(

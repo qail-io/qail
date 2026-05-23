@@ -33,9 +33,19 @@ fn project_mutation_returning_rows(
     Ok(rows)
 }
 
+fn ensure_path_mutation_affected(row_count: usize, row_id: &str) -> Result<(), ApiError> {
+    if row_count == 0 {
+        return Err(ApiError::not_found(format!("row '{}'", row_id)));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{mutation_needs_full_returning, project_mutation_returning_rows};
+    use super::{
+        ensure_path_mutation_affected, mutation_needs_full_returning,
+        project_mutation_returning_rows,
+    };
     use serde_json::json;
 
     #[test]
@@ -66,5 +76,18 @@ mod tests {
         let projected = project_mutation_returning_rows(rows.clone(), Some("*")).unwrap();
 
         assert_eq!(projected, rows);
+    }
+
+    #[test]
+    fn ensure_path_mutation_affected_rejects_zero_rows() {
+        let err = ensure_path_mutation_affected(0, "missing-row").unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::NOT_FOUND);
+        assert!(err.message.contains("missing-row"));
+    }
+
+    #[test]
+    fn ensure_path_mutation_affected_allows_nonzero_rows() {
+        ensure_path_mutation_affected(1, "row-1").unwrap();
     }
 }
