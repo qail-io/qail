@@ -113,6 +113,12 @@ fn decode_numeric_binary(bytes: &[u8]) -> Result<Numeric, TypeError> {
     let mut digits = Vec::with_capacity(ndigits);
     for i in 0..ndigits {
         let d = u16::from_be_bytes([bytes[8 + i * 2], bytes[9 + i * 2]]);
+        if d > 9999 {
+            return Err(TypeError::InvalidData(format!(
+                "NUMERIC digit out of range: {}",
+                d
+            )));
+        }
         digits.push(d);
     }
 
@@ -206,5 +212,18 @@ mod tests {
 
         let n = Numeric::from_pg(&bytes, oid::NUMERIC, 1).unwrap();
         assert_eq!(n.as_str(), "0.00000001");
+    }
+
+    #[test]
+    fn test_numeric_binary_rejects_out_of_range_digits() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // ndigits
+        bytes.extend_from_slice(&0i16.to_be_bytes()); // weight
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // sign
+        bytes.extend_from_slice(&0u16.to_be_bytes()); // dscale
+        bytes.extend_from_slice(&10000u16.to_be_bytes()); // invalid base-10000 digit
+
+        let err = Numeric::from_pg(&bytes, oid::NUMERIC, 1).unwrap_err();
+        assert!(matches!(err, TypeError::InvalidData(msg) if msg.contains("out of range")));
     }
 }
