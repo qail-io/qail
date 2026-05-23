@@ -2,6 +2,39 @@
 
 use qail_core::prelude::*;
 
+fn append_column_check_sql(out: &mut String, column_name: &str, vals: &[String]) {
+    if vals.len() == 1
+        && vals[0]
+            .trim_start()
+            .to_ascii_uppercase()
+            .starts_with("CONSTRAINT ")
+    {
+        out.push(' ');
+        out.push_str(&vals[0]);
+        return;
+    }
+
+    let raw_check = vals.join(" ");
+    let looks_like_expr = vals.len() == 1
+        || vals.iter().any(|v| {
+            v.chars()
+                .any(|c| c.is_whitespace() || matches!(c, '<' | '>' | '=' | '!' | '(' | ')'))
+        });
+
+    if looks_like_expr {
+        out.push_str(&format!(" CHECK ({raw_check})"));
+    } else {
+        out.push_str(&format!(
+            " CHECK ({} IN ({}))",
+            column_name,
+            vals.iter()
+                .map(|v| format!("'{}'", v.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+}
+
 /// Convert Qail to SQL string for preview.
 pub fn cmd_to_sql(cmd: &Qail) -> String {
     match cmd.action {
@@ -37,6 +70,9 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
                                 }
                                 Constraint::References(target) => {
                                     col_def.push_str(&format!(" REFERENCES {}", target))
+                                }
+                                Constraint::Check(vals) => {
+                                    append_column_check_sql(&mut col_def, name, vals)
                                 }
                                 _ => {}
                             }
@@ -82,6 +118,7 @@ pub fn cmd_to_sql(cmd: &Qail) -> String {
                         Constraint::References(target) => {
                             sql.push_str(&format!(" REFERENCES {}", target))
                         }
+                        Constraint::Check(vals) => append_column_check_sql(&mut sql, name, vals),
                         _ => {}
                     }
                 }
@@ -279,6 +316,27 @@ mod tests {
     use qail_core::ast::IndexDef;
 
     #[test]
+    fn create_table_sql_renders_check_constraint() {
+        let cmd = Qail {
+            action: Action::Make,
+            table: "players".to_string(),
+            columns: vec![Expr::Def {
+                name: "score".to_string(),
+                data_type: "INT".to_string(),
+                constraints: vec![Constraint::Check(vec!["score >= 0".to_string()])],
+            }],
+            ..Default::default()
+        };
+
+        let sql = cmd_to_sql(&cmd);
+
+        assert!(
+            sql.contains("CHECK (score >= 0)"),
+            "create-table SQL should render CHECK constraint, got: {sql}"
+        );
+    }
+
+    #[test]
     fn alter_add_column_sql_renders_not_null_by_default() {
         let cmd = Qail {
             action: Action::Alter,
@@ -296,6 +354,27 @@ mod tests {
         assert!(
             sql.contains("email TEXT NOT NULL"),
             "add-column SQL should render NOT NULL by default, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn alter_add_column_sql_renders_check_constraint() {
+        let cmd = Qail {
+            action: Action::Alter,
+            table: "players".to_string(),
+            columns: vec![Expr::Def {
+                name: "score".to_string(),
+                data_type: "INT".to_string(),
+                constraints: vec![Constraint::Check(vec!["score >= 0".to_string()])],
+            }],
+            ..Default::default()
+        };
+
+        let sql = cmd_to_sql(&cmd);
+
+        assert!(
+            sql.contains("CHECK (score >= 0)"),
+            "add-column SQL should render CHECK constraint, got: {sql}"
         );
     }
 
