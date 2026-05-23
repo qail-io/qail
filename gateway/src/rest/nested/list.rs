@@ -17,6 +17,11 @@ use crate::rest::filters::{
 };
 use crate::rest::types::{ListParams, ListResponse};
 
+fn parse_nested_search_columns(input: Option<&str>) -> Result<String, String> {
+    let cols = parse_identifier_csv(input.unwrap_or("name"))?;
+    Ok(cols.join(","))
+}
+
 /// GET /api/{parent}/:id/{child} — list child rows filtered by parent FK
 ///
 /// Example: `GET /api/users/123/orders` → `get orders[user_id = 123]`
@@ -129,13 +134,9 @@ pub(crate) async fn nested_list_handler(
 
     // Full-text search
     if let Some(ref term) = params.search {
-        let cols = params.search_columns.as_deref().unwrap_or("name");
-        // SECURITY: Validate search column identifier.
-        if crate::rest::filters::is_safe_identifier(cols) {
-            cmd = cmd.filter(cols, Operator::TextSearch, QailValue::String(term.clone()));
-        } else {
-            tracing::warn!(cols = %cols, "nested: search_columns rejected by identifier guard");
-        }
+        let cols = parse_nested_search_columns(params.search_columns.as_deref())
+            .map_err(ApiError::parse_error)?;
+        cmd = cmd.filter(&cols, Operator::TextSearch, QailValue::String(term.clone()));
     }
 
     cmd = cmd.limit(limit);
@@ -191,4 +192,25 @@ pub(crate) async fn nested_list_handler(
         limit,
         offset,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_nested_search_columns;
+
+    #[test]
+    fn nested_search_columns_accept_csv_and_default() {
+        assert_eq!(parse_nested_search_columns(None).unwrap(), "name");
+        assert_eq!(
+            parse_nested_search_columns(Some("name, description,name")).unwrap(),
+            "name,description"
+        );
+    }
+
+    #[test]
+    fn nested_search_columns_reject_fail_open_inputs() {
+        assert!(parse_nested_search_columns(Some("")).is_err());
+        assert!(parse_nested_search_columns(Some("name,")).is_err());
+        assert!(parse_nested_search_columns(Some("name,bad-col")).is_err());
+    }
 }
