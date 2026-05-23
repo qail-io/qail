@@ -1,6 +1,7 @@
 use axum::{extract::State, response::Json};
 use qail_core::ast::{Expr, Operator, Qail, Value as AstValue};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::GatewayState;
@@ -48,34 +49,37 @@ fn normalize_contract_arg_types(raw_arg_types_json: &str, total_args: usize) -> 
     arg_types
 }
 
-/// GET /api/_rpc/contracts — Introspect callable PostgreSQL function contracts.
-///
-/// Returns schema-qualified function signatures, argument defaults, and result types.
-/// Useful for generating typed internal clients without GraphQL.
-pub(crate) async fn rpc_contracts_handler(
-    headers: axum::http::HeaderMap,
-    State(state): State<Arc<GatewayState>>,
-) -> Result<Json<Value>, ApiError> {
-    let auth = authenticate_request(state.as_ref(), &headers).await?;
-    if !auth.is_authenticated() {
-        return Err(ApiError::auth_error(
-            "Authentication required for RPC contract introspection",
-        ));
-    }
-    if !auth.can_use_branching() {
-        return Err(ApiError::forbidden(
-            "Platform administrator role required for RPC contract introspection",
-        ));
-    }
-    let Some(rpc_allow_list) = state.rpc_allow_list.as_ref() else {
-        return Err(ApiError::forbidden(
-            "RPC contract endpoint is disabled until rpc_allowlist_path is configured",
-        ));
-    };
+fn rpc_contract_allow_list_names(rpc_allow_list: &HashSet<String>) -> Vec<String> {
+    let mut names: Vec<String> = rpc_allow_list
+        .iter()
+        .filter_map(|name| {
+            let (schema_name, function_name) = name.split_once('.')?;
+            callable_rpc_allow_list_key(schema_name, function_name)
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
 
-    let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
+fn rpc_contract_catalog_row_limit(allowed_function_count: usize) -> i64 {
+    const MIN_CONTRACT_ROWS: usize = 5_000;
+    const MAX_CONTRACT_ROWS: usize = 50_000;
+    const OVERLOADS_PER_FUNCTION_BUDGET: usize = 16;
 
-    let mut cmd = Qail::get("pg_catalog.pg_proc p")
+    allowed_function_count
+        .saturating_mul(OVERLOADS_PER_FUNCTION_BUDGET)
+        .clamp(MIN_CONTRACT_ROWS, MAX_CONTRACT_ROWS) as i64
+}
+
+fn rpc_contract_catalog_cmd(allowed_rpc_names: &[String]) -> Qail {
+    let allowed_values = allowed_rpc_names
+        .iter()
+        .cloned()
+        .map(AstValue::String)
+        .collect();
+
+    Qail::get("pg_catalog.pg_proc p")
         .columns_expr(vec![
             Expr::Named("n.nspname AS schema_name".to_string()),
             Expr::Named("p.proname AS function_name".to_string()),
@@ -107,10 +111,52 @@ pub(crate) async fn rpc_contracts_handler(
                 AstValue::String("information_schema".to_string()),
             ]),
         )
+        .filter(
+            "LOWER(n.nspname || '.' || p.proname)",
+            Operator::In,
+            AstValue::Array(allowed_values),
+        )
         .order_asc("n.nspname")
         .order_asc("p.proname")
         .order_asc("p.oid")
-        .limit(5000);
+        .limit(rpc_contract_catalog_row_limit(allowed_rpc_names.len()))
+}
+
+/// GET /api/_rpc/contracts — Introspect callable PostgreSQL function contracts.
+///
+/// Returns schema-qualified function signatures, argument defaults, and result types.
+/// Useful for generating typed internal clients without GraphQL.
+pub(crate) async fn rpc_contracts_handler(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<Value>, ApiError> {
+    let auth = authenticate_request(state.as_ref(), &headers).await?;
+    if !auth.is_authenticated() {
+        return Err(ApiError::auth_error(
+            "Authentication required for RPC contract introspection",
+        ));
+    }
+    if !auth.can_use_branching() {
+        return Err(ApiError::forbidden(
+            "Platform administrator role required for RPC contract introspection",
+        ));
+    }
+    let Some(rpc_allow_list) = state.rpc_allow_list.as_ref() else {
+        return Err(ApiError::forbidden(
+            "RPC contract endpoint is disabled until rpc_allowlist_path is configured",
+        ));
+    };
+    let allowed_rpc_names = rpc_contract_allow_list_names(rpc_allow_list);
+    if allowed_rpc_names.is_empty() {
+        return Ok(Json(json!({
+            "functions": [],
+            "count": 0,
+        })));
+    }
+
+    let mut conn = state.acquire_with_auth_rls_guarded(&auth, None).await?;
+
+    let mut cmd = rpc_contract_catalog_cmd(&allowed_rpc_names);
     state.optimize_qail_for_execution(&mut cmd);
     let rows = conn
         .fetch_all_uncached(&cmd)
@@ -227,8 +273,13 @@ pub(crate) async fn rpc_contracts_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{callable_rpc_allow_list_key, normalize_contract_arg_types};
+    use super::{
+        callable_rpc_allow_list_key, normalize_contract_arg_types, rpc_contract_allow_list_names,
+        rpc_contract_catalog_cmd, rpc_contract_catalog_row_limit,
+    };
     use crate::rest::handlers::minimum_required_rpc_args;
+    use qail_core::ast::{CageKind, Operator, Value as AstValue};
+    use std::collections::HashSet;
 
     #[test]
     fn callable_rpc_allow_list_key_normalizes_safe_identifiers() {
@@ -248,6 +299,51 @@ mod tests {
     fn normalize_contract_arg_types_matches_runtime_type_canonicalization() {
         let arg_types = normalize_contract_arg_types(r#"["UUID","\"Api\".\"My_Enum\""]"#, 2);
         assert_eq!(arg_types, vec!["uuid", "api.my_enum"]);
+    }
+
+    #[test]
+    fn rpc_contract_allow_list_names_filters_and_normalizes_config_values() {
+        let allow_list = HashSet::from([
+            "API.Search_Orders".to_string(),
+            "bad-name.fn".to_string(),
+            "api.search_orders".to_string(),
+        ]);
+
+        assert_eq!(
+            rpc_contract_allow_list_names(&allow_list),
+            vec!["api.search_orders".to_string()]
+        );
+    }
+
+    #[test]
+    fn rpc_contract_catalog_limit_scales_with_allow_list_size() {
+        assert_eq!(rpc_contract_catalog_row_limit(1), 5_000);
+        assert_eq!(rpc_contract_catalog_row_limit(400), 6_400);
+        assert_eq!(rpc_contract_catalog_row_limit(10_000), 50_000);
+    }
+
+    #[test]
+    fn rpc_contract_catalog_cmd_filters_to_allow_list_before_row_cap() {
+        let cmd = rpc_contract_catalog_cmd(&[
+            "api.search_orders".to_string(),
+            "public.reprice".to_string(),
+        ]);
+
+        let allow_list_filter = cmd
+            .cages
+            .iter()
+            .filter(|cage| matches!(cage.kind, CageKind::Filter))
+            .flat_map(|cage| cage.conditions.iter())
+            .find(|condition| condition.left.to_string() == "LOWER(n.nspname || '.' || p.proname)")
+            .expect("catalog query should constrain functions to the allow-list");
+        assert_eq!(allow_list_filter.op, Operator::In);
+        assert_eq!(
+            allow_list_filter.value,
+            AstValue::Array(vec![
+                AstValue::String("api.search_orders".to_string()),
+                AstValue::String("public.reprice".to_string())
+            ])
+        );
     }
 
     #[test]
