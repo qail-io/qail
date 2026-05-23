@@ -78,6 +78,45 @@ pub(crate) async fn branch_merge_handler(
             .into_response();
     }
 
+    let lock_sql = qail_pg::driver::branch_sql::lock_active_branch_for_merge_sql(&name);
+    match conn.get_mut() {
+        Ok(pg_conn) => match pg_conn.simple_query(&lock_sql).await {
+            Ok(rows) if !rows.is_empty() => {}
+            Ok(_) => {
+                let _ = conn.rollback_to(BRANCH_MERGE_SAVEPOINT).await;
+                let _ = conn.release_savepoint(BRANCH_MERGE_SAVEPOINT).await;
+                conn.release().await;
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "Branch not found or not active"})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("Branch merge lock failed for '{}': {}", name, e);
+                let _ = conn.rollback_to(BRANCH_MERGE_SAVEPOINT).await;
+                let _ = conn.release_savepoint(BRANCH_MERGE_SAVEPOINT).await;
+                conn.release().await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to lock branch for merge"})),
+                )
+                    .into_response();
+            }
+        },
+        Err(e) => {
+            tracing::error!("Branch connection unavailable before merge lock: {}", e);
+            let _ = conn.rollback_to(BRANCH_MERGE_SAVEPOINT).await;
+            let _ = conn.release_savepoint(BRANCH_MERGE_SAVEPOINT).await;
+            conn.release().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Database connection unavailable"})),
+            )
+                .into_response();
+        }
+    }
+
     let overlay_sql = qail_pg::driver::branch_sql::merge_overlay_rows_sql(&name);
     let mut applied = 0u32;
     let mut errors: Vec<String> = Vec::new();

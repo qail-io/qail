@@ -108,6 +108,20 @@ pub fn delete_branch_sql(name: &str) -> String {
     )
 }
 
+/// SQL to lock an active branch before merge.
+///
+/// Holding this row lock blocks concurrent overlay writes that use
+/// `FOR KEY SHARE` until the merge commits or rolls back.
+pub fn lock_active_branch_for_merge_sql(name: &str) -> String {
+    let safe_name = escape_literal(name);
+    format!(
+        "SELECT id FROM _qail_branches \
+         WHERE name = {} AND status = 'active' \
+         FOR UPDATE;",
+        safe_name
+    )
+}
+
 /// SQL to read overlay rows for a branch on a specific table.
 ///
 /// Returns the ordered operation stream so CoW reads can replay inserts,
@@ -146,7 +160,7 @@ pub fn write_overlay_sql(
     format!(
         "INSERT INTO _qail_branch_rows (branch_id, table_name, row_pk, operation, row_data) \
          VALUES (\
-           (SELECT id FROM _qail_branches WHERE name = {} AND status = 'active'), \
+           (SELECT id FROM _qail_branches WHERE name = {} AND status = 'active' FOR KEY SHARE), \
            {}, {}, {}, $1::jsonb\
          ) RETURNING id;",
         safe_branch, safe_table, safe_pk, safe_op
@@ -246,6 +260,15 @@ mod tests {
     }
 
     #[test]
+    fn test_lock_active_branch_for_merge_sql() {
+        let sql = lock_active_branch_for_merge_sql("feature-1");
+        assert!(sql.contains("SELECT id FROM _qail_branches"));
+        assert!(sql.contains("'feature-1'"));
+        assert!(sql.contains("status = 'active'"));
+        assert!(sql.contains("FOR UPDATE"));
+    }
+
+    #[test]
     fn test_write_overlay_sql() {
         let sql = write_overlay_sql("feat", "orders", "123", "insert");
         assert!(sql.contains("INSERT INTO _qail_branch_rows"));
@@ -254,6 +277,7 @@ mod tests {
         assert!(sql.contains("'insert'"));
         assert!(sql.contains("$1::jsonb"));
         assert!(sql.contains("status = 'active'"));
+        assert!(sql.contains("FOR KEY SHARE"));
     }
 
     #[test]
