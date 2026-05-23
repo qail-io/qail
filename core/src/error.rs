@@ -124,6 +124,14 @@ pub enum QailBuildError {
         tenant_column: String,
     },
 
+    /// RLS-protected updates cannot rewrite the tenant column.
+    RlsTenantColumnMutationDenied {
+        /// Target table being scoped.
+        table: String,
+        /// Tenant column that was assigned.
+        tenant_column: String,
+    },
+
     /// Runtime relation registry lock failed.
     RelationRegistryLock(String),
 
@@ -155,6 +163,13 @@ impl std::fmt::Display for QailBuildError {
             } => write!(
                 f,
                 "with_rls requires explicit columns for positional INSERT payloads on table '{table}' (tenant column '{tenant_column}')"
+            ),
+            Self::RlsTenantColumnMutationDenied {
+                table,
+                tenant_column,
+            } => write!(
+                f,
+                "with_rls rejects tenant column mutation on table '{table}' (tenant column '{tenant_column}')"
             ),
             Self::RelationRegistryLock(msg) => write!(f, "Relation registry lock error: {msg}"),
             Self::AmbiguousRelation {

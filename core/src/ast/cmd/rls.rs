@@ -123,50 +123,101 @@ impl Qail {
             return Ok(self);
         }
 
-        let Some(tenant_col) = lookup_tenant_column(&self.table) else {
+        if !ctx.is_global() && !ctx.has_tenant() {
             return Ok(self);
+        }
+
+        let scoped = self.scope_nested_rls(ctx)?;
+
+        let Some(tenant_col) = lookup_tenant_column(&scoped.table) else {
+            return Ok(scoped);
         };
 
         if ctx.is_global() {
-            return match self.action {
+            return match scoped.action {
                 Action::Get
                 | Action::Cnt
-                | Action::Set
                 | Action::Del
                 | Action::Over
                 | Action::Gen
                 | Action::Export
                 | Action::Search
-                | Action::Scroll => Ok(self.scope_to_global(&tenant_col)),
-                Action::Add | Action::Upsert | Action::Put => self.scope_insert_global(&tenant_col),
-                Action::Merge => self.scope_merge_global(&tenant_col),
-                _ => Ok(self),
+                | Action::Scroll => Ok(scoped.scope_to_global(&tenant_col)),
+                Action::Set => scoped.scope_update_global(&tenant_col),
+                Action::Add | Action::Upsert | Action::Put => {
+                    scoped.scope_insert_global(&tenant_col)
+                }
+                Action::Merge => scoped.scope_merge_global(&tenant_col),
+                _ => Ok(scoped),
             };
         }
 
-        if !ctx.has_tenant() {
-            return Ok(self);
-        }
-
-        match self.action {
+        match scoped.action {
             // Read / Update / Delete → inject WHERE filter
             Action::Get
             | Action::Cnt
-            | Action::Set
             | Action::Del
             | Action::Over
             | Action::Gen
             | Action::Export
             | Action::Search
-            | Action::Scroll => Ok(self.scope_to_tenant(&tenant_col, ctx)),
+            | Action::Scroll => Ok(scoped.scope_to_tenant(&tenant_col, ctx)),
+            Action::Set => scoped.scope_update_tenant(&tenant_col, ctx),
             // Insert / Upsert → auto-set tenant column in payload
             Action::Add | Action::Upsert | Action::Put => {
-                self.scope_insert_tenant(&tenant_col, ctx)
+                scoped.scope_insert_tenant(&tenant_col, ctx)
             }
-            Action::Merge => self.scope_merge_tenant(&tenant_col, ctx),
+            Action::Merge => scoped.scope_merge_tenant(&tenant_col, ctx),
             // DDL, transactions, etc. → no injection
-            _ => Ok(self),
+            _ => Ok(scoped),
         }
+    }
+
+    fn scope_nested_rls(mut self, ctx: &RlsContext) -> QailBuildResult<Self> {
+        for cte in &mut self.ctes {
+            cte.base_query = Box::new(cte.base_query.as_ref().clone().with_rls(ctx)?);
+            if let Some(ref mut recursive_query) = cte.recursive_query {
+                *recursive_query = Box::new(recursive_query.as_ref().clone().with_rls(ctx)?);
+            }
+        }
+
+        if let Some(ref mut source_query) = self.source_query {
+            *source_query = Box::new(source_query.as_ref().clone().with_rls(ctx)?);
+        }
+
+        for (_, set_query) in &mut self.set_ops {
+            *set_query = Box::new(set_query.as_ref().clone().with_rls(ctx)?);
+        }
+
+        Ok(self)
+    }
+
+    fn scope_update_tenant(self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
+        self.reject_tenant_payload_mutation(tenant_col)?;
+        Ok(self.scope_to_tenant(tenant_col, ctx))
+    }
+
+    fn scope_update_global(self, tenant_col: &str) -> QailBuildResult<Self> {
+        self.reject_tenant_payload_mutation(tenant_col)?;
+        Ok(self.scope_to_global(tenant_col))
+    }
+
+    fn reject_tenant_payload_mutation(&self, tenant_col: &str) -> QailBuildResult<()> {
+        let assigns_tenant = self
+            .cages
+            .iter()
+            .filter(|cage| matches!(cage.kind, CageKind::Payload))
+            .flat_map(|cage| cage.conditions.iter())
+            .any(|cond| expr_named_eq(&cond.left, tenant_col));
+
+        if assigns_tenant {
+            return Err(QailBuildError::RlsTenantColumnMutationDenied {
+                table: self.table.clone(),
+                tenant_column: tenant_col.to_string(),
+            });
+        }
+
+        Ok(())
     }
 
     /// Inject a `WHERE tenant_col = scope_id` filter for reads.
@@ -309,6 +360,7 @@ impl Qail {
 
     fn scope_merge_tenant(mut self, tenant_col: &str, ctx: &RlsContext) -> QailBuildResult<Self> {
         self.scope_merge_query_source(ctx)?;
+        self.reject_merge_tenant_update_mutation(tenant_col)?;
         let target_col = self.merge_target_tenant_col(tenant_col);
         let source_col = self.merge_source_tenant_col();
         self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
@@ -335,6 +387,7 @@ impl Qail {
 
     fn scope_merge_global(mut self, tenant_col: &str) -> QailBuildResult<Self> {
         self.scope_merge_query_source(&RlsContext::global())?;
+        self.reject_merge_tenant_update_mutation(tenant_col)?;
         let target_col = self.merge_target_tenant_col(tenant_col);
         let source_col = self.merge_source_tenant_col();
         self.scope_merge_on_tenant_equality(tenant_col, target_col.clone(), source_col.clone());
@@ -474,6 +527,29 @@ impl Qail {
                 columns.push(tenant_col.to_string());
                 values.push(tenant_expr.clone());
             }
+        }
+
+        Ok(())
+    }
+
+    fn reject_merge_tenant_update_mutation(&self, tenant_col: &str) -> QailBuildResult<()> {
+        let assigns_tenant = self
+            .merge
+            .as_ref()
+            .is_some_and(|merge| {
+                merge.clauses.iter().any(|clause| {
+                    matches!(&clause.action, MergeAction::Update { assignments }
+                        if assignments
+                            .iter()
+                            .any(|(column, _)| normalize_ident(column) == normalize_ident(tenant_col)))
+                })
+            });
+
+        if assigns_tenant {
+            return Err(QailBuildError::RlsTenantColumnMutationDenied {
+                table: self.table.clone(),
+                tenant_column: tenant_col.to_string(),
+            });
         }
 
         Ok(())
@@ -691,6 +767,19 @@ mod tests {
     }
 
     #[test]
+    fn test_with_rls_on_set_rejects_tenant_column_update() {
+        register_tenant_table("_rls_set_tenant_rewrite_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-a");
+        let err = Qail::set("_rls_set_tenant_rewrite_orders")
+            .set_value("tenant_id", "tenant-b")
+            .with_rls(&ctx)
+            .expect_err("tenant column updates must fail closed");
+
+        assert!(err.to_string().contains("tenant column mutation"));
+    }
+
+    #[test]
     fn test_with_rls_injects_filter_on_read_like_actions() {
         let actions = [
             (Action::Cnt, "_rls_cnt_orders"),
@@ -879,6 +968,86 @@ mod tests {
             }),
             "MERGE query source must be tenant-scoped"
         );
+    }
+
+    #[test]
+    fn test_with_rls_scopes_cte_backed_merge_source() {
+        register_tenant_table("_rls_merge_cte_target_orders", "tenant_id");
+        register_tenant_table("_rls_merge_cte_source_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-cte");
+        let incoming =
+            Qail::get("_rls_merge_cte_source_orders").columns(["id", "status", "tenant_id"]);
+        let source_query = Qail::get("incoming").columns(["id", "status", "tenant_id"]);
+        let query = Qail::merge_into("_rls_merge_cte_target_orders")
+            .target_alias("t")
+            .with("incoming", incoming)
+            .using_query_as(source_query, "s")
+            .merge_on_column("t.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("status", Expr::Named("s.status".to_string()))])
+            .when_not_matched_insert(
+                &["id", "status"],
+                &[
+                    Expr::Named("s.id".to_string()),
+                    Expr::Named("s.status".to_string()),
+                ],
+            )
+            .with_rls(&ctx)
+            .expect("merge rls should apply");
+
+        let cte = query.ctes.first().expect("incoming CTE");
+        assert!(
+            cte.base_query.cages.iter().any(|cage| {
+                matches!(cage.kind, CageKind::Filter) && cage.conditions.iter().any(|condition| {
+                    matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                        && condition.op == Operator::Eq
+                        && matches!(&condition.value, Value::String(value) if value == "tenant-cte")
+                })
+            }),
+            "outer MERGE CTE source must be tenant-scoped"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_scopes_cte_alias_queries_before_table_lookup() {
+        register_tenant_table("_rls_cte_alias_source_orders", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-alias");
+        let query = Qail::get("incoming")
+            .with(
+                "incoming",
+                Qail::get("_rls_cte_alias_source_orders").columns(["id", "tenant_id"]),
+            )
+            .with_rls(&ctx)
+            .expect("cte alias query should still scope registered CTE body");
+
+        let cte = query.ctes.first().expect("incoming CTE");
+        assert!(
+            cte.base_query.cages.iter().any(|cage| {
+                matches!(cage.kind, CageKind::Filter)
+                    && cage.conditions.iter().any(|condition| {
+                        matches!(&condition.left, Expr::Named(name) if name == "tenant_id")
+                            && matches!(&condition.value, Value::String(value) if value == "tenant-alias")
+                    })
+            }),
+            "registered CTE bodies must be scoped even when outer table is a CTE alias"
+        );
+    }
+
+    #[test]
+    fn test_with_rls_rejects_merge_tenant_column_update() {
+        register_tenant_table("_rls_merge_tenant_rewrite_orders", "tenant_id");
+        register_tenant_table("_rls_merge_tenant_rewrite_source", "tenant_id");
+
+        let ctx = RlsContext::tenant("tenant-a");
+        let err = Qail::merge_into("_rls_merge_tenant_rewrite_orders")
+            .using_table_as("_rls_merge_tenant_rewrite_source", "s")
+            .merge_on_column("_rls_merge_tenant_rewrite_orders.id", Operator::Eq, "s.id")
+            .when_matched_update(&[("tenant_id", Expr::Named("s.tenant_id".to_string()))])
+            .with_rls(&ctx)
+            .expect_err("MERGE tenant column updates must fail closed");
+
+        assert!(err.to_string().contains("tenant column mutation"));
     }
 
     #[test]
