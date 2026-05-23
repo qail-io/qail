@@ -11,8 +11,11 @@ use qail_core::ast::{
 use super::super::helpers::{NUMERIC_VALUES, i64_to_bytes, write_param_placeholder};
 
 /// Encode column list to buffer.
-pub fn encode_columns(columns: &[Expr], buf: &mut BytesMut) {
-    encode_columns_with_params(columns, buf, None);
+pub fn encode_columns(
+    columns: &[Expr],
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
+    encode_columns_with_params(columns, buf, None)
 }
 
 /// Encode column list with shared params (for subquery param sharing).
@@ -20,10 +23,10 @@ pub fn encode_columns_with_params(
     columns: &[Expr],
     buf: &mut BytesMut,
     params: Option<&mut Vec<Option<Vec<u8>>>>,
-) {
+) -> Result<(), crate::protocol::EncodeError> {
     if columns.is_empty() {
         buf.extend_from_slice(b"*");
-        return;
+        return Ok(());
     }
 
     // We need to reborrow params for each iteration
@@ -32,13 +35,17 @@ pub fn encode_columns_with_params(
         if i > 0 {
             buf.extend_from_slice(b", ");
         }
-        encode_column_expr_inner(col, buf, params_opt.as_deref_mut());
+        encode_column_expr_inner(col, buf, params_opt.as_deref_mut())?;
     }
+    Ok(())
 }
 
 /// Encode a single column expression (supports complex expressions).
-pub fn encode_column_expr(col: &Expr, buf: &mut BytesMut) {
-    encode_column_expr_inner(col, buf, None);
+pub fn encode_column_expr(
+    col: &Expr,
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
+    encode_column_expr_inner(col, buf, None)
 }
 
 /// Encode a single column expression with optional shared params.
@@ -49,7 +56,7 @@ fn encode_column_expr_inner(
     col: &Expr,
     buf: &mut BytesMut,
     mut params: Option<&mut Vec<Option<Vec<u8>>>>,
-) {
+) -> Result<(), crate::protocol::EncodeError> {
     match col {
         Expr::Star => buf.extend_from_slice(b"*"),
         Expr::Named(name) => buf.extend_from_slice(name.as_bytes()),
@@ -78,46 +85,10 @@ fn encode_column_expr_inner(
                 && !conditions.is_empty()
             {
                 buf.extend_from_slice(b" FILTER (WHERE ");
-                for (i, cond) in conditions.iter().enumerate() {
-                    if i > 0 {
-                        buf.extend_from_slice(b" AND ");
-                    }
-                    // Encode condition inline using AST encoder (not to_string())
-                    encode_expr(&cond.left, buf);
-                    buf.extend_from_slice(b" ");
-                    encode_operator(&cond.op, buf);
-                    buf.extend_from_slice(b" ");
-                    // Handle Value::Expr specially for complex expressions like NOW() - INTERVAL
-                    match &cond.value {
-                        Value::Expr(expr) => encode_column_expr(expr, buf),
-                        Value::String(s) => {
-                            buf.extend_from_slice(b"'");
-                            buf.extend_from_slice(s.as_bytes());
-                            buf.extend_from_slice(b"'");
-                        }
-                        Value::Int(n) => buf.extend_from_slice(n.to_string().as_bytes()),
-                        Value::Bool(b) => {
-                            buf.extend_from_slice(if *b { b"TRUE" } else { b"FALSE" })
-                        }
-                        Value::Null => buf.extend_from_slice(b"NULL"),
-                        Value::Array(arr) => {
-                            buf.extend_from_slice(b"(");
-                            for (j, v) in arr.iter().enumerate() {
-                                if j > 0 {
-                                    buf.extend_from_slice(b", ");
-                                }
-                                if let Value::String(s) = v {
-                                    buf.extend_from_slice(b"'");
-                                    buf.extend_from_slice(s.as_bytes());
-                                    buf.extend_from_slice(b"'");
-                                } else {
-                                    buf.extend_from_slice(v.to_string().as_bytes());
-                                }
-                            }
-                            buf.extend_from_slice(b")");
-                        }
-                        _ => buf.extend_from_slice(cond.value.to_string().as_bytes()),
-                    }
+                if let Some(params) = params.as_deref_mut() {
+                    encode_conditions(conditions, buf, params)?;
+                } else {
+                    encode_conditions_inline(conditions, buf)?;
                 }
                 buf.extend_from_slice(b")");
             }
@@ -134,7 +105,7 @@ fn encode_column_expr_inner(
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_column_expr(arg, buf);
+                encode_column_expr_inner(arg, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
@@ -147,7 +118,7 @@ fn encode_column_expr_inner(
             target_type,
             alias,
         } => {
-            encode_column_expr(expr, buf);
+            encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b"::");
             buf.extend_from_slice(target_type.as_bytes());
             if let Some(a) = alias {
@@ -162,11 +133,11 @@ fn encode_column_expr_inner(
             alias,
         } => {
             buf.extend_from_slice(b"(");
-            encode_column_expr(left, buf);
+            encode_column_expr_inner(left, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(op.to_string().as_bytes());
             buf.extend_from_slice(b" ");
-            encode_column_expr(right, buf);
+            encode_column_expr_inner(right, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
@@ -174,7 +145,7 @@ fn encode_column_expr_inner(
             }
         }
         Expr::Literal(val) => {
-            buf.extend_from_slice(val.to_string().as_bytes());
+            encode_inline_value(val, buf)?;
         }
         Expr::Case {
             when_clauses,
@@ -184,19 +155,19 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b"CASE");
             for (cond, then_expr) in when_clauses {
                 buf.extend_from_slice(b" WHEN ");
-                encode_column_expr_inner(&cond.left, buf, params.as_deref_mut());
+                encode_column_expr_inner(&cond.left, buf, params.as_deref_mut())?;
                 buf.extend_from_slice(b" ");
                 encode_operator(&cond.op, buf);
                 if !matches!(cond.op, Operator::IsNull | Operator::IsNotNull) {
                     buf.extend_from_slice(b" ");
-                    encode_case_condition_value(&cond.value, buf, params.as_deref_mut());
+                    encode_case_condition_value(&cond.value, buf, params.as_deref_mut())?;
                 }
                 buf.extend_from_slice(b" THEN ");
-                encode_column_expr_inner(then_expr, buf, params.as_deref_mut());
+                encode_column_expr_inner(then_expr, buf, params.as_deref_mut())?;
             }
             if let Some(else_val) = else_value {
                 buf.extend_from_slice(b" ELSE ");
-                encode_column_expr_inner(else_val, buf, params.as_deref_mut());
+                encode_column_expr_inner(else_val, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b" END");
             if let Some(a) = alias {
@@ -208,7 +179,7 @@ fn encode_column_expr_inner(
             if name.eq_ignore_ascii_case("INTERVAL") {
                 buf.extend_from_slice(b"INTERVAL ");
                 for (_kw, expr) in args {
-                    encode_column_expr(expr, buf);
+                    encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
                 }
             } else {
                 buf.extend_from_slice(name.to_uppercase().as_bytes());
@@ -221,7 +192,7 @@ fn encode_column_expr_inner(
                         buf.extend_from_slice(kw.as_bytes());
                         buf.extend_from_slice(b" ");
                     }
-                    encode_column_expr(expr, buf);
+                    encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
                 }
                 buf.extend_from_slice(b")");
             }
@@ -269,18 +240,18 @@ fn encode_column_expr_inner(
         Expr::Window {
             name,
             func,
-            params,
+            params: window_params,
             partition,
             order,
             frame,
         } => {
             buf.extend_from_slice(func.to_uppercase().as_bytes());
             buf.extend_from_slice(b"(");
-            for (i, p) in params.iter().enumerate() {
+            for (i, p) in window_params.iter().enumerate() {
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_column_expr(p, buf); // Use Expr encoding for column references
+                encode_column_expr_inner(p, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b") OVER (");
             if !partition.is_empty() {
@@ -335,7 +306,7 @@ fn encode_column_expr_inner(
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_column_expr(elem, buf);
+                encode_column_expr_inner(elem, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b"]");
             if let Some(a) = alias {
@@ -349,7 +320,7 @@ fn encode_column_expr_inner(
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_column_expr(elem, buf);
+                encode_column_expr_inner(elem, buf, params.as_deref_mut())?;
             }
             buf.extend_from_slice(b")");
             if let Some(a) = alias {
@@ -358,9 +329,9 @@ fn encode_column_expr_inner(
             }
         }
         Expr::Subscript { expr, index, alias } => {
-            encode_column_expr(expr, buf);
+            encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b"[");
-            encode_column_expr(index, buf);
+            encode_column_expr_inner(index, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b"]");
             if let Some(a) = alias {
                 buf.extend_from_slice(b" AS ");
@@ -372,7 +343,7 @@ fn encode_column_expr_inner(
             collation,
             alias,
         } => {
-            encode_column_expr(expr, buf);
+            encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b" COLLATE \"");
             buf.extend_from_slice(collation.as_bytes());
             buf.extend_from_slice(b"\"");
@@ -383,7 +354,7 @@ fn encode_column_expr_inner(
         }
         Expr::FieldAccess { expr, field, alias } => {
             buf.extend_from_slice(b"(");
-            encode_column_expr(expr, buf);
+            encode_column_expr_inner(expr, buf, params.as_deref_mut())?;
             buf.extend_from_slice(b").");
             buf.extend_from_slice(field.as_bytes());
             if let Some(a) = alias {
@@ -397,16 +368,18 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b"(");
             match params {
                 Some(ref mut p) => {
-                    let _ = super::super::dml::encode_select(query, buf, p);
+                    super::super::dml::encode_select(query, buf, p)?;
                 }
                 None => {
                     let mut sub_buf = BytesMut::with_capacity(128);
                     let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
-                    if let Ok(()) =
-                        super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params)
-                    {
-                        buf.extend_from_slice(&sub_buf);
+                    super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params)?;
+                    if !sub_params.is_empty() {
+                        return Err(crate::protocol::EncodeError::InvalidAst(
+                            "subquery expression requires a parameter context".to_string(),
+                        ));
                     }
+                    buf.extend_from_slice(&sub_buf);
                 }
             }
             buf.extend_from_slice(b")");
@@ -427,16 +400,18 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b"EXISTS (");
             match params {
                 Some(ref mut p) => {
-                    let _ = super::super::dml::encode_select(query, buf, p);
+                    super::super::dml::encode_select(query, buf, p)?;
                 }
                 None => {
                     let mut sub_buf = BytesMut::with_capacity(128);
                     let mut sub_params: Vec<Option<Vec<u8>>> = Vec::new();
-                    if let Ok(()) =
-                        super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params)
-                    {
-                        buf.extend_from_slice(&sub_buf);
+                    super::super::dml::encode_select(query, &mut sub_buf, &mut sub_params)?;
+                    if !sub_params.is_empty() {
+                        return Err(crate::protocol::EncodeError::InvalidAst(
+                            "exists expression requires a parameter context".to_string(),
+                        ));
                     }
+                    buf.extend_from_slice(&sub_buf);
                 }
             }
             buf.extend_from_slice(b")");
@@ -481,14 +456,15 @@ fn encode_column_expr_inner(
         Expr::Mod { kind, col } => match kind {
             ModKind::Add => {
                 buf.extend_from_slice(b"ADD COLUMN ");
-                encode_column_expr(col, buf);
+                encode_column_expr_inner(col, buf, params.as_deref_mut())?;
             }
             ModKind::Drop => {
                 buf.extend_from_slice(b"DROP COLUMN ");
-                encode_column_expr(col, buf);
+                encode_column_expr_inner(col, buf, params.as_deref_mut())?;
             }
         },
     }
+    Ok(())
 }
 
 /// Encode an operator to bytes.
@@ -537,9 +513,9 @@ fn encode_case_condition_value(
     value: &Value,
     buf: &mut BytesMut,
     params: Option<&mut Vec<Option<Vec<u8>>>>,
-) {
+) -> Result<(), crate::protocol::EncodeError> {
     match value {
-        Value::Expr(expr) => encode_column_expr_inner(expr, buf, params),
+        Value::Expr(expr) => encode_column_expr_inner(expr, buf, params)?,
         Value::Column(column) => buf.extend_from_slice(column.as_bytes()),
         Value::String(s) => {
             buf.extend_from_slice(b"'");
@@ -555,23 +531,147 @@ fn encode_case_condition_value(
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_case_condition_value(value, buf, None);
+                encode_case_condition_value(value, buf, None)?;
             }
             buf.extend_from_slice(b")");
         }
         _ => buf.extend_from_slice(value.to_string().as_bytes()),
     }
+    Ok(())
+}
+
+fn encode_conditions_inline(
+    conditions: &[Condition],
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
+    for (i, cond) in conditions.iter().enumerate() {
+        if i > 0 {
+            buf.extend_from_slice(b" AND ");
+        }
+
+        if matches!(cond.op, Operator::Exists | Operator::NotExists) {
+            if cond.op == Operator::NotExists {
+                buf.extend_from_slice(b"NOT ");
+            }
+            buf.extend_from_slice(b"EXISTS (");
+            if let Value::Subquery(query) = &cond.value {
+                let mut sub_params = Vec::new();
+                super::super::dml::encode_select(query, buf, &mut sub_params)?;
+                if !sub_params.is_empty() {
+                    return Err(crate::protocol::EncodeError::InvalidAst(
+                        "inline EXISTS condition requires a parameter context".to_string(),
+                    ));
+                }
+            } else {
+                encode_inline_value(&cond.value, buf)?;
+            }
+            buf.extend_from_slice(b")");
+            continue;
+        }
+
+        encode_expr(&cond.left, buf)?;
+        buf.extend_from_slice(b" ");
+        encode_operator(&cond.op, buf);
+
+        match cond.op {
+            Operator::IsNull | Operator::IsNotNull => {}
+            Operator::In | Operator::NotIn => {
+                buf.extend_from_slice(b" ");
+                if let Value::Array(values) = &cond.value {
+                    buf.extend_from_slice(b"(");
+                    for (j, value) in values.iter().enumerate() {
+                        if j > 0 {
+                            buf.extend_from_slice(b", ");
+                        }
+                        encode_inline_value(value, buf)?;
+                    }
+                    buf.extend_from_slice(b")");
+                } else {
+                    encode_inline_value(&cond.value, buf)?;
+                }
+            }
+            Operator::Between | Operator::NotBetween => {
+                if let Value::Array(values) = &cond.value
+                    && values.len() >= 2
+                {
+                    buf.extend_from_slice(b" ");
+                    encode_inline_value(&values[0], buf)?;
+                    buf.extend_from_slice(b" AND ");
+                    encode_inline_value(&values[1], buf)?;
+                } else {
+                    buf.extend_from_slice(b" ");
+                    encode_inline_value(&cond.value, buf)?;
+                }
+            }
+            _ => {
+                buf.extend_from_slice(b" ");
+                encode_inline_value(&cond.value, buf)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_inline_value(
+    value: &Value,
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
+    match value {
+        Value::String(value) | Value::Timestamp(value) => {
+            if value.as_bytes().contains(&0) {
+                return Err(crate::protocol::EncodeError::NullByte);
+            }
+            buf.extend_from_slice(b"'");
+            buf.extend_from_slice(value.replace('\'', "''").as_bytes());
+            buf.extend_from_slice(b"'");
+        }
+        Value::Json(value) => {
+            if value.as_bytes().contains(&0) {
+                return Err(crate::protocol::EncodeError::NullByte);
+            }
+            buf.extend_from_slice(b"'");
+            buf.extend_from_slice(value.replace('\'', "''").as_bytes());
+            buf.extend_from_slice(b"'::jsonb");
+        }
+        Value::Bool(value) => buf.extend_from_slice(if *value { b"TRUE" } else { b"FALSE" }),
+        Value::Column(column) => buf.extend_from_slice(column.as_bytes()),
+        Value::Expr(expr) => encode_column_expr(expr, buf)?,
+        Value::Subquery(query) => {
+            let mut sub_params = Vec::new();
+            buf.extend_from_slice(b"(");
+            super::super::dml::encode_select(query, buf, &mut sub_params)?;
+            if !sub_params.is_empty() {
+                return Err(crate::protocol::EncodeError::InvalidAst(
+                    "inline subquery value requires a parameter context".to_string(),
+                ));
+            }
+            buf.extend_from_slice(b")");
+        }
+        Value::Array(values) => {
+            buf.extend_from_slice(b"(");
+            for (i, value) in values.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                encode_inline_value(value, buf)?;
+            }
+            buf.extend_from_slice(b")");
+        }
+        _ => buf.extend_from_slice(value.to_string().as_bytes()),
+    }
+    Ok(())
 }
 
 /// Encode simple expression (for WHERE left side).
-pub fn encode_expr(expr: &Expr, buf: &mut BytesMut) {
+pub fn encode_expr(expr: &Expr, buf: &mut BytesMut) -> Result<(), crate::protocol::EncodeError> {
     match expr {
         Expr::Named(name) => buf.extend_from_slice(name.as_bytes()),
         Expr::Star => buf.extend_from_slice(b"*"),
         Expr::Aliased { name, .. } => buf.extend_from_slice(name.as_bytes()),
         // Delegate complex expressions to the full encoder
-        _ => encode_column_expr(expr, buf),
+        _ => encode_column_expr(expr, buf)?,
     }
+    Ok(())
 }
 
 /// Encode JOIN ON value - AST-native, no allocations for column references.
@@ -605,7 +705,7 @@ pub fn encode_conditions(
 
         if cond.is_array_unnest {
             buf.extend_from_slice(b"EXISTS (SELECT 1 FROM unnest(");
-            encode_expr(&cond.left, buf);
+            encode_expr(&cond.left, buf)?;
             buf.extend_from_slice(b") _el WHERE ");
 
             match cond.op {
@@ -653,7 +753,7 @@ pub fn encode_conditions(
             continue;
         }
 
-        encode_expr(&cond.left, buf);
+        encode_expr(&cond.left, buf)?;
 
         match cond.op {
             Operator::Eq => buf.extend_from_slice(b" = "),
@@ -936,7 +1036,7 @@ pub fn encode_value(
             write_param_placeholder(buf, params.len());
         }
         Value::Expr(expr) => {
-            encode_column_expr(expr, buf);
+            encode_column_expr_inner(expr, buf, Some(params))?;
         }
         Value::Vector(vec) => {
             // Encode vector as PostgreSQL array format: '{1.0,2.0,3.0}'

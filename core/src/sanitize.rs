@@ -73,13 +73,16 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
         Expr::Aggregate {
             col, alias, filter, ..
         } => {
-            check_ident(field, col)?;
+            if col != "*" {
+                check_ident(field, col)?;
+            }
             if let Some(a) = alias {
                 check_ident(&format!("{field}.alias"), a)?;
             }
             if let Some(conditions) = filter {
                 for cond in conditions {
                     check_expr(&format!("{field}.filter"), &cond.left)?;
+                    check_value(&format!("{field}.filter"), &cond.value)?;
                 }
             }
             Ok(())
@@ -186,10 +189,8 @@ fn check_expr(field: &str, expr: &Expr) -> Result<(), SanitizeError> {
             alias,
         } => {
             for (cond, val) in when_clauses {
-                check_expr(
-                    &format!("{field}.case_when"),
-                    &Expr::Named(cond.left.to_string()),
-                )?;
+                check_expr(&format!("{field}.case_when"), &cond.left)?;
+                check_value(&format!("{field}.case_when"), &cond.value)?;
                 check_expr(&format!("{field}.case_then"), val)?;
             }
             if let Some(e) = else_value {
@@ -572,6 +573,76 @@ mod tests {
         let err = validate_ast(&cmd).unwrap_err();
 
         assert_eq!(err.field, "on_conflict.assignment.column");
+    }
+
+    #[test]
+    fn aggregate_filter_value_expression_injection_rejected() {
+        use crate::ast::{AggregateFunc, Condition, Operator, Value};
+
+        let mut cmd = Qail::get("events");
+        cmd.columns.push(Expr::Aggregate {
+            col: "id".to_string(),
+            func: AggregateFunc::Count,
+            distinct: false,
+            filter: Some(vec![Condition {
+                left: Expr::Named("direction".to_string()),
+                op: Operator::Eq,
+                value: Value::Expr(Box::new(Expr::Named("bad;DROP".to_string()))),
+                is_array_unnest: false,
+            }]),
+            alias: None,
+        });
+
+        let err = validate_ast(&cmd).unwrap_err();
+        assert_eq!(err.field, "columns[0].filter");
+    }
+
+    #[test]
+    fn count_star_aggregate_passes_sanitizer() {
+        use crate::ast::AggregateFunc;
+
+        let mut cmd = Qail::get("events");
+        cmd.columns.push(Expr::Aggregate {
+            col: "*".to_string(),
+            func: AggregateFunc::Count,
+            distinct: false,
+            filter: None,
+            alias: Some("total".to_string()),
+        });
+
+        assert!(validate_ast(&cmd).is_ok());
+    }
+
+    #[test]
+    fn case_when_complex_condition_expression_passes_sanitizer() {
+        use crate::ast::{Condition, Operator, Value};
+
+        let mut cmd = Qail::get("users");
+        cmd.columns.push(Expr::Case {
+            when_clauses: vec![(
+                Condition {
+                    left: Expr::Cast {
+                        expr: Box::new(Expr::JsonAccess {
+                            column: "profile".to_string(),
+                            path_segments: vec![("active".to_string(), true)],
+                            alias: None,
+                        }),
+                        target_type: "integer".to_string(),
+                        alias: None,
+                    },
+                    op: Operator::Gt,
+                    value: Value::Int(0),
+                    is_array_unnest: false,
+                },
+                Box::new(Expr::Literal(Value::String("active".to_string()))),
+            )],
+            else_value: Some(Box::new(Expr::Literal(Value::String(
+                "inactive".to_string(),
+            )))),
+            alias: Some("status_label".to_string()),
+        });
+
+        assert!(validate_ast(&cmd).is_ok());
     }
 
     #[test]

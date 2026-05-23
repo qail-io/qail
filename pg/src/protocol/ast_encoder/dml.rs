@@ -52,7 +52,7 @@ fn encode_select_with_columns(
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), crate::protocol::EncodeError> {
-    if try_encode_simple_select_fast(cmd, columns, buf, params) {
+    if try_encode_simple_select_fast(cmd, columns, buf, params)? {
         return Ok(());
     }
 
@@ -70,7 +70,7 @@ fn encode_select_with_columns(
             if i > 0 {
                 buf.extend_from_slice(b", ");
             }
-            encode_expr(expr, buf);
+            encode_expr(expr, buf)?;
         }
         buf.extend_from_slice(b") ");
     } else if cmd.distinct {
@@ -78,7 +78,7 @@ fn encode_select_with_columns(
         buf.extend_from_slice(b"DISTINCT ");
     }
 
-    encode_columns_with_params(columns, buf, Some(params));
+    encode_columns_with_params(columns, buf, Some(params))?;
 
     // FROM
     buf.extend_from_slice(b" FROM ");
@@ -106,7 +106,7 @@ fn encode_select_with_columns(
                 if i > 0 {
                     buf.extend_from_slice(b" AND ");
                 }
-                encode_expr(&cond.left, buf);
+                encode_expr(&cond.left, buf)?;
                 buf.extend_from_slice(b" ");
                 encode_operator(&cond.op, buf);
                 buf.extend_from_slice(b" ");
@@ -129,7 +129,7 @@ fn encode_select_with_columns(
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_expr(&cond.left, buf);
+                encode_expr(&cond.left, buf)?;
             }
         }
     } else {
@@ -218,7 +218,7 @@ fn encode_select_with_columns(
                     buf.extend_from_slice(b", ");
                 }
                 first = false;
-                encode_expr(&cond.left, buf);
+                encode_expr(&cond.left, buf)?;
                 match order {
                     SortOrder::Desc | SortOrder::DescNullsFirst | SortOrder::DescNullsLast => {
                         buf.extend_from_slice(b" DESC");
@@ -330,7 +330,7 @@ fn try_encode_simple_select_fast(
     columns: &[Expr],
     buf: &mut BytesMut,
     params: &mut Vec<Option<Vec<u8>>>,
-) -> bool {
+) -> Result<bool, crate::protocol::EncodeError> {
     if !cmd.ctes.is_empty()
         || cmd.distinct
         || !cmd.distinct_on.is_empty()
@@ -340,14 +340,14 @@ fn try_encode_simple_select_fast(
         || cmd.fetch.is_some()
         || !matches!(cmd.group_by_mode, GroupByMode::Simple)
     {
-        return false;
+        return Ok(false);
     }
 
     if columns
         .iter()
         .any(|expr| matches!(expr, Expr::Aggregate { .. }))
     {
-        return false;
+        return Ok(false);
     }
 
     let mut limit: Option<usize> = None;
@@ -355,7 +355,7 @@ fn try_encode_simple_select_fast(
 
     for cage in &cmd.cages {
         if !cage.conditions.is_empty() {
-            return false;
+            return Ok(false);
         }
 
         match cage.kind {
@@ -369,12 +369,12 @@ fn try_encode_simple_select_fast(
                     offset = Some(n);
                 }
             }
-            _ => return false,
+            _ => return Ok(false),
         }
     }
 
     buf.extend_from_slice(b"SELECT ");
-    encode_columns_with_params(columns, buf, Some(params));
+    encode_columns_with_params(columns, buf, Some(params))?;
     buf.extend_from_slice(b" FROM ");
     buf.extend_from_slice(cmd.table.as_bytes());
 
@@ -388,7 +388,7 @@ fn try_encode_simple_select_fast(
         write_usize(buf, n);
     }
 
-    true
+    Ok(true)
 }
 
 /// Encode the CTE prefix (`WITH [RECURSIVE] cte1 AS (...), cte2 AS (...)`).
@@ -501,7 +501,7 @@ pub fn encode_insert(
     // Column list - prefer cmd.columns, but extract from conditions if empty (set_value pattern)
     if !cmd.columns.is_empty() {
         buf.extend_from_slice(b" (");
-        encode_columns(&cmd.columns, buf);
+        encode_columns(&cmd.columns, buf)?;
         buf.extend_from_slice(b")");
     } else if let Some(cage) = payload_cage {
         // Extract column names from condition.left (set_value pattern)
@@ -510,7 +510,7 @@ pub fn encode_insert(
             if i > 0 {
                 buf.extend_from_slice(b", ");
             }
-            encode_expr(&cond.left, buf);
+            encode_expr(&cond.left, buf)?;
         }
         buf.extend_from_slice(b")");
     }
@@ -561,7 +561,7 @@ pub fn encode_insert(
                     }
                     buf.extend_from_slice(col.as_bytes());
                     buf.extend_from_slice(b" = ");
-                    encode_expr(expr, buf);
+                    encode_expr(expr, buf)?;
                 }
                 encode_where(cmd, buf, params)?;
             }
@@ -571,7 +571,7 @@ pub fn encode_insert(
     // RETURNING clause
     if let Some(ref ret_cols) = cmd.returning {
         buf.extend_from_slice(b" RETURNING ");
-        encode_columns(ret_cols, buf);
+        encode_columns(ret_cols, buf)?;
     }
 
     Ok(())
@@ -604,7 +604,7 @@ pub fn encode_update(
                     buf.extend_from_slice(b", ");
                 }
                 // Column name from cmd.columns
-                encode_expr(col, buf);
+                encode_expr(col, buf)?;
                 buf.extend_from_slice(b" = ");
                 // Value from payload condition
                 encode_value(&cond.value, buf, params)?;
@@ -615,7 +615,7 @@ pub fn encode_update(
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_expr(&cond.left, buf);
+                encode_expr(&cond.left, buf)?;
                 buf.extend_from_slice(b" = ");
                 encode_value(&cond.value, buf, params)?;
             }
@@ -638,7 +638,7 @@ pub fn encode_update(
     // RETURNING clause
     if let Some(ref ret_cols) = cmd.returning {
         buf.extend_from_slice(b" RETURNING ");
-        encode_columns(ret_cols, buf);
+        encode_columns(ret_cols, buf)?;
     }
 
     Ok(())
@@ -675,7 +675,7 @@ pub fn encode_delete(
     // RETURNING clause
     if let Some(ref ret_cols) = cmd.returning {
         buf.extend_from_slice(b" RETURNING ");
-        encode_columns(ret_cols, buf);
+        encode_columns(ret_cols, buf)?;
     }
 
     Ok(())
@@ -721,14 +721,14 @@ pub fn encode_merge(
             encode_conditions(&clause.condition, buf, params)?;
         }
         buf.extend_from_slice(b" THEN ");
-        encode_merge_action(&clause.action, buf);
+        encode_merge_action(&clause.action, buf)?;
     }
 
     if let Some(ref ret_cols) = cmd.returning
         && !ret_cols.is_empty()
     {
         buf.extend_from_slice(b" RETURNING ");
-        encode_columns(ret_cols, buf);
+        encode_columns(ret_cols, buf)?;
     }
 
     Ok(())
@@ -821,7 +821,10 @@ fn encode_merge_source(
     Ok(())
 }
 
-fn encode_merge_action(action: &MergeAction, buf: &mut BytesMut) {
+fn encode_merge_action(
+    action: &MergeAction,
+    buf: &mut BytesMut,
+) -> Result<(), crate::protocol::EncodeError> {
     match action {
         MergeAction::Update { assignments } => {
             buf.extend_from_slice(b"UPDATE SET ");
@@ -831,7 +834,7 @@ fn encode_merge_action(action: &MergeAction, buf: &mut BytesMut) {
                 }
                 buf.extend_from_slice(col.as_bytes());
                 buf.extend_from_slice(b" = ");
-                encode_expr(expr, buf);
+                encode_expr(expr, buf)?;
             }
         }
         MergeAction::Insert { columns, values } => {
@@ -851,13 +854,14 @@ fn encode_merge_action(action: &MergeAction, buf: &mut BytesMut) {
                 if i > 0 {
                     buf.extend_from_slice(b", ");
                 }
-                encode_expr(value, buf);
+                encode_expr(value, buf)?;
             }
             buf.extend_from_slice(b")");
         }
         MergeAction::Delete => buf.extend_from_slice(b"DELETE"),
         MergeAction::DoNothing => buf.extend_from_slice(b"DO NOTHING"),
     }
+    Ok(())
 }
 
 /// Encode an EXPORT command as `COPY (SELECT ...) TO STDOUT`.

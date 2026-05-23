@@ -578,6 +578,113 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_aggregate_filter_parameterizes_string_values() {
+        use qail_core::ast::{AggregateFunc, Condition, Expr, Operator, Value};
+
+        let mut cmd = Qail::get("events");
+        cmd.columns.push(Expr::Aggregate {
+            col: "*".to_string(),
+            func: AggregateFunc::Count,
+            distinct: false,
+            filter: Some(vec![Condition {
+                left: Expr::Named("direction".to_string()),
+                op: Operator::Eq,
+                value: Value::String("outbound' OR true --".to_string()),
+                is_array_unnest: false,
+            }]),
+            alias: Some("outbound_count".to_string()),
+        });
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("COUNT(*) FILTER (WHERE direction = $1) AS outbound_count"),
+            "aggregate FILTER must use condition encoder: {sql}"
+        );
+        assert_eq!(
+            params,
+            vec![Some(b"outbound' OR true --".to_vec())],
+            "string value must be carried as a bind parameter"
+        );
+    }
+
+    #[test]
+    fn test_encode_aggregate_filter_handles_is_null_without_rhs() {
+        use qail_core::ast::{AggregateFunc, Condition, Expr, Operator, Value};
+
+        let mut cmd = Qail::get("events");
+        cmd.columns.push(Expr::Aggregate {
+            col: "*".to_string(),
+            func: AggregateFunc::Count,
+            distinct: false,
+            filter: Some(vec![Condition {
+                left: Expr::Named("deleted_at".to_string()),
+                op: Operator::IsNull,
+                value: Value::Null,
+                is_array_unnest: false,
+            }]),
+            alias: Some("deleted_count".to_string()),
+        });
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("COUNT(*) FILTER (WHERE deleted_at IS NULL) AS deleted_count"),
+            "aggregate FILTER must not render an extra NULL operand: {sql}"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_value_expr_subquery_shares_outer_params() {
+        use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
+
+        let subquery = Qail::get("plans")
+            .columns(["id"])
+            .filter("tier", Operator::Eq, "gold");
+        let mut cmd = Qail::get("users");
+        cmd.cages.push(Cage {
+            kind: CageKind::Filter,
+            conditions: vec![Condition {
+                left: Expr::Named("plan_id".to_string()),
+                op: Operator::Eq,
+                value: Value::Expr(Box::new(Expr::Subquery {
+                    query: Box::new(subquery),
+                    alias: None,
+                })),
+                is_array_unnest: false,
+            }],
+            logical_op: LogicalOp::And,
+        });
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("plan_id = (SELECT id FROM plans WHERE tier = $1)"),
+            "subquery expression value must share the outer parameter context: {sql}"
+        );
+        assert_eq!(params, vec![Some(b"gold".to_vec())]);
+    }
+
+    #[test]
+    fn test_encode_literal_timestamp_escapes_quotes() {
+        use qail_core::ast::{Expr, Value};
+
+        let mut cmd = Qail::get("events");
+        cmd.columns.push(Expr::Literal(Value::Timestamp(
+            "2026-05-24 00:00:00'::timestamp); SELECT 1 --".to_string(),
+        )));
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("'2026-05-24 00:00:00''::timestamp); SELECT 1 --'"),
+            "timestamp literal must escape embedded quotes: {sql}"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
     fn test_encode_select_with_multiple_and_cages() {
         use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Value};
 
@@ -1051,7 +1158,7 @@ mod tests {
         };
 
         let mut buf = bytes::BytesMut::with_capacity(128);
-        super::values::encode_column_expr(&def, &mut buf);
+        super::values::encode_column_expr(&def, &mut buf).unwrap();
         let result = String::from_utf8_lossy(&buf).to_string();
 
         assert!(
@@ -1077,7 +1184,7 @@ mod tests {
         };
 
         let mut buf = bytes::BytesMut::with_capacity(128);
-        super::values::encode_column_expr(&mod_add, &mut buf);
+        super::values::encode_column_expr(&mod_add, &mut buf).unwrap();
         let result = String::from_utf8_lossy(&buf).to_string();
 
         assert!(
