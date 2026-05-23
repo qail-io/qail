@@ -987,7 +987,18 @@ pub fn verify_tenant_boundary(
                 }
                 continue;
             }
-            JsonValue::Null => continue, // NULL tenant column — skip (system rows)
+            JsonValue::Null => {
+                violations += 1;
+                tracing::error!(
+                    table = table,
+                    endpoint = endpoint,
+                    row = i,
+                    column = tenant_column,
+                    expected = expected_tenant_id,
+                    "TENANT_BOUNDARY_VIOLATION — tenant column is NULL in tenant-scoped response"
+                );
+                continue;
+            }
             other => {
                 violations += 1;
                 tracing::error!(

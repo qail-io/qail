@@ -173,9 +173,11 @@ fn rows_without_operator_id_are_violations() {
 }
 
 #[test]
-fn null_operator_id_ignored() {
+fn null_operator_id_is_violation_for_tenant_scope() {
     let rows = vec![json!({"id": 1, "operator_id": null, "name": "System row"})];
-    assert!(verify_tenant_boundary(&rows, "op-123", "operator_id", "settings", "GET").is_ok());
+    let err = verify_tenant_boundary(&rows, "op-123", "operator_id", "settings", "GET")
+        .expect_err("tenant-scoped verifier must reject NULL tenant rows");
+    assert_eq!(err.violation_count, 1);
 }
 
 #[test]
