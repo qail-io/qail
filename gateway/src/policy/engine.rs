@@ -217,9 +217,11 @@ impl PolicyEngine {
                 match filters_to_inject.len() {
                     0 => {}
                     1 => {
-                        let filter = filters_to_inject
-                            .pop()
-                            .expect("length checked before join policy injection");
+                        let Some(filter) = filters_to_inject.pop() else {
+                            return Err(GatewayError::Internal(anyhow::anyhow!(
+                                "missing join policy filter after length check"
+                            )));
+                        };
                         Self::inject_join_filter(cmd, &mut join, filter)?;
                     }
                     _ => {
@@ -586,16 +588,14 @@ impl PolicyEngine {
             cmd.columns.push(Expr::Named(column.to_string()));
         }
 
-        let source_query = cmd
-            .source_query
-            .as_deref_mut()
-            .expect("source query checked before rewrite");
-        Self::rewrite_source_projection_create_policy(
-            source_query,
-            column_index,
-            append_column,
-            value,
-        );
+        if let Some(source_query) = cmd.source_query.as_deref_mut() {
+            Self::rewrite_source_projection_create_policy(
+                source_query,
+                column_index,
+                append_column,
+                value,
+            );
+        }
 
         Ok(())
     }
@@ -774,9 +774,12 @@ impl PolicyEngine {
                 cmd.action
             ))
         })?;
-        let op = *required_ops
-            .last()
-            .expect("required_for_action never returns an empty operation list");
+        let Some(op) = required_ops.last().copied() else {
+            return Err(GatewayError::AccessDenied(format!(
+                "Action {:?} has no policy operations",
+                cmd.action
+            )));
+        };
         let (base_table, base_qualifier) = Self::table_ref_name_and_qualifier(&cmd.table);
         for required_op in required_ops {
             self.applicable_policies(auth, &base_table, *required_op)?;

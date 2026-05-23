@@ -45,5 +45,5 @@ Use the Gradle module in this repository:
 
 ```bash
 qail --version
-# qail 1.0.0
+# qail 1.1.0
 ```

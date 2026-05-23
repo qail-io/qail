@@ -171,7 +171,7 @@ fn auth_replay_fingerprint(auth: &crate::auth::AuthContext) -> String {
     );
 
     let mut claims: Vec<_> = auth.claims.iter().collect();
-    claims.sort_by(|(left, _), (right, _)| left.cmp(right));
+    claims.sort_by_key(|(left, _)| *left);
     for (key, value) in claims {
         canonical.push('|');
         canonical.push_str(key);

@@ -18,7 +18,7 @@ fn rest_list_cache_key(
     qail_core::wire::encode_cmd_text(cmd).hash(&mut hasher);
 
     let mut claims: Vec<_> = auth.claims.iter().collect();
-    claims.sort_by(|(left, _), (right, _)| left.cmp(right));
+    claims.sort_by_key(|(left, _)| *left);
     for (key, value) in claims {
         key.hash(&mut hasher);
         serde_json::to_string(value)

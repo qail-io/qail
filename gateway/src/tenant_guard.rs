@@ -429,16 +429,14 @@ fn inject_tenant_payload_from_source_query(
         cmd.columns.push(Expr::Named(tenant_column.to_string()));
     }
 
-    let source_query = cmd
-        .source_query
-        .as_deref_mut()
-        .expect("source query checked before rewrite");
-    rewrite_source_projection_tenant_column(
-        source_query,
-        tenant_index,
-        append_tenant_column,
-        tenant_id,
-    );
+    if let Some(source_query) = cmd.source_query.as_deref_mut() {
+        rewrite_source_projection_tenant_column(
+            source_query,
+            tenant_index,
+            append_tenant_column,
+            tenant_id,
+        );
+    }
 
     Ok(())
 }

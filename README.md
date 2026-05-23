@@ -82,7 +82,7 @@ Qail addresses these by making AST-first query execution and explicit tenant con
 
 Older pre-1.0 QAIL experiments used symbolic text forms such as `get::users•@id@email@role[active=true][lim=10]` and macro examples such as `qail!("get::users:'id'email [ 'active == true ]")`.
 
-Those forms are historical and are not the canonical `1.0.0` API surface. Current application code should use the AST/DSL path:
+Those forms are historical and are not the canonical `1.x` API surface. Current application code should use the AST/DSL path:
 
 ```rust
 let query = Qail::get("users")

@@ -416,9 +416,12 @@ pub(crate) async fn create_handler(
         }
 
         let mut old_cmd = if classify_upsert_event {
-            let conflict_cols = conflict_update_cols
-                .as_ref()
-                .expect("classify_upsert_event requires conflict columns");
+            let Some(conflict_cols) = conflict_update_cols.as_ref() else {
+                let _ = conn.rollback_and_release().await;
+                return Err(ApiError::internal(
+                    "Upsert conflict columns missing for event classification",
+                ));
+            };
             Some(build_upsert_old_row_lookup(
                 &table_name,
                 conflict_cols,
