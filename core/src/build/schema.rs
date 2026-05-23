@@ -58,12 +58,51 @@ pub struct ResourceSchema {
 }
 
 fn strip_schema_comments(line: &str) -> &str {
-    let line = line.split_once("--").map_or(line, |(left, _)| left);
-    line.split_once('#').map_or(line, |(left, _)| left).trim()
+    let Some(idx) = schema_comment_start(line, true) else {
+        return line.trim();
+    };
+    line[..idx].trim()
 }
 
 fn strip_sql_line_comments(line: &str) -> &str {
-    line.split_once("--").map_or(line, |(left, _)| left).trim()
+    let Some(idx) = schema_comment_start(line, false) else {
+        return line.trim();
+    };
+    line[..idx].trim()
+}
+
+fn schema_comment_start(line: &str, hash_comments: bool) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if !in_double => {
+                if in_single && bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = !in_single;
+            }
+            b'"' if !in_single => {
+                if in_double && bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = !in_double;
+            }
+            b'-' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'-') => {
+                return Some(i);
+            }
+            b'#' if hash_comments && !in_single && !in_double => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
 }
 
 impl Schema {
@@ -885,5 +924,34 @@ impl TableSchema {
             }
             "id" // Universal fallback
         }
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::{strip_schema_comments, strip_sql_line_comments};
+
+    #[test]
+    fn schema_comment_stripping_ignores_markers_inside_quotes() {
+        assert_eq!(
+            strip_schema_comments(r#"status TEXT default 'draft--internal#tag' # comment"#),
+            r#"status TEXT default 'draft--internal#tag'"#
+        );
+        assert_eq!(
+            strip_schema_comments(r#"status TEXT default "draft--internal#tag" -- comment"#),
+            r#"status TEXT default "draft--internal#tag""#
+        );
+    }
+
+    #[test]
+    fn sql_comment_stripping_ignores_double_dash_inside_strings() {
+        assert_eq!(
+            strip_sql_line_comments("CREATE TABLE logs (message text DEFAULT 'a--b'); -- comment"),
+            "CREATE TABLE logs (message text DEFAULT 'a--b');"
+        );
+        assert_eq!(
+            strip_sql_line_comments("CREATE TABLE tags (name text DEFAULT '#not-comment');"),
+            "CREATE TABLE tags (name text DEFAULT '#not-comment');"
+        );
     }
 }

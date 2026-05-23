@@ -20,8 +20,44 @@
 use crate::validator::Validator;
 
 fn strip_schema_comments(line: &str) -> &str {
-    let line = line.split_once("--").map_or(line, |(left, _)| left);
-    line.split_once('#').map_or(line, |(left, _)| left).trim()
+    let Some(idx) = schema_comment_start(line, true) else {
+        return line.trim();
+    };
+    line[..idx].trim()
+}
+
+fn schema_comment_start(line: &str, hash_comments: bool) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if !in_double => {
+                if in_single && bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = !in_single;
+            }
+            b'"' if !in_single => {
+                if in_double && bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = !in_double;
+            }
+            b'-' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'-') => {
+                return Some(i);
+            }
+            b'#' if hash_comments && !in_single && !in_double => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
 }
 
 /// A database schema comprising one or more table definitions.
@@ -486,6 +522,18 @@ table users { -- inline table comment
         assert_eq!(schema.tables[0].columns.len(), 2);
         assert_eq!(schema.tables[0].columns[0].name, "id");
         assert_eq!(schema.tables[0].columns[1].name, "email");
+    }
+
+    #[test]
+    fn test_schema_comment_stripping_ignores_markers_inside_quotes() {
+        assert_eq!(
+            super::strip_schema_comments(r#"name text default 'a--b#c' -- real comment"#),
+            r#"name text default 'a--b#c'"#
+        );
+        assert_eq!(
+            super::strip_schema_comments(r#"name text default "a--b#c" # real comment"#),
+            r#"name text default "a--b#c""#
+        );
     }
 
     #[test]
