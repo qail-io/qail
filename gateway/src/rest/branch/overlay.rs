@@ -39,6 +39,39 @@ pub(crate) fn project_rows_to_selected_columns(data: &mut [Value], selected_colu
     }
 }
 
+async fn ensure_active_branch_exists(
+    conn: &mut qail_pg::driver::PooledConnection,
+    branch_name: &str,
+) -> Result<(), ApiError> {
+    let sql = qail_pg::driver::branch_sql::active_branch_exists_sql(branch_name);
+    let rows = conn
+        .get_mut()
+        .map_err(|e| ApiError::internal(format!("Branch connection unavailable: {}", e)))?
+        .simple_query(&sql)
+        .await
+        .map_err(|e| ApiError::internal(format!("Branch lookup failed: {}", e)))?;
+
+    if rows.is_empty() {
+        return Err(ApiError::not_found(format!("branch '{}'", branch_name)));
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn read_branch_overlay_rows(
+    conn: &mut qail_pg::driver::PooledConnection,
+    branch_name: &str,
+    table_name: &str,
+) -> Result<Vec<qail_pg::PgRow>, ApiError> {
+    ensure_active_branch_exists(conn, branch_name).await?;
+    let sql = qail_pg::driver::branch_sql::read_overlay_sql(branch_name, table_name);
+    conn.get_mut()
+        .map_err(|e| ApiError::internal(format!("Branch connection unavailable: {}", e)))?
+        .simple_query(&sql)
+        .await
+        .map_err(|e| ApiError::internal(format!("Branch overlay read failed: {}", e)))
+}
+
 fn upsert_overlay_row(
     data: &mut Vec<Value>,
     data_map: &mut std::collections::HashMap<String, usize>,
@@ -98,18 +131,11 @@ pub(crate) async fn apply_branch_overlay(
     table_name: &str,
     data: &mut Vec<Value>,
     pk_column: &str,
-) {
-    let sql = qail_pg::driver::branch_sql::read_overlay_sql(branch_name, table_name);
-    let overlay_rows = match conn.get_mut() {
-        Ok(pg_conn) => match pg_conn.simple_query(&sql).await {
-            Ok(rows) => rows,
-            Err(_) => return,
-        },
-        Err(_) => return,
-    };
+) -> Result<(), ApiError> {
+    let overlay_rows = read_branch_overlay_rows(conn, branch_name, table_name).await?;
 
     if overlay_rows.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Optimization: Index existing results by PK for O(1) lookup during merge.
@@ -184,6 +210,8 @@ pub(crate) async fn apply_branch_overlay(
             keep
         });
     }
+
+    Ok(())
 }
 
 /// Redirect a write to the branch overlay (CoW Write).

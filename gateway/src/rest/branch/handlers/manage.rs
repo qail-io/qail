@@ -75,10 +75,27 @@ pub(crate) async fn branch_create_handler(
     };
 
     let ddl = qail_pg::driver::branch_sql::create_branch_tables_sql();
-    if let Ok(pg_conn) = conn.get_mut()
-        && let Err(e) = pg_conn.execute_simple(ddl).await
-    {
-        tracing::warn!("Branch DDL bootstrap (may already exist): {}", e);
+    match conn.get_mut() {
+        Ok(pg_conn) => {
+            if let Err(e) = pg_conn.execute_simple(ddl).await {
+                tracing::error!("Branch DDL bootstrap failed: {}", e);
+                let _ = conn.rollback_and_release().await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to bootstrap branch metadata"})),
+                )
+                    .into_response();
+            }
+        }
+        Err(e) => {
+            tracing::error!("Branch connection unavailable before DDL bootstrap: {}", e);
+            let _ = conn.rollback_and_release().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Database connection unavailable"})),
+            )
+                .into_response();
+        }
     }
 
     let sql = qail_pg::driver::branch_sql::create_branch_sql(name, parent);

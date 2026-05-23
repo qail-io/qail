@@ -157,50 +157,40 @@ pub(crate) async fn get_by_id_handler(
 
     // Branch overlay: check if this row is overridden on the branch.
     if let Some(branch_name) = branch_ctx.branch_name() {
-        let sql = qail_pg::driver::branch_sql::read_overlay_sql(branch_name, &table_name);
-        if let Ok(pg_conn) = conn.get_mut()
-            && let Ok(overlay_rows) = pg_conn.simple_query(&sql).await
-        {
-            for orow in &overlay_rows {
-                let row_pk = orow
-                    .try_get_by_name::<String>("row_pk")
+        let overlay_rows = read_branch_overlay_rows(&mut conn, branch_name, &table_name).await?;
+        for orow in &overlay_rows {
+            let row_pk = orow
+                .try_get_by_name::<String>("row_pk")
+                .ok()
+                .or_else(|| orow.get_string(0))
+                .unwrap_or_default();
+            if row_pk == id {
+                let operation = orow
+                    .try_get_by_name::<String>("operation")
                     .ok()
-                    .or_else(|| orow.get_string(0))
+                    .or_else(|| orow.get_string(1))
                     .unwrap_or_default();
-                if row_pk == id {
-                    let operation = orow
-                        .try_get_by_name::<String>("operation")
-                        .ok()
-                        .or_else(|| orow.get_string(1))
-                        .unwrap_or_default();
-                    match operation.as_str() {
-                        "delete" => {
+                match operation.as_str() {
+                    "delete" => {
+                        apply_branch_single_row_overlay(&mut data, "delete", Value::Null, pk, &id);
+                    }
+                    "update" | "insert" => {
+                        let row_data_str = orow
+                            .try_get_by_name::<String>("row_data")
+                            .ok()
+                            .or_else(|| orow.get_string(2))
+                            .unwrap_or_default();
+                        if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
                             apply_branch_single_row_overlay(
                                 &mut data,
-                                "delete",
-                                Value::Null,
+                                operation.as_str(),
+                                val,
                                 pk,
                                 &id,
                             );
                         }
-                        "update" | "insert" => {
-                            let row_data_str = orow
-                                .try_get_by_name::<String>("row_data")
-                                .ok()
-                                .or_else(|| orow.get_string(2))
-                                .unwrap_or_default();
-                            if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
-                                apply_branch_single_row_overlay(
-                                    &mut data,
-                                    operation.as_str(),
-                                    val,
-                                    pk,
-                                    &id,
-                                );
-                            }
-                        }
-                        _ => {}
                     }
+                    _ => {}
                 }
             }
         }

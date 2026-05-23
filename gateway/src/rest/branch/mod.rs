@@ -18,7 +18,8 @@ pub(crate) use handlers::{
     branch_create_handler, branch_delete_handler, branch_list_handler, branch_merge_handler,
 };
 pub(crate) use overlay::{
-    apply_branch_overlay, project_rows_to_selected_columns, redirect_to_overlay,
+    apply_branch_overlay, project_rows_to_selected_columns, read_branch_overlay_rows,
+    redirect_to_overlay,
 };
 
 pub(crate) fn validate_branch_name(name: &str) -> Result<(), ApiError> {

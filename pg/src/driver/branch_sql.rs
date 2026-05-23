@@ -128,6 +128,17 @@ pub fn lock_active_branch_for_merge_sql(name: &str) -> String {
     )
 }
 
+/// SQL to verify that a branch exists and is active.
+pub fn active_branch_exists_sql(name: &str) -> String {
+    let safe_name = escape_literal(name);
+    format!(
+        "SELECT id FROM _qail_branches \
+         WHERE name = {} AND status = 'active' \
+         LIMIT 1;",
+        safe_name
+    )
+}
+
 /// SQL to read overlay rows for a branch on a specific table.
 ///
 /// Returns the ordered operation stream so CoW reads can replay inserts,
@@ -278,6 +289,16 @@ mod tests {
         assert!(sql.contains("'feature-1'"));
         assert!(sql.contains("status = 'active'"));
         assert!(sql.contains("FOR UPDATE"));
+    }
+
+    #[test]
+    fn test_active_branch_exists_sql() {
+        let sql = active_branch_exists_sql("feature-1");
+        assert!(sql.contains("SELECT id FROM _qail_branches"));
+        assert!(sql.contains("'feature-1'"));
+        assert!(sql.contains("status = 'active'"));
+        assert!(sql.contains("LIMIT 1"));
+        assert!(!sql.contains("FOR UPDATE"));
     }
 
     #[test]

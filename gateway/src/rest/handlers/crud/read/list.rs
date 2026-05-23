@@ -576,7 +576,7 @@ pub(crate) async fn list_handler(
     // Branch overlay merge (CoW Read)
     if let Some(branch_name) = branch_ctx.branch_name() {
         let pk_col = table.primary_key.as_deref().unwrap_or("id");
-        apply_branch_overlay(&mut conn, branch_name, &table_name, &mut data, pk_col).await;
+        apply_branch_overlay(&mut conn, branch_name, &table_name, &mut data, pk_col).await?;
         if let Err(e) = apply_branch_read_constraints(
             &mut data,
             BranchReadConstraintInput {
