@@ -93,11 +93,12 @@ pub(super) async fn execute_qdrant_cmd(
         }
 
         Action::Scroll => {
+            let scroll_limit = qdrant_scroll_limit_from_cmd(&cmd, state.config.max_result_rows)?;
             let scroll_offset = qdrant_scroll_offset_from_cmd(&cmd)?;
             let result = if must_conditions.is_empty() && should_groups.is_empty() {
                 conn.scroll(
                     collection,
-                    limit_val as u32,
+                    scroll_limit,
                     scroll_offset.as_ref(),
                     cmd.with_vector,
                 )
@@ -106,7 +107,7 @@ pub(super) async fn execute_qdrant_cmd(
             } else {
                 conn.scroll_filtered_grouped_cages(
                     collection,
-                    limit_val as u32,
+                    scroll_limit,
                     scroll_offset.as_ref(),
                     cmd.with_vector,
                     &must_conditions,
@@ -426,6 +427,14 @@ fn qdrant_limit_from_cmd(
     }
 
     Ok((requested as u64).min(max_result_rows.max(1) as u64))
+}
+
+fn qdrant_scroll_limit_from_cmd(
+    cmd: &qail_core::ast::Qail,
+    max_result_rows: usize,
+) -> Result<u32, ApiError> {
+    let limit = qdrant_limit_from_cmd(cmd, max_result_rows)?;
+    Ok(u32::try_from(limit).unwrap_or(u32::MAX))
 }
 
 fn qdrant_scroll_offset_from_cmd(
@@ -1147,9 +1156,9 @@ mod tests {
         enforce_qdrant_upsert_payload_filters, ensure_qdrant_collection_management_allowed,
         extract_upsert_point, prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
         qdrant_payload_matches_filter_cages, qdrant_point_id_to_json, qdrant_request_filter_cages,
-        qdrant_scroll_metadata, qdrant_scroll_offset_from_cmd, qdrant_upsert_filter_cages,
-        scored_point_to_json, split_filter_conditions, tenant_scoped_qdrant_point_id,
-        verify_existing_qdrant_points_tenant_boundary,
+        qdrant_scroll_limit_from_cmd, qdrant_scroll_metadata, qdrant_scroll_offset_from_cmd,
+        qdrant_upsert_filter_cages, scored_point_to_json, split_filter_conditions,
+        tenant_scoped_qdrant_point_id, verify_existing_qdrant_points_tenant_boundary,
     };
     use crate::auth::AuthContext;
     use qail_core::ast::{
@@ -1285,6 +1294,18 @@ mod tests {
 
         let err = qdrant_limit_from_cmd(&cmd, 1_000).unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn qdrant_scroll_limit_caps_at_protocol_max_without_wrapping() {
+        let requested = i64::from(u32::MAX) + 100;
+        let max_rows = u32::MAX as usize + 100;
+        let cmd = Qail::scroll("embeddings").limit(requested);
+
+        assert_eq!(
+            qdrant_scroll_limit_from_cmd(&cmd, max_rows).unwrap(),
+            u32::MAX
+        );
     }
 
     #[test]
