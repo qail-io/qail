@@ -110,6 +110,7 @@ impl TransactionSessionManager {
         session.last_used = Instant::now();
 
         let result = f(&mut session).await;
+        session.last_used = Instant::now();
 
         if let Err(TransactionError::Database(_)) = &result {
             session.pg_aborted = true;

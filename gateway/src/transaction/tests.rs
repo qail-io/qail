@@ -26,6 +26,33 @@ async fn insert_test_session(
     crate::metrics::record_txn_active_sessions(sessions.len());
 }
 
+async fn test_pooled_connection_from_env() -> Option<qail_pg::PooledConnection> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let parsed = url::Url::parse(&database_url).ok()?;
+    let host = parsed.host_str()?;
+    let port = parsed.port().unwrap_or(5432);
+    let user = parsed.username();
+    if user.is_empty() {
+        return None;
+    }
+    let database = parsed.path().trim_start_matches('/');
+    if database.is_empty() {
+        return None;
+    }
+
+    let mut config = qail_pg::PoolConfig::new_dev(host, port, user, database)
+        .min_connections(0)
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(2))
+        .connect_timeout(Duration::from_secs(2));
+    if let Some(password) = parsed.password() {
+        config = config.password(password);
+    }
+
+    let pool = qail_pg::PgPool::connect(config).await.ok()?;
+    pool.acquire_raw().await.ok()
+}
+
 #[test]
 fn test_transaction_error_display() {
     let err = TransactionError::SessionLimitReached(10);
@@ -211,4 +238,68 @@ async fn test_with_session_allow_aborted_enables_recovery_flow() {
     // Test helper sessions have no pinned connection. Reaching SessionNotFound
     // here confirms we passed the aborted-state guard.
     assert!(matches!(recovered, Err(TransactionError::SessionNotFound)));
+}
+
+#[tokio::test]
+async fn test_with_session_refreshes_last_used_after_success_when_database_url_set() {
+    let Some(conn) = test_pooled_connection_from_env().await else {
+        eprintln!(
+            "DATABASE_URL unavailable or unreachable; skipping live transaction timestamp test"
+        );
+        return;
+    };
+
+    let mgr = TransactionSessionManager::new(10, 30, 900, 1000);
+    let now = Instant::now();
+    let session = TransactionSession {
+        conn: Some(conn),
+        tenant_id: "tenant_touch".to_string(),
+        user_id: Some("test-user".to_string()),
+        created_at: now,
+        last_used: now - Duration::from_secs(60),
+        closed: false,
+        statements_executed: 0,
+        pg_aborted: false,
+        mutated_tables: std::collections::HashSet::new(),
+    };
+    {
+        let mut sessions = mgr.sessions.lock().await;
+        sessions.insert("s_touch".to_string(), Arc::new(Mutex::new(session)));
+        crate::metrics::record_txn_active_sessions(sessions.len());
+    }
+
+    let operation_finished_at = Arc::new(Mutex::new(None));
+    let operation_finished_at_for_closure = Arc::clone(&operation_finished_at);
+    let result = mgr
+        .with_session(
+            "s_touch",
+            "tenant_touch",
+            Some("test-user"),
+            move |_session| {
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    *operation_finished_at_for_closure.lock().await = Some(Instant::now());
+                    Ok(())
+                })
+            },
+        )
+        .await;
+    assert!(result.is_ok());
+
+    let operation_finished_at = operation_finished_at
+        .lock()
+        .await
+        .expect("closure should record its finish time");
+    let session = {
+        let sessions = mgr.sessions.lock().await;
+        Arc::clone(sessions.get("s_touch").expect("session remains open"))
+    };
+    let mut guard = session.lock().await;
+    assert!(
+        guard.last_used >= operation_finished_at,
+        "last_used must be refreshed after the operation completes"
+    );
+    let conn = guard.conn.take();
+    drop(guard);
+    TransactionSessionManager::rollback_and_release(conn).await;
 }
