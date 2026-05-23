@@ -126,6 +126,37 @@ fn test_create_function_with_args_sql() {
 }
 
 #[test]
+fn test_procedural_bodies_use_non_colliding_dollar_quotes() {
+    let do_cmd = Qail {
+        action: Action::Do,
+        table: "plpgsql".to_string(),
+        payload: Some("BEGIN RAISE NOTICE $$boom$$; END;".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        do_cmd.to_sql_with_dialect(Dialect::Postgres),
+        "DO $qail_body_1$ BEGIN RAISE NOTICE $$boom$$; END; $qail_body_1$ LANGUAGE plpgsql"
+    );
+
+    let function_cmd = Qail {
+        action: Action::CreateFunction,
+        function_def: Some(FunctionDef {
+            name: "notice_boom".to_string(),
+            args: vec![],
+            returns: "void".to_string(),
+            body: "BEGIN RAISE NOTICE $$boom$$; END;".to_string(),
+            language: Some("plpgsql".to_string()),
+            volatility: None,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        function_cmd.to_sql_with_dialect(Dialect::Postgres),
+        "CREATE OR REPLACE FUNCTION notice_boom() RETURNS void LANGUAGE plpgsql AS $qail_body_1$ BEGIN RAISE NOTICE $$boom$$; END; $qail_body_1$"
+    );
+}
+
+#[test]
 fn test_create_policy_sql() {
     let policy = RlsPolicy::create("users_isolation", "users")
         .for_all()

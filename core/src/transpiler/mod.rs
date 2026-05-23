@@ -272,14 +272,15 @@ impl ToSql for Qail {
                         .as_deref()
                         .map(|v| format!(" {}", v.to_uppercase()))
                         .unwrap_or_default();
+                    let body = dollar_quote_block(&func.body);
                     format!(
-                        "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} LANGUAGE {}{} AS $$ {} $$",
+                        "CREATE OR REPLACE FUNCTION {}({}) RETURNS {} LANGUAGE {}{} AS {}",
                         escape_identifier(&func.name),
                         args,
                         func.returns,
-                        lang,
+                        escape_identifier(lang),
                         volatility,
-                        func.body
+                        body
                     )
                 } else {
                     "-- CreateFunction requires function_def".to_string()
@@ -444,7 +445,11 @@ impl ToSql for Qail {
                 } else {
                     &self.table
                 };
-                format!("DO $$ {} $$ LANGUAGE {}", body, lang)
+                format!(
+                    "DO {} LANGUAGE {}",
+                    dollar_quote_block(body),
+                    escape_identifier(lang)
+                )
             }
             Action::SessionSet => {
                 let value = self.payload.as_deref().unwrap_or("");
@@ -530,6 +535,23 @@ fn session_setting_name_to_sql(name: &str) -> String {
 
 fn quote_single_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('\0', "").replace('"', "\"\""))
+}
+
+fn dollar_quote_block(body: &str) -> String {
+    let body = body.replace('\0', "");
+    for idx in 0..=body.len() {
+        let tag = if idx == 0 {
+            String::new()
+        } else {
+            format!("qail_body_{idx}")
+        };
+        let delimiter = format!("${tag}$");
+        if !body.contains(&delimiter) {
+            return format!("{delimiter} {body} {delimiter}");
+        }
+    }
+
+    format!("'{}'", escape_sql_string_literal(&body))
 }
 
 fn is_valid_session_setting_name(name: &str) -> bool {

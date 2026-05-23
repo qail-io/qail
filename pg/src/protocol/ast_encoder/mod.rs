@@ -2188,6 +2188,37 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_procedural_bodies_use_non_colliding_dollar_quotes() {
+        let do_cmd = Qail {
+            action: Action::Do,
+            table: "plpgsql".to_string(),
+            payload: Some("BEGIN RAISE NOTICE $$boom$$; END;".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&do_cmd).unwrap().0,
+            "DO $qail_body_1$ BEGIN RAISE NOTICE $$boom$$; END; $qail_body_1$ LANGUAGE plpgsql"
+        );
+
+        let function_cmd = Qail {
+            action: Action::CreateFunction,
+            function_def: Some(qail_core::ast::FunctionDef {
+                name: "notice_boom".to_string(),
+                args: vec![],
+                returns: "void".to_string(),
+                body: "BEGIN RAISE NOTICE $$boom$$; END;".to_string(),
+                language: Some("plpgsql".to_string()),
+                volatility: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&function_cmd).unwrap().0,
+            "CREATE OR REPLACE FUNCTION notice_boom() RETURNS void LANGUAGE plpgsql AS $qail_body_1$ BEGIN RAISE NOTICE $$boom$$; END; $qail_body_1$"
+        );
+    }
+
+    #[test]
     fn test_encode_batch_mixed_dml_ddl() {
         use qail_core::ast::Expr;
 

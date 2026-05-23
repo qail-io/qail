@@ -59,6 +59,23 @@ fn push_index_column(buf: &mut BytesMut, column: &str) {
     }
 }
 
+fn dollar_quote_block(body: &str) -> String {
+    let body = body.replace('\0', "");
+    for idx in 0..=body.len() {
+        let tag = if idx == 0 {
+            String::new()
+        } else {
+            format!("qail_body_{idx}")
+        };
+        let delimiter = format!("${tag}$");
+        if !body.contains(&delimiter) {
+            return format!("{delimiter} {body} {delimiter}");
+        }
+    }
+
+    format!("'{}'", escape_sql_string_literal(&body))
+}
+
 fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
     match constraint {
         TableConstraint::Unique(cols) => {
@@ -595,10 +612,10 @@ pub fn encode_do(cmd: &Qail, buf: &mut BytesMut) {
     } else {
         &cmd.table
     };
-    buf.extend_from_slice(b"DO $$ ");
-    buf.extend_from_slice(body.as_bytes());
-    buf.extend_from_slice(b" $$ LANGUAGE ");
-    buf.extend_from_slice(lang.as_bytes());
+    buf.extend_from_slice(b"DO ");
+    buf.extend_from_slice(dollar_quote_block(body).as_bytes());
+    buf.extend_from_slice(b" LANGUAGE ");
+    buf.extend_from_slice(escape_identifier(lang).as_bytes());
 }
 
 /// Encode SET key = 'value'.
@@ -825,22 +842,21 @@ pub fn encode_create_function(
     let lang = func.language.as_deref().unwrap_or("plpgsql");
     let args = func.args.join(", ");
     buf.extend_from_slice(b"CREATE OR REPLACE FUNCTION ");
-    buf.extend_from_slice(func.name.as_bytes());
+    push_identifier(buf, &func.name);
     buf.extend_from_slice(b"(");
     buf.extend_from_slice(args.as_bytes());
     buf.extend_from_slice(b") RETURNS ");
     buf.extend_from_slice(func.returns.as_bytes());
     buf.extend_from_slice(b" LANGUAGE ");
-    buf.extend_from_slice(lang.as_bytes());
+    buf.extend_from_slice(escape_identifier(lang).as_bytes());
     if let Some(volatility) = &func.volatility
         && !volatility.trim().is_empty()
     {
         buf.extend_from_slice(b" ");
         buf.extend_from_slice(volatility.trim().to_ascii_uppercase().as_bytes());
     }
-    buf.extend_from_slice(b" AS $$ ");
-    buf.extend_from_slice(func.body.as_bytes());
-    buf.extend_from_slice(b" $$");
+    buf.extend_from_slice(b" AS ");
+    buf.extend_from_slice(dollar_quote_block(&func.body).as_bytes());
     Ok(())
 }
 
@@ -850,7 +866,7 @@ pub fn encode_drop_function(cmd: &Qail, buf: &mut BytesMut) {
     if let Some(signature) = &cmd.payload {
         buf.extend_from_slice(signature.as_bytes());
     } else {
-        buf.extend_from_slice(cmd.table.as_bytes());
+        push_identifier(buf, &cmd.table);
         buf.extend_from_slice(b"()");
     }
 }
