@@ -158,6 +158,30 @@ fn existing_column_primary_key_diffs(old: &Schema, new: &Schema) -> Vec<String> 
     changes
 }
 
+fn new_column_primary_key_additions(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in &new_table.columns {
+            if new_col.primary_key
+                && !old_table
+                    .columns
+                    .iter()
+                    .any(|old_col| old_col.name == new_col.name)
+            {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
 fn same_name_index_definition_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     let mut changes = Vec::new();
 
@@ -254,6 +278,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
             "State-based diff cannot safely alter PRIMARY KEY constraints on existing columns: {}. \
              Use an explicit migration for ADD/DROP/replace PRIMARY KEY constraints.",
             pk_diffs.join(", ")
+        ));
+    }
+
+    let new_pk_columns = new_column_primary_key_additions(old, new);
+    if !new_pk_columns.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely add PRIMARY KEY columns to existing tables: {}. \
+             Use an explicit migration to backfill data and add the PRIMARY KEY constraint.",
+            new_pk_columns.join(", ")
         ));
     }
 
@@ -950,6 +983,26 @@ mod tests {
         let err = diff_schemas_checked(&old, &new)
             .expect_err("existing-column PRIMARY KEY removal should fail closed");
         assert!(err.contains("PRIMARY KEY constraints"));
+        assert!(err.contains("api_keys.key"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_new_primary_key_column_on_existing_table() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("api_keys").column(Column::new("label", ColumnType::Text)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("api_keys")
+            .expect("api_keys table should exist")
+            .columns
+            .push(Column::new("key", ColumnType::Text).primary_key());
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("new PRIMARY KEY column on existing table should fail closed");
+        assert!(err.contains("add PRIMARY KEY columns"));
         assert!(err.contains("api_keys.key"));
     }
 
