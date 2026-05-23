@@ -128,6 +128,33 @@ fn existing_column_unique_diffs(old: &Schema, new: &Schema) -> Vec<String> {
     changes
 }
 
+fn existing_column_primary_key_diffs(old: &Schema, new: &Schema) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    for (table_name, new_table) in &new.tables {
+        let Some(old_table) = old.tables.get(table_name) else {
+            continue;
+        };
+
+        for new_col in &new_table.columns {
+            let Some(old_col) = old_table
+                .columns
+                .iter()
+                .find(|old_col| old_col.name == new_col.name)
+            else {
+                continue;
+            };
+
+            if old_col.primary_key != new_col.primary_key {
+                changes.push(format!("{}.{}", table_name, new_col.name));
+            }
+        }
+    }
+
+    changes.sort();
+    changes
+}
+
 fn check_signature(check: &Option<super::schema::CheckConstraint>) -> Option<String> {
     check
         .as_ref()
@@ -170,6 +197,15 @@ pub fn validate_state_diff_support(old: &Schema, new: &Schema) -> Result<(), Str
             "State-based diff cannot safely alter UNIQUE constraints on existing columns: {}. \
              Use an explicit migration for ADD/DROP/replace UNIQUE constraints.",
             unique_diffs.join(", ")
+        ));
+    }
+
+    let pk_diffs = existing_column_primary_key_diffs(old, new);
+    if !pk_diffs.is_empty() {
+        return Err(format!(
+            "State-based diff cannot safely alter PRIMARY KEY constraints on existing columns: {}. \
+             Use an explicit migration for ADD/DROP/replace PRIMARY KEY constraints.",
+            pk_diffs.join(", ")
         ));
     }
 
@@ -723,6 +759,42 @@ mod tests {
             .expect_err("existing-column UNIQUE change should fail closed");
         assert!(err.contains("UNIQUE constraints"));
         assert!(err.contains("users.email"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_existing_column_primary_key_addition() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("api_keys").column(Column::new("key", ColumnType::Text)));
+
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("api_keys").column(Column::new("key", ColumnType::Text).primary_key()),
+        );
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("existing-column PRIMARY KEY addition should fail closed");
+        assert!(err.contains("PRIMARY KEY constraints"));
+        assert!(err.contains("api_keys.key"));
+    }
+
+    #[test]
+    fn state_diff_checked_rejects_existing_column_primary_key_removal() {
+        use super::super::types::ColumnType;
+
+        let mut old = Schema::default();
+        old.add_table(
+            Table::new("api_keys").column(Column::new("key", ColumnType::Text).primary_key()),
+        );
+
+        let mut new = Schema::default();
+        new.add_table(Table::new("api_keys").column(Column::new("key", ColumnType::Text)));
+
+        let err = diff_schemas_checked(&old, &new)
+            .expect_err("existing-column PRIMARY KEY removal should fail closed");
+        assert!(err.contains("PRIMARY KEY constraints"));
+        assert!(err.contains("api_keys.key"));
     }
 
     #[test]
