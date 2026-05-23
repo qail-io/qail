@@ -88,7 +88,7 @@ pub(crate) async fn aggregate_handler(
 
     // Parse and apply filters from query string
     let query_string = request.uri().query().unwrap_or("");
-    let filters = parse_filters(query_string);
+    let filters = parse_filters_checked(query_string).map_err(ApiError::parse_error)?;
     cmd = apply_filters(cmd, &filters);
     if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         cmd = cmd.filter(

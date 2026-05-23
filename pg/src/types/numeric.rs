@@ -28,6 +28,22 @@ impl Numeric {
         int_part.parse()
     }
 
+    /// Parse as i64 only when the numeric value has no non-zero decimal part.
+    pub fn to_i64_exact(&self) -> Result<i64, std::num::ParseIntError> {
+        if !self.is_integral() {
+            return self.0.parse();
+        }
+        self.0.split('.').next().unwrap_or("0").parse::<i64>()
+    }
+
+    /// Whether the decimal representation has no non-zero fractional digits.
+    pub fn is_integral(&self) -> bool {
+        let Some((_, fractional)) = self.0.split_once('.') else {
+            return true;
+        };
+        !fractional.is_empty() && fractional.bytes().all(|b| b == b'0')
+    }
+
     /// Get the string representation
     pub fn as_str(&self) -> &str {
         &self.0
@@ -163,6 +179,12 @@ mod tests {
     fn test_numeric_to_i64() {
         let n = Numeric::new("12345.67");
         assert_eq!(n.to_i64().unwrap(), 12345);
+    }
+
+    #[test]
+    fn test_numeric_to_i64_exact_rejects_fractional_values() {
+        assert_eq!(Numeric::new("12345.00").to_i64_exact().unwrap(), 12345);
+        assert!(Numeric::new("12345.67").to_i64_exact().is_err());
     }
 
     #[test]

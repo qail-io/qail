@@ -52,6 +52,41 @@ pub(crate) fn parse_identifier_csv(input: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Parse the REST `select` parameter.
+///
+/// `*` is allowed only as the whole projection. Mixed projections such as
+/// `*,id` are rejected because they make projection and tenant-guard behavior
+/// ambiguous.
+pub(crate) fn parse_select_columns(input: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for raw in input.split(',') {
+        let ident = raw.trim();
+        if ident.is_empty() {
+            return Err("Select list contains an empty entry".to_string());
+        }
+        if ident == "*" {
+            if input.split(',').count() != 1 {
+                return Err("Wildcard select cannot be mixed with named columns".to_string());
+            }
+            return Ok(vec!["*".to_string()]);
+        }
+        if !is_safe_identifier(ident) {
+            return Err(format!("Invalid select column '{}'", ident));
+        }
+        if seen.insert(ident.to_string()) {
+            out.push(ident.to_string());
+        }
+    }
+
+    if out.is_empty() {
+        return Err("Select list cannot be empty".to_string());
+    }
+
+    Ok(out)
+}
+
 /// Parse filter operators from query string.
 ///
 /// Supports both forms:
@@ -59,7 +94,22 @@ pub(crate) fn parse_identifier_csv(input: &str) -> Result<Vec<String>, String> {
 /// - Value-style: `?price=gte.100`, `?status=in.(active,pending)`, `?notes=is_null`
 ///
 /// If no operator is provided, defaults to `eq`.
+#[cfg(test)]
 pub(crate) fn parse_filters(query_string: &str) -> Vec<(String, Operator, QailValue)> {
+    parse_filters_impl(query_string, false).unwrap_or_default()
+}
+
+/// Parse filter operators and reject unsafe user-provided filter columns.
+pub(crate) fn parse_filters_checked(
+    query_string: &str,
+) -> Result<Vec<(String, Operator, QailValue)>, String> {
+    parse_filters_impl(query_string, true)
+}
+
+fn parse_filters_impl(
+    query_string: &str,
+    fail_on_invalid_identifier: bool,
+) -> Result<Vec<(String, Operator, QailValue)>, String> {
     let reserved = [
         "limit",
         "offset",
@@ -110,6 +160,9 @@ pub(crate) fn parse_filters(query_string: &str) -> Vec<(String, Operator, QailVa
 
         if !is_safe_identifier(column) {
             tracing::warn!("Filter column rejected by identifier guard: {:?}", column);
+            if fail_on_invalid_identifier {
+                return Err(format!("Invalid filter column '{}'", column));
+            }
             continue;
         }
 
@@ -131,7 +184,7 @@ pub(crate) fn parse_filters(query_string: &str) -> Vec<(String, Operator, QailVa
         filters.push((column.to_string(), op, qail_value));
     }
 
-    filters
+    Ok(filters)
 }
 
 /// Parse a scalar value, attempting type detection (bool → int → float → uuid → string).

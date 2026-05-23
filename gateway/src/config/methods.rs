@@ -243,4 +243,21 @@ mod tests {
         assert_eq!(cfg.pg_sslmode, "require");
         assert_eq!(cfg.pg_channel_binding, "require");
     }
+
+    #[test]
+    fn toml_defaults_keep_rpc_hardening_enabled() {
+        let cfg: GatewayConfig = toml::from_str(
+            r#"
+database_url = "postgres://localhost/qail"
+schema_path = "schema.yaml"
+policy_path = "policies.yaml"
+bind_address = "127.0.0.1:8080"
+rpc_allowlist_path = "rpc.allow"
+"#,
+        )
+        .unwrap();
+
+        assert!(cfg.rpc_require_schema_qualified);
+        assert!(cfg.rpc_signature_check);
+    }
 }

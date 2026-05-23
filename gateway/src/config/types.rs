@@ -229,7 +229,7 @@ pub struct GatewayConfig {
     pub binary_requires_allow_list: bool,
 
     /// Require schema-qualified RPC function names (`schema.function`).
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub rpc_require_schema_qualified: bool,
 
     /// Path to RPC allow-list file (one function per line). Optional.
@@ -239,7 +239,7 @@ pub struct GatewayConfig {
 
     /// Validate named RPC args against PostgreSQL function signatures.
     /// Requires schema-qualified function names.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub rpc_signature_check: bool,
 
     /// Maximum request body size in bytes (default: 1MB).

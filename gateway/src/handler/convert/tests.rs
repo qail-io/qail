@@ -51,6 +51,23 @@ fn typed_numeric_oid_1700() {
 }
 
 #[test]
+fn binary_numeric_oid_1700_preserves_fractional_value() {
+    let bytes = [
+        0x00, 0x02, // ndigits
+        0x00, 0x00, // weight
+        0x00, 0x00, // sign
+        0x00, 0x02, // dscale
+        0x00, 0x63, // 99
+        0x25, 0x1c, // 9500
+    ];
+
+    assert_eq!(
+        bytes_to_json_typed(&bytes, qail_pg::protocol::types::oid::NUMERIC, 1),
+        serde_json::json!(99.95)
+    );
+}
+
+#[test]
 fn typed_json_oid_114() {
     assert_eq!(
         text_to_json_typed(r#"{"key":"val"}"#, 114),

@@ -212,20 +212,17 @@ pub(crate) async fn list_handler(
 
     // Column selection
     if let Some(ref select) = params.select {
-        let mut cols: Vec<&str> = select
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| *s == "*" || crate::rest::filters::is_safe_identifier(s))
-            .collect();
+        let mut cols =
+            crate::rest::filters::parse_select_columns(select).map_err(ApiError::parse_error)?;
 
         // SECURITY: Ensure tenant column is always projected so verify_tenant_boundary()
         // can check row ownership. Without this, a malicious client could bypass the
         // tenant guard by omitting the tenant column from `select`.
         if let Some(scope_column) = tenant_scope_column
-            && !cols.contains(&"*")
-            && !cols.contains(&scope_column)
+            && !cols.iter().any(|col| col == "*")
+            && !cols.iter().any(|col| col == scope_column)
         {
-            cols.push(scope_column);
+            cols.push(scope_column.to_string());
             strip_tenant_scope_column = true;
         }
 
@@ -327,7 +324,7 @@ pub(crate) async fn list_handler(
 
     // Parse and apply filters from query string
     let query_string = request.uri().query().unwrap_or("");
-    let filters = parse_filters(query_string);
+    let filters = parse_filters_checked(query_string).map_err(ApiError::parse_error)?;
     cmd = apply_filters(cmd, &filters);
     if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         cmd = cmd.filter(

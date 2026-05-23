@@ -24,6 +24,24 @@ fn test_parse_identifier_csv_rejects_invalid_entries() {
 }
 
 #[test]
+fn test_parse_select_columns_rejects_fail_open_projection() {
+    assert_eq!(
+        parse_select_columns("id, name").unwrap(),
+        vec!["id".to_string(), "name".to_string()]
+    );
+    assert_eq!(parse_select_columns("*").unwrap(), vec!["*".to_string()]);
+    assert!(parse_select_columns("password-hash").is_err());
+    assert!(parse_select_columns("id,").is_err());
+    assert!(parse_select_columns("*,id").is_err());
+}
+
+#[test]
+fn test_parse_filters_checked_rejects_invalid_filter_column() {
+    let err = parse_filters_checked("password-hash.eq=secret").unwrap_err();
+    assert!(err.contains("Invalid filter column"));
+}
+
+#[test]
 fn test_parse_filters_in() {
     let filters = parse_filters("status.in=active,pending,closed");
     assert_eq!(filters.len(), 1);

@@ -12,7 +12,7 @@ use crate::GatewayState;
 use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
 use crate::middleware::ApiError;
-use crate::rest::filters::{apply_filters, apply_sorting, parse_filters};
+use crate::rest::filters::{apply_filters, apply_sorting, parse_filters_checked};
 use crate::rest::types::{ListParams, ListResponse};
 
 /// GET /api/{parent}/:id/{child} — list child rows filtered by parent FK
@@ -88,16 +88,13 @@ pub(crate) async fn nested_list_handler(
 
     // Column selection
     if let Some(ref select) = params.select {
-        let mut cols: Vec<&str> = select
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| *s == "*" || crate::rest::filters::is_safe_identifier(s))
-            .collect();
+        let mut cols =
+            crate::rest::filters::parse_select_columns(select).map_err(ApiError::parse_error)?;
         if let Some(scope_column) = tenant_scope_column
-            && !cols.contains(&"*")
-            && !cols.contains(&scope_column)
+            && !cols.iter().any(|col| col == "*")
+            && !cols.iter().any(|col| col == scope_column)
         {
-            cols.push(scope_column);
+            cols.push(scope_column.to_string());
             strip_tenant_scope_column = true;
         }
         if !cols.is_empty() {
@@ -124,7 +121,7 @@ pub(crate) async fn nested_list_handler(
 
     // Parse and apply filters from query string
     let query_string = request.uri().query().unwrap_or("");
-    let filters = parse_filters(query_string);
+    let filters = parse_filters_checked(query_string).map_err(ApiError::parse_error)?;
     cmd = apply_filters(cmd, &filters);
     if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
         cmd = cmd.filter(

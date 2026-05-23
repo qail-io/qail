@@ -33,7 +33,7 @@ use super::super::branch::{
     project_rows_to_selected_columns, read_branch_overlay_rows, redirect_to_overlay,
 };
 use super::super::filters::{
-    apply_filters, apply_returning, apply_sorting, json_to_qail_value, parse_filters,
+    apply_filters, apply_returning, apply_sorting, json_to_qail_value, parse_filters_checked,
     parse_scalar_value,
 };
 use super::super::nested::expand_nested;

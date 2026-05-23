@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::RpcCallableSignature;
 
 fn is_rpc_void_context_error(err: &qail_pg::PgError) -> bool {
     let Some(server) = err.server_error() else {
@@ -32,6 +33,68 @@ async fn execute_rpc_rows(
         conn.query_rows_with_params_with_format(&query.sql, &query.params, result_format)
             .await
     }
+}
+
+fn scalar_arg_matches_tenant(value: &Value, tenant_id: &str) -> bool {
+    match value {
+        Value::String(s) => s == tenant_id,
+        Value::Number(n) => n.to_string() == tenant_id,
+        Value::Bool(b) => b.to_string() == tenant_id,
+        Value::Null | Value::Array(_) | Value::Object(_) => false,
+    }
+}
+
+fn enforce_rpc_tenant_arg_boundary(
+    args: Option<&Value>,
+    signature: Option<&RpcCallableSignature>,
+    tenant_id: Option<&str>,
+    tenant_column: &str,
+    function_name: &str,
+) -> Result<(), ApiError> {
+    let (Some(args), Some(tenant_id)) = (args, tenant_id) else {
+        return Ok(());
+    };
+    let tenant_column = tenant_column.trim().to_ascii_lowercase();
+    if tenant_column.is_empty() {
+        return Ok(());
+    }
+
+    let tenant_arg = match args {
+        Value::Object(map) => map.iter().find_map(|(key, value)| {
+            (key.trim().eq_ignore_ascii_case(&tenant_column)).then_some(value)
+        }),
+        Value::Array(items) => signature.and_then(|signature| {
+            signature
+                .arg_names
+                .iter()
+                .enumerate()
+                .find_map(|(idx, name)| {
+                    name.as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&tenant_column))
+                        .then(|| items.get(idx))
+                        .flatten()
+                })
+        }),
+        scalar => signature.and_then(|signature| {
+            signature
+                .arg_names
+                .first()
+                .and_then(|name| name.as_deref())
+                .is_some_and(|name| name.eq_ignore_ascii_case(&tenant_column))
+                .then_some(scalar)
+        }),
+    };
+
+    if let Some(value) = tenant_arg
+        && !scalar_arg_matches_tenant(value, tenant_id)
+    {
+        return Err(ApiError::forbidden(format!(
+            "RPC tenant argument '{}' for '{}' must match authenticated tenant",
+            tenant_column, function_name
+        )));
+    }
+
+    Ok(())
 }
 
 /// POST /api/rpc/{function} — invoke PostgreSQL functions with JSON args.
@@ -133,6 +196,21 @@ pub(crate) async fn rpc_handler(
     };
     let execution_mode = contract.execution_mode;
     let signature = contract.signature;
+    if let Err(err) = enforce_rpc_tenant_arg_boundary(
+        args.as_ref(),
+        signature.as_ref(),
+        auth.tenant_id.as_deref(),
+        &state.config.tenant_column,
+        &function.canonical(),
+    ) {
+        conn.release().await;
+        crate::metrics::record_rpc_call(
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            false,
+            result_format_label,
+        );
+        return Err(err);
+    }
 
     if matches!(execution_mode, super::signature::RpcExecutionMode::Void) {
         let scalar_query =
@@ -309,7 +387,26 @@ pub(crate) async fn rpc_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::is_rpc_void_context_error;
+    use super::{enforce_rpc_tenant_arg_boundary, is_rpc_void_context_error};
+    use crate::server::RpcCallableSignature;
+    use serde_json::json;
+
+    fn signature_with_args(arg_names: &[Option<&str>]) -> RpcCallableSignature {
+        RpcCallableSignature {
+            total_args: arg_names.len(),
+            default_args: 0,
+            variadic: false,
+            arg_names: arg_names
+                .iter()
+                .map(|name| name.map(str::to_string))
+                .collect(),
+            arg_types: vec!["text".to_string(); arg_names.len()],
+            arg_type_oids: vec![0; arg_names.len()],
+            variadic_element_oid: None,
+            identity_args: String::new(),
+            result_type: "void".to_string(),
+        }
+    }
 
     #[test]
     fn detects_void_context_server_error() {
@@ -334,5 +431,52 @@ mod tests {
             hint: None,
         });
         assert!(!is_rpc_void_context_error(&err));
+    }
+
+    #[test]
+    fn rpc_tenant_boundary_rejects_mismatched_named_tenant_arg() {
+        let args = json!({"tenant_id": "tenant-b", "order_id": "order-1"});
+
+        let err = enforce_rpc_tenant_arg_boundary(
+            Some(&args),
+            None,
+            Some("tenant-a"),
+            "tenant_id",
+            "api.delete_order",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn rpc_tenant_boundary_checks_positional_arg_when_signature_names_it() {
+        let args = json!(["tenant-b", "order-1"]);
+        let signature = signature_with_args(&[Some("tenant_id"), Some("order_id")]);
+
+        let err = enforce_rpc_tenant_arg_boundary(
+            Some(&args),
+            Some(&signature),
+            Some("tenant-a"),
+            "tenant_id",
+            "api.delete_order",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn rpc_tenant_boundary_allows_matching_tenant_arg() {
+        let args = json!({"tenant_id": "tenant-a", "order_id": "order-1"});
+
+        enforce_rpc_tenant_arg_boundary(
+            Some(&args),
+            None,
+            Some("tenant-a"),
+            "tenant_id",
+            "api.delete_order",
+        )
+        .unwrap();
     }
 }

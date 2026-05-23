@@ -14,7 +14,7 @@ use crate::auth::authenticate_request;
 use crate::middleware::ApiError;
 
 use super::extract_table_name;
-use super::filters::{apply_filters, parse_filters};
+use super::filters::{apply_filters, parse_filters_checked};
 use super::types::ListParams;
 
 /// GET /api/{table}/_explain — return EXPLAIN ANALYZE for the query
@@ -53,11 +53,8 @@ pub(crate) async fn explain_handler(
 
     // Apply select
     if let Some(ref select) = params.select {
-        let cols: Vec<&str> = select
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| *s == "*" || crate::rest::filters::is_safe_identifier(s))
-            .collect();
+        let cols =
+            crate::rest::filters::parse_select_columns(select).map_err(ApiError::parse_error)?;
         if !cols.is_empty() {
             cmd = cmd.columns(cols);
         }
@@ -139,7 +136,7 @@ pub(crate) async fn explain_handler(
 
     // Apply filters
     let query_string = request.uri().query().unwrap_or("");
-    let filters = parse_filters(query_string);
+    let filters = parse_filters_checked(query_string).map_err(ApiError::parse_error)?;
     cmd = apply_filters(cmd, &filters);
 
     // Full-text search

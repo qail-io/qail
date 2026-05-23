@@ -120,7 +120,7 @@ fn bytes_to_json_typed(bytes: &[u8], oid: u32, format: i16) -> serde_json::Value
         },
         pg_oid::NUMERIC => match Numeric::from_pg(bytes, oid, format) {
             Ok(n) => {
-                if let Ok(i) = n.to_i64() {
+                if let Ok(i) = n.to_i64_exact() {
                     serde_json::Value::Number(i.into())
                 } else if let Ok(f) = n.to_f64() {
                     match serde_json::Number::from_f64(f) {
