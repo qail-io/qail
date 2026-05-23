@@ -87,6 +87,60 @@ pub(crate) fn parse_select_columns(input: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Parse the REST `expand` parameter into flat and nested relation lists.
+///
+/// `nested:relation` is returned separately so callers that cannot represent
+/// nested expansion can reject it explicitly instead of silently dropping it.
+pub(crate) fn parse_expand_relations(
+    expand: &str,
+    max_expand_depth: usize,
+) -> Result<(Vec<&str>, Vec<&str>), String> {
+    let mut seen_flat = std::collections::HashSet::new();
+    let mut seen_nested = std::collections::HashSet::new();
+    let mut flat = Vec::new();
+    let mut nested = Vec::new();
+
+    for raw_relation in expand.split(',') {
+        let relation = raw_relation.trim();
+        if relation.is_empty() {
+            return Err("Expand contains an empty relation".to_string());
+        }
+
+        if let Some(nested_relation) = relation.strip_prefix("nested:") {
+            let nested_relation = nested_relation.trim();
+            if nested_relation.is_empty() {
+                return Err("Nested expand relation cannot be empty".to_string());
+            }
+            if !is_safe_identifier(nested_relation) {
+                return Err(format!(
+                    "Invalid nested expand relation '{}'",
+                    nested_relation
+                ));
+            }
+            if seen_nested.insert(nested_relation) {
+                nested.push(nested_relation);
+            }
+        } else {
+            if !is_safe_identifier(relation) {
+                return Err(format!("Invalid expand relation '{}'", relation));
+            }
+            if seen_flat.insert(relation) {
+                flat.push(relation);
+            }
+        }
+    }
+
+    let total = flat.len() + nested.len();
+    if total > max_expand_depth {
+        return Err(format!(
+            "Too many expand relations ({}). Maximum is {}",
+            total, max_expand_depth
+        ));
+    }
+
+    Ok((flat, nested))
+}
+
 /// Parse filter operators from query string.
 ///
 /// Supports both forms:

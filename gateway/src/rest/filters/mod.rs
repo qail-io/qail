@@ -15,8 +15,8 @@ pub(crate) use convert::json_to_qail_value;
 #[cfg(test)]
 pub(crate) use parse::parse_filters;
 pub(crate) use parse::{
-    is_safe_identifier, parse_filters_checked, parse_identifier_csv, parse_scalar_value,
-    parse_select_columns,
+    is_safe_identifier, parse_expand_relations, parse_filters_checked, parse_identifier_csv,
+    parse_scalar_value, parse_select_columns,
 };
 
 #[cfg(test)]

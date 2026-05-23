@@ -36,6 +36,21 @@ fn test_parse_select_columns_rejects_fail_open_projection() {
 }
 
 #[test]
+fn test_parse_expand_relations_rejects_fail_open_inputs() {
+    let (flat, nested) =
+        parse_expand_relations("users,nested:items,users,nested:items", 3).unwrap();
+    assert_eq!(flat, vec!["users"]);
+    assert_eq!(nested, vec!["items"]);
+
+    assert!(parse_expand_relations("", 3).is_err());
+    assert!(parse_expand_relations("users,", 3).is_err());
+    assert!(parse_expand_relations("nested:", 3).is_err());
+    assert!(parse_expand_relations("bad-rel", 3).is_err());
+    assert!(parse_expand_relations("nested:bad-rel", 3).is_err());
+    assert!(parse_expand_relations("users,nested:items,nested:payments", 2).is_err());
+}
+
+#[test]
 fn test_parse_filters_checked_rejects_invalid_filter_column() {
     let err = parse_filters_checked("password-hash.eq=secret").unwrap_err();
     assert!(err.contains("Invalid filter column"));

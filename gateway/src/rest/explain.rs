@@ -14,7 +14,7 @@ use crate::auth::authenticate_request;
 use crate::middleware::ApiError;
 
 use super::extract_table_name;
-use super::filters::{apply_filters, apply_sorting, parse_filters_checked};
+use super::filters::{apply_filters, apply_sorting, parse_expand_relations, parse_filters_checked};
 use super::types::ListParams;
 
 /// GET /api/{table}/_explain — return EXPLAIN ANALYZE for the query
@@ -72,19 +72,13 @@ pub(crate) async fn explain_handler(
     // Apply expand (flat JOIN only) — enforce depth limit
     let mut has_joins = false;
     if let Some(ref expand) = params.expand {
-        let relations: Vec<&str> = {
-            let mut seen = std::collections::HashSet::new();
-            expand
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty() && !s.starts_with("nested:") && seen.insert(*s))
-                .collect()
-        };
-        if relations.len() > state.config.max_expand_depth {
+        let (relations, nested_relations) =
+            parse_expand_relations(expand, state.config.max_expand_depth)
+                .map_err(ApiError::parse_error)?;
+        if !nested_relations.is_empty() {
             return Err(ApiError::parse_error(format!(
-                "Too many expand relations ({}). Maximum is {}",
-                relations.len(),
-                state.config.max_expand_depth
+                "Nested expand is not supported by _explain: {}",
+                nested_relations.join(",")
             )));
         }
         for rel in relations {
