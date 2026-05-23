@@ -331,6 +331,9 @@ pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
             if !constraints.contains(&Constraint::Nullable) {
                 buf.extend_from_slice(b" NOT NULL");
             }
+            if constraints.contains(&Constraint::Unique) {
+                buf.extend_from_slice(b" UNIQUE");
+            }
 
             for constraint in constraints {
                 if let Constraint::Default(val) = constraint {
@@ -1099,6 +1102,29 @@ mod tests {
         assert!(
             sql.contains("CHECK (score >= 0)"),
             "add-column SQL should preserve CHECK constraint, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn encode_alter_add_column_renders_unique_constraint() {
+        let cmd = Qail {
+            action: Action::Alter,
+            table: "users".to_string(),
+            columns: vec![Expr::Def {
+                name: "email".to_string(),
+                data_type: "text".to_string(),
+                constraints: vec![Constraint::Unique],
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+
+        encode_alter_add_column(&cmd, &mut buf);
+
+        let sql = String::from_utf8(buf.to_vec()).expect("encoded SQL should be UTF-8");
+        assert!(
+            sql.contains("UNIQUE"),
+            "add-column SQL should preserve UNIQUE constraint, got: {sql}"
         );
     }
 }

@@ -421,6 +421,9 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
             if !is_nullable {
                 col_def.push_str(" NOT NULL");
             }
+            if constraints.contains(&Constraint::Unique) {
+                col_def.push_str(" UNIQUE");
+            }
 
             for constraint in constraints {
                 if let Constraint::Default(val) = constraint {

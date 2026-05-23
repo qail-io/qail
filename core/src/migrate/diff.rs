@@ -1066,6 +1066,39 @@ mod tests {
     }
 
     #[test]
+    fn diff_new_column_preserves_unique_constraint() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let mut old = Schema::default();
+        old.add_table(Table::new("users").column(Column::new("id", ColumnType::Int)));
+
+        let mut new = old.clone();
+        new.tables
+            .get_mut("users")
+            .expect("users table should exist")
+            .columns
+            .push(Column::new("email", ColumnType::Text).unique());
+
+        let cmds = diff_schemas_checked(&old, &new).expect("new unique column should diff");
+        let add_col = cmds
+            .iter()
+            .find(|cmd| matches!(cmd.action, Action::Alter) && cmd.table == "users")
+            .expect("add-column command should be present");
+
+        let Expr::Def { constraints, .. } = &add_col.columns[0] else {
+            panic!("expected email column definition");
+        };
+        assert!(constraints.contains(&Constraint::Unique));
+
+        let sql = add_col.to_sql();
+        assert!(
+            sql.contains("UNIQUE"),
+            "add-column SQL should preserve UNIQUE constraint, got: {sql}"
+        );
+    }
+
+    #[test]
     fn diff_new_table_preserves_foreign_key_actions() {
         use super::super::types::ColumnType;
         use crate::transpiler::ToSql;
