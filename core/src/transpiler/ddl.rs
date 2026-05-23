@@ -41,6 +41,44 @@ fn table_constraint_to_sql(constraint: &TableConstraint, generator: &dyn SqlGene
     }
 }
 
+fn append_column_check_sql(
+    out: &mut String,
+    column_name: &str,
+    vals: &[String],
+    generator: &dyn SqlGenerator,
+) {
+    if vals.len() == 1
+        && vals[0]
+            .trim_start()
+            .to_ascii_uppercase()
+            .starts_with("CONSTRAINT ")
+    {
+        out.push(' ');
+        out.push_str(&vals[0]);
+        return;
+    }
+
+    let raw_check = vals.join(" ");
+    let looks_like_expr = vals.len() == 1
+        || vals.iter().any(|v| {
+            v.chars()
+                .any(|c| c.is_whitespace() || matches!(c, '<' | '>' | '=' | '!' | '(' | ')'))
+        });
+
+    if looks_like_expr {
+        out.push_str(&format!(" CHECK ({raw_check})"));
+    } else {
+        out.push_str(&format!(
+            " CHECK ({} IN ({}))",
+            generator.quote_identifier(column_name),
+            vals.iter()
+                .map(|v| format!("'{}'", v.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+}
+
 /// Generate CREATE TABLE SQL.
 pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
@@ -116,37 +154,7 @@ pub fn build_create_table(cmd: &Qail, dialect: Dialect) -> String {
 
             for constraint in constraints {
                 if let Constraint::Check(vals) = constraint {
-                    if vals.len() == 1
-                        && vals[0]
-                            .trim_start()
-                            .to_ascii_uppercase()
-                            .starts_with("CONSTRAINT ")
-                    {
-                        line.push(' ');
-                        line.push_str(&vals[0]);
-                        continue;
-                    }
-
-                    let raw_check = vals.join(" ");
-                    let looks_like_expr = vals.len() == 1
-                        || vals.iter().any(|v| {
-                            v.chars().any(|c| {
-                                c.is_whitespace() || matches!(c, '<' | '>' | '=' | '!' | '(' | ')')
-                            })
-                        });
-
-                    if looks_like_expr {
-                        line.push_str(&format!(" CHECK ({raw_check})"));
-                    } else {
-                        line.push_str(&format!(
-                            " CHECK ({} IN ({}))",
-                            generator.quote_identifier(name),
-                            vals.iter()
-                                .map(|v| format!("'{}'", v.replace('\'', "''")))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
-                    }
+                    append_column_check_sql(&mut line, name, vals, generator.as_ref());
                 }
                 if let Constraint::References(target) = constraint {
                     line.push_str(&format!(" REFERENCES {target}"));
@@ -427,6 +435,9 @@ pub fn build_alter_add_column(cmd: &Qail, dialect: Dialect) -> String {
                 if let Constraint::References(target) = constraint {
                     col_def.push_str(" REFERENCES ");
                     col_def.push_str(target);
+                }
+                if let Constraint::Check(vals) = constraint {
+                    append_column_check_sql(&mut col_def, name, vals, generator.as_ref());
                 }
             }
 

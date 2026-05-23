@@ -80,6 +80,53 @@ fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
     }
 }
 
+fn encode_column_check_constraint(name: &str, vals: &[String], buf: &mut BytesMut) {
+    if vals.len() == 1
+        && vals[0]
+            .trim_start()
+            .to_ascii_uppercase()
+            .starts_with("CONSTRAINT ")
+    {
+        buf.extend_from_slice(b" ");
+        buf.extend_from_slice(vals[0].as_bytes());
+        return;
+    }
+
+    let looks_like_expr = vals.len() == 1
+        || vals.iter().any(|v| {
+            v.chars()
+                .any(|c| c.is_whitespace() || matches!(c, '<' | '>' | '=' | '!' | '(' | ')'))
+        });
+
+    if looks_like_expr {
+        buf.extend_from_slice(b" CHECK (");
+        if vals.len() == 1 {
+            buf.extend_from_slice(vals[0].as_bytes());
+        } else {
+            for (i, v) in vals.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b" ");
+                }
+                buf.extend_from_slice(v.as_bytes());
+            }
+        }
+        buf.extend_from_slice(b")");
+    } else {
+        buf.extend_from_slice(b" CHECK (");
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(b" IN (");
+        for (i, v) in vals.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b", ");
+            }
+            buf.extend_from_slice(b"'");
+            buf.extend_from_slice(v.as_bytes());
+            buf.extend_from_slice(b"'");
+        }
+        buf.extend_from_slice(b"))");
+    }
+}
+
 /// Encode CREATE TABLE statement.
 pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"CREATE TABLE ");
@@ -174,51 +221,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
             // CHECK constraint
             for constraint in constraints {
                 if let Constraint::Check(vals) = constraint {
-                    if vals.len() == 1
-                        && vals[0]
-                            .trim_start()
-                            .to_ascii_uppercase()
-                            .starts_with("CONSTRAINT ")
-                    {
-                        buf.extend_from_slice(b" ");
-                        buf.extend_from_slice(vals[0].as_bytes());
-                        continue;
-                    }
-
-                    let looks_like_expr = vals.len() == 1
-                        || vals.iter().any(|v| {
-                            v.chars().any(|c| {
-                                c.is_whitespace() || matches!(c, '<' | '>' | '=' | '!' | '(' | ')')
-                            })
-                        });
-
-                    if looks_like_expr {
-                        buf.extend_from_slice(b" CHECK (");
-                        if vals.len() == 1 {
-                            buf.extend_from_slice(vals[0].as_bytes());
-                        } else {
-                            for (i, v) in vals.iter().enumerate() {
-                                if i > 0 {
-                                    buf.extend_from_slice(b" ");
-                                }
-                                buf.extend_from_slice(v.as_bytes());
-                            }
-                        }
-                        buf.extend_from_slice(b")");
-                    } else {
-                        buf.extend_from_slice(b" CHECK (");
-                        buf.extend_from_slice(name.as_bytes());
-                        buf.extend_from_slice(b" IN (");
-                        for (i, v) in vals.iter().enumerate() {
-                            if i > 0 {
-                                buf.extend_from_slice(b", ");
-                            }
-                            buf.extend_from_slice(b"'");
-                            buf.extend_from_slice(v.as_bytes());
-                            buf.extend_from_slice(b"'");
-                        }
-                        buf.extend_from_slice(b"))");
-                    }
+                    encode_column_check_constraint(name, vals, buf);
                 }
             }
         }
@@ -342,6 +345,9 @@ pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
                 if let Constraint::References(target) = constraint {
                     buf.extend_from_slice(b" REFERENCES ");
                     buf.extend_from_slice(target.as_bytes());
+                }
+                if let Constraint::Check(vals) = constraint {
+                    encode_column_check_constraint(name, vals, buf);
                 }
             }
         }
@@ -1066,5 +1072,33 @@ pub fn encode_notify(cmd: &Qail, buf: &mut BytesMut) {
         buf.extend_from_slice(b", '");
         buf.extend_from_slice(payload.replace('\'', "''").as_bytes());
         buf.extend_from_slice(b"'");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_alter_add_column_renders_check_constraint() {
+        let cmd = Qail {
+            action: Action::Alter,
+            table: "players".to_string(),
+            columns: vec![Expr::Def {
+                name: "score".to_string(),
+                data_type: "int".to_string(),
+                constraints: vec![Constraint::Check(vec!["score >= 0".to_string()])],
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+
+        encode_alter_add_column(&cmd, &mut buf);
+
+        let sql = String::from_utf8(buf.to_vec()).expect("encoded SQL should be UTF-8");
+        assert!(
+            sql.contains("CHECK (score >= 0)"),
+            "add-column SQL should preserve CHECK constraint, got: {sql}"
+        );
     }
 }
