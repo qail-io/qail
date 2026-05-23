@@ -363,6 +363,17 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
                         fk.table, fk.column
                     )));
                 }
+                if let Some(check) = &col.check {
+                    let check_sql = check_expr_to_sql(&check.expr);
+                    if let Some(name) = &check.name {
+                        constraints.push(Constraint::Check(vec![format!(
+                            "CONSTRAINT {} CHECK ({})",
+                            name, check_sql
+                        )]));
+                    } else {
+                        constraints.push(Constraint::Check(vec![check_sql]));
+                    }
+                }
 
                 Expr::Def {
                     name: col.name.clone(),
@@ -870,6 +881,48 @@ mod tests {
                 "REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"
             ),
             "add-column SQL should preserve FK reference, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn diff_new_table_preserves_column_check_constraint() {
+        use super::super::types::ColumnType;
+        use crate::transpiler::ToSql;
+
+        let old = Schema::default();
+        let mut new = Schema::default();
+        new.add_table(
+            Table::new("inventory").column(
+                Column::new("quantity", ColumnType::Int).not_null().check(
+                    CheckExpr::GreaterOrEqual {
+                        column: "quantity".to_string(),
+                        value: 0,
+                    },
+                ),
+            ),
+        );
+
+        let cmds =
+            diff_schemas_checked(&old, &new).expect("new table with checked column should diff");
+        let make_cmd = cmds
+            .iter()
+            .find(|cmd| matches!(cmd.action, Action::Make) && cmd.table == "inventory")
+            .expect("create-table command should be present");
+
+        let Expr::Def { constraints, .. } = &make_cmd.columns[0] else {
+            panic!("expected quantity column definition");
+        };
+        assert!(constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                Constraint::Check(vals) if vals.len() == 1 && vals[0] == "quantity >= 0"
+            )
+        }));
+
+        let sql = make_cmd.to_sql();
+        assert!(
+            sql.contains("CHECK (quantity >= 0)"),
+            "create-table SQL should preserve CHECK constraint, got: {sql}"
         );
     }
 
