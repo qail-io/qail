@@ -333,7 +333,12 @@ pub(crate) async fn list_handler(
     // Pagination. Branch overlay reads need a broader bounded base set so the
     // overlay can be merged before applying the requested page window.
     if has_branch {
-        cmd = cmd.limit(max_rows);
+        cmd = cmd.limit(branch_base_fetch_limit(
+            offset,
+            limit,
+            max_rows,
+            state.config.max_result_rows,
+        )?);
     } else {
         cmd = cmd.limit(limit);
         cmd = cmd.offset(offset);
@@ -1063,6 +1068,31 @@ fn row_matches_filter(row: &Value, column: &str, op: Operator, expected: &QailVa
     }
 }
 
+fn branch_base_fetch_limit(
+    offset: i64,
+    requested_limit: i64,
+    page_limit_cap: i64,
+    materialization_cap: usize,
+) -> Result<i64, ApiError> {
+    let offset = offset.max(0);
+    let requested_limit = requested_limit.max(1);
+    let page_limit_cap = page_limit_cap.max(requested_limit).max(1);
+    let materialization_cap = i64::try_from(materialization_cap.max(1)).unwrap_or(i64::MAX);
+    let required_window = offset.saturating_add(requested_limit);
+    if required_window > materialization_cap {
+        return Err(ApiError::bad_request(
+            "BRANCH_PAGE_WINDOW_TOO_LARGE",
+            format!(
+                "Branch page offset + limit exceeds configured max_result_rows ({materialization_cap})"
+            ),
+        ));
+    }
+
+    Ok(offset
+        .saturating_add(page_limit_cap)
+        .min(materialization_cap))
+}
+
 fn row_matches_filters(row: &Value, filters: &[(String, Operator, QailValue)]) -> bool {
     filters
         .iter()
@@ -1118,7 +1148,7 @@ fn compare_json_sort_keys(
 #[cfg(test)]
 mod tests {
     use super::{
-        BranchReadConstraintInput, apply_branch_read_constraints,
+        BranchReadConstraintInput, apply_branch_read_constraints, branch_base_fetch_limit,
         branch_projection_columns_from_cmd, project_rows_to_selected_columns,
         row_matches_policy_filter_cages, split_expand_relations,
     };
@@ -1359,6 +1389,29 @@ mod tests {
                 json!({"id": 2, "status": "open"})
             ]
         );
+    }
+
+    #[test]
+    fn branch_base_fetch_limit_includes_requested_offset_window() {
+        let fetch_limit =
+            branch_base_fetch_limit(1_500, 50, 1_000, 10_000).expect("window fits cap");
+
+        assert_eq!(fetch_limit, 2_500);
+    }
+
+    #[test]
+    fn branch_base_fetch_limit_preserves_initial_overlay_cushion() {
+        let fetch_limit = branch_base_fetch_limit(0, 50, 1_000, 10_000).expect("window fits cap");
+
+        assert_eq!(fetch_limit, 1_000);
+    }
+
+    #[test]
+    fn branch_base_fetch_limit_rejects_windows_past_materialization_cap() {
+        let err = branch_base_fetch_limit(9_990, 50, 1_000, 10_000)
+            .expect_err("branch cannot materialize this requested page exactly");
+
+        assert_eq!(err.code, "BRANCH_PAGE_WINDOW_TOO_LARGE");
     }
 
     #[test]
