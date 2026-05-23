@@ -40,12 +40,24 @@ fn ensure_path_mutation_affected(row_count: usize, row_id: &str) -> Result<(), A
     Ok(())
 }
 
+fn branch_overlay_write_needs_base_lookup(
+    overlay_state: BranchOverlayRowState,
+    row_id: &str,
+) -> Result<bool, ApiError> {
+    match overlay_state {
+        BranchOverlayRowState::Visible => Ok(false),
+        BranchOverlayRowState::Deleted => Err(ApiError::not_found(format!("row '{}'", row_id))),
+        BranchOverlayRowState::Absent => Ok(true),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_path_mutation_affected, mutation_needs_full_returning,
-        project_mutation_returning_rows,
+        branch_overlay_write_needs_base_lookup, ensure_path_mutation_affected,
+        mutation_needs_full_returning, project_mutation_returning_rows,
     };
+    use crate::rest::branch::BranchOverlayRowState;
     use serde_json::json;
 
     #[test]
@@ -89,5 +101,20 @@ mod tests {
     #[test]
     fn ensure_path_mutation_affected_allows_nonzero_rows() {
         ensure_path_mutation_affected(1, "row-1").unwrap();
+    }
+
+    #[test]
+    fn branch_overlay_write_needs_base_lookup_for_absent_rows_only() {
+        assert!(
+            !branch_overlay_write_needs_base_lookup(BranchOverlayRowState::Visible, "row-1")
+                .unwrap()
+        );
+        assert!(
+            branch_overlay_write_needs_base_lookup(BranchOverlayRowState::Absent, "row-1").unwrap()
+        );
+
+        let err = branch_overlay_write_needs_base_lookup(BranchOverlayRowState::Deleted, "row-1")
+            .unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::NOT_FOUND);
     }
 }
