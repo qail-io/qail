@@ -157,7 +157,14 @@ pub(crate) async fn get_by_id_handler(
 
     // Branch overlay: check if this row is overridden on the branch.
     if let Some(branch_name) = branch_ctx.branch_name() {
-        let overlay_rows = read_branch_overlay_rows(&mut conn, branch_name, &table_name).await?;
+        let overlay_rows = match read_branch_overlay_rows(&mut conn, branch_name, &table_name).await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                conn.release().await;
+                return Err(err);
+            }
+        };
         for orow in &overlay_rows {
             let row_pk = orow
                 .try_get_by_name::<String>("row_pk")

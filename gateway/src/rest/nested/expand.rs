@@ -110,17 +110,17 @@ pub async fn expand_nested(
             .as_ref()
             .map(|(scope_column, _)| scope_column.clone());
         if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
-            let _proof = crate::tenant_guard::verify_tenant_boundary(
+            if let Err(v) = crate::tenant_guard::verify_tenant_boundary(
                 &related_rows,
                 tenant_id,
                 scope_column,
                 rel,
                 "rest_nested_expand",
-            )
-            .map_err(|v| {
+            ) {
                 tracing::error!("{}", v);
-                ApiError::internal("Data integrity error")
-            })?;
+                conn.release().await;
+                return Err(ApiError::internal("Data integrity error"));
+            }
         }
 
         match plan.kind {
