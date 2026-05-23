@@ -577,7 +577,45 @@ pub(super) fn parse_pg_url(url: &str) -> PgResult<(String, u16, String, String, 
         (host_part, "postgres".to_string())
     };
 
-    let (host, port) = if host_port.contains(':') {
+    let (host, port) = if host_port.starts_with('[') {
+        let end = host_port.find(']').ok_or_else(|| {
+            PgError::Connection("Invalid PostgreSQL URL IPv6 host: missing ']'".to_string())
+        })?;
+        let host = &host_port[..=end];
+        if host == "[]" {
+            return Err(PgError::Connection(
+                "Invalid PostgreSQL URL host: missing host".to_string(),
+            ));
+        }
+        let suffix = &host_port[end + 1..];
+        let port = if suffix.is_empty() {
+            5432u16
+        } else if let Some(port_str) = suffix.strip_prefix(':') {
+            if port_str.is_empty() {
+                return Err(PgError::Connection(
+                    "Invalid PostgreSQL URL port: missing port after ':'".to_string(),
+                ));
+            }
+            let p = port_str.parse::<u16>().map_err(|_| {
+                PgError::Connection(format!(
+                    "Invalid PostgreSQL URL port '{}': expected a number from 1 to 65535",
+                    port_str
+                ))
+            })?;
+            if p == 0 {
+                return Err(PgError::Connection(
+                    "Invalid PostgreSQL URL port '0': expected a number from 1 to 65535"
+                        .to_string(),
+                ));
+            }
+            p
+        } else {
+            return Err(PgError::Connection(
+                "Invalid PostgreSQL URL IPv6 host: unexpected characters after ']'".to_string(),
+            ));
+        };
+        (host.to_string(), port)
+    } else if host_port.contains(':') {
         let mut parts = host_port.splitn(2, ':');
         let h = parts.next().unwrap_or("localhost").to_string();
         if h.is_empty() {

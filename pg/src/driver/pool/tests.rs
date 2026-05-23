@@ -488,6 +488,24 @@ fn test_parse_pg_url_decodes_utf8_percent_encoding() {
 }
 
 #[test]
+fn test_parse_pg_url_supports_bracketed_ipv6() {
+    let (host, port, user, db, password) =
+        parse_pg_url("postgresql://alice:secret@[::1]:5544/app").unwrap();
+    assert_eq!(host, "[::1]");
+    assert_eq!(port, 5544);
+    assert_eq!(user, "alice");
+    assert_eq!(db, "app");
+    assert_eq!(password, Some("secret".to_string()));
+
+    let err = match parse_pg_url("postgresql://alice@[::1:5544/app") {
+        Ok(_) => panic!("malformed IPv6 URL must be rejected"),
+        Err(PgError::Connection(msg)) => msg,
+        Err(other) => panic!("unexpected error: {other:?}"),
+    };
+    assert!(err.contains("IPv6"));
+}
+
+#[test]
 fn test_parse_pg_url_rejects_non_postgres_scheme_and_missing_host() {
     let err = match parse_pg_url("mysql://alice:secret@db.internal/app") {
         Ok(_) => panic!("non-postgres URL scheme must be rejected"),
