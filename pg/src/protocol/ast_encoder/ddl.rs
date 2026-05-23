@@ -7,6 +7,7 @@ use qail_core::ast::{
     Action, ColumnGeneration, Constraint, Expr, Qail, TableConstraint, TriggerEvent, TriggerTiming,
 };
 use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget};
+use qail_core::transpiler::{escape_identifier, escape_sql_string_literal};
 
 /// Quote a SQL identifier for savepoint names.
 fn quote_savepoint_name(name: &str) -> String {
@@ -593,24 +594,40 @@ pub fn encode_do(cmd: &Qail, buf: &mut BytesMut) {
 /// The value is escaped: `'` → `''` to prevent SQL injection.
 pub fn encode_session_set(cmd: &Qail, buf: &mut BytesMut) {
     let value = cmd.payload.as_deref().unwrap_or("");
-    let escaped = value.replace('\'', "''");
     buf.extend_from_slice(b"SET ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    encode_session_setting_name(buf, &cmd.table);
     buf.extend_from_slice(b" = '");
-    buf.extend_from_slice(escaped.as_bytes());
+    buf.extend_from_slice(escape_sql_string_literal(value).as_bytes());
     buf.extend_from_slice(b"'");
 }
 
 /// Encode SHOW key.
 pub fn encode_session_show(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"SHOW ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    encode_session_setting_name(buf, &cmd.table);
 }
 
 /// Encode RESET key.
 pub fn encode_session_reset(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"RESET ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    encode_session_setting_name(buf, &cmd.table);
+}
+
+fn encode_session_setting_name(buf: &mut BytesMut, name: &str) {
+    if is_valid_session_setting_name(name) {
+        buf.extend_from_slice(name.as_bytes());
+    } else {
+        buf.extend_from_slice(escape_identifier(name).as_bytes());
+    }
+}
+
+fn is_valid_session_setting_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('.').all(|part| {
+            let mut chars = part.chars();
+            matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
 }
 
 #[inline]

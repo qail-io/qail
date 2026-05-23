@@ -650,6 +650,42 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_session_set_escapes_value_and_name() {
+        let cmd = Qail::session_set(
+            "app.current_tenant_id",
+            "t1'; SET app.is_super_admin = 'true'; SELECT 'ok",
+        );
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(params.is_empty());
+        assert_eq!(
+            sql,
+            "SET app.current_tenant_id = 't1''; SET app.is_super_admin = ''true''; SELECT ''ok'"
+        );
+    }
+
+    #[test]
+    fn test_encode_session_commands_escape_malformed_setting_names() {
+        let set_cmd = Qail::session_set("statement_timeout; RESET ALL", "5000");
+        let show_cmd = Qail::session_show("statement_timeout; RESET ALL");
+        let reset_cmd = Qail::session_reset("statement_timeout; RESET ALL");
+
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&set_cmd).unwrap().0,
+            "SET \"statement_timeout; RESET ALL\" = '5000'"
+        );
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&show_cmd).unwrap().0,
+            "SHOW \"statement_timeout; RESET ALL\""
+        );
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&reset_cmd).unwrap().0,
+            "RESET \"statement_timeout; RESET ALL\""
+        );
+    }
+
+    #[test]
     fn test_encode_rejects_unsafe_dml_table_ref() {
         use qail_core::ast::Operator;
 
