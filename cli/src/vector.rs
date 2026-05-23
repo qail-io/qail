@@ -33,9 +33,7 @@ pub async fn vector_create(collection: &str, size: u64, distance: &str, url: &st
     println!("  Distance: {:?}", dist);
     println!("  URL: {}", url);
 
-    // Parse URL to extract host and port
-    let (_scheme, host, port, _path) = crate::util::parse_url_parts(url)?;
-    let port = if port == 5432 { 6334 } else { port };
+    let (host, port) = qdrant_grpc_endpoint(url)?;
 
     let mut driver = QdrantDriver::connect(&host, port).await?;
     driver
@@ -61,9 +59,7 @@ pub async fn vector_drop(collection: &str, url: &str) -> Result<()> {
     );
     println!("  URL: {}", url);
 
-    // Parse URL to extract host and port
-    let (_scheme, host, port, _path) = crate::util::parse_url_parts(url)?;
-    let port = if port == 5432 { 6334 } else { port };
+    let (host, port) = qdrant_grpc_endpoint(url)?;
 
     let mut driver = QdrantDriver::connect(&host, port).await?;
     driver.delete_collection(collection).await?;
@@ -74,4 +70,39 @@ pub async fn vector_drop(collection: &str, url: &str) -> Result<()> {
         collection
     );
     Ok(())
+}
+
+fn qdrant_grpc_endpoint(url: &str) -> Result<(String, u16)> {
+    let (_scheme, host, port, _path) = crate::util::parse_url_parts(url)?;
+    let port = if port == 6333 { 6334 } else { port };
+    Ok((host, port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::qdrant_grpc_endpoint;
+
+    #[test]
+    fn qdrant_grpc_endpoint_maps_rest_port_to_grpc() {
+        assert_eq!(
+            qdrant_grpc_endpoint("http://localhost:6333").unwrap(),
+            ("localhost".to_string(), 6334)
+        );
+    }
+
+    #[test]
+    fn qdrant_grpc_endpoint_preserves_explicit_grpc_port() {
+        assert_eq!(
+            qdrant_grpc_endpoint("http://localhost:6334").unwrap(),
+            ("localhost".to_string(), 6334)
+        );
+    }
+
+    #[test]
+    fn qdrant_grpc_endpoint_preserves_custom_port() {
+        assert_eq!(
+            qdrant_grpc_endpoint("http://localhost:7000").unwrap(),
+            ("localhost".to_string(), 7000)
+        );
+    }
 }
