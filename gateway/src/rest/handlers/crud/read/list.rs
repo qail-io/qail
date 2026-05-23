@@ -688,6 +688,110 @@ struct BranchReadConstraintInput<'a> {
     limit: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BranchSortKey {
+    column: String,
+    desc: bool,
+}
+
+fn branch_sort_default_column(default_sort_column: &str) -> &str {
+    if crate::rest::filters::is_safe_identifier(default_sort_column) {
+        default_sort_column
+    } else {
+        "id"
+    }
+}
+
+fn branch_sort_keys(
+    sort: Option<&str>,
+    default_sort_column: &str,
+) -> Result<Vec<BranchSortKey>, ApiError> {
+    let fallback = branch_sort_default_column(default_sort_column);
+    let Some(sort) = sort else {
+        return Ok(vec![BranchSortKey {
+            column: fallback.to_string(),
+            desc: false,
+        }]);
+    };
+
+    let mut keys = Vec::new();
+    for part in sort.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err(ApiError::parse_error("Sort contains an empty entry"));
+        }
+
+        if let Some(column) = part.strip_prefix('-') {
+            let column = column.trim();
+            if column.is_empty() || !crate::rest::filters::is_safe_identifier(column) {
+                return Err(ApiError::parse_error(format!(
+                    "Invalid sort column '{}'",
+                    column
+                )));
+            }
+            keys.push(BranchSortKey {
+                column: column.to_string(),
+                desc: true,
+            });
+            continue;
+        }
+
+        if let Some(column) = part.strip_prefix('+') {
+            let column = column.trim();
+            if column.is_empty() || !crate::rest::filters::is_safe_identifier(column) {
+                return Err(ApiError::parse_error(format!(
+                    "Invalid sort column '{}'",
+                    column
+                )));
+            }
+            keys.push(BranchSortKey {
+                column: column.to_string(),
+                desc: false,
+            });
+            continue;
+        }
+
+        if let Some((column, direction)) = part.split_once(':') {
+            let column = column.trim();
+            let direction = direction.trim();
+            if column.is_empty() || !crate::rest::filters::is_safe_identifier(column) {
+                return Err(ApiError::parse_error(format!(
+                    "Invalid sort column '{}'",
+                    column
+                )));
+            }
+            let desc = if direction.eq_ignore_ascii_case("desc") {
+                true
+            } else if direction.eq_ignore_ascii_case("asc") {
+                false
+            } else {
+                return Err(ApiError::parse_error(format!(
+                    "Invalid sort direction '{}'",
+                    direction
+                )));
+            };
+            keys.push(BranchSortKey {
+                column: column.to_string(),
+                desc,
+            });
+            continue;
+        }
+
+        if !crate::rest::filters::is_safe_identifier(part) {
+            return Err(ApiError::parse_error(format!(
+                "Invalid sort column '{}'",
+                part
+            )));
+        }
+        keys.push(BranchSortKey {
+            column: part.to_string(),
+            desc: false,
+        });
+    }
+
+    Ok(keys)
+}
+
 fn apply_branch_read_constraints(
     data: &mut Vec<Value>,
     input: BranchReadConstraintInput<'_>,
@@ -703,14 +807,21 @@ fn apply_branch_read_constraints(
     }
     *data = filtered;
 
-    let (sort_col, desc) = primary_sort_for_cursor(input.sort, input.default_sort_column);
+    let sort_keys = branch_sort_keys(input.sort, input.default_sort_column)?;
+    let primary_sort = sort_keys.first().ok_or_else(|| {
+        ApiError::internal("Branch sort parser returned no sort keys after validation")
+    })?;
     if let Some(cursor) = input.cursor {
         let cursor_val = parse_scalar_value(cursor);
-        let cursor_op = if desc { Operator::Lt } else { Operator::Gt };
-        data.retain(|row| row_matches_filter(row, &sort_col, cursor_op, &cursor_val));
+        let cursor_op = if primary_sort.desc {
+            Operator::Lt
+        } else {
+            Operator::Gt
+        };
+        data.retain(|row| row_matches_filter(row, &primary_sort.column, cursor_op, &cursor_val));
     }
 
-    data.sort_by(|left, right| compare_json_field(left, right, &sort_col, desc));
+    data.sort_by(|left, right| compare_json_sort_keys(left, right, &sort_keys));
 
     let start = input.offset.max(0) as usize;
     let take = input.limit.max(0) as usize;
@@ -990,6 +1101,20 @@ fn compare_json_field(left: &Value, right: &Value, column: &str, desc: bool) -> 
     if desc { ordering.reverse() } else { ordering }
 }
 
+fn compare_json_sort_keys(
+    left: &Value,
+    right: &Value,
+    sort_keys: &[BranchSortKey],
+) -> std::cmp::Ordering {
+    for sort_key in sort_keys {
+        let ordering = compare_json_field(left, right, &sort_key.column, sort_key.desc);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1201,6 +1326,39 @@ mod tests {
         .unwrap();
 
         assert_eq!(rows, vec![json!({"id": 1, "name": "Beta"})]);
+    }
+
+    #[test]
+    fn branch_read_constraints_applies_all_sort_keys_before_limit() {
+        let mut rows = vec![
+            json!({"id": 1, "status": "open"}),
+            json!({"id": 2, "status": "open"}),
+            json!({"id": 3, "status": "open"}),
+        ];
+
+        apply_branch_read_constraints(
+            &mut rows,
+            BranchReadConstraintInput {
+                filters: &[],
+                policy_filter_cages: &[],
+                search: None,
+                search_columns: None,
+                cursor: None,
+                sort: Some("status:asc,id:desc"),
+                default_sort_column: "id",
+                offset: 0,
+                limit: 2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                json!({"id": 3, "status": "open"}),
+                json!({"id": 2, "status": "open"})
+            ]
+        );
     }
 
     #[test]
