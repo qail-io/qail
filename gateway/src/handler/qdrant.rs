@@ -23,7 +23,7 @@ pub(super) async fn execute_qdrant_cmd(
     auth: &crate::auth::AuthContext,
     cmd: &qail_core::ast::Qail,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    use qail_core::ast::{Action, CageKind, Distance as CoreDistance};
+    use qail_core::ast::{Action, Distance as CoreDistance};
 
     let pool = state.qdrant_pool.as_ref().ok_or_else(|| {
         tracing::error!("Qdrant operation requested but no [qdrant] config");
@@ -45,14 +45,7 @@ pub(super) async fn execute_qdrant_cmd(
     let (must_conditions, should_groups) = split_filter_conditions(&cmd);
 
     // Extract limit from CageKind::Limit if present
-    let limit_val: u64 = cmd
-        .cages
-        .iter()
-        .find_map(|c| match c.kind {
-            CageKind::Limit(n) => Some(n as u64),
-            _ => None,
-        })
-        .unwrap_or(10);
+    let limit_val = qdrant_limit_from_cmd(&cmd, state.config.max_result_rows);
 
     match cmd.action {
         Action::Search => {
@@ -386,6 +379,21 @@ fn split_filter_conditions(
         }
     }
     (must_conditions, should_groups)
+}
+
+fn qdrant_limit_from_cmd(cmd: &qail_core::ast::Qail, max_result_rows: usize) -> u64 {
+    use qail_core::ast::CageKind;
+
+    let requested = cmd
+        .cages
+        .iter()
+        .find_map(|c| match c.kind {
+            CageKind::Limit(n) => Some(n as u64),
+            _ => None,
+        })
+        .unwrap_or(10);
+
+    requested.min(max_result_rows as u64)
 }
 
 fn verify_existing_qdrant_points_tenant_boundary(
@@ -925,10 +933,10 @@ mod tests {
     use super::{
         ORIGINAL_POINT_ID_PAYLOAD_KEY, enforce_qdrant_upsert_outgoing_filters,
         enforce_qdrant_upsert_payload_filters, extract_upsert_point,
-        prepare_tenant_scoped_qdrant_upsert_point, qdrant_payload_matches_filter_cages,
-        qdrant_request_filter_cages, qdrant_upsert_filter_cages, scored_point_to_json,
-        split_filter_conditions, tenant_scoped_qdrant_point_id,
-        verify_existing_qdrant_points_tenant_boundary,
+        prepare_tenant_scoped_qdrant_upsert_point, qdrant_limit_from_cmd,
+        qdrant_payload_matches_filter_cages, qdrant_request_filter_cages,
+        qdrant_upsert_filter_cages, scored_point_to_json, split_filter_conditions,
+        tenant_scoped_qdrant_point_id, verify_existing_qdrant_points_tenant_boundary,
     };
     use qail_core::ast::{Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
 
@@ -1017,6 +1025,22 @@ mod tests {
             point.payload.get(ORIGINAL_POINT_ID_PAYLOAD_KEY),
             Some(&qail_qdrant::PayloadValue::Integer(7))
         );
+    }
+
+    #[test]
+    fn qdrant_limit_is_clamped_to_gateway_max_rows() {
+        let cmd = Qail::search("embeddings")
+            .vector(vec![0.1, 0.2])
+            .limit(50_000);
+
+        assert_eq!(qdrant_limit_from_cmd(&cmd, 1_000), 1_000);
+    }
+
+    #[test]
+    fn qdrant_limit_defaults_to_ten_within_gateway_max_rows() {
+        let cmd = Qail::scroll("embeddings");
+
+        assert_eq!(qdrant_limit_from_cmd(&cmd, 1_000), 10);
     }
 
     #[test]
