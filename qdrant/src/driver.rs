@@ -130,6 +130,7 @@ impl QdrantDriver {
             limit,
             score_threshold,
             None,
+            false,
         );
         let request_bytes = self.buffer.split().freeze();
         let response = self.client.search(request_bytes).await?;
@@ -153,6 +154,27 @@ impl QdrantDriver {
             limit,
             score_threshold,
             Some(vector_name),
+            false,
+        );
+        let request_bytes = self.buffer.split().freeze();
+        let response = self.client.search(request_bytes).await?;
+        decoder::decode_search_response(&response)
+    }
+
+    /// Vector similarity search using the shared search request options.
+    pub async fn search_with_request(
+        &mut self,
+        request: encoder::SearchRequest<'_>,
+    ) -> QdrantResult<Vec<ScoredPoint>> {
+        self.buffer.clear();
+        encoder::encode_search_proto(
+            &mut self.buffer,
+            request.collection,
+            request.vector,
+            request.limit,
+            request.score_threshold,
+            request.vector_name,
+            request.with_vectors,
         );
         let request_bytes = self.buffer.split().freeze();
         let response = self.client.search(request_bytes).await?;
@@ -181,6 +203,7 @@ impl QdrantDriver {
                 limit,
                 score_threshold,
                 vector_name: None,
+                with_vectors: false,
             },
             conditions,
             is_or,
@@ -261,6 +284,7 @@ impl QdrantDriver {
                 limit,
                 score_threshold,
                 None,
+                false,
             );
             encoded_requests.push(self.buffer.split().freeze());
         }
@@ -328,6 +352,7 @@ impl QdrantDriver {
                         limit,
                         score_threshold,
                         vector_name: cmd.vector_name.as_deref(),
+                        with_vectors: cmd.with_vector,
                     },
                     &must_conditions,
                     &should_groups,
@@ -335,8 +360,15 @@ impl QdrantDriver {
                 .await;
         }
 
-        self.search(collection, vector, limit, score_threshold)
-            .await
+        self.search_with_request(encoder::SearchRequest {
+            collection,
+            vector,
+            limit,
+            score_threshold,
+            vector_name: cmd.vector_name.as_deref(),
+            with_vectors: cmd.with_vector,
+        })
+        .await
     }
 
     // ========================================================================

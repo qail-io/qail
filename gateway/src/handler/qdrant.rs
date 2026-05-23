@@ -55,30 +55,22 @@ pub(super) async fn execute_qdrant_cmd(
             let vector = cmd.vector.as_deref().ok_or_else(|| {
                 ApiError::bad_request("MISSING_VECTOR", "Search requires a vector")
             })?;
+            let search_request = qail_qdrant::encoder::SearchRequest {
+                collection,
+                vector,
+                limit: limit_val,
+                score_threshold: cmd.score_threshold,
+                vector_name: cmd.vector_name.as_deref(),
+                with_vectors: cmd.with_vector,
+            };
             let results = if must_conditions.is_empty() && should_groups.is_empty() {
-                if let Some(name) = cmd.vector_name.as_deref() {
-                    conn.search_named(collection, name, vector, limit_val, cmd.score_threshold)
-                        .await
-                        .map_err(|e| qdrant_err(e, "search"))?
-                } else {
-                    conn.search(collection, vector, limit_val, cmd.score_threshold)
-                        .await
-                        .map_err(|e| qdrant_err(e, "search"))?
-                }
+                conn.search_with_request(search_request)
+                    .await
+                    .map_err(|e| qdrant_err(e, "search"))?
             } else {
-                conn.search_filtered_grouped_cages(
-                    qail_qdrant::encoder::SearchRequest {
-                        collection,
-                        vector,
-                        limit: limit_val,
-                        score_threshold: cmd.score_threshold,
-                        vector_name: cmd.vector_name.as_deref(),
-                    },
-                    &must_conditions,
-                    &should_groups,
-                )
-                .await
-                .map_err(|e| qdrant_err(e, "search"))?
+                conn.search_filtered_grouped_cages(search_request, &must_conditions, &should_groups)
+                    .await
+                    .map_err(|e| qdrant_err(e, "search"))?
             };
 
             let rows: Vec<serde_json::Value> = results.iter().map(scored_point_to_json).collect();

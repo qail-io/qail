@@ -70,6 +70,7 @@ async fn main() -> QdrantResult<()> {
         3,    // limit
         None, // no score threshold
         None, // no vector name
+        false,
     );
 
     println!("   Encoded {} bytes of protobuf", buf.len());

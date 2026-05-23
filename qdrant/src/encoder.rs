@@ -38,6 +38,8 @@ const SEARCH_WITH_PAYLOAD: u8 = 0x32;
 const SEARCH_SCORE_THRESHOLD: u8 = 0x45;
 /// Field 10: vector_name (string) -> (10 << 3) | 2 = 0x52
 const SEARCH_VECTOR_NAME: u8 = 0x52;
+/// Field 11: with_vectors (message) -> (11 << 3) | 2 = 0x5A
+const SEARCH_WITH_VECTORS: u8 = 0x5A;
 
 // ============================================================================
 // ScrollPoints Field Tags
@@ -147,6 +149,7 @@ pub struct SearchRequest<'a> {
     pub limit: u64,
     pub score_threshold: Option<f32>,
     pub vector_name: Option<&'a str>,
+    pub with_vectors: bool,
 }
 
 /// Encode a SearchPoints request directly to protobuf wire format.
@@ -168,6 +171,7 @@ pub fn encode_search_proto(
     limit: u64,
     score_threshold: Option<f32>,
     vector_name: Option<&str>,
+    with_vectors: bool,
 ) {
     buf.clear();
 
@@ -204,6 +208,11 @@ pub fn encode_search_proto(
         buf.put_u8(SEARCH_VECTOR_NAME);
         encode_varint(buf, name.len());
         buf.extend_from_slice(name.as_bytes());
+    }
+
+    // Field 11: with_vectors = true (optional)
+    if with_vectors {
+        encode_search_with_vectors_true(buf);
     }
 }
 
@@ -280,6 +289,11 @@ pub fn encode_search_with_filter_groups_proto(
         buf.extend_from_slice(name.as_bytes());
     }
 
+    // Field 11: with_vectors = true (optional)
+    if request.with_vectors {
+        encode_search_with_vectors_true(buf);
+    }
+
     Ok(())
 }
 
@@ -336,6 +350,11 @@ pub fn encode_search_with_filter_grouped_cages_proto(
         buf.extend_from_slice(name.as_bytes());
     }
 
+    // Field 11: with_vectors = true (optional)
+    if request.with_vectors {
+        encode_search_with_vectors_true(buf);
+    }
+
     Ok(())
 }
 
@@ -344,6 +363,16 @@ pub fn encode_with_payload_true(buf: &mut BytesMut) {
     // WithPayloadSelector { enable = true }
     // Field 1: enable (bool) = 0x08, value = 1
     buf.put_u8(SEARCH_WITH_PAYLOAD);
+    encode_varint(buf, 2); // submessage length
+    buf.put_u8(0x08); // field 1, varint
+    buf.put_u8(0x01); // true
+}
+
+/// Encode search with_vectors = true as a sub-message.
+pub fn encode_search_with_vectors_true(buf: &mut BytesMut) {
+    // WithVectorsSelector { enable = true }
+    // Field 1: enable (bool) = 0x08, value = 1
+    buf.put_u8(SEARCH_WITH_VECTORS);
     encode_varint(buf, 2); // submessage length
     buf.put_u8(0x08); // field 1, varint
     buf.put_u8(0x01); // true
@@ -1481,7 +1510,7 @@ mod tests {
         let mut buf = BytesMut::with_capacity(1024);
         let vector = vec![0.1f32, 0.2, 0.3, 0.4];
 
-        encode_search_proto(&mut buf, "test_collection", &vector, 10, None, None);
+        encode_search_proto(&mut buf, "test_collection", &vector, 10, None, None, false);
 
         // Verify starts with collection name field
         assert_eq!(buf[0], SEARCH_COLLECTION);
@@ -1491,11 +1520,28 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_search_with_vectors_selector() {
+        let mut buf = BytesMut::with_capacity(1024);
+        let vector = vec![0.1f32, 0.2, 0.3, 0.4];
+
+        encode_search_proto(&mut buf, "test_collection", &vector, 10, None, None, true);
+
+        let selector_offset = buf
+            .iter()
+            .position(|tag| *tag == SEARCH_WITH_VECTORS)
+            .expect("search request should include with_vectors field");
+        assert_eq!(
+            &buf[selector_offset..selector_offset + 4],
+            &[SEARCH_WITH_VECTORS, 0x02, 0x08, 0x01]
+        );
+    }
+
+    #[test]
     fn test_zero_copy_vector() {
         let mut buf = BytesMut::with_capacity(1024);
         let vector = vec![1.0f32, 2.0, 3.0, 4.0];
 
-        encode_search_proto(&mut buf, "test", &vector, 5, None, None);
+        encode_search_proto(&mut buf, "test", &vector, 5, None, None, false);
 
         // Find where vector data starts (after collection name + vector tag + length)
         // collection: 0x0A, len(4), "test" = 6 bytes
@@ -1549,6 +1595,7 @@ mod tests {
                 limit: 10,
                 score_threshold: None,
                 vector_name: None,
+                with_vectors: false,
             },
             &conditions,
             false,
@@ -1561,6 +1608,40 @@ mod tests {
         assert_eq!(buf[0], SEARCH_COLLECTION);
         // Filter tag (0x1A) should appear somewhere after vector
         assert!(buf.contains(&SEARCH_FILTER));
+    }
+
+    #[test]
+    fn test_encode_filtered_search_with_vectors_selector() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let mut buf = BytesMut::with_capacity(1024);
+        let vector = vec![0.1f32, 0.2, 0.3];
+        let conditions = vec![Condition {
+            left: Expr::Named("tenant_id".to_string()),
+            op: Operator::Eq,
+            value: Value::String("tenant-1".to_string()),
+            is_array_unnest: false,
+        }];
+
+        encode_search_with_filter_proto(
+            &mut buf,
+            SearchRequest {
+                collection: "products",
+                vector: &vector,
+                limit: 10,
+                score_threshold: None,
+                vector_name: None,
+                with_vectors: true,
+            },
+            &conditions,
+            false,
+        )
+        .expect("filter encoding should succeed");
+
+        assert!(
+            buf.contains(&SEARCH_WITH_VECTORS),
+            "filtered search should preserve the with_vectors selector"
+        );
     }
 
     #[test]
@@ -1668,6 +1749,7 @@ mod tests {
                 limit: 5,
                 score_threshold: None,
                 vector_name: None,
+                with_vectors: false,
             },
             &conditions,
             false,
@@ -1703,6 +1785,7 @@ mod tests {
                 limit: 5,
                 score_threshold: None,
                 vector_name: None,
+                with_vectors: false,
             },
             &conditions,
             false,
@@ -1766,6 +1849,7 @@ mod tests {
                 limit: 10,
                 score_threshold: None,
                 vector_name: None,
+                with_vectors: false,
             },
             &must_conditions,
             &should_groups,
