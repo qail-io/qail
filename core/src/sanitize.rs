@@ -7,7 +7,7 @@
 //! Call [`validate_ast`] on any `Qail` obtained from an untrusted source
 //! (binary endpoint, external API, etc.) before execution.
 
-use crate::ast::{Action, Expr, Qail, Value};
+use crate::ast::{Action, ConflictAction, Expr, Qail, Value};
 use std::fmt;
 
 /// Error returned when AST structural validation fails.
@@ -352,6 +352,12 @@ pub fn validate_ast(cmd: &Qail) -> Result<(), SanitizeError> {
         for col in &oc.columns {
             check_ident("on_conflict.column", col)?;
         }
+        if let ConflictAction::DoUpdate { assignments } = &oc.action {
+            for (col, expr) in assignments {
+                check_ident("on_conflict.assignment.column", col)?;
+                check_expr("on_conflict.assignment.expr", expr)?;
+            }
+        }
     }
 
     // ── FROM / USING tables ──────────────────────────────────────────
@@ -450,6 +456,44 @@ mod tests {
         let cmd = Qail::get("users").columns(["id", "name; DROP TABLE x"]);
         let err = validate_ast(&cmd).unwrap_err();
         assert!(err.field.contains("columns"));
+    }
+
+    #[test]
+    fn on_conflict_update_assignment_expression_injection_rejected() {
+        let cmd = Qail::add("users")
+            .set_value("id", 1)
+            .set_value("name", "Alice")
+            .on_conflict_update(
+                &["id"],
+                &[(
+                    "name",
+                    Expr::Named("EXCLUDED.name, is_admin = true".to_string()),
+                )],
+            );
+
+        let err = validate_ast(&cmd).unwrap_err();
+
+        assert_eq!(err.field, "on_conflict.assignment.expr");
+        assert!(
+            err.value.contains("EXCLUDED.name"),
+            "unexpected rejected value: {}",
+            err.value
+        );
+    }
+
+    #[test]
+    fn on_conflict_update_assignment_column_injection_rejected() {
+        let cmd = Qail::add("users")
+            .set_value("id", 1)
+            .set_value("name", "Alice")
+            .on_conflict_update(
+                &["id"],
+                &[("name, is_admin", Expr::Named("EXCLUDED.name".to_string()))],
+            );
+
+        let err = validate_ast(&cmd).unwrap_err();
+
+        assert_eq!(err.field, "on_conflict.assignment.column");
     }
 
     #[test]
