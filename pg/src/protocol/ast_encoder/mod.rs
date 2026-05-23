@@ -1212,6 +1212,161 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_merge_complex_expressions_and_params() {
+        use qail_core::ast::{BinaryOp, Condition, Expr, Operator, Value};
+
+        let cmd = Qail::merge_into("users")
+            .target_alias("u")
+            .using_table_as("staging_users", "s")
+            .merge_on_condition(Condition {
+                left: Expr::Cast {
+                    expr: Box::new(Expr::JsonAccess {
+                        column: "u.profile".to_string(),
+                        path_segments: vec![("external_id".to_string(), true)],
+                        alias: None,
+                    }),
+                    target_type: "integer".to_string(),
+                    alias: None,
+                },
+                op: Operator::Eq,
+                value: Value::Column("s.external_id".to_string()),
+                is_array_unnest: false,
+            })
+            .when_matched_update_if(
+                vec![
+                    Condition {
+                        left: Expr::JsonAccess {
+                            column: "s.profile".to_string(),
+                            path_segments: vec![("tier".to_string(), true)],
+                            alias: None,
+                        },
+                        op: Operator::Eq,
+                        value: Value::String("gold".to_string()),
+                        is_array_unnest: false,
+                    },
+                    Condition {
+                        left: Expr::Named("s.score".to_string()),
+                        op: Operator::Gt,
+                        value: Value::Expr(Box::new(Expr::Binary {
+                            left: Box::new(Expr::Named("u.score".to_string())),
+                            op: BinaryOp::Add,
+                            right: Box::new(Expr::Literal(Value::Int(5))),
+                            alias: None,
+                        })),
+                        is_array_unnest: false,
+                    },
+                ],
+                &[
+                    (
+                        "name",
+                        Expr::FunctionCall {
+                            name: "coalesce".to_string(),
+                            args: vec![
+                                Expr::Named("s.name".to_string()),
+                                Expr::Named("u.name".to_string()),
+                            ],
+                            alias: None,
+                        },
+                    ),
+                    (
+                        "score",
+                        Expr::Binary {
+                            left: Box::new(Expr::Named("s.score".to_string())),
+                            op: BinaryOp::Add,
+                            right: Box::new(Expr::Literal(Value::Int(1))),
+                            alias: None,
+                        },
+                    ),
+                    (
+                        "tier",
+                        Expr::JsonAccess {
+                            column: "s.profile".to_string(),
+                            path_segments: vec![("tier".to_string(), true)],
+                            alias: None,
+                        },
+                    ),
+                    (
+                        "status",
+                        Expr::Case {
+                            when_clauses: vec![(
+                                Condition {
+                                    left: Expr::Cast {
+                                        expr: Box::new(Expr::JsonAccess {
+                                            column: "s.profile".to_string(),
+                                            path_segments: vec![("active".to_string(), true)],
+                                            alias: None,
+                                        }),
+                                        target_type: "integer".to_string(),
+                                        alias: None,
+                                    },
+                                    op: Operator::Gt,
+                                    value: Value::Int(0),
+                                    is_array_unnest: false,
+                                },
+                                Box::new(Expr::Literal(Value::String("active".to_string()))),
+                            )],
+                            else_value: Some(Box::new(Expr::Literal(Value::String(
+                                "archived".to_string(),
+                            )))),
+                            alias: None,
+                        },
+                    ),
+                ],
+            )
+            .when_not_matched_insert_if(
+                vec![Condition {
+                    left: Expr::Cast {
+                        expr: Box::new(Expr::Named("s.external_id".to_string())),
+                        target_type: "integer".to_string(),
+                        alias: None,
+                    },
+                    op: Operator::Gt,
+                    value: Value::Int(0),
+                    is_array_unnest: false,
+                }],
+                &["id", "name", "score", "tier", "status"],
+                &[
+                    Expr::Cast {
+                        expr: Box::new(Expr::Named("s.external_id".to_string())),
+                        target_type: "integer".to_string(),
+                        alias: None,
+                    },
+                    Expr::FunctionCall {
+                        name: "coalesce".to_string(),
+                        args: vec![
+                            Expr::Named("s.name".to_string()),
+                            Expr::Literal(Value::String("unknown".to_string())),
+                        ],
+                        alias: None,
+                    },
+                    Expr::Binary {
+                        left: Box::new(Expr::Named("s.score".to_string())),
+                        op: BinaryOp::Add,
+                        right: Box::new(Expr::Literal(Value::Int(1))),
+                        alias: None,
+                    },
+                    Expr::JsonAccess {
+                        column: "s.profile".to_string(),
+                        path_segments: vec![("tier".to_string(), true)],
+                        alias: None,
+                    },
+                    Expr::Literal(Value::String("new".to_string())),
+                ],
+            );
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+        assert_eq!(
+            sql,
+            "MERGE INTO users AS u USING staging_users AS s ON (u.profile->>'external_id')::integer = s.external_id \
+             WHEN MATCHED AND (s.profile->>'tier') = $1 AND s.score > (u.score + 5) \
+             THEN UPDATE SET name = COALESCE(s.name, u.name), score = (s.score + 1), tier = (s.profile->>'tier'), status = CASE WHEN (s.profile->>'active')::integer > 0 THEN 'active' ELSE 'archived' END \
+             WHEN NOT MATCHED BY TARGET AND s.external_id::integer > $2 \
+             THEN INSERT (id, name, score, tier, status) VALUES (s.external_id::integer, COALESCE(s.name, 'unknown'), (s.score + 1), (s.profile->>'tier'), 'new')"
+        );
+        assert_eq!(params, vec![Some(b"gold".to_vec()), Some(b"0".to_vec())]);
+    }
+
+    #[test]
     fn test_encode_batch_ddl_make() {
         use qail_core::ast::{Constraint, Expr};
 

@@ -184,19 +184,19 @@ fn encode_column_expr_inner(
             buf.extend_from_slice(b"CASE");
             for (cond, then_expr) in when_clauses {
                 buf.extend_from_slice(b" WHEN ");
-                buf.extend_from_slice(cond.left.to_string().as_bytes());
+                encode_column_expr_inner(&cond.left, buf, params.as_deref_mut());
                 buf.extend_from_slice(b" ");
                 encode_operator(&cond.op, buf);
                 if !matches!(cond.op, Operator::IsNull | Operator::IsNotNull) {
                     buf.extend_from_slice(b" ");
-                    buf.extend_from_slice(cond.value.to_string().as_bytes());
+                    encode_case_condition_value(&cond.value, buf, params.as_deref_mut());
                 }
                 buf.extend_from_slice(b" THEN ");
-                encode_column_expr(then_expr, buf);
+                encode_column_expr_inner(then_expr, buf, params.as_deref_mut());
             }
             if let Some(else_val) = else_value {
                 buf.extend_from_slice(b" ELSE ");
-                encode_column_expr(else_val, buf);
+                encode_column_expr_inner(else_val, buf, params.as_deref_mut());
             }
             buf.extend_from_slice(b" END");
             if let Some(a) = alias {
@@ -531,6 +531,36 @@ pub fn encode_operator(op: &Operator, buf: &mut BytesMut) {
         Operator::ArrayElemContainedInText => b"CONTAINS_ANY_TOKEN",
     };
     buf.extend_from_slice(bytes);
+}
+
+fn encode_case_condition_value(
+    value: &Value,
+    buf: &mut BytesMut,
+    params: Option<&mut Vec<Option<Vec<u8>>>>,
+) {
+    match value {
+        Value::Expr(expr) => encode_column_expr_inner(expr, buf, params),
+        Value::Column(column) => buf.extend_from_slice(column.as_bytes()),
+        Value::String(s) => {
+            buf.extend_from_slice(b"'");
+            buf.extend_from_slice(s.replace('\'', "''").as_bytes());
+            buf.extend_from_slice(b"'");
+        }
+        Value::Bool(value) => {
+            buf.extend_from_slice(if *value { b"TRUE" } else { b"FALSE" });
+        }
+        Value::Array(values) => {
+            buf.extend_from_slice(b"(");
+            for (i, value) in values.iter().enumerate() {
+                if i > 0 {
+                    buf.extend_from_slice(b", ");
+                }
+                encode_case_condition_value(value, buf, None);
+            }
+            buf.extend_from_slice(b")");
+        }
+        _ => buf.extend_from_slice(value.to_string().as_bytes()),
+    }
 }
 
 /// Encode simple expression (for WHERE left side).
