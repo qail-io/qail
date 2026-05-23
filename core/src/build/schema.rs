@@ -105,6 +105,40 @@ fn schema_comment_start(line: &str, hash_comments: bool) -> Option<usize> {
     None
 }
 
+fn count_parens_outside_quotes(line: &str) -> (usize, usize) {
+    let bytes = line.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut opens = 0usize;
+    let mut closes = 0usize;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if !in_double => {
+                if in_single && bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = !in_single;
+            }
+            b'"' if !in_single => {
+                if in_double && bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = !in_double;
+            }
+            b'(' if !in_single && !in_double => opens += 1,
+            b')' if !in_single && !in_double => closes += 1,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    (opens, closes)
+}
+
 impl Schema {
     /// Parse a schema.qail file
     pub fn parse_file(path: &str) -> Result<Self, String> {
@@ -536,9 +570,9 @@ impl Schema {
             }
 
             if in_create_block {
-                paren_depth += line.chars().filter(|c| *c == '(').count();
-                paren_depth =
-                    paren_depth.saturating_sub(line.chars().filter(|c| *c == ')').count());
+                let (open_parens, close_parens) = count_parens_outside_quotes(line);
+                paren_depth += open_parens;
+                paren_depth = paren_depth.saturating_sub(close_parens);
 
                 // Extract column name (first identifier after opening paren)
                 if let Some(col) = extract_column_from_create(line)
@@ -929,7 +963,7 @@ impl TableSchema {
 
 #[cfg(test)]
 mod comment_tests {
-    use super::{strip_schema_comments, strip_sql_line_comments};
+    use super::{Schema, strip_schema_comments, strip_sql_line_comments};
 
     #[test]
     fn schema_comment_stripping_ignores_markers_inside_quotes() {
@@ -953,5 +987,24 @@ mod comment_tests {
             strip_sql_line_comments("CREATE TABLE tags (name text DEFAULT '#not-comment');"),
             "CREATE TABLE tags (name text DEFAULT '#not-comment');"
         );
+    }
+
+    #[test]
+    fn sql_migration_paren_depth_ignores_string_literals() {
+        let mut schema = Schema::default();
+        schema.parse_sql_migration(
+            r#"
+CREATE TABLE logs (
+  message text DEFAULT ')',
+  tag text DEFAULT '(',
+  level text
+);
+"#,
+        );
+
+        let logs = schema.table("logs").expect("logs table should parse");
+        assert!(logs.has_column("message"));
+        assert!(logs.has_column("tag"));
+        assert!(logs.has_column("level"));
     }
 }
