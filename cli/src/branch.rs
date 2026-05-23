@@ -22,9 +22,20 @@ pub async fn branch_create(name: &str, parent: Option<&str>, db_url: &str) -> Re
         .context("Failed to create branch tables (may already exist)")?;
 
     let sql = branch_sql::create_branch_sql(name, parent);
-    conn.execute_simple(&sql)
+    let rows = conn
+        .simple_query(&sql)
         .await
         .context(format!("Failed to create branch '{}'", name))?;
+    require_branch_returning_row(
+        rows.len(),
+        match parent {
+            Some(parent) => format!(
+                "Branch '{}' was not created because parent branch '{}' was not found or is not active",
+                name, parent
+            ),
+            None => format!("Branch '{}' was not created", name),
+        },
+    )?;
 
     println!("✅ Branch '{}' created", name);
     if let Some(p) = parent {
@@ -66,9 +77,14 @@ pub async fn branch_delete(name: &str, db_url: &str) -> Result<()> {
     let mut conn = connect(&host, port, &user, &database, password.as_deref()).await?;
 
     let sql = branch_sql::delete_branch_sql(name);
-    conn.execute_simple(&sql)
+    let rows = conn
+        .simple_query(&sql)
         .await
         .context(format!("Failed to delete branch '{}'", name))?;
+    require_branch_returning_row(
+        rows.len(),
+        format!("Branch '{}' was not found or is not active", name),
+    )?;
 
     println!("🗑  Branch '{}' deleted", name);
     Ok(())
@@ -195,6 +211,13 @@ fn overlay_row_from_pg(row: &qail_pg::driver::PgRow) -> Result<OverlayRow> {
             .ok_or_else(|| anyhow::anyhow!("Branch overlay row is missing operation"))?,
         row_data: row.get_string(3),
     })
+}
+
+fn require_branch_returning_row(row_count: usize, missing_message: String) -> Result<()> {
+    if row_count == 0 {
+        bail!(missing_message);
+    }
+    Ok(())
 }
 
 async fn primary_key_for_table(
@@ -386,7 +409,9 @@ async fn connect(
 
 #[cfg(test)]
 mod tests {
-    use super::{OverlayRow, overlay_apply_sql, parse_url, quote_ident};
+    use super::{
+        OverlayRow, overlay_apply_sql, parse_url, quote_ident, require_branch_returning_row,
+    };
     use anyhow::Result;
     use qail_pg::driver::branch_sql;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -400,6 +425,15 @@ mod tests {
         assert_eq!(user, "us@er");
         assert_eq!(database, "app");
         assert_eq!(password, Some("p@ss".to_string()));
+    }
+
+    #[test]
+    fn branch_mutations_reject_empty_returning_rows() {
+        let err = require_branch_returning_row(0, "Branch 'missing' was not found".to_string())
+            .expect_err("zero RETURNING rows must fail");
+
+        assert!(err.to_string().contains("missing"));
+        require_branch_returning_row(1, "unused".to_string()).expect("returned row should pass");
     }
 
     #[test]
