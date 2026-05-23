@@ -792,7 +792,14 @@ impl PolicyEngine {
             !cmd.joins.is_empty(),
         )?;
 
-        if matches!(
+        if cmd.action == Action::Upsert {
+            let create_policies =
+                self.applicable_policies(auth, &base_table, OperationType::Create)?;
+            Self::enforce_write_column_policies(cmd, &create_policies, OperationType::Create)?;
+            let update_policies =
+                self.applicable_policies(auth, &base_table, OperationType::Update)?;
+            Self::enforce_write_column_policies(cmd, &update_policies, OperationType::Update)?;
+        } else if matches!(
             cmd.action,
             Action::Add | Action::Set | Action::Put | Action::Over
         ) {

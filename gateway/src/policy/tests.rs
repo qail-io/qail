@@ -882,6 +882,88 @@ fn test_create_column_whitelist_rejects_unlisted_payload_column() {
 }
 
 #[test]
+fn test_qdrant_upsert_create_column_blacklist_rejects_payload_column() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "embeddings_create".to_string(),
+        table: "embeddings".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec!["moderation_state".into()],
+    });
+    engine.add_policy(PolicyDef {
+        name: "embeddings_update".to_string(),
+        table: "embeddings".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::upsert("embeddings")
+        .set_value("id", 7)
+        .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+        .set_value("moderation_state", "approved");
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Create on column 'moderation_state'")
+    );
+}
+
+#[test]
+fn test_qdrant_upsert_update_column_blacklist_rejects_payload_column() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "embeddings_create".to_string(),
+        table: "embeddings".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "embeddings_update".to_string(),
+        table: "embeddings".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["moderation_state".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::upsert("embeddings")
+        .set_value("id", 7)
+        .set_value("vector", Value::Vector(vec![0.1, 0.2]))
+        .set_value("moderation_state", "approved");
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Update on column 'moderation_state'")
+    );
+}
+
+#[test]
 fn test_insert_select_column_blacklist_requires_safe_target_columns() {
     let mut engine = PolicyEngine::new();
     engine.add_policy(PolicyDef {
