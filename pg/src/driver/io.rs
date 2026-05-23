@@ -441,6 +441,17 @@ impl PgConnection {
     }
 
     #[inline]
+    fn protocol_desync_error<T>(&mut self, err: PgError) -> PgResult<T> {
+        match err {
+            PgError::Protocol(msg) => self.protocol_desync(msg),
+            err => {
+                self.mark_io_desynced();
+                Err(err)
+            }
+        }
+    }
+
+    #[inline]
     fn connection_desync<T>(&mut self, msg: String) -> PgResult<T> {
         self.mark_io_desynced();
         Err(PgError::Connection(msg))
@@ -1222,7 +1233,7 @@ impl PgConnection {
                         let _ = self.buffer.split_to(msg_len + 1);
                         match parse_result {
                             Ok(columns) => return Ok((msg_type, Some(columns))),
-                            Err(err) => return Err(err),
+                            Err(err) => return self.protocol_desync_error(err),
                         }
                     }
 
@@ -1312,7 +1323,9 @@ impl PgConnection {
                         };
 
                         let _ = self.buffer.split_to(msg_len + 1);
-                        parse_result?;
+                        if let Err(err) = parse_result {
+                            return self.protocol_desync_error(err);
+                        }
                         return Ok(msg_type);
                     }
 
@@ -1394,7 +1407,9 @@ impl PgConnection {
                     if msg_type == b'D' {
                         let msg_bytes = self.buffer.split_to(msg_len + 1).freeze();
                         let payload = msg_bytes.slice(5..);
-                        parse_data_row_payload_zerocopy(payload, row)?;
+                        if let Err(err) = parse_data_row_payload_zerocopy(payload, row) {
+                            return self.protocol_desync_error(err);
+                        }
                         return Ok(msg_type);
                     }
 
@@ -1476,7 +1491,10 @@ impl PgConnection {
                     if msg_type == b'D' {
                         let msg_bytes = self.buffer.split_to(msg_len + 1).freeze();
                         let payload = msg_bytes.slice(5..);
-                        *first_column = parse_first_column_payload_zerocopy(payload)?;
+                        match parse_first_column_payload_zerocopy(payload) {
+                            Ok(column) => *first_column = column,
+                            Err(err) => return self.protocol_desync_error(err),
+                        }
                         return Ok(msg_type);
                     }
 
@@ -1558,7 +1576,11 @@ impl PgConnection {
                     if msg_type == b'D' {
                         let msg_bytes = self.buffer.split_to(msg_len + 1).freeze();
                         let payload = msg_bytes.slice(5..);
-                        parse_first_four_columns_payload_zerocopy(payload, columns)?;
+                        if let Err(err) =
+                            parse_first_four_columns_payload_zerocopy(payload, columns)
+                        {
+                            return self.protocol_desync_error(err);
+                        }
                         return Ok(msg_type);
                     }
 
@@ -1792,78 +1814,78 @@ impl PgConnection {
 
                         // Bounds checks to prevent panic on truncated DataRow
                         if msg_bytes.remaining() < 2 {
-                            return Err(PgError::Protocol(
+                            return self.protocol_desync(
                                 "DataRow ultra: too short for column count".into(),
-                            ));
+                            );
                         }
 
                         // Read column count (expect 2)
                         let col_count = msg_bytes.get_i16();
                         if col_count != 2 {
-                            return Err(PgError::Protocol(format!(
+                            return self.protocol_desync(format!(
                                 "DataRow ultra expects exactly 2 columns, got {}",
                                 col_count
-                            )));
+                            ));
                         }
 
                         if msg_bytes.remaining() < 4 {
-                            return Err(PgError::Protocol(
+                            return self.protocol_desync(
                                 "DataRow ultra: truncated before col0 length".into(),
-                            ));
+                            );
                         }
                         let len0 = msg_bytes.get_i32();
                         let col0 = if len0 > 0 {
                             let len0 = len0 as usize;
                             if msg_bytes.remaining() < len0 {
-                                return Err(PgError::Protocol(
+                                return self.protocol_desync(
                                     "DataRow ultra: col0 data exceeds payload".into(),
-                                ));
+                                );
                             }
                             msg_bytes.split_to(len0).freeze()
                         } else if len0 == 0 {
                             bytes::Bytes::new()
                         } else if len0 == -1 {
-                            return Err(PgError::Protocol(
+                            return self.protocol_desync(
                                 "DataRow ultra does not support NULL columns".into(),
-                            ));
+                            );
                         } else {
-                            return Err(PgError::Protocol(format!(
+                            return self.protocol_desync(format!(
                                 "DataRow ultra: invalid col0 length {}",
                                 len0
-                            )));
+                            ));
                         };
 
                         if msg_bytes.remaining() < 4 {
-                            return Err(PgError::Protocol(
+                            return self.protocol_desync(
                                 "DataRow ultra: truncated before col1 length".into(),
-                            ));
+                            );
                         }
                         let len1 = msg_bytes.get_i32();
                         let col1 = if len1 > 0 {
                             let len1 = len1 as usize;
                             if msg_bytes.remaining() < len1 {
-                                return Err(PgError::Protocol(
+                                return self.protocol_desync(
                                     "DataRow ultra: col1 data exceeds payload".into(),
-                                ));
+                                );
                             }
                             msg_bytes.split_to(len1).freeze()
                         } else if len1 == 0 {
                             bytes::Bytes::new()
                         } else if len1 == -1 {
-                            return Err(PgError::Protocol(
+                            return self.protocol_desync(
                                 "DataRow ultra does not support NULL columns".into(),
-                            ));
+                            );
                         } else {
-                            return Err(PgError::Protocol(format!(
+                            return self.protocol_desync(format!(
                                 "DataRow ultra: invalid col1 length {}",
                                 len1
-                            )));
+                            ));
                         };
 
                         if msg_bytes.remaining() != 0 {
-                            return Err(PgError::Protocol(
+                            return self.protocol_desync(
                                 "DataRow ultra: trailing bytes after expected columns".into(),
-                            ));
+                            );
                         }
 
                         return Ok((msg_type, Some((col0, col1))));
@@ -1934,6 +1956,28 @@ mod tests {
         Bytes::from(payload)
     }
 
+    fn push_data_row_frame(conn: &mut PgConnection, payload: &[u8]) {
+        let msg_len = payload.len() + 4;
+        conn.buffer.extend_from_slice(&[b'D']);
+        conn.buffer
+            .extend_from_slice(&(msg_len as u32).to_be_bytes());
+        conn.buffer.extend_from_slice(payload);
+    }
+
+    fn push_one_column_datarow_without_column_length(conn: &mut PgConnection) {
+        push_data_row_frame(conn, &[0, 1]);
+    }
+
+    fn assert_protocol_error_contains(err: PgError, expected: &str) {
+        match err {
+            PgError::Protocol(msg) => assert!(
+                msg.contains(expected),
+                "expected protocol error containing {expected:?}, got {msg:?}"
+            ),
+            err => panic!("expected protocol error containing {expected:?}, got {err:?}"),
+        }
+    }
+
     #[test]
     fn parse_first_four_columns_payload_zerocopy_reads_values() {
         let payload = build_data_row_payload(&[Some(b"10"), None, Some(b"30"), Some(b"")]);
@@ -1981,6 +2025,91 @@ mod tests {
         let err = conn.recv_data_zerocopy().await.unwrap_err();
 
         assert!(err.to_string().contains("DataRow payload too short"));
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_with_data_fast_desyncs_on_malformed_datarow() {
+        let mut conn = test_conn();
+        push_one_column_datarow_without_column_length(&mut conn);
+
+        let err = conn.recv_with_data_fast().await.unwrap_err();
+
+        assert_protocol_error_contains(err, "DataRow truncated");
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_fill_data_row_fast_desyncs_on_malformed_datarow() {
+        let mut conn = test_conn();
+        let mut row = Vec::new();
+        push_one_column_datarow_without_column_length(&mut conn);
+
+        let err = conn.recv_fill_data_row_fast(&mut row).await.unwrap_err();
+
+        assert_protocol_error_contains(err, "DataRow truncated");
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_fill_zerocopy_row_fast_desyncs_on_malformed_datarow() {
+        let mut conn = test_conn();
+        let mut row = PgBytesRow::default();
+        push_one_column_datarow_without_column_length(&mut conn);
+
+        let err = conn
+            .recv_fill_zerocopy_row_fast(&mut row)
+            .await
+            .unwrap_err();
+
+        assert_protocol_error_contains(err, "DataRow truncated");
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_fill_first_column_zerocopy_fast_desyncs_on_malformed_datarow() {
+        let mut conn = test_conn();
+        let mut first_column = None;
+        push_one_column_datarow_without_column_length(&mut conn);
+
+        let err = conn
+            .recv_fill_first_column_zerocopy_fast(&mut first_column)
+            .await
+            .unwrap_err();
+
+        assert_protocol_error_contains(err, "DataRow truncated");
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_fill_first_four_columns_zerocopy_fast_desyncs_on_malformed_datarow() {
+        let mut conn = test_conn();
+        let mut columns = [None, None, None, None];
+        push_one_column_datarow_without_column_length(&mut conn);
+
+        let err = conn
+            .recv_fill_first_four_columns_zerocopy_fast(&mut columns)
+            .await
+            .unwrap_err();
+
+        assert_protocol_error_contains(err, "DataRow fast-path expects exactly 4 columns");
+        assert!(conn.is_io_desynced());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recv_data_ultra_desyncs_on_malformed_datarow() {
+        let mut conn = test_conn();
+        push_one_column_datarow_without_column_length(&mut conn);
+
+        let err = conn.recv_data_ultra().await.unwrap_err();
+
+        assert_protocol_error_contains(err, "DataRow ultra expects exactly 2 columns");
         assert!(conn.is_io_desynced());
     }
 
