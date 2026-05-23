@@ -129,6 +129,58 @@ pub(crate) fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usi
     (depth, filter_count, join_count)
 }
 
+pub(crate) fn qail_table_name(table_ref: &str) -> String {
+    table_ref
+        .split_whitespace()
+        .next()
+        .unwrap_or(table_ref)
+        .trim_matches('"')
+        .to_string()
+}
+
+pub(crate) fn cache_tables_for_qail(cmd: &qail_core::ast::Qail) -> Vec<String> {
+    fn push_table(tables: &mut Vec<String>, table_ref: &str) {
+        let table = qail_table_name(table_ref);
+        if !table.is_empty() && !tables.iter().any(|existing| existing == &table) {
+            tables.push(table);
+        }
+    }
+
+    fn collect(cmd: &qail_core::ast::Qail, tables: &mut Vec<String>) {
+        let cte_names: Vec<&str> = cmd.ctes.iter().map(|cte| cte.name.as_str()).collect();
+        let base_table = qail_table_name(&cmd.table);
+        if !cte_names.iter().any(|name| *name == base_table) {
+            push_table(tables, &cmd.table);
+        }
+
+        for cte in &cmd.ctes {
+            collect(&cte.base_query, tables);
+            if let Some(ref recursive_query) = cte.recursive_query {
+                collect(recursive_query, tables);
+            }
+        }
+
+        if let Some(ref source_query) = cmd.source_query {
+            collect(source_query, tables);
+        }
+
+        for (_, set_query) in &cmd.set_ops {
+            collect(set_query, tables);
+        }
+
+        for join in &cmd.joins {
+            let join_table = qail_table_name(&join.table);
+            if !cte_names.iter().any(|name| *name == join_table) {
+                push_table(tables, &join.table);
+            }
+        }
+    }
+
+    let mut tables = Vec::new();
+    collect(cmd, &mut tables);
+    tables
+}
+
 /// Common query execution logic
 pub(super) fn exact_cache_key(cmd: &qail_core::ast::Qail) -> String {
     use std::collections::hash_map::DefaultHasher;

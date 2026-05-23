@@ -281,15 +281,6 @@ pub(super) async fn execute_qail_cmd(
     Ok(Json(response))
 }
 
-fn qail_table_name(table_ref: &str) -> String {
-    table_ref
-        .split_whitespace()
-        .next()
-        .unwrap_or(table_ref)
-        .trim_matches('"')
-        .to_string()
-}
-
 fn command_is_read_only_for_release(cmd: &qail_core::ast::Qail) -> bool {
     let action_is_read_only = matches!(
         cmd.action,
@@ -317,54 +308,10 @@ fn command_is_cacheable_query(cmd: &qail_core::ast::Qail) -> bool {
     matches!(cmd.action, Action::Get) && command_is_read_only_for_release(cmd)
 }
 
-fn cache_tables_for_qail(cmd: &qail_core::ast::Qail) -> Vec<String> {
-    fn push_table(tables: &mut Vec<String>, table_ref: &str) {
-        let table = qail_table_name(table_ref);
-        if !table.is_empty() && !tables.iter().any(|existing| existing == &table) {
-            tables.push(table);
-        }
-    }
-
-    fn collect(cmd: &qail_core::ast::Qail, tables: &mut Vec<String>) {
-        let cte_names: Vec<&str> = cmd.ctes.iter().map(|cte| cte.name.as_str()).collect();
-        let base_table = qail_table_name(&cmd.table);
-        if !cte_names.iter().any(|name| *name == base_table) {
-            push_table(tables, &cmd.table);
-        }
-
-        for cte in &cmd.ctes {
-            collect(&cte.base_query, tables);
-            if let Some(ref recursive_query) = cte.recursive_query {
-                collect(recursive_query, tables);
-            }
-        }
-
-        if let Some(ref source_query) = cmd.source_query {
-            collect(source_query, tables);
-        }
-
-        for (_, set_query) in &cmd.set_ops {
-            collect(set_query, tables);
-        }
-
-        for join in &cmd.joins {
-            let join_table = qail_table_name(&join.table);
-            if !cte_names.iter().any(|name| *name == join_table) {
-                push_table(tables, &join.table);
-            }
-        }
-    }
-
-    let mut tables = Vec::new();
-    collect(cmd, &mut tables);
-    tables
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        cache_tables_for_qail, command_is_cacheable_query, command_is_read_only_for_release,
-    };
+    use super::{command_is_cacheable_query, command_is_read_only_for_release};
+    use crate::handler::query::cache_tables_for_qail;
     use qail_core::ast::{Qail, SetOp};
 
     #[test]

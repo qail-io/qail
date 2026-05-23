@@ -27,5 +27,6 @@ mod tests;
 pub use endpoints::{
     execute_batch, execute_query, execute_query_binary, execute_query_export, execute_query_fast,
 };
-pub(crate) use rules::{clamp_query_limit, is_query_allowed, query_complexity};
+pub(crate) use rules::{cache_tables_for_qail, clamp_query_limit, is_query_allowed};
+pub(crate) use rules::{qail_table_name, query_complexity};
 pub(crate) use rules::{reject_dangerous_action, reject_non_read_action};

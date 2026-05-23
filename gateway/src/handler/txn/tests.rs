@@ -51,6 +51,23 @@ fn test_reject_ddl_blocks_ddl() {
 }
 
 #[test]
+fn test_reject_ddl_blocks_nested_unsupported_actions() {
+    use qail_core::ast::{Qail, SetOp};
+
+    let cmd = Qail::get("safe").with("safe", Qail::export("orders"));
+    assert!(reject_ddl_in_transaction(&cmd).is_err());
+
+    let mut cmd = Qail::add("audit_log");
+    cmd.source_query = Some(Box::new(Qail::export("orders")));
+    assert!(reject_ddl_in_transaction(&cmd).is_err());
+
+    let mut cmd = Qail::get("orders");
+    cmd.set_ops
+        .push((SetOp::UnionAll, Box::new(Qail::export("archived_orders"))));
+    assert!(reject_ddl_in_transaction(&cmd).is_err());
+}
+
+#[test]
 fn test_savepoint_name_validation() {
     // Valid names
     assert!("sp1".chars().all(|c| c.is_alphanumeric() || c == '_'));

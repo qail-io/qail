@@ -326,7 +326,9 @@ pub async fn execute_batch(
 
                 if !command_is_read_only {
                     batch_has_write = true;
-                    state.cache.invalidate_table(&cmd.table);
+                    for cache_table in cache_tables_for_qail(&cmd) {
+                        state.cache.invalidate_table(&cache_table);
+                    }
                 }
 
                 results.push(BatchQueryResult {
