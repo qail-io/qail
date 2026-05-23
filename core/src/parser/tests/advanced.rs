@@ -26,6 +26,11 @@ fn test_parse_session_commands() {
     assert_eq!(set_cmd.table, "statement_timeout");
     assert_eq!(set_cmd.payload.as_deref(), Some("5000"));
 
+    let set_guc_cmd = parse("session set app.current_tenant_id = 'tenant-1'").unwrap();
+    assert_eq!(set_guc_cmd.action, Action::SessionSet);
+    assert_eq!(set_guc_cmd.table, "app.current_tenant_id");
+    assert_eq!(set_guc_cmd.payload.as_deref(), Some("tenant-1"));
+
     let show_cmd = parse("session show statement_timeout").unwrap();
     assert_eq!(show_cmd.action, Action::SessionShow);
     assert_eq!(show_cmd.table, "statement_timeout");
@@ -33,6 +38,15 @@ fn test_parse_session_commands() {
     let reset_cmd = parse("session reset statement_timeout").unwrap();
     assert_eq!(reset_cmd.action, Action::SessionReset);
     assert_eq!(reset_cmd.table, "statement_timeout");
+}
+
+#[test]
+fn test_session_setting_keys_reject_malformed_names() {
+    assert!(parse("session set app..current_tenant_id = tenant-1").is_err());
+    assert!(parse("session set 1app.current_tenant_id = tenant-1").is_err());
+    assert!(parse("session set app-current_tenant_id = tenant-1").is_err());
+    assert!(parse("session show app..current_tenant_id").is_err());
+    assert!(parse("session reset app-current_tenant_id").is_err());
 }
 
 fn first_op(query: &str) -> Operator {

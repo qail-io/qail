@@ -29,7 +29,7 @@ use crate::ast::*;
 pub use conditions::ConditionToSql;
 pub use dialect::Dialect;
 pub use traits::SqlGenerator;
-pub use traits::escape_identifier;
+pub use traits::{escape_identifier, escape_sql_string_literal};
 
 /// Result of transpilation with extracted parameters.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -387,13 +387,17 @@ impl ToSql for Qail {
             }
             Action::SessionSet => {
                 let value = self.payload.as_deref().unwrap_or("");
-                format!("SET {} = '{}'", self.table, value)
+                format!(
+                    "SET {} = '{}'",
+                    session_setting_name_to_sql(&self.table),
+                    escape_sql_string_literal(value)
+                )
             }
             Action::SessionShow => {
-                format!("SHOW {}", self.table)
+                format!("SHOW {}", session_setting_name_to_sql(&self.table))
             }
             Action::SessionReset => {
-                format!("RESET {}", self.table)
+                format!("RESET {}", session_setting_name_to_sql(&self.table))
             }
             Action::CreateDatabase => {
                 format!("CREATE DATABASE {}", escape_identifier(&self.table))
@@ -448,6 +452,23 @@ impl ToSql for Qail {
             }
         }
     }
+}
+
+fn session_setting_name_to_sql(name: &str) -> String {
+    if is_valid_session_setting_name(name) {
+        name.to_string()
+    } else {
+        escape_identifier(name)
+    }
+}
+
+fn is_valid_session_setting_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('.').all(|part| {
+            let mut chars = part.chars();
+            matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
 }
 
 impl ToSqlParameterized for Qail {

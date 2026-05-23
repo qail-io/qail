@@ -42,6 +42,30 @@ fn test_select_with_order() {
 }
 
 #[test]
+fn test_session_set_escapes_values() {
+    let cmd = parse(
+        "session set app.current_tenant_id = t1'; SET app.is_super_admin = 'true'; SELECT 'ok",
+    )
+    .unwrap();
+
+    assert_eq!(
+        cmd.to_sql(),
+        "SET app.current_tenant_id = 't1''; SET app.is_super_admin = ''true''; SELECT ''ok'"
+    );
+}
+
+#[test]
+fn test_session_builder_escapes_malformed_setting_names() {
+    use crate::ast::Qail;
+
+    let cmd = Qail::session_set("statement_timeout; RESET ALL", "5000");
+    assert_eq!(
+        cmd.to_sql(),
+        "SET \"statement_timeout; RESET ALL\" = '5000'"
+    );
+}
+
+#[test]
 fn test_select_complex() {
     let cmd =
         parse("get users fields id, email where active = true order by created_at desc limit 10")

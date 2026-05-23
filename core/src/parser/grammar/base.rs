@@ -421,7 +421,7 @@ fn parse_session_command(input: &str) -> IResult<&str, Qail> {
     // session set <key> = <value>
     if let Ok((input, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("set").parse(input) {
         let (input, _) = multispace1(input)?;
-        let (input, key) = parse_identifier(input)?;
+        let (input, key) = parse_session_setting_key(input)?;
         let (input, _) = multispace0(input)?;
         let (input, _) = opt(char('=')).parse(input)?;
         let value = input.trim().trim_end_matches(';').trim();
@@ -446,7 +446,7 @@ fn parse_session_command(input: &str) -> IResult<&str, Qail> {
     // session show <key>
     if let Ok((input, _)) = tag_no_case::<_, _, nom::error::Error<&str>>("show").parse(input) {
         let (input, _) = multispace1(input)?;
-        let (input, key) = parse_identifier(input)?;
+        let (input, key) = parse_session_setting_key(input)?;
         let trailing = input.trim().trim_end_matches(';').trim();
         if !trailing.is_empty() {
             return Err(nom::Err::Error(nom::error::Error::new(
@@ -467,7 +467,7 @@ fn parse_session_command(input: &str) -> IResult<&str, Qail> {
     // session reset <key>
     let (input, _) = tag_no_case("reset").parse(input)?;
     let (input, _) = multispace1(input)?;
-    let (input, key) = parse_identifier(input)?;
+    let (input, key) = parse_session_setting_key(input)?;
     let trailing = input.trim().trim_end_matches(';').trim();
     if !trailing.is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -483,6 +483,31 @@ fn parse_session_command(input: &str) -> IResult<&str, Qail> {
             ..Default::default()
         },
     ))
+}
+
+fn parse_session_setting_key(input: &str) -> IResult<&str, &str> {
+    let end = input
+        .char_indices()
+        .find_map(|(idx, ch)| (ch.is_whitespace() || ch == '=' || ch == ';').then_some(idx))
+        .unwrap_or(input.len());
+    let key = &input[..end];
+    if is_valid_session_setting_key(key) {
+        Ok((&input[end..], key))
+    } else {
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )))
+    }
+}
+
+fn is_valid_session_setting_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.split('.').all(|part| {
+            let mut chars = part.chars();
+            matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
 }
 
 fn strip_matching_quotes(s: &str) -> &str {
