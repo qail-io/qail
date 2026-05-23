@@ -50,6 +50,27 @@ pub(crate) enum IntrospectedUniqueConstraint {
     Multi(Index),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct IntrospectedConstraintIdentity {
+    pub table: String,
+    pub name: String,
+}
+
+impl IntrospectedConstraintIdentity {
+    pub(crate) fn new(table: String, name: String) -> Self {
+        Self { table, name }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IntrospectedForeignKeyReference {
+    pub constraint: IntrospectedConstraintIdentity,
+    pub referenced_constraint: IntrospectedConstraintIdentity,
+    pub on_delete: FkAction,
+    pub on_update: FkAction,
+    pub deferrable: Deferrable,
+}
+
 /// Output format for schema generation
 #[derive(Clone, Default)]
 pub enum SchemaOutputFormat {
@@ -291,6 +312,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
     // Track constraint → columns for uniqueness and FK detection
     let mut constraint_columns: std::collections::HashMap<String, Vec<IntrospectedKeyColumn>> =
         std::collections::HashMap::new();
+    let mut qualified_constraint_columns: std::collections::HashMap<
+        IntrospectedConstraintIdentity,
+        Vec<IntrospectedKeyColumn>,
+    > = std::collections::HashMap::new();
     for row in &kcu_rows {
         let table = row.text(0);
         let column = row.text(1);
@@ -304,11 +329,23 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
             pk_columns.insert((table.clone(), column.clone()));
         }
         constraint_columns
-            .entry(constraint)
+            .entry(constraint.clone())
+            .or_default()
+            .push(IntrospectedKeyColumn::new(
+                table.clone(),
+                column.clone(),
+                ordinal_position,
+            ));
+        qualified_constraint_columns
+            .entry(IntrospectedConstraintIdentity::new(
+                table.clone(),
+                constraint,
+            ))
             .or_default()
             .push(IntrospectedKeyColumn::new(table, column, ordinal_position));
     }
     sort_introspected_key_columns(&mut constraint_columns);
+    sort_qualified_introspected_key_columns(&mut qualified_constraint_columns);
 
     // Mark primary key columns
     for (table_name, columns) in tables.iter_mut() {
@@ -441,14 +478,10 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         }
     }
 
-    // Get FK constraint names, referenced constraint, and ON DELETE/UPDATE rules
+    // Get FK constraint names and referenced constraints. Actions come from
+    // pg_constraint below because this view is keyed by bare constraint name.
     let fk_ref_cmd = Qail::get("information_schema.referential_constraints")
-        .columns([
-            "constraint_name",
-            "unique_constraint_name",
-            "delete_rule",
-            "update_rule",
-        ])
+        .columns(["constraint_name", "unique_constraint_name"])
         .filter("constraint_schema", Operator::Eq, "public");
 
     let fk_ref_rows = driver
@@ -456,42 +489,59 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query foreign key refs: {}", e))?;
 
-    // Map FK constraint_name → (referenced constraint_name, on_delete, on_update)
-    let mut fk_to_ref: std::collections::HashMap<
-        String,
-        (
-            String,
-            qail_core::migrate::schema::FkAction,
-            qail_core::migrate::schema::FkAction,
-        ),
-    > = std::collections::HashMap::new();
+    // Map bare FK constraint name → candidate referenced constraints. PostgreSQL
+    // allows duplicate FK names on different tables, so source table identity is
+    // added from pg_constraint before resolving.
+    let mut fk_ref_candidates: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     for row in fk_ref_rows {
         let fk_constraint = row.text(0);
         let unique_constraint = row.text(1);
-        let delete_rule = parse_fk_action(&row.text(2));
-        let update_rule = parse_fk_action(&row.text(3));
-        fk_to_ref.insert(fk_constraint, (unique_constraint, delete_rule, update_rule));
+        fk_ref_candidates
+            .entry(fk_constraint)
+            .or_default()
+            .push(unique_constraint);
     }
 
-    // ── 5b. Deferrable FK Detection ──────────────────────────────────────
-    let defer_cmd = Qail::get("pg_catalog.pg_constraint")
-        .columns(["conname", "condeferrable", "condeferred"])
-        .filter("contype", Operator::Eq, "f")
-        .filter("connamespace", Operator::Eq, public_namespace_oid.clone());
+    // ── 5b. Qualified FK source/reference tables + deferrability ─────────
+    let fk_catalog_cmd = Qail::get(
+        "pg_catalog.pg_constraint con \
+         JOIN pg_catalog.pg_class src ON src.oid = con.conrelid \
+         JOIN pg_catalog.pg_class ref ON ref.oid = con.confrelid",
+    )
+    .columns([
+        "con.conname",
+        "src.relname",
+        "ref.relname",
+        "con.condeferrable",
+        "con.condeferred",
+        "con.confdeltype",
+        "con.confupdtype",
+    ])
+    .filter("con.contype", Operator::Eq, "f")
+    .filter(
+        "con.connamespace",
+        Operator::Eq,
+        public_namespace_oid.clone(),
+    );
 
-    let defer_rows = driver
-        .fetch_all(&defer_cmd)
+    let fk_catalog_rows = driver
+        .fetch_all(&fk_catalog_cmd)
         .await
-        .map_err(|e| anyhow!("Failed to query deferrable constraints: {}", e))?;
+        .map_err(|e| anyhow!("Failed to query FK constraint metadata: {}", e))?;
 
-    let mut deferrable_map: std::collections::HashMap<
-        String,
-        qail_core::migrate::schema::Deferrable,
-    > = std::collections::HashMap::new();
-    for row in defer_rows {
-        let conname = row.text(0);
-        let condeferrable = row.text(1) == "t";
-        let condeferred = row.text(2) == "t";
+    let mut fk_references = Vec::new();
+    for row in fk_catalog_rows {
+        let constraint_name = row.text(0);
+        let source_table = row.text(1);
+        let ref_table = row.text(2);
+        if !base_tables.contains(&source_table) {
+            continue;
+        }
+        let condeferrable = row.text(3) == "t";
+        let condeferred = row.text(4) == "t";
+        let on_delete = parse_pg_constraint_fk_action(&row.text(5));
+        let on_update = parse_pg_constraint_fk_action(&row.text(6));
         let status = if condeferred {
             qail_core::migrate::schema::Deferrable::InitiallyDeferred
         } else if condeferrable {
@@ -499,32 +549,39 @@ async fn inspect_postgres(url: &str) -> Result<Schema> {
         } else {
             qail_core::migrate::schema::Deferrable::NotDeferrable
         };
-        deferrable_map.insert(conname, status);
+
+        let Some(candidates) = fk_ref_candidates.get(&constraint_name) else {
+            continue;
+        };
+        let Some(ref_constraint) = candidates.iter().find(|ref_constraint| {
+            qualified_constraint_columns.contains_key(&IntrospectedConstraintIdentity::new(
+                ref_table.clone(),
+                (*ref_constraint).clone(),
+            ))
+        }) else {
+            continue;
+        };
+
+        fk_references.push(IntrospectedForeignKeyReference {
+            constraint: IntrospectedConstraintIdentity::new(source_table, constraint_name),
+            referenced_constraint: IntrospectedConstraintIdentity::new(
+                ref_table,
+                ref_constraint.clone(),
+            ),
+            on_delete,
+            on_update,
+            deferrable: status,
+        });
     }
 
     let mut table_multi_column_fks: std::collections::HashMap<String, Vec<MultiColumnForeignKey>> =
         std::collections::HashMap::new();
 
     // Resolve FK source column → referenced table.column with actions
-    for (fk_constraint, (ref_constraint, on_delete, on_update)) in &fk_to_ref {
-        let fk_cols = constraint_columns.get(fk_constraint.as_str());
-        let ref_cols = constraint_columns.get(ref_constraint.as_str());
-
-        let Some((fk_list, ref_list)) = fk_cols.zip(ref_cols) else {
-            continue;
-        };
-        let def_status = deferrable_map
-            .get(fk_constraint.as_str())
-            .cloned()
-            .unwrap_or(Deferrable::NotDeferrable);
-
-        match resolve_introspected_foreign_key(
-            fk_constraint,
-            fk_list,
-            ref_list,
-            on_delete,
-            on_update,
-            def_status,
+    for fk_reference in &fk_references {
+        match resolve_qualified_introspected_foreign_key(
+            fk_reference,
+            &qualified_constraint_columns,
         ) {
             Some(IntrospectedForeignKey::Single {
                 table,
@@ -1461,19 +1518,29 @@ fn is_trivial_not_null_check(check_clause: &str) -> bool {
         && normalized.split_whitespace().count() <= 4
 }
 
-/// Map information_schema FK rule string to FkAction enum
-fn parse_fk_action(rule: &str) -> qail_core::migrate::schema::FkAction {
-    match rule {
-        "CASCADE" => qail_core::migrate::schema::FkAction::Cascade,
-        "SET NULL" => qail_core::migrate::schema::FkAction::SetNull,
-        "SET DEFAULT" => qail_core::migrate::schema::FkAction::SetDefault,
-        "RESTRICT" => qail_core::migrate::schema::FkAction::Restrict,
-        _ => qail_core::migrate::schema::FkAction::NoAction,
+pub(crate) fn parse_pg_constraint_fk_action(code: &str) -> FkAction {
+    match code {
+        "c" => FkAction::Cascade,
+        "n" => FkAction::SetNull,
+        "d" => FkAction::SetDefault,
+        "r" => FkAction::Restrict,
+        _ => FkAction::NoAction,
     }
 }
 
 pub(crate) fn sort_introspected_key_columns(
     constraints: &mut std::collections::HashMap<String, Vec<IntrospectedKeyColumn>>,
+) {
+    for cols in constraints.values_mut() {
+        cols.sort_by_key(|col| col.ordinal_position);
+    }
+}
+
+pub(crate) fn sort_qualified_introspected_key_columns(
+    constraints: &mut std::collections::HashMap<
+        IntrospectedConstraintIdentity,
+        Vec<IntrospectedKeyColumn>,
+    >,
 ) {
     for cols in constraints.values_mut() {
         cols.sort_by_key(|col| col.ordinal_position);
@@ -1600,6 +1667,26 @@ pub(crate) fn resolve_introspected_foreign_key(
             },
         },
     })
+}
+
+pub(crate) fn resolve_qualified_introspected_foreign_key(
+    reference: &IntrospectedForeignKeyReference,
+    constraint_columns: &std::collections::HashMap<
+        IntrospectedConstraintIdentity,
+        Vec<IntrospectedKeyColumn>,
+    >,
+) -> Option<IntrospectedForeignKey> {
+    let fk_list = constraint_columns.get(&reference.constraint)?;
+    let ref_list = constraint_columns.get(&reference.referenced_constraint)?;
+
+    resolve_introspected_foreign_key(
+        &reference.constraint.name,
+        fk_list,
+        ref_list,
+        &reference.on_delete,
+        &reference.on_update,
+        reference.deferrable.clone(),
+    )
 }
 
 fn same_key_column_table(cols: &[IntrospectedKeyColumn]) -> Option<&str> {
@@ -1818,6 +1905,96 @@ mod tests {
         );
 
         assert!(matches!(generated, Some(Generated::ByDefaultIdentity)));
+    }
+
+    #[test]
+    fn resolves_duplicate_named_foreign_keys_with_qualified_identity() {
+        let mut constraint_columns = std::collections::HashMap::from([
+            (
+                IntrospectedConstraintIdentity::new("orders".to_string(), "tenant_fk".to_string()),
+                vec![key("orders", "tenant_id", 1)],
+            ),
+            (
+                IntrospectedConstraintIdentity::new(
+                    "invoices".to_string(),
+                    "tenant_fk".to_string(),
+                ),
+                vec![key("invoices", "tenant_id", 1)],
+            ),
+            (
+                IntrospectedConstraintIdentity::new(
+                    "tenants".to_string(),
+                    "tenants_pkey".to_string(),
+                ),
+                vec![key("tenants", "id", 1)],
+            ),
+        ]);
+        sort_qualified_introspected_key_columns(&mut constraint_columns);
+
+        let references = [
+            IntrospectedForeignKeyReference {
+                constraint: IntrospectedConstraintIdentity::new(
+                    "orders".to_string(),
+                    "tenant_fk".to_string(),
+                ),
+                referenced_constraint: IntrospectedConstraintIdentity::new(
+                    "tenants".to_string(),
+                    "tenants_pkey".to_string(),
+                ),
+                on_delete: FkAction::Cascade,
+                on_update: FkAction::NoAction,
+                deferrable: Deferrable::NotDeferrable,
+            },
+            IntrospectedForeignKeyReference {
+                constraint: IntrospectedConstraintIdentity::new(
+                    "invoices".to_string(),
+                    "tenant_fk".to_string(),
+                ),
+                referenced_constraint: IntrospectedConstraintIdentity::new(
+                    "tenants".to_string(),
+                    "tenants_pkey".to_string(),
+                ),
+                on_delete: FkAction::Restrict,
+                on_update: FkAction::NoAction,
+                deferrable: Deferrable::NotDeferrable,
+            },
+        ];
+
+        let resolved: Vec<_> = references
+            .iter()
+            .map(|reference| {
+                resolve_qualified_introspected_foreign_key(reference, &constraint_columns)
+                    .expect("duplicate named FK should resolve by table-qualified identity")
+            })
+            .collect();
+
+        let IntrospectedForeignKey::Single {
+            table,
+            column,
+            foreign_key,
+        } = &resolved[0]
+        else {
+            panic!("expected orders single-column FK");
+        };
+        assert_eq!(table, "orders");
+        assert_eq!(column, "tenant_id");
+        assert_eq!(foreign_key.table, "tenants");
+        assert_eq!(foreign_key.column, "id");
+        assert_eq!(foreign_key.on_delete, FkAction::Cascade);
+
+        let IntrospectedForeignKey::Single {
+            table,
+            column,
+            foreign_key,
+        } = &resolved[1]
+        else {
+            panic!("expected invoices single-column FK");
+        };
+        assert_eq!(table, "invoices");
+        assert_eq!(column, "tenant_id");
+        assert_eq!(foreign_key.table, "tenants");
+        assert_eq!(foreign_key.column, "id");
+        assert_eq!(foreign_key.on_delete, FkAction::Restrict);
     }
 
     #[test]

@@ -14,9 +14,11 @@ use qail_core::ast::{Action, Constraint, Expr, Qail};
 use qail_pg::driver::PgDriver;
 
 use crate::introspection::{
-    IntrospectedForeignKey, IntrospectedKeyColumn, IntrospectedUniqueConstraint,
-    introspected_column_generation, resolve_introspected_foreign_key,
-    resolve_introspected_unique_constraint, sort_introspected_key_columns,
+    IntrospectedConstraintIdentity, IntrospectedForeignKey, IntrospectedForeignKeyReference,
+    IntrospectedKeyColumn, IntrospectedUniqueConstraint, introspected_column_generation,
+    parse_pg_constraint_fk_action, resolve_introspected_unique_constraint,
+    resolve_qualified_introspected_foreign_key, sort_introspected_key_columns,
+    sort_qualified_introspected_key_columns,
 };
 use crate::util::{parse_pg_url, redact_url};
 
@@ -572,12 +574,7 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
 
     // 4. Query FK constraints (batch approach, not N+1)
     let fk_ref_cmd = Qail::get("information_schema.referential_constraints")
-        .columns([
-            "constraint_name",
-            "unique_constraint_name",
-            "delete_rule",
-            "update_rule",
-        ])
+        .columns(["constraint_name", "unique_constraint_name"])
         .filter("constraint_schema", Operator::Eq, "public");
 
     let fk_ref_rows = driver
@@ -585,33 +582,46 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query FK refs: {}", e))?;
 
-    // Build FK constraint → (referenced constraint, on_delete, on_update)
-    let mut fk_map: std::collections::HashMap<
-        String,
-        (
-            String,
-            qail_core::migrate::schema::FkAction,
-            qail_core::migrate::schema::FkAction,
-        ),
-    > = std::collections::HashMap::new();
+    // Build bare FK constraint name → candidate referenced constraints. Source
+    // table identity is added from pg_constraint before resolving.
+    let mut fk_ref_candidates: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     for row in fk_ref_rows {
         let fk_name = row.text(0);
         let ref_name = row.text(1);
-        let on_delete = match row.text(2).as_str() {
-            "CASCADE" => qail_core::migrate::schema::FkAction::Cascade,
-            "SET NULL" => qail_core::migrate::schema::FkAction::SetNull,
-            "SET DEFAULT" => qail_core::migrate::schema::FkAction::SetDefault,
-            "RESTRICT" => qail_core::migrate::schema::FkAction::Restrict,
-            _ => qail_core::migrate::schema::FkAction::NoAction,
-        };
-        let on_update = match row.text(3).as_str() {
-            "CASCADE" => qail_core::migrate::schema::FkAction::Cascade,
-            "SET NULL" => qail_core::migrate::schema::FkAction::SetNull,
-            "SET DEFAULT" => qail_core::migrate::schema::FkAction::SetDefault,
-            "RESTRICT" => qail_core::migrate::schema::FkAction::Restrict,
-            _ => qail_core::migrate::schema::FkAction::NoAction,
-        };
-        fk_map.insert(fk_name, (ref_name, on_delete, on_update));
+        fk_ref_candidates.entry(fk_name).or_default().push(ref_name);
+    }
+
+    let fk_catalog_cmd = Qail::get(
+        "pg_catalog.pg_constraint con \
+         JOIN pg_catalog.pg_class src ON src.oid = con.conrelid \
+         JOIN pg_catalog.pg_class ref ON ref.oid = con.confrelid \
+         JOIN pg_catalog.pg_namespace ns ON ns.oid = con.connamespace",
+    )
+    .columns([
+        "con.conname",
+        "src.relname",
+        "ref.relname",
+        "con.confdeltype",
+        "con.confupdtype",
+    ])
+    .filter("con.contype", Operator::Eq, "f")
+    .filter("ns.nspname", Operator::Eq, "public");
+
+    let fk_catalog_rows = driver
+        .fetch_all(&fk_catalog_cmd)
+        .await
+        .map_err(|e| anyhow!("Failed to query FK constraint metadata: {}", e))?;
+
+    let mut fk_catalog_metadata = Vec::new();
+    for row in fk_catalog_rows {
+        fk_catalog_metadata.push((
+            row.text(0),
+            row.text(1),
+            row.text(2),
+            parse_pg_constraint_fk_action(&row.text(3)),
+            parse_pg_constraint_fk_action(&row.text(4)),
+        ));
     }
 
     // Batch query key_column_usage for FK resolution
@@ -629,8 +639,10 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
         .await
         .map_err(|e| anyhow!("Failed to query key columns: {}", e))?;
 
-    let mut constraint_cols: std::collections::HashMap<String, Vec<IntrospectedKeyColumn>> =
-        std::collections::HashMap::new();
+    let mut constraint_cols: std::collections::HashMap<
+        IntrospectedConstraintIdentity,
+        Vec<IntrospectedKeyColumn>,
+    > = std::collections::HashMap::new();
     for row in &kcu_rows {
         let table = row.text(0);
         let column = row.text(1);
@@ -640,29 +652,47 @@ pub async fn introspect_schema(driver: &mut PgDriver) -> Result<Schema> {
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(0);
         constraint_cols
-            .entry(constraint)
+            .entry(IntrospectedConstraintIdentity::new(
+                table.clone(),
+                constraint,
+            ))
             .or_default()
             .push(IntrospectedKeyColumn::new(table, column, ordinal_position));
     }
-    sort_introspected_key_columns(&mut constraint_cols);
+    sort_qualified_introspected_key_columns(&mut constraint_cols);
 
-    // Resolve FKs
-    for (fk_name, (ref_name, on_delete, on_update)) in &fk_map {
-        let fk_cols = constraint_cols.get(fk_name.as_str());
-        let ref_cols = constraint_cols.get(ref_name.as_str());
-
-        let Some((fk_list, ref_list)) = fk_cols.zip(ref_cols) else {
+    let mut fk_references = Vec::new();
+    for (constraint_name, source_table, ref_table, on_delete, on_update) in fk_catalog_metadata {
+        if !schema.tables.contains_key(&source_table) {
+            continue;
+        }
+        let Some(candidates) = fk_ref_candidates.get(&constraint_name) else {
+            continue;
+        };
+        let Some(ref_constraint) = candidates.iter().find(|ref_constraint| {
+            constraint_cols.contains_key(&IntrospectedConstraintIdentity::new(
+                ref_table.clone(),
+                (*ref_constraint).clone(),
+            ))
+        }) else {
             continue;
         };
 
-        match resolve_introspected_foreign_key(
-            fk_name,
-            fk_list,
-            ref_list,
+        fk_references.push(IntrospectedForeignKeyReference {
+            constraint: IntrospectedConstraintIdentity::new(source_table, constraint_name),
+            referenced_constraint: IntrospectedConstraintIdentity::new(
+                ref_table,
+                ref_constraint.clone(),
+            ),
             on_delete,
             on_update,
-            qail_core::migrate::schema::Deferrable::NotDeferrable,
-        ) {
+            deferrable: qail_core::migrate::schema::Deferrable::NotDeferrable,
+        });
+    }
+
+    // Resolve FKs
+    for fk_reference in &fk_references {
+        match resolve_qualified_introspected_foreign_key(fk_reference, &constraint_cols) {
             Some(IntrospectedForeignKey::Single {
                 table,
                 column,
