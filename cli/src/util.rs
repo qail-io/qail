@@ -117,26 +117,33 @@ fn default_port(scheme: &str) -> u16 {
 }
 
 fn percent_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2
-                && let Ok(byte) = u8::from_str_radix(&hex, 16)
-            {
-                result.push(byte as char);
-                continue;
-            }
-            result.push('%');
-            result.push_str(&hex);
-        } else {
-            result.push(c);
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
         }
     }
 
-    result
+    let bytes = s.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            decoded.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 #[cfg(test)]
@@ -204,6 +211,17 @@ mod tests {
         assert_eq!(user, "us@er");
         assert_eq!(password, Some("p@ss/word".to_string()));
         assert_eq!(database, "my/db");
+    }
+
+    #[test]
+    fn test_parse_pg_url_decodes_utf8_percent_encoding() {
+        let (host, _port, user, password, database) =
+            parse_pg_url("postgres://caf%C3%A9:p%C3%A9ss@db.example.com/app_%E2%9C%93").unwrap();
+
+        assert_eq!(host, "db.example.com");
+        assert_eq!(user, "café");
+        assert_eq!(password, Some("péss".to_string()));
+        assert_eq!(database, "app_✓");
     }
 
     #[test]
