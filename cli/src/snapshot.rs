@@ -4,9 +4,11 @@
 //! Snapshots are REST-only (not gRPC) and stored as .tar archives.
 
 use crate::colors::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use url::Url;
 
 /// Snapshot info returned by Qdrant.
 #[derive(Debug, Deserialize)]
@@ -42,7 +44,7 @@ pub async fn snapshot_create(collection: &str, url: &str) -> Result<SnapshotInfo
     );
 
     let client = Client::new();
-    let endpoint = format!("{}/collections/{}/snapshots", url, collection);
+    let endpoint = qdrant_endpoint(url, &["collections", collection, "snapshots"])?;
 
     let response = client.post(&endpoint).send().await?;
 
@@ -61,7 +63,7 @@ pub async fn snapshot_create(collection: &str, url: &str) -> Result<SnapshotInfo
 /// List snapshots for a collection.
 pub async fn snapshot_list(collection: &str, url: &str) -> Result<Vec<SnapshotInfo>> {
     let client = Client::new();
-    let endpoint = format!("{}/collections/{}/snapshots", url, collection);
+    let endpoint = qdrant_endpoint(url, &["collections", collection, "snapshots"])?;
 
     let response = client.get(&endpoint).send().await?;
 
@@ -96,12 +98,12 @@ pub async fn snapshot_download(
     );
 
     let client = Client::new();
-    let endpoint = format!(
-        "{}/collections/{}/snapshots/{}",
-        url, collection, snapshot_name
-    );
+    let endpoint = qdrant_endpoint(
+        url,
+        &["collections", collection, "snapshots", snapshot_name],
+    )?;
 
-    let response = client.get(&endpoint).send().await?;
+    let mut response = client.get(&endpoint).send().await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -109,13 +111,18 @@ pub async fn snapshot_download(
         anyhow::bail!("Snapshot download failed: {} - {}", status, body);
     }
 
-    let bytes = response.bytes().await?;
-    std::fs::write(output_path, &bytes)?;
+    let mut file = tokio::fs::File::create(output_path).await?;
+    let mut bytes_written: u64 = 0;
+    while let Some(chunk) = response.chunk().await? {
+        file.write_all(&chunk).await?;
+        bytes_written += chunk.len() as u64;
+    }
+    file.flush().await?;
 
     println!(
         "{} Downloaded {} bytes to {}",
         "✓".green(),
-        bytes.len(),
+        bytes_written,
         output_path
     );
     Ok(())
@@ -131,7 +138,7 @@ pub async fn snapshot_restore(collection: &str, snapshot_location: &str, url: &s
     println!("  Location: {}", snapshot_location);
 
     let client = Client::new();
-    let endpoint = format!("{}/collections/{}/snapshots/recover", url, collection);
+    let endpoint = qdrant_endpoint(url, &["collections", collection, "snapshots", "recover"])?;
 
     let request = SnapshotRecoverRequest {
         location: snapshot_location.to_string(),
@@ -157,10 +164,10 @@ pub async fn snapshot_restore(collection: &str, snapshot_location: &str, url: &s
 /// Delete a snapshot.
 pub async fn snapshot_delete(collection: &str, snapshot_name: &str, url: &str) -> Result<()> {
     let client = Client::new();
-    let endpoint = format!(
-        "{}/collections/{}/snapshots/{}",
-        url, collection, snapshot_name
-    );
+    let endpoint = qdrant_endpoint(
+        url,
+        &["collections", collection, "snapshots", snapshot_name],
+    )?;
 
     let response = client.delete(&endpoint).send().await?;
 
@@ -172,4 +179,51 @@ pub async fn snapshot_delete(collection: &str, snapshot_name: &str, url: &str) -
 
     println!("{} Snapshot '{}' deleted", "✓".green(), snapshot_name);
     Ok(())
+}
+
+fn qdrant_endpoint(base_url: &str, segments: &[&str]) -> Result<String> {
+    let mut url = Url::parse(base_url).context("Invalid Qdrant URL")?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("Qdrant URL cannot be used as a path base"))?;
+        path.pop_if_empty();
+        for segment in segments {
+            path.push(segment);
+        }
+    }
+    Ok(url.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::qdrant_endpoint;
+
+    #[test]
+    fn qdrant_endpoint_encodes_collection_and_snapshot_segments() {
+        let endpoint = qdrant_endpoint(
+            "http://localhost:6333",
+            &["collections", "tenant/a?x", "snapshots", "snap 1.tar"],
+        )
+        .unwrap();
+
+        assert_eq!(
+            endpoint,
+            "http://localhost:6333/collections/tenant%2Fa%3Fx/snapshots/snap%201.tar"
+        );
+    }
+
+    #[test]
+    fn qdrant_endpoint_preserves_base_path_without_double_slash() {
+        let endpoint = qdrant_endpoint(
+            "http://localhost:6333/api/",
+            &["collections", "products", "snapshots"],
+        )
+        .unwrap();
+
+        assert_eq!(
+            endpoint,
+            "http://localhost:6333/api/collections/products/snapshots"
+        );
+    }
 }
