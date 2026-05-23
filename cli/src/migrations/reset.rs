@@ -15,6 +15,19 @@ use crate::migrations::{
 };
 use crate::util::parse_pg_url;
 
+async fn migration_history_table_exists(driver: &mut PgDriver) -> Result<bool> {
+    let exists_cmd = qail_core::prelude::Qail::get("information_schema.tables")
+        .column("1")
+        .where_eq("table_schema", "public")
+        .where_eq("table_name", "_qail_migrations")
+        .limit(1);
+    let rows = driver
+        .fetch_all(&exists_cmd)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check migration history table: {}", e))?;
+    Ok(!rows.is_empty())
+}
+
 /// Reset database: drop all objects, clear migration history, re-apply target schema.
 pub async fn migrate_reset(
     schema_file: &str,
@@ -76,16 +89,18 @@ pub async fn migrate_reset(
         )
     })?;
 
+    let history_table_exists = migration_history_table_exists(&mut driver).await?;
+
+    driver
+        .begin()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to begin reset transaction: {}", e))?;
+
     // === Phase 1: DROP everything ===
     if drop_cmds.is_empty() {
         println!("  {} No objects to drop", "○".dimmed());
     } else {
         println!("  {} Dropping {} object(s)...", "↓".red(), drop_cmds.len());
-
-        driver
-            .begin()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
 
         for (i, cmd) in drop_cmds.iter().enumerate() {
             print!("    [{}] {} ", i + 1, format!("{:?}", cmd.action).red());
@@ -98,31 +113,27 @@ pub async fn migrate_reset(
                 }
             }
         }
-
-        driver
-            .commit()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to commit drops: {}", e))?;
     }
 
     // === Phase 2: Clear migration history ===
     println!("  {} Clearing migration history...", "⊘".yellow());
-    let clear_cmd = qail_core::prelude::Qail::del("_qail_migrations");
-    match driver.execute(&clear_cmd).await {
-        Ok(_) => println!("  {} Cleared migration history", "✓".green()),
-        Err(e) => {
-            let msg = e.to_string();
-            // Table doesn't exist yet — that's fine for reset
-            if msg.contains("does not exist") || msg.contains("42P01") {
-                println!("  {} No migration history to clear", "○".dimmed());
-            } else {
+    if history_table_exists {
+        let clear_cmd = qail_core::prelude::Qail::del("_qail_migrations");
+        match driver.execute(&clear_cmd).await {
+            Ok(_) => println!("  {} Cleared migration history", "✓".green()),
+            Err(e) => {
+                let _ = driver.rollback().await;
                 anyhow::bail!(
                     "Failed to clear migration history (stale rows may cause drift): {}",
                     e
                 );
             }
         }
+    } else {
+        println!("  {} No migration history to clear", "○".dimmed());
     }
+
+    let mut recorded_version = None;
 
     // === Phase 3: CREATE everything ===
     if create_cmds.is_empty() {
@@ -137,11 +148,6 @@ pub async fn migrate_reset(
         // Capture start time before create phase for accurate receipts
         let started_ms = now_epoch_ms();
 
-        driver
-            .begin()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
-
         for (i, cmd) in create_cmds.iter().enumerate() {
             print!("    [{}] {} ", i + 1, format!("{:?}", cmd.action).green());
             match driver.execute(cmd).await {
@@ -155,9 +161,13 @@ pub async fn migrate_reset(
         }
 
         // Record migration
-        ensure_migration_table(&mut driver)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to bootstrap migration table: {}", e))?;
+        if let Err(e) = ensure_migration_table(&mut driver).await {
+            let _ = driver.rollback().await;
+            return Err(anyhow::anyhow!(
+                "Failed to bootstrap migration table: {}",
+                e
+            ));
+        }
 
         let version = crate::time::timestamp_version();
         let name = format!("reset_{}", version);
@@ -182,15 +192,19 @@ pub async fn migrate_reset(
             )),
             shadow_checksum: None,
         };
-        write_migration_receipt(&mut driver, &receipt)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to record migration: {}", e))?;
+        if let Err(e) = write_migration_receipt(&mut driver, &receipt).await {
+            let _ = driver.rollback().await;
+            return Err(anyhow::anyhow!("Failed to record migration: {}", e));
+        }
+        recorded_version = Some(version);
+    }
 
-        driver
-            .commit()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to commit creates: {}", e))?;
+    driver
+        .commit()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to commit reset transaction: {}", e))?;
 
+    if let Some(version) = recorded_version {
         println!(
             "\n  {} Recorded as migration: {}",
             "✓".green(),
@@ -205,4 +219,108 @@ pub async fn migrate_reset(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrate_reset;
+    use qail_core::prelude::Qail;
+    use qail_pg::PgDriver;
+
+    async fn table_exists(pg: &mut PgDriver, table: &str) -> bool {
+        let cmd = Qail::get("information_schema.tables")
+            .column("1")
+            .where_eq("table_schema", "public")
+            .where_eq("table_name", table)
+            .limit(1);
+        match pg.fetch_all(&cmd).await {
+            Ok(rows) => !rows.is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    async fn version_exists(pg: &mut PgDriver, version: &str) -> bool {
+        let cmd = Qail::get("_qail_migrations")
+            .column("version")
+            .where_eq("version", version)
+            .limit(1);
+        match pg.query_ast(&cmd).await {
+            Ok(result) => !result.rows.is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_create_failure_rolls_back_drops_and_history_cleanup_in_real_db() {
+        let Some(url) = std::env::var("QAIL_TEST_DB_URL").ok() else {
+            eprintln!("Skipping reset atomicity DB test (set QAIL_TEST_DB_URL)");
+            return;
+        };
+
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            crate::time::timestamp_version()
+        );
+        let marker_table = format!("reset_atomic_marker_{}", suffix);
+        let seed_version = format!("reset_atomic_seed_{}.up.qail", suffix);
+        let schema_file = std::env::temp_dir().join(format!("reset_atomic_{}.qail", suffix));
+
+        let mut pg = PgDriver::connect_url(&url)
+            .await
+            .expect("connect QAIL_TEST_DB_URL");
+        crate::migrations::ensure_migration_table(&mut pg)
+            .await
+            .expect("bootstrap _qail_migrations");
+
+        let _ = pg
+            .execute_simple(&format!("DROP TABLE IF EXISTS {} CASCADE", marker_table))
+            .await;
+        let cleanup_seed = Qail::del("_qail_migrations").where_eq("version", seed_version.as_str());
+        let _ = pg.execute(&cleanup_seed).await;
+
+        pg.execute_simple(&format!("CREATE TABLE {} (id integer)", marker_table))
+            .await
+            .expect("create marker table");
+        let seed = Qail::add("_qail_migrations")
+            .set_value("version", seed_version.as_str())
+            .set_value("name", "reset_atomic_seed")
+            .set_value("checksum", "reset_atomic_seed_checksum")
+            .set_value("sql_up", "-- reset atomic seed");
+        pg.execute(&seed).await.expect("seed migration history");
+
+        std::fs::write(
+            &schema_file,
+            "table _qail_migrations {\n  id serial primary_key\n}\n",
+        )
+        .expect("write conflicting reset schema");
+
+        let err = migrate_reset(
+            schema_file.to_str().expect("utf-8 temp path"),
+            &url,
+            true,
+            Some(10),
+        )
+        .await
+        .expect_err("reset should fail when target create conflicts with history table");
+
+        assert!(
+            err.to_string().contains("Create failed"),
+            "unexpected reset error: {err}"
+        );
+        assert!(
+            table_exists(&mut pg, marker_table.as_str()).await,
+            "drop phase should be rolled back when create fails"
+        );
+        assert!(
+            version_exists(&mut pg, seed_version.as_str()).await,
+            "history cleanup should be rolled back when create fails"
+        );
+
+        let _ = pg
+            .execute_simple(&format!("DROP TABLE IF EXISTS {} CASCADE", marker_table))
+            .await;
+        let _ = pg.execute(&cleanup_seed).await;
+        let _ = std::fs::remove_file(&schema_file);
+    }
 }
