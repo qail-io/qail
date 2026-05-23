@@ -357,6 +357,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_database_url_rejects_invalid_scheme_and_missing_host() {
+        assert!(crate::driver::PgDriver::parse_database_url("mysql://user@host/db").is_err());
+        assert!(crate::driver::PgDriver::parse_database_url("postgres://user@:5432/db").is_err());
+        assert!(crate::driver::PgDriver::parse_database_url("postgres://user@host:0/db").is_err());
+    }
+
+    #[test]
+    fn parse_database_url_decodes_utf8_and_bracketed_ipv6() {
+        let (host, port, user, db, pw) = crate::driver::PgDriver::parse_database_url(
+            "postgresql://caf%C3%A9:p%C3%A9ss@[::1]:5544/app_%E2%9C%93",
+        )
+        .unwrap();
+
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 5544);
+        assert_eq!(user, "café");
+        assert_eq!(db, "app_✓");
+        assert_eq!(pw, Some("péss".to_string()));
+    }
+
+    #[test]
     fn connect_options_with_logical_replication_replaces_existing_key() {
         let opts = crate::driver::ConnectOptions::default()
             .with_startup_param("Replication", "true")

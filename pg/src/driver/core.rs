@@ -208,10 +208,15 @@ impl PgDriver {
     pub(crate) fn parse_database_url(
         url: &str,
     ) -> PgResult<(String, u16, String, String, Option<String>)> {
-        // Remove scheme (postgresql:// or postgres://)
-        let after_scheme = url.split("://").nth(1).ok_or_else(|| {
-            PgError::Connection("Invalid DATABASE_URL: missing scheme".to_string())
-        })?;
+        let after_scheme = if let Some(rest) = url.strip_prefix("postgres://") {
+            rest
+        } else if let Some(rest) = url.strip_prefix("postgresql://") {
+            rest
+        } else {
+            return Err(PgError::Connection(
+                "Invalid DATABASE_URL: expected postgres:// or postgresql://".to_string(),
+            ));
+        };
 
         // Split into auth@host parts
         let (auth_part, host_db_part) = if let Some(at_pos) = after_scheme.rfind('@') {
@@ -242,7 +247,7 @@ impl PgDriver {
         let (host_port, database) = if let Some(slash_pos) = host_db_part.find('/') {
             let raw_db = &host_db_part[slash_pos + 1..];
             // Strip ?query params — they're handled separately by connect_url
-            let db = raw_db.split('?').next().unwrap_or(raw_db).to_string();
+            let db = Self::percent_decode(raw_db.split('?').next().unwrap_or(raw_db));
             (&host_db_part[..slash_pos], db)
         } else {
             return Err(PgError::Connection(
@@ -251,48 +256,96 @@ impl PgDriver {
         };
 
         // Parse host:port
-        let (host, port) = if let Some(colon_pos) = host_port.rfind(':') {
+        let (host, port) = if host_port.starts_with('[') {
+            let end = host_port.find(']').ok_or_else(|| {
+                PgError::Connection("Invalid DATABASE_URL: malformed IPv6 host".to_string())
+            })?;
+            let host = &host_port[..=end];
+            if host == "[]" {
+                return Err(PgError::Connection(
+                    "Invalid DATABASE_URL: missing host".to_string(),
+                ));
+            }
+            let suffix = &host_port[end + 1..];
+            let port = if suffix.is_empty() {
+                5432
+            } else if let Some(port_str) = suffix.strip_prefix(':') {
+                Self::parse_database_url_port(port_str)?
+            } else {
+                return Err(PgError::Connection(
+                    "Invalid DATABASE_URL: malformed IPv6 host".to_string(),
+                ));
+            };
+            (host.to_string(), port)
+        } else if let Some(colon_pos) = host_port.rfind(':') {
             let port_str = &host_port[colon_pos + 1..];
-            let port = port_str
-                .parse::<u16>()
-                .map_err(|_| PgError::Connection(format!("Invalid port: {}", port_str)))?;
-            (host_port[..colon_pos].to_string(), port)
+            let host = &host_port[..colon_pos];
+            if host.is_empty() {
+                return Err(PgError::Connection(
+                    "Invalid DATABASE_URL: missing host".to_string(),
+                ));
+            }
+            let port = Self::parse_database_url_port(port_str)?;
+            (host.to_string(), port)
         } else {
+            if host_port.is_empty() {
+                return Err(PgError::Connection(
+                    "Invalid DATABASE_URL: missing host".to_string(),
+                ));
+            }
             (host_port.to_string(), 5432) // Default PostgreSQL port
         };
 
         Ok((host, port, user, database, password))
     }
 
+    fn parse_database_url_port(port_str: &str) -> PgResult<u16> {
+        if port_str.is_empty() {
+            return Err(PgError::Connection(
+                "Invalid DATABASE_URL: missing port after ':'".to_string(),
+            ));
+        }
+        let port = port_str
+            .parse::<u16>()
+            .map_err(|_| PgError::Connection(format!("Invalid port: {}", port_str)))?;
+        if port == 0 {
+            return Err(PgError::Connection(
+                "Invalid port: 0 (expected 1..=65535)".to_string(),
+            ));
+        }
+        Ok(port)
+    }
+
     /// Decode URL percent-encoded string.
     /// Handles common encodings: %20 (space), %2B (+), %3D (=), %40 (@), %2F (/), etc.
     pub(crate) fn percent_decode(s: &str) -> String {
-        let mut result = String::with_capacity(s.len());
-        let mut chars = s.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                // Try to parse next two chars as hex
-                let hex: String = chars.by_ref().take(2).collect();
-                if hex.len() == 2
-                    && let Ok(byte) = u8::from_str_radix(&hex, 16)
-                {
-                    result.push(byte as char);
-                    continue;
-                }
-                // If parsing failed, keep original
-                result.push('%');
-                result.push_str(&hex);
-            } else if c == '+' {
-                // '+' often represents space in query strings (form encoding)
-                // But in path components, keep as-is. PostgreSQL URLs use path encoding.
-                result.push('+');
-            } else {
-                result.push(c);
+        fn hex_value(byte: u8) -> Option<u8> {
+            match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
             }
         }
 
-        result
+        let bytes = s.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+            {
+                decoded.push((hi << 4) | lo);
+                i += 3;
+            } else {
+                decoded.push(bytes[i]);
+                i += 1;
+            }
+        }
+
+        String::from_utf8_lossy(&decoded).into_owned()
     }
 
     /// Connect to PostgreSQL with a connection timeout.
