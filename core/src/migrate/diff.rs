@@ -475,6 +475,21 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> Vec<Qail> {
             columns,
             ..Default::default()
         });
+
+        if table.enable_rls {
+            cmds.push(Qail {
+                action: Action::AlterEnableRls,
+                table: name.clone(),
+                ..Default::default()
+            });
+        }
+        if table.force_rls {
+            cmds.push(Qail {
+                action: Action::AlterForceRls,
+                table: name.clone(),
+                ..Default::default()
+            });
+        }
     }
 
     // Detect dropped tables (only if not already handled by hints)
@@ -1222,6 +1237,35 @@ mod tests {
             sql.contains("REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT"),
             "create-table SQL should preserve FK action clauses, got: {sql}"
         );
+    }
+
+    #[test]
+    fn diff_new_table_emits_rls_commands_after_create() {
+        use super::super::types::ColumnType;
+
+        let old = Schema::default();
+        let mut new = Schema::default();
+        let mut docs = Table::new("docs").column(Column::new("id", ColumnType::Int));
+        docs.enable_rls = true;
+        docs.force_rls = true;
+        new.add_table(docs);
+
+        let cmds = diff_schemas_checked(&old, &new).expect("new RLS table should diff");
+        let make_idx = cmds
+            .iter()
+            .position(|cmd| matches!(cmd.action, Action::Make) && cmd.table == "docs")
+            .expect("create-table command should be present");
+        let enable_idx = cmds
+            .iter()
+            .position(|cmd| matches!(cmd.action, Action::AlterEnableRls) && cmd.table == "docs")
+            .expect("enable RLS command should be present");
+        let force_idx = cmds
+            .iter()
+            .position(|cmd| matches!(cmd.action, Action::AlterForceRls) && cmd.table == "docs")
+            .expect("force RLS command should be present");
+
+        assert!(make_idx < enable_idx);
+        assert!(enable_idx < force_idx);
     }
 
     #[test]
