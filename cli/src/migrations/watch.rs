@@ -7,7 +7,7 @@ use qail_core::migrate::{diff_schemas_checked, parse_qail_file};
 use qail_pg::PgDriver;
 
 use crate::sql_gen::cmd_to_sql;
-use crate::util::parse_pg_url;
+use crate::util::{parse_pg_url, redact_url};
 
 /// Watch a schema file for changes and auto-generate migrations.
 pub async fn watch_schema(schema_path: &str, db_url: Option<&str>, auto_apply: bool) -> Result<()> {
@@ -27,7 +27,7 @@ pub async fn watch_schema(schema_path: &str, db_url: Option<&str>, auto_apply: b
     println!("{}", "👀 QAIL Schema Watch Mode".cyan().bold());
     println!("   Watching: {}", schema_path.yellow());
     if let Some(url) = db_url {
-        println!("   Database: {}", url.yellow());
+        println!("   Database: {}", redact_url(url).yellow());
         if auto_apply {
             println!("   Auto-apply: {}", "enabled".green());
         }

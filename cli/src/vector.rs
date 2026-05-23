@@ -5,6 +5,7 @@
 //! - `qail vector drop` - Delete collection
 
 use crate::colors::*;
+use crate::util::redact_url;
 use anyhow::Result;
 
 /// Create a vector collection in Qdrant.
@@ -31,7 +32,7 @@ pub async fn vector_create(collection: &str, size: u64, distance: &str, url: &st
     );
     println!("  Size: {} dimensions", size);
     println!("  Distance: {:?}", dist);
-    println!("  URL: {}", url);
+    println!("  URL: {}", redact_url(url));
 
     let (host, port) = qdrant_grpc_endpoint(url)?;
 
@@ -57,7 +58,7 @@ pub async fn vector_drop(collection: &str, url: &str) -> Result<()> {
         "→".cyan(),
         collection.yellow()
     );
-    println!("  URL: {}", url);
+    println!("  URL: {}", redact_url(url));
 
     let (host, port) = qdrant_grpc_endpoint(url)?;
 
@@ -80,7 +81,7 @@ fn qdrant_grpc_endpoint(url: &str) -> Result<(String, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::qdrant_grpc_endpoint;
+    use super::{qdrant_grpc_endpoint, redact_url};
 
     #[test]
     fn qdrant_grpc_endpoint_maps_rest_port_to_grpc() {
@@ -103,6 +104,14 @@ mod tests {
         assert_eq!(
             qdrant_grpc_endpoint("http://localhost:7000").unwrap(),
             ("localhost".to_string(), 7000)
+        );
+    }
+
+    #[test]
+    fn vector_display_url_redacts_credentials() {
+        assert_eq!(
+            redact_url("http://qdrant:s3cret@localhost:6333"),
+            "http://qdrant:***@localhost:6333/"
         );
     }
 }

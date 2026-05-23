@@ -78,7 +78,7 @@ pub fn rewrite_url_host(url: &str, new_host: &str, new_port: u16) -> Result<Stri
     Ok(parsed.to_string())
 }
 
-/// Redact the password from a PostgreSQL URL.
+/// Redact the password from a credentialed URL.
 ///
 /// `postgres://user:secret@host:5432/db` → `postgres://user:***@host:5432/db`
 /// Returns the original string unchanged if there is no password.
