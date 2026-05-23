@@ -1,6 +1,8 @@
 use super::*;
 use crate::metrics::{reset_txn_test_metrics, txn_test_metrics_snapshot};
 
+const TEST_AUTH_FINGERPRINT: &str = "test-auth-scope";
+
 async fn insert_test_session(
     mgr: &TransactionSessionManager,
     id: &str,
@@ -14,6 +16,7 @@ async fn insert_test_session(
         conn: None,
         tenant_id: tenant.to_string(),
         user_id: Some("test-user".to_string()),
+        auth_fingerprint: TEST_AUTH_FINGERPRINT.to_string(),
         created_at: now - created_ago,
         last_used: now - last_used_ago,
         closed: false,
@@ -68,6 +71,9 @@ fn test_transaction_error_display() {
     let err = TransactionError::UserMismatch;
     assert!(err.to_string().contains("different user"));
 
+    let err = TransactionError::AuthScopeMismatch;
+    assert!(err.to_string().contains("different auth scope"));
+
     let err = TransactionError::SessionLifetimeExceeded(900);
     assert!(err.to_string().contains("900"));
 
@@ -106,11 +112,38 @@ async fn test_with_session_rejects_user_mismatch() {
             "s_user_mismatch",
             "tenant_um",
             Some("other-user"),
+            TEST_AUTH_FINGERPRINT,
             |_session| Box::pin(async move { Ok(()) }),
         )
         .await;
 
     assert!(matches!(result, Err(TransactionError::UserMismatch)));
+}
+
+#[tokio::test]
+async fn test_with_session_rejects_auth_scope_mismatch() {
+    let mgr = TransactionSessionManager::new(10, 30, 900, 1000);
+    insert_test_session(
+        &mgr,
+        "s_auth_scope_mismatch",
+        "tenant_scope",
+        Duration::from_secs(0),
+        Duration::from_secs(0),
+        0,
+    )
+    .await;
+
+    let result = mgr
+        .with_session(
+            "s_auth_scope_mismatch",
+            "tenant_scope",
+            Some("test-user"),
+            "different-auth-scope",
+            |_session| Box::pin(async move { Ok(()) }),
+        )
+        .await;
+
+    assert!(matches!(result, Err(TransactionError::AuthScopeMismatch)));
 }
 
 #[tokio::test]
@@ -129,9 +162,13 @@ async fn test_with_session_enforces_lifetime_limit_and_records_metrics() {
     .await;
 
     let result = mgr
-        .with_session("s_lifetime", "tenant_a", Some("test-user"), |_session| {
-            Box::pin(async move { Ok(()) })
-        })
+        .with_session(
+            "s_lifetime",
+            "tenant_a",
+            Some("test-user"),
+            TEST_AUTH_FINGERPRINT,
+            |_session| Box::pin(async move { Ok(()) }),
+        )
         .await;
 
     assert!(matches!(
@@ -166,6 +203,7 @@ async fn test_close_session_rejects_commit_after_lifetime_limit_and_records_metr
             "s_commit_lifetime",
             "tenant_commit",
             Some("test-user"),
+            TEST_AUTH_FINGERPRINT,
             true,
         )
         .await;
@@ -198,9 +236,13 @@ async fn test_with_session_enforces_statement_limit_and_records_metrics() {
     .await;
 
     let result = mgr
-        .with_session("s_stmt", "tenant_b", Some("test-user"), |_session| {
-            Box::pin(async move { Ok(()) })
-        })
+        .with_session(
+            "s_stmt",
+            "tenant_b",
+            Some("test-user"),
+            TEST_AUTH_FINGERPRINT,
+            |_session| Box::pin(async move { Ok(()) }),
+        )
         .await;
 
     assert!(matches!(
@@ -260,16 +302,24 @@ async fn test_with_session_allow_aborted_enables_recovery_flow() {
     }
 
     let blocked = mgr
-        .with_session("s_aborted", "tenant_d", Some("test-user"), |_session| {
-            Box::pin(async move { Ok(()) })
-        })
+        .with_session(
+            "s_aborted",
+            "tenant_d",
+            Some("test-user"),
+            TEST_AUTH_FINGERPRINT,
+            |_session| Box::pin(async move { Ok(()) }),
+        )
         .await;
     assert!(matches!(blocked, Err(TransactionError::Aborted)));
 
     let recovered = mgr
-        .with_session_allow_aborted("s_aborted", "tenant_d", Some("test-user"), |_session| {
-            Box::pin(async move { Ok(()) })
-        })
+        .with_session_allow_aborted(
+            "s_aborted",
+            "tenant_d",
+            Some("test-user"),
+            TEST_AUTH_FINGERPRINT,
+            |_session| Box::pin(async move { Ok(()) }),
+        )
         .await;
     // Test helper sessions have no pinned connection. Reaching SessionNotFound
     // here confirms we passed the aborted-state guard.
@@ -291,6 +341,7 @@ async fn test_with_session_refreshes_last_used_after_success_when_database_url_s
         conn: Some(conn),
         tenant_id: "tenant_touch".to_string(),
         user_id: Some("test-user".to_string()),
+        auth_fingerprint: TEST_AUTH_FINGERPRINT.to_string(),
         created_at: now,
         last_used: now - Duration::from_secs(60),
         closed: false,
@@ -311,6 +362,7 @@ async fn test_with_session_refreshes_last_used_after_success_when_database_url_s
             "s_touch",
             "tenant_touch",
             Some("test-user"),
+            TEST_AUTH_FINGERPRINT,
             move |_session| {
                 Box::pin(async move {
                     tokio::time::sleep(Duration::from_millis(20)).await;

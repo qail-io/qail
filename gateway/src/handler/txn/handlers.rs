@@ -168,6 +168,7 @@ pub async fn txn_query(
     let auth = authenticate_request(&state, &headers).await?;
     let txn_id = extract_txn_id(&headers)?;
     let tenant_id = auth.tenant_id.clone().unwrap_or_default();
+    let auth_fingerprint = auth.transaction_scope_fingerprint();
 
     // Parse the query
     let mut cmd = qail_core::parser::parse(&body)
@@ -230,6 +231,7 @@ pub async fn txn_query(
             &txn_id,
             &tenant_id,
             Some(auth.user_id.as_str()),
+            &auth_fingerprint,
             |session| {
                 Box::pin(async move {
                     use crate::handler::convert::row_to_json;
@@ -269,7 +271,13 @@ pub async fn txn_query(
             tracing::error!("{}", v);
             if let Err(e) = state
                 .transaction_manager
-                .close_session(&txn_id, &tenant_id, Some(auth.user_id.as_str()), false)
+                .close_session(
+                    &txn_id,
+                    &tenant_id,
+                    Some(auth.user_id.as_str()),
+                    &auth_fingerprint,
+                    false,
+                )
                 .await
             {
                 tracing::error!(
@@ -316,10 +324,17 @@ pub async fn txn_commit(
     let auth = authenticate_request(&state, &headers).await?;
     let txn_id = extract_txn_id(&headers)?;
     let tenant_id = auth.tenant_id.clone().unwrap_or_default();
+    let auth_fingerprint = auth.transaction_scope_fingerprint();
 
     let mutated_tables = state
         .transaction_manager
-        .close_session(&txn_id, &tenant_id, Some(auth.user_id.as_str()), true)
+        .close_session(
+            &txn_id,
+            &tenant_id,
+            Some(auth.user_id.as_str()),
+            &auth_fingerprint,
+            true,
+        )
         .await
         .map_err(txn_err_to_api)?;
     for table in mutated_tables {
@@ -342,10 +357,17 @@ pub async fn txn_rollback(
     let auth = authenticate_request(&state, &headers).await?;
     let txn_id = extract_txn_id(&headers)?;
     let tenant_id = auth.tenant_id.clone().unwrap_or_default();
+    let auth_fingerprint = auth.transaction_scope_fingerprint();
 
     let _ = state
         .transaction_manager
-        .close_session(&txn_id, &tenant_id, Some(auth.user_id.as_str()), false)
+        .close_session(
+            &txn_id,
+            &tenant_id,
+            Some(auth.user_id.as_str()),
+            &auth_fingerprint,
+            false,
+        )
         .await
         .map_err(txn_err_to_api)?;
 
@@ -366,6 +388,7 @@ pub async fn txn_savepoint(
     let auth = authenticate_request(&state, &headers).await?;
     let txn_id = extract_txn_id(&headers)?;
     let tenant_id = auth.tenant_id.clone().unwrap_or_default();
+    let auth_fingerprint = auth.transaction_scope_fingerprint();
 
     // Validate savepoint name (alphanumeric + underscore only)
     if !request
@@ -397,6 +420,7 @@ pub async fn txn_savepoint(
                 &txn_id,
                 &tenant_id,
                 Some(auth.user_id.as_str()),
+                &auth_fingerprint,
                 |session| run_savepoint_action(session, action.clone(), name.clone()),
             )
             .await
@@ -407,6 +431,7 @@ pub async fn txn_savepoint(
                 &txn_id,
                 &tenant_id,
                 Some(auth.user_id.as_str()),
+                &auth_fingerprint,
                 |session| run_savepoint_action(session, action.clone(), name.clone()),
             )
             .await

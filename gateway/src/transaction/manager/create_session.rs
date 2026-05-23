@@ -18,6 +18,7 @@ impl TransactionSessionManager {
         rls_ctx: RlsContext,
         tenant_id: String,
         user_id: Option<String>,
+        auth_fingerprint: String,
         statement_timeout_ms: u32,
         lock_timeout_ms: u32,
     ) -> Result<String, TransactionError> {
@@ -59,6 +60,7 @@ impl TransactionSessionManager {
                 conn: Some(conn),
                 tenant_id,
                 user_id,
+                auth_fingerprint,
                 created_at: now,
                 last_used: now,
                 closed: false,

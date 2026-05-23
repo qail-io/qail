@@ -183,4 +183,34 @@ impl AuthContext {
             rls
         }
     }
+
+    /// Stable fingerprint for long-lived transaction ownership checks.
+    ///
+    /// A transaction pins PostgreSQL-local RLS settings at BEGIN. Reusing it
+    /// with a different role, claim set, or derived RLS mode would execute new
+    /// requests against the original pinned scope.
+    pub fn transaction_scope_fingerprint(&self) -> String {
+        let mut claims: Vec<_> = self.claims.iter().collect();
+        claims.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let claims: Vec<_> = claims
+            .into_iter()
+            .map(|(key, value)| serde_json::json!([key, value]))
+            .collect();
+
+        serde_json::json!({
+            "user_id": self.user_id,
+            "role": self.role,
+            "tenant_id": self.tenant_id,
+            "platform_admin": self.is_platform_admin(),
+            "rls": {
+                "agent_id": self.claims
+                    .get("agent_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(""),
+                "super_admin": self.is_platform_admin(),
+            },
+            "claims": claims,
+        })
+        .to_string()
+    }
 }

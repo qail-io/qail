@@ -52,6 +52,7 @@ impl TransactionSessionManager {
             conn: None,
             tenant_id: tenant_id.to_string(),
             user_id: Some("anonymous".to_string()),
+            auth_fingerprint: crate::auth::AuthContext::anonymous().transaction_scope_fingerprint(),
             created_at: now - created_ago,
             last_used: now - last_used_ago,
             closed: false,

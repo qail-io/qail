@@ -8,6 +8,7 @@ impl TransactionSessionManager {
         session_id: &str,
         tenant_id: &str,
         user_id: Option<&str>,
+        auth_fingerprint: &str,
         allow_aborted: bool,
         f: F,
     ) -> Result<R, TransactionError>
@@ -36,6 +37,9 @@ impl TransactionSessionManager {
         }
         if session.user_id.as_deref() != user_id {
             return Err(TransactionError::UserMismatch);
+        }
+        if session.auth_fingerprint != auth_fingerprint {
+            return Err(TransactionError::AuthScopeMismatch);
         }
 
         if session.pg_aborted && !allow_aborted {
@@ -127,6 +131,7 @@ impl TransactionSessionManager {
         session_id: &str,
         tenant_id: &str,
         user_id: Option<&str>,
+        auth_fingerprint: &str,
         f: F,
     ) -> Result<R, TransactionError>
     where
@@ -136,7 +141,7 @@ impl TransactionSessionManager {
             Box<dyn std::future::Future<Output = Result<R, TransactionError>> + Send + '_>,
         >,
     {
-        self.with_session_inner(session_id, tenant_id, user_id, false, f)
+        self.with_session_inner(session_id, tenant_id, user_id, auth_fingerprint, false, f)
             .await
     }
 
@@ -150,6 +155,7 @@ impl TransactionSessionManager {
         session_id: &str,
         tenant_id: &str,
         user_id: Option<&str>,
+        auth_fingerprint: &str,
         f: F,
     ) -> Result<R, TransactionError>
     where
@@ -159,7 +165,7 @@ impl TransactionSessionManager {
             Box<dyn std::future::Future<Output = Result<R, TransactionError>> + Send + '_>,
         >,
     {
-        self.with_session_inner(session_id, tenant_id, user_id, true, f)
+        self.with_session_inner(session_id, tenant_id, user_id, auth_fingerprint, true, f)
             .await
     }
 
@@ -169,6 +175,7 @@ impl TransactionSessionManager {
         session_id: &str,
         tenant_id: &str,
         user_id: Option<&str>,
+        auth_fingerprint: &str,
         commit: bool,
     ) -> Result<Vec<String>, TransactionError> {
         let session = {
@@ -188,6 +195,9 @@ impl TransactionSessionManager {
         }
         if session.user_id.as_deref() != user_id {
             return Err(TransactionError::UserMismatch);
+        }
+        if session.auth_fingerprint != auth_fingerprint {
+            return Err(TransactionError::AuthScopeMismatch);
         }
 
         if commit && session.created_at.elapsed() > self.max_lifetime {

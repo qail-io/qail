@@ -143,6 +143,7 @@ impl GatewayState {
                 auth.to_rls_context(),
                 tenant_id,
                 user_id,
+                auth.transaction_scope_fingerprint(),
                 statement_timeout_ms,
                 lock_timeout_ms,
             )

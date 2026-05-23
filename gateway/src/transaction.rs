@@ -25,6 +25,8 @@ pub struct TransactionSession {
     pub tenant_id: String,
     /// User ID that created this session.
     pub user_id: Option<String>,
+    /// Stable auth/RLS scope fingerprint from the begin request.
+    pub auth_fingerprint: String,
     /// When this session was created.
     pub created_at: Instant,
     /// When this session was last used.
