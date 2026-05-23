@@ -45,7 +45,7 @@ pub(super) async fn execute_qdrant_cmd(
     let (must_conditions, should_groups) = split_filter_conditions(&cmd);
 
     // Extract limit from CageKind::Limit if present
-    let limit_val = qdrant_limit_from_cmd(&cmd, state.config.max_result_rows);
+    let limit_val = qdrant_limit_from_cmd(&cmd, state.config.max_result_rows)?;
 
     match cmd.action {
         Action::Search => {
@@ -381,19 +381,27 @@ fn split_filter_conditions(
     (must_conditions, should_groups)
 }
 
-fn qdrant_limit_from_cmd(cmd: &qail_core::ast::Qail, max_result_rows: usize) -> u64 {
+fn qdrant_limit_from_cmd(
+    cmd: &qail_core::ast::Qail,
+    max_result_rows: usize,
+) -> Result<u64, ApiError> {
     use qail_core::ast::CageKind;
 
     let requested = cmd
         .cages
         .iter()
         .find_map(|c| match c.kind {
-            CageKind::Limit(n) => Some(n as u64),
+            CageKind::Limit(n) => Some(n),
             _ => None,
         })
         .unwrap_or(10);
+    if requested <= 0 {
+        return Err(ApiError::parse_error(
+            "Qdrant limit must be greater than zero",
+        ));
+    }
 
-    requested.min(max_result_rows as u64)
+    Ok((requested as u64).min(max_result_rows.max(1) as u64))
 }
 
 fn verify_existing_qdrant_points_tenant_boundary(
@@ -1050,14 +1058,22 @@ mod tests {
             .vector(vec![0.1, 0.2])
             .limit(50_000);
 
-        assert_eq!(qdrant_limit_from_cmd(&cmd, 1_000), 1_000);
+        assert_eq!(qdrant_limit_from_cmd(&cmd, 1_000).unwrap(), 1_000);
     }
 
     #[test]
     fn qdrant_limit_defaults_to_ten_within_gateway_max_rows() {
         let cmd = Qail::scroll("embeddings");
 
-        assert_eq!(qdrant_limit_from_cmd(&cmd, 1_000), 10);
+        assert_eq!(qdrant_limit_from_cmd(&cmd, 1_000).unwrap(), 10);
+    }
+
+    #[test]
+    fn qdrant_limit_rejects_non_positive_values() {
+        let cmd = Qail::scroll("embeddings").limit(-1);
+
+        let err = qdrant_limit_from_cmd(&cmd, 1_000).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[test]

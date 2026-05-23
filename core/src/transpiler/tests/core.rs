@@ -28,6 +28,14 @@ fn test_select_with_limit() {
 }
 
 #[test]
+fn test_builder_negative_limit_offset_do_not_wrap() {
+    use crate::ast::Qail;
+
+    let cmd = Qail::get("users").limit(-1).offset(-5);
+    assert_eq!(cmd.to_sql(), "SELECT * FROM users LIMIT 0 OFFSET 0");
+}
+
+#[test]
 fn test_select_with_order() {
     let cmd = parse("get users fields * order by created_at desc").unwrap();
     assert_eq!(cmd.to_sql(), "SELECT * FROM users ORDER BY created_at DESC");

@@ -10,7 +10,7 @@ impl Qail {
     /// Set LIMIT.
     pub fn limit(mut self, n: i64) -> Self {
         self.cages.push(Cage {
-            kind: CageKind::Limit(n as usize),
+            kind: CageKind::Limit(usize::try_from(n).unwrap_or(0)),
             conditions: vec![],
             logical_op: LogicalOp::And,
         });
@@ -263,7 +263,7 @@ impl Qail {
     /// Set OFFSET.
     pub fn offset(mut self, n: i64) -> Self {
         self.cages.push(Cage {
-            kind: CageKind::Offset(n as usize),
+            kind: CageKind::Offset(usize::try_from(n).unwrap_or(0)),
             conditions: vec![],
             logical_op: LogicalOp::And,
         });
