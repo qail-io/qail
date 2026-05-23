@@ -21,7 +21,6 @@ use qail_core::ast::{AggregateFunc, Expr, JoinKind, Operator, Value as QailValue
 use qail_core::transpiler::ToSql;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::GatewayState;
 use crate::auth::authenticate_request;
@@ -30,8 +29,8 @@ use crate::middleware::ApiError;
 use crate::policy::OperationType;
 
 use super::super::branch::{
-    apply_branch_overlay, project_rows_to_selected_columns, read_branch_overlay_rows,
-    redirect_to_overlay,
+    BranchOverlayRowState, apply_branch_overlay, branch_overlay_row_state,
+    project_rows_to_selected_columns, read_branch_overlay_rows, redirect_to_overlay,
 };
 use super::super::filters::{
     apply_filters, apply_returning, apply_sorting, json_to_qail_value, parse_filters,

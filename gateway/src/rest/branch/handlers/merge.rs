@@ -18,10 +18,28 @@ const BRANCH_MERGE_SAVEPOINT: &str = "qail_branch_merge";
 
 fn apply_insert_conflict_target(
     cmd: qail_core::ast::Qail,
+    obj: &serde_json::Map<String, Value>,
     pk_col: Option<&str>,
 ) -> qail_core::ast::Qail {
     match pk_col {
-        Some(pk_col) => cmd.on_conflict_nothing(&[pk_col]),
+        Some(pk_col) => {
+            let updates: Vec<(&str, qail_core::ast::Expr)> = obj
+                .keys()
+                .filter(|k| k.as_str() != pk_col)
+                .filter(|k| crate::rest::filters::is_safe_identifier(k))
+                .map(|k| {
+                    (
+                        k.as_str(),
+                        qail_core::ast::Expr::Named(format!("EXCLUDED.{}", k)),
+                    )
+                })
+                .collect();
+            if updates.is_empty() {
+                cmd.on_conflict_nothing(&[pk_col])
+            } else {
+                cmd.on_conflict_update(&[pk_col], &updates)
+            }
+        }
         None => cmd,
     }
 }
@@ -157,6 +175,7 @@ pub(crate) async fn branch_merge_handler(
                                     }
                                     q = apply_insert_conflict_target(
                                         q,
+                                        obj,
                                         state
                                             .schema
                                             .table(&table)
@@ -339,11 +358,39 @@ pub(crate) async fn branch_merge_handler(
 #[cfg(test)]
 mod tests {
     use super::apply_insert_conflict_target;
-    use qail_core::ast::ConflictAction;
+    use qail_core::ast::{ConflictAction, Expr};
+    use serde_json::{Map, json};
 
     #[test]
-    fn insert_merge_uses_pk_conflict_target_when_known() {
-        let cmd = apply_insert_conflict_target(qail_core::ast::Qail::add("orders"), Some("id"));
+    fn insert_merge_uses_pk_conflict_update_when_known() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("order-1"));
+        obj.insert("status".to_string(), json!("paid"));
+
+        let cmd =
+            apply_insert_conflict_target(qail_core::ast::Qail::add("orders"), &obj, Some("id"));
+
+        let on_conflict = cmd.on_conflict.expect("on conflict");
+        assert_eq!(on_conflict.columns, vec!["id".to_string()]);
+        let ConflictAction::DoUpdate { assignments } = on_conflict.action else {
+            panic!("expected conflict update");
+        };
+        assert_eq!(
+            assignments,
+            vec![(
+                "status".to_string(),
+                Expr::Named("EXCLUDED.status".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn insert_merge_with_only_pk_uses_do_nothing() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("order-1"));
+
+        let cmd =
+            apply_insert_conflict_target(qail_core::ast::Qail::add("orders"), &obj, Some("id"));
 
         let on_conflict = cmd.on_conflict.expect("on conflict");
         assert_eq!(on_conflict.columns, vec!["id".to_string()]);
@@ -352,7 +399,8 @@ mod tests {
 
     #[test]
     fn insert_merge_omits_on_conflict_when_pk_unknown() {
-        let cmd = apply_insert_conflict_target(qail_core::ast::Qail::add("orders"), None);
+        let obj = Map::new();
+        let cmd = apply_insert_conflict_target(qail_core::ast::Qail::add("orders"), &obj, None);
 
         assert!(cmd.on_conflict.is_none());
     }

@@ -172,6 +172,50 @@ pub(crate) async fn update_handler(
 
     // Branch CoW Write: redirect updates to overlay
     if let Some(branch_name) = branch_ctx.branch_name() {
+        let overlay_rows = match read_branch_overlay_rows(&mut conn, branch_name, &table_name).await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                conn.release().await;
+                return Err(e);
+            }
+        };
+        match branch_overlay_row_state(&overlay_rows, &id) {
+            BranchOverlayRowState::Visible => {}
+            BranchOverlayRowState::Deleted => {
+                conn.release().await;
+                return Err(ApiError::not_found(format!("row '{}'", id)));
+            }
+            BranchOverlayRowState::Absent => {
+                let mut exists_cmd = qail_core::ast::Qail::get(&table_name)
+                    .filter(&pk, Operator::Eq, QailValue::String(id.clone()))
+                    .limit(1);
+                if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+                    exists_cmd = exists_cmd.filter(
+                        scope_column,
+                        Operator::Eq,
+                        QailValue::String(tenant_id.clone()),
+                    );
+                }
+                if let Err(e) = state.policy_engine.apply_policies(&auth, &mut exists_cmd) {
+                    conn.release().await;
+                    return Err(ApiError::forbidden(e.to_string()));
+                }
+                state.optimize_qail_for_execution(&mut exists_cmd);
+                let rows = match conn.fetch_all_uncached(&exists_cmd).await {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        conn.release().await;
+                        return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+                    }
+                };
+                if rows.is_empty() {
+                    conn.release().await;
+                    return Err(ApiError::not_found(format!("row '{}'", id)));
+                }
+            }
+        }
+
         let row_data = build_branch_update_overlay_row(
             obj,
             &pk,

@@ -2,6 +2,13 @@ use serde_json::Value;
 
 use crate::middleware::ApiError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchOverlayRowState {
+    Absent,
+    Visible,
+    Deleted,
+}
+
 fn json_value_to_pk(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
@@ -70,6 +77,54 @@ pub(crate) async fn read_branch_overlay_rows(
         .simple_query(&sql)
         .await
         .map_err(|e| ApiError::internal(format!("Branch overlay read failed: {}", e)))
+}
+
+fn overlay_row_pk_and_operation(row: &qail_pg::PgRow) -> (String, String) {
+    let row_pk = row
+        .try_get_by_name::<String>("row_pk")
+        .ok()
+        .or_else(|| row.get_string(0))
+        .unwrap_or_default();
+    let operation = row
+        .try_get_by_name::<String>("operation")
+        .ok()
+        .or_else(|| row.get_string(1))
+        .unwrap_or_default();
+
+    (row_pk, operation)
+}
+
+fn branch_overlay_row_state_from_ops<'a>(
+    operations: impl IntoIterator<Item = (&'a str, &'a str)>,
+    row_pk: &str,
+) -> BranchOverlayRowState {
+    let mut state = BranchOverlayRowState::Absent;
+
+    for (overlay_pk, operation) in operations {
+        if overlay_pk != row_pk {
+            continue;
+        }
+
+        state = match operation {
+            "insert" | "update" => BranchOverlayRowState::Visible,
+            "delete" => BranchOverlayRowState::Deleted,
+            _ => state,
+        };
+    }
+
+    state
+}
+
+pub(crate) fn branch_overlay_row_state(
+    rows: &[qail_pg::PgRow],
+    row_pk: &str,
+) -> BranchOverlayRowState {
+    let ops: Vec<(String, String)> = rows.iter().map(overlay_row_pk_and_operation).collect();
+    branch_overlay_row_state_from_ops(
+        ops.iter()
+            .map(|(row_pk, operation)| (row_pk.as_str(), operation.as_str())),
+        row_pk,
+    )
 }
 
 fn upsert_overlay_row(
@@ -151,16 +206,7 @@ pub(crate) async fn apply_branch_overlay(
     let mut to_delete: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     for row in &overlay_rows {
-        let row_pk = row
-            .try_get_by_name::<String>("row_pk")
-            .ok()
-            .or_else(|| row.get_string(0))
-            .unwrap_or_default();
-        let operation = row
-            .try_get_by_name::<String>("operation")
-            .ok()
-            .or_else(|| row.get_string(1))
-            .unwrap_or_default();
+        let (row_pk, operation) = overlay_row_pk_and_operation(row);
         let row_data_str = row
             .try_get_by_name::<String>("row_data")
             .ok()
@@ -230,15 +276,22 @@ pub(crate) async fn redirect_to_overlay(
     let data_str = serde_json::to_string(row_data)
         .map_err(|e| ApiError::internal(format!("Branch overlay JSON encode failed: {}", e)))?;
     let params = vec![Some(data_str.into_bytes())];
-    conn.query_raw_with_params(&sql, &params)
+    let rows = conn
+        .query_raw_with_params(&sql, &params)
         .await
         .map_err(|e| ApiError::internal(format!("Branch overlay write failed: {}", e)))?;
+    if rows.is_empty() {
+        return Err(ApiError::not_found(format!("branch '{}'", branch_name)));
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{patch_overlay_row, project_rows_to_selected_columns, upsert_overlay_row};
+    use super::{
+        BranchOverlayRowState, branch_overlay_row_state, branch_overlay_row_state_from_ops,
+        patch_overlay_row, project_rows_to_selected_columns, upsert_overlay_row,
+    };
     use serde_json::json;
 
     #[test]
@@ -300,5 +353,47 @@ mod tests {
 
         assert!(to_delete.contains(&0));
         assert_eq!(rows[1], json!({"id": "order-1", "status": "branch"}));
+    }
+
+    #[test]
+    fn branch_overlay_row_state_replays_last_operation_for_row() {
+        let ops = [
+            ("order-1", "insert"),
+            ("order-2", "delete"),
+            ("order-1", "delete"),
+            ("order-1", "update"),
+        ];
+
+        assert_eq!(
+            branch_overlay_row_state_from_ops(ops, "order-1"),
+            BranchOverlayRowState::Visible
+        );
+        assert_eq!(
+            branch_overlay_row_state_from_ops(ops, "order-2"),
+            BranchOverlayRowState::Deleted
+        );
+        assert_eq!(
+            branch_overlay_row_state_from_ops(ops, "order-3"),
+            BranchOverlayRowState::Absent
+        );
+    }
+
+    #[test]
+    fn branch_overlay_row_state_reads_pg_rows_without_metadata() {
+        let rows = vec![
+            qail_pg::PgRow {
+                columns: vec![Some(b"order-1".to_vec()), Some(b"insert".to_vec())],
+                column_info: None,
+            },
+            qail_pg::PgRow {
+                columns: vec![Some(b"order-1".to_vec()), Some(b"delete".to_vec())],
+                column_info: None,
+            },
+        ];
+
+        assert_eq!(
+            branch_overlay_row_state(&rows, "order-1"),
+            BranchOverlayRowState::Deleted
+        );
     }
 }

@@ -176,11 +176,12 @@ pub fn write_overlay_sql(
     let safe_op = escape_literal(operation);
     format!(
         "INSERT INTO _qail_branch_rows (branch_id, table_name, row_pk, operation, row_data) \
-         VALUES (\
-           (SELECT id FROM _qail_branches WHERE name = {} AND status = 'active' FOR KEY SHARE), \
-           {}, {}, {}, $1::jsonb\
-         ) RETURNING id;",
-        safe_branch, safe_table, safe_pk, safe_op
+         SELECT b.id, {}, {}, {}, $1::jsonb \
+         FROM _qail_branches b \
+         WHERE b.name = {} AND b.status = 'active' \
+         FOR KEY SHARE \
+         RETURNING id;",
+        safe_table, safe_pk, safe_op, safe_branch
     )
 }
 
@@ -305,12 +306,16 @@ mod tests {
     fn test_write_overlay_sql() {
         let sql = write_overlay_sql("feat", "orders", "123", "insert");
         assert!(sql.contains("INSERT INTO _qail_branch_rows"));
+        assert!(sql.contains("SELECT b.id"));
+        assert!(sql.contains("FROM _qail_branches b"));
         assert!(sql.contains("'orders'"));
         assert!(sql.contains("'123'"));
         assert!(sql.contains("'insert'"));
         assert!(sql.contains("$1::jsonb"));
         assert!(sql.contains("status = 'active'"));
         assert!(sql.contains("FOR KEY SHARE"));
+        assert!(sql.contains("RETURNING id"));
+        assert!(!sql.contains("VALUES"));
     }
 
     #[test]

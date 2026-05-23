@@ -33,6 +33,39 @@ fn pk_to_overlay_key(value: &Value) -> Option<String> {
     }
 }
 
+fn create_request_can_skip_required_validation(
+    prefer_wants_upsert: bool,
+    prefer_wants_ignore_duplicates: bool,
+    has_explicit_on_conflict: bool,
+) -> bool {
+    prefer_wants_upsert || prefer_wants_ignore_duplicates || has_explicit_on_conflict
+}
+
+fn branch_insert_overlay_key(
+    obj: &serde_json::Map<String, Value>,
+    pk_col: &str,
+) -> Result<String, ApiError> {
+    let value = obj.get(pk_col).ok_or_else(|| {
+        ApiError::bad_request(
+            "VALIDATION_ERROR",
+            format!(
+                "Branch insert requires primary key column '{}' in payload",
+                pk_col
+            ),
+        )
+    })?;
+
+    pk_to_overlay_key(value).ok_or_else(|| {
+        ApiError::bad_request(
+            "VALIDATION_ERROR",
+            format!(
+                "Branch insert primary key column '{}' must be a non-null scalar value",
+                pk_col
+            ),
+        )
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpsertConflictMode {
     ExplicitUpdate,
@@ -187,7 +220,11 @@ pub(crate) async fn create_handler(
     let prefer = parse_prefer_header(&headers);
 
     // Validate required columns upfront (skip for upserts — conflict rows may exist)
-    let required: Vec<String> = if prefer.wants_upsert() || prefer.wants_ignore_duplicates() {
+    let required: Vec<String> = if create_request_can_skip_required_validation(
+        prefer.wants_upsert(),
+        prefer.wants_ignore_duplicates(),
+        mutation_params.on_conflict.is_some(),
+    ) {
         Vec::new() // Upsert: required columns may already exist in the row
     } else {
         table
@@ -295,10 +332,13 @@ pub(crate) async fn create_handler(
         for obj in &normalized_objects {
             let row_data: Value = Value::Object(obj.clone());
             let pk_col = table.primary_key.as_deref().unwrap_or("id");
-            let row_pk = obj
-                .get(pk_col)
-                .and_then(pk_to_overlay_key)
-                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            let row_pk = match branch_insert_overlay_key(obj, pk_col) {
+                Ok(row_pk) => row_pk,
+                Err(e) => {
+                    conn.release().await;
+                    return Err(e);
+                }
+            };
 
             let overlay_result = redirect_to_overlay(
                 &mut conn,
@@ -603,7 +643,8 @@ pub(crate) async fn create_handler(
 mod tests {
     use super::{
         OnConflictActionParam, UpsertConflictMode, apply_on_conflict_update_or_noop,
-        build_upsert_old_row_lookup, guard_upsert_conflict_update_tenant,
+        branch_insert_overlay_key, build_upsert_old_row_lookup,
+        create_request_can_skip_required_validation, guard_upsert_conflict_update_tenant,
         normalize_create_object_for_tenant, parse_explicit_on_conflict_columns,
         parse_on_conflict_action, pk_to_overlay_key, upsert_update_assignments,
     };
@@ -660,6 +701,46 @@ mod tests {
         assert_eq!(pk_to_overlay_key(&json!(null)), None);
         assert_eq!(pk_to_overlay_key(&json!([1, 2, 3])), None);
         assert_eq!(pk_to_overlay_key(&json!({"id": 1})), None);
+    }
+
+    #[test]
+    fn explicit_on_conflict_skips_create_required_validation() {
+        assert!(create_request_can_skip_required_validation(
+            false, false, true
+        ));
+        assert!(create_request_can_skip_required_validation(
+            true, false, false
+        ));
+        assert!(create_request_can_skip_required_validation(
+            false, true, false
+        ));
+        assert!(!create_request_can_skip_required_validation(
+            false, false, false
+        ));
+    }
+
+    #[test]
+    fn branch_insert_overlay_key_requires_explicit_scalar_pk() {
+        let mut obj = Map::new();
+
+        let missing = branch_insert_overlay_key(&obj, "id").unwrap_err();
+        assert_eq!(missing.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(missing.message.contains("requires primary key column 'id'"));
+
+        obj.insert("id".to_string(), json!({"nested": true}));
+        let nonscalar = branch_insert_overlay_key(&obj, "id").unwrap_err();
+        assert_eq!(nonscalar.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            nonscalar
+                .message
+                .contains("must be a non-null scalar value")
+        );
+
+        obj.insert("id".to_string(), json!("order-1"));
+        assert_eq!(
+            branch_insert_overlay_key(&obj, "id").unwrap(),
+            "order-1".to_string()
+        );
     }
 
     #[test]
