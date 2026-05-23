@@ -43,7 +43,19 @@ fn push_joined_ident_list(buf: &mut BytesMut, cols: &[String]) {
         if i > 0 {
             buf.extend_from_slice(b", ");
         }
-        buf.extend_from_slice(col.as_bytes());
+        push_identifier(buf, col);
+    }
+}
+
+fn push_identifier(buf: &mut BytesMut, ident: &str) {
+    buf.extend_from_slice(escape_identifier(ident).as_bytes());
+}
+
+fn push_index_column(buf: &mut BytesMut, column: &str) {
+    if column.contains('(') {
+        buf.extend_from_slice(column.as_bytes());
+    } else {
+        push_identifier(buf, column);
     }
 }
 
@@ -67,13 +79,13 @@ fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
         } => {
             if let Some(name) = name {
                 buf.extend_from_slice(b"CONSTRAINT ");
-                buf.extend_from_slice(name.as_bytes());
+                push_identifier(buf, name);
                 buf.extend_from_slice(b" ");
             }
             buf.extend_from_slice(b"FOREIGN KEY (");
             push_joined_ident_list(buf, columns);
             buf.extend_from_slice(b") REFERENCES ");
-            buf.extend_from_slice(ref_table.as_bytes());
+            push_identifier(buf, ref_table);
             buf.extend_from_slice(b"(");
             push_joined_ident_list(buf, ref_columns);
             buf.extend_from_slice(b")");
@@ -114,14 +126,14 @@ fn encode_column_check_constraint(name: &str, vals: &[String], buf: &mut BytesMu
         buf.extend_from_slice(b")");
     } else {
         buf.extend_from_slice(b" CHECK (");
-        buf.extend_from_slice(name.as_bytes());
+        push_identifier(buf, name);
         buf.extend_from_slice(b" IN (");
         for (i, v) in vals.iter().enumerate() {
             if i > 0 {
                 buf.extend_from_slice(b", ");
             }
             buf.extend_from_slice(b"'");
-            buf.extend_from_slice(v.as_bytes());
+            buf.extend_from_slice(escape_sql_string_literal(v).as_bytes());
             buf.extend_from_slice(b"'");
         }
         buf.extend_from_slice(b"))");
@@ -131,7 +143,7 @@ fn encode_column_check_constraint(name: &str, vals: &[String], buf: &mut BytesMu
 /// Encode CREATE TABLE statement.
 pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"CREATE TABLE ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" (");
 
     let composite_pk_columns: Vec<&str> = cmd
@@ -159,7 +171,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
             }
             first = false;
 
-            buf.extend_from_slice(name.as_bytes());
+            push_identifier(buf, name);
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(map_type(data_type).as_bytes());
 
@@ -238,7 +250,7 @@ pub fn encode_make(cmd: &Qail, buf: &mut BytesMut) {
             if i > 0 {
                 buf.extend_from_slice(b", ");
             }
-            buf.extend_from_slice(col.as_bytes());
+            push_identifier(buf, col);
         }
         buf.extend_from_slice(b")");
     }
@@ -263,9 +275,9 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) {
         } else {
             buf.extend_from_slice(b"CREATE INDEX ");
         }
-        buf.extend_from_slice(idx.name.as_bytes());
+        push_identifier(buf, &idx.name);
         buf.extend_from_slice(b" ON ");
-        buf.extend_from_slice(idx.table.as_bytes());
+        push_identifier(buf, &idx.table);
         if let Some(method) = &idx.index_type
             && !method.trim().is_empty()
         {
@@ -277,7 +289,7 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) {
             if i > 0 {
                 buf.extend_from_slice(b", ");
             }
-            buf.extend_from_slice(col.as_bytes());
+            push_index_column(buf, col);
         }
         buf.extend_from_slice(b")");
         if let Some(where_clause) = &idx.where_clause {
@@ -290,20 +302,20 @@ pub fn encode_index(cmd: &Qail, buf: &mut BytesMut) {
 /// Encode DROP TABLE statement.
 pub fn encode_drop_table(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP TABLE IF EXISTS ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
 }
 
 /// Encode DROP INDEX statement.
 pub fn encode_drop_index(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP INDEX IF EXISTS ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
 }
 
 /// Encode ALTER TABLE ADD COLUMN statement.
 pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
     if cmd.columns.is_empty() && !cmd.table_constraints.is_empty() {
         buf.extend_from_slice(b"ALTER TABLE ");
-        buf.extend_from_slice(cmd.table.as_bytes());
+        push_identifier(buf, &cmd.table);
         buf.extend_from_slice(b" ");
         for (i, constraint) in cmd.table_constraints.iter().enumerate() {
             if i > 0 {
@@ -323,9 +335,9 @@ pub fn encode_alter_add_column(cmd: &Qail, buf: &mut BytesMut) {
         } = col
         {
             buf.extend_from_slice(b"ALTER TABLE ");
-            buf.extend_from_slice(cmd.table.as_bytes());
+            push_identifier(buf, &cmd.table);
             buf.extend_from_slice(b" ADD COLUMN ");
-            buf.extend_from_slice(name.as_bytes());
+            push_identifier(buf, name);
             buf.extend_from_slice(b" ");
             buf.extend_from_slice(map_type(data_type).as_bytes());
 
@@ -367,9 +379,9 @@ pub fn encode_alter_drop_column(cmd: &Qail, buf: &mut BytesMut) {
             _ => continue,
         };
         buf.extend_from_slice(b"ALTER TABLE ");
-        buf.extend_from_slice(cmd.table.as_bytes());
+        push_identifier(buf, &cmd.table);
         buf.extend_from_slice(b" DROP COLUMN ");
-        buf.extend_from_slice(col_name.as_bytes());
+        push_identifier(buf, &col_name);
     }
 }
 
@@ -381,9 +393,9 @@ pub fn encode_alter_column_type(cmd: &Qail, buf: &mut BytesMut) {
         } = col
         {
             buf.extend_from_slice(b"ALTER TABLE ");
-            buf.extend_from_slice(cmd.table.as_bytes());
+            push_identifier(buf, &cmd.table);
             buf.extend_from_slice(b" ALTER COLUMN ");
-            buf.extend_from_slice(name.as_bytes());
+            push_identifier(buf, name);
             buf.extend_from_slice(b" TYPE ");
             buf.extend_from_slice(map_type(data_type).as_bytes());
         }
@@ -398,11 +410,11 @@ pub fn encode_rename_column(cmd: &Qail, buf: &mut BytesMut) {
             // Parse "old_name -> new_name" format
             if let Some((old, new)) = rename_str.split_once(" -> ") {
                 buf.extend_from_slice(b"ALTER TABLE ");
-                buf.extend_from_slice(cmd.table.as_bytes());
+                push_identifier(buf, &cmd.table);
                 buf.extend_from_slice(b" RENAME COLUMN ");
-                buf.extend_from_slice(old.trim().as_bytes());
+                push_identifier(buf, old.trim());
                 buf.extend_from_slice(b" TO ");
-                buf.extend_from_slice(new.trim().as_bytes());
+                push_identifier(buf, new.trim());
             }
         }
     }
@@ -416,7 +428,7 @@ pub fn encode_create_view(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), super::super::EncodeError> {
     buf.extend_from_slice(b"CREATE VIEW ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" AS ");
 
     // The source_query contains the SELECT statement for the view
@@ -435,7 +447,7 @@ pub fn encode_create_view(
 /// Encode DROP VIEW statement.
 pub fn encode_drop_view(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP VIEW IF EXISTS ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
 }
 
 /// Encode CREATE MATERIALIZED VIEW statement.
@@ -445,7 +457,7 @@ pub fn encode_create_materialized_view(
     params: &mut Vec<Option<Vec<u8>>>,
 ) -> Result<(), super::super::EncodeError> {
     buf.extend_from_slice(b"CREATE MATERIALIZED VIEW ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" AS ");
 
     if let Some(ref source) = cmd.source_query {
@@ -463,22 +475,22 @@ pub fn encode_create_materialized_view(
 /// Encode REFRESH MATERIALIZED VIEW statement.
 pub fn encode_refresh_materialized_view(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"REFRESH MATERIALIZED VIEW ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
 }
 
 /// Encode DROP MATERIALIZED VIEW statement.
 pub fn encode_drop_materialized_view(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP MATERIALIZED VIEW IF EXISTS ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
 }
 
 /// Encode ALTER TABLE ALTER COLUMN SET NOT NULL.
 pub fn encode_alter_set_not_null(cmd: &Qail, buf: &mut BytesMut) {
     if let Some(Expr::Named(col)) = cmd.columns.first() {
         buf.extend_from_slice(b"ALTER TABLE ");
-        buf.extend_from_slice(cmd.table.as_bytes());
+        push_identifier(buf, &cmd.table);
         buf.extend_from_slice(b" ALTER COLUMN ");
-        buf.extend_from_slice(col.as_bytes());
+        push_identifier(buf, col);
         buf.extend_from_slice(b" SET NOT NULL");
     }
 }
@@ -487,9 +499,9 @@ pub fn encode_alter_set_not_null(cmd: &Qail, buf: &mut BytesMut) {
 pub fn encode_alter_drop_not_null(cmd: &Qail, buf: &mut BytesMut) {
     if let Some(Expr::Named(col)) = cmd.columns.first() {
         buf.extend_from_slice(b"ALTER TABLE ");
-        buf.extend_from_slice(cmd.table.as_bytes());
+        push_identifier(buf, &cmd.table);
         buf.extend_from_slice(b" ALTER COLUMN ");
-        buf.extend_from_slice(col.as_bytes());
+        push_identifier(buf, col);
         buf.extend_from_slice(b" DROP NOT NULL");
     }
 }
@@ -498,9 +510,9 @@ pub fn encode_alter_drop_not_null(cmd: &Qail, buf: &mut BytesMut) {
 pub fn encode_alter_set_default(cmd: &Qail, buf: &mut BytesMut) {
     if let Some(Expr::Named(col)) = cmd.columns.first() {
         buf.extend_from_slice(b"ALTER TABLE ");
-        buf.extend_from_slice(cmd.table.as_bytes());
+        push_identifier(buf, &cmd.table);
         buf.extend_from_slice(b" ALTER COLUMN ");
-        buf.extend_from_slice(col.as_bytes());
+        push_identifier(buf, col);
         buf.extend_from_slice(b" SET DEFAULT ");
         let default_expr = cmd.payload.as_deref().unwrap_or("NULL");
         buf.extend_from_slice(default_expr.as_bytes());
@@ -511,9 +523,9 @@ pub fn encode_alter_set_default(cmd: &Qail, buf: &mut BytesMut) {
 pub fn encode_alter_drop_default(cmd: &Qail, buf: &mut BytesMut) {
     if let Some(Expr::Named(col)) = cmd.columns.first() {
         buf.extend_from_slice(b"ALTER TABLE ");
-        buf.extend_from_slice(cmd.table.as_bytes());
+        push_identifier(buf, &cmd.table);
         buf.extend_from_slice(b" ALTER COLUMN ");
-        buf.extend_from_slice(col.as_bytes());
+        push_identifier(buf, col);
         buf.extend_from_slice(b" DROP DEFAULT");
     }
 }
@@ -521,28 +533,28 @@ pub fn encode_alter_drop_default(cmd: &Qail, buf: &mut BytesMut) {
 /// Encode ALTER TABLE ENABLE ROW LEVEL SECURITY.
 pub fn encode_alter_enable_rls(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"ALTER TABLE ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" ENABLE ROW LEVEL SECURITY");
 }
 
 /// Encode ALTER TABLE DISABLE ROW LEVEL SECURITY.
 pub fn encode_alter_disable_rls(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"ALTER TABLE ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" DISABLE ROW LEVEL SECURITY");
 }
 
 /// Encode ALTER TABLE FORCE ROW LEVEL SECURITY.
 pub fn encode_alter_force_rls(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"ALTER TABLE ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" FORCE ROW LEVEL SECURITY");
 }
 
 /// Encode ALTER TABLE NO FORCE ROW LEVEL SECURITY.
 pub fn encode_alter_no_force_rls(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"ALTER TABLE ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" NO FORCE ROW LEVEL SECURITY");
 }
 
@@ -687,9 +699,9 @@ pub fn encode_grant(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super::
     buf.extend_from_slice(b"GRANT ");
     buf.extend_from_slice(privs.as_bytes());
     buf.extend_from_slice(b" ON ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" TO ");
-    buf.extend_from_slice(role.as_bytes());
+    push_identifier(buf, role);
     Ok(())
 }
 
@@ -717,9 +729,9 @@ pub fn encode_revoke(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::super:
     buf.extend_from_slice(b"REVOKE ");
     buf.extend_from_slice(privs.as_bytes());
     buf.extend_from_slice(b" ON ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" FROM ");
-    buf.extend_from_slice(role.as_bytes());
+    push_identifier(buf, role);
     Ok(())
 }
 
@@ -735,9 +747,9 @@ pub fn encode_create_policy(
     };
 
     buf.extend_from_slice(b"CREATE POLICY ");
-    buf.extend_from_slice(policy.name.as_bytes());
+    push_identifier(buf, &policy.name);
     buf.extend_from_slice(b" ON ");
-    buf.extend_from_slice(policy.table.as_bytes());
+    push_identifier(buf, &policy.table);
 
     if policy.permissiveness == PolicyPermissiveness::Restrictive {
         buf.extend_from_slice(b" AS RESTRICTIVE");
@@ -755,7 +767,7 @@ pub fn encode_create_policy(
 
     if let Some(role) = &policy.role {
         buf.extend_from_slice(b" TO ");
-        buf.extend_from_slice(role.as_bytes());
+        push_identifier(buf, role);
     }
 
     if let Some(expr) = &policy.using {
@@ -793,9 +805,9 @@ pub fn encode_drop_policy(cmd: &Qail, buf: &mut BytesMut) -> Result<(), super::s
     }
 
     buf.extend_from_slice(b"DROP POLICY IF EXISTS ");
-    buf.extend_from_slice(policy_name.as_bytes());
+    push_identifier(buf, policy_name);
     buf.extend_from_slice(b" ON ");
-    buf.extend_from_slice(table_name.as_bytes());
+    push_identifier(buf, table_name);
     Ok(())
 }
 
@@ -872,7 +884,12 @@ pub fn encode_create_trigger(
             TriggerEvent::Update => {
                 if !trig.update_columns.is_empty() {
                     events.push_str("UPDATE OF ");
-                    events.push_str(&trig.update_columns.join(", "));
+                    for (idx, column) in trig.update_columns.iter().enumerate() {
+                        if idx > 0 {
+                            events.push_str(", ");
+                        }
+                        events.push_str(&escape_identifier(column));
+                    }
                     continue;
                 }
                 "UPDATE"
@@ -896,17 +913,17 @@ pub fn encode_create_trigger(
     };
 
     buf.extend_from_slice(b"CREATE TRIGGER ");
-    buf.extend_from_slice(trig.name.as_bytes());
+    push_identifier(buf, &trig.name);
     buf.extend_from_slice(b" ");
     buf.extend_from_slice(timing.as_bytes());
     buf.extend_from_slice(b" ");
     buf.extend_from_slice(events.as_bytes());
     buf.extend_from_slice(b" ON ");
-    buf.extend_from_slice(trig.table.as_bytes());
+    push_identifier(buf, &trig.table);
     buf.extend_from_slice(b" ");
     buf.extend_from_slice(for_each.as_bytes());
     buf.extend_from_slice(b" EXECUTE FUNCTION ");
-    buf.extend_from_slice(trig.execute_function.as_bytes());
+    push_identifier(buf, &trig.execute_function);
     buf.extend_from_slice(b"()");
     Ok(())
 }
@@ -924,9 +941,9 @@ pub fn encode_drop_trigger(
         ));
     };
     buf.extend_from_slice(b"DROP TRIGGER IF EXISTS ");
-    buf.extend_from_slice(trigger.as_bytes());
+    push_identifier(buf, trigger);
     buf.extend_from_slice(b" ON ");
-    buf.extend_from_slice(table.as_bytes());
+    push_identifier(buf, table);
     Ok(())
 }
 
@@ -985,23 +1002,23 @@ pub fn encode_comment_on(cmd: &Qail, buf: &mut BytesMut) {
         let table = parts.next().unwrap_or_default();
         let col = parts.next().unwrap_or_default();
         buf.extend_from_slice(b"COMMENT ON COLUMN ");
-        buf.extend_from_slice(table.as_bytes());
+        push_identifier(buf, table);
         buf.extend_from_slice(b".");
-        buf.extend_from_slice(col.as_bytes());
+        push_identifier(buf, col);
     } else {
         buf.extend_from_slice(b"COMMENT ON TABLE ");
-        buf.extend_from_slice(cmd.table.as_bytes());
+        push_identifier(buf, &cmd.table);
     }
 
     buf.extend_from_slice(b" IS '");
-    buf.extend_from_slice(escaped.as_bytes());
+    buf.extend_from_slice(escaped.replace('\0', "").as_bytes());
     buf.extend_from_slice(b"'");
 }
 
 /// Encode CREATE SEQUENCE statement.
 pub fn encode_create_sequence(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"CREATE SEQUENCE ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
 
     for col in &cmd.columns {
         if let Expr::Named(opt) = col {
@@ -1014,13 +1031,13 @@ pub fn encode_create_sequence(cmd: &Qail, buf: &mut BytesMut) {
 /// Encode DROP SEQUENCE statement.
 pub fn encode_drop_sequence(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP SEQUENCE IF EXISTS ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
 }
 
 /// Encode CREATE TYPE ... AS ENUM statement.
 pub fn encode_create_enum(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"CREATE TYPE ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
     buf.extend_from_slice(b" AS ENUM (");
 
     let mut first = true;
@@ -1031,7 +1048,7 @@ pub fn encode_create_enum(cmd: &Qail, buf: &mut BytesMut) {
             }
             first = false;
             buf.extend_from_slice(b"'");
-            buf.extend_from_slice(val.replace('\'', "''").as_bytes());
+            buf.extend_from_slice(escape_sql_string_literal(val).as_bytes());
             buf.extend_from_slice(b"'");
         }
     }
@@ -1042,7 +1059,7 @@ pub fn encode_create_enum(cmd: &Qail, buf: &mut BytesMut) {
 /// Encode DROP TYPE statement.
 pub fn encode_drop_enum(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"DROP TYPE IF EXISTS ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    push_identifier(buf, &cmd.table);
 }
 
 /// Encode ALTER TYPE ... ADD VALUE IF NOT EXISTS statement(s).
@@ -1055,9 +1072,9 @@ pub fn encode_alter_enum_add_value(cmd: &Qail, buf: &mut BytesMut) {
             }
             first = false;
             buf.extend_from_slice(b"ALTER TYPE ");
-            buf.extend_from_slice(cmd.table.as_bytes());
+            push_identifier(buf, &cmd.table);
             buf.extend_from_slice(b" ADD VALUE IF NOT EXISTS '");
-            buf.extend_from_slice(val.replace('\'', "''").as_bytes());
+            buf.extend_from_slice(escape_sql_string_literal(val).as_bytes());
             buf.extend_from_slice(b"'");
         }
     }
@@ -1090,7 +1107,7 @@ pub fn encode_notify(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"\"");
     if let Some(ref payload) = cmd.payload {
         buf.extend_from_slice(b", '");
-        buf.extend_from_slice(payload.replace('\'', "''").as_bytes());
+        buf.extend_from_slice(escape_sql_string_literal(payload).as_bytes());
         buf.extend_from_slice(b"'");
     }
 }

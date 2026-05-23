@@ -1894,6 +1894,68 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_ddl_quotes_structured_identifiers() {
+        use qail_core::ast::{Constraint, Expr, IndexDef};
+
+        let make = Qail {
+            action: Action::Make,
+            table: "orders; DROP TABLE users; --".to_string(),
+            columns: vec![Expr::Def {
+                name: "status; DROP".to_string(),
+                data_type: "str".to_string(),
+                constraints: vec![Constraint::Check(vec![
+                    "draft".to_string(),
+                    "O'Brien".to_string(),
+                ])],
+            }],
+            ..Default::default()
+        };
+        let (make_sql, params) = AstEncoder::encode_cmd_sql(&make).unwrap();
+        assert!(params.is_empty());
+        assert_eq!(
+            make_sql,
+            "CREATE TABLE \"orders; DROP TABLE users; --\" (\"status; DROP\" TEXT NOT NULL CHECK (\"status; DROP\" IN ('draft', 'O''Brien')))"
+        );
+
+        let drop = Qail {
+            action: Action::Drop,
+            table: "orders; DROP TABLE users; --".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&drop).unwrap().0,
+            "DROP TABLE IF EXISTS \"orders; DROP TABLE users; --\""
+        );
+
+        let index = Qail {
+            action: Action::Index,
+            index_def: Some(IndexDef {
+                name: "idx; DROP INDEX x; --".to_string(),
+                table: "orders; DROP TABLE users; --".to_string(),
+                columns: vec!["tenant_id; DROP".to_string()],
+                unique: false,
+                index_type: None,
+                where_clause: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&index).unwrap().0,
+            "CREATE INDEX \"idx; DROP INDEX x; --\" ON \"orders; DROP TABLE users; --\" (\"tenant_id; DROP\")"
+        );
+
+        let enable_rls = Qail {
+            action: Action::AlterEnableRls,
+            table: "orders; DROP TABLE users; --".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&enable_rls).unwrap().0,
+            "ALTER TABLE \"orders; DROP TABLE users; --\" ENABLE ROW LEVEL SECURITY"
+        );
+    }
+
+    #[test]
     fn test_encode_create_extension() {
         use qail_core::ast::Expr;
 
