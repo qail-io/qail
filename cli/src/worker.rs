@@ -475,18 +475,26 @@ fn parse_grpc_url(url: &str) -> Result<(String, u16)> {
         && let Some(end) = authority.find(']')
     {
         let host = &authority[1..end];
-        let port = authority[end + 1..]
-            .strip_prefix(':')
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(6334);
+        let suffix = &authority[end + 1..];
+        let port = if suffix.is_empty() {
+            6334
+        } else if let Some(port_str) = suffix.strip_prefix(':') {
+            port_str
+                .parse::<u16>()
+                .map_err(|_| anyhow::anyhow!("Invalid Qdrant gRPC port: {port_str}"))?
+        } else {
+            anyhow::bail!("Invalid Qdrant gRPC endpoint: '{url}'");
+        };
         return Ok((host.to_string(), port));
     }
 
     if let Some((host, port_str)) = authority.rsplit_once(':')
         && !host.is_empty()
         && !host.contains(':')
-        && let Ok(port) = port_str.parse::<u16>()
     {
+        let port = port_str
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("Invalid Qdrant gRPC port: {port_str}"))?;
         return Ok((host.to_string(), port));
     }
 
@@ -495,55 +503,7 @@ fn parse_grpc_url(url: &str) -> Result<(String, u16)> {
 
 /// Parse PostgreSQL URL: postgres://user:password@host:port/database
 fn parse_postgres_url(url: &str) -> Result<(String, u16, String, String, Option<String>)> {
-    let url = url
-        .trim_start_matches("postgres://")
-        .trim_start_matches("postgresql://");
-
-    // Split by @ to separate credentials from host
-    let (credentials, host_part): (Option<&str>, &str) = if url.contains('@') {
-        let parts: Vec<&str> = url.splitn(2, '@').collect();
-        (
-            Some(parts[0]),
-            parts.get(1).copied().unwrap_or("localhost/postgres"),
-        )
-    } else {
-        (None, url)
-    };
-
-    // Parse host:port/database
-    let (host_port, database) = if host_part.contains('/') {
-        let parts: Vec<&str> = host_part.splitn(2, '/').collect();
-        (parts[0], parts.get(1).unwrap_or(&"postgres").to_string())
-    } else {
-        (host_part, "postgres".to_string())
-    };
-
-    // Parse host:port
-    let (host, port) = if host_port.contains(':') {
-        let parts: Vec<&str> = host_port.split(':').collect();
-        (
-            parts[0].to_string(),
-            parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(5432),
-        )
-    } else {
-        (host_port.to_string(), 5432u16)
-    };
-
-    // Parse user:password
-    let (user, password) = if let Some(creds) = credentials {
-        if creds.contains(':') {
-            let parts: Vec<&str> = creds.splitn(2, ':').collect();
-            (
-                parts[0].to_string(),
-                Some(parts.get(1).unwrap_or(&"").to_string()),
-            )
-        } else {
-            (creds.to_string(), None)
-        }
-    } else {
-        ("postgres".to_string(), None)
-    };
-
+    let (host, port, user, password, database) = crate::util::parse_pg_url(url)?;
     Ok((host, port, user, database, password))
 }
 
@@ -705,7 +665,7 @@ async fn recover_stale_jobs(pg: &mut qail_pg::PgDriver) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_grpc_url;
+    use super::{parse_grpc_url, parse_postgres_url};
 
     #[test]
     fn parse_grpc_url_supports_host_port_and_scheme() {
@@ -739,5 +699,26 @@ mod tests {
     fn parse_grpc_url_rejects_empty() {
         let err = parse_grpc_url("").expect_err("empty endpoint must fail");
         assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn parse_grpc_url_rejects_invalid_port() {
+        let err = parse_grpc_url("qdrant.internal:notaport")
+            .expect_err("bad port must not silently default");
+        assert!(err.to_string().contains("Invalid Qdrant gRPC port"));
+
+        let err = parse_grpc_url("[::1]:bad").expect_err("bad ipv6 port must fail");
+        assert!(err.to_string().contains("Invalid Qdrant gRPC port"));
+    }
+
+    #[test]
+    fn parse_postgres_url_decodes_credentials() {
+        let (host, port, user, database, password) =
+            parse_postgres_url("postgres://us%40er:p%40ss@db.example.com:15432/app").unwrap();
+        assert_eq!(host, "db.example.com");
+        assert_eq!(port, 15432);
+        assert_eq!(user, "us@er");
+        assert_eq!(database, "app");
+        assert_eq!(password, Some("p@ss".to_string()));
     }
 }

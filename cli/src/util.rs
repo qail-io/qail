@@ -1,6 +1,7 @@
 //! Utility functions for qail-cli
 
 use anyhow::Result;
+use url::Url;
 
 /// Parse a PostgreSQL URL into (host, port, user, password, database).
 ///
@@ -10,41 +11,27 @@ use anyhow::Result;
 ///
 /// * `url` — Full connection string starting with `postgres://` or `postgresql://`.
 pub fn parse_pg_url(url: &str) -> Result<(String, u16, String, Option<String>, String)> {
-    // Strip scheme
-    let rest = url
-        .strip_prefix("postgres://")
-        .or_else(|| url.strip_prefix("postgresql://"))
-        .ok_or_else(|| anyhow::anyhow!("URL must start with postgres:// or postgresql://"))?;
-
-    // Split at '/' for database
-    let (authority, database) = rest
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("Missing database in URL"))?;
-    let database = database.split('?').next().unwrap_or(database).to_string();
-    if database.is_empty() {
-        return Err(anyhow::anyhow!("Missing database in URL"));
+    let parsed = Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid PostgreSQL URL: {e}"))?;
+    if !matches!(parsed.scheme(), "postgres" | "postgresql") {
+        return Err(anyhow::anyhow!(
+            "URL must start with postgres:// or postgresql://"
+        ));
     }
 
-    // Split authority into userinfo and host
-    let (user, password, hostport) = if let Some((userinfo, hp)) = authority.split_once('@') {
-        if let Some((u, p)) = userinfo.split_once(':') {
-            (u.to_string(), Some(p.to_string()), hp)
-        } else {
-            (userinfo.to_string(), None, hp)
-        }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing host in URL"))?
+        .to_string();
+    let port = parsed.port().unwrap_or(5432);
+    let user = if parsed.username().is_empty() {
+        "postgres".to_string()
     } else {
-        ("postgres".to_string(), None, authority)
+        percent_decode(parsed.username())
     };
-
-    // Split host:port
-    let (host, port) = if let Some((h, p)) = hostport.rsplit_once(':') {
-        (h.to_string(), p.parse::<u16>().unwrap_or(5432))
-    } else {
-        (hostport.to_string(), 5432u16)
-    };
-
-    if host.is_empty() {
-        return Err(anyhow::anyhow!("Missing host in URL"));
+    let password = parsed.password().map(percent_decode);
+    let database = percent_decode(parsed.path().trim_start_matches('/'));
+    if database.is_empty() {
+        return Err(anyhow::anyhow!("Missing database in URL"));
     }
 
     Ok((host, port, user, password, database))
@@ -58,45 +45,37 @@ pub fn parse_pg_url(url: &str) -> Result<(String, u16, String, Option<String>, S
 ///
 /// * `url` — URL string containing `scheme://[userinfo@]host[:port]/path`.
 pub fn parse_url_parts(url: &str) -> Result<(String, String, u16, String)> {
-    let (scheme, rest) = url
-        .split_once("://")
-        .ok_or_else(|| anyhow::anyhow!("Invalid URL: missing ://"))?;
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let parsed = Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing host in URL"))?
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or_else(|| default_port(parsed.scheme()));
+    let mut path = parsed.path().to_string();
+    if path.is_empty() {
+        path.push('/');
+    }
+    if let Some(query) = parsed.query() {
+        path.push('?');
+        path.push_str(query);
+    }
 
-    // Strip userinfo
-    let hostport = if let Some((_userinfo, hp)) = authority.split_once('@') {
-        hp
-    } else {
-        authority
-    };
-
-    let (host, port) = if let Some((h, p)) = hostport.rsplit_once(':') {
-        (h.to_string(), p.parse::<u16>().unwrap_or(5432))
-    } else {
-        (hostport.to_string(), 5432u16)
-    };
-
-    Ok((scheme.to_string(), host, port, format!("/{}", path)))
+    Ok((parsed.scheme().to_string(), host, port, path))
 }
 
 /// Rewrite a URL to point at a different host:port (for SSH tunneling).
 pub fn rewrite_url_host(url: &str, new_host: &str, new_port: u16) -> Result<String> {
-    let (scheme, rest) = url
-        .split_once("://")
-        .ok_or_else(|| anyhow::anyhow!("Invalid URL: missing ://"))?;
-    let (authority, path_and_rest) = rest.split_once('/').unwrap_or((rest, ""));
+    let mut parsed = Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid URL: {e}"))?;
+    parsed
+        .set_host(Some(new_host))
+        .map_err(|_| anyhow::anyhow!("Invalid replacement host: {new_host}"))?;
+    parsed
+        .set_port(Some(new_port))
+        .map_err(|_| anyhow::anyhow!("Invalid replacement port: {new_port}"))?;
 
-    // Preserve userinfo if present
-    let userinfo = authority.split_once('@').map(|(u, _)| u);
-
-    let mut result = format!("{}://", scheme);
-    if let Some(ui) = userinfo {
-        result.push_str(ui);
-        result.push('@');
-    }
-    result.push_str(&format!("{}:{}/{}", new_host, new_port, path_and_rest));
-
-    Ok(result)
+    Ok(parsed.to_string())
 }
 
 /// Redact the password from a PostgreSQL URL.
@@ -104,6 +83,14 @@ pub fn rewrite_url_host(url: &str, new_host: &str, new_port: u16) -> Result<Stri
 /// `postgres://user:secret@host:5432/db` → `postgres://user:***@host:5432/db`
 /// Returns the original string unchanged if there is no password.
 pub fn redact_url(url: &str) -> String {
+    if let Ok(mut parsed) = Url::parse(url)
+        && parsed.password().is_some()
+    {
+        if parsed.set_password(Some("***")).is_ok() {
+            return parsed.to_string();
+        }
+    }
+
     // Find the scheme separator
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
@@ -118,6 +105,38 @@ pub fn redact_url(url: &str) -> String {
     } else {
         url.to_string() // no password in userinfo
     }
+}
+
+fn default_port(scheme: &str) -> u16 {
+    match scheme {
+        "http" => 80,
+        "https" => 443,
+        "postgres" | "postgresql" => 5432,
+        _ => 5432,
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(&hex, 16)
+            {
+                result.push(byte as char);
+                continue;
+            }
+            result.push('%');
+            result.push_str(&hex);
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -165,5 +184,63 @@ mod tests {
         assert_eq!(user, "admin");
         assert_eq!(password, Some("pass".to_string()));
         assert_eq!(database, "testdb");
+    }
+
+    #[test]
+    fn test_parse_pg_url_decodes_credentials_and_database() {
+        let (host, port, user, password, database) =
+            parse_pg_url("postgres://us%40er:p%40ss%2Fword@db.example.com/my%2Fdb").unwrap();
+        assert_eq!(host, "db.example.com");
+        assert_eq!(port, 5432);
+        assert_eq!(user, "us@er");
+        assert_eq!(password, Some("p@ss/word".to_string()));
+        assert_eq!(database, "my/db");
+    }
+
+    #[test]
+    fn test_parse_pg_url_supports_ipv6() {
+        let (host, port, user, password, database) =
+            parse_pg_url("postgres://admin:pass@[::1]:5544/testdb").unwrap();
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 5544);
+        assert_eq!(user, "admin");
+        assert_eq!(password, Some("pass".to_string()));
+        assert_eq!(database, "testdb");
+    }
+
+    #[test]
+    fn test_parse_pg_url_rejects_invalid_port() {
+        let err = parse_pg_url("postgres://admin:pass@localhost:notaport/testdb")
+            .expect_err("invalid port must not silently fall back to 5432");
+        assert!(err.to_string().contains("Invalid PostgreSQL URL"));
+    }
+
+    #[test]
+    fn test_parse_url_parts_preserves_query_and_rejects_bad_port() {
+        let (scheme, host, port, path) =
+            parse_url_parts("postgres://user:pass@db.example.com:15432/app?sslmode=require")
+                .unwrap();
+        assert_eq!(scheme, "postgres");
+        assert_eq!(host, "db.example.com");
+        assert_eq!(port, 15432);
+        assert_eq!(path, "/app?sslmode=require");
+
+        assert!(
+            parse_url_parts("postgres://user:pass@db.example.com:bad/app").is_err(),
+            "bad port must fail before SSH tunnel setup"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_url_host_preserves_credentials_path_and_query() {
+        assert_eq!(
+            rewrite_url_host(
+                "postgres://user:p%40ss@db.example.com:15432/app?sslmode=require",
+                "127.0.0.1",
+                6543
+            )
+            .unwrap(),
+            "postgres://user:p%40ss@127.0.0.1:6543/app?sslmode=require"
+        );
     }
 }

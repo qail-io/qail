@@ -103,51 +103,7 @@ pub async fn branch_merge(name: &str, db_url: &str) -> Result<()> {
 // Helpers
 
 fn parse_url(url: &str) -> Result<(String, u16, String, String, Option<String>)> {
-    let url = url
-        .trim_start_matches("postgres://")
-        .trim_start_matches("postgresql://");
-
-    let (credentials, host_part) = if url.contains('@') {
-        let mut parts = url.splitn(2, '@');
-        let creds = parts.next().unwrap_or("");
-        let host = parts.next().unwrap_or("localhost/postgres");
-        (Some(creds), host)
-    } else {
-        (None, url)
-    };
-
-    let (host_port, database) = if host_part.contains('/') {
-        let mut parts = host_part.splitn(2, '/');
-        (
-            parts.next().unwrap_or("localhost"),
-            parts.next().unwrap_or("postgres").to_string(),
-        )
-    } else {
-        (host_part, "postgres".to_string())
-    };
-
-    let (host, port) = if host_port.contains(':') {
-        let mut parts = host_port.split(':');
-        let h = parts.next().unwrap_or("localhost").to_string();
-        let p = parts.next().and_then(|s| s.parse().ok()).unwrap_or(5432u16);
-        (h, p)
-    } else {
-        (host_port.to_string(), 5432u16)
-    };
-
-    let (user, password) = if let Some(creds) = credentials {
-        if creds.contains(':') {
-            let mut parts = creds.splitn(2, ':');
-            let u = parts.next().unwrap_or("postgres").to_string();
-            let p = parts.next().map(|s| s.to_string());
-            (u, p)
-        } else {
-            (creds.to_string(), None)
-        }
-    } else {
-        ("postgres".to_string(), None)
-    };
-
+    let (host, port, user, password, database) = crate::util::parse_pg_url(url)?;
     Ok((host, port, user, database, password))
 }
 
@@ -163,4 +119,20 @@ async fn connect(
             .await
             .context("Failed to connect to database")?;
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_url;
+
+    #[test]
+    fn branch_parse_url_reuses_strict_cli_parser() {
+        let (host, port, user, database, password) =
+            parse_url("postgres://us%40er:p%40ss@db.example.com:15432/app").unwrap();
+        assert_eq!(host, "db.example.com");
+        assert_eq!(port, 15432);
+        assert_eq!(user, "us@er");
+        assert_eq!(database, "app");
+        assert_eq!(password, Some("p@ss".to_string()));
+    }
 }
