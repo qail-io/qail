@@ -204,7 +204,7 @@ pub fn decode_search_response(data: &[u8]) -> QdrantResult<Vec<ScoredPoint>> {
 
 /// Decode a single ScoredPoint message (with payload support).
 fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
-    let mut id = PointId::Num(0);
+    let mut id = None;
     let mut score = 0.0f32;
     let mut payload = Payload::new();
     let mut vector = None;
@@ -220,7 +220,7 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                     continue;
                 }
                 let id_data = read_submessage(&mut buf)?;
-                id = decode_point_id(id_data)?;
+                id = Some(decode_point_id(id_data)?);
             }
             SCORED_POINT_PAYLOAD => {
                 if wire_type != WIRE_LEN {
@@ -258,6 +258,8 @@ fn decode_scored_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
             }
         }
     }
+
+    let id = id.ok_or_else(|| QdrantError::Decode("Missing point id".to_string()))?;
 
     Ok(ScoredPoint {
         id,
@@ -354,7 +356,7 @@ pub fn decode_scroll_response(data: &[u8]) -> QdrantResult<ScrollResult> {
 
 /// Decode a RetrievedPoint message (same shape as ScoredPoint, score = 0).
 fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
-    let mut id = PointId::Num(0);
+    let mut id = None;
     let mut payload = Payload::new();
     let mut vector = None;
     let mut buf = data;
@@ -369,7 +371,7 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
                     continue;
                 }
                 let id_data = read_submessage(&mut buf)?;
-                id = decode_point_id(id_data)?;
+                id = Some(decode_point_id(id_data)?);
             }
             RETRIEVED_POINT_PAYLOAD => {
                 if wire_type != WIRE_LEN {
@@ -394,6 +396,8 @@ fn decode_retrieved_point(data: &[u8]) -> QdrantResult<ScoredPoint> {
             }
         }
     }
+
+    let id = id.ok_or_else(|| QdrantError::Decode("Missing point id".to_string()))?;
 
     Ok(ScoredPoint {
         id,
@@ -750,7 +754,7 @@ fn decode_point_id(data: &[u8]) -> QdrantResult<PointId> {
         }
     }
 
-    Ok(PointId::Num(0))
+    Err(QdrantError::Decode("Missing point id".to_string()))
 }
 
 // ============================================================================
@@ -793,6 +797,19 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_point_id_explicit_zero() {
+        let data = &[0x08, 0x00];
+        let id = decode_point_id(data).unwrap();
+        assert_eq!(id, PointId::Num(0));
+    }
+
+    #[test]
+    fn test_decode_point_id_rejects_empty_message() {
+        let err = decode_point_id(&[]).unwrap_err();
+        assert!(err.to_string().contains("Missing point id"));
+    }
+
+    #[test]
     fn test_decode_point_id_uuid() {
         let data = &[0x12, 0x03, b'a', b'b', b'c'];
         let id = decode_point_id(data).unwrap();
@@ -817,6 +834,53 @@ mod tests {
         let point = decode_scored_point(data).unwrap();
         assert_eq!(point.id, PointId::Num(1));
         assert!((point.score - 0.5).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_decode_search_response_rejects_point_without_id() {
+        let score_bytes = 1.0f32.to_le_bytes();
+        let data = &[
+            0x0A,
+            0x05,
+            0x1D,
+            score_bytes[0],
+            score_bytes[1],
+            score_bytes[2],
+            score_bytes[3],
+        ];
+
+        let err = decode_search_response(data).unwrap_err();
+        assert!(err.to_string().contains("Missing point id"));
+    }
+
+    #[test]
+    fn test_decode_get_response_rejects_point_without_id() {
+        let data = &[0x0A, 0x00];
+
+        let err = decode_get_response(data).unwrap_err();
+        assert!(err.to_string().contains("Missing point id"));
+    }
+
+    #[test]
+    fn test_decode_scroll_response_rejects_point_without_id() {
+        let data = &[0x12, 0x00];
+
+        let err = match decode_scroll_response(data) {
+            Ok(_) => panic!("scroll response without point id must fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("Missing point id"));
+    }
+
+    #[test]
+    fn test_decode_scroll_response_rejects_empty_next_offset() {
+        let data = &[0x0A, 0x00];
+
+        let err = match decode_scroll_response(data) {
+            Ok(_) => panic!("scroll response with empty next offset must fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("Missing point id"));
     }
 
     #[test]
