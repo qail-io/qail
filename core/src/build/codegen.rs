@@ -33,25 +33,87 @@ fn qail_type_to_rust(col_type: &ColumnType) -> &'static str {
 
 /// Convert table/column names to valid Rust identifiers
 fn to_rust_ident(name: &str) -> String {
-    // Handle Rust keywords
-    let name = match name {
-        "type" => "r#type",
-        "match" => "r#match",
-        "ref" => "r#ref",
-        "self" => "r#self",
-        "mod" => "r#mod",
-        "use" => "r#use",
-        _ => name,
-    };
-    name.to_string()
+    escape_keyword(&sanitize_rust_ident(name))
 }
 
 /// Convert table name to PascalCase struct name
 fn to_struct_name(name: &str) -> String {
-    name.chars()
+    let mut out = String::new();
+    for part in name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+    {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+
+    if out.is_empty() {
+        out.push_str("QailGenerated");
+    }
+    if out
+        .chars()
         .next()
-        .map(|c| c.to_uppercase().collect::<String>() + &name[1..])
-        .unwrap_or_default()
+        .is_none_or(|c| !c.is_ascii_alphabetic() && c != '_')
+    {
+        out.insert_str(0, "Qail");
+    }
+    if is_rust_keyword(&out) {
+        out.insert_str(0, "Qail");
+    }
+    out
+}
+
+fn sanitize_rust_ident(name: &str) -> String {
+    let mut ident: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if ident.is_empty() {
+        ident.push('_');
+    }
+    if ident
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_ascii_alphabetic() && c != '_')
+    {
+        ident.insert(0, '_');
+    }
+
+    ident
+}
+
+fn escape_keyword(name: &str) -> String {
+    if is_rust_keyword(name) {
+        format!("r#{}", name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn is_rust_keyword(name: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
+        "final", "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+    ];
+
+    KEYWORDS.contains(&name)
+}
+
+fn rust_string_literal(value: &str) -> String {
+    format!("{value:?}")
 }
 
 /// Generate typed Rust module from schema.
@@ -108,22 +170,23 @@ pub fn generate_schema_code(schema: &Schema) -> String {
 
         code.push_str(&format!("    impl Table for {} {{\n", struct_name));
         code.push_str(&format!(
-            "        fn table_name() -> &'static str {{ \"{}\" }}\n",
-            table.name
+            "        fn table_name() -> &'static str {{ {} }}\n",
+            rust_string_literal(&table.name)
         ));
         code.push_str("    }\n\n");
 
         code.push_str(&format!("    impl From<{}> for String {{\n", struct_name));
         code.push_str(&format!(
-            "        fn from(_: {}) -> String {{ \"{}\".to_string() }}\n",
-            struct_name, table.name
+            "        fn from(_: {}) -> String {{ {}.to_string() }}\n",
+            struct_name,
+            rust_string_literal(&table.name)
         ));
         code.push_str("    }\n\n");
 
         code.push_str(&format!("    impl AsRef<str> for {} {{\n", struct_name));
         code.push_str(&format!(
-            "        fn as_ref(&self) -> &str {{ \"{}\" }}\n",
-            table.name
+            "        fn as_ref(&self) -> &str {{ {} }}\n",
+            rust_string_literal(&table.name)
         ));
         code.push_str("    }\n\n");
 
@@ -161,8 +224,12 @@ pub fn generate_schema_code(schema: &Schema) -> String {
                 policy
             ));
             code.push_str(&format!(
-                "    pub const {}: TypedColumn<{}, {}> = TypedColumn::new(\"{}\", \"{}\");\n",
-                col_ident, rust_type, rust_policy, table.name, col_name
+                "    pub const {}: TypedColumn<{}, {}> = TypedColumn::new({}, {});\n",
+                col_ident,
+                rust_type,
+                rust_policy,
+                rust_string_literal(&table.name),
+                rust_string_literal(col_name)
             ));
         }
 
@@ -203,8 +270,9 @@ pub fn generate_schema_code(schema: &Schema) -> String {
                 to_mod, to_struct, from_mod, from_struct
             ));
             code.push_str(&format!(
-                "    fn join_columns() -> (&'static str, &'static str) {{ (\"{}\", \"{}\") }}\n",
-                fk.column, fk.ref_column
+                "    fn join_columns() -> (&'static str, &'static str) {{ ({}, {}) }}\n",
+                rust_string_literal(&fk.column),
+                rust_string_literal(&fk.ref_column)
             ));
             code.push_str("}\n\n");
 
@@ -220,8 +288,9 @@ pub fn generate_schema_code(schema: &Schema) -> String {
                 from_mod, from_struct, to_mod, to_struct
             ));
             code.push_str(&format!(
-                "    fn join_columns() -> (&'static str, &'static str) {{ (\"{}\", \"{}\") }}\n",
-                fk.ref_column, fk.column
+                "    fn join_columns() -> (&'static str, &'static str) {{ ({}, {}) }}\n",
+                rust_string_literal(&fk.ref_column),
+                rust_string_literal(&fk.column)
             ));
             code.push_str("}\n\n");
         }
@@ -284,6 +353,24 @@ table secrets {
 
         // Verify Protected policy
         assert!(code.contains("pub const token: TypedColumn<String, Protected>"));
+    }
+
+    #[test]
+    fn test_generate_schema_code_sanitizes_rust_identifiers() {
+        let schema_content = r#"
+table type {
+    1st TEXT
+    match TEXT
+}
+"#;
+        let schema = Schema::parse(schema_content).unwrap();
+        let code = generate_schema_code(&schema);
+
+        assert!(code.contains("pub mod r#type {"));
+        assert!(code.contains("pub struct Type;"));
+        assert!(code.contains("pub const _1st: TypedColumn<String, Public>"));
+        assert!(code.contains("pub const r#match: TypedColumn<String, Public>"));
+        assert!(code.contains("TypedColumn::new(\"type\", \"1st\")"));
     }
 }
 

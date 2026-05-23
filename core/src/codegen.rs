@@ -64,10 +64,11 @@ pub fn generate_schema_code(schema: &Schema) -> String {
     code.push_str("pub mod tables {\n");
 
     for table_name in &table_names {
+        let module_name = to_rust_ident(table_name);
         let struct_name = to_pascal_case(table_name);
         code.push_str(&format!(
             "    pub use super::{}::{};\n",
-            table_name, struct_name
+            module_name, struct_name
         ));
     }
     code.push_str("}\n\n");
@@ -88,10 +89,11 @@ pub fn generate_schema_code(schema: &Schema) -> String {
         code.push_str("/// Re-export all resource types\n");
         code.push_str("pub mod resources {\n");
         for res_name in &resource_names {
+            let module_name = to_rust_ident(res_name);
             let struct_name = to_pascal_case(res_name);
             code.push_str(&format!(
                 "    pub use super::{}::{};\n",
-                res_name, struct_name
+                module_name, struct_name
             ));
         }
         code.push_str("}\n");
@@ -106,11 +108,12 @@ fn generate_resource_module(
     resource: &crate::build::ResourceSchema,
 ) -> String {
     let mut code = String::new();
+    let module_name = to_rust_ident(resource_name);
     let struct_name = to_pascal_case(resource_name);
     let kind = &resource.kind;
 
     code.push_str(&format!("/// {} resource: {}\n", kind, resource_name));
-    code.push_str(&format!("pub mod {} {{\n", resource_name));
+    code.push_str(&format!("pub mod {} {{\n", module_name));
     code.push_str("    use super::*;\n\n");
 
     // Struct
@@ -131,25 +134,27 @@ fn generate_resource_module(
 
     code.push_str(&format!("    impl {} for {} {{\n", trait_name, struct_name));
     code.push_str(&format!(
-        "        fn {}() -> &'static str {{ \"{}\" }}\n",
-        method_name, resource_name
+        "        fn {}() -> &'static str {{ {} }}\n",
+        method_name,
+        rust_string_literal(resource_name)
     ));
     code.push_str("    }\n");
 
     // Add provider constant if specified
     if let Some(ref provider) = resource.provider {
         code.push_str(&format!(
-            "\n    pub const PROVIDER: &str = \"{}\";\n",
-            provider
+            "\n    pub const PROVIDER: &str = {};\n",
+            rust_string_literal(provider)
         ));
     }
 
     // Add property constants
     for (key, value) in &resource.properties {
-        let const_name = key.to_uppercase();
+        let const_name = to_const_ident(key);
         code.push_str(&format!(
-            "    pub const {}: &str = \"{}\";\n",
-            const_name, value
+            "    pub const {}: &str = {};\n",
+            const_name,
+            rust_string_literal(value)
         ));
     }
 
@@ -159,10 +164,11 @@ fn generate_resource_module(
 
 fn generate_table_module(table_name: &str, table: &crate::build::TableSchema) -> String {
     let mut code = String::new();
+    let module_name = to_rust_ident(table_name);
     let struct_name = to_pascal_case(table_name);
 
     code.push_str(&format!("/// Table: {}\n", table_name));
-    code.push_str(&format!("pub mod {} {{\n", table_name));
+    code.push_str(&format!("pub mod {} {{\n", module_name));
     code.push_str("    use super::*;\n\n");
 
     // Table struct with Table trait
@@ -175,24 +181,25 @@ fn generate_table_module(table_name: &str, table: &crate::build::TableSchema) ->
 
     code.push_str(&format!("    impl Table for {} {{\n", struct_name));
     code.push_str(&format!(
-        "        fn table_name() -> &'static str {{ \"{}\" }}\n",
-        table_name
+        "        fn table_name() -> &'static str {{ {} }}\n",
+        rust_string_literal(table_name)
     ));
     code.push_str("    }\n\n");
 
     // Implement From<Table> for String to work with Qail::get()
     code.push_str(&format!("    impl From<{}> for String {{\n", struct_name));
     code.push_str(&format!(
-        "        fn from(_: {}) -> String {{ \"{}\".to_string() }}\n",
-        struct_name, table_name
+        "        fn from(_: {}) -> String {{ {}.to_string() }}\n",
+        struct_name,
+        rust_string_literal(table_name)
     ));
     code.push_str("    }\n\n");
 
     // AsRef<str> for TypedQail compatibility
     code.push_str(&format!("    impl AsRef<str> for {} {{\n", struct_name));
     code.push_str(&format!(
-        "        fn as_ref(&self) -> &str {{ \"{}\" }}\n",
-        table_name
+        "        fn as_ref(&self) -> &str {{ {} }}\n",
+        rust_string_literal(table_name)
     ));
     code.push_str("    }\n\n");
 
@@ -217,15 +224,18 @@ fn generate_table_module(table_name: &str, table: &crate::build::TableSchema) ->
     for col_name in &col_names {
         if let Some(col_type) = table.columns.get(*col_name) {
             let rust_type = column_type_to_rust(col_type);
-            let fn_name = escape_keyword(col_name);
+            let fn_name = to_rust_ident(col_name);
             code.push_str(&format!(
                 "    /// Column `{}` ({})\n",
                 col_name,
                 col_type.to_pg_type()
             ));
             code.push_str(&format!(
-                "    pub fn {}() -> TypedColumn<{}> {{ TypedColumn::new(\"{}\", \"{}\") }}\n\n",
-                fn_name, rust_type, table_name, col_name
+                "    pub fn {}() -> TypedColumn<{}> {{ TypedColumn::new({}, {}) }}\n\n",
+                fn_name,
+                rust_type,
+                rust_string_literal(table_name),
+                rust_string_literal(col_name)
             ));
         }
     }
@@ -260,7 +270,9 @@ fn column_type_to_rust(col_type: &ColumnType) -> &'static str {
 
 /// Convert snake_case to PascalCase
 fn to_pascal_case(s: &str) -> String {
-    s.split('_')
+    let pascal: String = s
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {
@@ -268,11 +280,36 @@ fn to_pascal_case(s: &str) -> String {
                 Some(c) => c.to_uppercase().chain(chars).collect(),
             }
         })
-        .collect()
+        .collect();
+
+    let mut pascal = if pascal.is_empty() {
+        "QailGenerated".to_string()
+    } else {
+        pascal
+    };
+    if pascal
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_ascii_alphabetic() && c != '_')
+    {
+        pascal.insert_str(0, "Qail");
+    }
+    if is_rust_keyword(&pascal) {
+        pascal.insert_str(0, "Qail");
+    }
+    pascal
 }
 
 /// Escape Rust reserved keywords with r# prefix
 fn escape_keyword(name: &str) -> String {
+    if is_rust_keyword(name) {
+        format!("r#{}", name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn is_rust_keyword(name: &str) -> bool {
     const KEYWORDS: &[&str] = &[
         "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
         "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
@@ -281,11 +318,45 @@ fn escape_keyword(name: &str) -> String {
         "final", "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
     ];
 
-    if KEYWORDS.contains(&name) {
-        format!("r#{}", name)
-    } else {
-        name.to_string()
+    KEYWORDS.contains(&name)
+}
+
+fn sanitize_rust_ident(name: &str) -> String {
+    let mut ident: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if ident.is_empty() {
+        ident.push('_');
     }
+    if ident
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_ascii_alphabetic() && c != '_')
+    {
+        ident.insert(0, '_');
+    }
+
+    ident
+}
+
+fn to_rust_ident(name: &str) -> String {
+    escape_keyword(&sanitize_rust_ident(name))
+}
+
+fn to_const_ident(name: &str) -> String {
+    to_rust_ident(&name.to_ascii_uppercase())
+}
+
+fn rust_string_literal(value: &str) -> String {
+    format!("{value:?}")
 }
 
 #[cfg(test)]
@@ -296,6 +367,15 @@ mod tests {
     fn test_pascal_case() {
         assert_eq!(to_pascal_case("users"), "Users");
         assert_eq!(to_pascal_case("user_profiles"), "UserProfiles");
+        assert_eq!(to_pascal_case("123_events"), "Qail123Events");
+        assert_eq!(to_pascal_case("self"), "QailSelf");
+    }
+
+    #[test]
+    fn test_rust_identifier_sanitizing() {
+        assert_eq!(to_rust_ident("type"), "r#type");
+        assert_eq!(to_rust_ident("123abc"), "_123abc");
+        assert_eq!(to_rust_ident("user-files"), "user_files");
     }
 
     #[test]
@@ -312,5 +392,24 @@ mod tests {
             "chrono::DateTime<chrono::Utc>"
         );
         assert_eq!(column_type_to_rust(&ColumnType::Bytea), "Vec<u8>");
+    }
+
+    #[test]
+    fn test_generate_schema_code_sanitizes_rust_identifiers() {
+        let schema_content = r#"
+table type {
+    1st TEXT
+    match TEXT
+}
+"#;
+
+        let schema = Schema::parse(schema_content).unwrap();
+        let code = generate_schema_code(&schema);
+
+        assert!(code.contains("pub mod r#type {"));
+        assert!(code.contains("pub struct Type;"));
+        assert!(code.contains("pub fn _1st()"));
+        assert!(code.contains("pub fn r#match()"));
+        assert!(code.contains("TypedColumn::new(\"type\", \"1st\")"));
     }
 }
