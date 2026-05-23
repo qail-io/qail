@@ -76,6 +76,27 @@ fn dollar_quote_block(body: &str) -> String {
     format!("'{}'", escape_sql_string_literal(&body))
 }
 
+fn call_target_to_sql(target: &str) -> String {
+    let target = target.trim().trim_end_matches(';').trim();
+    if target.is_empty()
+        || target.contains('\0')
+        || target.contains(';')
+        || target.contains("--")
+        || target.contains("/*")
+        || target.contains("*/")
+    {
+        return escape_identifier(target);
+    }
+
+    match target.split_once('(') {
+        Some((name, args)) if args.ends_with(')') && !args[..args.len() - 1].contains('(') => {
+            format!("{}({}", escape_identifier(name.trim()), args)
+        }
+        None => escape_identifier(target),
+        _ => escape_identifier(target),
+    }
+}
+
 fn encode_table_constraint(constraint: &TableConstraint, buf: &mut BytesMut) {
     match constraint {
         TableConstraint::Unique(cols) => {
@@ -601,7 +622,7 @@ pub fn encode_rollback_to_savepoint(cmd: &Qail, buf: &mut BytesMut) {
 /// Encode CALL procedure_name.
 pub fn encode_call(cmd: &Qail, buf: &mut BytesMut) {
     buf.extend_from_slice(b"CALL ");
-    buf.extend_from_slice(cmd.table.as_bytes());
+    buf.extend_from_slice(call_target_to_sql(&cmd.table).as_bytes());
 }
 
 /// Encode DO $$ body $$ LANGUAGE lang.

@@ -436,7 +436,7 @@ impl ToSql for Qail {
             }
             // Session & procedural commands
             Action::Call => {
-                format!("CALL {}", self.table)
+                format!("CALL {}", call_target_to_sql(&self.table))
             }
             Action::Do => {
                 let body = self.payload.as_deref().unwrap_or("");
@@ -552,6 +552,27 @@ fn dollar_quote_block(body: &str) -> String {
     }
 
     format!("'{}'", escape_sql_string_literal(&body))
+}
+
+fn call_target_to_sql(target: &str) -> String {
+    let target = target.trim().trim_end_matches(';').trim();
+    if target.is_empty()
+        || target.contains('\0')
+        || target.contains(';')
+        || target.contains("--")
+        || target.contains("/*")
+        || target.contains("*/")
+    {
+        return escape_identifier(target);
+    }
+
+    match target.split_once('(') {
+        Some((name, args)) if args.ends_with(')') && !args[..args.len() - 1].contains('(') => {
+            format!("{}({}", escape_identifier(name.trim()), args)
+        }
+        None => escape_identifier(target),
+        _ => escape_identifier(target),
+    }
 }
 
 fn is_valid_session_setting_name(name: &str) -> bool {

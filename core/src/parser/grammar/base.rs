@@ -362,6 +362,12 @@ fn parse_call_command(input: &str) -> IResult<&str, Qail> {
             nom::error::ErrorKind::Eof,
         )));
     }
+    if !is_safe_call_target(procedure) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
 
     Ok((
         "",
@@ -371,6 +377,36 @@ fn parse_call_command(input: &str) -> IResult<&str, Qail> {
             ..Default::default()
         },
     ))
+}
+
+fn is_safe_call_target(procedure: &str) -> bool {
+    let procedure = procedure.trim();
+    if procedure.is_empty()
+        || procedure.contains('\0')
+        || procedure.contains(';')
+        || procedure.contains("--")
+        || procedure.contains("/*")
+        || procedure.contains("*/")
+    {
+        return false;
+    }
+
+    match procedure.split_once('(') {
+        Some((name, args)) if args.ends_with(')') && !args[..args.len() - 1].contains('(') => {
+            is_valid_qualified_ident(name.trim())
+        }
+        None => is_valid_qualified_ident(procedure),
+        _ => false,
+    }
+}
+
+fn is_valid_qualified_ident(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('.').all(|part| {
+            let mut chars = part.chars();
+            matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
 }
 
 fn parse_do_command(input: &str) -> IResult<&str, Qail> {

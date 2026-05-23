@@ -157,6 +157,29 @@ fn test_procedural_bodies_use_non_colliding_dollar_quotes() {
 }
 
 #[test]
+fn test_call_target_quotes_malformed_builder_target() {
+    let cmd = Qail {
+        action: Action::Call,
+        table: "refresh(); DROP TABLE users; --".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        cmd.to_sql_with_dialect(Dialect::Postgres),
+        "CALL \"refresh(); DROP TABLE users; --\""
+    );
+
+    let valid = Qail {
+        action: Action::Call,
+        table: "maintenance.refresh()".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(
+        valid.to_sql_with_dialect(Dialect::Postgres),
+        "CALL maintenance.refresh()"
+    );
+}
+
+#[test]
 fn test_create_policy_sql() {
     let policy = RlsPolicy::create("users_isolation", "users")
         .for_all()

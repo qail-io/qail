@@ -9,6 +9,12 @@ fn test_parse_call_command() {
 }
 
 #[test]
+fn test_parse_call_command_rejects_statement_delimiters() {
+    assert!(parse("call refresh_materialized_views(); drop table users").is_err());
+    assert!(parse("call 1refresh_materialized_views()").is_err());
+}
+
+#[test]
 fn test_parse_do_command_with_language() {
     let cmd = parse("do $$ BEGIN RAISE NOTICE 'ok'; END; $$ language plpgsql").unwrap();
     assert_eq!(cmd.action, Action::Do);

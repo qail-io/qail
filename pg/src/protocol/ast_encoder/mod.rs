@@ -2219,6 +2219,29 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_call_targets_are_sanitized() {
+        let valid = Qail {
+            action: Action::Call,
+            table: "maintenance.refresh()".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&valid).unwrap().0,
+            "CALL maintenance.refresh()"
+        );
+
+        let malicious = Qail {
+            action: Action::Call,
+            table: "refresh(); DROP TABLE users; --".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            AstEncoder::encode_cmd_sql(&malicious).unwrap().0,
+            "CALL \"refresh(); DROP TABLE users; --\""
+        );
+    }
+
+    #[test]
     fn test_encode_batch_mixed_dml_ddl() {
         use qail_core::ast::Expr;
 
