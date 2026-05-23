@@ -1250,7 +1250,7 @@ mod tests {
             ..Default::default()
         };
         let (sql, params) = AstEncoder::encode_cmd_sql(&savepoint).unwrap();
-        assert_eq!(sql, "SAVEPOINT sp1");
+        assert_eq!(sql, "SAVEPOINT \"sp1\"");
         assert!(params.is_empty());
 
         let rollback = Qail {
@@ -1259,7 +1259,7 @@ mod tests {
             ..Default::default()
         };
         let (sql, params) = AstEncoder::encode_cmd_sql(&rollback).unwrap();
-        assert_eq!(sql, "ROLLBACK TO SAVEPOINT sp1");
+        assert_eq!(sql, "ROLLBACK TO SAVEPOINT \"sp1\"");
         assert!(params.is_empty());
 
         let release = Qail {
@@ -1268,7 +1268,19 @@ mod tests {
             ..Default::default()
         };
         let (sql, params) = AstEncoder::encode_cmd_sql(&release).unwrap();
-        assert_eq!(sql, "RELEASE SAVEPOINT sp1");
+        assert_eq!(sql, "RELEASE SAVEPOINT \"sp1\"");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_savepoint_quotes_untrusted_name() {
+        let savepoint = Qail {
+            action: Action::Savepoint,
+            savepoint_name: Some("sp\"; DROP TABLE users; --\0tail".to_string()),
+            ..Default::default()
+        };
+        let (sql, params) = AstEncoder::encode_cmd_sql(&savepoint).unwrap();
+        assert_eq!(sql, "SAVEPOINT \"sp\"\"; DROP TABLE users; --tail\"");
         assert!(params.is_empty());
     }
 

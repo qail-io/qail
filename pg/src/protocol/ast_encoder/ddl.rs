@@ -8,6 +8,12 @@ use qail_core::ast::{
 };
 use qail_core::migrate::policy::{PolicyPermissiveness, PolicyTarget};
 
+/// Quote a SQL identifier for savepoint names.
+fn quote_savepoint_name(name: &str) -> String {
+    let clean = name.replace('\0', "").replace('"', "\"\"");
+    format!("\"{}\"", clean)
+}
+
 /// Map QAIL types to PostgreSQL types.
 #[inline]
 pub fn map_type(t: &str) -> &str {
@@ -494,21 +500,21 @@ pub fn encode_alter_no_force_rls(cmd: &Qail, buf: &mut BytesMut) {
 
 /// Encode SAVEPOINT name.
 pub fn encode_savepoint(cmd: &Qail, buf: &mut BytesMut) {
-    let name = cmd.savepoint_name.as_deref().unwrap_or("qail_sp");
+    let name = quote_savepoint_name(cmd.savepoint_name.as_deref().unwrap_or("qail_sp"));
     buf.extend_from_slice(b"SAVEPOINT ");
     buf.extend_from_slice(name.as_bytes());
 }
 
 /// Encode RELEASE SAVEPOINT name.
 pub fn encode_release_savepoint(cmd: &Qail, buf: &mut BytesMut) {
-    let name = cmd.savepoint_name.as_deref().unwrap_or("qail_sp");
+    let name = quote_savepoint_name(cmd.savepoint_name.as_deref().unwrap_or("qail_sp"));
     buf.extend_from_slice(b"RELEASE SAVEPOINT ");
     buf.extend_from_slice(name.as_bytes());
 }
 
 /// Encode ROLLBACK TO SAVEPOINT name.
 pub fn encode_rollback_to_savepoint(cmd: &Qail, buf: &mut BytesMut) {
-    let name = cmd.savepoint_name.as_deref().unwrap_or("qail_sp");
+    let name = quote_savepoint_name(cmd.savepoint_name.as_deref().unwrap_or("qail_sp"));
     buf.extend_from_slice(b"ROLLBACK TO SAVEPOINT ");
     buf.extend_from_slice(name.as_bytes());
 }
