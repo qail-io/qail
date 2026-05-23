@@ -389,6 +389,137 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_recursive_cte_parenthesizes_set_op_base_term() {
+        use qail_core::ast::{CTEDef, Expr, SetOp};
+
+        let mut base = Qail::get("employees");
+        base.columns.push(Expr::Named("id".to_string()));
+
+        let mut second_base = Qail::get("contractors");
+        second_base.columns.push(Expr::Named("id".to_string()));
+
+        base.set_ops.push((SetOp::UnionAll, Box::new(second_base)));
+
+        let mut recursive = Qail::get("tree");
+        recursive.columns.push(Expr::Named("id".to_string()));
+
+        let mut cmd = Qail::get("tree");
+        cmd.action = Action::With;
+        cmd.ctes = vec![CTEDef {
+            name: "tree".to_string(),
+            recursive: true,
+            columns: vec!["id".to_string()],
+            base_query: Box::new(base),
+            recursive_query: Some(Box::new(recursive)),
+            source_table: None,
+        }];
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(params.is_empty());
+        assert_eq!(
+            sql,
+            "WITH RECURSIVE tree(id) AS ((SELECT id FROM employees UNION ALL SELECT id FROM contractors) UNION ALL SELECT id FROM tree) SELECT * FROM tree"
+        );
+    }
+
+    #[test]
+    fn test_encode_recursive_cte_parenthesizes_limited_base_term() {
+        use qail_core::ast::{CTEDef, Expr};
+
+        let base = Qail::get("roots").columns(["id"]).limit(1);
+
+        let mut recursive = Qail::get("tree");
+        recursive.columns.push(Expr::Named("id".to_string()));
+
+        let mut cmd = Qail::get("tree");
+        cmd.action = Action::With;
+        cmd.ctes = vec![CTEDef {
+            name: "tree".to_string(),
+            recursive: true,
+            columns: vec!["id".to_string()],
+            base_query: Box::new(base),
+            recursive_query: Some(Box::new(recursive)),
+            source_table: None,
+        }];
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(params.is_empty());
+        assert_eq!(
+            sql,
+            "WITH RECURSIVE tree(id) AS ((SELECT id FROM roots LIMIT 1) UNION ALL SELECT id FROM tree) SELECT * FROM tree"
+        );
+    }
+
+    #[test]
+    fn test_encode_set_op_parenthesizes_limited_left_operand() {
+        use qail_core::ast::SetOp;
+
+        let mut q1 = Qail::get("employees").columns(["id"]).limit(5);
+        let q2 = Qail::get("contractors").columns(["id"]);
+
+        q1.set_ops.push((SetOp::Union, Box::new(q2)));
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&q1).unwrap();
+
+        assert!(params.is_empty());
+        assert_eq!(
+            sql,
+            "(SELECT id FROM employees LIMIT 5) UNION SELECT id FROM contractors"
+        );
+    }
+
+    #[test]
+    fn test_encode_set_op_parenthesizes_sorted_right_operand() {
+        use qail_core::ast::SetOp;
+
+        let mut q1 = Qail::get("employees").columns(["id"]);
+        let q2 = Qail::get("contractors")
+            .columns(["id"])
+            .order_desc("id")
+            .limit(5);
+
+        q1.set_ops.push((SetOp::Union, Box::new(q2)));
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&q1).unwrap();
+
+        assert!(params.is_empty());
+        assert_eq!(
+            sql,
+            "SELECT id FROM employees UNION (SELECT id FROM contractors ORDER BY id DESC LIMIT 5)"
+        );
+    }
+
+    #[test]
+    fn test_encode_fetch_first() {
+        let cmd = Qail::get("employees").columns(["id"]).fetch_first(5);
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(params.is_empty());
+        assert_eq!(sql, "SELECT id FROM employees FETCH FIRST 5 ROWS ONLY");
+    }
+
+    #[test]
+    fn test_encode_set_op_parenthesizes_fetch_left_operand() {
+        use qail_core::ast::SetOp;
+
+        let mut q1 = Qail::get("employees").columns(["id"]).fetch_first(5);
+        let q2 = Qail::get("contractors").columns(["id"]);
+
+        q1.set_ops.push((SetOp::Union, Box::new(q2)));
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&q1).unwrap();
+
+        assert!(params.is_empty());
+        assert_eq!(
+            sql,
+            "(SELECT id FROM employees FETCH FIRST 5 ROWS ONLY) UNION SELECT id FROM contractors"
+        );
+    }
+
+    #[test]
     fn test_encode_cmd_with_binary_result_format() {
         let cmd = Qail::get("users").columns(["id"]);
         let (wire, params) = AstEncoder::encode_cmd_with_result_format(&cmd, 1).unwrap();
@@ -579,6 +710,80 @@ mod tests {
             sql
         );
         assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn test_encode_insert_conflict_update_with_filter_guard() {
+        use qail_core::ast::{Expr, Operator};
+
+        let cmd = Qail::add("orders")
+            .set_value("id", "order-1")
+            .set_value("status", "paid")
+            .on_conflict_update(
+                &["id"],
+                &[("status", Expr::Named("EXCLUDED.status".into()))],
+            )
+            .filter("operator_id", Operator::Eq, "operator-1");
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains(
+                "ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status WHERE operator_id = $3"
+            ),
+            "{}",
+            sql
+        );
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn test_encode_insert_select_source_query() {
+        let mut cmd = Qail::add("archived_orders").columns(["id", "total"]);
+        cmd.source_query = Some(Box::new(Qail::get("orders").columns(["id", "total"])));
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert_eq!(
+            sql,
+            "INSERT INTO archived_orders (id, total) SELECT id, total FROM orders"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_encode_update_from_tables() {
+        let cmd = Qail::set("orders")
+            .set_value("status", "paid")
+            .update_from(["payments"])
+            .eq("orders.payment_id", 42);
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains(
+                "UPDATE orders SET status = $1 FROM payments WHERE orders.payment_id = $2"
+            ),
+            "{}",
+            sql
+        );
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_encode_delete_using_tables() {
+        let cmd = Qail::del("orders")
+            .delete_using(["payments"])
+            .eq("orders.payment_id", 42);
+
+        let (sql, params) = AstEncoder::encode_cmd_sql(&cmd).unwrap();
+
+        assert!(
+            sql.contains("DELETE FROM orders USING payments WHERE orders.payment_id = $1"),
+            "{}",
+            sql
+        );
+        assert_eq!(params.len(), 1);
     }
 
     #[test]

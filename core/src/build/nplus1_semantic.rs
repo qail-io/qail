@@ -155,15 +155,26 @@ struct SemanticNPlusOneIndex {
     method_by_module_impl_and_name: HashMap<String, Vec<usize>>,
 }
 
-const EXEC_METHODS: [&str; 8] = [
+const EXEC_METHODS: &[&str] = &[
+    "fetch_all_cached",
+    "fetch_all_cached_with_format",
     "fetch_all_with_rls",
     "fetch_all_uncached",
     "fetch_all_fast",
     "fetch_all",
     "fetch_one",
+    "fetch_one_typed",
+    "fetch_one_typed_with_format",
+    "fetch_typed",
+    "fetch_typed_with_format",
     "fetch_opt",
     "execute",
     "query",
+    "query_ast",
+    "query_ast_with_format",
+    "scroll",
+    "search",
+    "search_ast",
 ];
 
 const ITER_LOOP_PATTERNS: [&str; 4] = [
@@ -204,6 +215,7 @@ fn detect_n_plus_one_in_source_with_index(
 
     let mut loop_stack: Vec<LoopFrame> = Vec::new();
     let mut pending_loop_vars: Option<HashSet<String>> = None;
+    let mut pending_iterator_loop = false;
     let mut brace_depth: i32 = 0;
 
     for (idx, raw_line) in lines.iter().enumerate() {
@@ -223,6 +235,25 @@ fn detect_n_plus_one_in_source_with_index(
             }
         }
 
+        if pending_iterator_loop {
+            if let Some(params) = extract_closure_params(trimmed) {
+                let mut vars = HashSet::new();
+                collect_closure_param_idents(params, &mut vars);
+                pending_iterator_loop = false;
+                if code_line.contains('{') {
+                    let has_scheduler_pacing =
+                        loop_block_has_scheduler_pacing(&code_lines, idx, brace_depth);
+                    let mut frame = LoopFrame::new(brace_depth, vars);
+                    frame.has_scheduler_pacing = has_scheduler_pacing;
+                    loop_stack.push(frame);
+                } else {
+                    pending_loop_vars = Some(vars);
+                }
+            } else if trimmed.contains(';') {
+                pending_iterator_loop = false;
+            }
+        }
+
         if let Some(work_loop_vars) = parse_work_loop_vars(trimmed) {
             if code_line.contains('{') {
                 let has_scheduler_pacing =
@@ -233,6 +264,8 @@ fn detect_n_plus_one_in_source_with_index(
             } else {
                 pending_loop_vars = Some(work_loop_vars);
             }
+        } else if starts_iterator_loop(trimmed) && extract_closure_params(trimmed).is_none() {
+            pending_iterator_loop = true;
         }
 
         let work_depth = loop_stack.len();
@@ -559,12 +592,13 @@ fn extract_functions_from_source(unit: &SourceUnit) -> Vec<FunctionSymbol> {
     let mut impl_stack: Vec<(String, i32)> = Vec::new();
     let mut pending_impl_type: Option<String> = None;
     let mut pending_function: Option<PendingFunction> = None;
-    let mut active_function: Option<ActiveFunction> = None;
+    let mut active_functions: Vec<ActiveFunction> = Vec::new();
 
-    for (idx, _raw_line) in lines.iter().enumerate() {
+    for (idx, raw_line) in lines.iter().enumerate() {
         let code_line = code_lines.get(idx).copied().unwrap_or_default();
         let line_no = idx + 1;
         let trimmed = code_line.trim();
+        let raw_trimmed = raw_line.trim();
 
         if let Some(impl_type) = pending_impl_type.take() {
             if code_line.contains('{') {
@@ -576,7 +610,7 @@ fn extract_functions_from_source(unit: &SourceUnit) -> Vec<FunctionSymbol> {
 
         if let Some(pending) = pending_function.take() {
             if code_line.contains('{') {
-                active_function = Some(ActiveFunction {
+                active_functions.push(ActiveFunction {
                     exit_depth: brace_depth,
                     symbol: pending.symbol,
                 });
@@ -585,39 +619,46 @@ fn extract_functions_from_source(unit: &SourceUnit) -> Vec<FunctionSymbol> {
             }
         }
 
-        if active_function.is_none() {
-            if let Some(impl_type) = parse_impl_type(trimmed) {
-                if code_line.contains('{') {
-                    impl_stack.push((impl_type, brace_depth));
-                } else {
-                    pending_impl_type = Some(impl_type);
-                }
-            }
-
-            if let Some(fn_name) = parse_function_name(trimmed) {
-                let symbol = FunctionSymbol {
-                    file: unit.file.clone(),
-                    module_path: unit.module_path.clone(),
-                    name: fn_name,
-                    impl_type: impl_stack.last().map(|(name, _)| name.clone()),
-                    start_line: line_no,
-                    end_line: line_no,
-                    direct_query_exec: false,
-                    calls: Vec::new(),
-                };
-                if code_line.contains('{') {
-                    active_function = Some(ActiveFunction {
-                        exit_depth: brace_depth,
-                        symbol,
-                    });
-                } else {
-                    pending_function = Some(PendingFunction { symbol });
-                }
+        if active_functions.is_empty()
+            && !trimmed.is_empty()
+            && let Some(impl_type) = parse_impl_type(raw_trimmed)
+        {
+            if code_line.contains('{') {
+                impl_stack.push((impl_type, brace_depth));
+            } else {
+                pending_impl_type = Some(impl_type);
             }
         }
 
-        if let Some(active) = active_function.as_mut() {
+        if pending_function.is_none()
+            && !trimmed.is_empty()
+            && let Some(fn_name) = parse_function_name(raw_trimmed)
+        {
+            let symbol = FunctionSymbol {
+                file: unit.file.clone(),
+                module_path: unit.module_path.clone(),
+                name: fn_name,
+                impl_type: impl_stack.last().map(|(name, _)| name.clone()),
+                start_line: line_no,
+                end_line: line_no,
+                direct_query_exec: false,
+                calls: Vec::new(),
+            };
+            if code_line.contains('{') {
+                active_functions.push(ActiveFunction {
+                    exit_depth: brace_depth,
+                    symbol,
+                });
+            } else {
+                pending_function = Some(PendingFunction { symbol });
+            }
+        }
+
+        for active in &mut active_functions {
             active.symbol.end_line = line_no;
+        }
+
+        if let Some(active) = active_functions.last_mut() {
             // Ignore signature line call-like tokens to avoid false call edges.
             if line_no != active.symbol.start_line {
                 if find_exec_call(code_line).is_some() {
@@ -640,16 +681,17 @@ fn extract_functions_from_source(unit: &SourceUnit) -> Vec<FunctionSymbol> {
             }
         }
 
-        if let Some(active) = active_function.take() {
-            if brace_depth <= active.exit_depth {
+        while active_functions
+            .last()
+            .is_some_and(|active| brace_depth <= active.exit_depth)
+        {
+            if let Some(active) = active_functions.pop() {
                 functions.push(active.symbol);
-            } else {
-                active_function = Some(active);
             }
         }
     }
 
-    if let Some(active) = active_function {
+    while let Some(active) = active_functions.pop() {
         functions.push(active.symbol);
     }
 
@@ -692,7 +734,11 @@ fn parse_function_name(trimmed: &str) -> Option<String> {
 }
 
 fn parse_impl_type(trimmed: &str) -> Option<String> {
-    let rest = trimmed.strip_prefix("impl ")?;
+    let rest = trimmed.strip_prefix("impl")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) && !rest.starts_with('<') {
+        return None;
+    }
+    let rest = rest.trim_start();
     let header = rest.split('{').next().unwrap_or(rest).trim();
     if header.is_empty() {
         return None;
@@ -879,14 +925,7 @@ fn collect_function_calls(line: &str) -> Vec<FunctionCallSite> {
 }
 
 fn is_function_signature_line(trimmed: &str) -> bool {
-    trimmed.starts_with("fn ")
-        || trimmed.starts_with("pub fn ")
-        || trimmed.starts_with("pub(crate) fn ")
-        || trimmed.starts_with("pub(super) fn ")
-        || trimmed.starts_with("async fn ")
-        || trimmed.starts_with("pub async fn ")
-        || trimmed.starts_with("pub(crate) async fn ")
-        || trimmed.starts_with("pub(super) async fn ")
+    parse_function_name(trimmed).is_some()
 }
 
 fn call_token_before_open_paren(line: &str, open_paren_idx: usize) -> Option<(String, usize)> {
@@ -1113,7 +1152,7 @@ fn parse_loop_block_vars(trimmed_line: &str) -> Option<HashSet<String>> {
 
 fn parse_iterator_loop_vars(trimmed_line: &str) -> Option<HashSet<String>> {
     let line = strip_loop_label(trimmed_line);
-    if !ITER_LOOP_PATTERNS.iter().any(|pat| line.contains(pat)) {
+    if !contains_iterator_loop_pattern(line) {
         return None;
     }
 
@@ -1121,6 +1160,14 @@ fn parse_iterator_loop_vars(trimmed_line: &str) -> Option<HashSet<String>> {
     let mut out = HashSet::new();
     collect_closure_param_idents(params, &mut out);
     Some(out)
+}
+
+fn starts_iterator_loop(trimmed_line: &str) -> bool {
+    contains_iterator_loop_pattern(strip_loop_label(trimmed_line))
+}
+
+fn contains_iterator_loop_pattern(line: &str) -> bool {
+    ITER_LOOP_PATTERNS.iter().any(|pat| line.contains(pat))
 }
 
 fn strip_loop_label(trimmed_line: &str) -> &str {
@@ -2174,6 +2221,36 @@ async fn demo(ids: Vec<i64>, conn: &Conn) {
     }
 
     #[test]
+    fn detects_pg_and_qdrant_exec_method_variants() {
+        let source = r#"
+async fn demo(ids: Vec<i64>, conn: &Conn, vectors: Vec<Vec<f32>>, driver: &mut QdrantDriver) {
+    for id in ids {
+        let cmd = Qail::get("users").eq("id", id);
+        let _ = conn.fetch_typed::<UserRow>(&cmd).await;
+        let _ = conn.fetch_one_typed::<UserRow>(&cmd).await;
+        let _ = conn.fetch_all_cached(&cmd).await;
+        let _ = conn.query_ast(&cmd).await;
+        let _ = driver.search_ast(&cmd).await;
+    }
+    for vector in vectors {
+        let _ = driver.search("users", vector, 10, None).await;
+        let _ = driver.scroll("users", None, 100, None).await;
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1001),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
     fn does_not_flag_builder_without_execution() {
         let source = r#"
 fn demo(ids: Vec<i64>) {
@@ -2247,6 +2324,26 @@ fn demo(conn: &Conn, ids: Vec<i64>) {
     }
 
     #[test]
+    fn detects_multiline_iterator_closure_query_execution() {
+        let source = r#"
+fn demo(conn: &Conn, ids: Vec<i64>) {
+    ids.iter().for_each(
+        |id| {
+            let cmd = Qail::get("users").eq("id", *id);
+            let _ = conn.fetch_all(&cmd);
+        }
+    );
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1002),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
     fn detects_nested_for_each_inside_for_as_error() {
         let source = r#"
 fn demo(conn: &Conn, tenants: Vec<i64>, ids: Vec<i64>) {
@@ -2291,6 +2388,28 @@ async fn process(conn: &Conn, ids: Vec<i64>) {
     }
 
     #[test]
+    fn detects_nested_function_query_helper_called_in_loop() {
+        let source = r#"
+fn outer_process(conn: &Conn, ids: Vec<i64>) {
+    fn run_query(conn: &Conn, id: i64) {
+        let cmd = Qail::get("users").eq("id", id);
+        let _ = conn.fetch_all(&cmd);
+    }
+
+    for id in ids {
+        run_query(conn, id);
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
     fn detects_self_method_query_call_in_loop() {
         let source = r#"
 struct Repo;
@@ -2304,6 +2423,32 @@ impl Repo {
     async fn process(&self, conn: &Conn, ids: Vec<i64>) {
         for id in ids {
             self.load_user(conn, id).await;
+        }
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn detects_self_method_inside_impl_with_spaced_generics() {
+        let source = r#"
+struct Repo<'a, T>(&'a T);
+
+impl   <'a, T> Repo<'a, T> {
+    fn load_user(&self, conn: &Conn, id: i64) {
+        let cmd = Qail::get("users").eq("id", id);
+        let _ = conn.fetch_one(&cmd);
+    }
+
+    fn process(&self, conn: &Conn, ids: Vec<i64>) {
+        for id in ids {
+            self.load_user(conn, id);
         }
     }
 }
@@ -2366,6 +2511,39 @@ async fn process(conn: &Conn, ids: Vec<i64>) {
 
         let diags = detect_n_plus_one_in_file("demo.rs", source);
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn unsafe_and_const_signatures_are_not_collected_as_calls() {
+        assert!(collect_function_calls("pub unsafe fn fetch_user(conn: &Conn) {").is_empty());
+        assert!(collect_function_calls("const unsafe fn build_query() -> Qail {").is_empty());
+        assert!(
+            collect_function_calls("pub(crate) const unsafe fn build_query() -> Qail {").is_empty()
+        );
+    }
+
+    #[test]
+    fn detects_unsafe_query_helper_called_in_loop() {
+        let source = r#"
+pub unsafe fn load_user(conn: &Conn, id: i64) {
+    let cmd = Qail::get("users").eq("id", id);
+    let _ = conn.fetch_one(&cmd);
+}
+
+fn process(conn: &Conn, ids: Vec<i64>) {
+    for id in ids {
+        unsafe {
+            load_user(conn, id);
+        }
+    }
+}
+"#;
+
+        let diags = detect_n_plus_one_in_file("demo.rs", source);
+        assert!(
+            diags.iter().any(|d| d.code == NPlusOneCode::N1003),
+            "{diags:?}"
+        );
     }
 
     #[test]

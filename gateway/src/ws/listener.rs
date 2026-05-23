@@ -6,8 +6,7 @@ use crate::GatewayState;
 
 use super::{
     ListenControl, ListenerNotification, WS_LISTENER_CMD_TIMEOUT_MS, WS_LISTENER_RETRY_MS,
-    WS_LISTENER_UNAVAILABLE_NOTICE_MS, WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
-    WS_NOTIFY_DROP_NOTICE_MS, WsServerMessage,
+    WS_LISTENER_UNAVAILABLE_NOTICE_MS, WS_MAX_SUBSCRIPTIONS_PER_CONNECTION, WsServerMessage,
 };
 
 async fn release_listener_conn(conn: &mut Option<qail_pg::PooledConnection>) {
@@ -87,7 +86,6 @@ pub(super) async fn run_listener_session(
     let mut conn: Option<qail_pg::PooledConnection> = None;
     let mut channels: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut last_unavailable_notice: Option<std::time::Instant> = None;
-    let mut last_notify_drop_notice: Option<std::time::Instant> = None;
 
     loop {
         if conn.is_none()
@@ -99,9 +97,11 @@ pub(super) async fn run_listener_session(
                 t.elapsed() >= std::time::Duration::from_millis(WS_LISTENER_UNAVAILABLE_NOTICE_MS)
             });
             if should_notify {
-                let _ = tx.try_send(WsServerMessage::Error {
-                    message: "Notification channel unavailable".to_string(),
-                });
+                let _ = tx
+                    .send(WsServerMessage::Error {
+                        message: "Notification channel unavailable".to_string(),
+                    })
+                    .await;
                 last_unavailable_notice = Some(std::time::Instant::now());
             }
             tokio::select! {
@@ -183,24 +183,12 @@ pub(super) async fn run_listener_session(
                         Ok(notification) => {
                             let channel = notification.channel;
                             if channels.contains(&channel) {
-                                match notify_tx.try_send(ListenerNotification {
+                                match notify_tx.send(ListenerNotification {
                                     channel: channel.clone(),
                                     payload: notification.payload,
-                                }) {
+                                }).await {
                                     Ok(()) => {}
-                                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                        let should_log = last_notify_drop_notice.is_none_or(|t| {
-                                            t.elapsed() >= std::time::Duration::from_millis(WS_NOTIFY_DROP_NOTICE_MS)
-                                        });
-                                        if should_log {
-                                            tracing::warn!(
-                                                channel = %channel,
-                                                "Dropping WS notification: internal queue is full"
-                                            );
-                                            last_notify_drop_notice = Some(std::time::Instant::now());
-                                        }
-                                    }
-                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    Err(_) => {
                                         break;
                                     }
                                 }

@@ -57,6 +57,7 @@ impl TransactionSessionManager {
             closed: false,
             statements_executed,
             pg_aborted: false,
+            mutated_tables: std::collections::HashSet::new(),
         };
         let mut sessions = self.sessions.lock().await;
         sessions.insert(
@@ -67,14 +68,13 @@ impl TransactionSessionManager {
     }
 
     pub(super) async fn rollback_and_release(conn: Option<PooledConnection>) {
-        if let Some(mut conn) = conn {
-            if let Err(e) = conn.rollback().await {
-                tracing::warn!(
-                    error = %e,
-                    "Rollback failed during session termination"
-                );
-            }
-            conn.release().await;
+        if let Some(conn) = conn
+            && let Err(e) = conn.rollback_and_release().await
+        {
+            tracing::warn!(
+                error = %e,
+                "Rollback/release failed during session termination"
+            );
         }
     }
 }

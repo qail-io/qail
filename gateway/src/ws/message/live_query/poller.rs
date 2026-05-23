@@ -21,6 +21,7 @@ pub(super) struct LiveQueryPollerConfig {
     pub(super) lock_timeout: u32,
     pub(super) tenant_id: Option<String>,
     pub(super) tenant_col: String,
+    pub(super) strip_tenant_col: bool,
 }
 
 pub(super) fn spawn_live_query_poller(
@@ -38,6 +39,7 @@ pub(super) fn spawn_live_query_poller(
         lock_timeout,
         tenant_id,
         tenant_col,
+        strip_tenant_col,
     } = cfg;
     let mut cmd = cmd;
     state.optimize_qail_for_execution(&mut cmd);
@@ -90,7 +92,7 @@ pub(super) fn spawn_live_query_poller(
             {
                 match conn.fetch_all_uncached(&cmd).await {
                     Ok(rows) => {
-                        let json_rows: Vec<serde_json::Value> =
+                        let mut json_rows: Vec<serde_json::Value> =
                             rows.iter().map(crate::handler::row_to_json).collect();
 
                         if let Some(ref tenant_id) = tenant_id
@@ -112,9 +114,16 @@ pub(super) fn spawn_live_query_poller(
                             break;
                         }
 
+                        if strip_tenant_col {
+                            crate::tenant_guard::strip_tenant_column_from_json_rows(
+                                &mut json_rows,
+                                &tenant_col,
+                            );
+                        }
+
                         let count = json_rows.len();
                         conn.release().await;
-                        if !dispatch_live_query_update(&tx, &table, json_rows, count, seq) {
+                        if !dispatch_live_query_update(&tx, &table, json_rows, count, seq).await {
                             break;
                         }
                         seq += 1;

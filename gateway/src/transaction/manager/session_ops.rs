@@ -169,7 +169,7 @@ impl TransactionSessionManager {
         tenant_id: &str,
         user_id: Option<&str>,
         commit: bool,
-    ) -> Result<(), TransactionError> {
+    ) -> Result<Vec<String>, TransactionError> {
         let session = {
             let sessions = self.sessions.lock().await;
             sessions
@@ -189,8 +189,14 @@ impl TransactionSessionManager {
             return Err(TransactionError::UserMismatch);
         }
 
+        let was_aborted = session.pg_aborted;
+        let mutated_tables = if commit {
+            session.mutated_tables.iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
         session.closed = true;
-        let mut conn = session
+        let conn = session
             .conn
             .take()
             .ok_or(TransactionError::SessionNotFound)?;
@@ -202,41 +208,42 @@ impl TransactionSessionManager {
             crate::metrics::record_txn_active_sessions(sessions.len());
         }
 
-        let action = if commit { "COMMIT" } else { "ROLLBACK" };
-
-        let result = if commit {
-            conn.commit().await
+        let result = if commit && was_aborted {
+            tracing::warn!(
+                session_id = %session_id,
+                "Transaction commit requested while PostgreSQL transaction is aborted; rolling back"
+            );
+            match conn.rollback_and_release().await {
+                Ok(()) => Err(TransactionError::Aborted),
+                Err(e) => Err(TransactionError::Database(e.to_string())),
+            }
+        } else if commit {
+            conn.release_checked()
+                .await
+                .map_err(|e| TransactionError::Database(e.to_string()))
         } else {
-            conn.rollback().await
+            conn.rollback_and_release()
+                .await
+                .map_err(|e| TransactionError::Database(e.to_string()))
         };
 
         if let Err(e) = &result {
             tracing::error!(
                 session_id = %session_id,
-                action = %action,
                 error = %e,
-                "Transaction {} failed",
-                action
+                action = if commit { "COMMIT" } else { "ROLLBACK" },
+                "Transaction close failed"
             );
-            if let Err(rb_err) = conn.rollback().await {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %rb_err,
-                    "Recovery ROLLBACK also failed; connection will be destroyed on release"
-                );
-            }
             crate::metrics::record_txn_session_closed("error");
         } else {
             tracing::info!(
                 session_id = %session_id,
-                action = %action,
+                action = if commit { "COMMIT" } else { "ROLLBACK" },
                 "Transaction session closed"
             );
             crate::metrics::record_txn_session_closed(if commit { "commit" } else { "rollback" });
         }
 
-        conn.release().await;
-
-        result.map_err(|e| TransactionError::Database(e.to_string()))
+        result.map(|()| mutated_tables)
     }
 }

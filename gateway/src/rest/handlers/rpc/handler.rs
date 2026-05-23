@@ -159,7 +159,16 @@ pub(crate) async fn rpc_handler(
             return Err(ApiError::from_pg_driver_error(&e, None));
         }
 
-        conn.release().await;
+        if let Err(e) = conn.release_checked().await {
+            state.cache.invalidate_all();
+            crate::metrics::record_rpc_call(
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                false,
+                result_format_label,
+            );
+            return Err(ApiError::from_pg_driver_error(&e, None));
+        }
+        state.cache.invalidate_all();
         crate::metrics::record_rpc_call(
             started_at.elapsed().as_secs_f64() * 1000.0,
             true,
@@ -216,7 +225,16 @@ pub(crate) async fn rpc_handler(
                 return Err(ApiError::from_pg_driver_error(&void_err, None));
             }
 
-            conn.release().await;
+            if let Err(e) = conn.release_checked().await {
+                state.cache.invalidate_all();
+                crate::metrics::record_rpc_call(
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                    false,
+                    result_format_label,
+                );
+                return Err(ApiError::from_pg_driver_error(&e, None));
+            }
+            state.cache.invalidate_all();
             crate::metrics::record_rpc_call(
                 started_at.elapsed().as_secs_f64() * 1000.0,
                 true,
@@ -240,9 +258,40 @@ pub(crate) async fn rpc_handler(
         }
     };
 
-    conn.release().await;
-
     let data: Vec<Value> = rows.iter().map(row_to_json).collect();
+    if let Some(ref tenant_id) = auth.tenant_id
+        && let Err(v) = crate::tenant_guard::verify_tenant_boundary(
+            &data,
+            tenant_id,
+            &state.config.tenant_column,
+            &function.canonical(),
+            "rest_rpc",
+        )
+    {
+        tracing::error!("{}", v);
+        let _ = conn.rollback_and_release().await;
+        crate::metrics::record_rpc_call(
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            false,
+            result_format_label,
+        );
+        return Err(ApiError::with_code(
+            "TENANT_BOUNDARY_VIOLATION",
+            "Data integrity error",
+        ));
+    }
+
+    if let Err(e) = conn.release_checked().await {
+        state.cache.invalidate_all();
+        crate::metrics::record_rpc_call(
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            false,
+            result_format_label,
+        );
+        return Err(ApiError::from_pg_driver_error(&e, None));
+    }
+    state.cache.invalidate_all();
+
     let count = data.len();
     crate::metrics::record_rpc_call(
         started_at.elapsed().as_secs_f64() * 1000.0,

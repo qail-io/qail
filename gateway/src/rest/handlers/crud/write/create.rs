@@ -33,6 +33,113 @@ fn pk_to_overlay_key(value: &Value) -> Option<String> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpsertConflictMode {
+    ExplicitUpdate,
+    ImplicitMerge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnConflictActionParam {
+    Update,
+    Nothing,
+}
+
+fn upsert_update_assignments<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    conflict_cols: &[&str],
+    enforce_tenant_column: bool,
+    tenant_column: &str,
+) -> Vec<(&'a str, Expr)> {
+    obj.keys()
+        .filter(|k| !conflict_cols.contains(&k.as_str()))
+        .filter(|k| !enforce_tenant_column || k.as_str() != tenant_column)
+        .filter(|k| crate::rest::filters::is_safe_identifier(k))
+        .map(|k| (k.as_str(), Expr::Named(format!("EXCLUDED.{}", k))))
+        .collect()
+}
+
+fn parse_explicit_on_conflict_columns(input: &str) -> Result<Vec<String>, ApiError> {
+    crate::rest::filters::parse_identifier_csv(input).map_err(|msg| {
+        ApiError::bad_request(
+            "VALIDATION_ERROR",
+            format!("Invalid on_conflict parameter: {}", msg),
+        )
+    })
+}
+
+fn parse_on_conflict_action(input: Option<&str>) -> Result<OnConflictActionParam, ApiError> {
+    let Some(input) = input else {
+        return Ok(OnConflictActionParam::Update);
+    };
+
+    match input.trim().to_ascii_lowercase().as_str() {
+        "update" => Ok(OnConflictActionParam::Update),
+        "nothing" => Ok(OnConflictActionParam::Nothing),
+        _ => Err(ApiError::bad_request(
+            "VALIDATION_ERROR",
+            "Invalid on_conflict_action parameter: expected 'update' or 'nothing'",
+        )),
+    }
+}
+
+fn apply_on_conflict_update_or_noop(
+    cmd: qail_core::ast::Qail,
+    conflict_cols: &[&str],
+    updates: &[(&str, Expr)],
+    mode: UpsertConflictMode,
+) -> Result<qail_core::ast::Qail, ApiError> {
+    if updates.is_empty() {
+        return match mode {
+            UpsertConflictMode::ImplicitMerge => Ok(cmd.on_conflict_nothing(conflict_cols)),
+            UpsertConflictMode::ExplicitUpdate => Err(ApiError::bad_request(
+                "VALIDATION_ERROR",
+                "on_conflict update requires at least one non-conflict updatable column",
+            )),
+        };
+    }
+
+    Ok(cmd.on_conflict_update(conflict_cols, updates))
+}
+
+fn build_upsert_old_row_lookup(
+    table_name: &str,
+    conflict_cols: &[String],
+    obj: &serde_json::Map<String, Value>,
+    tenant_scope: Option<(&str, &str)>,
+) -> Result<qail_core::ast::Qail, ApiError> {
+    if conflict_cols.is_empty() {
+        return Err(ApiError::bad_request(
+            "VALIDATION_ERROR",
+            "on_conflict update requires at least one conflict column for event classification",
+        ));
+    }
+
+    let mut cmd = qail_core::ast::Qail::get(table_name).limit(1);
+    for column in conflict_cols {
+        let value = obj.get(column).ok_or_else(|| {
+            ApiError::bad_request(
+                "VALIDATION_ERROR",
+                format!(
+                    "on_conflict update with triggers requires conflict column '{}' in payload",
+                    column
+                ),
+            )
+        })?;
+        cmd = cmd.filter(column, Operator::Eq, json_to_qail_value(value));
+    }
+
+    if let Some((scope_column, tenant_id)) = tenant_scope {
+        cmd = cmd.filter(
+            scope_column,
+            Operator::Eq,
+            QailValue::String(tenant_id.to_string()),
+        );
+    }
+
+    Ok(cmd)
+}
+
 pub(crate) async fn create_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -51,6 +158,8 @@ pub(crate) async fn create_handler(
     let auth = authenticate_request(state.as_ref(), &headers).await?;
     let tenant_scope_column =
         crate::rest::tenant_scope_column_for_table(state.as_ref(), &table_name);
+    let tenant_scope =
+        crate::rest::tenant_scope_filter_for_table(state.as_ref(), &auth, &table_name);
     let prefer = parse_prefer_header(&headers);
 
     // Validate required columns upfront (skip for upserts — conflict rows may exist)
@@ -140,6 +249,9 @@ pub(crate) async fn create_handler(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let on_conflict_action =
+        parse_on_conflict_action(mutation_params.on_conflict_action.as_deref())?;
+
     // SECURITY: Check branch admin gate BEFORE acquiring connection
     let branch_ctx = extract_branch_from_headers(&headers)?;
     if branch_ctx.branch_name().is_some() && !auth.can_use_branching() {
@@ -180,7 +292,9 @@ pub(crate) async fn create_handler(
             all_results.push(row_data);
         }
 
-        conn.release().await;
+        conn.release_checked()
+            .await
+            .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
         if is_batch {
             return Ok((
@@ -215,9 +329,22 @@ pub(crate) async fn create_handler(
     let mut all_results: Vec<Value> = Vec::with_capacity(normalized_objects.len());
     let enforce_tenant_column = auth.tenant_id.is_some() && tenant_scope_column.is_some();
     let tenant_column = tenant_scope_column.as_deref().unwrap_or("");
+    let has_create_triggers = !state
+        .event_engine
+        .triggers_for(&table_name, &OperationType::Create)
+        .is_empty();
+    let has_update_triggers = !state
+        .event_engine
+        .triggers_for(&table_name, &OperationType::Update)
+        .is_empty();
+    let response_requested_returning = prefer.return_mode.as_deref() == Some("representation")
+        || mutation_params.returning.is_some();
+    let mut classified_upsert_events: Vec<(OperationType, Option<Value>, Option<Value>)> =
+        Vec::new();
 
     for obj in &normalized_objects {
         let mut cmd = qail_core::ast::Qail::add(&table_name);
+        let mut conflict_update_cols: Option<Vec<String>> = None;
 
         for (key, value) in obj {
             let qail_val = json_to_qail_value(value);
@@ -226,30 +353,30 @@ pub(crate) async fn create_handler(
 
         // Upsert support: explicit on_conflict param takes precedence
         if let Some(ref conflict_col) = mutation_params.on_conflict {
-            // SECURITY: Validate on_conflict column identifiers.
-            let conflict_cols: Vec<&str> = conflict_col
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| crate::rest::filters::is_safe_identifier(s))
-                .collect();
-            let action = mutation_params
-                .on_conflict_action
-                .as_deref()
-                .unwrap_or("update");
+            let conflict_cols = parse_explicit_on_conflict_columns(conflict_col)?;
+            let conflict_col_refs: Vec<&str> = conflict_cols.iter().map(String::as_str).collect();
 
-            if action == "nothing" {
-                cmd = cmd.on_conflict_nothing(&conflict_cols);
-            } else {
-                // Default: update all provided columns on conflict
-                // SECURITY: Filter update keys through identifier guard.
-                let updates: Vec<(&str, Expr)> = obj
-                    .keys()
-                    .filter(|k| !conflict_cols.contains(&k.as_str()))
-                    .filter(|k| !enforce_tenant_column || k.as_str() != tenant_column)
-                    .filter(|k| crate::rest::filters::is_safe_identifier(k))
-                    .map(|k| (k.as_str(), Expr::Named(format!("EXCLUDED.{}", k))))
-                    .collect();
-                cmd = cmd.on_conflict_update(&conflict_cols, &updates);
+            match on_conflict_action {
+                OnConflictActionParam::Nothing => {
+                    cmd = cmd.on_conflict_nothing(&conflict_col_refs);
+                }
+                OnConflictActionParam::Update => {
+                    // Default: update all provided columns on conflict
+                    // SECURITY: Filter update keys through identifier guard.
+                    conflict_update_cols = Some(conflict_cols.clone());
+                    let updates = upsert_update_assignments(
+                        obj,
+                        &conflict_col_refs,
+                        enforce_tenant_column,
+                        tenant_column,
+                    );
+                    cmd = apply_on_conflict_update_or_noop(
+                        cmd,
+                        &conflict_col_refs,
+                        &updates,
+                        UpsertConflictMode::ExplicitUpdate,
+                    )?;
+                }
             }
         } else if prefer.wants_ignore_duplicates() {
             // Prefer: resolution=ignore-duplicates → DO NOTHING on PK
@@ -260,19 +387,27 @@ pub(crate) async fn create_handler(
         } else if let Some(ref pk_col) = prefer_conflict_col {
             // Prefer: resolution=merge-duplicates → DO UPDATE on all cols
             let conflict_cols: Vec<&str> = vec![pk_col.as_str()];
+            conflict_update_cols = Some(vec![pk_col.clone()]);
             // SECURITY: Filter update keys through identifier guard.
-            let updates: Vec<(&str, Expr)> = obj
-                .keys()
-                .filter(|k| k.as_str() != pk_col.as_str())
-                .filter(|k| !enforce_tenant_column || k.as_str() != tenant_column)
-                .filter(|k| crate::rest::filters::is_safe_identifier(k))
-                .map(|k| (k.as_str(), Expr::Named(format!("EXCLUDED.{}", k))))
-                .collect();
-            cmd = cmd.on_conflict_update(&conflict_cols, &updates);
+            let updates = upsert_update_assignments(
+                obj,
+                &conflict_cols,
+                enforce_tenant_column,
+                tenant_column,
+            );
+            cmd = apply_on_conflict_update_or_noop(
+                cmd,
+                &conflict_cols,
+                &updates,
+                UpsertConflictMode::ImplicitMerge,
+            )?;
         }
 
-        // Returning clause: Prefer return=representation forces RETURNING *
-        if prefer.return_mode.as_deref() == Some("representation")
+        // Returning clause: Prefer return=representation and webhook triggers
+        // need the created row even when the HTTP caller did not ask for it.
+        let classify_upsert_event =
+            conflict_update_cols.is_some() && (has_create_triggers || has_update_triggers);
+        if (response_requested_returning || has_create_triggers || classify_upsert_event)
             && mutation_params.returning.is_none()
         {
             cmd = apply_returning(cmd, Some("*"));
@@ -280,17 +415,53 @@ pub(crate) async fn create_handler(
             cmd = apply_returning(cmd, mutation_params.returning.as_deref());
         }
 
+        let mut old_cmd = if classify_upsert_event {
+            let conflict_cols = conflict_update_cols
+                .as_ref()
+                .expect("classify_upsert_event requires conflict columns");
+            Some(build_upsert_old_row_lookup(
+                &table_name,
+                conflict_cols,
+                obj,
+                tenant_scope
+                    .as_ref()
+                    .map(|(column, tenant_id)| (column.as_str(), tenant_id.as_str())),
+            )?)
+        } else {
+            None
+        };
+
         // Apply RLS
         if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
-            conn.release().await;
+            let _ = conn.rollback_and_release().await;
             return Err(ApiError::forbidden(e.to_string()));
         }
+        if let Some(ref mut old_cmd) = old_cmd {
+            if let Err(e) = state.policy_engine.apply_policies(&auth, old_cmd) {
+                let _ = conn.rollback_and_release().await;
+                return Err(ApiError::forbidden(e.to_string()));
+            }
+            state.optimize_qail_for_execution(old_cmd);
+        }
         state.optimize_qail_for_execution(&mut cmd);
+
+        let old_data = if let Some(ref old_cmd) = old_cmd {
+            let rows = match conn.fetch_all_uncached(old_cmd).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    let _ = conn.rollback_and_release().await;
+                    return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+                }
+            };
+            rows.first().map(row_to_json)
+        } else {
+            None
+        };
 
         let rows = match conn.fetch_all_uncached(&cmd).await {
             Ok(rows) => rows,
             Err(e) => {
-                conn.release().await;
+                let _ = conn.rollback_and_release().await;
                 return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
             }
         };
@@ -300,57 +471,110 @@ pub(crate) async fn create_handler(
                 all_results.push(row_to_json(row));
             }
         }
+
+        if classify_upsert_event {
+            let new_data = rows.first().map(row_to_json);
+            match (old_data, new_data) {
+                (Some(old_data), Some(new_data)) if has_update_triggers => {
+                    classified_upsert_events.push((
+                        OperationType::Update,
+                        Some(new_data),
+                        Some(old_data),
+                    ));
+                }
+                (None, Some(new_data)) if has_create_triggers => {
+                    classified_upsert_events.push((OperationType::Create, Some(new_data), None));
+                }
+                _ => {}
+            }
+        }
     }
 
-    // Release connection before JSON processing
-    conn.release().await;
+    if !classified_upsert_events.is_empty() {
+        for (operation, new_data, old_data) in classified_upsert_events {
+            if let Err(e) = state
+                .event_engine
+                .enqueue_durable(&mut conn, &table_name, operation, new_data, old_data)
+                .await
+            {
+                let _ = conn.rollback_and_release().await;
+                return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+            }
+        }
+    } else {
+        let event_new = if all_results.is_empty() {
+            None
+        } else if is_batch {
+            Some(json!(all_results.clone()))
+        } else {
+            all_results.first().cloned()
+        };
+
+        if let Some(new_data) = event_new.clone()
+            && let Err(e) = state
+                .event_engine
+                .enqueue_durable(
+                    &mut conn,
+                    &table_name,
+                    OperationType::Create,
+                    Some(new_data),
+                    None,
+                )
+                .await
+        {
+            let _ = conn.rollback_and_release().await;
+            return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+        }
+    }
+
+    conn.release_checked()
+        .await
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
     // Invalidate cache
     state.cache.invalidate_table(&table_name);
 
     // Prefer: return=minimal → 201 with no body
     if prefer.wants_minimal() {
-        state.event_engine.fire(
-            &table_name,
-            OperationType::Create,
-            Some(json!(all_results)),
-            None,
-        );
         return Ok((StatusCode::CREATED, Json(json!({}))));
     }
 
     if is_batch {
-        let count = all_results.len();
-        // Fire event triggers
-        state.event_engine.fire(
-            &table_name,
-            OperationType::Create,
-            Some(json!(all_results)),
-            None,
-        );
+        let response_results = if response_requested_returning {
+            all_results.clone()
+        } else {
+            Vec::new()
+        };
+        let count = response_results.len();
         Ok((
             StatusCode::CREATED,
             Json(json!({
-                "data": all_results,
+                "data": response_results,
                 "count": count,
             })),
         ))
     } else {
-        let data = all_results
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| json!({"created": true}));
-        // Fire event triggers
-        state
-            .event_engine
-            .fire(&table_name, OperationType::Create, Some(data.clone()), None);
+        let data = if response_requested_returning {
+            all_results
+                .first()
+                .cloned()
+                .unwrap_or_else(|| json!({"created": true}))
+        } else {
+            json!({"created": true})
+        };
         Ok((StatusCode::CREATED, Json(json!({ "data": data }))))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_create_object_for_tenant, pk_to_overlay_key};
+    use super::{
+        OnConflictActionParam, UpsertConflictMode, apply_on_conflict_update_or_noop,
+        build_upsert_old_row_lookup, normalize_create_object_for_tenant,
+        parse_explicit_on_conflict_columns, parse_on_conflict_action, pk_to_overlay_key,
+        upsert_update_assignments,
+    };
+    use qail_core::ast::ConflictAction;
     use serde_json::{Map, Value, json};
 
     #[test]
@@ -403,5 +627,140 @@ mod tests {
         assert_eq!(pk_to_overlay_key(&json!(null)), None);
         assert_eq!(pk_to_overlay_key(&json!([1, 2, 3])), None);
         assert_eq!(pk_to_overlay_key(&json!({"id": 1})), None);
+    }
+
+    #[test]
+    fn implicit_merge_with_no_updatable_columns_uses_do_nothing() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("order-1"));
+        obj.insert("tenant_id".to_string(), json!("tenant-a"));
+        let conflict_cols = vec!["id"];
+        let updates = upsert_update_assignments(&obj, &conflict_cols, true, "tenant_id");
+        assert!(updates.is_empty());
+
+        let cmd = apply_on_conflict_update_or_noop(
+            qail_core::ast::Qail::add("orders"),
+            &conflict_cols,
+            &updates,
+            UpsertConflictMode::ImplicitMerge,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            cmd.on_conflict.expect("on conflict").action,
+            ConflictAction::DoNothing
+        ));
+    }
+
+    #[test]
+    fn explicit_update_with_no_updatable_columns_is_400() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("order-1"));
+        obj.insert("tenant_id".to_string(), json!("tenant-a"));
+        let conflict_cols = vec!["id"];
+        let updates = upsert_update_assignments(&obj, &conflict_cols, true, "tenant_id");
+
+        let err = apply_on_conflict_update_or_noop(
+            qail_core::ast::Qail::add("orders"),
+            &conflict_cols,
+            &updates,
+            UpsertConflictMode::ExplicitUpdate,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("at least one"));
+    }
+
+    #[test]
+    fn explicit_on_conflict_columns_accept_valid_list() {
+        let cols = parse_explicit_on_conflict_columns("id, tenant_id").unwrap();
+        assert_eq!(cols, vec!["id".to_string(), "tenant_id".to_string()]);
+    }
+
+    #[test]
+    fn explicit_on_conflict_columns_reject_empty_segment() {
+        let err = parse_explicit_on_conflict_columns("id, ,tenant_id").unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("Invalid on_conflict parameter"));
+    }
+
+    #[test]
+    fn explicit_on_conflict_columns_reject_empty_list() {
+        let err = parse_explicit_on_conflict_columns("").unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("Invalid on_conflict parameter"));
+    }
+
+    #[test]
+    fn explicit_on_conflict_columns_reject_invalid_column() {
+        let err = parse_explicit_on_conflict_columns("id,tenant-id").unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("Invalid on_conflict parameter"));
+    }
+
+    #[test]
+    fn on_conflict_action_defaults_to_update() {
+        assert_eq!(
+            parse_on_conflict_action(None).unwrap(),
+            OnConflictActionParam::Update
+        );
+    }
+
+    #[test]
+    fn on_conflict_action_accepts_update_and_nothing_case_insensitive() {
+        assert_eq!(
+            parse_on_conflict_action(Some("update")).unwrap(),
+            OnConflictActionParam::Update
+        );
+        assert_eq!(
+            parse_on_conflict_action(Some("NoThInG")).unwrap(),
+            OnConflictActionParam::Nothing
+        );
+    }
+
+    #[test]
+    fn on_conflict_action_rejects_unknown_values() {
+        let err = parse_on_conflict_action(Some("merge")).unwrap_err();
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("Invalid on_conflict_action"));
+    }
+
+    #[test]
+    fn upsert_old_row_lookup_uses_conflict_and_tenant_filters() {
+        let mut obj = Map::new();
+        obj.insert("id".to_string(), json!("order-1"));
+        obj.insert("status".to_string(), json!("paid"));
+        let conflict_cols = vec!["id".to_string()];
+
+        let cmd = build_upsert_old_row_lookup(
+            "orders",
+            &conflict_cols,
+            &obj,
+            Some(("tenant_id", "tenant-a")),
+        )
+        .unwrap();
+
+        assert_eq!(cmd.table, "orders");
+        assert!(cmd.cages.len() >= 2);
+        assert!(cmd.cages.iter().any(|cage| {
+            cage.conditions
+                .iter()
+                .any(|condition| condition.left == qail_core::ast::Expr::Named("id".to_string()))
+        }));
+        assert!(cmd.cages.iter().any(|cage| cage.conditions.iter().any(
+            |condition| condition.left == qail_core::ast::Expr::Named("tenant_id".to_string())
+        )));
+    }
+
+    #[test]
+    fn upsert_old_row_lookup_requires_conflict_column_payload() {
+        let obj = Map::new();
+        let conflict_cols = vec!["id".to_string()];
+
+        let err = build_upsert_old_row_lookup("orders", &conflict_cols, &obj, None).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("requires conflict column 'id'"));
     }
 }

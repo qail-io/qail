@@ -15,10 +15,10 @@ use qail_pg::PgPool;
 
 pub(super) fn load_policy_engine(config: &GatewayConfig) -> Result<PolicyEngine, GatewayError> {
     let mut policy_engine = PolicyEngine::new();
-    if let Some(ref policy_path) = config.policy_path
-        && let Ok(canonical) =
+    if let Some(ref policy_path) = config.policy_path {
+        let canonical =
             crate::config::validate_config_path(policy_path, config.config_root.as_deref())
-    {
+                .map_err(GatewayError::Config)?;
         tracing::info!("Loading policies from: {}", canonical.display());
         policy_engine.load_from_file(canonical.to_str().unwrap_or(policy_path))?;
     }
@@ -27,10 +27,10 @@ pub(super) fn load_policy_engine(config: &GatewayConfig) -> Result<PolicyEngine,
 
 pub(super) fn load_schema_registry(config: &GatewayConfig) -> Result<SchemaRegistry, GatewayError> {
     let mut schema = SchemaRegistry::new();
-    if let Some(ref schema_path) = config.schema_path
-        && let Ok(canonical) =
+    if let Some(ref schema_path) = config.schema_path {
+        let canonical =
             crate::config::validate_config_path(schema_path, config.config_root.as_deref())
-    {
+                .map_err(GatewayError::Config)?;
         tracing::info!("Loading schema from: {}", canonical.display());
         schema.load_from_file(canonical.to_str().unwrap_or(schema_path))?;
     }
@@ -107,10 +107,10 @@ pub(super) fn load_event_engine(
     config: &GatewayConfig,
 ) -> Result<EventTriggerEngine, GatewayError> {
     let mut event_engine = EventTriggerEngine::new();
-    if let Some(ref events_path) = config.events_path
-        && let Ok(canonical) =
+    if let Some(ref events_path) = config.events_path {
+        let canonical =
             crate::config::validate_config_path(events_path, config.config_root.as_deref())
-    {
+                .map_err(GatewayError::Config)?;
         event_engine
             .load_from_file(canonical.to_str().unwrap_or(events_path))
             .map_err(GatewayError::Config)?;
@@ -185,10 +185,9 @@ pub(super) fn build_prometheus_handle() -> Result<Arc<PrometheusHandle>, Gateway
 
 pub(super) fn load_allow_list(config: &GatewayConfig) -> Result<QueryAllowList, GatewayError> {
     let mut allow_list = QueryAllowList::new();
-    if let Some(ref path) = config.allow_list_path
-        && let Ok(canonical) =
-            crate::config::validate_config_path(path, config.config_root.as_deref())
-    {
+    if let Some(ref path) = config.allow_list_path {
+        let canonical = crate::config::validate_config_path(path, config.config_root.as_deref())
+            .map_err(GatewayError::Config)?;
         allow_list
             .load_from_file(canonical.to_str().unwrap_or(path))
             .map_err(|e| {
@@ -201,10 +200,9 @@ pub(super) fn load_allow_list(config: &GatewayConfig) -> Result<QueryAllowList, 
 pub(super) fn load_rpc_allow_list_from_config(
     config: &GatewayConfig,
 ) -> Result<Option<HashSet<String>>, GatewayError> {
-    if let Some(ref path) = config.rpc_allowlist_path
-        && let Ok(canonical) =
-            crate::config::validate_config_path(path, config.config_root.as_deref())
-    {
+    if let Some(ref path) = config.rpc_allowlist_path {
+        let canonical = crate::config::validate_config_path(path, config.config_root.as_deref())
+            .map_err(GatewayError::Config)?;
         return Ok(Some(load_rpc_allow_list(&canonical)?));
     }
     Ok(None)
@@ -225,5 +223,54 @@ pub(super) async fn load_jwks_store() -> Option<crate::jwks::JwksKeyStore> {
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_config_root_and_outside_file() -> (std::path::PathBuf, std::path::PathBuf) {
+        let unique = format!(
+            "qail-embedded-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let root = base.join("root");
+        let outside = base.join("outside.txt");
+        std::fs::create_dir_all(&root).expect("create temp config root");
+        std::fs::write(&outside, "SELECT 1\n").expect("write outside config file");
+        (root, outside)
+    }
+
+    #[test]
+    fn embedded_allow_list_fails_when_config_path_escapes_root() {
+        let (root, outside) = temp_config_root_and_outside_file();
+        let cfg = GatewayConfig {
+            allow_list_path: Some(outside.to_string_lossy().to_string()),
+            config_root: Some(root.to_string_lossy().to_string()),
+            ..GatewayConfig::default()
+        };
+
+        let err = load_allow_list(&cfg).expect_err("escaped allow-list path must fail");
+        assert!(err.to_string().contains("escapes config_root"));
+    }
+
+    #[test]
+    fn embedded_rpc_allow_list_fails_when_config_path_escapes_root() {
+        let (root, outside) = temp_config_root_and_outside_file();
+        let cfg = GatewayConfig {
+            rpc_allowlist_path: Some(outside.to_string_lossy().to_string()),
+            config_root: Some(root.to_string_lossy().to_string()),
+            ..GatewayConfig::default()
+        };
+
+        let err = load_rpc_allow_list_from_config(&cfg)
+            .expect_err("escaped RPC allow-list path must fail");
+        assert!(err.to_string().contains("escapes config_root"));
     }
 }

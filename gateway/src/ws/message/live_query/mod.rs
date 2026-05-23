@@ -19,6 +19,11 @@ pub(super) struct LiveQueryRequest {
     pub interval_ms: u64,
 }
 
+pub(super) struct PreparedLiveQuery {
+    pub cmd: qail_core::ast::Qail,
+    pub tenant_guard_plan: Option<crate::tenant_guard::TenantGuardPlan>,
+}
+
 pub(super) struct LiveQueryRuntime<'a> {
     pub state: &'a Arc<GatewayState>,
     pub tx: &'a mpsc::Sender<WsServerMessage>,

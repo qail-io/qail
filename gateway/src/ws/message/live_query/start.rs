@@ -12,7 +12,7 @@ pub(super) async fn handle_live_query(
         request.table
     );
 
-    let Some(cmd) = prepare_and_send_initial_snapshot(
+    let Some(prepared) = prepare_and_send_initial_snapshot(
         &request.qail,
         &request.table,
         runtime.state,
@@ -24,5 +24,5 @@ pub(super) async fn handle_live_query(
         return;
     };
 
-    subscribe_and_spawn_live_query(&request.table, request.interval_ms, cmd, runtime).await;
+    subscribe_and_spawn_live_query(&request.table, request.interval_ms, prepared, runtime).await;
 }

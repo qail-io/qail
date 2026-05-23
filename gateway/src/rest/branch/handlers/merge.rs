@@ -4,13 +4,27 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::GatewayState;
 use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
+use crate::middleware::ApiError;
 use crate::rest::branch::validate_branch_name;
 use crate::rest::filters::json_to_qail_value;
+
+const BRANCH_MERGE_SAVEPOINT: &str = "qail_branch_merge";
+
+fn apply_insert_conflict_target(
+    cmd: qail_core::ast::Qail,
+    pk_col: Option<&str>,
+) -> qail_core::ast::Qail {
+    match pk_col {
+        Some(pk_col) => cmd.on_conflict_nothing(&[pk_col]),
+        None => cmd,
+    }
+}
 
 /// POST /api/_branch/:name/merge — Merge branch overlay into main tables.
 pub(crate) async fn branch_merge_handler(
@@ -54,32 +68,20 @@ pub(crate) async fn branch_merge_handler(
         Err(_) => vec![],
     };
 
-    match conn.get_mut() {
-        Ok(pg_conn) => {
-            if let Err(e) = pg_conn.execute_simple("BEGIN;").await {
-                tracing::error!("Branch merge transaction start failed: {}", e);
-                conn.release().await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "Failed to start merge transaction"})),
-                )
-                    .into_response();
-            }
-        }
-        Err(e) => {
-            tracing::error!("Branch connection released unexpectedly: {}", e);
-            conn.release().await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Database connection unavailable"})),
-            )
-                .into_response();
-        }
+    if let Err(e) = conn.savepoint(BRANCH_MERGE_SAVEPOINT).await {
+        tracing::error!("Branch merge savepoint start failed: {}", e);
+        conn.release().await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to start merge transaction"})),
+        )
+            .into_response();
     }
 
     let overlay_sql = qail_pg::driver::branch_sql::merge_overlay_rows_sql(&name);
     let mut applied = 0u32;
     let mut errors: Vec<String> = Vec::new();
+    let mut mutated_tables: HashSet<String> = HashSet::new();
 
     match conn.get_mut() {
         Ok(pg_conn) => match pg_conn.simple_query(&overlay_sql).await {
@@ -114,7 +116,13 @@ pub(crate) async fn branch_merge_handler(
                                     for (k, v) in obj {
                                         q = q.set_value(k, json_to_qail_value(v));
                                     }
-                                    q = q.on_conflict_nothing::<String>(&[]);
+                                    q = apply_insert_conflict_target(
+                                        q,
+                                        state
+                                            .schema
+                                            .table(&table)
+                                            .and_then(|t| t.primary_key.as_deref()),
+                                    );
                                     Some(q)
                                 } else {
                                     None
@@ -159,7 +167,10 @@ pub(crate) async fn branch_merge_handler(
                     if let Some(mut qail_cmd) = cmd {
                         state.optimize_qail_for_execution(&mut qail_cmd);
                         match conn.fetch_all_uncached(&qail_cmd).await {
-                            Ok(_) => applied += 1,
+                            Ok(_) => {
+                                applied += 1;
+                                mutated_tables.insert(table.clone());
+                            }
                             Err(e) => errors.push(format!("{}.{}: {}", table, row_pk, e)),
                         }
                     }
@@ -173,8 +184,20 @@ pub(crate) async fn branch_merge_handler(
     }
 
     if !errors.is_empty() {
-        if let Ok(pg_conn) = conn.get_mut() {
-            let _ = pg_conn.execute_simple("ROLLBACK;").await;
+        if let Err(e) = conn.rollback_to(BRANCH_MERGE_SAVEPOINT).await {
+            tracing::error!("Branch merge rollback failed for '{}': {}", name, e);
+            let _ = conn.rollback_and_release().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Merge rollback failed"})),
+            )
+                .into_response();
+        }
+        if let Err(e) = conn.release_savepoint(BRANCH_MERGE_SAVEPOINT).await {
+            tracing::warn!(
+                "Branch merge savepoint release after rollback failed: {}",
+                e
+            );
         }
         conn.release().await;
         return (
@@ -185,44 +208,34 @@ pub(crate) async fn branch_merge_handler(
     }
 
     let merge_sql = qail_pg::driver::branch_sql::mark_merged_sql(&name);
+    let mut rollback_merge = false;
+    let mut commit_merge = false;
     let result = match conn.get_mut() {
         Ok(pg_conn) => match pg_conn.simple_query(&merge_sql).await {
             Ok(rows) => {
                 if rows.is_empty() {
-                    let _ = pg_conn.execute_simple("ROLLBACK;").await;
+                    rollback_merge = true;
                     (
                         StatusCode::CONFLICT,
                         Json(json!({"error": "Branch not found or not active"})),
                     )
                         .into_response()
                 } else {
-                    match pg_conn.execute_simple("COMMIT;").await {
-                        Ok(_) => {
-                            let mut response = json!({
-                                "branch": name,
-                                "status": "merged",
-                                "applied": applied,
-                                "overlay_stats": stats,
-                            });
-                            if !errors.is_empty() {
-                                response["merge_errors"] = json!(errors);
-                            }
-                            Json(response).into_response()
-                        }
-                        Err(e) => {
-                            tracing::error!("Branch merge COMMIT failed for '{}': {}", name, e);
-                            let _ = pg_conn.execute_simple("ROLLBACK;").await;
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(json!({"error": "Merge transaction failed to commit"})),
-                            )
-                                .into_response()
-                        }
+                    commit_merge = true;
+                    let mut response = json!({
+                        "branch": name,
+                        "status": "merged",
+                        "applied": applied,
+                        "overlay_stats": stats,
+                    });
+                    if !errors.is_empty() {
+                        response["merge_errors"] = json!(errors);
                     }
+                    Json(response).into_response()
                 }
             }
             Err(e) => {
-                let _ = pg_conn.execute_simple("ROLLBACK;").await;
+                rollback_merge = true;
                 tracing::error!("Failed to merge branch '{}': {}", name, e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -232,6 +245,7 @@ pub(crate) async fn branch_merge_handler(
             }
         },
         Err(e) => {
+            rollback_merge = true;
             tracing::error!("Branch connection released unexpectedly: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -240,6 +254,67 @@ pub(crate) async fn branch_merge_handler(
                 .into_response()
         }
     };
-    conn.release().await;
+
+    if rollback_merge {
+        if let Err(e) = conn.rollback_to(BRANCH_MERGE_SAVEPOINT).await {
+            tracing::error!("Branch merge rollback failed for '{}': {}", name, e);
+            let _ = conn.rollback_and_release().await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Merge rollback failed"})),
+            )
+                .into_response();
+        }
+        if let Err(e) = conn.release_savepoint(BRANCH_MERGE_SAVEPOINT).await {
+            tracing::warn!(
+                "Branch merge savepoint release after rollback failed: {}",
+                e
+            );
+        }
+    } else if commit_merge && let Err(e) = conn.release_savepoint(BRANCH_MERGE_SAVEPOINT).await {
+        tracing::error!("Branch merge savepoint commit failed for '{}': {}", name, e);
+        let _ = conn.rollback_and_release().await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Merge transaction failed to commit"})),
+        )
+            .into_response();
+    }
+
+    if commit_merge {
+        if let Err(e) = conn.release_checked().await {
+            for table in &mutated_tables {
+                state.cache.invalidate_table(table);
+            }
+            return ApiError::from_pg_driver_error(&e, None).into_response();
+        }
+        for table in mutated_tables {
+            state.cache.invalidate_table(&table);
+        }
+    } else {
+        conn.release().await;
+    }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_insert_conflict_target;
+    use qail_core::ast::ConflictAction;
+
+    #[test]
+    fn insert_merge_uses_pk_conflict_target_when_known() {
+        let cmd = apply_insert_conflict_target(qail_core::ast::Qail::add("orders"), Some("id"));
+
+        let on_conflict = cmd.on_conflict.expect("on conflict");
+        assert_eq!(on_conflict.columns, vec!["id".to_string()]);
+        assert!(matches!(on_conflict.action, ConflictAction::DoNothing));
+    }
+
+    #[test]
+    fn insert_merge_omits_on_conflict_when_pk_unknown() {
+        let cmd = apply_insert_conflict_target(qail_core::ast::Qail::add("orders"), None);
+
+        assert!(cmd.on_conflict.is_none());
+    }
 }

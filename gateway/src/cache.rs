@@ -10,10 +10,11 @@
 //! - **Table invalidation**: Mutations invalidate all cache entries for the affected table.
 //! - **Thread-safe**: All operations are safe for concurrent access without external locking.
 
+use moka::notification::RemovalCause;
 use moka::sync::Cache;
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// Cache configuration
@@ -41,8 +42,8 @@ impl Default for CacheConfig {
 pub struct QueryCache {
     /// moka cache: query_key → JSON result
     entries: Cache<String, String>,
-    /// Table → list of cache keys for invalidation
-    table_keys: RwLock<HashMap<String, Vec<String>>>,
+    /// Table → cache keys for invalidation
+    table_keys: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     enabled: bool,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -51,6 +52,8 @@ pub struct QueryCache {
 impl QueryCache {
     /// Create a new cache from configuration.
     pub fn new(config: CacheConfig) -> Self {
+        let table_keys = Arc::new(RwLock::new(HashMap::<String, HashSet<String>>::new()));
+        let evict_index = Arc::clone(&table_keys);
         let entries = Cache::builder()
             .max_capacity(config.max_entries as u64)
             .time_to_live(config.ttl)
@@ -59,11 +62,20 @@ impl QueryCache {
             .weigher(|key: &String, val: &String| -> u32 {
                 (key.len() + val.len()).min(u32::MAX as usize) as u32
             })
+            .eviction_listener(move |key, _value, cause| {
+                if matches!(
+                    cause,
+                    RemovalCause::Expired | RemovalCause::Explicit | RemovalCause::Size
+                ) && let Ok(mut map) = evict_index.write()
+                {
+                    remove_key_from_table_index(&mut map, key.as_ref());
+                }
+            })
             .build();
 
         Self {
             entries,
-            table_keys: RwLock::new(HashMap::new()),
+            table_keys,
             enabled: config.enabled,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -108,6 +120,12 @@ impl QueryCache {
     /// * `table` — Table name for invalidation tracking.
     /// * `result` — Serialized query result to cache.
     pub fn set(&self, query: &str, table: &str, result: String) {
+        self.set_for_tables(query, std::slice::from_ref(&table), result);
+    }
+
+    /// Insert a query result into the cache, associated with every table it
+    /// reads from. Invalidating any of those tables removes the entry.
+    pub fn set_for_tables(&self, query: &str, tables: &[&str], result: String) {
         if !self.enabled {
             return;
         }
@@ -115,23 +133,51 @@ impl QueryCache {
         let key = query.to_string();
         self.entries.insert(key.clone(), result);
 
-        // Track which keys belong to which table for invalidation
+        // Track which keys belong to each table for invalidation.
         if let Ok(mut map) = self.table_keys.write() {
-            map.entry(table.to_string()).or_default().push(key);
+            remove_key_from_table_index(&mut map, &key);
+            for table in tables {
+                if table.is_empty() {
+                    continue;
+                }
+                map.entry((*table).to_string())
+                    .or_default()
+                    .insert(key.clone());
+            }
         }
     }
 
     /// Invalidate all cache entries for a table
     pub fn invalidate_table(&self, table: &str) {
-        if let Ok(mut map) = self.table_keys.write()
-            && let Some(keys) = map.remove(table)
-        {
+        let keys = self
+            .table_keys
+            .write()
+            .ok()
+            .and_then(|mut map| map.remove(table));
+
+        if let Some(keys) = keys {
             let count = keys.len();
             for key in &keys {
                 self.entries.invalidate(key);
             }
             tracing::debug!("Invalidated {} cache entries for table '{}'", count, table);
         }
+    }
+
+    /// Invalidate every cached query result.
+    ///
+    /// Used by mutation surfaces that do not currently declare precise table
+    /// dependencies, such as RPC functions.
+    pub fn invalidate_all(&self) {
+        if !self.enabled {
+            return;
+        }
+
+        self.entries.invalidate_all();
+        if let Ok(mut map) = self.table_keys.write() {
+            map.clear();
+        }
+        tracing::debug!("Invalidated all cache entries");
     }
 
     /// Return a snapshot of cache statistics.
@@ -143,6 +189,13 @@ impl QueryCache {
             weighted_size: self.entries.weighted_size(),
         }
     }
+}
+
+fn remove_key_from_table_index(map: &mut HashMap<String, HashSet<String>>, key: &str) {
+    map.retain(|_, keys| {
+        keys.remove(key);
+        !keys.is_empty()
+    });
 }
 
 /// Snapshot of cache statistics.

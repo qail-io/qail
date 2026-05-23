@@ -121,9 +121,15 @@ impl Qail {
 
         if ctx.is_global() {
             return match self.action {
-                Action::Get | Action::Set | Action::Del | Action::Over | Action::Gen => {
-                    Ok(self.scope_to_global(&tenant_col))
-                }
+                Action::Get
+                | Action::Cnt
+                | Action::Set
+                | Action::Del
+                | Action::Over
+                | Action::Gen
+                | Action::Export
+                | Action::Search
+                | Action::Scroll => Ok(self.scope_to_global(&tenant_col)),
                 Action::Add | Action::Upsert | Action::Put => self.scope_insert_global(&tenant_col),
                 _ => Ok(self),
             };
@@ -135,9 +141,15 @@ impl Qail {
 
         match self.action {
             // Read / Update / Delete → inject WHERE filter
-            Action::Get | Action::Set | Action::Del | Action::Over | Action::Gen => {
-                Ok(self.scope_to_tenant(&tenant_col, ctx))
-            }
+            Action::Get
+            | Action::Cnt
+            | Action::Set
+            | Action::Del
+            | Action::Over
+            | Action::Gen
+            | Action::Export
+            | Action::Search
+            | Action::Scroll => Ok(self.scope_to_tenant(&tenant_col, ctx)),
             // Insert / Upsert → auto-set tenant column in payload
             Action::Add | Action::Upsert | Action::Put => {
                 self.scope_insert_tenant(&tenant_col, ctx)
@@ -494,6 +506,43 @@ mod tests {
                 .any(|c| { matches!(&c.left, Expr::Named(n) if n == "tenant_id") }),
             "Expected tenant_id filter on SET"
         );
+    }
+
+    #[test]
+    fn test_with_rls_injects_filter_on_read_like_actions() {
+        let actions = [
+            (Action::Cnt, "_rls_cnt_orders"),
+            (Action::Export, "_rls_export_orders"),
+            (Action::Search, "_rls_search_vectors"),
+            (Action::Scroll, "_rls_scroll_vectors"),
+        ];
+
+        for (action, table) in actions {
+            register_tenant_table(table, "tenant_id");
+
+            let ctx = RlsContext::tenant("tenant-read-like");
+            let query = Qail {
+                action,
+                table: table.to_string(),
+                ..Default::default()
+            }
+            .with_rls(&ctx)
+            .expect("read-like action should apply RLS");
+
+            let filter = query
+                .cages
+                .iter()
+                .find(|c| matches!(c.kind, CageKind::Filter))
+                .expect("Expected filter cage");
+
+            assert!(
+                filter.conditions.iter().any(|c| {
+                    matches!(&c.left, Expr::Named(n) if n == "tenant_id")
+                        && matches!(&c.value, Value::String(v) if v == "tenant-read-like")
+                }),
+                "Expected tenant filter on {action:?}"
+            );
+        }
     }
 
     #[test]

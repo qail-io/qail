@@ -1,8 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Payload sent to the webhook.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookPayload {
     /// Trigger name.
     pub trigger: String,
@@ -17,7 +17,7 @@ pub struct WebhookPayload {
 }
 
 /// Data included in webhook payload.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookData {
     /// New row data (for INSERT and UPDATE).
     #[serde(skip_serializing_if = "Option::is_none")]

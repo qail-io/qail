@@ -6,8 +6,8 @@ use super::super::super::{
     WS_MIN_LIVE_QUERY_INTERVAL_MS, WsServerMessage, build_live_query_notify_channel,
     decrement_channel_refcount, increment_channel_refcount, tracked_channel_count,
 };
-use super::LiveQueryRuntime;
 use super::poller::{LiveQueryPollerConfig, spawn_live_query_poller};
+use super::{LiveQueryRuntime, PreparedLiveQuery};
 
 fn exceeds_live_query_task_limit(task_count: usize, replacing_existing: bool) -> bool {
     !replacing_existing && task_count >= WS_MAX_SUBSCRIPTIONS_PER_CONNECTION
@@ -16,7 +16,7 @@ fn exceeds_live_query_task_limit(task_count: usize, replacing_existing: bool) ->
 pub(super) async fn subscribe_and_spawn_live_query(
     table: &str,
     interval_ms: u64,
-    cmd: qail_core::ast::Qail,
+    prepared: PreparedLiveQuery,
     runtime: &mut LiveQueryRuntime<'_>,
 ) {
     let state = runtime.state;
@@ -109,6 +109,23 @@ pub(super) async fn subscribe_and_spawn_live_query(
         None
     };
 
+    let PreparedLiveQuery {
+        cmd,
+        tenant_guard_plan,
+    } = prepared;
+    let tenant_guard_column = tenant_guard_plan
+        .as_ref()
+        .filter(|plan| plan.verify_rows)
+        .map(|plan| plan.column.clone())
+        .or_else(|| {
+            auth.tenant_id.as_ref().and_then(|_| {
+                crate::tenant_guard::tenant_guard_column_for_table(state.as_ref(), table)
+            })
+        });
+    let strip_tenant_col = tenant_guard_plan
+        .as_ref()
+        .is_some_and(|plan| plan.strip_output_column);
+
     let (handle, trigger_tx) = spawn_live_query_poller(LiveQueryPollerConfig {
         poll_interval,
         tx: tx.clone(),
@@ -123,8 +140,11 @@ pub(super) async fn subscribe_and_spawn_live_query(
         ),
         stmt_timeout: state.config.statement_timeout_ms,
         lock_timeout: state.config.lock_timeout_ms,
-        tenant_id: auth.tenant_id.clone(),
-        tenant_col: state.config.tenant_column.clone(),
+        tenant_id: tenant_guard_column
+            .as_ref()
+            .and_then(|_| auth.tenant_id.clone()),
+        tenant_col: tenant_guard_column.unwrap_or_else(|| state.config.tenant_column.clone()),
+        strip_tenant_col,
     });
 
     if let Some(old_handle) = conn_state

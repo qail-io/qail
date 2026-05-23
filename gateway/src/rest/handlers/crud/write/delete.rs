@@ -46,11 +46,38 @@ pub(crate) async fn delete_handler(
         );
     }
 
+    let has_delete_triggers = !state
+        .event_engine
+        .triggers_for(&table_name, &OperationType::Delete)
+        .is_empty();
+    let mut old_cmd = if has_delete_triggers {
+        let mut old_cmd = qail_core::ast::Qail::get(&table_name)
+            .filter(&pk, Operator::Eq, QailValue::String(id.clone()))
+            .limit(1);
+        if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+            old_cmd = old_cmd.filter(
+                scope_column,
+                Operator::Eq,
+                QailValue::String(tenant_id.clone()),
+            );
+        }
+        Some(old_cmd)
+    } else {
+        None
+    };
+
     // Apply RLS
     state
         .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    if let Some(ref mut old_cmd) = old_cmd {
+        state
+            .policy_engine
+            .apply_policies(&auth, old_cmd)
+            .map_err(|e| ApiError::forbidden(e.to_string()))?;
+        state.optimize_qail_for_execution(old_cmd);
+    }
     state.optimize_qail_for_execution(&mut cmd);
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
@@ -81,9 +108,24 @@ pub(crate) async fn delete_handler(
             conn.release().await;
             return Err(e);
         }
-        conn.release().await;
+        conn.release_checked()
+            .await
+            .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
         return Ok(axum::http::StatusCode::NO_CONTENT);
     }
+
+    let old_data = if let Some(ref old_cmd) = old_cmd {
+        let rows = match conn.fetch_all_uncached(old_cmd).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                conn.release().await;
+                return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+            }
+        };
+        rows.first().map(row_to_json)
+    } else {
+        None
+    };
 
     match conn.fetch_all_uncached(&cmd).await {
         Ok(_) => {}
@@ -93,19 +135,28 @@ pub(crate) async fn delete_handler(
         }
     };
 
-    // Release connection before event processing
-    conn.release().await;
+    if let Some(old_data) = old_data.clone()
+        && let Err(e) = state
+            .event_engine
+            .enqueue_durable(
+                &mut conn,
+                &table_name,
+                OperationType::Delete,
+                None,
+                Some(old_data),
+            )
+            .await
+    {
+        let _ = conn.rollback_and_release().await;
+        return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+    }
+
+    conn.release_checked()
+        .await
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
     // Invalidate cache
     state.cache.invalidate_table(&table_name);
-
-    // Fire event triggers
-    state.event_engine.fire(
-        &table_name,
-        OperationType::Delete,
-        None,
-        Some(json!({"id": id})),
-    );
 
     // F6: Return 204 No Content to match OpenAPI spec
     Ok(axum::http::StatusCode::NO_CONTENT)

@@ -69,6 +69,7 @@ pub(crate) async fn aggregate_handler(
     };
 
     let mut cmd = qail_core::ast::Qail::get(&table_name).column_expr(agg_expr);
+    let mut strip_tenant_scope_column = false;
 
     // Group by
     if let Some(ref group_by) = params.group_by {
@@ -95,6 +96,22 @@ pub(crate) async fn aggregate_handler(
             Operator::Eq,
             QailValue::String(tenant_id.clone()),
         );
+        if crate::rest::filters::is_safe_identifier(scope_column)
+            && !cmd.columns.iter().any(|expr| {
+                crate::tenant_guard::expression_projects_tenant_column(expr, scope_column)
+            })
+        {
+            cmd = cmd.column_expr(Expr::FunctionCall {
+                name: "MIN".to_string(),
+                args: vec![Expr::Cast {
+                    expr: Box::new(Expr::Named(scope_column.clone())),
+                    target_type: "text".to_string(),
+                    alias: None,
+                }],
+                alias: Some(scope_column.clone()),
+            });
+            strip_tenant_scope_column = true;
+        }
     }
 
     // Apply RLS
@@ -117,7 +134,7 @@ pub(crate) async fn aggregate_handler(
     conn.release().await;
     let rows = rows?;
 
-    let data: Vec<Value> = rows.iter().map(row_to_json).collect();
+    let mut data: Vec<Value> = rows.iter().map(row_to_json).collect();
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
     if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
@@ -132,6 +149,9 @@ pub(crate) async fn aggregate_handler(
             tracing::error!("{}", v);
             ApiError::internal("Data integrity error")
         })?;
+        if strip_tenant_scope_column {
+            crate::tenant_guard::strip_tenant_column_from_json_rows(&mut data, scope_column);
+        }
     }
 
     let count = data.len();

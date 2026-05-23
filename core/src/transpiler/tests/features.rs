@@ -285,6 +285,23 @@ fn test_json_table() {
 }
 
 #[test]
+fn test_json_table_postgres_standalone_has_no_dual_table() {
+    let mut cmd = Qail::get("items");
+    cmd.action = Action::JsonTable;
+    cmd.columns = vec![
+        Expr::Named("name=$.product".to_string()),
+        Expr::Named("qty=$.quantity".to_string()),
+    ];
+
+    let sql = cmd.to_sql_with_dialect(Dialect::Postgres);
+    assert_eq!(
+        sql,
+        "SELECT jt.* FROM JSON_TABLE(items, '$[*]' COLUMNS (name TEXT PATH '$.product', qty TEXT PATH '$.quantity')) AS jt"
+    );
+    assert!(!sql.contains("dual"));
+}
+
+#[test]
 fn test_tablesample() {
     let mut cmd = Qail::get("users");
     cmd.cages.push(Cage {
@@ -425,6 +442,54 @@ fn test_union_all() {
     let sql = q1.to_sql();
     println!("UNION ALL: {}", sql);
     assert!(sql.contains("UNION ALL"));
+}
+
+#[test]
+fn test_postgres_set_op_parenthesizes_limited_left_operand() {
+    let mut q1 = Qail::get("employees").columns(["id"]).limit(5);
+    let q2 = Qail::get("contractors").columns(["id"]);
+
+    q1.set_ops.push((SetOp::Union, Box::new(q2)));
+
+    let sql = q1.to_sql_with_dialect(Dialect::Postgres);
+
+    assert_eq!(
+        sql,
+        "(SELECT id FROM employees LIMIT 5) UNION SELECT id FROM contractors"
+    );
+}
+
+#[test]
+fn test_postgres_set_op_parenthesizes_sorted_right_operand() {
+    let mut q1 = Qail::get("employees").columns(["id"]);
+    let q2 = Qail::get("contractors")
+        .columns(["id"])
+        .order_desc("id")
+        .limit(5);
+
+    q1.set_ops.push((SetOp::Union, Box::new(q2)));
+
+    let sql = q1.to_sql_with_dialect(Dialect::Postgres);
+
+    assert_eq!(
+        sql,
+        "SELECT id FROM employees UNION (SELECT id FROM contractors ORDER BY id DESC LIMIT 5)"
+    );
+}
+
+#[test]
+fn test_postgres_set_op_parenthesizes_fetch_left_operand() {
+    let mut q1 = Qail::get("employees").columns(["id"]).fetch_first(5);
+    let q2 = Qail::get("contractors").columns(["id"]);
+
+    q1.set_ops.push((SetOp::Union, Box::new(q2)));
+
+    let sql = q1.to_sql_with_dialect(Dialect::Postgres);
+
+    assert_eq!(
+        sql,
+        "(SELECT id FROM employees FETCH FIRST 5 ROWS ONLY) UNION SELECT id FROM contractors"
+    );
 }
 
 #[test]
@@ -625,6 +690,117 @@ fn test_recursive_cte() {
     assert!(sql.contains("WITH RECURSIVE"));
     assert!(sql.contains("emp_tree"));
     assert!(sql.contains("UNION ALL"));
+}
+
+#[test]
+fn test_postgres_recursive_cte_parenthesizes_set_op_base_term() {
+    let mut base = Qail::get("employees");
+    base.columns.push(Expr::Named("id".to_string()));
+
+    let mut second_base = Qail::get("contractors");
+    second_base.columns.push(Expr::Named("id".to_string()));
+
+    base.set_ops.push((SetOp::UnionAll, Box::new(second_base)));
+
+    let mut recursive = Qail::get("tree");
+    recursive.columns.push(Expr::Named("id".to_string()));
+
+    let mut cmd = Qail::get("tree");
+    cmd.action = Action::With;
+    cmd.ctes = vec![CTEDef {
+        name: "tree".to_string(),
+        recursive: true,
+        columns: vec!["id".to_string()],
+        base_query: Box::new(base),
+        recursive_query: Some(Box::new(recursive)),
+        source_table: None,
+    }];
+
+    use crate::transpiler::dml::cte::build_cte;
+    let sql = build_cte(&cmd, Dialect::Postgres);
+
+    assert_eq!(
+        sql,
+        "WITH RECURSIVE tree(id) AS ((SELECT id FROM employees UNION ALL SELECT id FROM contractors) UNION ALL SELECT id FROM tree) SELECT * FROM tree"
+    );
+}
+
+#[test]
+fn test_postgres_recursive_cte_parenthesizes_set_op_recursive_term() {
+    let mut base = Qail::get("roots");
+    base.columns.push(Expr::Named("id".to_string()));
+
+    let mut recursive = Qail::get("tree");
+    recursive.columns.push(Expr::Named("id".to_string()));
+
+    let mut fallback_recursive = Qail::get("archived_tree");
+    fallback_recursive
+        .columns
+        .push(Expr::Named("id".to_string()));
+
+    recursive
+        .set_ops
+        .push((SetOp::UnionAll, Box::new(fallback_recursive)));
+
+    let mut cmd = Qail::get("tree");
+    cmd.action = Action::With;
+    cmd.ctes = vec![CTEDef {
+        name: "tree".to_string(),
+        recursive: true,
+        columns: vec!["id".to_string()],
+        base_query: Box::new(base),
+        recursive_query: Some(Box::new(recursive)),
+        source_table: None,
+    }];
+
+    use crate::transpiler::dml::cte::build_cte;
+    let sql = build_cte(&cmd, Dialect::Postgres);
+
+    assert_eq!(
+        sql,
+        "WITH RECURSIVE tree(id) AS (SELECT id FROM roots UNION ALL (SELECT id FROM tree UNION ALL SELECT id FROM archived_tree)) SELECT * FROM tree"
+    );
+}
+
+#[test]
+fn test_postgres_recursive_cte_parenthesizes_limited_base_term() {
+    let base = Qail::get("roots").columns(["id"]).limit(1);
+
+    let mut recursive = Qail::get("tree");
+    recursive.columns.push(Expr::Named("id".to_string()));
+
+    let mut cmd = Qail::get("tree");
+    cmd.action = Action::With;
+    cmd.ctes = vec![CTEDef {
+        name: "tree".to_string(),
+        recursive: true,
+        columns: vec!["id".to_string()],
+        base_query: Box::new(base),
+        recursive_query: Some(Box::new(recursive)),
+        source_table: None,
+    }];
+
+    use crate::transpiler::dml::cte::build_cte;
+    let sql = build_cte(&cmd, Dialect::Postgres);
+
+    assert_eq!(
+        sql,
+        "WITH RECURSIVE tree(id) AS ((SELECT id FROM roots LIMIT 1) UNION ALL SELECT id FROM tree) SELECT * FROM tree"
+    );
+}
+
+#[test]
+fn test_cte_final_select_preserves_outer_filters() {
+    let base = Qail::get("orders").columns(["id", "total", "tenant_id"]);
+    let mut cmd = Qail::get("summary")
+        .with("summary", base)
+        .eq("tenant_id", "tenant-1");
+    cmd.action = Action::With;
+
+    use crate::transpiler::dml::cte::build_cte;
+    let sql = build_cte(&cmd, Dialect::Postgres);
+
+    assert!(sql.contains("SELECT * FROM summary WHERE tenant_id = 'tenant-1'"));
 }
 
 // ============= v0.8.6: Custom JOINs & DISTINCT ON =============

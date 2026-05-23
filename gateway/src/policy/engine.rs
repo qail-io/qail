@@ -1,6 +1,9 @@
 use std::fs;
 
-use qail_core::ast::{Action, Cage, CageKind, Condition, Expr, LogicalOp, Operator, Qail, Value};
+use qail_core::ast::{
+    Action, Cage, CageKind, Condition, ConflictAction, Expr, Join, JoinKind, LogicalOp, Operator,
+    Qail, Value,
+};
 
 use crate::auth::AuthContext;
 use crate::error::GatewayError;
@@ -50,21 +53,55 @@ impl PolicyEngine {
     /// * `auth` — Authenticated user context (role, operator, agent).
     /// * `cmd` — Mutable Qail AST command to inject policy filters into.
     pub fn apply_policies(&self, auth: &AuthContext, cmd: &mut Qail) -> Result<(), GatewayError> {
-        if self.policies.is_empty() {
-            return Ok(());
-        }
+        self.apply_policies_inner(auth, cmd)
+    }
 
-        let op = OperationType::from_action(cmd.action).ok_or_else(|| {
-            GatewayError::AccessDenied(format!(
-                "Action {:?} is not permitted by policy engine",
-                cmd.action
-            ))
-        })?;
+    fn table_ref_name_and_qualifier(table_ref: &str) -> (String, String) {
+        let parts: Vec<&str> = table_ref.split_whitespace().collect();
+        match parts.as_slice() {
+            [] => (String::new(), String::new()),
+            [table] => (
+                table.trim_matches('"').to_string(),
+                table.trim_matches('"').to_string(),
+            ),
+            [table, alias] => (
+                table.trim_matches('"').to_string(),
+                alias.trim_matches('"').to_string(),
+            ),
+            [table, as_kw, alias, ..] if as_kw.eq_ignore_ascii_case("as") => (
+                table.trim_matches('"').to_string(),
+                alias.trim_matches('"').to_string(),
+            ),
+            [table, alias, ..] => (
+                table.trim_matches('"').to_string(),
+                alias.trim_matches('"').to_string(),
+            ),
+        }
+    }
+
+    fn qualify_condition_left(condition: &mut Condition, qualifier: &str) {
+        if let Expr::Named(name) = &condition.left
+            && !name.contains('.')
+        {
+            condition.left = Expr::Named(format!("{}.{}", qualifier, name));
+        }
+    }
+
+    fn projection_restricted_action(action: Action) -> bool {
+        matches!(action, Action::Get | Action::Export | Action::With)
+    }
+
+    fn applicable_policies<'a>(
+        &'a self,
+        auth: &AuthContext,
+        table: &str,
+        op: OperationType,
+    ) -> Result<Vec<&'a PolicyDef>, GatewayError> {
         let mut matched_policy_names: Vec<String> = Vec::new();
         let mut applicable_policies: Vec<&PolicyDef> = Vec::new();
 
         for policy in &self.policies {
-            if policy.table != "*" && policy.table != cmd.table {
+            if policy.table != "*" && policy.table != table {
                 continue;
             }
 
@@ -86,29 +123,688 @@ impl PolicyEngine {
         if !matched_policy_names.is_empty() && applicable_policies.is_empty() {
             return Err(GatewayError::AccessDenied(format!(
                 "Operation {:?} not allowed on table '{}' by matching policies {:?}",
-                op, cmd.table, matched_policy_names
+                op, table, matched_policy_names
             )));
         }
 
         if applicable_policies.is_empty() {
             return Err(GatewayError::AccessDenied(format!(
                 "No policy allows {:?} on table '{}'",
-                op, cmd.table
+                op, table
             )));
         }
 
-        let mut filters_to_inject: Vec<Condition> = Vec::new();
+        Ok(applicable_policies)
+    }
+
+    fn inject_join_filter(
+        cmd: &mut Qail,
+        join: &mut Join,
+        filter: Condition,
+    ) -> Result<(), GatewayError> {
+        match join.kind {
+            JoinKind::Inner | JoinKind::Left | JoinKind::Lateral => {
+                join.on_true = false;
+                join.on.get_or_insert_with(Vec::new).push(filter);
+                Ok(())
+            }
+            JoinKind::Cross => {
+                cmd.cages.push(Cage {
+                    kind: CageKind::Filter,
+                    conditions: vec![filter],
+                    logical_op: LogicalOp::And,
+                });
+                Ok(())
+            }
+            JoinKind::Right | JoinKind::Full => Err(GatewayError::AccessDenied(format!(
+                "Policy filters cannot be safely enforced on joined table '{}' through {:?} joins",
+                join.table, join.kind
+            ))),
+        }
+    }
+
+    fn apply_join_policies(
+        &self,
+        auth: &AuthContext,
+        cmd: &mut Qail,
+        cte_names: &[String],
+    ) -> Result<(), GatewayError> {
+        if self.policies.is_empty() || cmd.joins.is_empty() {
+            return Ok(());
+        }
+
+        let Some(op) = OperationType::from_action(cmd.action) else {
+            return Ok(());
+        };
+        let projection_restricted_action = Self::projection_restricted_action(cmd.action);
+
+        let mut rewritten_joins = Vec::with_capacity(cmd.joins.len());
+        for mut join in std::mem::take(&mut cmd.joins) {
+            let (join_table, qualifier) = Self::table_ref_name_and_qualifier(&join.table);
+            if join_table.is_empty() || cte_names.iter().any(|name| name == &join_table) {
+                rewritten_joins.push(join);
+                continue;
+            }
+
+            let applicable_policies = self.applicable_policies(auth, &join_table, op)?;
+
+            for policy in &applicable_policies {
+                if projection_restricted_action
+                    && (!policy.allowed_columns.is_empty() || !policy.denied_columns.is_empty())
+                {
+                    return Err(GatewayError::AccessDenied(format!(
+                        "Joined table '{}' has column policies that cannot be enforced in a flat join",
+                        join_table
+                    )));
+                }
+            }
+
+            let mut filters_to_inject = Vec::new();
+            let mut has_unrestricted_policy = false;
+            for policy in &applicable_policies {
+                if let Some(ref filter_template) = policy.filter {
+                    let filter_str = self.expand_filter(filter_template, auth);
+                    let mut condition = self.parse_filter_to_condition(&filter_str)?;
+                    Self::qualify_condition_left(&mut condition, &qualifier);
+                    filters_to_inject.push(condition);
+                } else {
+                    has_unrestricted_policy = true;
+                    break;
+                }
+            }
+
+            if !has_unrestricted_policy {
+                match filters_to_inject.len() {
+                    0 => {}
+                    1 => {
+                        let filter = filters_to_inject
+                            .pop()
+                            .expect("length checked before join policy injection");
+                        Self::inject_join_filter(cmd, &mut join, filter)?;
+                    }
+                    _ => {
+                        return Err(GatewayError::AccessDenied(format!(
+                            "Joined table '{}' has multiple filtered policies that cannot be represented safely in a flat join",
+                            join_table
+                        )));
+                    }
+                }
+            }
+
+            rewritten_joins.push(join);
+        }
+        cmd.joins = rewritten_joins;
+        Ok(())
+    }
+
+    fn payload_is_positional(cage: &Cage) -> bool {
+        cage.conditions.iter().all(|cond| {
+            matches!(
+                &cond.left,
+                Expr::Named(name)
+                    if name.starts_with('$') && name[1..].chars().all(|c| c.is_ascii_digit())
+            )
+        })
+    }
+
+    fn expr_named_eq(expr: &Expr, name: &str) -> bool {
+        matches!(expr, Expr::Named(existing) if existing.trim_matches('"').eq_ignore_ascii_case(name.trim_matches('"')))
+    }
+
+    fn payload_condition(column: String, value: Value) -> Condition {
+        Condition {
+            left: Expr::Named(column),
+            op: Operator::Eq,
+            value,
+            is_array_unnest: false,
+        }
+    }
+
+    fn normalized_policy_column(name: &str) -> String {
+        name.rsplit('.')
+            .next()
+            .unwrap_or(name)
+            .trim_matches('"')
+            .to_ascii_lowercase()
+    }
+
+    fn projects_all_columns(expr: &Expr) -> bool {
+        match expr {
+            Expr::Star => true,
+            Expr::Named(name) => {
+                let trimmed = name.trim();
+                trimmed == "*" || trimmed.ends_with(".*")
+            }
+            _ => false,
+        }
+    }
+
+    fn write_target_column_name(expr: &Expr, context: &str) -> Result<String, GatewayError> {
+        match expr {
+            Expr::Named(name)
+                if !Self::projects_all_columns(expr)
+                    && !name.trim().is_empty()
+                    && Self::is_safe_policy_column_name(name) =>
+            {
+                Ok(Self::normalized_policy_column(name))
+            }
+            other => Err(GatewayError::AccessDenied(format!(
+                "Policy column restrictions cannot be enforced on {} target expression {:?}",
+                context, other
+            ))),
+        }
+    }
+
+    fn payload_column_from_condition(
+        cmd: &Qail,
+        condition: &Condition,
+    ) -> Result<String, GatewayError> {
+        match &condition.left {
+            Expr::Named(name)
+                if name.starts_with('$') && name[1..].chars().all(|c| c.is_ascii_digit()) =>
+            {
+                let index: usize = name[1..].parse().map_err(|_| {
+                    GatewayError::AccessDenied(format!(
+                        "Policy column restrictions cannot map positional payload '{}'",
+                        name
+                    ))
+                })?;
+                if index == 0 || cmd.columns.is_empty() {
+                    return Err(GatewayError::AccessDenied(
+                        "Policy column restrictions require explicit columns for positional mutation payloads"
+                            .to_string(),
+                    ));
+                }
+                let expr = cmd.columns.get(index - 1).ok_or_else(|| {
+                    GatewayError::AccessDenied(format!(
+                        "Policy column restrictions cannot map positional payload '{}' to a target column",
+                        name
+                    ))
+                })?;
+                Self::write_target_column_name(expr, "positional mutation payload")
+            }
+            Expr::Named(name) if Self::is_safe_policy_column_name(name) => {
+                Ok(Self::normalized_policy_column(name))
+            }
+            other => Err(GatewayError::AccessDenied(format!(
+                "Policy column restrictions cannot be enforced on mutation payload expression {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn write_payload_columns(cmd: &Qail) -> Result<Vec<String>, GatewayError> {
+        if cmd.source_query.is_some() {
+            if cmd.columns.is_empty() {
+                return Err(GatewayError::AccessDenied(
+                    "Policy column restrictions require explicit target columns for INSERT ... SELECT"
+                        .to_string(),
+                ));
+            }
+
+            return cmd
+                .columns
+                .iter()
+                .map(|expr| Self::write_target_column_name(expr, "INSERT ... SELECT"))
+                .collect();
+        }
+
+        let mut columns = Vec::new();
+        for cage in &cmd.cages {
+            if !matches!(cage.kind, CageKind::Payload) {
+                continue;
+            }
+            for condition in &cage.conditions {
+                columns.push(Self::payload_column_from_condition(cmd, condition)?);
+            }
+        }
+        Ok(columns)
+    }
+
+    fn conflict_update_columns(cmd: &Qail) -> Result<Vec<String>, GatewayError> {
+        let Some(on_conflict) = cmd.on_conflict.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let ConflictAction::DoUpdate { assignments } = &on_conflict.action else {
+            return Ok(Vec::new());
+        };
+
+        assignments
+            .iter()
+            .map(|(column, _)| {
+                if Self::is_safe_policy_column_name(column) {
+                    Ok(Self::normalized_policy_column(column))
+                } else {
+                    Err(GatewayError::AccessDenied(format!(
+                        "Policy column restrictions rejected unsupported conflict update column '{}'",
+                        column
+                    )))
+                }
+            })
+            .collect()
+    }
+
+    fn policy_restricts_columns(policy: &PolicyDef) -> bool {
+        !policy.allowed_columns.is_empty() || !policy.denied_columns.is_empty()
+    }
+
+    fn enforce_write_columns_for_policies(
+        policies: &[&PolicyDef],
+        columns: &[String],
+        operation: OperationType,
+    ) -> Result<(), GatewayError> {
+        for policy in policies {
+            if !Self::policy_restricts_columns(policy) {
+                continue;
+            }
+
+            let allowed: std::collections::HashSet<String> = policy
+                .allowed_columns
+                .iter()
+                .map(|column| Self::normalized_policy_column(column))
+                .collect();
+            let denied: std::collections::HashSet<String> = policy
+                .denied_columns
+                .iter()
+                .map(|column| Self::normalized_policy_column(column))
+                .collect();
+
+            for column in columns {
+                if !allowed.is_empty() && !allowed.contains(column) {
+                    return Err(GatewayError::AccessDenied(format!(
+                        "Policy '{}' does not allow {:?} on column '{}'",
+                        policy.name, operation, column
+                    )));
+                }
+                if denied.contains(column) {
+                    return Err(GatewayError::AccessDenied(format!(
+                        "Policy '{}' denies {:?} on column '{}'",
+                        policy.name, operation, column
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn enforce_write_column_policies(
+        cmd: &Qail,
+        policies: &[&PolicyDef],
+        operation: OperationType,
+    ) -> Result<(), GatewayError> {
+        if !policies
+            .iter()
+            .any(|policy| Self::policy_restricts_columns(policy))
+        {
+            return Ok(());
+        }
+
+        let columns = Self::write_payload_columns(cmd)?;
+        Self::enforce_write_columns_for_policies(policies, &columns, operation)
+    }
+
+    fn enforce_conflict_update_column_policies(
+        cmd: &Qail,
+        policies: &[&PolicyDef],
+    ) -> Result<(), GatewayError> {
+        if !policies
+            .iter()
+            .any(|policy| Self::policy_restricts_columns(policy))
+        {
+            return Ok(());
+        }
+
+        let columns = Self::conflict_update_columns(cmd)?;
+        Self::enforce_write_columns_for_policies(policies, &columns, OperationType::Update)
+    }
+
+    fn create_policy_column(condition: &Condition) -> Result<String, GatewayError> {
+        match &condition.left {
+            Expr::Named(name) if !name.contains('.') => Ok(name.trim_matches('"').to_string()),
+            Expr::Named(name) => Ok(name
+                .rsplit('.')
+                .next()
+                .unwrap_or(name)
+                .trim_matches('"')
+                .to_string()),
+            other => Err(GatewayError::AccessDenied(format!(
+                "Create policy filter left expression {:?} cannot be enforced for INSERT payloads",
+                other
+            ))),
+        }
+    }
+
+    fn ensure_explicit_insert_select_target_columns(
+        cmd: &Qail,
+        column: &str,
+    ) -> Result<(), GatewayError> {
+        if cmd.columns.is_empty() {
+            return Err(GatewayError::AccessDenied(format!(
+                "Create policy filter on '{}' requires explicit target columns for INSERT ... SELECT",
+                column
+            )));
+        }
+
+        if cmd.columns.iter().any(|expr| {
+            !matches!(expr, Expr::Named(name) if !Self::projects_all_columns(expr) && !name.trim().is_empty() && !name.contains('.'))
+        }) {
+            return Err(GatewayError::AccessDenied(format!(
+                "Create policy filter on '{}' requires simple named target columns for INSERT ... SELECT",
+                column
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn ensure_source_projection_can_be_rewritten(
+        source_query: &Qail,
+        expected_len: usize,
+        column: &str,
+    ) -> Result<(), GatewayError> {
+        if source_query.columns.is_empty()
+            || source_query.columns.iter().any(Self::projects_all_columns)
+        {
+            return Err(GatewayError::AccessDenied(format!(
+                "Create policy filter on '{}' requires an explicit non-star source projection for INSERT ... SELECT",
+                column
+            )));
+        }
+
+        if source_query.columns.len() != expected_len {
+            return Err(GatewayError::AccessDenied(format!(
+                "Create policy filter on '{}' cannot be enforced for INSERT ... SELECT target/source column count mismatch: target has {}, source has {}",
+                column,
+                expected_len,
+                source_query.columns.len()
+            )));
+        }
+
+        for (_, set_query) in &source_query.set_ops {
+            Self::ensure_source_projection_can_be_rewritten(set_query, expected_len, column)?;
+        }
+
+        Ok(())
+    }
+
+    fn rewrite_source_projection_create_policy(
+        source_query: &mut Qail,
+        column_index: usize,
+        append_column: bool,
+        value: &Value,
+    ) {
+        if append_column {
+            source_query.columns.push(Expr::Literal(value.clone()));
+        } else {
+            source_query.columns[column_index] = Expr::Literal(value.clone());
+        }
+
+        for (_, set_query) in &mut source_query.set_ops {
+            Self::rewrite_source_projection_create_policy(
+                set_query,
+                column_index,
+                append_column,
+                value,
+            );
+        }
+    }
+
+    fn apply_create_policy_constraint_to_source_query(
+        cmd: &mut Qail,
+        column: &str,
+        value: &Value,
+    ) -> Result<(), GatewayError> {
+        Self::ensure_explicit_insert_select_target_columns(cmd, column)?;
+
+        let target_column_count = cmd
+            .columns
+            .iter()
+            .filter(|expr| Self::expr_named_eq(expr, column))
+            .count();
+        if target_column_count > 1 {
+            return Err(GatewayError::AccessDenied(format!(
+                "Create policy filter on '{}' cannot be enforced for duplicate target columns",
+                column
+            )));
+        }
+
+        let append_column = target_column_count == 0;
+        let column_index = cmd
+            .columns
+            .iter()
+            .position(|expr| Self::expr_named_eq(expr, column))
+            .unwrap_or(cmd.columns.len());
+        let expected_source_len = cmd.columns.len();
+
+        let Some(source_query) = cmd.source_query.as_deref() else {
+            return Ok(());
+        };
+        Self::ensure_source_projection_can_be_rewritten(source_query, expected_source_len, column)?;
+
+        if append_column {
+            cmd.columns.push(Expr::Named(column.to_string()));
+        }
+
+        let source_query = cmd
+            .source_query
+            .as_deref_mut()
+            .expect("source query checked before rewrite");
+        Self::rewrite_source_projection_create_policy(
+            source_query,
+            column_index,
+            append_column,
+            value,
+        );
+
+        Ok(())
+    }
+
+    fn apply_create_policy_constraint(
+        cmd: &mut Qail,
+        condition: &Condition,
+    ) -> Result<(), GatewayError> {
+        if condition.op != Operator::Eq {
+            return Err(GatewayError::AccessDenied(format!(
+                "Create policy filter on '{}' cannot be enforced for INSERT payloads; use equality filters",
+                condition.left
+            )));
+        }
+
+        let column = Self::create_policy_column(condition)?;
+
+        if cmd.source_query.is_some() {
+            return Self::apply_create_policy_constraint_to_source_query(
+                cmd,
+                &column,
+                &condition.value,
+            );
+        }
+
+        let payload_idx = cmd
+            .cages
+            .iter()
+            .position(|cage| matches!(cage.kind, CageKind::Payload));
+
+        let Some(idx) = payload_idx else {
+            cmd.cages.push(Cage {
+                kind: CageKind::Payload,
+                conditions: vec![Self::payload_condition(column, condition.value.clone())],
+                logical_op: LogicalOp::And,
+            });
+            return Ok(());
+        };
+
+        if Self::payload_is_positional(&cmd.cages[idx]) {
+            if cmd.columns.is_empty() {
+                return Err(GatewayError::AccessDenied(format!(
+                    "Create policy filter on '{}' requires explicit columns for positional INSERT payloads",
+                    column
+                )));
+            }
+
+            if let Some(col_idx) = cmd
+                .columns
+                .iter()
+                .position(|expr| Self::expr_named_eq(expr, &column))
+            {
+                let placeholder = format!("${}", col_idx + 1);
+                let cage = &mut cmd.cages[idx];
+                if let Some(cond) = cage
+                    .conditions
+                    .iter_mut()
+                    .find(|cond| Self::expr_named_eq(&cond.left, &placeholder))
+                {
+                    *cond = Self::payload_condition(placeholder, condition.value.clone());
+                } else {
+                    cage.conditions.push(Self::payload_condition(
+                        placeholder,
+                        condition.value.clone(),
+                    ));
+                }
+                return Ok(());
+            }
+
+            cmd.columns.push(Expr::Named(column));
+            let col_idx = cmd.columns.len() - 1;
+            cmd.cages[idx].conditions.push(Self::payload_condition(
+                format!("${}", col_idx + 1),
+                condition.value.clone(),
+            ));
+            return Ok(());
+        }
+
+        let cage = &mut cmd.cages[idx];
+        cage.conditions
+            .retain(|cond| !Self::expr_named_eq(&cond.left, &column));
+        cage.conditions
+            .push(Self::payload_condition(column, condition.value.clone()));
+        Ok(())
+    }
+
+    fn on_conflict_do_update(cmd: &Qail) -> bool {
+        cmd.action == Action::Add
+            && cmd.on_conflict.as_ref().is_some_and(|on_conflict| {
+                matches!(
+                    on_conflict.action,
+                    qail_core::ast::ConflictAction::DoUpdate { .. }
+                )
+            })
+    }
+
+    fn policy_filters_for(
+        &self,
+        auth: &AuthContext,
+        policies: &[&PolicyDef],
+        qualifier: &str,
+        qualify: bool,
+    ) -> Result<(Vec<Condition>, bool), GatewayError> {
+        let mut filters = Vec::new();
         let mut has_unrestricted_policy = false;
 
-        for policy in &applicable_policies {
+        for policy in policies {
             if let Some(ref filter_template) = policy.filter {
                 let filter_str = self.expand_filter(filter_template, auth);
-                let condition = self.parse_filter_to_condition(&filter_str)?;
-                filters_to_inject.push(condition);
+                let mut condition = self.parse_filter_to_condition(&filter_str)?;
+                if qualify {
+                    Self::qualify_condition_left(&mut condition, qualifier);
+                }
+                filters.push(condition);
             } else {
-                // Policy matches and has no filter -> UNRESTRICTED access for this op
                 has_unrestricted_policy = true;
                 break;
+            }
+        }
+
+        Ok((filters, has_unrestricted_policy))
+    }
+
+    pub(crate) fn filter_cages_for_operation(
+        &self,
+        auth: &AuthContext,
+        table: &str,
+        op: OperationType,
+    ) -> Result<Vec<Cage>, GatewayError> {
+        if self.policies.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let applicable_policies = self.applicable_policies(auth, table, op)?;
+        let (filters, has_unrestricted_policy) =
+            self.policy_filters_for(auth, &applicable_policies, table, false)?;
+        if has_unrestricted_policy || filters.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(vec![Cage {
+            kind: CageKind::Filter,
+            conditions: filters,
+            logical_op: LogicalOp::Or,
+        }])
+    }
+
+    fn apply_policies_inner(&self, auth: &AuthContext, cmd: &mut Qail) -> Result<(), GatewayError> {
+        for cte in &mut cmd.ctes {
+            self.apply_policies_inner(auth, &mut cte.base_query)?;
+            if let Some(ref mut recursive_query) = cte.recursive_query {
+                self.apply_policies_inner(auth, recursive_query)?;
+            }
+        }
+        for (_, set_query) in &mut cmd.set_ops {
+            self.apply_policies_inner(auth, set_query)?;
+        }
+        if let Some(ref mut source_query) = cmd.source_query {
+            self.apply_policies_inner(auth, source_query)?;
+        }
+
+        let cte_names: Vec<String> = cmd.ctes.iter().map(|cte| cte.name.clone()).collect();
+        self.apply_join_policies(auth, cmd, &cte_names)?;
+
+        if self.policies.is_empty() {
+            return Ok(());
+        }
+
+        if command_reads_cte_alias(cmd) {
+            return Ok(());
+        }
+
+        let required_ops = OperationType::required_for_action(cmd.action).ok_or_else(|| {
+            GatewayError::AccessDenied(format!(
+                "Action {:?} is not permitted by policy engine",
+                cmd.action
+            ))
+        })?;
+        let op = *required_ops
+            .last()
+            .expect("required_for_action never returns an empty operation list");
+        let (base_table, base_qualifier) = Self::table_ref_name_and_qualifier(&cmd.table);
+        for required_op in required_ops {
+            self.applicable_policies(auth, &base_table, *required_op)?;
+        }
+        let applicable_policies = self.applicable_policies(auth, &base_table, op)?;
+        let (filters_to_inject, has_unrestricted_policy) = self.policy_filters_for(
+            auth,
+            &applicable_policies,
+            &base_qualifier,
+            !cmd.joins.is_empty(),
+        )?;
+
+        if matches!(
+            cmd.action,
+            Action::Add | Action::Set | Action::Put | Action::Over
+        ) {
+            Self::enforce_write_column_policies(cmd, &applicable_policies, op)?;
+        }
+
+        if cmd.action == Action::Add && !has_unrestricted_policy {
+            if filters_to_inject.len() > 1 {
+                return Err(GatewayError::AccessDenied(format!(
+                    "Multiple filtered create policies cannot be safely enforced on INSERT for table '{}'",
+                    base_table
+                )));
+            }
+            for condition in &filters_to_inject {
+                Self::apply_create_policy_constraint(cmd, condition)?;
             }
         }
 
@@ -124,8 +820,26 @@ impl PolicyEngine {
             );
         }
 
-        let projection_restricted_action =
-            matches!(cmd.action, Action::Get | Action::Export | Action::With);
+        if Self::on_conflict_do_update(cmd) {
+            let update_policies =
+                self.applicable_policies(auth, &base_table, OperationType::Update)?;
+            Self::enforce_conflict_update_column_policies(cmd, &update_policies)?;
+            let (update_filters, update_unrestricted) = self.policy_filters_for(
+                auth,
+                &update_policies,
+                &base_qualifier,
+                !cmd.joins.is_empty(),
+            )?;
+            if !update_unrestricted && !update_filters.is_empty() {
+                cmd.cages.push(Cage {
+                    kind: CageKind::Filter,
+                    conditions: update_filters,
+                    logical_op: LogicalOp::Or,
+                });
+            }
+        }
+
+        let projection_restricted_action = Self::projection_restricted_action(cmd.action);
 
         // Apply column-level permissions for projection-bearing reads.
         for policy in &applicable_policies {
@@ -260,7 +974,7 @@ impl PolicyEngine {
     }
 
     fn is_star_projection(columns: &[Expr]) -> bool {
-        columns.is_empty() || (columns.len() == 1 && matches!(columns[0], Expr::Star))
+        columns.is_empty() || (columns.len() == 1 && Self::projects_all_columns(&columns[0]))
     }
 
     fn projection_column_name(expr: &Expr) -> Option<&str> {
@@ -379,34 +1093,24 @@ impl PolicyEngine {
         if self.policies.is_empty() {
             return Ok(());
         }
-        let op = OperationType::from_action(action).ok_or_else(|| {
+        let required_ops = OperationType::required_for_action(action).ok_or_else(|| {
             GatewayError::AccessDenied(format!(
                 "Action {:?} is not permitted by policy engine",
                 action
             ))
         })?;
 
-        for policy in &self.policies {
-            if policy.table != "*" && policy.table != table {
-                continue;
-            }
-
-            // Check role
-            if let Some(ref required_role) = policy.role
-                && &auth.role != required_role
-            {
-                continue;
-            }
-
-            if policy.operations.is_empty() || policy.operations.contains(&op) {
-                return Ok(()); // Found a matching policy that allows
-            }
+        for op in required_ops {
+            self.applicable_policies(auth, table, *op)?;
         }
 
-        // No matching policy found - deny (secure by default)
-        Err(GatewayError::AccessDenied(format!(
-            "No policy allows {:?} on table '{}'",
-            op, table
-        )))
+        Ok(())
     }
+}
+
+fn command_reads_cte_alias(cmd: &Qail) -> bool {
+    matches!(
+        cmd.action,
+        Action::Get | Action::Cnt | Action::Export | Action::With
+    ) && cmd.ctes.iter().any(|cte| cte.name == cmd.table)
 }

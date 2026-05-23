@@ -3,7 +3,7 @@
 //! Provides multi-statement transaction support via pinned connections.
 //! Sessions are identified by UUID and bound to authenticated tenants.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -36,6 +36,8 @@ pub struct TransactionSession {
     /// Set when a query error puts PG in aborted-transaction state.
     /// Further queries are impossible until ROLLBACK or session close.
     pub pg_aborted: bool,
+    /// Tables mutated by successful statements in this session.
+    pub mutated_tables: HashSet<String>,
 }
 
 /// Manages active transaction sessions with timeout-based cleanup.

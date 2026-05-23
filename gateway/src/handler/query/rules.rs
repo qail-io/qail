@@ -1,20 +1,88 @@
 use super::*;
 
 pub(crate) fn reject_dangerous_action(cmd: &qail_core::ast::Qail) -> Result<(), ApiError> {
-    match cmd.action {
-        Action::Call
-        | Action::Do
-        | Action::SessionSet
-        | Action::SessionShow
-        | Action::SessionReset => Err(ApiError::with_code(
+    if !public_query_action_allowed(cmd.action) {
+        return Err(ApiError::with_code(
             "ACTION_DENIED",
             format!(
                 "Action {:?} is not allowed on public query endpoints",
                 cmd.action
             ),
-        )),
-        _ => Ok(()),
+        ));
     }
+
+    for cte in &cmd.ctes {
+        reject_dangerous_action(&cte.base_query)?;
+        if let Some(ref recursive_query) = cte.recursive_query {
+            reject_dangerous_action(recursive_query)?;
+        }
+    }
+    for (_, set_query) in &cmd.set_ops {
+        reject_dangerous_action(set_query)?;
+    }
+    if let Some(ref source_query) = cmd.source_query {
+        reject_dangerous_action(source_query)?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn reject_non_read_action(
+    cmd: &qail_core::ast::Qail,
+    surface: &str,
+) -> Result<(), ApiError> {
+    if !read_query_action_allowed(cmd.action) {
+        return Err(ApiError::with_code(
+            "ACTION_DENIED",
+            format!("Action {:?} is not allowed on {}", cmd.action, surface),
+        ));
+    }
+
+    for cte in &cmd.ctes {
+        reject_non_read_action(&cte.base_query, surface)?;
+        if let Some(ref recursive_query) = cte.recursive_query {
+            reject_non_read_action(recursive_query, surface)?;
+        }
+    }
+    for (_, set_query) in &cmd.set_ops {
+        reject_non_read_action(set_query, surface)?;
+    }
+    if let Some(ref source_query) = cmd.source_query {
+        reject_non_read_action(source_query, surface)?;
+    }
+
+    Ok(())
+}
+
+fn public_query_action_allowed(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Get
+            | Action::Cnt
+            | Action::Set
+            | Action::Del
+            | Action::Add
+            | Action::Over
+            | Action::Put
+            | Action::JsonTable
+            | Action::Export
+            | Action::With
+            | Action::Search
+            | Action::Scroll
+            | Action::Upsert
+    )
+}
+
+fn read_query_action_allowed(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Get
+            | Action::Cnt
+            | Action::JsonTable
+            | Action::With
+            | Action::Search
+            | Action::Scroll
+    )
 }
 
 pub(crate) fn query_complexity(cmd: &qail_core::ast::Qail) -> (usize, usize, usize) {

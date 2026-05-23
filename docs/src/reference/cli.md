@@ -1,6 +1,6 @@
 # CLI Commands
 
-The `qail` command-line tool — v1.0.0.
+The `qail` command-line tool — v1.1.0.
 
 ## Installation
 
@@ -348,8 +348,8 @@ qail worker --interval 1000 --batch 100
 
 | Flag | Description |
 |------|-------------|
-| `-d, --dialect` | Target SQL dialect (`pg`, `mysql`) |
 | `-f, --format` | Output format (`sql`, `ast`, `json`) |
+| `-d, --dialect` | Target SQL dialect (`postgres`, `sqlite`; SQLite is compatibility-only) |
 | `-v, --verbose` | Verbose output |
 | `--version` | Show version |
 | `--help` | Show help |

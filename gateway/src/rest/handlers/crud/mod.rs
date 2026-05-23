@@ -29,7 +29,9 @@ use crate::handler::row_to_json;
 use crate::middleware::ApiError;
 use crate::policy::OperationType;
 
-use super::super::branch::{apply_branch_overlay, redirect_to_overlay};
+use super::super::branch::{
+    apply_branch_overlay, project_rows_to_selected_columns, redirect_to_overlay,
+};
 use super::super::filters::{
     apply_filters, apply_returning, apply_sorting, json_to_qail_value, parse_filters,
     parse_scalar_value,

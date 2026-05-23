@@ -40,6 +40,23 @@ const SEARCH_SCORE_THRESHOLD: u8 = 0x45;
 const SEARCH_VECTOR_NAME: u8 = 0x52;
 
 // ============================================================================
+// ScrollPoints Field Tags
+// ============================================================================
+
+/// Field 1: collection_name (string) -> 0x0A
+const SCROLL_COLLECTION: u8 = 0x0A;
+/// Field 2: filter (message) -> 0x12
+const SCROLL_FILTER: u8 = 0x12;
+/// Field 3: offset (PointId) -> 0x1A
+const SCROLL_OFFSET: u8 = 0x1A;
+/// Field 4: limit (uint32) -> 0x20
+const SCROLL_LIMIT: u8 = 0x20;
+/// Field 6: with_payload selector -> 0x32
+const SCROLL_WITH_PAYLOAD: u8 = 0x32;
+/// Field 7: with_vectors selector -> 0x3A
+const SCROLL_WITH_VECTORS: u8 = 0x3A;
+
+// ============================================================================
 // UpsertPoints Field Tags
 // ============================================================================
 
@@ -80,6 +97,8 @@ const FILTER_MUST: u8 = 0x0A;
 const FILTER_SHOULD: u8 = 0x12;
 /// Condition.filter (field 4, nested Filter message) -> 0x22
 const CONDITION_FILTER: u8 = 0x22;
+/// Condition.is_null (field 5, IsNullCondition message) -> 0x2A
+const CONDITION_IS_NULL: u8 = 0x2A;
 
 // ============================================================================
 // Varint Encoding
@@ -511,11 +530,27 @@ fn encode_condition_message(cond: &qail_core::ast::Condition) -> QdrantResult<By
             Ok(encode_field_condition_match_text(key, s))
         }
 
+        (Operator::IsNull, Value::Null) => Ok(encode_is_null_condition(key)),
+
         _ => Err(QdrantError::Encode(format!(
             "Unsupported Qdrant filter condition: op={:?}, value={:?}",
             cond.op, cond.value
         ))),
     }
+}
+
+/// Encode a Condition { is_null: IsNullCondition { key } }.
+fn encode_is_null_condition(key: &str) -> BytesMut {
+    let mut is_null_buf = BytesMut::with_capacity(key.len() + 8);
+    is_null_buf.put_u8(0x0A); // IsNullCondition.key, field 1, LEN
+    encode_varint(&mut is_null_buf, key.len());
+    is_null_buf.extend_from_slice(key.as_bytes());
+
+    let mut cond_buf = BytesMut::with_capacity(is_null_buf.len() + 8);
+    cond_buf.put_u8(CONDITION_IS_NULL);
+    encode_varint(&mut cond_buf, is_null_buf.len());
+    cond_buf.extend_from_slice(&is_null_buf);
+    cond_buf
 }
 
 /// Encode a FieldCondition with Match { keyword } for string equality.
@@ -985,7 +1020,7 @@ pub fn encode_scroll_points_proto(
     buf.clear();
 
     // Field 1: collection_name
-    buf.put_u8(0x0A);
+    buf.put_u8(SCROLL_COLLECTION);
     encode_varint(buf, collection.len());
     buf.extend_from_slice(collection.as_bytes());
 
@@ -1003,28 +1038,93 @@ pub fn encode_scroll_points_proto(
                 id_buf.extend_from_slice(s.as_bytes());
             }
         }
-        buf.put_u8(0x1A); // field 3, wire LEN
+        buf.put_u8(SCROLL_OFFSET);
         encode_varint(buf, id_buf.len());
         buf.extend_from_slice(&id_buf);
     }
 
     // Field 4: limit (uint32)
-    buf.put_u8(0x20); // (4 << 3) | 0 = 0x20
+    buf.put_u8(SCROLL_LIMIT);
     encode_varint(buf, limit as usize);
 
     // Field 6: with_payload = true
-    buf.put_u8(0x32); // (6 << 3) | 2 = 0x32
+    buf.put_u8(SCROLL_WITH_PAYLOAD);
     encode_varint(buf, 2);
     buf.put_u8(0x08);
     buf.put_u8(0x01);
 
     // Field 7: with_vectors
     if with_vectors {
-        buf.put_u8(0x3A); // (7 << 3) | 2 = 0x3A
+        buf.put_u8(SCROLL_WITH_VECTORS);
         encode_varint(buf, 2);
         buf.put_u8(0x08);
         buf.put_u8(0x01);
     }
+}
+
+/// Encode a filtered ScrollPoints request.
+pub fn encode_scroll_points_with_filter_grouped_cages_proto(
+    buf: &mut BytesMut,
+    collection: &str,
+    limit: u32,
+    offset: Option<&crate::PointId>,
+    with_vectors: bool,
+    must_conditions: &[qail_core::ast::Condition],
+    should_groups: &[Vec<qail_core::ast::Condition>],
+) -> QdrantResult<()> {
+    buf.clear();
+
+    // Field 1: collection_name
+    buf.put_u8(SCROLL_COLLECTION);
+    encode_varint(buf, collection.len());
+    buf.extend_from_slice(collection.as_bytes());
+
+    // Field 2: filter
+    if !must_conditions.is_empty() || !should_groups.is_empty() {
+        let filter_buf = encode_filter_message_grouped_cages(must_conditions, should_groups)?;
+        buf.put_u8(SCROLL_FILTER);
+        encode_varint(buf, filter_buf.len());
+        buf.extend_from_slice(&filter_buf);
+    }
+
+    // Field 3: offset (optional PointId)
+    if let Some(id) = offset {
+        let mut id_buf = BytesMut::with_capacity(40);
+        match id {
+            crate::PointId::Num(n) => {
+                id_buf.put_u8(POINT_ID_NUM);
+                encode_varint_u64(&mut id_buf, *n);
+            }
+            crate::PointId::Uuid(s) => {
+                id_buf.put_u8(POINT_ID_UUID);
+                encode_varint(&mut id_buf, s.len());
+                id_buf.extend_from_slice(s.as_bytes());
+            }
+        }
+        buf.put_u8(SCROLL_OFFSET);
+        encode_varint(buf, id_buf.len());
+        buf.extend_from_slice(&id_buf);
+    }
+
+    // Field 4: limit (uint32)
+    buf.put_u8(SCROLL_LIMIT);
+    encode_varint(buf, limit as usize);
+
+    // Field 6: with_payload = true
+    buf.put_u8(SCROLL_WITH_PAYLOAD);
+    encode_varint(buf, 2);
+    buf.put_u8(0x08);
+    buf.put_u8(0x01);
+
+    // Field 7: with_vectors
+    if with_vectors {
+        buf.put_u8(SCROLL_WITH_VECTORS);
+        encode_varint(buf, 2);
+        buf.put_u8(0x08);
+        buf.put_u8(0x01);
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -1488,6 +1588,36 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_filtered_scroll_points() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let mut buf = BytesMut::with_capacity(1024);
+        let must = vec![Condition {
+            left: Expr::Named("tenant_id".to_string()),
+            op: Operator::Eq,
+            value: Value::String("tenant-1".to_string()),
+            is_array_unnest: false,
+        }];
+
+        encode_scroll_points_with_filter_grouped_cages_proto(
+            &mut buf,
+            "my_collection",
+            100,
+            None,
+            false,
+            &must,
+            &[],
+        )
+        .expect("filtered scroll should encode");
+
+        assert_eq!(buf[0], SCROLL_COLLECTION);
+        assert!(
+            buf.contains(&SCROLL_FILTER),
+            "filtered scroll should include filter field"
+        );
+    }
+
+    #[test]
     fn test_encode_delete_points_uuid() {
         let mut buf = BytesMut::with_capacity(1024);
         let ids = vec![
@@ -1550,6 +1680,39 @@ mod tests {
             }
             other => panic!("expected encode error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_encode_search_with_filter_supports_is_null() {
+        use qail_core::ast::{Condition, Expr, Operator, Value};
+
+        let mut buf = BytesMut::with_capacity(512);
+        let vector = vec![0.1f32, 0.2];
+        let conditions = vec![Condition {
+            left: Expr::Named("tenant_id".to_string()),
+            op: Operator::IsNull,
+            value: Value::Null,
+            is_array_unnest: false,
+        }];
+
+        encode_search_with_filter_proto(
+            &mut buf,
+            SearchRequest {
+                collection: "products",
+                vector: &vector,
+                limit: 5,
+                score_threshold: None,
+                vector_name: None,
+            },
+            &conditions,
+            false,
+        )
+        .expect("IS NULL filters should encode as Qdrant IsNullCondition");
+
+        assert!(
+            buf.contains(&CONDITION_IS_NULL),
+            "encoded request should contain an IsNullCondition"
+        );
     }
 
     #[test]

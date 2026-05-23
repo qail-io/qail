@@ -105,16 +105,36 @@ pub async fn expand_nested(
             }
         };
 
+        let related_rows: Vec<Value> = rows.iter().map(row_to_json).collect();
+        let related_tenant_column = tenant_scope
+            .as_ref()
+            .map(|(scope_column, _)| scope_column.clone());
+        if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+            let _proof = crate::tenant_guard::verify_tenant_boundary(
+                &related_rows,
+                tenant_id,
+                scope_column,
+                rel,
+                "rest_nested_expand",
+            )
+            .map_err(|v| {
+                tracing::error!("{}", v);
+                ApiError::internal("Data integrity error")
+            })?;
+        }
+
         match plan.kind {
             NestedRelationKind::ForwardObject => {
-                let related: HashMap<String, Value> = rows
-                    .iter()
-                    .map(|row| {
-                        let json = row_to_json(row);
+                let related: HashMap<String, Value> = related_rows
+                    .into_iter()
+                    .map(|mut json| {
                         let key = json
                             .get(&plan.related_match_column)
                             .map(json_value_key)
                             .unwrap_or_default();
+                        if let Some(ref scope_column) = related_tenant_column {
+                            strip_json_column(&mut json, scope_column);
+                        }
                         (key, json)
                     })
                     .collect();
@@ -132,12 +152,14 @@ pub async fn expand_nested(
             }
             NestedRelationKind::ReverseArray => {
                 let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
-                for row in &rows {
-                    let json = row_to_json(row);
+                for mut json in related_rows {
                     let key = json
                         .get(&plan.related_match_column)
                         .map(json_value_key)
                         .unwrap_or_default();
+                    if let Some(ref scope_column) = related_tenant_column {
+                        strip_json_column(&mut json, scope_column);
+                    }
                     grouped.entry(key).or_default().push(json);
                 }
 
@@ -158,6 +180,12 @@ pub async fn expand_nested(
     conn.release().await;
 
     Ok(())
+}
+
+fn strip_json_column(row: &mut Value, column: &str) {
+    if let Some(object) = row.as_object_mut() {
+        object.remove(column);
+    }
 }
 
 fn relation_registry_for_pair(

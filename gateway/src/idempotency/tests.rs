@@ -126,6 +126,26 @@ fn is_mutation_method_check() {
 }
 
 #[test]
+fn transaction_paths_bypass_idempotency() {
+    for path in [
+        "/txn",
+        "/txn/begin",
+        "/txn/query",
+        "/txn/commit?trace=1",
+        "/txn/rollback",
+        "/txn/savepoint",
+    ] {
+        let uri = path.parse::<Uri>().expect("valid transaction uri");
+        assert!(is_transaction_path(&uri), "{path} should bypass");
+    }
+
+    for path in ["/txns/begin", "/api/txn/begin", "/transaction/begin"] {
+        let uri = path.parse::<Uri>().expect("valid non-transaction uri");
+        assert!(!is_transaction_path(&uri), "{path} should not bypass");
+    }
+}
+
+#[test]
 fn extract_idempotency_key_from_header() {
     let req = Request::builder()
         .method(Method::POST)
@@ -349,6 +369,31 @@ fn fingerprint_changes_with_branch_id_header() {
 }
 
 #[test]
+fn fingerprint_changes_with_impersonated_tenant_header() {
+    let uri = "/api/orders".parse::<Uri>().expect("valid uri");
+    let mut tenant_a = HeaderMap::new();
+    tenant_a.insert("x-impersonate-tenant", "tenant-a".parse().unwrap());
+    let mut tenant_b = HeaderMap::new();
+    tenant_b.insert("x-impersonate-tenant", "tenant-b".parse().unwrap());
+
+    let a = request_fingerprint(
+        &Method::POST,
+        &uri,
+        &tenant_a,
+        Some("application/json"),
+        b"{}",
+    );
+    let b = request_fingerprint(
+        &Method::POST,
+        &uri,
+        &tenant_b,
+        Some("application/json"),
+        b"{}",
+    );
+    assert_ne!(a, b);
+}
+
+#[test]
 fn fingerprint_changes_with_prefer_header() {
     let uri = "/api/orders".parse::<Uri>().expect("valid uri");
     let mut merge = HeaderMap::new();
@@ -373,6 +418,65 @@ fn fingerprint_changes_with_prefer_header() {
 }
 
 #[test]
+fn auth_replay_fingerprint_changes_with_role_and_claims() {
+    let mut claims = std::collections::HashMap::new();
+    claims.insert("tier".to_string(), serde_json::json!("gold"));
+    let mut admin = crate::auth::AuthContext {
+        user_id: "user-1".to_string(),
+        role: "admin".to_string(),
+        tenant_id: Some("tenant-a".to_string()),
+        claims: claims.clone(),
+    };
+    let mut viewer = admin.clone();
+    viewer.role = "viewer".to_string();
+
+    assert_ne!(
+        auth_replay_fingerprint(&admin),
+        auth_replay_fingerprint(&viewer)
+    );
+
+    admin
+        .claims
+        .insert("tier".to_string(), serde_json::json!("platinum"));
+    assert_ne!(
+        auth_replay_fingerprint(&admin),
+        auth_replay_fingerprint(&crate::auth::AuthContext {
+            user_id: "user-1".to_string(),
+            role: "admin".to_string(),
+            tenant_id: Some("tenant-a".to_string()),
+            claims,
+        })
+    );
+}
+
+#[test]
+fn request_fingerprint_changes_with_auth_replay_fingerprint() {
+    let uri = "/api/orders".parse::<Uri>().expect("valid uri");
+    let headers = HeaderMap::new();
+    let auth_a = "auth-a";
+    let auth_b = "auth-b";
+
+    let a = request_fingerprint_with_auth(
+        &Method::POST,
+        &uri,
+        &headers,
+        Some("application/json"),
+        b"{}",
+        auth_a,
+    );
+    let b = request_fingerprint_with_auth(
+        &Method::POST,
+        &uri,
+        &headers,
+        Some("application/json"),
+        b"{}",
+        auth_b,
+    );
+
+    assert_ne!(a, b);
+}
+
+#[test]
 fn should_capture_response_requires_success_status() {
     let headers = HeaderMap::new();
     assert!(!should_capture_response_for_idempotency(
@@ -383,9 +487,9 @@ fn should_capture_response_requires_success_status() {
 }
 
 #[test]
-fn should_capture_response_requires_known_content_length() {
+fn should_capture_response_accepts_unknown_content_length() {
     let headers = HeaderMap::new();
-    assert!(!should_capture_response_for_idempotency(
+    assert!(should_capture_response_for_idempotency(
         StatusCode::OK,
         &headers,
         1024

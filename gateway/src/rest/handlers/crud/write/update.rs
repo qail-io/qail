@@ -113,14 +113,48 @@ pub(crate) async fn update_handler(
         cmd = cmd.set_value(key, qail_val);
     }
 
-    // Returning clause
-    cmd = apply_returning(cmd, mutation_params.returning.as_deref());
+    let has_update_triggers = !state
+        .event_engine
+        .triggers_for(&table_name, &OperationType::Update)
+        .is_empty();
+    let response_requested_returning = mutation_params.returning.is_some();
+
+    // Returning clause. Event triggers need the post-update row even when the
+    // HTTP caller did not ask for representation.
+    if has_update_triggers && mutation_params.returning.is_none() {
+        cmd = cmd.returning_all();
+    } else {
+        cmd = apply_returning(cmd, mutation_params.returning.as_deref());
+    }
+
+    let mut old_cmd = if has_update_triggers {
+        let mut old_cmd = qail_core::ast::Qail::get(&table_name)
+            .filter(&pk, Operator::Eq, QailValue::String(id.clone()))
+            .limit(1);
+        if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
+            old_cmd = old_cmd.filter(
+                scope_column,
+                Operator::Eq,
+                QailValue::String(tenant_id.clone()),
+            );
+        }
+        Some(old_cmd)
+    } else {
+        None
+    };
 
     // Apply RLS
     state
         .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    if let Some(ref mut old_cmd) = old_cmd {
+        state
+            .policy_engine
+            .apply_policies(&auth, old_cmd)
+            .map_err(|e| ApiError::forbidden(e.to_string()))?;
+        state.optimize_qail_for_execution(old_cmd);
+    }
     state.optimize_qail_for_execution(&mut cmd);
 
     // SECURITY: Check branch admin gate BEFORE acquiring connection
@@ -160,11 +194,26 @@ pub(crate) async fn update_handler(
             conn.release().await;
             return Err(e);
         }
-        conn.release().await;
+        conn.release_checked()
+            .await
+            .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
         return Ok(Json(SingleResponse {
             data: json!({"updated": true, "branch": branch_name}),
         }));
     }
+
+    let old_data = if let Some(ref old_cmd) = old_cmd {
+        let rows = match conn.fetch_all_uncached(old_cmd).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                conn.release().await;
+                return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+            }
+        };
+        rows.first().map(row_to_json)
+    } else {
+        None
+    };
 
     let rows = match conn.fetch_all_uncached(&cmd).await {
         Ok(rows) => rows,
@@ -174,21 +223,39 @@ pub(crate) async fn update_handler(
         }
     };
 
-    let data = rows
-        .first()
-        .map(row_to_json)
-        .unwrap_or_else(|| json!({"updated": true}));
+    let returned_data = rows.first().map(row_to_json);
+    let event_new = returned_data.clone();
+    let data = if response_requested_returning {
+        returned_data
+            .clone()
+            .unwrap_or_else(|| json!({"updated": true}))
+    } else {
+        json!({"updated": true})
+    };
 
-    // Release connection before event processing
-    conn.release().await;
+    if has_update_triggers
+        && event_new.is_some()
+        && let Err(e) = state
+            .event_engine
+            .enqueue_durable(
+                &mut conn,
+                &table_name,
+                OperationType::Update,
+                event_new.clone(),
+                old_data.clone(),
+            )
+            .await
+    {
+        let _ = conn.rollback_and_release().await;
+        return Err(ApiError::from_pg_driver_error(&e, Some(&table_name)));
+    }
+
+    conn.release_checked()
+        .await
+        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&table_name)))?;
 
     // Invalidate cache
     state.cache.invalidate_table(&table_name);
-
-    // Fire event triggers
-    state
-        .event_engine
-        .fire(&table_name, OperationType::Update, Some(data.clone()), None);
 
     Ok(Json(SingleResponse { data }))
 }

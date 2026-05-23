@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
+use qail_core::ast::Action;
 use tokio::sync::mpsc;
 
 use crate::GatewayState;
 use crate::auth::AuthContext;
 
 use super::super::super::{WS_ERR_DB_UNAVAILABLE, WsServerMessage};
+use super::PreparedLiveQuery;
 
 pub(super) async fn prepare_and_send_initial_snapshot(
     qail: &str,
@@ -13,7 +15,7 @@ pub(super) async fn prepare_and_send_initial_snapshot(
     state: &Arc<GatewayState>,
     tx: &mpsc::Sender<WsServerMessage>,
     auth: &AuthContext,
-) -> Option<qail_core::ast::Qail> {
+) -> Option<PreparedLiveQuery> {
     let mut cmd = match qail_core::parser::parse(qail) {
         Ok(cmd) => cmd,
         Err(e) => {
@@ -26,17 +28,21 @@ pub(super) async fn prepare_and_send_initial_snapshot(
         }
     };
 
-    if matches!(
-        cmd.action,
-        qail_core::ast::Action::Call
-            | qail_core::ast::Action::Do
-            | qail_core::ast::Action::SessionSet
-            | qail_core::ast::Action::SessionShow
-            | qail_core::ast::Action::SessionReset
-    ) {
+    if !matches!(cmd.action, Action::Get) {
         let _ = tx
             .send(WsServerMessage::Error {
-                message: format!("Action {:?} is not allowed on WebSocket", cmd.action),
+                message: format!(
+                    "Action {:?} is not allowed on WebSocket live_query",
+                    cmd.action
+                ),
+            })
+            .await;
+        return None;
+    }
+    if let Err(e) = crate::handler::query::reject_non_read_action(&cmd, "WebSocket live_query") {
+        let _ = tx
+            .send(WsServerMessage::Error {
+                message: e.message.clone(),
             })
             .await;
         return None;
@@ -66,7 +72,25 @@ pub(super) async fn prepare_and_send_initial_snapshot(
         return None;
     }
 
-    if !crate::handler::is_query_allowed(&state.allow_list, Some(qail), &cmd) {
+    let tenant_guard_plan =
+        match crate::tenant_guard::prepare_tenant_guarded_query(state.as_ref(), auth, &mut cmd) {
+            Ok(column) => column,
+            Err(e) => {
+                let _ = tx
+                    .send(WsServerMessage::Error {
+                        message: e.to_string(),
+                    })
+                    .await;
+                return None;
+            }
+        };
+
+    let allow_list_raw_query = if tenant_guard_plan.is_some() {
+        None
+    } else {
+        Some(qail)
+    };
+    if !crate::handler::is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
         tracing::warn!("WS LiveQuery rejected by allow-list: {}", qail);
         let _ = tx
             .send(WsServerMessage::Error {
@@ -81,6 +105,18 @@ pub(super) async fn prepare_and_send_initial_snapshot(
         let _ = tx
             .send(WsServerMessage::Error {
                 message: "Access denied by policy".to_string(),
+            })
+            .await;
+        return None;
+    }
+
+    if let Some(ref plan) = tenant_guard_plan
+        && plan.verify_rows
+        && let Err(e) = crate::tenant_guard::ensure_verifiable_tenant_projection(&cmd, &plan.column)
+    {
+        let _ = tx
+            .send(WsServerMessage::Error {
+                message: e.to_string(),
             })
             .await;
         return None;
@@ -111,14 +147,16 @@ pub(super) async fn prepare_and_send_initial_snapshot(
     {
         match conn.fetch_all_uncached(&cmd).await {
             Ok(rows) => {
-                let json_rows: Vec<serde_json::Value> =
+                let mut json_rows: Vec<serde_json::Value> =
                     rows.iter().map(crate::handler::row_to_json).collect();
 
-                if let Some(ref tenant_id) = auth.tenant_id
+                if let (Some(tenant_id), Some(plan)) =
+                    (auth.tenant_id.as_deref(), tenant_guard_plan.as_ref())
+                    && plan.verify_rows
                     && let Err(v) = crate::tenant_guard::verify_tenant_boundary(
                         &json_rows,
                         tenant_id,
-                        &state.config.tenant_column,
+                        &plan.column,
                         &cmd.table,
                         "ws_live_query",
                     )
@@ -131,6 +169,15 @@ pub(super) async fn prepare_and_send_initial_snapshot(
                         })
                         .await;
                     return None;
+                }
+
+                if let Some(plan) = tenant_guard_plan.as_ref()
+                    && plan.strip_output_column
+                {
+                    crate::tenant_guard::strip_tenant_column_from_json_rows(
+                        &mut json_rows,
+                        &plan.column,
+                    );
                 }
 
                 let count = json_rows.len();
@@ -165,5 +212,8 @@ pub(super) async fn prepare_and_send_initial_snapshot(
         return None;
     }
 
-    Some(cmd)
+    Some(PreparedLiveQuery {
+        cmd,
+        tenant_guard_plan,
+    })
 }

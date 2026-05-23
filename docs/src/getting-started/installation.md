@@ -6,8 +6,8 @@ Add QAIL to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-qail-core = "1.0.0"    # AST and builder
-qail-pg = "1.0.0"      # PostgreSQL driver
+qail-core = "1.1.0"    # AST and builder
+qail-pg = "1.1.0"      # PostgreSQL driver
 ```
 
 ## CLI

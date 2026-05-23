@@ -57,9 +57,65 @@ fn run_savepoint_action<'a>(
     })
 }
 
+fn txn_table_name(table_ref: &str) -> String {
+    table_ref
+        .split_whitespace()
+        .next()
+        .unwrap_or(table_ref)
+        .trim_matches('"')
+        .to_string()
+}
+
+fn txn_action_mutates(action: qail_core::ast::Action) -> bool {
+    matches!(
+        action,
+        qail_core::ast::Action::Add
+            | qail_core::ast::Action::Set
+            | qail_core::ast::Action::Del
+            | qail_core::ast::Action::Over
+            | qail_core::ast::Action::Put
+            | qail_core::ast::Action::Upsert
+    )
+}
+
+fn push_unique_table(tables: &mut Vec<String>, table_ref: &str) {
+    let table = txn_table_name(table_ref);
+    if !table.is_empty() && !tables.iter().any(|existing| existing == &table) {
+        tables.push(table);
+    }
+}
+
+fn collect_txn_mutated_tables(cmd: &qail_core::ast::Qail, tables: &mut Vec<String>) {
+    if txn_action_mutates(cmd.action) {
+        push_unique_table(tables, &cmd.table);
+    }
+
+    for cte in &cmd.ctes {
+        collect_txn_mutated_tables(&cte.base_query, tables);
+        if let Some(ref recursive_query) = cte.recursive_query {
+            collect_txn_mutated_tables(recursive_query, tables);
+        }
+    }
+
+    if let Some(ref source_query) = cmd.source_query {
+        collect_txn_mutated_tables(source_query, tables);
+    }
+
+    for (_, set_query) in &cmd.set_ops {
+        collect_txn_mutated_tables(set_query, tables);
+    }
+}
+
+fn txn_mutated_tables(cmd: &qail_core::ast::Qail) -> Vec<String> {
+    let mut tables = Vec::new();
+    collect_txn_mutated_tables(cmd, &mut tables);
+    tables
+}
+
 /// `POST /txn/begin` — Start a new transaction session.
 ///
-/// Acquires a connection from the pool, sets RLS context, and issues BEGIN.
+/// Acquires a connection from the pool. The RLS checkout opens the transaction
+/// that pins tenant-local settings for subsequent statements.
 /// Returns a session ID to use in subsequent `/txn/*` requests.
 pub async fn txn_begin(
     State(state): State<Arc<GatewayState>>,
@@ -110,8 +166,17 @@ pub async fn txn_query(
     // Security: reject DDL inside transactions
     reject_ddl_in_transaction(&cmd)?;
 
+    let tenant_guard_plan =
+        crate::tenant_guard::prepare_tenant_guarded_query(state.as_ref(), &auth, &mut cmd)
+            .map_err(|e| ApiError::bad_request("TENANT_GUARD_PROJECTION", e.to_string()))?;
+
     // Enforce query allow-list parity with non-transaction endpoints.
-    if !crate::handler::is_query_allowed(&state.allow_list, Some(&body), &cmd) {
+    let allow_list_raw_query = if tenant_guard_plan.is_some() {
+        None
+    } else {
+        Some(body.as_str())
+    };
+    if !crate::handler::is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
         return Err(ApiError::with_code(
             "QUERY_NOT_ALLOWED",
             "Query not in allow-list",
@@ -123,6 +188,13 @@ pub async fn txn_query(
         .policy_engine
         .apply_policies(&auth, &mut cmd)
         .map_err(|e| ApiError::with_code("POLICY_DENIED", e.to_string()))?;
+
+    if let Some(ref plan) = tenant_guard_plan
+        && plan.verify_rows
+    {
+        crate::tenant_guard::ensure_verifiable_tenant_projection(&cmd, &plan.column)
+            .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    }
 
     // Clamp LIMIT to prevent oversized result sets in long-lived txn sessions.
     crate::handler::clamp_query_limit(&mut cmd, state.config.max_result_rows);
@@ -136,9 +208,10 @@ pub async fn txn_query(
     }
 
     let cmd_table = cmd.table.clone();
+    let mutated_tables = txn_mutated_tables(&cmd);
 
     // Execute within the pinned session
-    let rows = state
+    let mut rows = state
         .transaction_manager
         .with_session(
             &txn_id,
@@ -160,6 +233,7 @@ pub async fn txn_query(
 
                     let json_rows: Vec<serde_json::Value> =
                         result.iter().map(row_to_json).collect();
+                    session.mutated_tables.extend(mutated_tables);
 
                     Ok(json_rows)
                 })
@@ -168,11 +242,13 @@ pub async fn txn_query(
         .await
         .map_err(txn_err_to_api)?;
 
-    if let Some(ref tenant_id) = auth.tenant_id {
+    if let (Some(tenant_id), Some(plan)) = (auth.tenant_id.as_deref(), tenant_guard_plan.as_ref())
+        && plan.verify_rows
+    {
         let _proof = crate::tenant_guard::verify_tenant_boundary(
             &rows,
             tenant_id,
-            &state.config.tenant_column,
+            &plan.column,
             &cmd_table,
             "txn_query",
         )
@@ -180,6 +256,12 @@ pub async fn txn_query(
             tracing::error!("{}", v);
             ApiError::internal("Data integrity error")
         })?;
+    }
+
+    if let Some(plan) = tenant_guard_plan.as_ref()
+        && plan.strip_output_column
+    {
+        crate::tenant_guard::strip_tenant_column_from_json_rows(&mut rows, &plan.column);
     }
 
     let count = rows.len();
@@ -200,8 +282,8 @@ pub async fn txn_query(
 
 /// `POST /txn/commit` — Commit and close a transaction session.
 ///
-/// Requires `X-Transaction-Id` header. The pinned connection is released
-/// back to the pool after COMMIT.
+/// Requires `X-Transaction-Id` header. The pinned RLS transaction is committed
+/// and the connection is released back to the pool.
 pub async fn txn_commit(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -210,11 +292,14 @@ pub async fn txn_commit(
     let txn_id = extract_txn_id(&headers)?;
     let tenant_id = auth.tenant_id.clone().unwrap_or_default();
 
-    state
+    let mutated_tables = state
         .transaction_manager
         .close_session(&txn_id, &tenant_id, Some(auth.user_id.as_str()), true)
         .await
         .map_err(txn_err_to_api)?;
+    for table in mutated_tables {
+        state.cache.invalidate_table(&table);
+    }
 
     Ok(Json(TxnEndResponse {
         status: "committed".to_string(),
@@ -223,8 +308,8 @@ pub async fn txn_commit(
 
 /// `POST /txn/rollback` — Rollback and close a transaction session.
 ///
-/// Requires `X-Transaction-Id` header. The pinned connection is released
-/// back to the pool after ROLLBACK.
+/// Requires `X-Transaction-Id` header. The pinned RLS transaction is rolled
+/// back and the connection is released back to the pool.
 pub async fn txn_rollback(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
@@ -233,7 +318,7 @@ pub async fn txn_rollback(
     let txn_id = extract_txn_id(&headers)?;
     let tenant_id = auth.tenant_id.clone().unwrap_or_default();
 
-    state
+    let _ = state
         .transaction_manager
         .close_session(&txn_id, &tenant_id, Some(auth.user_id.as_str()), false)
         .await

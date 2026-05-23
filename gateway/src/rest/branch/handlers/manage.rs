@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::GatewayState;
 use crate::auth::authenticate_request;
 use crate::handler::row_to_json;
+use crate::middleware::ApiError;
 use crate::rest::branch::validate_branch_name;
 
 /// POST /api/_branch — Create a new branch.
@@ -111,7 +112,9 @@ pub(crate) async fn branch_create_handler(
                 .into_response()
         }
     };
-    conn.release().await;
+    if let Err(e) = conn.release_checked().await {
+        return ApiError::from_pg_driver_error(&e, None).into_response();
+    }
     result
 }
 
@@ -226,6 +229,8 @@ pub(crate) async fn branch_delete_handler(
                 .into_response()
         }
     };
-    conn.release().await;
+    if let Err(e) = conn.release_checked().await {
+        return ApiError::from_pg_driver_error(&e, None).into_response();
+    }
     result
 }

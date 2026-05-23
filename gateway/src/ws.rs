@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::GatewayState;
-use crate::auth::{ensure_request_auth, ensure_tenant_rate_limit, extract_auth_for_state};
+use crate::auth::{ensure_request_auth, extract_auth_for_state};
 
 mod listener;
 mod message;
@@ -169,7 +169,6 @@ fn auth_headers_for_ws(headers: &HeaderMap, uri: &Uri, allow_query_token: bool) 
 const WS_LISTENER_CMD_TIMEOUT_MS: u64 = 3000;
 const WS_LISTENER_UNAVAILABLE_NOTICE_MS: u64 = 5000;
 const WS_NOTIFY_QUEUE_CAPACITY: usize = 256;
-const WS_NOTIFY_DROP_NOTICE_MS: u64 = 5000;
 
 fn tenant_scoped_channel(tenant_id: &str, suffix: &str) -> Result<String, String> {
     if tenant_id.is_empty() {
@@ -282,30 +281,21 @@ pub(super) fn build_live_query_notify_channel(
     Ok(channel)
 }
 
-fn dispatch_live_query_update(
+async fn dispatch_live_query_update(
     tx: &mpsc::Sender<WsServerMessage>,
     table: &str,
     rows: Vec<serde_json::Value>,
     count: usize,
     seq: u64,
 ) -> bool {
-    match tx.try_send(WsServerMessage::LiveQueryUpdate {
+    tx.send(WsServerMessage::LiveQueryUpdate {
         table: table.to_string(),
         rows,
         count,
         seq,
-    }) {
-        Ok(_) => true,
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            tracing::warn!(
-                table = %table,
-                seq,
-                "Dropping live query update: outbound WebSocket queue is full"
-            );
-            true
-        }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
-    }
+    })
+    .await
+    .is_ok()
 }
 
 #[cfg(test)]
@@ -380,10 +370,6 @@ pub async fn ws_handler(
     ) {
         return e.into_response();
     }
-    if let Err(e) = ensure_tenant_rate_limit(state.as_ref(), &auth).await {
-        return e.into_response();
-    }
-
     // SECURITY: Validate Origin header against CORS allowed origins.
     // Prevents cross-site WebSocket hijacking from malicious pages.
     if !state.config.cors_allowed_origins.is_empty() {

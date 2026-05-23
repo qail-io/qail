@@ -6,11 +6,12 @@ pub(super) async fn execute_qail_cmd_fast(
     state: &Arc<GatewayState>,
     auth: &crate::auth::AuthContext,
     cmd: &qail_core::ast::Qail,
+    tenant_guard_plan: Option<&crate::tenant_guard::TenantGuardPlan>,
     extensions: &axum::http::Extensions,
 ) -> Result<Json<FastQueryResponse>, ApiError> {
-    use qail_core::ast::Action;
     let mut cmd = cmd.clone();
     state.optimize_qail_for_execution(&mut cmd);
+    let is_read_only = command_is_read_only_for_release(&cmd);
 
     let (depth, filters, joins) = query_complexity(&cmd);
     if let Err(api_err) = state.complexity_guard.check(depth, filters, joins) {
@@ -37,16 +38,68 @@ pub(super) async fn execute_qail_cmd_fast(
         .await?;
 
     let timer = crate::metrics::QueryTimer::new(&cmd.table, &cmd.action.to_string());
-    let rows = conn
-        .fetch_all_fast(&cmd)
-        .await
-        .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
+    let rows = if tenant_guard_plan.is_some_and(|plan| plan.verify_rows) {
+        // Tenant boundary verification needs column metadata so it can locate
+        // the tenant column before returning positional arrays.
+        conn.fetch_all_uncached(&cmd).await
+    } else {
+        conn.fetch_all_fast(&cmd).await
+    }
+    .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
     let duration_ms = timer.elapsed_ms();
     timer.finish(rows.is_ok());
-    conn.release().await;
-    let rows = rows?;
+    let rows = match rows {
+        Ok(rows) => {
+            if is_read_only {
+                conn.release().await;
+            } else {
+                conn.release_checked()
+                    .await
+                    .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
+            }
+            rows
+        }
+        Err(err) => {
+            conn.release().await;
+            return Err(err);
+        }
+    };
 
-    let json_rows: Vec<Vec<serde_json::Value>> = rows.iter().map(row_to_array).collect();
+    if let (Some(tenant_id), Some(plan)) = (auth.tenant_id.as_deref(), tenant_guard_plan)
+        && plan.verify_rows
+    {
+        let guard_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
+        let _proof = crate::tenant_guard::verify_tenant_boundary(
+            &guard_rows,
+            tenant_id,
+            &plan.column,
+            &cmd.table,
+            "qail_cmd_fast",
+        )
+        .map_err(|v| {
+            tracing::error!("{}", v);
+            ApiError::with_code("TENANT_BOUNDARY_VIOLATION", "Data integrity error")
+        })?;
+    }
+
+    let strip_index = tenant_guard_plan
+        .filter(|plan| plan.strip_output_column)
+        .and_then(|plan| {
+            rows.first()
+                .and_then(|row| crate::tenant_guard::tenant_column_index(row, &plan.column))
+        });
+    let json_rows: Vec<Vec<serde_json::Value>> = rows
+        .iter()
+        .map(|row| {
+            let mut values = row_to_array(row);
+            if let Some(idx) = strip_index
+                && idx < values.len()
+            {
+                values.remove(idx);
+            }
+            values
+        })
+        .collect();
 
     let count = json_rows.len();
     let request_id = match extensions.get::<crate::middleware::RequestId>() {
@@ -74,9 +127,9 @@ pub(super) async fn execute_qail_cmd(
     state: &Arc<GatewayState>,
     auth: &crate::auth::AuthContext,
     cmd: &qail_core::ast::Qail,
+    tenant_guard_plan: Option<&crate::tenant_guard::TenantGuardPlan>,
     extensions: &axum::http::Extensions,
 ) -> Result<Json<QueryResponse>, ApiError> {
-    use qail_core::ast::Action;
     let mut cmd = cmd.clone();
     state.optimize_qail_for_execution(&mut cmd);
 
@@ -101,7 +154,7 @@ pub(super) async fn execute_qail_cmd(
     ) {
         #[cfg(feature = "qdrant")]
         {
-            return execute_qdrant_cmd(state, &cmd).await;
+            return execute_qdrant_cmd(state, auth, &cmd).await;
         }
         #[cfg(not(feature = "qdrant"))]
         {
@@ -112,8 +165,9 @@ pub(super) async fn execute_qail_cmd(
         }
     }
 
-    let table = &cmd.table;
-    let is_read_query = matches!(cmd.action, Action::Get);
+    let table = qail_table_name(&cmd.table);
+    let should_cache_query = matches!(cmd.action, Action::Get);
+    let is_read_only = command_is_read_only_for_release(&cmd);
 
     let tenant = match &auth.tenant_id {
         Some(t) => t.as_str(),
@@ -121,7 +175,7 @@ pub(super) async fn execute_qail_cmd(
     };
     let cache_key = format!("{}:{}:{}", tenant, auth.user_id, exact_cache_key(&cmd));
 
-    if is_read_query && let Some(cached) = state.cache.get(&cache_key) {
+    if should_cache_query && let Some(cached) = state.cache.get(&cache_key) {
         tracing::debug!("Cache HIT for table '{}'", table);
         if let Ok(mut response) = serde_json::from_str::<QueryResponse>(&cached) {
             let request_id = match extensions.get::<crate::middleware::RequestId>() {
@@ -153,18 +207,34 @@ pub(super) async fn execute_qail_cmd(
         .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
     let duration_ms = timer.elapsed_ms();
     timer.finish(rows.is_ok());
-    conn.release().await;
+    let rows = match rows {
+        Ok(rows) => {
+            if is_read_only {
+                conn.release().await;
+            } else {
+                conn.release_checked()
+                    .await
+                    .map_err(|e| ApiError::from_pg_driver_error(&e, Some(&cmd.table)))?;
+            }
+            rows
+        }
+        Err(err) => {
+            conn.release().await;
+            return Err(err);
+        }
+    };
 
-    let rows = rows?;
+    let mut json_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
 
-    let json_rows: Vec<serde_json::Value> = rows.iter().map(row_to_json).collect();
-
-    let _proof = if let Some(ref tenant_id) = auth.tenant_id {
+    let _proof = if let (Some(tenant_id), Some(plan)) =
+        (auth.tenant_id.as_deref(), tenant_guard_plan)
+        && plan.verify_rows
+    {
         crate::tenant_guard::verify_tenant_boundary(
             &json_rows,
             tenant_id,
-            &state.config.tenant_column,
-            table,
+            &plan.column,
+            &table,
             "qail_cmd",
         )
         .map_err(|v| {
@@ -174,6 +244,12 @@ pub(super) async fn execute_qail_cmd(
     } else {
         crate::tenant_guard::TenantVerified::unscoped()
     };
+
+    if let Some(plan) = tenant_guard_plan
+        && plan.strip_output_column
+    {
+        crate::tenant_guard::strip_tenant_column_from_json_rows(&mut json_rows, &plan.column);
+    }
 
     let count = json_rows.len();
     let request_id = match extensions.get::<crate::middleware::RequestId>() {
@@ -190,15 +266,121 @@ pub(super) async fn execute_qail_cmd(
         }),
     };
 
-    if is_read_query {
+    if should_cache_query {
         if let Ok(json) = serde_json::to_string(&response) {
-            state.cache.set(&cache_key, table, json);
+            let cache_tables = cache_tables_for_qail(&cmd);
+            let cache_table_refs: Vec<&str> = cache_tables.iter().map(String::as_str).collect();
+            state
+                .cache
+                .set_for_tables(&cache_key, &cache_table_refs, json);
             tracing::debug!("Cache STORE for table '{}' ({} rows)", table, count);
         }
-    } else {
-        state.cache.invalidate_table(table);
-        tracing::debug!("Cache INVALIDATED for table '{}' (mutation)", table);
+    } else if !is_read_only {
+        for cache_table in cache_tables_for_qail(&cmd) {
+            state.cache.invalidate_table(&cache_table);
+            tracing::debug!("Cache INVALIDATED for table '{}' (mutation)", cache_table);
+        }
     }
 
     Ok(Json(response))
+}
+
+fn qail_table_name(table_ref: &str) -> String {
+    table_ref
+        .split_whitespace()
+        .next()
+        .unwrap_or(table_ref)
+        .trim_matches('"')
+        .to_string()
+}
+
+fn command_is_read_only_for_release(cmd: &qail_core::ast::Qail) -> bool {
+    let action_is_read_only = matches!(
+        cmd.action,
+        Action::Get | Action::Cnt | Action::JsonTable | Action::With | Action::Export
+    );
+    action_is_read_only
+        && cmd.ctes.iter().all(|cte| {
+            command_is_read_only_for_release(&cte.base_query)
+                && cte
+                    .recursive_query
+                    .as_deref()
+                    .is_none_or(command_is_read_only_for_release)
+        })
+        && cmd
+            .source_query
+            .as_deref()
+            .is_none_or(command_is_read_only_for_release)
+        && cmd
+            .set_ops
+            .iter()
+            .all(|(_, set_query)| command_is_read_only_for_release(set_query))
+}
+
+fn cache_tables_for_qail(cmd: &qail_core::ast::Qail) -> Vec<String> {
+    fn push_table(tables: &mut Vec<String>, table_ref: &str) {
+        let table = qail_table_name(table_ref);
+        if !table.is_empty() && !tables.iter().any(|existing| existing == &table) {
+            tables.push(table);
+        }
+    }
+
+    fn collect(cmd: &qail_core::ast::Qail, tables: &mut Vec<String>) {
+        let cte_names: Vec<&str> = cmd.ctes.iter().map(|cte| cte.name.as_str()).collect();
+        let base_table = qail_table_name(&cmd.table);
+        if !cte_names.iter().any(|name| *name == base_table) {
+            push_table(tables, &cmd.table);
+        }
+
+        for cte in &cmd.ctes {
+            collect(&cte.base_query, tables);
+            if let Some(ref recursive_query) = cte.recursive_query {
+                collect(recursive_query, tables);
+            }
+        }
+
+        if let Some(ref source_query) = cmd.source_query {
+            collect(source_query, tables);
+        }
+
+        for (_, set_query) in &cmd.set_ops {
+            collect(set_query, tables);
+        }
+
+        for join in &cmd.joins {
+            let join_table = qail_table_name(&join.table);
+            if !cte_names.iter().any(|name| *name == join_table) {
+                push_table(tables, &join.table);
+            }
+        }
+    }
+
+    let mut tables = Vec::new();
+    collect(cmd, &mut tables);
+    tables
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cache_tables_for_qail;
+    use qail_core::ast::{Qail, SetOp};
+
+    #[test]
+    fn cache_tables_include_cte_body_not_alias() {
+        let cmd = Qail::get("recent").with("recent", Qail::get("orders"));
+
+        assert_eq!(cache_tables_for_qail(&cmd), vec!["orders"]);
+    }
+
+    #[test]
+    fn cache_tables_include_set_op_dependencies() {
+        let mut cmd = Qail::get("orders");
+        cmd.set_ops
+            .push((SetOp::UnionAll, Box::new(Qail::get("archived_orders"))));
+
+        assert_eq!(
+            cache_tables_for_qail(&cmd),
+            vec!["orders", "archived_orders"]
+        );
+    }
 }

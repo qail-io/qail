@@ -46,6 +46,11 @@ fn is_mutation_method(method: &Method) -> bool {
     matches!(*method, Method::POST | Method::PATCH | Method::DELETE)
 }
 
+fn is_transaction_path(uri: &Uri) -> bool {
+    let path = uri.path();
+    path == "/txn" || path.starts_with("/txn/")
+}
+
 /// Extract the `Idempotency-Key` header value.
 fn extract_idempotency_key(request: &Request<Body>) -> Option<String> {
     request
@@ -93,6 +98,7 @@ const IDEMPOTENCY_FINGERPRINT_HEADERS: &[&str] = &[
     "x-branch-id",
     "x-branch",
     "x-qail-result-format",
+    "x-impersonate-tenant",
 ];
 
 fn canonical_fingerprint_headers(headers: &HeaderMap) -> String {
@@ -127,9 +133,11 @@ fn capture_replay_headers(headers: &HeaderMap) -> Vec<(String, String)> {
 
 /// Decide whether a response is safe to capture for idempotency replay.
 ///
-/// We only capture successful responses with a known bounded content length.
-/// Unknown/streaming responses are passed through without buffering to avoid
-/// truncation risk.
+/// We capture successful responses unless an explicit `Content-Length` already
+/// proves they exceed the configured body limit. Responses without a length are
+/// still attempted because normal Axum JSON responses commonly omit the header
+/// until after middleware inspection; `to_bytes(..., body_limit)` enforces the
+/// hard cap before insertion.
 fn should_capture_response_for_idempotency(
     status: StatusCode,
     headers: &HeaderMap,
@@ -138,12 +146,10 @@ fn should_capture_response_for_idempotency(
     if !status.is_success() {
         return false;
     }
-    let Some(content_length) = parse_content_length(headers) else {
-        return false;
-    };
-    content_length <= body_limit
+    parse_content_length(headers).is_none_or(|content_length| content_length <= body_limit)
 }
 
+#[cfg(test)]
 fn request_fingerprint(
     method: &Method,
     uri: &Uri,
@@ -151,18 +157,54 @@ fn request_fingerprint(
     content_type: Option<&str>,
     body: &[u8],
 ) -> String {
+    request_fingerprint_with_auth(method, uri, headers, content_type, body, "")
+}
+
+fn auth_replay_fingerprint(auth: &crate::auth::AuthContext) -> String {
+    let mut canonical = format!(
+        "authenticated={}|denied={}|user={}|tenant={}|role={}",
+        auth.is_authenticated(),
+        auth.is_denied(),
+        auth.user_id,
+        auth.tenant_id.as_deref().unwrap_or(""),
+        auth.role
+    );
+
+    let mut claims: Vec<_> = auth.claims.iter().collect();
+    claims.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (key, value) in claims {
+        canonical.push('|');
+        canonical.push_str(key);
+        canonical.push('=');
+        canonical.push_str(&serde_json::to_string(value).unwrap_or_default());
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn request_fingerprint_with_auth(
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    content_type: Option<&str>,
+    body: &[u8],
+    auth_fingerprint: &str,
+) -> String {
     let mut body_hasher = Sha256::new();
     body_hasher.update(body);
     let body_hash = body_hasher.finalize();
 
     let ct = content_type.unwrap_or("").trim().to_ascii_lowercase();
     let canonical = format!(
-        "{}|{}|{}|{}|{}|{:x}",
+        "{}|{}|{}|{}|{}|{}|{:x}",
         method.as_str(),
         uri.path(),
         canonical_query(uri.query()),
         canonical_fingerprint_headers(headers),
         ct,
+        auth_fingerprint,
         body_hash
     );
 
@@ -191,16 +233,6 @@ fn idempotency_scope_from_auth(auth: &crate::auth::AuthContext) -> String {
         .filter(|v| !v.is_empty())
         .unwrap_or("_");
     format!("{}:{}", tenant_scope, auth.user_id)
-}
-
-async fn extract_idempotency_scope(state: &crate::GatewayState, headers: HeaderMap) -> String {
-    let mut auth = crate::auth::extract_auth_from_headers_with_jwks(
-        &headers,
-        state.jwks_store.as_ref(),
-        &state.jwt_allowed_algorithms,
-    );
-    auth.enrich_with_tenant_map(&state.user_tenant_map).await;
-    idempotency_scope_from_auth(&auth)
 }
 
 /// Build an HTTP response from a cached entry.

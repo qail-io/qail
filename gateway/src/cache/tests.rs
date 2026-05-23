@@ -87,6 +87,45 @@ fn test_cross_table_isolation() {
 }
 
 #[test]
+fn test_multi_table_entry_invalidates_from_any_table() {
+    let cache = QueryCache::new(CacheConfig::default());
+
+    cache.set_for_tables(
+        "SELECT * FROM orders JOIN users",
+        &["orders", "users"],
+        "joined_data".to_string(),
+    );
+    assert!(cache.get("SELECT * FROM orders JOIN users").is_some());
+
+    cache.invalidate_table("users");
+
+    assert!(
+        cache.get("SELECT * FROM orders JOIN users").is_none(),
+        "joined cache entry should be invalidated when a related table changes"
+    );
+}
+
+#[test]
+fn test_invalidate_all_clears_entries_and_table_index() {
+    let cache = QueryCache::new(CacheConfig::default());
+
+    cache.set("SELECT * FROM users", "users", "users_data".to_string());
+    cache.set("SELECT * FROM orders", "orders", "orders_data".to_string());
+
+    cache.invalidate_all();
+
+    assert!(cache.get("SELECT * FROM users").is_none());
+    assert!(cache.get("SELECT * FROM orders").is_none());
+    assert!(
+        cache
+            .table_keys
+            .read()
+            .expect("table index lock")
+            .is_empty()
+    );
+}
+
+#[test]
 fn test_ttl_expiry() {
     let cache = QueryCache::new(CacheConfig {
         ttl: Duration::from_millis(50),
@@ -98,6 +137,57 @@ fn test_ttl_expiry() {
 
     std::thread::sleep(Duration::from_millis(60));
     assert!(cache.get("query").is_none(), "Should miss after TTL expiry");
+}
+
+#[test]
+fn test_table_index_pruned_on_ttl_expiry() {
+    let cache = QueryCache::new(CacheConfig {
+        ttl: Duration::from_millis(20),
+        ..Default::default()
+    });
+
+    cache.set("query", "users", "data".to_string());
+    assert_eq!(
+        cache
+            .table_keys
+            .read()
+            .expect("table index lock")
+            .get("users")
+            .map(|keys| keys.len()),
+        Some(1)
+    );
+
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(cache.get("query").is_none());
+    cache.entries.run_pending_tasks();
+
+    assert!(
+        !cache
+            .table_keys
+            .read()
+            .expect("table index lock")
+            .contains_key("users"),
+        "expired entries must be removed from the table invalidation index"
+    );
+}
+
+#[test]
+fn test_table_index_deduplicates_repeated_cache_key() {
+    let cache = QueryCache::new(CacheConfig::default());
+
+    for i in 0..5 {
+        cache.set("SELECT * FROM users", "users", format!(r#"{{"v":{}}}"#, i));
+    }
+
+    assert_eq!(
+        cache
+            .table_keys
+            .read()
+            .expect("table index lock")
+            .get("users")
+            .map(|keys| keys.len()),
+        Some(1)
+    );
 }
 
 #[test]

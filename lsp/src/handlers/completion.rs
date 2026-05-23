@@ -133,19 +133,162 @@ fn rust_builder_context(content: &str, position: Position) -> bool {
         return false;
     };
 
-    let bytes = content.as_bytes();
-    let mut stmt_start = offset;
-    while stmt_start > 0 {
-        let b = bytes[stmt_start - 1];
-        if matches!(b, b';' | b'{' | b'}') {
-            break;
-        }
-        stmt_start -= 1;
-    }
+    let stmt_start = rust_statement_start_before(content, offset);
 
     content
         .get(stmt_start..offset)
         .is_some_and(|context| context.contains("Qail::"))
+}
+
+fn rust_statement_start_before(content: &str, offset: usize) -> usize {
+    #[derive(Clone, Copy)]
+    enum LexState {
+        Code,
+        LineComment,
+        BlockComment { depth: usize },
+        String { escaped: bool },
+        Char { escaped: bool },
+        RawString { hashes: usize },
+    }
+
+    let bytes = content.as_bytes();
+    let limit = offset.min(bytes.len());
+    let mut stmt_start = 0;
+    let mut i = 0;
+    let mut state = LexState::Code;
+
+    while i < limit {
+        match state {
+            LexState::Code => {
+                if bytes[i] == b'/' && i + 1 < limit && bytes[i + 1] == b'/' {
+                    state = LexState::LineComment;
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'/' && i + 1 < limit && bytes[i + 1] == b'*' {
+                    state = LexState::BlockComment { depth: 1 };
+                    i += 2;
+                    continue;
+                }
+                if let Some((raw_start, hashes)) = rust_raw_string_start(bytes, i, limit) {
+                    state = LexState::RawString { hashes };
+                    i = raw_start;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    state = LexState::String { escaped: false };
+                    i += 1;
+                    continue;
+                }
+                if bytes[i] == b'\'' && rust_char_literal_end(bytes, i, limit).is_some() {
+                    state = LexState::Char { escaped: false };
+                    i += 1;
+                    continue;
+                }
+                if matches!(bytes[i], b';' | b'{' | b'}') {
+                    stmt_start = i + 1;
+                }
+                i += 1;
+            }
+            LexState::LineComment => {
+                if bytes[i] == b'\n' {
+                    state = LexState::Code;
+                }
+                i += 1;
+            }
+            LexState::BlockComment { depth } => {
+                if bytes[i] == b'/' && i + 1 < limit && bytes[i + 1] == b'*' {
+                    state = LexState::BlockComment { depth: depth + 1 };
+                    i += 2;
+                } else if bytes[i] == b'*' && i + 1 < limit && bytes[i + 1] == b'/' {
+                    if depth == 1 {
+                        state = LexState::Code;
+                    } else {
+                        state = LexState::BlockComment { depth: depth - 1 };
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            LexState::String { escaped } => {
+                if escaped {
+                    state = LexState::String { escaped: false };
+                } else if bytes[i] == b'\\' {
+                    state = LexState::String { escaped: true };
+                } else if bytes[i] == b'"' {
+                    state = LexState::Code;
+                }
+                i += 1;
+            }
+            LexState::Char { escaped } => {
+                if escaped {
+                    state = LexState::Char { escaped: false };
+                } else if bytes[i] == b'\\' {
+                    state = LexState::Char { escaped: true };
+                } else if bytes[i] == b'\'' {
+                    state = LexState::Code;
+                }
+                i += 1;
+            }
+            LexState::RawString { hashes } => {
+                if bytes[i] == b'"' && rust_raw_string_closes(bytes, i, hashes, limit) {
+                    state = LexState::Code;
+                    i += 1 + hashes;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    stmt_start
+}
+
+fn rust_raw_string_start(bytes: &[u8], i: usize, limit: usize) -> Option<(usize, usize)> {
+    let raw_idx = if bytes.get(i) == Some(&b'r') {
+        i
+    } else if matches!(bytes.get(i), Some(b'b' | b'c')) && bytes.get(i + 1) == Some(&b'r') {
+        i + 1
+    } else {
+        return None;
+    };
+
+    let mut j = raw_idx + 1;
+    let mut hashes = 0;
+    while j < limit && bytes[j] == b'#' {
+        hashes += 1;
+        j += 1;
+    }
+
+    (j < limit && bytes[j] == b'"').then_some((j + 1, hashes))
+}
+
+fn rust_raw_string_closes(bytes: &[u8], quote_idx: usize, hashes: usize, limit: usize) -> bool {
+    quote_idx + 1 + hashes <= limit
+        && bytes[quote_idx + 1..quote_idx + 1 + hashes]
+            .iter()
+            .all(|b| *b == b'#')
+}
+
+fn rust_char_literal_end(bytes: &[u8], start: usize, limit: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'\'') {
+        return None;
+    }
+
+    let mut i = start + 1;
+    let mut escaped = false;
+    while i < limit {
+        match bytes[i] {
+            b'\n' | b'\r' if !escaped => return None,
+            b'\\' if !escaped => escaped = true,
+            b'\'' if !escaped => return (i > start + 1).then_some(i + 1),
+            _ => escaped = false,
+        }
+        i += 1;
+    }
+
+    None
 }
 
 fn push_qail_keyword_items(items: &mut Vec<CompletionItem>) {
@@ -348,6 +491,14 @@ fn push_schema_items(items: &mut Vec<CompletionItem>, validator: &qail_core::val
 mod tests {
     use super::*;
 
+    fn position_at_marker(src: &str) -> (String, Position) {
+        let marker = "/*cursor*/";
+        let offset = src.find(marker).expect("test source should contain marker");
+        let content = src.replace(marker, "");
+        let position = Utf16Index::new(&content).offset_to_position(offset);
+        (content, position)
+    }
+
     #[test]
     fn rust_builder_context_detects_active_builder_statement() {
         let src = r#"let _q = Qail::get("users")
@@ -375,6 +526,50 @@ foo."#;
                 character: 4,
             }
         ));
+    }
+
+    #[test]
+    fn rust_builder_context_ignores_boundaries_inside_string_literals() {
+        let (src, position) = position_at_marker(
+            r#"let _q = Qail::get("users")
+    .filter_cond("email = 'foo;bar' AND meta ? '{tier}'")
+    ./*cursor*/"#,
+        );
+
+        assert!(rust_builder_context(&src, position));
+    }
+
+    #[test]
+    fn rust_builder_context_ignores_boundaries_inside_comments() {
+        let (src, position) = position_at_marker(
+            r#"let _q = Qail::get("users") // comment with ; { }
+    /* block comment with ; { } */
+    ./*cursor*/"#,
+        );
+
+        assert!(rust_builder_context(&src, position));
+    }
+
+    #[test]
+    fn rust_builder_context_ignores_boundaries_inside_raw_strings() {
+        let (src, position) = position_at_marker(
+            r##"let _q = Qail::get("users")
+    .filter_cond(r#"payload @> '{"roles":["admin;root"]}'"#)
+    ./*cursor*/"##,
+        );
+
+        assert!(rust_builder_context(&src, position));
+    }
+
+    #[test]
+    fn rust_builder_context_ignores_boundaries_inside_character_literals() {
+        let (src, position) = position_at_marker(
+            r#"let _q = Qail::get("users")
+    .filter_cond(&format!("marker = {}", ';'))
+    ./*cursor*/"#,
+        );
+
+        assert!(rust_builder_context(&src, position));
     }
 
     #[test]

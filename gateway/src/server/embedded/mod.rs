@@ -42,6 +42,11 @@ impl GatewayState {
 
         let cache = QueryCache::new(config.cache_config());
         let event_engine = helpers::load_event_engine(&config)?;
+        event_engine
+            .ensure_durable_outbox(&pool)
+            .await
+            .map_err(|e| GatewayError::Database(format!("Webhook outbox init failed: {}", e)))?;
+        event_engine.start_outbox_worker(pool.clone());
 
         let rate_limiter = RateLimiter::new(config.rate_limit_rate, config.rate_limit_burst);
         let tenant_rate_limiter = RateLimiter::new(

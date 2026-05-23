@@ -58,6 +58,5 @@ pub async fn authenticate_request(
         &auth,
         state.config.require_auth || state.config.production_strict,
     )?;
-    ensure_tenant_rate_limit(state, &auth).await?;
     Ok(auth)
 }

@@ -63,26 +63,46 @@ fn stop_live_query_unlisten_failure_clears_tracking_and_errors() {
     assert_eq!(subscribed, vec!["tenant_qail_table_invoices".to_string()]);
 }
 
-#[test]
-fn dispatch_live_query_update_drops_when_channel_full() {
+#[tokio::test]
+async fn dispatch_live_query_update_waits_for_outbound_capacity() {
     let (tx, mut rx) = mpsc::channel(1);
     tx.try_send(WsServerMessage::Pong)
         .expect("seed channel should succeed");
 
-    let keep_running =
-        dispatch_live_query_update(&tx, "orders", vec![serde_json::json!({"id": 1})], 1, 1);
+    let tx_for_dispatch = tx.clone();
+    let dispatch = tokio::spawn(async move {
+        dispatch_live_query_update(
+            &tx_for_dispatch,
+            "orders",
+            vec![serde_json::json!({"id": 1})],
+            1,
+            1,
+        )
+        .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(
+        !dispatch.is_finished(),
+        "live-query update must wait for capacity instead of dropping"
+    );
+
+    assert!(matches!(rx.recv().await, Some(WsServerMessage::Pong)));
+    let keep_running = dispatch.await.expect("dispatch task should not panic");
     assert!(keep_running);
-    assert!(matches!(rx.try_recv(), Ok(WsServerMessage::Pong)));
-    assert!(rx.try_recv().is_err());
+    assert!(matches!(
+        rx.recv().await,
+        Some(WsServerMessage::LiveQueryUpdate { seq: 1, .. })
+    ));
 }
 
-#[test]
-fn dispatch_live_query_update_stops_when_channel_closed() {
+#[tokio::test]
+async fn dispatch_live_query_update_stops_when_channel_closed() {
     let (tx, rx) = mpsc::channel(1);
     drop(rx);
 
     let keep_running =
-        dispatch_live_query_update(&tx, "orders", vec![serde_json::json!({"id": 1})], 1, 1);
+        dispatch_live_query_update(&tx, "orders", vec![serde_json::json!({"id": 1})], 1, 1).await;
     assert!(!keep_running);
 }
 

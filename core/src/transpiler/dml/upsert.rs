@@ -4,7 +4,7 @@ use crate::ast::*;
 use crate::transpiler::conditions::ConditionToSql;
 use crate::transpiler::dialect::Dialect;
 
-/// Supports Postgres ON CONFLICT, MySQL ON DUPLICATE KEY, and Oracle/SQL Server MERGE.
+/// Supports PostgreSQL `INSERT ... ON CONFLICT ... DO UPDATE`.
 pub fn build_upsert(cmd: &Qail, dialect: Dialect) -> String {
     let generator = dialect.generator();
     let table = generator.quote_identifier(&cmd.table);
@@ -90,7 +90,7 @@ pub fn build_upsert(cmd: &Qail, dialect: Dialect) -> String {
             } else {
                 sql.push_str(&updates.join(", "));
             }
-            // Postgres supports RETURNING on upsert (SQLite depends on version, but usually fine in simple cases or ignored)
+            // Postgres supports RETURNING on upsert.
             sql.push_str(" RETURNING *");
         }
     }

@@ -75,12 +75,39 @@ fn capture_query_server_error(conn: &mut PgConnection, slot: &mut Option<PgError
 }
 
 #[inline]
-fn rollback_new_cached_statements(conn: &mut PgConnection, new_stmt_hashes: &[u64]) {
-    for sql_hash in new_stmt_hashes {
-        if let Some(stmt_name) = conn.stmt_cache.remove(sql_hash) {
-            conn.prepared_statements.remove(&stmt_name);
-        }
+fn rollback_new_cached_statements_from(
+    conn: &mut PgConnection,
+    new_stmt_hashes: &[u64],
+    start_idx: usize,
+) {
+    for sql_hash in &new_stmt_hashes[start_idx.min(new_stmt_hashes.len())..] {
+        conn.stmt_cache.remove(sql_hash);
+        let stmt_name = super::prepared::stmt_name_from_hash(*sql_hash);
+        conn.prepared_statements.remove(&stmt_name);
+        conn.column_info_cache.remove(sql_hash);
     }
+}
+
+#[inline]
+fn rollback_new_cached_statements(conn: &mut PgConnection, new_stmt_hashes: &[u64]) {
+    rollback_new_cached_statements_from(conn, new_stmt_hashes, 0);
+}
+
+#[inline]
+fn enforce_prepared_statement_cache_limit(conn: &mut PgConnection) {
+    while conn.prepared_statements.len() > PgConnection::MAX_PREPARED_PER_CONN {
+        conn.evict_prepared_if_full();
+    }
+}
+
+#[inline]
+fn reconcile_new_cached_statements_after_server_error(
+    conn: &mut PgConnection,
+    new_stmt_hashes: &[u64],
+    parse_completes: usize,
+) {
+    rollback_new_cached_statements_from(conn, new_stmt_hashes, parse_completes);
+    enforce_prepared_statement_cache_limit(conn);
 }
 
 #[inline]
@@ -1086,8 +1113,6 @@ impl PgConnection {
                     // entries that were not mirrored in stmt_cache.
                     self.stmt_cache.put(sql_hash, stmt_name.clone());
                 } else {
-                    self.evict_prepared_if_full();
-
                     let sql = String::from_utf8_lossy(sql_buf.as_ref()).to_string();
                     let parse_msg = match PgEncoder::try_encode_parse(&stmt_name, &sql, &[]) {
                         Ok(msg) => msg,
@@ -1150,9 +1175,14 @@ impl PgConnection {
                         Ok(FastPipelineEvent::Continue) => {}
                         Ok(FastPipelineEvent::ReadyForQuery) => {
                             if let Some(err) = error {
-                                rollback_new_cached_statements(self, &new_stmt_hashes);
+                                reconcile_new_cached_statements_after_server_error(
+                                    self,
+                                    &new_stmt_hashes,
+                                    flow.parse_completes,
+                                );
                                 return Err(err);
                             }
+                            enforce_prepared_statement_cache_limit(self);
                             return Ok(flow.completed_queries());
                         }
                         Err(err) => {
@@ -2092,6 +2122,15 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn insert_cached_stmt(conn: &mut PgConnection, sql_hash: u64) -> String {
+        let stmt_name = super::super::prepared::stmt_name_from_hash(sql_hash);
+        conn.stmt_cache.put(sql_hash, stmt_name.clone());
+        conn.prepared_statements
+            .insert(stmt_name.clone(), format!("SELECT {sql_hash}"));
+        stmt_name
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn capture_query_server_error_clears_prepared_state_on_retryable_error() {
         let mut conn = make_test_conn_with_prepared();
@@ -2155,6 +2194,63 @@ mod tests {
         assert_eq!(conn.prepared_statements.len(), baseline);
         assert_eq!(conn.stmt_cache.len(), baseline_stmt_cache);
         assert!(conn.prepared_statements.contains_key("s1"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rollback_new_cached_statements_preserves_server_parsed_prefix() {
+        let mut conn = make_test_conn_with_prepared();
+        let parsed_1 = insert_cached_stmt(&mut conn, 10);
+        let parsed_2 = insert_cached_stmt(&mut conn, 11);
+        let unparsed = insert_cached_stmt(&mut conn, 12);
+
+        rollback_new_cached_statements_from(&mut conn, &[10, 11, 12], 2);
+
+        assert!(conn.prepared_statements.contains_key(&parsed_1));
+        assert!(conn.prepared_statements.contains_key(&parsed_2));
+        assert!(!conn.prepared_statements.contains_key(&unparsed));
+        assert!(conn.stmt_cache.contains(&10));
+        assert!(conn.stmt_cache.contains(&11));
+        assert!(!conn.stmt_cache.contains(&12));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rollback_new_cached_statements_removes_prepared_entry_after_lru_drop() {
+        let mut conn = make_test_conn_with_prepared();
+        let stmt_name = insert_cached_stmt(&mut conn, 99);
+        conn.stmt_cache.remove(&99);
+
+        rollback_new_cached_statements(&mut conn, &[99]);
+
+        assert!(!conn.prepared_statements.contains_key(&stmt_name));
+        assert!(!conn.stmt_cache.contains(&99));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cached_pipeline_capacity_enforcement_queues_closes_after_registration() {
+        use crate::driver::connection::StatementCache;
+        use std::num::NonZeroUsize;
+
+        let mut conn = make_test_conn_with_prepared();
+        conn.prepared_statements.clear();
+        conn.stmt_cache = StatementCache::new(
+            NonZeroUsize::new(PgConnection::MAX_PREPARED_PER_CONN).expect("non-zero"),
+        );
+
+        for hash in 0..(PgConnection::MAX_PREPARED_PER_CONN as u64 + 3) {
+            insert_cached_stmt(&mut conn, hash);
+        }
+        assert!(conn.pending_statement_closes.is_empty());
+
+        enforce_prepared_statement_cache_limit(&mut conn);
+
+        assert_eq!(
+            conn.prepared_statements.len(),
+            PgConnection::MAX_PREPARED_PER_CONN
+        );
+        assert_eq!(conn.pending_statement_closes.len(), 3);
     }
 
     #[cfg(unix)]

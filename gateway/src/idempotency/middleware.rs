@@ -2,6 +2,8 @@ use super::*;
 use axum::middleware::Next;
 use std::sync::Arc;
 
+const IDEMPOTENCY_RESPONSE_TOO_LARGE_BODY: &str = r#"{"error":"idempotency_response_too_large","message":"Mutation completed but response exceeded the idempotency replay buffer. Retrying with the same idempotency key will replay this error without re-executing the mutation."}"#;
+
 /// RAII guard that removes an in-flight key when dropped.
 /// Ensures cleanup even on panic or tokio task cancellation.
 struct InFlightGuard {
@@ -31,16 +33,21 @@ pub async fn idempotency_middleware(
         return next.run(request).await;
     }
 
+    if is_transaction_path(request.uri()) {
+        return next.run(request).await;
+    }
+
     let Some(idempotency_key) = extract_idempotency_key(&request) else {
         return next.run(request).await;
     };
 
-    let idempotency_scope =
-        extract_idempotency_scope(state.as_ref(), request.headers().clone()).await;
+    let auth = crate::auth::extract_auth_for_state(request.headers(), state.as_ref()).await;
+    let idempotency_scope = idempotency_scope_from_auth(&auth);
     if idempotency_scope == "anonymous" {
         // SECURITY: avoid cross-client idempotency key collisions when auth is disabled.
         return next.run(request).await;
     }
+    let auth_fingerprint = auth_replay_fingerprint(&auth);
     let body_limit = state.config.max_request_body_bytes;
 
     let (parts_req, body_req) = request.into_parts();
@@ -53,7 +60,7 @@ pub async fn idempotency_middleware(
             );
         }
     };
-    let request_fingerprint = request_fingerprint(
+    let request_fingerprint = request_fingerprint_with_auth(
         &parts_req.method,
         &parts_req.uri,
         &parts_req.headers,
@@ -62,6 +69,7 @@ pub async fn idempotency_middleware(
             .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok()),
         &body_bytes_req,
+        &auth_fingerprint,
     );
     let request = Request::from_parts(parts_req, Body::from(body_bytes_req));
 
@@ -132,7 +140,21 @@ pub async fn idempotency_middleware(
                 status = %parts.status,
                 "Failed to capture bounded response body for idempotency cache"
             );
-            let mut resp = Response::from_parts(parts, Body::empty());
+            state.idempotency_store.insert(
+                &idempotency_scope,
+                &idempotency_key,
+                CachedResponse {
+                    status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    body: IDEMPOTENCY_RESPONSE_TOO_LARGE_BODY.as_bytes().to_vec(),
+                    content_type: "application/json".to_string(),
+                    replay_headers: Vec::new(),
+                    request_fingerprint,
+                },
+            );
+            let mut resp = json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                IDEMPOTENCY_RESPONSE_TOO_LARGE_BODY,
+            );
             resp.headers_mut().insert(
                 "x-idempotency-body-capture-failed",
                 HeaderValue::from_static("true"),

@@ -571,6 +571,11 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     sql.push_str(&generator.limit_offset(limit, offset));
+    append_fetch_clause(&mut sql, cmd.fetch);
+
+    if !cmd.set_ops.is_empty() && set_operand_has_branch_clauses(cmd) {
+        sql = wrap_set_operand_sql(sql, dialect);
+    }
 
     // SET OPERATIONS (UNION, INTERSECT, EXCEPT)
     for (set_op, other_cmd) in &cmd.set_ops {
@@ -580,16 +585,11 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
             SetOp::Intersect => "INTERSECT",
             SetOp::Except => "EXCEPT",
         };
-        sql.push_str(&format!(" {} {}", op_str, build_select(other_cmd, dialect)));
-    }
-
-    // FETCH clause (SQL standard alternative to LIMIT)
-    if let Some((count, with_ties)) = cmd.fetch {
-        if with_ties {
-            sql.push_str(&format!(" FETCH FIRST {} ROWS WITH TIES", count));
-        } else {
-            sql.push_str(&format!(" FETCH FIRST {} ROWS ONLY", count));
-        }
+        sql.push_str(&format!(
+            " {} {}",
+            op_str,
+            build_set_operand(other_cmd, dialect)
+        ));
     }
 
     // FOR UPDATE/SHARE (row locking)
@@ -606,6 +606,45 @@ pub fn build_select(cmd: &Qail, dialect: Dialect) -> String {
     }
 
     sql
+}
+
+pub(super) fn build_set_operand(cmd: &Qail, dialect: Dialect) -> String {
+    let sql = build_select(cmd, dialect);
+    if set_operand_needs_wrapper(cmd) {
+        wrap_set_operand_sql(sql, dialect)
+    } else {
+        sql
+    }
+}
+
+fn set_operand_needs_wrapper(cmd: &Qail) -> bool {
+    !cmd.set_ops.is_empty() || set_operand_has_branch_clauses(cmd)
+}
+
+fn set_operand_has_branch_clauses(cmd: &Qail) -> bool {
+    cmd.fetch.is_some()
+        || cmd.cages.iter().any(|cage| {
+            matches!(
+                cage.kind,
+                CageKind::Sort(_) | CageKind::Limit(_) | CageKind::Offset(_)
+            )
+        })
+}
+
+fn wrap_set_operand_sql(sql: String, dialect: Dialect) -> String {
+    match dialect {
+        Dialect::Postgres | Dialect::SQLite => format!("({sql})"),
+    }
+}
+
+fn append_fetch_clause(sql: &mut String, fetch: Option<(u64, bool)>) {
+    if let Some((count, with_ties)) = fetch {
+        if with_ties {
+            sql.push_str(&format!(" FETCH FIRST {} ROWS WITH TIES", count));
+        } else {
+            sql.push_str(&format!(" FETCH FIRST {} ROWS ONLY", count));
+        }
+    }
 }
 
 /// Render an expression for ORDER BY (and potentially other contexts).

@@ -4,6 +4,7 @@
 //! `PooledConnection::fetch_all_with_rls*`.
 
 use qail_core::ast::Qail;
+use qail_core::rls::RlsContext;
 use qail_pg::protocol::PROTOCOL_VERSION_3_2;
 use qail_pg::{PgPool, PoolConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -130,6 +131,142 @@ fn pool_config(port: u16) -> PoolConfig {
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(2))
         .connect_timeout(Duration::from_secs(2))
+}
+
+#[tokio::test]
+async fn dropped_pooled_connection_rolls_back_instead_of_commit() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let (msg_type, payload) = timeout(Duration::from_secs(2), read_frontend_frame(&mut sock))
+            .await
+            .expect("timed out waiting for leaked connection cleanup");
+        assert_eq!(msg_type, b'Q');
+        assert_eq!(
+            payload_cstr(&payload),
+            "ROLLBACK",
+            "implicit Drop cleanup must fail closed and never COMMIT"
+        );
+
+        sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let pool = PgPool::connect(pool_config(port)).await.unwrap();
+    let conn = pool.acquire_raw().await.unwrap();
+    drop(conn);
+
+    server.await.unwrap();
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn rollback_and_release_sends_rollback() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let (msg_type, payload) = timeout(Duration::from_secs(2), read_frontend_frame(&mut sock))
+            .await
+            .expect("timed out waiting for explicit rollback release");
+        assert_eq!(msg_type, b'Q');
+        assert_eq!(payload_cstr(&payload), "ROLLBACK");
+
+        sock.write_all(&command_complete("ROLLBACK")).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let pool = PgPool::connect(pool_config(port)).await.unwrap();
+    let conn = pool.acquire_raw().await.unwrap();
+    conn.rollback_and_release().await.unwrap();
+
+    server.await.unwrap();
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn rls_bound_connection_rejects_outer_transaction_control() {
+    let (listener, port) = mock_listener().await;
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        read_startup_message(&mut sock).await;
+        sock.write_all(&auth_ok()).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let (msg_type, payload) = timeout(Duration::from_secs(2), read_frontend_frame(&mut sock))
+            .await
+            .expect("timed out waiting for acquire_with_rls setup");
+        assert_eq!(msg_type, b'Q');
+        let setup_sql = payload_cstr(&payload);
+        assert!(setup_sql.starts_with("BEGIN; SET LOCAL app.is_global"));
+        assert!(setup_sql.contains("app.current_tenant_id"));
+
+        sock.write_all(&command_complete("SELECT 1")).await.unwrap();
+        sock.write_all(&ready_in_block()).await.unwrap();
+        sock.flush().await.unwrap();
+
+        let (msg_type, payload) = timeout(Duration::from_secs(2), read_frontend_frame(&mut sock))
+            .await
+            .expect("timed out waiting for release COMMIT");
+        assert_eq!(msg_type, b'Q');
+        assert_eq!(
+            payload_cstr(&payload),
+            "COMMIT",
+            "BEGIN/COMMIT/ROLLBACK guards must fail before writing to the socket"
+        );
+
+        sock.write_all(&command_complete("COMMIT")).await.unwrap();
+        sock.write_all(&ready_idle()).await.unwrap();
+        sock.flush().await.unwrap();
+    });
+
+    let pool = PgPool::connect(pool_config(port)).await.unwrap();
+    let mut conn = pool
+        .acquire_with_rls(RlsContext::tenant("tenant-a"))
+        .await
+        .unwrap();
+
+    for (operation, err) in [
+        (
+            "BEGIN",
+            conn.begin().await.expect_err("BEGIN should be rejected"),
+        ),
+        (
+            "COMMIT",
+            conn.commit().await.expect_err("COMMIT should be rejected"),
+        ),
+        (
+            "ROLLBACK",
+            conn.rollback()
+                .await
+                .expect_err("ROLLBACK should be rejected"),
+        ),
+    ] {
+        let msg = err.to_string();
+        assert!(
+            msg.contains(operation) && msg.contains("RLS-bound pooled connection"),
+            "unexpected {operation} rejection message: {msg}"
+        );
+    }
+
+    conn.release().await;
+    pool.close().await;
+    server.await.unwrap();
 }
 
 #[tokio::test]

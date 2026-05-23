@@ -73,17 +73,17 @@ pub fn build_insert(cmd: &Qail, dialect: Dialect) -> String {
     sql
 }
 
-/// Build ON CONFLICT clause (Standard SQL / Postgres / SQLite style)
+/// Build ON CONFLICT clause (Postgres style)
 fn build_on_conflict(
     on_conflict: &OnConflict,
     _dialect: &Dialect,
     generator: &dyn SqlGenerator,
 ) -> String {
-    // Both Postgres and SQLite support ON CONFLICT
+    // Postgres supports ON CONFLICT.
     build_on_conflict_postgres(on_conflict, generator)
 }
 
-/// PostgreSQL/SQLite style: ON CONFLICT (cols) DO UPDATE SET ... or DO NOTHING
+/// PostgreSQL style: ON CONFLICT (cols) DO UPDATE SET ... or DO NOTHING
 fn build_on_conflict_postgres(on_conflict: &OnConflict, generator: &dyn SqlGenerator) -> String {
     let mut sql = String::from(" ON CONFLICT (");
     let cols: Vec<String> = on_conflict

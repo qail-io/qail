@@ -59,12 +59,34 @@ impl OperationType {
     /// Map a Qail AST [`Action`] to the corresponding operation type.
     pub fn from_action(action: Action) -> Option<Self> {
         match action {
-            Action::Get | Action::Cnt | Action::Export | Action::With => Some(OperationType::Read),
+            Action::Get
+            | Action::Cnt
+            | Action::Export
+            | Action::With
+            | Action::Search
+            | Action::Scroll => Some(OperationType::Read),
             Action::Add => Some(OperationType::Create),
             Action::Set | Action::Put | Action::Over | Action::Upsert => {
                 Some(OperationType::Update)
             }
             Action::Del => Some(OperationType::Delete),
+            _ => None,
+        }
+    }
+
+    /// Return every operation capability required to execute an action.
+    pub fn required_for_action(action: Action) -> Option<&'static [Self]> {
+        match action {
+            Action::Get
+            | Action::Cnt
+            | Action::Export
+            | Action::With
+            | Action::Search
+            | Action::Scroll => Some(&[OperationType::Read]),
+            Action::Add => Some(&[OperationType::Create]),
+            Action::Set | Action::Put | Action::Over => Some(&[OperationType::Update]),
+            Action::Upsert => Some(&[OperationType::Create, OperationType::Update]),
+            Action::Del => Some(&[OperationType::Delete]),
             _ => None,
         }
     }

@@ -27,10 +27,12 @@ pub async fn pull_schema(url_str: &str, _format: SchemaOutputFormat) -> Result<(
 
     let schema = match scheme {
         "postgres" | "postgresql" => inspect_postgres(url_str).await?,
-        "mysql" | "mariadb" => {
-            return Err(anyhow!("MySQL introspection not yet migrated to qail-pg"));
+        _ => {
+            return Err(anyhow!(
+                "Unsupported database scheme: {} (CLI introspection supports postgres:// and postgresql:// only)",
+                scheme
+            ));
         }
-        _ => return Err(anyhow!("Unsupported database scheme: {}", scheme)),
     };
 
     // Always output .qail format now

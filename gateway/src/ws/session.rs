@@ -163,18 +163,12 @@ pub(super) async fn handle_socket(
                     send_token_expired(&tx).await;
                     break;
                 }
-                match tx.try_send(WsServerMessage::Notification {
+                match tx.send(WsServerMessage::Notification {
                     channel: notification.channel.clone(),
                     payload: notification.payload,
-                }) {
+                }).await {
                     Ok(()) => {}
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(
-                            channel = %notification.channel,
-                            "Dropping WS notification: outbound queue is full"
-                        );
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                    Err(_) => break,
                 }
 
                 let mut stale_tables = Vec::new();

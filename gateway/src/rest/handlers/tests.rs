@@ -38,35 +38,42 @@ mod suite {
 
     #[test]
     fn primary_sort_defaults_to_id_asc() {
-        let (col, desc) = primary_sort_for_cursor(None);
+        let (col, desc) = primary_sort_for_cursor(None, "id");
         assert_eq!(col, "id");
         assert!(!desc);
     }
 
     #[test]
+    fn primary_sort_uses_schema_pk_default() {
+        let (col, desc) = primary_sort_for_cursor(None, "code");
+        assert_eq!(col, "code");
+        assert!(!desc);
+    }
+
+    #[test]
     fn primary_sort_parses_prefix_desc() {
-        let (col, desc) = primary_sort_for_cursor(Some("-created_at,total:asc"));
+        let (col, desc) = primary_sort_for_cursor(Some("-created_at,total:asc"), "id");
         assert_eq!(col, "created_at");
         assert!(desc);
     }
 
     #[test]
     fn primary_sort_parses_prefix_asc() {
-        let (col, desc) = primary_sort_for_cursor(Some("+created_at"));
+        let (col, desc) = primary_sort_for_cursor(Some("+created_at"), "id");
         assert_eq!(col, "created_at");
         assert!(!desc);
     }
 
     #[test]
     fn primary_sort_parses_explicit_desc() {
-        let (col, desc) = primary_sort_for_cursor(Some("created_at:desc,id:asc"));
+        let (col, desc) = primary_sort_for_cursor(Some("created_at:desc,id:asc"), "id");
         assert_eq!(col, "created_at");
         assert!(desc);
     }
 
     #[test]
     fn primary_sort_parses_plain_col() {
-        let (col, desc) = primary_sort_for_cursor(Some("created_at"));
+        let (col, desc) = primary_sort_for_cursor(Some("created_at"), "id");
         assert_eq!(col, "created_at");
         assert!(!desc);
     }

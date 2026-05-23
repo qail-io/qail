@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-23
+
+### Added
+- **Durable webhook outbox:** Gateway mutation triggers now persist webhook deliveries through an outbox path with bounded dispatch behavior.
+- **Tenant and policy regression coverage:** Added focused red-team coverage for tenant-guarded query surfaces, policy-filter injection, mutation column policies, branch overlays, Qdrant upserts, idempotency, transactions, and workflow resume/checkpoint behavior.
+- **Branch overlay sequencing:** Added monotonic branch row sequencing and live branch merge/read ordering coverage for deterministic copy-on-write behavior.
+
+### Changed
+- **Stable runtime surface:** Centered the supported execution surface on PostgreSQL and Qdrant while retaining SQLite, DynamoDB, and MongoDB transpiler compatibility symbols for 1.x consumers.
+- **Gateway mutation/event semantics:** REST create/upsert/update/delete paths now use stricter tenant, policy, trigger, cache invalidation, and branch-overlay handling, including conflict-update event classification.
+- **Query execution hardening:** Gateway text/binary/batch/transaction handlers now apply tenant guards, allow-list checks, cache behavior, branch context, and RLS policies more consistently across nested, CTE, source-query, and transaction paths.
+- **Driver and encoder behavior:** PostgreSQL DML/CTE/set-op encoding, pooled connection release behavior, cached pipeline reconciliation, branch SQL, and live integration coverage were tightened.
+- **LSP and analyzer behavior:** Completion and N+1 analysis paths now account for schema and semantic query context more accurately.
+
+### Fixed
+- **Workflow engine correctness:** Fixed nested `ForEach` context preservation, wait-event resume validation, timeout fallback execution, and transition checkpointing/idempotency risks.
+- **Tenant boundary enforcement:** Hardened tenant guards for `INSERT ... SELECT`, joins, CTEs, set ops, source queries, REST responses, and branch overlays.
+- **Policy enforcement gaps:** Enforced create/update requirements for upserts, write-side column policies, source-query create filters, branch overlay policy filters/projection, and Qdrant policy filters.
+- **Qdrant multi-tenant safety:** Tenant-scoped Qdrant upserts now namespace point IDs, preserve original IDs in hidden payload metadata, and enforce tenant/policy boundaries before mutation.
+- **Branch overlay correctness:** Branch list/get reads now apply overlay operations chronologically, enforce policy filters and post-policy projection, and branch merges now apply rows in global sequence order.
+- **Idempotency and transactions:** Transaction endpoints bypass response replay caching, and transaction/session limits, DDL guards, and cache fingerprints were tightened.
+- **Webhook consistency:** Mutation webhook payloads now better preserve old/new row state and avoid blind create semantics for conflict-update upserts.
+
+### Removed
+- **Obsolete PostgreSQL examples and live stress artifacts:** Pruned stale `qail-pg` examples and moved retained live coverage into focused ignored integration tests.
+
 ## [1.0.0] - 2026-05-20
 
 ### Added
@@ -355,7 +381,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Migration guidance:**
   - Use AST-native builders (`Qail::get/add/set/del`, typed expressions, joins, filters) instead of string SQL.
   - Use session AST commands (`Qail::session_set`, `Qail::session_reset`, etc.) for connection/session settings.
-  - Legacy examples that still rely on removed raw APIs are now gated behind `legacy-raw-examples` and disabled by default.
+  - Archived examples that still relied on removed raw APIs were removed from the active package surface.
 
 ### Added
 
@@ -982,7 +1008,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Window `FRAME` clause (`ROWS/RANGE BETWEEN ... AND ...`)
 - `GROUP BY` with `ROLLUP`, `CUBE`, and `GROUPING SETS`
 - `CREATE VIEW` and `DROP VIEW` DDL
-- Comprehensive tests: `complex_test.rs`, `expr_test.rs`
+- Comprehensive AST-native transpiler and expression coverage tests
 
 **Expression System (100% Grammar Coverage):**
 - `Expr::ArrayConstructor` - `ARRAY[col1, col2, ...]`

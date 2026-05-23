@@ -33,16 +33,21 @@ use crate::middleware::ApiError;
 /// - explicit style: `col:desc`, `col:asc`
 /// - default style: `col`
 ///
-/// Falls back to `id ASC` when sort is missing or malformed.
-pub(super) fn primary_sort_for_cursor(sort: Option<&str>) -> (String, bool) {
+/// Falls back to `default_column ASC` when sort is missing or malformed.
+pub(super) fn primary_sort_for_cursor(sort: Option<&str>, default_column: &str) -> (String, bool) {
+    let fallback = if crate::rest::filters::is_safe_identifier(default_column) {
+        default_column
+    } else {
+        "id"
+    };
     let first = sort
         .and_then(|s| s.split(',').map(str::trim).find(|p| !p.is_empty()))
-        .unwrap_or("id");
+        .unwrap_or(fallback);
 
     if let Some(col) = first.strip_prefix('-') {
         let col = col.trim();
         return if col.is_empty() || !crate::rest::filters::is_safe_identifier(col) {
-            ("id".to_string(), true)
+            (fallback.to_string(), true)
         } else {
             (col.to_string(), true)
         };
@@ -51,7 +56,7 @@ pub(super) fn primary_sort_for_cursor(sort: Option<&str>) -> (String, bool) {
     if let Some(col) = first.strip_prefix('+') {
         let col = col.trim();
         return if col.is_empty() || !crate::rest::filters::is_safe_identifier(col) {
-            ("id".to_string(), false)
+            (fallback.to_string(), false)
         } else {
             (col.to_string(), false)
         };
@@ -61,7 +66,7 @@ pub(super) fn primary_sort_for_cursor(sort: Option<&str>) -> (String, bool) {
         let col = col.trim();
         let is_desc = dir.trim().eq_ignore_ascii_case("desc");
         return if col.is_empty() || !crate::rest::filters::is_safe_identifier(col) {
-            ("id".to_string(), is_desc)
+            (fallback.to_string(), is_desc)
         } else {
             (col.to_string(), is_desc)
         };
@@ -69,7 +74,7 @@ pub(super) fn primary_sort_for_cursor(sort: Option<&str>) -> (String, bool) {
 
     let col = first.trim();
     if col.is_empty() || !crate::rest::filters::is_safe_identifier(col) {
-        ("id".to_string(), false)
+        (fallback.to_string(), false)
     } else {
         (col.to_string(), false)
     }

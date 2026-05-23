@@ -10,6 +10,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::step::WorkflowStep;
+
 /// Workflow execution context.
 ///
 /// Persisted between steps so workflows survive process restarts.
@@ -28,6 +30,66 @@ pub struct WorkflowContext {
     pub updated_at: DateTime<Utc>,
     /// Audit trail of state transitions
     pub history: Vec<StateChange>,
+    /// Cursor used to resume inside nested workflow blocks after a Wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<WorkflowCursor>,
+}
+
+/// Persisted execution cursor for resuming after a Wait.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowCursor {
+    /// State whose transition owns the cursor frames.
+    pub state: String,
+    /// Nested frame path to the next executable step.
+    pub frames: Vec<WorkflowCursorFrame>,
+    /// External event currently required before this cursor may resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<WorkflowPendingWait>,
+}
+
+/// Persisted metadata for a paused Wait step.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowPendingWait {
+    /// Event name required to resume this workflow.
+    pub event: String,
+    /// Wall-clock deadline after which timeout fallback is eligible.
+    pub deadline_at: DateTime<Utc>,
+    /// Steps to execute if the wait times out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_timeout: Vec<WorkflowStep>,
+}
+
+/// One level in a persisted workflow execution cursor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WorkflowCursorFrame {
+    /// Top-level transition step list.
+    Steps {
+        /// Next top-level step index.
+        index: usize,
+    },
+    /// Selected branch step list.
+    Branch {
+        /// Branch arm that was active when execution paused.
+        selection: WorkflowBranchCursorSelection,
+        /// Next step index inside the selected branch.
+        index: usize,
+    },
+    /// Active ForEach item step list.
+    ForEach {
+        /// Current array item index.
+        item_index: usize,
+        /// Next step index inside the item block.
+        index: usize,
+    },
+}
+
+/// Persisted branch arm selection for workflow resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WorkflowBranchCursorSelection {
+    /// A concrete branch index from `WorkflowStep::Branch::branches`.
+    Branch(usize),
+    /// The default branch arm.
+    Default,
 }
 
 /// Record of a state transition for audit trail.
@@ -54,6 +116,7 @@ impl WorkflowContext {
             created_at: now,
             updated_at: now,
             history: Vec::new(),
+            cursor: None,
         }
     }
 
@@ -91,7 +154,30 @@ impl WorkflowContext {
             reason,
         });
         self.current_state = new;
+        self.cursor = None;
         self.updated_at = Utc::now();
+    }
+
+    /// Store a resume cursor for the next run.
+    pub fn set_cursor(&mut self, cursor: WorkflowCursor) {
+        self.cursor = Some(cursor);
+        self.updated_at = Utc::now();
+    }
+
+    /// Remove and return the current resume cursor.
+    pub fn take_cursor(&mut self) -> Option<WorkflowCursor> {
+        let cursor = self.cursor.take();
+        if cursor.is_some() {
+            self.updated_at = Utc::now();
+        }
+        cursor
+    }
+
+    /// Clear any saved resume cursor.
+    pub fn clear_cursor(&mut self) {
+        if self.cursor.take().is_some() {
+            self.updated_at = Utc::now();
+        }
     }
 
     /// Get the number of state transitions that have occurred.
@@ -127,6 +213,7 @@ mod tests {
         assert_eq!(ctx.current_state, "created");
         assert!(ctx.data.is_empty());
         assert!(ctx.history.is_empty());
+        assert!(ctx.cursor.is_none());
     }
 
     #[test]
@@ -175,5 +262,65 @@ mod tests {
         assert_eq!(restored.workflow_id, "wf-001");
         assert_eq!(restored.current_state, "pending");
         assert_eq!(restored.get_str("booking_id"), Some("b-123"));
+        assert!(restored.cursor.is_none());
+    }
+
+    #[test]
+    fn test_context_resume_cursor_round_trip() {
+        let mut ctx = WorkflowContext::new("wf-001", "created");
+        ctx.set_cursor(WorkflowCursor {
+            state: "created".to_string(),
+            frames: vec![
+                WorkflowCursorFrame::Steps { index: 0 },
+                WorkflowCursorFrame::ForEach {
+                    item_index: 1,
+                    index: 2,
+                },
+            ],
+            wait: Some(WorkflowPendingWait {
+                event: "operator_accept".to_string(),
+                deadline_at: Utc::now(),
+                on_timeout: vec![],
+            }),
+        });
+
+        let json = serde_json::to_string(&ctx).unwrap();
+        let restored: WorkflowContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.cursor, ctx.cursor);
+    }
+
+    #[test]
+    fn test_context_deserializes_cursor_without_wait_metadata() {
+        let json = r#"{
+            "workflow_id":"wf-001",
+            "current_state":"created",
+            "data":{},
+            "created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z",
+            "history":[],
+            "cursor":{
+                "state":"created",
+                "frames":[{"Steps":{"index":1}}]
+            }
+        }"#;
+
+        let restored: WorkflowContext = serde_json::from_str(json).unwrap();
+        let cursor = restored.cursor.expect("cursor should deserialize");
+        assert!(cursor.wait.is_none());
+    }
+
+    #[test]
+    fn test_context_deserializes_without_cursor() {
+        let json = r#"{
+            "workflow_id":"wf-001",
+            "current_state":"created",
+            "data":{},
+            "created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z",
+            "history":[]
+        }"#;
+
+        let restored: WorkflowContext = serde_json::from_str(json).unwrap();
+        assert!(restored.cursor.is_none());
     }
 }

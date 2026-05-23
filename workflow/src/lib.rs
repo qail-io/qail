@@ -56,10 +56,13 @@ pub mod step;
 
 // Re-exports for convenience
 pub use channel::{ChannelError, ChannelKind, NotifyChannel};
-pub use context::WorkflowContext;
+pub use context::{
+    WorkflowBranchCursorSelection, WorkflowContext, WorkflowCursor, WorkflowCursorFrame,
+    WorkflowPendingWait,
+};
 pub use engine::{
     LegacyQueryPayloadIssue, WorkflowError, WorkflowExecutor, collect_legacy_query_payload_issues,
-    run_workflow,
+    resume_workflow, resume_workflow_with_event, run_workflow, timeout_workflow,
 };
 pub use payment::{
     ChargeRequest, ChargeResponse, ChargeStatus, Currency, PaymentError, PaymentEvent, PaymentKind,

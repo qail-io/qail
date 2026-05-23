@@ -2,8 +2,8 @@
 //!
 //! Tests are organized by category:
 //! - `core`: Basic SELECT, UPDATE, DELETE, INSERT tests
-//! - `dialects`: SQL dialect-specific tests (MySQL, SQLite, Oracle, etc.)
-//! - `nosql`: NoSQL transpiler tests (MongoDB, DynamoDB, etc.)
+//! - `dialects`: PostgreSQL plus 1.x dialect compatibility checks
+//! - `nosql`: Qdrant transpiler tests
 //! - `features`: DDL, Upsert, JSON operations, advanced features
 
 mod core;

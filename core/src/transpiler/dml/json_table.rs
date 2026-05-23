@@ -2,6 +2,13 @@
 
 use crate::ast::*;
 use crate::transpiler::dialect::Dialect;
+use crate::transpiler::traits::SqlGenerator;
+
+struct JsonTableColumn {
+    name: String,
+    data_type: String,
+    path: String,
+}
 
 /// QAIL Syntax: `jtable::orders.items [$[*]] :product_name=$.name,quantity=$.qty`
 /// Generates:
@@ -47,41 +54,16 @@ pub fn build_json_table(cmd: &Qail, dialect: Dialect) -> String {
         "$[*]".to_string()
     };
 
-    let column_defs: Vec<String> = cmd
-        .columns
+    let json_columns = json_table_columns(cmd);
+    let column_defs: Vec<String> = json_columns
         .iter()
-        .filter_map(|c| {
-            match c {
-                Expr::Named(def) => {
-                    if let Some((name, json_path)) = def.split_once('=') {
-                        // Default type TEXT
-                        Some(format!(
-                            "{} TEXT PATH '{}'",
-                            generator.quote_identifier(name),
-                            json_path
-                        ))
-                    } else {
-                        // If no path specified, use $.name
-                        Some(format!(
-                            "{} TEXT PATH '$.{}'",
-                            generator.quote_identifier(def),
-                            def
-                        ))
-                    }
-                }
-                Expr::Def {
-                    name, data_type, ..
-                } => {
-                    // If using Column::Def, data_type might contain the path
-                    Some(format!(
-                        "{} {} PATH '$.{}'",
-                        generator.quote_identifier(name),
-                        data_type,
-                        name
-                    ))
-                }
-                _ => None,
-            }
+        .map(|column| {
+            format!(
+                "{} {} PATH '{}'",
+                generator.quote_identifier(&column.name),
+                column.data_type,
+                escape_sql_string(&column.path)
+            )
         })
         .collect();
 
@@ -100,17 +82,84 @@ pub fn build_json_table(cmd: &Qail, dialect: Dialect) -> String {
         )
     };
 
-    let sql = format!(
-        "SELECT jt.* FROM {}, JSON_TABLE({}, '{}' COLUMNS ({})) AS jt",
-        if source_table == "_" {
-            "dual".to_string()
-        } else {
-            generator.quote_identifier(source_table)
-        },
+    match dialect {
+        Dialect::Postgres => {
+            build_postgres_json_table(&*generator, source_table, &source_ref, &path, &column_defs)
+        }
+        Dialect::SQLite => format!(
+            "SELECT jt.* FROM {}, JSON_TABLE({}, '{}' COLUMNS ({})) AS jt",
+            if source_table == "_" {
+                "dual".to_string()
+            } else {
+                generator.quote_identifier(source_table)
+            },
+            source_ref,
+            path,
+            column_defs.join(", ")
+        ),
+    }
+}
+
+fn json_table_columns(cmd: &Qail) -> Vec<JsonTableColumn> {
+    cmd.columns
+        .iter()
+        .filter_map(|c| {
+            match c {
+                Expr::Named(def) => {
+                    if let Some((name, json_path)) = def.split_once('=') {
+                        // Default type TEXT
+                        Some(JsonTableColumn {
+                            name: name.to_string(),
+                            data_type: "TEXT".to_string(),
+                            path: json_path.to_string(),
+                        })
+                    } else {
+                        // If no path specified, use $.name
+                        Some(JsonTableColumn {
+                            name: def.to_string(),
+                            data_type: "TEXT".to_string(),
+                            path: format!("$.{}", def),
+                        })
+                    }
+                }
+                Expr::Def {
+                    name, data_type, ..
+                } => Some(JsonTableColumn {
+                    name: name.to_string(),
+                    data_type: data_type.to_string(),
+                    path: format!("$.{}", name),
+                }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn build_postgres_json_table(
+    generator: &dyn SqlGenerator,
+    source_table: &str,
+    source_ref: &str,
+    path: &str,
+    column_defs: &[String],
+) -> String {
+    let json_table = format!(
+        "JSON_TABLE({}, '{}' COLUMNS ({})) AS jt",
         source_ref,
-        path,
+        escape_sql_string(path),
         column_defs.join(", ")
     );
 
-    sql
+    if source_table == "_" {
+        format!("SELECT jt.* FROM {}", json_table)
+    } else {
+        format!(
+            "SELECT jt.* FROM {}, {}",
+            generator.quote_identifier(source_table),
+            json_table
+        )
+    }
+}
+
+fn escape_sql_string(value: &str) -> String {
+    value.replace('\'', "''")
 }

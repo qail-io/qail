@@ -58,10 +58,13 @@ impl Gateway {
             }
         });
 
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .map_err(|e| GatewayError::Internal(e.into()))?;
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|e| GatewayError::Internal(e.into()))?;
 
         tracing::info!("In-flight requests drained. Closing connection pool...");
         state.pool.close().await;

@@ -2,7 +2,7 @@
 
 use crate::ast::*;
 use crate::transpiler::dialect::Dialect;
-use crate::transpiler::dml::select::build_select;
+use crate::transpiler::dml::select::{build_select, build_set_operand};
 
 /// Generate CTE SQL with support for multiple CTEs and RECURSIVE.
 /// Supports:
@@ -10,8 +10,6 @@ use crate::transpiler::dml::select::build_select;
 /// - Multiple CTEs: `WITH x AS (...), y AS (...), z AS (...) SELECT ...`
 /// - Recursive CTEs: `WITH RECURSIVE x AS (base UNION ALL recursive) SELECT ...`
 pub fn build_cte(cmd: &Qail, dialect: Dialect) -> String {
-    let generator = dialect.generator();
-
     // If no CTEs, just return a select
     if cmd.ctes.is_empty() {
         return build_select(cmd, dialect);
@@ -32,12 +30,16 @@ pub fn build_cte(cmd: &Qail, dialect: Dialect) -> String {
 
     sql.push_str(&cte_parts.join(", "));
 
-    let Some(final_table) = cmd.ctes.last().map(|cte| &cte.name) else {
-        return build_select(cmd, dialect);
-    };
+    let mut final_query = cmd.clone();
+    final_query.ctes.clear();
+    if final_query.table.is_empty()
+        && let Some(final_table) = cmd.ctes.last().map(|cte| &cte.name)
+    {
+        final_query.table = final_table.clone();
+    }
 
-    sql.push_str(" SELECT * FROM ");
-    sql.push_str(&generator.quote_identifier(final_table));
+    sql.push(' ');
+    sql.push_str(&build_select(&final_query, dialect));
 
     sql
 }
@@ -62,14 +64,14 @@ pub fn build_single_cte(cte: &CTEDef, dialect: Dialect) -> String {
 
     sql.push_str(" AS (");
 
-    sql.push_str(&build_select(&cte.base_query, dialect));
+    sql.push_str(&build_set_operand(&cte.base_query, dialect));
 
     // Recursive part (if RECURSIVE)
     if cte.recursive
         && let Some(ref recursive_query) = cte.recursive_query
     {
         sql.push_str(" UNION ALL ");
-        sql.push_str(&build_select(recursive_query, dialect));
+        sql.push_str(&build_set_operand(recursive_query, dialect));
     }
 
     sql.push(')');

@@ -1,6 +1,6 @@
 use super::*;
 use crate::auth::AuthContext;
-use qail_core::ast::{Action, CageKind, Expr, Qail, Value};
+use qail_core::ast::{Action, CageKind, Expr, LogicalOp, Qail, Value};
 
 #[test]
 fn test_policy_expands_user_id() {
@@ -84,6 +84,597 @@ fn test_apply_policies_treats_cnt_as_read_operation() {
     cmd.action = Action::Cnt;
     let result = engine.apply_policies(&auth, &mut cmd);
     assert!(result.is_ok(), "cnt should be treated as read");
+}
+
+#[test]
+fn test_apply_policies_recurses_into_cte_body() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "orders_read".to_string(),
+        table: "orders".to_string(),
+        filter: Some("tenant_id = $tenant_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user_cte".to_string(),
+        role: "user".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd =
+        Qail::get("summary").with("summary", Qail::get("orders").columns(["id", "total"]));
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    let cte_body = &cmd.ctes[0].base_query;
+    assert_eq!(cte_body.cages.len(), 1);
+    let condition = &cte_body.cages[0].conditions[0];
+    assert_eq!(condition.left, Expr::Named("tenant_id".to_string()));
+    assert_eq!(condition.value, Value::String("tenant-1".to_string()));
+}
+
+#[test]
+fn test_apply_policies_adds_joined_table_filter_to_join_clause() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "orders_read".to_string(),
+        table: "orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "users_tenant".to_string(),
+        table: "users".to_string(),
+        filter: Some("tenant_id = $tenant_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user_join".to_string(),
+        role: "user".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("orders").left_join("users", "orders.user_id", "users.id");
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    let join = cmd.joins.first().expect("join");
+    let on = join.on.as_ref().expect("join conditions");
+    assert!(on.iter().any(|condition| {
+        condition.left == Expr::Named("users.tenant_id".to_string())
+            && condition.value == Value::String("tenant-1".to_string())
+    }));
+}
+
+#[test]
+fn test_apply_policies_rejects_joined_table_column_policy() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "orders_read".to_string(),
+        table: "orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "users_columns".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec!["id".to_string()],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user_join".to_string(),
+        role: "user".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::get("orders").left_join("users", "orders.user_id", "users.id");
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(err.to_string().contains("column policies"));
+}
+
+#[test]
+fn test_create_policy_filter_is_injected_into_insert_payload() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "operator_create".to_string(),
+        table: "orders".to_string(),
+        filter: Some("operator_id = $user_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("orders")
+        .set_value("id", "order-1")
+        .set_value("operator_id", "attacker");
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    let payload = cmd
+        .cages
+        .iter()
+        .find(|cage| matches!(cage.kind, CageKind::Payload))
+        .expect("payload cage");
+    assert!(payload.conditions.iter().any(|condition| {
+        condition.left == Expr::Named("operator_id".to_string())
+            && condition.value == Value::String("operator-1".to_string())
+    }));
+    assert!(
+        !payload
+            .conditions
+            .iter()
+            .any(|condition| { condition.value == Value::String("attacker".to_string()) })
+    );
+}
+
+#[test]
+fn test_create_policy_rejects_multiple_filtered_policies() {
+    let mut engine = PolicyEngine::new();
+    for name in ["operator_create", "region_create"] {
+        engine.add_policy(PolicyDef {
+            name: name.to_string(),
+            table: "orders".to_string(),
+            filter: Some(if name == "operator_create" {
+                "operator_id = $user_id".to_string()
+            } else {
+                "region = 'west'".to_string()
+            }),
+            role: None,
+            operations: vec![OperationType::Create],
+            allowed_columns: vec![],
+            denied_columns: vec![],
+        });
+    }
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("orders").set_value("id", "order-1");
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Multiple filtered create policies")
+    );
+}
+
+#[test]
+fn test_create_policy_rewrites_insert_select_projection() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "source_read".to_string(),
+        table: "source_orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "create_west_orders".to_string(),
+        table: "orders".to_string(),
+        filter: Some("region = 'west'".to_string()),
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("orders").columns(["id", "total"]);
+    cmd.source_query = Some(Box::new(
+        Qail::get("source_orders").columns(["id", "total"]),
+    ));
+
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert_eq!(
+        cmd.columns,
+        vec![
+            Expr::Named("id".to_string()),
+            Expr::Named("total".to_string()),
+            Expr::Named("region".to_string())
+        ]
+    );
+    let source_query = cmd.source_query.as_ref().expect("source query");
+    assert!(matches!(
+        source_query.columns.last(),
+        Some(Expr::Literal(Value::String(value))) if value == "west"
+    ));
+
+    let (sql, params) = qail_pg::protocol::ast_encoder::AstEncoder::encode_cmd_sql(&cmd).unwrap();
+    assert_eq!(
+        sql,
+        "INSERT INTO orders (id, total, region) SELECT id, total, 'west' FROM source_orders"
+    );
+    assert!(params.is_empty());
+}
+
+#[test]
+fn test_create_policy_replaces_insert_select_policy_column_projection() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "source_read".to_string(),
+        table: "source_orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "create_west_orders".to_string(),
+        table: "orders".to_string(),
+        filter: Some("region = 'west'".to_string()),
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("orders").columns(["id", "region", "total"]);
+    cmd.source_query = Some(Box::new(Qail::get("source_orders").columns([
+        "id",
+        "attacker_region",
+        "total",
+    ])));
+
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert_eq!(
+        cmd.columns,
+        vec![
+            Expr::Named("id".to_string()),
+            Expr::Named("region".to_string()),
+            Expr::Named("total".to_string())
+        ]
+    );
+    let source_query = cmd.source_query.as_ref().expect("source query");
+    assert!(matches!(
+        &source_query.columns[1],
+        Expr::Literal(Value::String(value)) if value == "west"
+    ));
+    assert!(
+        !source_query
+            .columns
+            .iter()
+            .any(|expr| { matches!(expr, Expr::Named(name) if name == "attacker_region") }),
+        "policy column projection should be replaced by policy literal"
+    );
+}
+
+#[test]
+fn test_create_policy_rejects_insert_select_source_projection_mismatch() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "source_read".to_string(),
+        table: "source_orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "create_west_orders".to_string(),
+        table: "orders".to_string(),
+        filter: Some("region = 'west'".to_string()),
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("orders").columns(["id", "total"]);
+    cmd.source_query = Some(Box::new(Qail::get("source_orders").columns(["id"])));
+
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("target/source column count mismatch")
+    );
+}
+
+#[test]
+fn test_create_policy_rejects_insert_select_implicit_source_projection() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "source_read".to_string(),
+        table: "source_orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "create_west_orders".to_string(),
+        table: "orders".to_string(),
+        filter: Some("region = 'west'".to_string()),
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("orders").columns(["id", "total"]);
+    cmd.source_query = Some(Box::new(Qail::get("source_orders")));
+
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("explicit non-star source projection")
+    );
+}
+
+#[test]
+fn test_upsert_conflict_update_requires_update_policy() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "create_only".to_string(),
+        table: "orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("orders")
+        .set_value("id", "order-1")
+        .set_value("status", "paid")
+        .on_conflict_update(
+            &["id"],
+            &[("status", Expr::Named("EXCLUDED.status".to_string()))],
+        );
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(err.to_string().contains("Update"));
+}
+
+#[test]
+fn test_upsert_conflict_update_injects_update_policy_filter() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "create_orders".to_string(),
+        table: "orders".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "update_own_orders".to_string(),
+        table: "orders".to_string(),
+        filter: Some("operator_id = $user_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("orders")
+        .set_value("id", "order-1")
+        .set_value("status", "paid")
+        .on_conflict_update(
+            &["id"],
+            &[("status", Expr::Named("EXCLUDED.status".to_string()))],
+        );
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+
+    assert!(cmd.cages.iter().any(|cage| {
+        matches!(cage.kind, CageKind::Filter)
+            && cage.conditions.iter().any(|condition| {
+                condition.left == Expr::Named("operator_id".to_string())
+                    && condition.value == Value::String("operator-1".to_string())
+            })
+    }));
+}
+
+#[test]
+fn test_vector_upsert_requires_create_policy() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "update_vectors".to_string(),
+        table: "embeddings".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::upsert("embeddings");
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(err.to_string().contains("Create"));
+}
+
+#[test]
+fn test_vector_upsert_requires_update_policy() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "create_vectors".to_string(),
+        table: "embeddings".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::upsert("embeddings");
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+    assert!(err.to_string().contains("Update"));
+}
+
+#[test]
+fn test_vector_upsert_allows_create_and_update_policies() {
+    let mut engine = PolicyEngine::new();
+    for (name, operation) in [
+        ("create_vectors", OperationType::Create),
+        ("update_vectors", OperationType::Update),
+    ] {
+        engine.add_policy(PolicyDef {
+            name: name.to_string(),
+            table: "embeddings".to_string(),
+            filter: None,
+            role: None,
+            operations: vec![operation],
+            allowed_columns: vec![],
+            denied_columns: vec![],
+        });
+    }
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::upsert("embeddings");
+    engine.apply_policies(&auth, &mut cmd).unwrap();
+}
+
+#[test]
+fn test_filter_cages_for_operation_returns_filtered_vector_policies() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "create_west_vectors".to_string(),
+        table: "embeddings".to_string(),
+        filter: Some("region = 'west'".to_string()),
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "update_operator_vectors".to_string(),
+        table: "embeddings".to_string(),
+        filter: Some("operator_id = $user_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "operator-1".to_string(),
+        role: "operator".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let create_cages = engine
+        .filter_cages_for_operation(&auth, "embeddings", OperationType::Create)
+        .unwrap();
+    let update_cages = engine
+        .filter_cages_for_operation(&auth, "embeddings", OperationType::Update)
+        .unwrap();
+
+    assert_eq!(create_cages.len(), 1);
+    assert_eq!(create_cages[0].logical_op, LogicalOp::Or);
+    assert_eq!(
+        create_cages[0].conditions[0].left,
+        Expr::Named("region".to_string())
+    );
+    assert_eq!(
+        create_cages[0].conditions[0].value,
+        Value::String("west".to_string())
+    );
+    assert_eq!(update_cages.len(), 1);
+    assert_eq!(
+        update_cages[0].conditions[0].left,
+        Expr::Named("operator_id".to_string())
+    );
+    assert_eq!(
+        update_cages[0].conditions[0].value,
+        Value::String("operator-1".to_string())
+    );
 }
 
 #[test]
@@ -228,6 +819,151 @@ fn test_column_blacklist_rejects_expression_projection() {
     }];
     let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
     assert!(err.to_string().contains("expression projections"));
+}
+
+#[test]
+fn test_update_column_blacklist_rejects_payload_column() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: Some("tenant_id = $tenant_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["is_admin".into(), "password_hash".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::set("users").set_value("is_admin", true);
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Update on column 'is_admin'")
+    );
+}
+
+#[test]
+fn test_create_column_whitelist_rejects_unlisted_payload_column() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_create".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec!["email".into(), "name".into()],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("users")
+        .set_value("email", "a@example.test")
+        .set_value("is_admin", true);
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("does not allow Create on column 'is_admin'")
+    );
+}
+
+#[test]
+fn test_insert_select_column_blacklist_requires_safe_target_columns() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_create".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec!["is_admin".into()],
+    });
+    engine.add_policy(PolicyDef {
+        name: "staging_users_read".to_string(),
+        table: "staging_users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Read],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("users").columns(["email", "is_admin"]);
+    cmd.source_query = Some(Box::new(
+        Qail::get("staging_users").columns(["email", "is_admin"]),
+    ));
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Create on column 'is_admin'")
+    );
+}
+
+#[test]
+fn test_on_conflict_update_column_blacklist_rejects_assignment() {
+    let mut engine = PolicyEngine::new();
+    engine.add_policy(PolicyDef {
+        name: "users_create".to_string(),
+        table: "users".to_string(),
+        filter: None,
+        role: None,
+        operations: vec![OperationType::Create],
+        allowed_columns: vec![],
+        denied_columns: vec![],
+    });
+    engine.add_policy(PolicyDef {
+        name: "users_update".to_string(),
+        table: "users".to_string(),
+        filter: Some("tenant_id = $tenant_id".to_string()),
+        role: None,
+        operations: vec![OperationType::Update],
+        allowed_columns: vec![],
+        denied_columns: vec!["is_admin".into()],
+    });
+
+    let auth = AuthContext {
+        user_id: "user1".to_string(),
+        role: "support".to_string(),
+        tenant_id: Some("tenant-1".to_string()),
+        claims: std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Qail::add("users")
+        .set_value("id", "user-1")
+        .set_value("is_admin", true)
+        .on_conflict_update(
+            &["id"],
+            &[("is_admin", Expr::Named("EXCLUDED.is_admin".into()))],
+        );
+    let err = engine.apply_policies(&auth, &mut cmd).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("denies Update on column 'is_admin'")
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════

@@ -5,6 +5,9 @@ use std::time::Duration;
 use crate::policy::OperationType;
 
 use super::delivery::deliver_webhook;
+use super::outbox::{
+    OutboxEventInsert, ensure_outbox_schema, insert_outbox_event, spawn_outbox_worker,
+};
 use super::{EventTrigger, WebhookData, WebhookPayload, normalize_trigger};
 
 /// The event trigger engine — holds all registered triggers
@@ -117,10 +120,100 @@ impl EventTriggerEngine {
             .collect()
     }
 
-    /// Fire matching triggers for a mutation.
+    /// Return whether any enabled mutation trigger is registered.
+    pub fn has_enabled_mutation_triggers(&self) -> bool {
+        self.triggers.iter().any(|trigger| {
+            trigger.enabled
+                && trigger.operations.iter().any(|op| {
+                    matches!(
+                        op,
+                        OperationType::Create | OperationType::Update | OperationType::Delete
+                    )
+                })
+        })
+    }
+
+    /// Create the durable webhook outbox table if event delivery is configured.
+    pub async fn ensure_durable_outbox(
+        &self,
+        pool: &qail_pg::PgPool,
+    ) -> Result<(), qail_pg::PgError> {
+        if self.has_enabled_mutation_triggers() {
+            ensure_outbox_schema(pool).await?;
+        }
+        Ok(())
+    }
+
+    /// Start the background outbox dispatcher.
+    pub fn start_outbox_worker(&self, pool: qail_pg::PgPool) {
+        if !self.has_enabled_mutation_triggers() {
+            return;
+        }
+        let Some(client) = self.client.as_ref().map(Arc::clone) else {
+            tracing::warn!("Webhook outbox worker disabled: HTTP client is unavailable");
+            return;
+        };
+        spawn_outbox_worker(pool, client, Arc::clone(&self.webhook_semaphore));
+    }
+
+    /// Persist matching trigger deliveries into the outbox inside the caller's
+    /// open mutation transaction.
+    pub async fn enqueue_durable(
+        &self,
+        conn: &mut qail_pg::PooledConnection,
+        table: &str,
+        op: OperationType,
+        new_data: Option<Value>,
+        old_data: Option<Value>,
+    ) -> Result<usize, qail_pg::PgError> {
+        let matching = self.triggers_for(table, &op);
+        if matching.is_empty() {
+            return Ok(0);
+        }
+
+        let op_str = match op {
+            OperationType::Read => return Ok(0),
+            OperationType::Create => "INSERT",
+            OperationType::Update => "UPDATE",
+            OperationType::Delete => "DELETE",
+        };
+
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let mut queued = 0;
+        for trigger in matching {
+            let payload = WebhookPayload {
+                trigger: trigger.name.clone(),
+                table: table.to_string(),
+                operation: op_str.to_string(),
+                data: WebhookData {
+                    new: new_data.clone(),
+                    old: old_data.clone(),
+                },
+                timestamp: timestamp.clone(),
+            };
+            insert_outbox_event(
+                conn,
+                OutboxEventInsert {
+                    trigger_name: &trigger.name,
+                    table,
+                    operation: op_str,
+                    webhook_url: &trigger.webhook_url,
+                    headers: &trigger.headers,
+                    payload: &payload,
+                    retry_count: trigger.retry_count,
+                },
+            )
+            .await?;
+            queued += 1;
+        }
+        Ok(queued)
+    }
+
+    /// Fire matching triggers for a mutation without persistence.
     ///
-    /// This is **non-blocking** — each webhook call is spawned as a
-    /// separate tokio task so the REST response is not delayed.
+    /// This legacy path is **non-blocking** — each webhook call is spawned as
+    /// a separate tokio task. REST mutations should use [`Self::enqueue_durable`]
+    /// while their database transaction is still open.
     pub fn fire(
         &self,
         table: &str,

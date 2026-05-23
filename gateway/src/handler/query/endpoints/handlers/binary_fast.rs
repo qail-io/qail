@@ -65,6 +65,9 @@ pub async fn execute_query_binary(
     }
 
     reject_dangerous_action(&cmd)?;
+    let tenant_guard_plan =
+        crate::tenant_guard::prepare_tenant_guarded_query(state.as_ref(), &auth, &mut cmd)
+            .map_err(|e| ApiError::bad_request("TENANT_GUARD_PROJECTION", e.to_string()))?;
 
     if !is_query_allowed(&state.allow_list, None, &cmd) {
         tracing::warn!("Binary query rejected by allow-list");
@@ -78,10 +81,16 @@ pub async fn execute_query_binary(
         tracing::warn!("Policy error: {}", e);
         return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
+    if let Some(ref plan) = tenant_guard_plan
+        && plan.verify_rows
+    {
+        crate::tenant_guard::ensure_verifiable_tenant_projection(&cmd, &plan.column)
+            .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    }
 
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
-    execute_qail_cmd(&state, &auth, &cmd, &extensions).await
+    execute_qail_cmd(&state, &auth, &cmd, tenant_guard_plan.as_ref(), &extensions).await
 }
 
 /// Execute a QAIL query (FAST — array-of-arrays response)
@@ -105,8 +114,16 @@ pub async fn execute_query_fast(
     let mut cmd = parse_cached_query(&state, query_text)?;
 
     reject_dangerous_action(&cmd)?;
+    let tenant_guard_plan =
+        crate::tenant_guard::prepare_tenant_guarded_query(state.as_ref(), &auth, &mut cmd)
+            .map_err(|e| ApiError::bad_request("TENANT_GUARD_PROJECTION", e.to_string()))?;
 
-    if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
+    let allow_list_raw_query = if tenant_guard_plan.is_some() {
+        None
+    } else {
+        Some(query_text)
+    };
+    if !is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
         tracing::warn!("Fast query rejected by allow-list: {}", query_text);
         return Err(ApiError::with_code(
             "QUERY_NOT_ALLOWED",
@@ -117,8 +134,14 @@ pub async fn execute_query_fast(
     if let Err(e) = state.policy_engine.apply_policies(&auth, &mut cmd) {
         return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
+    if let Some(ref plan) = tenant_guard_plan
+        && plan.verify_rows
+    {
+        crate::tenant_guard::ensure_verifiable_tenant_projection(&cmd, &plan.column)
+            .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    }
 
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
 
-    execute_qail_cmd_fast(&state, &auth, &cmd, &extensions).await
+    execute_qail_cmd_fast(&state, &auth, &cmd, tenant_guard_plan.as_ref(), &extensions).await
 }

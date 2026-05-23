@@ -8,7 +8,10 @@ pub enum Dialect {
     /// PostgreSQL dialect (default).
     #[default]
     Postgres,
-    /// SQLite dialect.
+    /// SQLite dialect compatibility surface.
+    ///
+    /// PostgreSQL is the supported SQL runtime; this variant remains so 1.x
+    /// consumers that selected SQLite still compile.
     SQLite,
 }
 

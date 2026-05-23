@@ -33,6 +33,11 @@ impl Gateway {
         .await?;
 
         let event_engine = load_event_engine(&self.config)?;
+        event_engine
+            .ensure_durable_outbox(&pool)
+            .await
+            .map_err(|e| GatewayError::Database(format!("Webhook outbox init failed: {}", e)))?;
+        event_engine.start_outbox_worker(pool.clone());
 
         let rate_limiter =
             RateLimiter::new(self.config.rate_limit_rate, self.config.rate_limit_burst);

@@ -19,6 +19,7 @@ async fn insert_test_session(
         closed: false,
         statements_executed,
         pg_aborted: false,
+        mutated_tables: std::collections::HashSet::new(),
     };
     let mut sessions = mgr.sessions.lock().await;
     sessions.insert(id.to_string(), Arc::new(Mutex::new(session)));

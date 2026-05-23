@@ -30,7 +30,7 @@ pub(crate) async fn explain_handler(
     let table_name =
         extract_table_name(request.uri()).ok_or_else(|| ApiError::not_found("table"))?;
 
-    let _table = state
+    let table = state
         .schema
         .table(&table_name)
         .ok_or_else(|| ApiError::not_found(&table_name))?;
@@ -63,7 +63,9 @@ pub(crate) async fn explain_handler(
         }
     }
 
-    // Apply sorting — default to `id ASC` for deterministic pagination
+    let default_sort_column = table.primary_key.as_deref().unwrap_or("id");
+
+    // Apply sorting — default to the schema primary key for deterministic pagination
     if let Some(ref sort) = params.sort {
         for part in sort.split(',') {
             let mut iter = part.splitn(2, ':');
@@ -79,8 +81,8 @@ pub(crate) async fn explain_handler(
                 cmd.order_asc(col)
             };
         }
-    } else {
-        cmd = cmd.order_asc("id");
+    } else if crate::rest::filters::is_safe_identifier(default_sort_column) {
+        cmd = cmd.order_asc(default_sort_column);
     }
 
     // Apply expand (flat JOIN only) — enforce depth limit

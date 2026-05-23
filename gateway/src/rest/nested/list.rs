@@ -7,7 +7,6 @@ use axum::{
 };
 use qail_core::ast::{Operator, Value as QailValue};
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::GatewayState;
 use crate::auth::authenticate_request;
@@ -62,10 +61,6 @@ pub(crate) async fn nested_list_handler(
         )));
     }
 
-    // Validate parent UUID format
-    Uuid::parse_str(&parent_id)
-        .map_err(|_| ApiError::parse_error(format!("Invalid UUID: {}", parent_id)))?;
-
     // Look up FK relation: child → parent
     let (fk_col, _pk_col) = state
         .schema
@@ -89,6 +84,7 @@ pub(crate) async fn nested_list_handler(
         Operator::Eq,
         QailValue::String(parent_id),
     );
+    let mut strip_tenant_scope_column = false;
 
     // Column selection
     if let Some(ref select) = params.select {
@@ -102,6 +98,7 @@ pub(crate) async fn nested_list_handler(
             && !cols.contains(&scope_column)
         {
             cols.push(scope_column);
+            strip_tenant_scope_column = true;
         }
         if !cols.is_empty() {
             cmd = cmd.columns(cols);
@@ -172,7 +169,7 @@ pub(crate) async fn nested_list_handler(
     conn.release().await;
 
     let rows = rows?;
-    let data: Vec<Value> = rows.iter().map(row_to_json).collect();
+    let mut data: Vec<Value> = rows.iter().map(row_to_json).collect();
 
     // ── Tenant Boundary Invariant ────────────────────────────────────
     if let Some((scope_column, tenant_id)) = tenant_scope.as_ref() {
@@ -187,6 +184,9 @@ pub(crate) async fn nested_list_handler(
             tracing::error!("{}", v);
             crate::middleware::ApiError::internal("Data integrity error")
         })?;
+    }
+    if strip_tenant_scope_column && let Some(scope_column) = tenant_scope_column {
+        crate::tenant_guard::strip_tenant_column_from_json_rows(&mut data, scope_column);
     }
 
     let count = data.len();

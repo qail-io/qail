@@ -1,6 +1,53 @@
 use super::common::parse_cached_query;
 use super::*;
 
+fn build_export_tenant_violation_check(
+    cmd: &qail_core::ast::Qail,
+    tenant_column: &str,
+    tenant_id: &str,
+) -> qail_core::ast::Qail {
+    use qail_core::ast::{AggregateFunc, CageKind, Expr, Operator, Value as QailValue};
+
+    let mut guard_cmd = cmd.clone();
+    guard_cmd.action = Action::Get;
+    guard_cmd.columns = vec![Expr::Aggregate {
+        col: "*".to_string(),
+        func: AggregateFunc::Count,
+        distinct: false,
+        filter: None,
+        alias: Some("violation_count".to_string()),
+    }];
+    guard_cmd.distinct = false;
+    guard_cmd.distinct_on.clear();
+    guard_cmd.having.clear();
+    guard_cmd.set_ops.clear();
+    guard_cmd.fetch = None;
+    guard_cmd
+        .cages
+        .retain(|cage| matches!(cage.kind, CageKind::Filter));
+
+    let filter_column = if guard_cmd.joins.is_empty() {
+        tenant_column.to_string()
+    } else {
+        format!("{}.{}", guard_cmd.table, tenant_column)
+    };
+    guard_cmd.filter(
+        filter_column,
+        Operator::Ne,
+        QailValue::String(tenant_id.to_string()),
+    )
+}
+
+fn export_violation_count(row: &serde_json::Value) -> u64 {
+    row.get("violation_count")
+        .and_then(|value| match value {
+            serde_json::Value::Number(n) => n.as_u64(),
+            serde_json::Value::String(s) => s.parse::<u64>().ok(),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
 pub async fn execute_query(
     State(state): State<Arc<GatewayState>>,
     extensions: axum::http::Extensions,
@@ -24,8 +71,16 @@ pub async fn execute_query(
     let mut cmd = parse_cached_query(&state, query_text)?;
 
     reject_dangerous_action(&cmd)?;
+    let tenant_guard_plan =
+        crate::tenant_guard::prepare_tenant_guarded_query(state.as_ref(), &auth, &mut cmd)
+            .map_err(|e| ApiError::bad_request("TENANT_GUARD_PROJECTION", e.to_string()))?;
 
-    if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
+    let allow_list_raw_query = if tenant_guard_plan.is_some() {
+        None
+    } else {
+        Some(query_text)
+    };
+    if !is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
         tracing::warn!("Query rejected by allow-list: {}", query_text);
         return Err(ApiError::with_code(
             "QUERY_NOT_ALLOWED",
@@ -37,9 +92,15 @@ pub async fn execute_query(
         tracing::warn!("Policy error: {}", e);
         return Err(ApiError::with_code("POLICY_DENIED", e.to_string()));
     }
+    if let Some(ref plan) = tenant_guard_plan
+        && plan.verify_rows
+    {
+        crate::tenant_guard::ensure_verifiable_tenant_projection(&cmd, &plan.column)
+            .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    }
 
     clamp_query_limit(&mut cmd, state.config.max_result_rows);
-    execute_qail_cmd(&state, &auth, &cmd, &extensions).await
+    execute_qail_cmd(&state, &auth, &cmd, tenant_guard_plan.as_ref(), &extensions).await
 }
 
 /// Execute a streaming export query (POST /qail/export).
@@ -68,7 +129,16 @@ pub async fn execute_query_export(
 
     reject_dangerous_action(&cmd)?;
 
-    if !is_query_allowed(&state.allow_list, Some(query_text), &cmd) {
+    let tenant_guard_plan =
+        crate::tenant_guard::prepare_tenant_guarded_query(state.as_ref(), &auth, &mut cmd)
+            .map_err(|e| ApiError::bad_request("TENANT_GUARD_PROJECTION", e.to_string()))?;
+
+    let allow_list_raw_query = if tenant_guard_plan.is_some() {
+        None
+    } else {
+        Some(query_text)
+    };
+    if !is_query_allowed(&state.allow_list, allow_list_raw_query, &cmd) {
         tracing::warn!("Export query rejected by allow-list: {}", query_text);
         return Err(ApiError::with_code(
             "QUERY_NOT_ALLOWED",
@@ -92,6 +162,41 @@ pub async fn execute_query_export(
     let mut conn = state
         .acquire_with_auth_rls_guarded(&auth, Some(&cmd.table))
         .await?;
+
+    if let Some(tenant_id) = auth.tenant_id.as_deref()
+        && let Some(tenant_column) =
+            crate::tenant_guard::tenant_guard_column_for_table(state.as_ref(), &cmd.table)
+    {
+        let mut guard_cmd = build_export_tenant_violation_check(&cmd, &tenant_column, tenant_id);
+        state.optimize_qail_for_execution(&mut guard_cmd);
+        let guard_rows = match conn.fetch_all_uncached(&guard_cmd).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                conn.release().await;
+                return Err(ApiError::from_pg_driver_error(&e, Some(&cmd.table)));
+            }
+        };
+        let violation_count = guard_rows
+            .first()
+            .map(row_to_json)
+            .as_ref()
+            .map(export_violation_count)
+            .unwrap_or(0);
+        if violation_count > 0 {
+            conn.release().await;
+            tracing::error!(
+                table = %cmd.table,
+                endpoint = "qail_export",
+                violation_count,
+                "TENANT_BOUNDARY_VIOLATION - export preflight found cross-tenant rows"
+            );
+            return Err(ApiError::with_code(
+                "TENANT_BOUNDARY_VIOLATION",
+                "Data integrity error",
+            ));
+        }
+    }
+
     let cmd_for_stream = cmd.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 

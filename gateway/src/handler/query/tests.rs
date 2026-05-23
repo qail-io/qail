@@ -1,5 +1,8 @@
 use super::rules::exact_cache_key;
-use super::{execute_query_binary, execute_query_export, is_query_allowed};
+use super::{
+    execute_query_binary, execute_query_export, is_query_allowed, reject_dangerous_action,
+    reject_non_read_action,
+};
 use crate::GatewayState;
 use crate::cache::QueryCache;
 use crate::concurrency::TenantSemaphore;
@@ -182,6 +185,34 @@ fn query_complexity_with_joins() {
     assert_eq!(depth, 0);
     assert_eq!(filters, 2);
     assert_eq!(joins, 1);
+}
+
+#[test]
+fn reject_dangerous_action_blocks_public_ddl() {
+    let cmd = qail_core::ast::Qail::make("qa_pwned");
+
+    assert!(reject_dangerous_action(&cmd).is_err());
+}
+
+#[test]
+fn reject_dangerous_action_blocks_nested_cte_ddl() {
+    let cmd = qail_core::ast::Qail::get("safe").with("safe", qail_core::ast::Qail::make("evil"));
+
+    assert!(reject_dangerous_action(&cmd).is_err());
+}
+
+#[test]
+fn reject_non_read_action_blocks_mutations() {
+    let cmd = qail_core::ast::Qail::add("orders").set_value("total", 1);
+
+    assert!(reject_non_read_action(&cmd, "test").is_err());
+}
+
+#[test]
+fn reject_non_read_action_blocks_nested_mutations() {
+    let cmd = qail_core::ast::Qail::get("safe").with("safe", qail_core::ast::Qail::add("evil"));
+
+    assert!(reject_non_read_action(&cmd, "test").is_err());
 }
 
 #[tokio::test]

@@ -55,6 +55,8 @@ fn encode_select_with_columns(
         return Ok(());
     }
 
+    let select_start = buf.len();
+
     // CTE prefix
     encode_cte_prefix(cmd, buf, params)?;
 
@@ -244,6 +246,12 @@ fn encode_select_with_columns(
         }
     }
 
+    append_fetch_clause(cmd, buf);
+
+    if !cmd.set_ops.is_empty() && set_operand_has_branch_clauses(cmd) {
+        wrap_sql_range_in_parens(buf, select_start);
+    }
+
     // SET OPERATIONS (UNION, INTERSECT, EXCEPT)
     for (set_op, other_cmd) in &cmd.set_ops {
         match set_op {
@@ -252,10 +260,62 @@ fn encode_select_with_columns(
             SetOp::Intersect => buf.extend_from_slice(b" INTERSECT "),
             SetOp::Except => buf.extend_from_slice(b" EXCEPT "),
         }
-        encode_select(other_cmd, buf, params)?;
+        encode_set_operand(other_cmd, buf, params)?;
     }
 
     Ok(())
+}
+
+fn encode_set_operand(
+    query: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), crate::protocol::EncodeError> {
+    let wrap = set_operand_needs_wrapper(query);
+    if wrap {
+        buf.extend_from_slice(b"(");
+    }
+
+    encode_select(query, buf, params)?;
+
+    if wrap {
+        buf.extend_from_slice(b")");
+    }
+
+    Ok(())
+}
+
+fn set_operand_needs_wrapper(query: &Qail) -> bool {
+    !query.set_ops.is_empty() || set_operand_has_branch_clauses(query)
+}
+
+fn set_operand_has_branch_clauses(query: &Qail) -> bool {
+    query.fetch.is_some()
+        || query.cages.iter().any(|cage| {
+            matches!(
+                cage.kind,
+                CageKind::Sort(_) | CageKind::Limit(_) | CageKind::Offset(_)
+            )
+        })
+}
+
+fn wrap_sql_range_in_parens(buf: &mut BytesMut, start: usize) {
+    let suffix = buf.split_off(start);
+    buf.extend_from_slice(b"(");
+    buf.extend_from_slice(&suffix);
+    buf.extend_from_slice(b")");
+}
+
+fn append_fetch_clause(cmd: &Qail, buf: &mut BytesMut) {
+    if let Some((count, with_ties)) = cmd.fetch {
+        buf.extend_from_slice(b" FETCH FIRST ");
+        buf.extend_from_slice(count.to_string().as_bytes());
+        if with_ties {
+            buf.extend_from_slice(b" ROWS WITH TIES");
+        } else {
+            buf.extend_from_slice(b" ROWS ONLY");
+        }
+    }
 }
 
 /// Fast path for the dominant read shape:
@@ -276,6 +336,7 @@ fn try_encode_simple_select_fast(
         || !cmd.joins.is_empty()
         || !cmd.set_ops.is_empty()
         || !cmd.having.is_empty()
+        || cmd.fetch.is_some()
         || !matches!(cmd.group_by_mode, GroupByMode::Simple)
     {
         return false;
@@ -385,17 +446,36 @@ fn encode_single_cte(
 
     buf.extend_from_slice(b" AS (");
 
-    encode_select(&cte.base_query, buf, params)?;
+    encode_recursive_cte_arm(&cte.base_query, buf, params)?;
 
     // Recursive part (UNION ALL)
     if cte.recursive
         && let Some(ref recursive_query) = cte.recursive_query
     {
         buf.extend_from_slice(b" UNION ALL ");
-        encode_select(recursive_query, buf, params)?;
+        encode_recursive_cte_arm(recursive_query, buf, params)?;
     }
 
     buf.extend_from_slice(b")");
+    Ok(())
+}
+
+fn encode_recursive_cte_arm(
+    query: &Qail,
+    buf: &mut BytesMut,
+    params: &mut Vec<Option<Vec<u8>>>,
+) -> Result<(), super::super::EncodeError> {
+    let wrap_set_ops = set_operand_needs_wrapper(query);
+    if wrap_set_ops {
+        buf.extend_from_slice(b"(");
+    }
+
+    encode_select(query, buf, params)?;
+
+    if wrap_set_ops {
+        buf.extend_from_slice(b")");
+    }
+
     Ok(())
 }
 
@@ -434,8 +514,11 @@ pub fn encode_insert(
         buf.extend_from_slice(b")");
     }
 
-    // VALUES
-    if let Some(cage) = payload_cage {
+    // INSERT ... SELECT source query takes the place of VALUES.
+    if let Some(source_query) = &cmd.source_query {
+        buf.extend_from_slice(b" ");
+        encode_select(source_query, buf, params)?;
+    } else if let Some(cage) = payload_cage {
         buf.extend_from_slice(b" VALUES (");
         for (i, cond) in cage.conditions.iter().enumerate() {
             if i > 0 {
@@ -479,6 +562,7 @@ pub fn encode_insert(
                     buf.extend_from_slice(b" = ");
                     encode_expr(expr, buf);
                 }
+                encode_where(cmd, buf, params)?;
             }
         }
     }
@@ -537,6 +621,16 @@ pub fn encode_update(
         }
     }
 
+    if !cmd.from_tables.is_empty() {
+        buf.extend_from_slice(b" FROM ");
+        for (i, table) in cmd.from_tables.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b", ");
+            }
+            buf.extend_from_slice(table.as_bytes());
+        }
+    }
+
     // WHERE (supports AND + OR filter cages)
     encode_where(cmd, buf, params)?;
 
@@ -563,6 +657,16 @@ pub fn encode_delete(
 ) -> Result<(), crate::protocol::EncodeError> {
     buf.extend_from_slice(b"DELETE FROM ");
     buf.extend_from_slice(cmd.table.as_bytes());
+
+    if !cmd.using_tables.is_empty() {
+        buf.extend_from_slice(b" USING ");
+        for (i, table) in cmd.using_tables.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b", ");
+            }
+            buf.extend_from_slice(table.as_bytes());
+        }
+    }
 
     // WHERE (supports AND + OR filter cages)
     encode_where(cmd, buf, params)?;

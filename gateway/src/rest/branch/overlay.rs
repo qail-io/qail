@@ -19,6 +19,73 @@ fn ensure_pk_on_overlay_row(row: &mut Value, pk_column: &str, row_pk: &str) {
     }
 }
 
+pub(crate) fn project_rows_to_selected_columns(data: &mut [Value], selected_columns: &[String]) {
+    if selected_columns.is_empty() {
+        return;
+    }
+
+    for row in data {
+        let Some(obj) = row.as_object_mut() else {
+            continue;
+        };
+
+        let mut projected = serde_json::Map::new();
+        for column in selected_columns {
+            if let Some(value) = obj.get(column).cloned() {
+                projected.insert(column.clone(), value);
+            }
+        }
+        *obj = projected;
+    }
+}
+
+fn upsert_overlay_row(
+    data: &mut Vec<Value>,
+    data_map: &mut std::collections::HashMap<String, usize>,
+    to_delete: &mut std::collections::HashSet<usize>,
+    row_pk: &str,
+    mut row: Value,
+    pk_column: &str,
+) {
+    ensure_pk_on_overlay_row(&mut row, pk_column, row_pk);
+    if let Some(&idx) = data_map.get(row_pk) {
+        data[idx] = row;
+        to_delete.remove(&idx);
+    } else {
+        let idx = data.len();
+        data.push(row);
+        data_map.insert(row_pk.to_string(), idx);
+    }
+}
+
+fn patch_overlay_row(
+    data: &mut Vec<Value>,
+    data_map: &mut std::collections::HashMap<String, usize>,
+    to_delete: &mut std::collections::HashSet<usize>,
+    row_pk: &str,
+    mut patch: Value,
+    pk_column: &str,
+) {
+    if let Some(&idx) = data_map.get(row_pk) {
+        to_delete.remove(&idx);
+        let existing = &mut data[idx];
+        if let (Some(existing_obj), Some(patch_obj)) = (existing.as_object_mut(), patch.as_object())
+        {
+            for (k, v) in patch_obj {
+                existing_obj.insert(k.clone(), v.clone());
+            }
+        } else {
+            ensure_pk_on_overlay_row(&mut patch, pk_column, row_pk);
+            *existing = patch;
+        }
+    } else {
+        let idx = data.len();
+        ensure_pk_on_overlay_row(&mut patch, pk_column, row_pk);
+        data.push(patch);
+        data_map.insert(row_pk.to_string(), idx);
+    }
+}
+
 /// Apply branch overlay to main table data (CoW Read).
 ///
 /// When a branch is active, reads from `_qail_branch_rows` and merges:
@@ -77,33 +144,32 @@ pub(crate) async fn apply_branch_overlay(
         match operation.as_str() {
             "insert" => {
                 if let Ok(val) = serde_json::from_str::<Value>(&row_data_str) {
-                    data.push(val);
+                    upsert_overlay_row(
+                        data,
+                        &mut data_map,
+                        &mut to_delete,
+                        &row_pk,
+                        val,
+                        pk_column,
+                    );
                 }
             }
             "update" => {
                 if let Ok(new_val) = serde_json::from_str::<Value>(&row_data_str) {
-                    if let Some(&idx) = data_map.get(&row_pk) {
-                        let existing = &mut data[idx];
-                        if let (Some(existing_obj), Some(patch_obj)) =
-                            (existing.as_object_mut(), new_val.as_object())
-                        {
-                            for (k, v) in patch_obj {
-                                existing_obj.insert(k.clone(), v.clone());
-                            }
-                        } else {
-                            *existing = new_val;
-                        }
-                    } else {
-                        // Not in main data, treat as new row (e.g. if main data was filtered)
-                        let mut row = new_val;
-                        ensure_pk_on_overlay_row(&mut row, pk_column, &row_pk);
-                        data.push(row);
-                    }
+                    patch_overlay_row(
+                        data,
+                        &mut data_map,
+                        &mut to_delete,
+                        &row_pk,
+                        new_val,
+                        pk_column,
+                    );
                 }
             }
             "delete" => {
                 if let Some(&idx) = data_map.get(&row_pk) {
                     to_delete.insert(idx);
+                    data_map.remove(&row_pk);
                 }
             }
             _ => {}
@@ -140,4 +206,71 @@ pub(crate) async fn redirect_to_overlay(
         .await
         .map_err(|e| ApiError::internal(format!("Branch overlay write failed: {}", e)))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{patch_overlay_row, project_rows_to_selected_columns, upsert_overlay_row};
+    use serde_json::json;
+
+    #[test]
+    fn project_rows_to_selected_columns_removes_overlay_extras() {
+        let mut rows = vec![json!({
+            "id": 1,
+            "total": 50,
+            "secret": "hidden",
+            "tenant_id": "tenant-a"
+        })];
+        let selected = vec!["id".to_string(), "tenant_id".to_string()];
+
+        project_rows_to_selected_columns(&mut rows, &selected);
+
+        assert_eq!(rows[0], json!({"id": 1, "tenant_id": "tenant-a"}));
+    }
+
+    #[test]
+    fn chronological_overlay_helpers_patch_inserted_rows_once() {
+        let mut rows = Vec::new();
+        let mut data_map = std::collections::HashMap::new();
+        let mut to_delete = std::collections::HashSet::new();
+
+        upsert_overlay_row(
+            &mut rows,
+            &mut data_map,
+            &mut to_delete,
+            "order-1",
+            json!({"id": "order-1", "status": "draft"}),
+            "id",
+        );
+        patch_overlay_row(
+            &mut rows,
+            &mut data_map,
+            &mut to_delete,
+            "order-1",
+            json!({"status": "submitted"}),
+            "id",
+        );
+
+        assert_eq!(rows, vec![json!({"id": "order-1", "status": "submitted"})]);
+    }
+
+    #[test]
+    fn chronological_overlay_helpers_allow_reinsert_after_delete() {
+        let mut rows = vec![json!({"id": "order-1", "status": "main"})];
+        let mut data_map = std::collections::HashMap::from([("order-1".to_string(), 0)]);
+        let mut to_delete = std::collections::HashSet::from([0]);
+        data_map.remove("order-1");
+
+        upsert_overlay_row(
+            &mut rows,
+            &mut data_map,
+            &mut to_delete,
+            "order-1",
+            json!({"id": "order-1", "status": "branch"}),
+            "id",
+        );
+
+        assert!(to_delete.contains(&0));
+        assert_eq!(rows[1], json!({"id": "order-1", "status": "branch"}));
+    }
 }

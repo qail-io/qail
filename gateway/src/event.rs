@@ -1,8 +1,9 @@
 //! Event Trigger Engine
 //!
-//! Fires webhooks on REST mutations (INSERT, UPDATE, DELETE).
+//! Queues webhooks on REST mutations (INSERT, UPDATE, DELETE).
 //! Each trigger is a `{table, operation, webhook_url}` rule.
-//! Webhooks are fired asynchronously (`tokio::spawn`) with retry logic.
+//! REST mutations persist deliveries into an outbox before commit; the
+//! background dispatcher sends them asynchronously with retry logic.
 
 use reqwest::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use crate::policy::OperationType;
 
 mod delivery;
 mod engine;
+mod outbox;
 mod ssrf;
 #[cfg(test)]
 mod tests;

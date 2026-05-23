@@ -6,7 +6,7 @@
 [![Crates.io](https://img.shields.io/badge/crates.io-qail-orange)](https://crates.io/crates/qail)
 [![Docs](https://img.shields.io/badge/docs-dev.qail.io-blue)](https://dev.qail.io/docs)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.0-green)](CHANGELOG.md)
 
 ---
 
@@ -16,8 +16,8 @@ If you are searching for a **Rust PostgreSQL driver**, start with `qail-pg` + `q
 
 ```toml
 [dependencies]
-qail-core = "1.0.0"
-qail-pg = "1.0.0"
+qail-core = "1.1.0"
+qail-pg = "1.1.0"
 ```
 
 ```rust
@@ -82,7 +82,7 @@ Qail addresses these by making AST-first query execution and explicit tenant con
 
 Older pre-1.0 QAIL experiments used symbolic text forms such as `get::users•@id@email@role[active=true][lim=10]` and macro examples such as `qail!("get::users:'id'email [ 'active == true ]")`.
 
-Those forms are historical and are not the canonical `0.27.x` API surface. Current application code should use the AST/DSL path:
+Those forms are historical and are not the canonical `1.0.0` API surface. Current application code should use the AST/DSL path:
 
 ```rust
 let query = Qail::get("users")
@@ -118,8 +118,6 @@ Snapshot runs: **March 25, 2026** (`--release`, `BATTLE_ITERATIONS=200`, warmup 
 - **Config emitted:** `iterations`, per-approach warmup, and run order are printed in output.
 - **RTT simulation knob:** `BATTLE_SIMULATED_RTT_US` injects per-query transport delay in the harness.
 - **Measured stats:** median + p95 (and avg in raw output), query count per request, JSON bytes for REST variants.
-- **Run it yourself:**  
-  `DATABASE_URL=postgresql://orion@localhost:5432/swb_staging_local?sslmode=disable BATTLE_SIMULATED_RTT_US=1000 cargo run -p qail-pg --example battle_comparison --features chrono,uuid,legacy-raw-examples --release`
 
 </details>
 

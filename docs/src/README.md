@@ -4,12 +4,14 @@
 
 QAIL compiles typed query ASTs directly to database wire protocols. No application-level SQL string interpolation on the AST path. Built-in multi-tenant data isolation via RLS. The only Rust PostgreSQL driver with AST-level tenant injection.
 
-## Latest Updates (March 2026)
+## Latest Updates (May 2026)
 
-- Tenant-first naming is canonical across docs and gateway flows (`tenant_id`); legacy `operator_id` runtime aliases have been removed.
-- Gateway policy evaluation and execution-path fixes were applied to reduce false denies and keep optimized command execution consistent.
-- Direct SDK tracks are now first-class: TypeScript, Swift, and Kotlin.
-- Node.js native binding and WASM packaging remain deferred.
+- QAIL is now on the `v1.1.0` stable line across the Rust workspace crates, CLI, and VS Code extension metadata.
+- The public API is the AST/DSL path: `Qail::get/add/set/del`, typed expressions, relation helpers, RLS contexts, and driver/pool execution.
+- Compatibility aliases that hid fallible behavior were removed: use `with_rls(&ctx)?` and `join_on(...)?` directly.
+- Legacy raw SQL builder APIs remain out of the normal runtime path; use AST-native commands and session AST helpers instead.
+- PostgreSQL cancel-key APIs are bytes-native, matching protocol `3.0` and `3.2` behavior.
+- Gateway/API responses now carry response metadata, and the Qdrant engine has a generation-counted reconnect state machine for concurrent reconnect safety.
 
 ## Philosophy: AST = Meaning
 
@@ -30,7 +32,7 @@ Some search engines still surface old QAIL pages showing symbolic forms such as 
 
 Those pages are from historical pre-1.0 releases and are not the current API guidance.
 
-Current QAIL `0.27.x` application code should use the native AST/DSL path:
+Current QAIL `1.1.0` application code should use the native AST/DSL path:
 
 ```rust
 let query = Qail::get("users")
@@ -51,7 +53,7 @@ let rows = driver.fetch_all(&query).await?;
 > Redis support (`qail-redis`) was removed in `v0.20.0`.
 
 ### ❌ Not Supported
-* **Oracle, SQL Server, MySQL:** Proprietary/Closed protocols.
+* Database protocols outside PostgreSQL and Qdrant are not part of the supported surface.
 
 ## Quick Example
 
@@ -141,9 +143,9 @@ Qail::get("users").filter("id", Operator::Eq, user_input)
 - [Issue Tracker](https://github.com/qail-io/qail/issues)
 
 
-## 🤝 Contributing & Support
+## Contributing & Support
 
 We welcome issue reports on GitHub! Please provide detailed descriptions to help us reproduce and fix the problem. We aim to address critical issues within 1-5 business days.
 
-> [!CAUTION]
-> **Release Candidate**: QAIL is now in the **release-candidate** phase. The API is near-stable and battle-tested in production. Breaking changes are expected to be rare and limited to critical correctness/security fixes before 1.0.
+> [!NOTE]
+> **Stable Release**: QAIL is now on the `1.x` stable line. Breaking changes should be treated as release-line decisions and documented in `CHANGELOG.md`.

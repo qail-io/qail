@@ -381,6 +381,31 @@ impl QdrantDriver {
         decoder::decode_scroll_response(&response)
     }
 
+    /// Scroll through points with QAIL AST filters.
+    pub async fn scroll_filtered_grouped_cages(
+        &mut self,
+        collection: &str,
+        limit: u32,
+        offset: Option<&PointId>,
+        with_vectors: bool,
+        must_conditions: &[qail_core::ast::Condition],
+        should_groups: &[Vec<qail_core::ast::Condition>],
+    ) -> QdrantResult<decoder::ScrollResult> {
+        self.buffer.clear();
+        encoder::encode_scroll_points_with_filter_grouped_cages_proto(
+            &mut self.buffer,
+            collection,
+            limit,
+            offset,
+            with_vectors,
+            must_conditions,
+            should_groups,
+        )?;
+        let request_bytes = self.buffer.split().freeze();
+        let response = self.client.scroll(request_bytes).await?;
+        decoder::decode_scroll_response(&response)
+    }
+
     /// Delete points by numeric IDs.
     pub async fn delete_points(
         &mut self,

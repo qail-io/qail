@@ -54,6 +54,20 @@ fn test_update() {
 }
 
 #[test]
+fn test_update_returning_all() {
+    use crate::ast::Qail;
+
+    let cmd = Qail::set("users")
+        .set_value("verified", true)
+        .eq("id", 1)
+        .returning_all();
+    assert_eq!(
+        cmd.to_sql(),
+        "UPDATE users SET verified = true WHERE id = 1 RETURNING *"
+    );
+}
+
+#[test]
 fn test_update_with_where_or() {
     let cmd = parse("set users values verified = true where id = $1 or email = :email").unwrap();
     assert_eq!(

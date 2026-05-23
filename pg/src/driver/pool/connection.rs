@@ -70,6 +70,66 @@ impl PooledConnection {
         })
     }
 
+    fn reject_outer_transaction_control_in_rls(&self, operation: &str) -> PgResult<()> {
+        if self.rls_dirty {
+            return Err(PgError::Connection(format!(
+                "{operation} is not allowed on an RLS-bound pooled connection; \
+                 use savepoint(), rollback_to(), and release_savepoint() for nested work, \
+                 then release() to close the pool-managed RLS transaction"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn finish_with_reset(
+        mut self,
+        reset_sql: &'static str,
+        operation: &'static str,
+        failure_reason: &'static str,
+    ) -> PgResult<()> {
+        let Some(mut conn) = self.conn.take() else {
+            return Ok(());
+        };
+
+        if conn.is_io_desynced() {
+            tracing::warn!(
+                host = %self.pool.config.host,
+                port = self.pool.config.port,
+                user = %self.pool.config.user,
+                db = %self.pool.config.database,
+                "pool_release_desynced: dropping connection due to prior I/O/protocol desync"
+            );
+            decrement_active_count_saturating(&self.pool.active_count);
+            self.pool.semaphore.add_permits(1);
+            pool_churn_record_destroy(&self.pool.config, "release_desynced");
+            return Err(PgError::Connection(
+                "connection is protocol-desynced; dropped instead of returning to pool".into(),
+            ));
+        }
+
+        let reset_timeout = self.pool.config.connect_timeout;
+        if let Err(e) =
+            execute_simple_with_timeout(&mut conn, reset_sql, reset_timeout, operation).await
+        {
+            tracing::error!(
+                host = %self.pool.config.host,
+                port = self.pool.config.port,
+                user = %self.pool.config.user,
+                db = %self.pool.config.database,
+                timeout_ms = reset_timeout.as_millis() as u64,
+                error = %e,
+                "pool_release_failed: reset failed; dropping connection to prevent state leak"
+            );
+            decrement_active_count_saturating(&self.pool.active_count);
+            self.pool.semaphore.add_permits(1);
+            pool_churn_record_destroy(&self.pool.config, failure_reason);
+            return Err(e);
+        }
+
+        self.pool.return_connection(conn, self.created_at).await;
+        Ok(())
+    }
+
     /// Deterministic connection cleanup and pool return.
     ///
     /// This is the **correct** way to return a connection to the pool.
@@ -86,63 +146,51 @@ impl PooledConnection {
     /// conn.release().await; // COMMIT + return to pool
     /// result
     /// ```
-    pub async fn release(mut self) {
-        if let Some(mut conn) = self.conn.take() {
-            if conn.is_io_desynced() {
-                tracing::warn!(
-                    host = %self.pool.config.host,
-                    port = self.pool.config.port,
-                    user = %self.pool.config.user,
-                    db = %self.pool.config.database,
-                    "pool_release_desynced: dropping connection due to prior I/O/protocol desync"
-                );
-                decrement_active_count_saturating(&self.pool.active_count);
-                self.pool.semaphore.add_permits(1);
-                pool_churn_record_destroy(&self.pool.config, "release_desynced");
-                return;
-            }
-            // COMMIT the transaction opened by acquire_with_rls.
-            // Transaction-local set_config values auto-reset on COMMIT,
-            // so no explicit RLS cleanup is needed.
-            // Prepared statements survive — they are NOT transaction-scoped.
-            let reset_timeout = self.pool.config.connect_timeout;
-            if let Err(e) = execute_simple_with_timeout(
-                &mut conn,
-                crate::driver::rls::reset_sql(),
-                reset_timeout,
-                "pool release reset/COMMIT",
-            )
-            .await
-            {
-                tracing::error!(
-                    host = %self.pool.config.host,
-                    port = self.pool.config.port,
-                    user = %self.pool.config.user,
-                    db = %self.pool.config.database,
-                    timeout_ms = reset_timeout.as_millis() as u64,
-                    error = %e,
-                    "pool_release_failed: reset/COMMIT failed; dropping connection to prevent state leak"
-                );
-                decrement_active_count_saturating(&self.pool.active_count);
-                self.pool.semaphore.add_permits(1);
-                pool_churn_record_destroy(&self.pool.config, "release_reset_failed");
-                return; // Connection destroyed — not returned to pool
-            }
+    pub async fn release(self) {
+        let _ = self.release_checked().await;
+    }
 
-            self.pool.return_connection(conn, self.created_at).await;
-        }
+    /// Commit the pool-managed transaction and return the connection to the pool.
+    ///
+    /// This is the checked form of [`Self::release`]. It is useful for callers
+    /// that need to report commit/reset failures rather than only logging them.
+    pub async fn release_checked(self) -> PgResult<()> {
+        // COMMIT the transaction opened by acquire_with_rls.
+        // Transaction-local set_config values auto-reset on COMMIT,
+        // so no explicit RLS cleanup is needed.
+        // Prepared statements survive — they are NOT transaction-scoped.
+        self.finish_with_reset(
+            crate::driver::rls::reset_sql(),
+            "pool release reset/COMMIT",
+            "release_reset_failed",
+        )
+        .await
+    }
+
+    /// Roll back the pool-managed transaction and return the connection to the pool.
+    ///
+    /// Use this for abandoned RLS-bound work, expired transaction sessions, or
+    /// request-level savepoint failures that must fail closed.
+    pub async fn rollback_and_release(self) -> PgResult<()> {
+        self.finish_with_reset(
+            "ROLLBACK",
+            "pool release rollback/ROLLBACK",
+            "release_rollback_failed",
+        )
+        .await
     }
 
     // ==================== TRANSACTION CONTROL ====================
 
     /// Begin an explicit transaction on this pooled connection.
     ///
-    /// Use this when you need multi-statement atomicity beyond the
-    /// implicit transaction created by `acquire_with_rls()`.
+    /// Use this only on raw pooled connections. Connections acquired with
+    /// `acquire_with_rls()` already run inside the pool-managed RLS
+    /// transaction; use savepoints there instead.
     ///
     /// # Example
     /// ```ignore
-    /// let mut conn = pool.acquire_with_rls(ctx).await?;
+    /// let mut conn = pool.acquire_raw().await?;
     /// conn.begin().await?;
     /// conn.execute(&insert1).await?;
     /// conn.execute(&insert2).await?;
@@ -150,18 +198,21 @@ impl PooledConnection {
     /// conn.release().await;
     /// ```
     pub async fn begin(&mut self) -> PgResult<()> {
+        self.reject_outer_transaction_control_in_rls("BEGIN")?;
         self.conn_mut()?.begin_transaction().await
     }
 
     /// Commit the current transaction.
     /// Makes all changes since `begin()` permanent.
     pub async fn commit(&mut self) -> PgResult<()> {
+        self.reject_outer_transaction_control_in_rls("COMMIT")?;
         self.conn_mut()?.commit().await
     }
 
     /// Rollback the current transaction.
     /// Discards all changes since `begin()`.
     pub async fn rollback(&mut self) -> PgResult<()> {
+        self.reject_outer_transaction_control_in_rls("ROLLBACK")?;
         self.conn_mut()?.rollback().await
     }
 
@@ -267,7 +318,7 @@ impl Drop for PooledConnection {
             // Safety net: connection was NOT released via `release()`.
             // Best-effort strategy:
             // 1) If connection is already desynced, destroy immediately.
-            // 2) Else, queue bounded async reset+return cleanup.
+            // 2) Else, queue bounded async rollback+return cleanup.
             // 3) If cleanup queue/runtime unavailable, destroy.
             //
             // This preserves security (fail-closed) while reducing churn under
@@ -334,9 +385,9 @@ impl Drop for PooledConnection {
                     handle.spawn(async move {
                         let cleanup_ok = execute_simple_with_timeout(
                             &mut conn,
-                            crate::driver::rls::reset_sql(),
+                            "ROLLBACK",
                             reset_timeout,
-                            "pool leaked cleanup reset/COMMIT",
+                            "pool leaked cleanup ROLLBACK",
                         )
                         .await
                         .is_ok();

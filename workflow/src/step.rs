@@ -11,7 +11,7 @@ use crate::channel::ChannelKind;
 use crate::payment::PaymentKind;
 
 /// A single step in a workflow execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowStep {
     /// Execute a QAIL query against the database.
     /// The `cmd_json` field stores QAIL wire text (`qail_core::wire::encode_cmd_text`).

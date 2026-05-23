@@ -31,10 +31,11 @@ cargo doc --no-deps --open
 
 ### qail-core
 
-- `QailCmd` - Query command builder
+- `Qail` - Query command builder
 - `Operator` - Comparison operators
 - `SortOrder` - ASC/DESC
 - `Expr` - Expression AST nodes
+- `QailBuildError` - Structured builder error type
 
 ### qail-pg
 
@@ -42,6 +43,15 @@ cargo doc --no-deps --open
 - `PgPool` - Connection pool
 - `PgRow` - Result row
 - `PgError` - Error types
+
+## 1.0 API Notes
+
+- Use `Qail::get/add/set/del` and typed builder methods for normal database work.
+- Use `with_rls(&ctx)?`; the older `try_with_rls()` alias is removed.
+- Use `join_on(...)?` for schema-driven relation joins; the older `try_join_on()` alias is removed.
+- Use bytes-native PostgreSQL cancel-key APIs instead of legacy `i32` wrappers.
+- Keep `QailBuildError` structured; broad string conversion is no longer part of the stable API.
+- Avoid raw SQL builder APIs on the public runtime path. Session settings should use session AST commands.
 
 ## Source Code
 
