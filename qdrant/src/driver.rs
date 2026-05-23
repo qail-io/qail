@@ -13,6 +13,22 @@ use crate::error::{QdrantError, QdrantResult};
 use crate::point::{Payload, Point, PointId, ScoredPoint};
 use crate::transport::GrpcClient;
 
+fn search_limit_from_ast(cmd: &Qail) -> QdrantResult<u64> {
+    let mut limit = 10u64;
+    for cage in &cmd.cages {
+        if let qail_core::ast::CageKind::Limit(n) = cage.kind {
+            if n == 0 {
+                return Err(QdrantError::Encode(
+                    "Qdrant search limit must be positive".to_string(),
+                ));
+            }
+            limit = u64::try_from(n)
+                .map_err(|_| QdrantError::Encode("Qdrant search limit is too large".to_string()))?;
+        }
+    }
+    Ok(limit)
+}
+
 /// High-performance gRPC driver for Qdrant.
 ///
 /// Uses gRPC/HTTP2 with zero-copy protobuf encoding:
@@ -282,12 +298,7 @@ impl QdrantDriver {
             .as_ref()
             .ok_or_else(|| QdrantError::Encode("Vector required for search".to_string()))?;
 
-        let mut limit = 10u64;
-        for cage in &cmd.cages {
-            if let qail_core::ast::CageKind::Limit(n) = cage.kind {
-                limit = n as u64;
-            }
-        }
+        let limit = search_limit_from_ast(cmd)?;
 
         let score_threshold = cmd.score_threshold;
 
@@ -504,6 +515,29 @@ impl QdrantDriver {
         let request = self.buffer.split().freeze();
         self.client.create_field_index(request).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ast_limit_tests {
+    use qail_core::ast::Qail;
+
+    use super::{QdrantError, search_limit_from_ast};
+
+    #[test]
+    fn search_limit_defaults_without_ast_limit() {
+        let cmd = Qail::search("products").vector(vec![0.1]);
+
+        assert_eq!(search_limit_from_ast(&cmd).unwrap(), 10);
+    }
+
+    #[test]
+    fn search_limit_rejects_zero_from_ast() {
+        let cmd = Qail::search("products").vector(vec![0.1]).limit(0);
+
+        let err = search_limit_from_ast(&cmd).expect_err("zero limit should be rejected");
+        assert!(matches!(err, QdrantError::Encode(_)));
+        assert!(err.to_string().contains("must be positive"));
     }
 }
 
