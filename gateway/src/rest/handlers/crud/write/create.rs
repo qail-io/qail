@@ -41,6 +41,27 @@ fn create_request_can_skip_required_validation(
     prefer_wants_upsert || prefer_wants_ignore_duplicates || has_explicit_on_conflict
 }
 
+fn resolve_prefer_conflict_column(
+    prefer_wants_upsert: bool,
+    prefer_wants_ignore_duplicates: bool,
+    has_explicit_on_conflict: bool,
+    primary_key: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    if has_explicit_on_conflict || (!prefer_wants_upsert && !prefer_wants_ignore_duplicates) {
+        return Ok(None);
+    }
+
+    primary_key
+        .filter(|pk| !pk.trim().is_empty())
+        .map(|pk| Some(pk.to_string()))
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "VALIDATION_ERROR",
+                "Prefer resolution requires a primary key or explicit on_conflict parameter",
+            )
+        })
+}
+
 fn branch_insert_overlay_key(
     obj: &serde_json::Map<String, Value>,
     pk_col: &str,
@@ -389,15 +410,12 @@ pub(crate) async fn create_handler(
     }
 
     // Resolve PK column for Prefer: resolution=merge-duplicates
-    let prefer_conflict_col: Option<String> =
-        if prefer.wants_upsert() && explicit_conflict_cols.is_none() {
-            // Auto-resolve PK column from schema
-            table.primary_key.clone()
-        } else if prefer.wants_ignore_duplicates() && explicit_conflict_cols.is_none() {
-            table.primary_key.clone()
-        } else {
-            None
-        };
+    let prefer_conflict_col = resolve_prefer_conflict_column(
+        prefer.wants_upsert(),
+        prefer.wants_ignore_duplicates(),
+        explicit_conflict_cols.is_some(),
+        table.primary_key.as_deref(),
+    )?;
 
     let mut all_results: Vec<Value> = Vec::with_capacity(normalized_objects.len());
     let enforce_tenant_column = auth.tenant_id.is_some() && tenant_scope_column.is_some();
@@ -664,7 +682,7 @@ mod tests {
         create_request_can_skip_required_validation, guard_upsert_conflict_update_tenant,
         normalize_create_object_for_tenant, parse_explicit_on_conflict_columns,
         parse_explicit_on_conflict_param, parse_on_conflict_action, pk_to_overlay_key,
-        upsert_update_assignments,
+        resolve_prefer_conflict_column, upsert_update_assignments,
     };
     use qail_core::ast::{CageKind, ConflictAction, Expr, Operator, Value as QailValue};
     use serde_json::{Map, Value, json};
@@ -735,6 +753,37 @@ mod tests {
         assert!(!create_request_can_skip_required_validation(
             false, false, false
         ));
+    }
+
+    #[test]
+    fn prefer_conflict_resolution_uses_primary_key_when_available() {
+        assert_eq!(
+            resolve_prefer_conflict_column(true, false, false, Some("id")).unwrap(),
+            Some("id".to_string())
+        );
+        assert_eq!(
+            resolve_prefer_conflict_column(false, true, false, Some("uuid")).unwrap(),
+            Some("uuid".to_string())
+        );
+    }
+
+    #[test]
+    fn prefer_conflict_resolution_requires_pk_without_explicit_conflict_target() {
+        let err = resolve_prefer_conflict_column(true, false, false, None).unwrap_err();
+
+        assert_eq!(err.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            err.message
+                .contains("requires a primary key or explicit on_conflict")
+        );
+    }
+
+    #[test]
+    fn prefer_conflict_resolution_allows_explicit_conflict_without_primary_key() {
+        assert_eq!(
+            resolve_prefer_conflict_column(true, false, true, None).unwrap(),
+            None
+        );
     }
 
     #[test]
